@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint-python:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check host/ tests/
+
+  test-host:
+    name: Host unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests (no hardware required)
+        run: pytest tests/test_host_stack.py tests/test_ejtagaxi.py tests/test_ejtaguart.py -v
+
+  lint-rtl:
+    name: RTL lint (iverilog)
+    runs-on: ubuntu-latest
+    # Stubs for Xilinx primitives live in sim/
+    env:
+      IVFLAGS: "-Wall -g2012 -y rtl -y rtl/jtag_tap -y sim sim/bscane2_stub.v sim/xpm_fifo_async_stub.v"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install iverilog
+        run: sudo apt-get install -y iverilog
+
+      - name: Lint dpram.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/dpram.v
+
+      - name: Lint trig_compare.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/trig_compare.v
+
+      - name: Lint jtag_reg_iface.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/jtag_reg_iface.v
+
+      - name: Lint jtag_burst_read.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/jtag_burst_read.v
+
+      - name: Lint fcapz_ela.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ela.v
+
+      - name: Lint fcapz_eio.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_eio.v
+
+      - name: Lint fcapz_ela_xilinx7.v (wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ela_xilinx7.v
+
+      - name: Lint fcapz_eio_xilinx7.v (wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_eio_xilinx7.v
+
+      - name: Lint fcapz_async_fifo.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_async_fifo.v
+
+      - name: Lint fcapz_ejtagaxi.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtagaxi.v
+
+      - name: Lint fcapz_ejtagaxi_xilinx7.v (wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtagaxi_xilinx7.v
+
+      - name: Lint fcapz_ejtaguart.v
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtaguart.v
+
+  sim:
+    name: RTL simulation (iverilog + vvp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install iverilog
+        run: sudo apt-get install -y iverilog
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run simulations
+        run: python sim/run_sim.py

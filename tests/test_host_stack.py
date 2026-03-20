@@ -1,0 +1,353 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+from __future__ import annotations
+
+import json
+import unittest
+import uuid
+from pathlib import Path
+
+from host.fcapz.analyzer import (
+    Analyzer,
+    CaptureConfig,
+    SequencerStage,
+    TriggerConfig,
+)
+from host.fcapz.transport import Transport
+from host.fcapz.eio import EioController
+
+
+class FakeTransport(Transport):
+    def __init__(self):
+        # Per-chain register banks; chain=None is the default (chain 1)
+        self._chain_regs: dict[int, dict[int, int]] = {
+            1: {
+                0x0000: 0x0001_0001,  # VERSION
+                0x000C: 8,            # SAMPLE_W
+                0x0010: 1024,         # DEPTH
+                0x0008: 0x4,          # STATUS done
+                0x00A4: 1,            # NUM_CHAN
+                0x003C: 0x0001_0160,  # FEATURES (NUM_SEG=1, NUM_CH=1, HAS_*)
+                0x00C4: 0,            # TIMESTAMP_W
+                0x00B8: 1,            # NUM_SEGMENTS
+            },
+        }
+        self._active_chain: int = 1
+        self.data = [1, 2, 3, 4]
+
+    @property
+    def regs(self) -> dict[int, int]:
+        """Return the register bank for the active chain."""
+        return self._chain_regs.setdefault(self._active_chain, {})
+
+    @regs.setter
+    def regs(self, value: dict[int, int]) -> None:
+        self._chain_regs[self._active_chain] = value
+
+    def connect(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def select_chain(self, chain: int) -> None:
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        return bits  # simple echo
+
+    def read_reg(self, addr: int) -> int:
+        return self.regs.get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self.regs[addr] = value
+
+    def read_block(self, addr: int, words: int):
+        if addr == 0x0100:
+            return self.data[:words]
+        return [0] * words
+
+
+class AnalyzerTests(unittest.TestCase):
+    def _make_cfg(self) -> CaptureConfig:
+        return CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=7, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=100_000_000,
+        )
+
+    def test_capture_and_export_json(self):
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        cfg = self._make_cfg()
+        analyzer.configure(cfg)
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+        data = analyzer.export_json(result)
+        self.assertEqual(len(result.samples), 4)
+        self.assertEqual(data["trigger"]["value"], 7)
+        self.assertEqual(data["sample_width"], 8)
+
+    def test_export_files(self):
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        cfg = self._make_cfg()
+        analyzer.configure(cfg)
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+
+        tmp_root = Path("tests/_tmp") / f"run_{uuid.uuid4().hex}"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            out_json = tmp_root / "cap.json"
+            out_csv = tmp_root / "cap.csv"
+            out_vcd = tmp_root / "cap.vcd"
+
+            analyzer.write_json(result, str(out_json))
+            analyzer.write_csv(result, str(out_csv))
+            analyzer.write_vcd(result, str(out_vcd))
+
+            self.assertTrue(out_json.exists())
+            self.assertTrue(out_csv.exists())
+            self.assertTrue(out_vcd.exists())
+
+            obj = json.loads(out_json.read_text(encoding="utf-8"))
+            self.assertEqual(obj["samples"][0]["value"], 1)
+            self.assertIn("index,value", out_csv.read_text(encoding="ascii"))
+            self.assertIn("$enddefinitions $end", out_vcd.read_text(encoding="ascii"))
+        finally:
+            for p in sorted(tmp_root.glob("*"), reverse=True):
+                p.unlink(missing_ok=True)
+            tmp_root.rmdir()
+
+
+class SequencerTests(unittest.TestCase):
+    """Tests for trigger sequencer register writes via configure()."""
+
+    def test_two_stage_sequence_writes_registers(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+
+        stage0 = SequencerStage(
+            cmp_mode_a=0,     # EQ
+            cmp_mode_b=1,     # NEQ
+            combine=2,        # AND
+            next_state=1,
+            is_final=False,
+            count_target=3,
+            value_a=0x55,
+            mask_a=0xFF,
+            value_b=0xAA,
+            mask_b=0xF0,
+        )
+        stage1 = SequencerStage(
+            cmp_mode_a=6,     # RISING
+            cmp_mode_b=0,
+            combine=0,        # A_only
+            next_state=0,
+            is_final=True,
+            count_target=1,
+            value_a=0x80,
+            mask_a=0x80,
+            value_b=0,
+            mask_b=0xFFFFFFFF,
+        )
+
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[stage0, stage1],
+        )
+        analyzer.configure(cfg)
+
+        regs = transport.regs
+
+        # Stage 0: SEQ_BASE=0x0040, stride=20
+        # SEQ_CFG = cmp_a(0) | cmp_b(1)<<4 | combine(2)<<8 | next(1)<<10 | final(0)<<12 | count(3)<<16
+        expected_cfg0 = (0 & 0xF) | ((1 & 0xF) << 4) | ((2 & 0x3) << 8) | ((1 & 0x3) << 10) | (0 << 12) | (3 << 16)
+        self.assertEqual(regs[0x0040], expected_cfg0)
+        self.assertEqual(regs[0x0044], 0x55)      # value_a
+        self.assertEqual(regs[0x0048], 0xFF)       # mask_a
+        self.assertEqual(regs[0x004C], 0xAA)       # value_b
+        self.assertEqual(regs[0x0050], 0xF0)       # mask_b
+
+        # Stage 1: base = 0x0040 + 20 = 0x0054
+        expected_cfg1 = (6 & 0xF) | ((0 & 0xF) << 4) | ((0 & 0x3) << 8) | ((0 & 0x3) << 10) | (1 << 12) | (1 << 16)
+        self.assertEqual(regs[0x0054], expected_cfg1)
+        self.assertEqual(regs[0x0058], 0x80)       # value_a
+        self.assertEqual(regs[0x005C], 0x80)       # mask_a
+        self.assertEqual(regs[0x0060], 0)          # value_b
+        self.assertEqual(regs[0x0064], 0xFFFFFFFF) # mask_b
+
+    def test_probe_sel_written(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            probe_sel=3,
+        )
+        analyzer.configure(cfg)
+        self.assertEqual(transport.regs[0x00AC], 3)
+
+    def test_probe_reports_probe_mux_w(self):
+        transport = FakeTransport()
+        transport.regs[0x00D0] = 32  # PROBE_MUX_W
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        info = analyzer.probe()
+        self.assertEqual(info["probe_mux_w"], 32)
+
+
+class FakeVioTransport(Transport):
+    """Fake transport simulating a fcapz_eio with IN_W=8, OUT_W=8."""
+
+    EIO_ID = 0x56494F01
+
+    def __init__(self, probe_in: int = 0xAB):
+        self._probe_in = probe_in
+        self._active_chain: int = 1
+        self.regs = {
+            0x0000: self.EIO_ID,
+            0x0004: 8,   # IN_W
+            0x0008: 8,   # OUT_W
+            0x0010: probe_in & 0xFF,  # IN[0]
+        }
+
+    def connect(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def select_chain(self, chain: int) -> None:
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        return bits
+
+    def read_reg(self, addr: int) -> int:
+        return self.regs.get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self.regs[addr] = value
+
+    def read_block(self, addr: int, words: int):
+        return [0] * words
+
+
+class EioControllerTests(unittest.TestCase):
+    def _make_eio(self, probe_in: int = 0xAB) -> EioController:
+        eio = EioController(FakeVioTransport(probe_in))
+        eio.connect()
+        return eio
+
+    def test_connect_reads_widths(self):
+        eio = self._make_eio()
+        self.assertEqual(eio.in_w, 8)
+        self.assertEqual(eio.out_w, 8)
+
+    def test_read_inputs(self):
+        eio = self._make_eio(probe_in=0xAB)
+        self.assertEqual(eio.read_inputs(), 0xAB)
+
+    def test_write_and_read_outputs(self):
+        eio = self._make_eio()
+        eio.write_outputs(0x42)
+        self.assertEqual(eio.read_outputs(), 0x42)
+
+    def test_write_outputs_masked(self):
+        eio = self._make_eio()
+        eio.write_outputs(0x1FF)   # 9 bits but OUT_W=8
+        self.assertEqual(eio.read_outputs(), 0xFF)
+
+    def test_set_bit_and_get_bit(self):
+        eio = self._make_eio(probe_in=0b0101_1010)
+        # Output bit manipulation
+        eio.write_outputs(0x00)
+        eio.set_bit(3, 1)
+        self.assertEqual(eio.read_outputs(), 0x08)
+        eio.set_bit(3, 0)
+        self.assertEqual(eio.read_outputs(), 0x00)
+        # Input bit read
+        self.assertEqual(eio.get_bit(1), 1)   # 0b...1010 bit1=1
+        self.assertEqual(eio.get_bit(2), 0)   # bit2=0
+
+    def test_bad_id_raises(self):
+        transport = FakeVioTransport()
+        transport.regs[0x0000] = 0xDEAD_BEEF
+        eio = EioController(transport)
+        with self.assertRaises(RuntimeError):
+            eio.connect()
+
+    def test_repr(self):
+        eio = self._make_eio()
+        self.assertIn("in_w=8", repr(eio))
+
+
+class ChainSelectionTests(unittest.TestCase):
+    """Tests for multi-chain support in Transport and EioController."""
+
+    def test_select_chain_changes_register_bank(self):
+        t = FakeTransport()
+        # Write to chain 1
+        t.select_chain(1)
+        t.write_reg(0x0000, 0xAAAA)
+        # Switch to chain 3 and write different value
+        t.select_chain(3)
+        t.write_reg(0x0000, 0xBBBB)
+        # Chain 1 still has its value
+        t.select_chain(1)
+        self.assertEqual(t.read_reg(0x0000), 0xAAAA)
+        # Chain 3 has its own value
+        t.select_chain(3)
+        self.assertEqual(t.read_reg(0x0000), 0xBBBB)
+
+    def test_eio_connect_calls_select_chain_3(self):
+        transport = FakeVioTransport()
+        eio = EioController(transport, chain=3)
+        eio.connect()
+        self.assertEqual(transport._active_chain, 3)
+
+    def test_eio_custom_chain(self):
+        transport = FakeVioTransport()
+        eio = EioController(transport, chain=4)
+        eio.connect()
+        self.assertEqual(transport._active_chain, 4)
+
+    def test_raw_dr_scan_returns_bits(self):
+        t = FakeTransport()
+        result = t.raw_dr_scan(0xDEAD, 16)
+        self.assertEqual(result, 0xDEAD)
+
+    def test_raw_dr_scan_batch(self):
+        t = FakeTransport()
+        results = t.raw_dr_scan_batch([(0xAA, 8), (0xBB, 8)])
+        self.assertEqual(results, [0xAA, 0xBB])
+
+    def test_analyzer_default_chain_unchanged(self):
+        """Existing Analyzer tests work without chain selection (chain=1 default)."""
+        t = FakeTransport()
+        self.assertEqual(t._active_chain, 1)
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        # Analyzer reads registers on chain 1 by default
+        info = analyzer.probe()
+        self.assertIn("version_major", info)
+
+
+if __name__ == "__main__":
+    unittest.main()

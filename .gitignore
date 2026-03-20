@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Vivado project and generated tool state
+.Xil/
+vivado/
+*.jou
+*.log
+*.backup.*
+dfx_runtime.txt
+
+# Build artifacts
+*.bit
+*.bin
+
+# Simulation artifacts
+sim/*.vvp
+sim/*.vcd
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp test outputs
+tests/_tmp/

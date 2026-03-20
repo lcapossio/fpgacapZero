@@ -1,0 +1,120 @@
+{
+  "name": "fpgacapZero",
+  "version": "0.1.0",
+  "description": "Open-source, vendor-agnostic FPGA debug cores: Embedded Logic Analyzer (ELA) for waveform capture and Embedded I/O (EIO) for runtime read/write of fabric signals, all over JTAG. Includes single-instantiation wrappers for Xilinx 7-series/UltraScale, Lattice ECP5, Intel/Altera, and Gowin.",
+  "author": "Leonardo Capossio - bard0 design - <hello@bard0.com>",
+  "license": "MIT",
+  "language": "verilog",
+  "category": "debug",
+  "tags": ["ela", "jtag", "logic-analyzer", "eio", "ejtagaxi", "axi", "debug", "fpga", "capture", "waveform"],
+  "parameters": {
+    "SAMPLE_W": {
+      "type": "integer",
+      "default": 32,
+      "description": "Probe width in bits (1 to 256+)"
+    },
+    "DEPTH": {
+      "type": "integer",
+      "default": 1024,
+      "description": "Sample buffer depth (number of samples)"
+    },
+    "TRIG_STAGES": {
+      "type": "integer",
+      "default": 1,
+      "description": "Trigger sequencer stages: 1 = simple single-stage, 2-4 = multi-stage sequencer"
+    },
+    "STOR_QUAL": {
+      "type": "integer",
+      "default": 0,
+      "description": "Storage qualification: 0 = off, 1 = on (enables ~10x effective depth for sparse signals)"
+    }
+  },
+  "ports": {
+    "sample_clk":     { "direction": "input",  "width": 1,            "description": "Fabric sample clock" },
+    "sample_rst":     { "direction": "input",  "width": 1,            "description": "Active-high reset (sample_clk domain)" },
+    "probe_in":       { "direction": "input",  "width": "SAMPLE_W",   "description": "Probe signals to capture" },
+    "jtag_clk":       { "direction": "input",  "width": 1,            "description": "JTAG TCK (from TAP wrapper)" },
+    "jtag_rst":       { "direction": "input",  "width": 1,            "description": "JTAG reset (from TAP wrapper)" },
+    "jtag_wr_en":     { "direction": "input",  "width": 1,            "description": "Register write enable" },
+    "jtag_rd_en":     { "direction": "input",  "width": 1,            "description": "Register read enable" },
+    "jtag_addr":      { "direction": "input",  "width": 16,           "description": "Register address" },
+    "jtag_wdata":     { "direction": "input",  "width": 32,           "description": "Register write data" },
+    "jtag_rdata":     { "direction": "output", "width": 32,           "description": "Register read data" },
+    "burst_rd_addr":  { "direction": "input",  "width": "log2(DEPTH)","description": "Burst read sample address" },
+    "burst_rd_data":  { "direction": "output", "width": "SAMPLE_W",   "description": "Burst read sample data" },
+    "burst_start":    { "direction": "output", "width": 1,            "description": "Burst transfer start strobe" },
+    "burst_start_ptr":{ "direction": "output", "width": "log2(DEPTH)","description": "Circular buffer start pointer for burst" }
+  },
+  "files": [
+    "rtl/fcapz_ela.v",
+    "rtl/fcapz_eio.v",
+    "rtl/jtag_burst_read.v",
+    "rtl/jtag_reg_iface.v",
+    "rtl/trig_compare.v",
+    "rtl/fcapz_regbus_mux.v",
+    "rtl/dpram.v",
+    "rtl/fcapz_ela_xilinx7.v",
+    "rtl/fcapz_ela_ecp5.v",
+    "rtl/fcapz_ela_intel.v",
+    "rtl/fcapz_ela_gowin.v",
+    "rtl/fcapz_eio_xilinx7.v",
+    "rtl/fcapz_eio_ecp5.v",
+    "rtl/fcapz_eio_intel.v",
+    "rtl/fcapz_eio_gowin.v",
+    "rtl/jtag_tap/jtag_tap_xilinx7.v",
+    "rtl/jtag_tap/jtag_tap_ecp5.v",
+    "rtl/jtag_tap/jtag_tap_intel.v",
+    "rtl/jtag_tap/jtag_tap_gowin.v",
+    "rtl/fcapz_ejtagaxi.v",
+    "rtl/fcapz_ejtagaxi_xilinx7.v",
+    "rtl/fcapz_ejtagaxi_intel.v"
+  ],
+  "cores": {
+    "ejtagaxi": {
+      "description": "JTAG-to-AXI4 bridge: 72-bit pipelined DR for single and burst AXI4 transactions over JTAG",
+      "top": "fcapz_ejtagaxi",
+      "parameters": {
+        "ADDR_W": {
+          "type": "integer",
+          "default": 32,
+          "description": "AXI address width"
+        },
+        "DATA_W": {
+          "type": "integer",
+          "default": 32,
+          "description": "AXI data width"
+        },
+        "FIFO_DEPTH": {
+          "type": "integer",
+          "default": 16,
+          "description": "Async read FIFO depth for burst reads"
+        },
+        "TIMEOUT": {
+          "type": "integer",
+          "default": 4096,
+          "description": "AXI ready timeout in axi_clk cycles"
+        }
+      },
+      "ports": {
+        "tck":            { "direction": "input",  "width": 1,        "description": "JTAG TCK (from TAP wrapper)" },
+        "tdi":            { "direction": "input",  "width": 1,        "description": "JTAG TDI" },
+        "tdo":            { "direction": "output", "width": 1,        "description": "JTAG TDO" },
+        "capture":        { "direction": "input",  "width": 1,        "description": "DR capture strobe" },
+        "shift_en":       { "direction": "input",  "width": 1,        "description": "DR shift enable" },
+        "update":         { "direction": "input",  "width": 1,        "description": "DR update strobe" },
+        "sel":            { "direction": "input",  "width": 1,        "description": "USER chain select" },
+        "axi_clk":        { "direction": "input",  "width": 1,        "description": "AXI clock" },
+        "axi_rst":        { "direction": "input",  "width": 1,        "description": "AXI reset (active high)" },
+        "m_axi_awaddr":   { "direction": "output", "width": "ADDR_W", "description": "AXI write address" },
+        "m_axi_araddr":   { "direction": "output", "width": "ADDR_W", "description": "AXI read address" },
+        "m_axi_wdata":    { "direction": "output", "width": "DATA_W", "description": "AXI write data" },
+        "m_axi_rdata":    { "direction": "input",  "width": "DATA_W", "description": "AXI read data" }
+      },
+      "files": [
+        "rtl/fcapz_ejtagaxi.v",
+        "rtl/fcapz_ejtagaxi_xilinx7.v",
+        "rtl/fcapz_ejtagaxi_intel.v"
+      ]
+    }
+  }
+}
