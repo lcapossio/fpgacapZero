@@ -152,6 +152,21 @@ module fcapz_ela #(
     reg [31:0] jtag_trig_mode;   // legacy: [0]=value_match [1]=edge_detect
     reg [31:0] jtag_trig_value;  // legacy: comparator A value (stage 0)
     reg [31:0] jtag_trig_mask;   // legacy: comparator A mask (stage 0)
+    // Zero-extended to SAMPLE_W for sync pipeline.
+    // SAMPLE_W <= 32: direct truncation (Verilog replication count cannot be 0,
+    //   so the ternary trick is avoided — assign from a wider intermediate).
+    // SAMPLE_W > 32:  zero-pad upper bits.
+    wire [SAMPLE_W-1:0] jtag_trig_value_w;
+    wire [SAMPLE_W-1:0] jtag_trig_mask_w;
+    generate
+        if (SAMPLE_W <= 32) begin : g_trig_narrow
+            assign jtag_trig_value_w = jtag_trig_value[SAMPLE_W-1:0];
+            assign jtag_trig_mask_w  = jtag_trig_mask[SAMPLE_W-1:0];
+        end else begin : g_trig_wide
+            assign jtag_trig_value_w = {{(SAMPLE_W-32){1'b0}}, jtag_trig_value};
+            assign jtag_trig_mask_w  = {{(SAMPLE_W-32){1'b0}}, jtag_trig_mask};
+        end
+    endgenerate
 
     reg [7:0] jtag_chan_sel;   // active channel (jtag_clk domain)
 
@@ -162,6 +177,9 @@ module fcapz_ela #(
     reg [31:0] jtag_sq_mode;   // [3:0]=cmp_mode
     reg [31:0] jtag_sq_value;
     reg [31:0] jtag_sq_mask;
+    // Zero-extended wires for SAMPLE_W > 32
+    wire [SAMPLE_W-1:0] jtag_sq_value_w = {{(SAMPLE_W > 32 ? SAMPLE_W-32 : 1){1'b0}}, jtag_sq_value[SAMPLE_W > 32 ? 31 : SAMPLE_W-1:0]};
+    wire [SAMPLE_W-1:0] jtag_sq_mask_w  = {{(SAMPLE_W > 32 ? SAMPLE_W-32 : 1){1'b0}}, jtag_sq_mask[SAMPLE_W > 32 ? 31 : SAMPLE_W-1:0]};
 
     // Per-stage sequencer JTAG registers
     reg [31:0] jtag_seq_cfg     [0:TRIG_STAGES-1];
@@ -546,9 +564,9 @@ module fcapz_ela #(
             posttrig_len_sync2 <= posttrig_len_sync1;
             trig_mode_sync1    <= jtag_trig_mode[1:0];
             trig_mode_sync2    <= trig_mode_sync1;
-            trig_value_sync1   <= jtag_trig_value[SAMPLE_W-1:0];
+            trig_value_sync1   <= jtag_trig_value_w;
             trig_value_sync2   <= trig_value_sync1;
-            trig_mask_sync1    <= jtag_trig_mask[SAMPLE_W-1:0];
+            trig_mask_sync1    <= jtag_trig_mask_w;
             trig_mask_sync2    <= trig_mask_sync1;
             chan_sel_sync1     <= jtag_chan_sel;
             chan_sel_sync2     <= chan_sel_sync1;
