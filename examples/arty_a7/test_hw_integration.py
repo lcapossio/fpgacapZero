@@ -436,7 +436,6 @@ class TestSegmentedCapture(unittest.TestCase):
         captures, each triggered when counter hits 0x00.
         Segment depth = 1024/4 = 256, so pretrig+posttrig+1 <= 256.
         """
-        seg_depth = 1024 // 4  # 256
         cfg = self.CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
             pretrigger=2, posttrigger=3,

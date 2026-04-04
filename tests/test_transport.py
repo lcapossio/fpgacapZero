@@ -9,10 +9,7 @@ hardware or network connection required.
 
 from __future__ import annotations
 
-import socket
-import subprocess
 import unittest
-from io import StringIO
 from unittest.mock import MagicMock, patch
 
 from host.fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
