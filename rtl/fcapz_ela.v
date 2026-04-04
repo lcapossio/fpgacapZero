@@ -177,9 +177,17 @@ module fcapz_ela #(
     reg [31:0] jtag_sq_mode;   // [3:0]=cmp_mode
     reg [31:0] jtag_sq_value;
     reg [31:0] jtag_sq_mask;
-    // Zero-extended wires for SAMPLE_W > 32
-    wire [SAMPLE_W-1:0] jtag_sq_value_w = {{(SAMPLE_W > 32 ? SAMPLE_W-32 : 1){1'b0}}, jtag_sq_value[SAMPLE_W > 32 ? 31 : SAMPLE_W-1:0]};
-    wire [SAMPLE_W-1:0] jtag_sq_mask_w  = {{(SAMPLE_W > 32 ? SAMPLE_W-32 : 1){1'b0}}, jtag_sq_mask[SAMPLE_W > 32 ? 31 : SAMPLE_W-1:0]};
+    wire [SAMPLE_W-1:0] jtag_sq_value_w;
+    wire [SAMPLE_W-1:0] jtag_sq_mask_w;
+    generate
+        if (SAMPLE_W <= 32) begin : g_sq_narrow
+            assign jtag_sq_value_w = jtag_sq_value[SAMPLE_W-1:0];
+            assign jtag_sq_mask_w  = jtag_sq_mask[SAMPLE_W-1:0];
+        end else begin : g_sq_wide
+            assign jtag_sq_value_w = {{(SAMPLE_W-32){1'b0}}, jtag_sq_value};
+            assign jtag_sq_mask_w  = {{(SAMPLE_W-32){1'b0}}, jtag_sq_mask};
+        end
+    endgenerate
 
     // Per-stage sequencer JTAG registers
     reg [31:0] jtag_seq_cfg     [0:TRIG_STAGES-1];
@@ -187,6 +195,27 @@ module fcapz_ela #(
     reg [31:0] jtag_seq_mask_a  [0:TRIG_STAGES-1];
     reg [31:0] jtag_seq_value_b [0:TRIG_STAGES-1];
     reg [31:0] jtag_seq_mask_b  [0:TRIG_STAGES-1];
+    // Zero-extended per-stage wires (same generate pattern as trig/sq above)
+    wire [SAMPLE_W-1:0] jtag_seq_value_a_w [0:TRIG_STAGES-1];
+    wire [SAMPLE_W-1:0] jtag_seq_mask_a_w  [0:TRIG_STAGES-1];
+    wire [SAMPLE_W-1:0] jtag_seq_value_b_w [0:TRIG_STAGES-1];
+    wire [SAMPLE_W-1:0] jtag_seq_mask_b_w  [0:TRIG_STAGES-1];
+    genvar gi;
+    generate
+        for (gi = 0; gi < TRIG_STAGES; gi = gi + 1) begin : g_seq_w
+            if (SAMPLE_W <= 32) begin : g_narrow
+                assign jtag_seq_value_a_w[gi] = jtag_seq_value_a[gi][SAMPLE_W-1:0];
+                assign jtag_seq_mask_a_w[gi]  = jtag_seq_mask_a[gi][SAMPLE_W-1:0];
+                assign jtag_seq_value_b_w[gi] = jtag_seq_value_b[gi][SAMPLE_W-1:0];
+                assign jtag_seq_mask_b_w[gi]  = jtag_seq_mask_b[gi][SAMPLE_W-1:0];
+            end else begin : g_wide
+                assign jtag_seq_value_a_w[gi] = {{(SAMPLE_W-32){1'b0}}, jtag_seq_value_a[gi]};
+                assign jtag_seq_mask_a_w[gi]  = {{(SAMPLE_W-32){1'b0}}, jtag_seq_mask_a[gi]};
+                assign jtag_seq_value_b_w[gi] = {{(SAMPLE_W-32){1'b0}}, jtag_seq_value_b[gi]};
+                assign jtag_seq_mask_b_w[gi]  = {{(SAMPLE_W-32){1'b0}}, jtag_seq_mask_b[gi]};
+            end
+        end
+    endgenerate
 
     // Phase 1: decimation register
     reg [23:0] jtag_decim;
@@ -634,8 +663,8 @@ module fcapz_ela #(
                 trig_cmp_mode_b <= (trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
                 trig_combine    <= (trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
             end
-            trig_value_b     <= jtag_seq_value_b[0][SAMPLE_W-1:0];
-            trig_mask_b      <= jtag_seq_mask_b[0][SAMPLE_W-1:0];
+            trig_value_b     <= jtag_seq_value_b_w[0];
+            trig_mask_b      <= jtag_seq_mask_b_w[0];
             // Channel select (clamped to valid range)
             chan_sel         <= (chan_sel_sync2 < NUM_CHANNELS) ? chan_sel_sync2 : 8'h0;
             // Probe mux select (clamped when enabled)
@@ -646,8 +675,8 @@ module fcapz_ela #(
             // Storage qualification
             sq_enable        <= (STOR_QUAL != 0) && (jtag_sq_mode[3:0] != 0);
             sq_cmp_mode      <= jtag_sq_mode[3:0];
-            sq_value         <= jtag_sq_value[SAMPLE_W-1:0];
-            sq_mask          <= jtag_sq_mask[SAMPLE_W-1:0];
+            sq_value         <= jtag_sq_value_w;
+            sq_mask          <= jtag_sq_mask_w;
             // Phase 1: decimation
             decim_ratio      <= jtag_decim;
             // Phase 2: external trigger
@@ -660,10 +689,10 @@ module fcapz_ela #(
                 seq_next_state[si]   <= jtag_seq_cfg[si][10 +: SEQ_STATE_W];
                 seq_is_final[si]     <= jtag_seq_cfg[si][12];
                 seq_count_target[si] <= jtag_seq_cfg[si][31:16];
-                seq_value_a[si]      <= jtag_seq_value_a[si][SAMPLE_W-1:0];
-                seq_mask_a[si]       <= jtag_seq_mask_a[si][SAMPLE_W-1:0];
-                seq_value_b[si]      <= jtag_seq_value_b[si][SAMPLE_W-1:0];
-                seq_mask_b[si]       <= jtag_seq_mask_b[si][SAMPLE_W-1:0];
+                seq_value_a[si]      <= jtag_seq_value_a_w[si];
+                seq_mask_a[si]       <= jtag_seq_mask_a_w[si];
+                seq_value_b[si]      <= jtag_seq_value_b_w[si];
+                seq_mask_b[si]       <= jtag_seq_mask_b_w[si];
             end
         end
     end
