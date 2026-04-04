@@ -49,6 +49,21 @@ module fcapz_async_fifo #(
 
     localparam AW = $clog2(DEPTH);
 
+    // ---- Parameter assertions -------------------------------------------------
+    // Synthesis-safe: undefined module reference forces an elaboration error.
+    generate
+        if (DEPTH & (DEPTH - 1))
+            DEPTH_must_be_power_of_2 _depth_check_FAILED();
+    endgenerate
+
+    // Simulation-friendly versions of the same checks.
+    initial begin
+        if (DEPTH & (DEPTH - 1))
+            $error("fcapz_async_fifo: DEPTH must be a power of 2 (got %0d)", DEPTH);
+        if (DATA_W < 1)
+            $error("fcapz_async_fifo: DATA_W must be >= 1");
+    end
+
 generate
 if (!USE_BEHAV_ASYNC_FIFO) begin : gen_xpm
     // =================================================================

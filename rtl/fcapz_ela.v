@@ -103,6 +103,18 @@ module fcapz_ela #(
 
     localparam ADDR_DATA_BASE   = 16'h0100;
 
+    // ---- Parameter assertions (simulation) ------------------------------------
+    initial begin
+        if (DEPTH & (DEPTH - 1))
+            $error("fcapz_ela: DEPTH must be a power of 2 (got %0d)", DEPTH);
+        if (NUM_SEGMENTS > 1 && (DEPTH % NUM_SEGMENTS != 0))
+            $error("fcapz_ela: DEPTH must be divisible by NUM_SEGMENTS (%0d)", NUM_SEGMENTS);
+        if (TRIG_STAGES < 1 || TRIG_STAGES > 4)
+            $error("fcapz_ela: TRIG_STAGES must be 1-4 (got %0d)", TRIG_STAGES);
+        if (SAMPLE_W < 1)
+            $error("fcapz_ela: SAMPLE_W must be >= 1");
+    end
+
     localparam PTR_W = $clog2(DEPTH);
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;

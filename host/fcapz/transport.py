@@ -13,47 +13,101 @@ from typing import List
 
 
 class Transport(ABC):
+    """Abstract base class for all fpgacapZero JTAG transports.
+
+    Implementations must override the five abstract methods below.
+    Two optional extension points (``select_chain`` and ``raw_dr_scan``)
+    can be overridden to support multi-chain and raw DR access respectively.
+
+    Exception contract
+    ------------------
+    All methods should raise:
+
+    * ``RuntimeError``  — if called before :meth:`connect` or after
+      :meth:`close`, or if the underlying transport encounters an I/O
+      error (e.g. XSDB process exits, socket closed by peer).
+    * ``ConnectionError`` — when the remote endpoint closes the connection
+      unexpectedly mid-transaction (subclass of ``OSError``).
+    * ``ValueError`` — for invalid arguments (e.g. unsupported chain index).
+    * ``OSError`` / ``TimeoutError`` — for network or process-level errors
+      during :meth:`connect`.
+    """
+
     @abstractmethod
     def connect(self) -> None:
+        """Open the transport connection.
+
+        Raises ``RuntimeError`` if the backend cannot be reached (e.g. xsdb
+        not on PATH, OpenOCD port not listening).  Raises ``OSError`` or
+        ``TimeoutError`` for socket-level failures.
+        """
         raise NotImplementedError
 
     @abstractmethod
     def close(self) -> None:
+        """Close the transport.  Must be idempotent — safe to call multiple times."""
         raise NotImplementedError
 
     @abstractmethod
     def read_reg(self, addr: int) -> int:
+        """Read a 32-bit register at *addr*.
+
+        Raises ``RuntimeError`` if not connected or if the underlying I/O
+        fails.  Returns the raw 32-bit value (unsigned).
+        """
         raise NotImplementedError
 
     @abstractmethod
     def write_reg(self, addr: int, value: int) -> None:
+        """Write *value* (32-bit) to the register at *addr*.
+
+        Raises ``RuntimeError`` if not connected or if the underlying I/O
+        fails.
+        """
         raise NotImplementedError
 
     @abstractmethod
     def read_block(self, addr: int, words: int) -> List[int]:
+        """Read *words* consecutive 32-bit registers starting at *addr*.
+
+        Returns a list of *words* unsigned 32-bit integers.  Raises
+        ``RuntimeError`` if not connected or on I/O failure.
+        """
         raise NotImplementedError
 
     def select_chain(self, chain: int) -> None:
         """Select the BSCANE2 USER chain for subsequent register accesses.
 
-        Subclasses that support multi-chain access should override this.
+        Subclasses that support multi-chain access must override this.
+        Raises ``ValueError`` if *chain* is not in the transport's IR table.
+        Raises ``NotImplementedError`` on transports that only support a
+        single fixed chain.
         """
         raise NotImplementedError
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan of *width* bits, shifting in *bits*.
 
-        Returns the captured TDO value.  If *chain* is given it overrides
-        the active chain for this scan only.
+        Returns the captured TDO value as an unsigned integer.  If *chain*
+        is given it overrides the active chain for this scan only.
+
+        Subclasses that expose raw JTAG DR access must override this.
+        Raises ``NotImplementedError`` on transports that do not support it.
+        Raises ``RuntimeError`` if not connected or on I/O failure.
         """
         raise NotImplementedError
 
     def raw_dr_scan_batch(
         self, scans: list[tuple[int, int]], *, chain: int | None = None
     ) -> list[int]:
-        """Perform multiple raw DR scans and return all captured values.
+        """Perform multiple raw DR scans and return all captured TDO values.
+
+        *scans* is a list of ``(bits, width)`` tuples.  Returns a list of
+        captured values in the same order.
 
         Default implementation calls :meth:`raw_dr_scan` in a loop.
+        Override for transports that support batched transfers (e.g. a
+        single ``jtag sequence`` round-trip in XSDB).
         """
         return [self.raw_dr_scan(bits, width, chain=chain) for bits, width in scans]
 

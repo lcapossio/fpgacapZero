@@ -94,6 +94,11 @@ class RpcServer:
             sample_clock_hz=int(req.get("sample_clock_hz", 100_000_000)),
             probes=cls._parse_probes(req.get("probes")),
             channel=int(req.get("channel", 0)),
+            decimation=int(req.get("decimation", 0)),
+            ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
+            stor_qual_mode=int(req.get("stor_qual_mode", 0)),
+            stor_qual_value=int(req.get("stor_qual_value", 0)),
+            stor_qual_mask=int(req.get("stor_qual_mask", 0)),
         )
 
     @staticmethod

@@ -87,6 +87,9 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
             getattr(args, "ext_trigger_mode", "disabled"), 0),
         sequence=sequence,
         probe_sel=getattr(args, "probe_sel", 0),
+        stor_qual_mode=getattr(args, "stor_qual_mode", 0),
+        stor_qual_value=getattr(args, "stor_qual_value", 0),
+        stor_qual_mask=getattr(args, "stor_qual_mask", 0),
     )
 
 
@@ -153,6 +156,24 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=0,
             help="Runtime probe mux slice index (default 0)",
+        )
+        parser.add_argument(
+            "--stor-qual-mode",
+            type=int,
+            default=0,
+            help="Storage qualification mode: 0=disabled, 1=store-when-match, 2=store-when-no-match",
+        )
+        parser.add_argument(
+            "--stor-qual-value",
+            type=lambda x: int(x, 0),
+            default=0,
+            help="Storage qualification comparison value (hex or decimal)",
+        )
+        parser.add_argument(
+            "--stor-qual-mask",
+            type=lambda x: int(x, 0),
+            default=0,
+            help="Storage qualification mask (hex or decimal)",
         )
 
     cap.add_argument("--timeout", type=float, default=10.0)

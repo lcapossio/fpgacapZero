@@ -6,11 +6,27 @@ Integration tests for fpgacapZero on real hardware (Arty A7-100T).
 
 These tests require:
   - An Arty A7-100T physically connected via USB
-  - Vivado/XSDB on PATH (or at a standard install location)
-  - hw_server reachable on localhost:3121
+  - For hw_server backend: Vivado/XSDB on PATH, hw_server on localhost:3121
+  - For openocd backend: OpenOCD running with examples/arty_a7/arty_a7.cfg
+
+Environment variables
+---------------------
+FPGACAP_SKIP_HW=1
+    Skip all hardware tests (CI default).
+FPGACAP_BACKEND=openocd|hw_server
+    Select the transport backend.  Defaults to ``hw_server``.
+FPGACAP_OPENOCD_PORT=<port>
+    OpenOCD TCL port.  Defaults to 6666.
+FPGACAP_OPENOCD_TAP=<tap>
+    OpenOCD TAP name.  Defaults to ``xc7a100t.tap``.
 
 Run:
+    # hw_server backend (default)
     python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+    # OpenOCD backend (start openocd first)
+    openocd -f examples/arty_a7/arty_a7.cfg &
+    FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 Skip if no hardware:
     FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -28,13 +44,18 @@ from pathlib import Path
 _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
 
 BITFILE = str(Path(__file__).resolve().parent / "arty_a7_top.bit")
+_BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
+_OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
+_OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
 PORT = 3121
 FPGA = "xc7a100t"
 
 
 def _make_transport():
+    if _BACKEND == "openocd":
+        from host.fcapz.transport import OpenOcdTransport
+        return OpenOcdTransport(port=_OPENOCD_PORT, tap=_OPENOCD_TAP)
     from host.fcapz.transport import XilinxHwServerTransport
-
     return XilinxHwServerTransport(
         port=PORT, fpga_name=FPGA, bitfile=BITFILE,
     )

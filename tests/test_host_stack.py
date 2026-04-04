@@ -298,6 +298,95 @@ class EioControllerTests(unittest.TestCase):
         self.assertIn("in_w=8", repr(eio))
 
 
+class MultiSegmentTests(unittest.TestCase):
+    """Unit tests for capture_segment() with a multi-segment fake transport."""
+
+    def _make_4seg_transport(self) -> FakeTransport:
+        t = FakeTransport()
+        # Override identity registers for 4-segment core
+        t._chain_regs[1][0x00B8] = 4     # NUM_SEGMENTS = 4
+        t._chain_regs[1][0x003C] = (
+            (4 << 16) |   # NUM_SEGMENTS field in FEATURES[23:16]
+            (1 << 8)  |   # NUM_CHANNELS field in FEATURES[15:8]
+            0x60          # HAS_TIMESTAMP=0, HAS_EXT=1, HAS_DECIM=1
+        )
+        # Pre-fill data memory with distinct per-segment patterns
+        # capture_segment() reads from ADDR_DATA_BASE (0x0100)
+        # We use one sample per segment so data = [seg_value]
+        t.data = [0xA0, 0xA1, 0xA2, 0xA3]
+        return t
+
+    def test_capture_segment_returns_correct_segment_index(self):
+        t = self._make_4seg_transport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=0,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+        )
+        analyzer.configure(cfg)
+        analyzer.arm()
+
+        for seg in range(4):
+            result = analyzer.capture_segment(seg)
+            self.assertEqual(result.segment, seg,
+                             f"Expected segment={seg}, got {result.segment}")
+
+    def test_capture_segment_writes_seg_sel_register(self):
+        t = self._make_4seg_transport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=0,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+        )
+        analyzer.configure(cfg)
+        analyzer.arm()
+
+        analyzer.capture_segment(2)
+        self.assertEqual(t.regs.get(0x00C0, -1), 2,
+                         "ADDR_SEG_SEL (0x00C0) should be written with seg_idx=2")
+
+    def test_capture_segment_raises_without_configure(self):
+        t = self._make_4seg_transport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        with self.assertRaises(RuntimeError):
+            analyzer.capture_segment(0)
+
+    def test_capture_segment_returns_samples(self):
+        t = self._make_4seg_transport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=0,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+        )
+        analyzer.configure(cfg)
+        analyzer.arm()
+
+        result = analyzer.capture_segment(0)
+        # FakeTransport.read_block returns self.data[:words]; STATUS has done bit.
+        self.assertGreater(len(result.samples), 0)
+
+    def test_wait_all_segments_done_returns_true_when_done(self):
+        t = self._make_4seg_transport()
+        # STATUS already has done bit (0x4) set in the default FakeTransport
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        done = analyzer.wait_all_segments_done(timeout=0.05)
+        self.assertTrue(done)
+
+
 class ChainSelectionTests(unittest.TestCase):
     """Tests for multi-chain support in Transport and EioController."""
 

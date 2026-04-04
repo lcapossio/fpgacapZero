@@ -36,6 +36,9 @@ _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
+_ADDR_SQ_MODE = 0x0030
+_ADDR_SQ_VALUE = 0x0034
+_ADDR_SQ_MASK = 0x0038
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_DONE = 1 << 2
@@ -104,6 +107,9 @@ class CaptureConfig:
     ext_trigger_mode: int = 0  # 0=disabled, 1=OR, 2=AND
     sequence: list[SequencerStage] | None = None  # trigger sequencer stages
     probe_sel: int = 0  # runtime probe mux slice index
+    stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
+    stor_qual_value: int = 0   # storage qualification comparison value
+    stor_qual_mask: int = 0    # storage qualification mask
 
 
 @dataclass
@@ -207,6 +213,10 @@ class Analyzer:
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
         self.transport.write_reg(_ADDR_PROBE_SEL, config.probe_sel)
+        if config.stor_qual_mode:
+            self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
+            self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
+            self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask)
 
         if config.sequence is not None:
             for idx, stage in enumerate(config.sequence):

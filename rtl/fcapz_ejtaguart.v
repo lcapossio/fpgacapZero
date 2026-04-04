@@ -50,6 +50,18 @@ module fcapz_ejtaguart #(
 );
 
     // ---- Parameter assertions -------------------------------------------------
+    // Synthesis-safe: generate blocks with undefined module references force
+    // an elaboration error in all major synthesis tools.
+    generate
+        if (TX_FIFO_DEPTH & (TX_FIFO_DEPTH - 1))
+            TX_FIFO_DEPTH_must_be_power_of_2 _tx_depth_check_FAILED();
+        if (RX_FIFO_DEPTH & (RX_FIFO_DEPTH - 1))
+            RX_FIFO_DEPTH_must_be_power_of_2 _rx_depth_check_FAILED();
+        if (CLK_HZ / BAUD_RATE < 4)
+            BAUD_RATE_too_high_for_CLK_HZ _baud_check_FAILED();
+    endgenerate
+
+    // Simulation-friendly versions of the same checks.
     initial begin
         if (TX_FIFO_DEPTH & (TX_FIFO_DEPTH - 1))
             $error("TX_FIFO_DEPTH must be power of 2");
