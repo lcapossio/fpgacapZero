@@ -39,7 +39,8 @@ class FakeBridgeTransport(Transport):
     _CONFIG_REGS = {
         0x0000: _BRIDGE_ID,     # BRIDGE_ID
         0x0004: 0x0001_0002,    # version: major=1, minor=2
-        0x002C: 0x2020,         # features: addr_w=32, data_w=32
+        # features: addr_w=32, data_w=32, fifo_depth=16 (encoded as 15 in [23:16])
+        0x002C: (0x0F << 16) | 0x2020,
     }
 
     def __init__(self):
@@ -345,6 +346,38 @@ class EjtagAxiTests(unittest.TestCase):
             t.regs[i] = 0xBB00 + i
         result = ctrl.burst_read(0x0000, 4)
         self.assertEqual(result, [0xBB00 + i for i in range(4)])
+
+    def test_connect_caches_fifo_depth(self):
+        ctrl, _ = self._make_ctrl()
+        self.assertEqual(ctrl._fifo_depth, 16)
+
+    def test_burst_read_rejects_count_exceeding_fifo_depth(self):
+        ctrl, _ = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "FIFO_DEPTH"):
+            ctrl.burst_read(0x0000, 17)  # FIFO_DEPTH=16
+
+    def test_burst_read_rejects_count_exceeding_axi_max(self):
+        ctrl, _ = self._make_ctrl()
+        # Even if we patch fifo_depth, AXI4 max is 256 — but the FIFO check
+        # fires first.  Patch fifo_depth high to test the AXI4 check.
+        ctrl._fifo_depth = 512
+        with self.assertRaisesRegex(ValueError, "AXI4 max burst"):
+            ctrl.burst_read(0x0000, 257)
+
+    def test_burst_read_rejects_zero_count(self):
+        ctrl, _ = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "count must be > 0"):
+            ctrl.burst_read(0x0000, 0)
+
+    def test_burst_write_rejects_empty_data(self):
+        ctrl, _ = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            ctrl.burst_write(0x0000, [])
+
+    def test_burst_write_rejects_count_exceeding_fifo_depth(self):
+        ctrl, _ = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "FIFO_DEPTH"):
+            ctrl.burst_write(0x0000, [0] * 17)
 
     def test_error_raises_axi_error(self):
         ctrl, t = self._make_ctrl()

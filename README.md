@@ -342,6 +342,15 @@ optional `channel`, `probes`, and `summarize` fields.
 
 ## Integrating the core into your design
 
+Detailed specifications live in [`no_commit/specs/`](no_commit/specs/):
+
+| Document | Contents |
+|----------|----------|
+| [architecture.md](no_commit/specs/architecture.md) | Core block diagram, clock domains, data flow |
+| [register_map.md](no_commit/specs/register_map.md) | Full ELA / EIO / EJTAG-AXI register map with bit-field descriptions |
+| [transport_api.md](no_commit/specs/transport_api.md) | Transport abstract interface contract and extension guide |
+| [waveform_schema.md](no_commit/specs/waveform_schema.md) | JSON export format, VCD mapping, CSV layout |
+
 ### RTL instantiation
 
 Pick the wrapper for your FPGA vendor — one instantiation each for ELA and EIO:
@@ -661,7 +670,7 @@ fpgacapZero/
     test_host_stack.py     Python unit tests
     test_cli_rpc_events.py CLI, RPC, and event helper tests
     test_ejtaguart.py      EJTAG-UART controller unit tests
-  docs/specs/
+  no_commit/specs/
     architecture.md        Core block diagram
     register_map.md        Register map specification
     transport_api.md       Transport interface spec

@@ -3,11 +3,29 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from host.fcapz.analyzer import Analyzer, CaptureConfig, CaptureResult, ProbeSpec, TriggerConfig
-from host.fcapz.cli import _build_config, build_parser
-from host.fcapz.events import ProbeDefinition, find_bursts, find_edges, frequency_estimate, summarize
+from host.fcapz.cli import (
+    _build_config,
+    _non_negative_int,
+    _parse_trigger_sequence,
+    _positive_float,
+    _positive_int,
+    _tcp_port,
+    build_parser,
+)
+from host.fcapz.events import (
+    ProbeDefinition,
+    find_bursts,
+    find_edges,
+    frequency_estimate,
+    summarize,
+)
 from host.fcapz.rpc import RpcServer
 from host.fcapz.transport import Transport
 
@@ -108,6 +126,43 @@ class AnalyzerValidationTests(unittest.TestCase):
             )
 
 
+class ProbeDefinitionTests(unittest.TestCase):
+    """Tests for ProbeDefinition validation and extract() edge cases."""
+
+    def test_zero_width_raises(self):
+        with self.assertRaises(ValueError):
+            ProbeDefinition("bad", width=0, lsb=0)
+
+    def test_negative_width_raises(self):
+        with self.assertRaises(ValueError):
+            ProbeDefinition("bad", width=-1, lsb=0)
+
+    def test_negative_lsb_raises(self):
+        with self.assertRaises(ValueError):
+            ProbeDefinition("bad", width=4, lsb=-1)
+
+    def test_extract_1bit(self):
+        p = ProbeDefinition("b", width=1, lsb=3)
+        self.assertEqual(p.extract(0b1000), 1)
+        self.assertEqual(p.extract(0b0111), 0)
+
+    def test_extract_wide_64bit(self):
+        p = ProbeDefinition("wide", width=64, lsb=0)
+        val = (1 << 64) - 1
+        self.assertEqual(p.extract(val), val)
+        self.assertEqual(p.extract(val | (0xFF << 64)), val)
+
+    def test_extract_high_lsb(self):
+        p = ProbeDefinition("hi", width=4, lsb=28)
+        self.assertEqual(p.extract(0xA0000000), 0xA)
+
+    def test_extract_lsb_plus_width_overflow(self):
+        # lsb=30, width=4: bits 30-33
+        p = ProbeDefinition("cross", width=4, lsb=30)
+        sample = 0xF << 30  # bits 30-33 set
+        self.assertEqual(p.extract(sample), 0xF)
+
+
 class EventHelperTests(unittest.TestCase):
     def test_edges_bursts_frequency_and_summary(self):
         result = CaptureResult(
@@ -133,6 +188,254 @@ class EventHelperTests(unittest.TestCase):
         self.assertEqual(frequency_estimate(result, 0, probe), 50.0)
         self.assertEqual(summary["signals"][0]["name"], "bit0")
         self.assertEqual(summary["signals"][0]["edge_count"], 5)
+
+
+class FrequencyEstimateTests(unittest.TestCase):
+    """Tests for frequency_estimate edge cases."""
+
+    def _result(self, samples):
+        return CaptureResult(
+            config=CaptureConfig(
+                pretrigger=0,
+                posttrigger=len(samples) - 1,
+                trigger=TriggerConfig(mode="value_match", value=0, mask=1),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=1000,
+            ),
+            samples=samples,
+        )
+
+    def test_returns_none_with_no_edges(self):
+        result = self._result([0, 0, 0, 0])
+        self.assertIsNone(frequency_estimate(result, 0))
+
+    def test_returns_none_with_one_rising_edge(self):
+        result = self._result([0, 1, 1, 1])
+        self.assertIsNone(frequency_estimate(result, 0))
+
+    def test_returns_value_with_two_rising_edges(self):
+        result = self._result([0, 1, 0, 1])
+        freq = frequency_estimate(result, 0)
+        self.assertIsNotNone(freq)
+        self.assertAlmostEqual(freq, 500.0)
+
+    def test_returns_none_on_empty_samples(self):
+        result = self._result([])
+        self.assertIsNone(frequency_estimate(result, 0))
+
+
+class SummarizeSchemaTests(unittest.TestCase):
+    """Tests for consistent keys in summarize() output."""
+
+    def test_no_edges_still_has_keys(self):
+        result = CaptureResult(
+            config=CaptureConfig(
+                pretrigger=0,
+                posttrigger=3,
+                trigger=TriggerConfig(mode="value_match", value=0, mask=1),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=100,
+            ),
+            samples=[5, 5, 5, 5],  # constant — no edges
+        )
+        summary = summarize(result)
+        sig = summary["signals"][0]
+        self.assertIn("longest_burst", sig)
+        self.assertIn("first_edge", sig)
+        self.assertIn("last_edge", sig)
+        self.assertIsNone(sig["first_edge"])
+        self.assertIsNone(sig["last_edge"])
+        self.assertIsNotNone(sig["longest_burst"])  # one burst of length 4
+
+    def test_empty_samples_has_none_keys(self):
+        result = CaptureResult(
+            config=CaptureConfig(
+                pretrigger=0,
+                posttrigger=0,
+                trigger=TriggerConfig(mode="value_match", value=0, mask=1),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=100,
+            ),
+            samples=[],
+        )
+        summary = summarize(result)
+        sig = summary["signals"][0]
+        self.assertIsNone(sig["longest_burst"])
+        self.assertIsNone(sig["first_edge"])
+        self.assertIsNone(sig["last_edge"])
+
+
+class CliTriggerSequenceTests(unittest.TestCase):
+    """Tests for --trigger-sequence JSON parsing edge cases."""
+
+    def test_inline_json_single_stage(self):
+        stages = _parse_trigger_sequence('[{"cmp_a": 0, "is_final": true, "value_a": "0xFF"}]')
+        self.assertEqual(len(stages), 1)
+        self.assertTrue(stages[0].is_final)
+        self.assertEqual(stages[0].value_a, 0xFF)
+
+    def test_inline_json_empty_array(self):
+        stages = _parse_trigger_sequence("[]")
+        self.assertEqual(stages, [])
+
+    def test_inline_json_hex_values(self):
+        stages = _parse_trigger_sequence(
+            '[{"value_a": "0xDEAD", "mask_a": "0xFF00", "value_b": "0xBEEF", "mask_b": "0x0F"}]'
+        )
+        self.assertEqual(stages[0].value_a, 0xDEAD)
+        self.assertEqual(stages[0].mask_a, 0xFF00)
+        self.assertEqual(stages[0].value_b, 0xBEEF)
+        self.assertEqual(stages[0].mask_b, 0x0F)
+
+    def test_inline_json_defaults_filled(self):
+        stages = _parse_trigger_sequence("[{}]")
+        self.assertEqual(len(stages), 1)
+        self.assertFalse(stages[0].is_final)
+        self.assertEqual(stages[0].cmp_mode_a, 0)
+        self.assertEqual(stages[0].count_target, 1)
+
+    def test_non_array_raises(self):
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _parse_trigger_sequence('{"stage": 0}')
+
+    def test_invalid_json_raises(self):
+        with self.assertRaises(Exception):
+            _parse_trigger_sequence("not json at all")
+
+    def test_file_path_loaded(self):
+        stages_data = [{"cmp_a": 6, "is_final": True, "count": 3}]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                         delete=False, encoding="utf-8") as f:
+            json.dump(stages_data, f)
+            tmp_path = f.name
+        try:
+            stages = _parse_trigger_sequence(tmp_path)
+            self.assertEqual(len(stages), 1)
+            self.assertEqual(stages[0].cmp_mode_a, 6)
+            self.assertEqual(stages[0].count_target, 3)
+            self.assertTrue(stages[0].is_final)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+    def test_multi_stage_next_state(self):
+        raw = '[{"next_state": 1, "is_final": false}, {"next_state": 0, "is_final": true}]'
+        stages = _parse_trigger_sequence(raw)
+        self.assertEqual(len(stages), 2)
+        self.assertEqual(stages[0].next_state, 1)
+        self.assertFalse(stages[0].is_final)
+        self.assertEqual(stages[1].next_state, 0)
+        self.assertTrue(stages[1].is_final)
+
+
+class RpcProbeValidationTests(unittest.TestCase):
+    """Tests for _parse_probes() input validation in RpcServer."""
+
+    def test_negative_lsb_string_raises(self):
+        with self.assertRaises(ValueError):
+            RpcServer._parse_probes("sig:-1:0")
+
+    def test_zero_width_string_raises(self):
+        with self.assertRaises(ValueError):
+            RpcServer._parse_probes("sig:0:0")
+
+    def test_negative_width_string_raises(self):
+        with self.assertRaises(ValueError):
+            RpcServer._parse_probes("sig:-4:0")
+
+    def test_negative_lsb_list_raises(self):
+        with self.assertRaises(ValueError):
+            RpcServer._parse_probes([{"name": "sig", "width": 4, "lsb": -1}])
+
+    def test_zero_width_list_raises(self):
+        with self.assertRaises(ValueError):
+            RpcServer._parse_probes([{"name": "sig", "width": 0, "lsb": 0}])
+
+    def test_valid_probe_string(self):
+        probes = RpcServer._parse_probes("lo:4:0,hi:4:4")
+        self.assertEqual(len(probes), 2)
+        self.assertEqual(probes[0].name, "lo")
+        self.assertEqual(probes[1].lsb, 4)
+
+    def test_valid_probe_list(self):
+        probes = RpcServer._parse_probes([{"name": "clk", "width": 1, "lsb": 7}])
+        self.assertEqual(probes[0].width, 1)
+        self.assertEqual(probes[0].lsb, 7)
+
+
+class CliArgValidatorTests(unittest.TestCase):
+    """Tests for CLI argument type validators."""
+
+    def test_positive_int_rejects_zero(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_int("0")
+
+    def test_positive_int_rejects_negative(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_int("-5")
+
+    def test_positive_int_accepts_positive(self):
+        self.assertEqual(_positive_int("42"), 42)
+
+    def test_non_negative_int_rejects_negative(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _non_negative_int("-1")
+
+    def test_non_negative_int_accepts_zero(self):
+        self.assertEqual(_non_negative_int("0"), 0)
+
+    def test_positive_float_rejects_zero(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_float("0")
+
+    def test_positive_float_rejects_negative(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_float("-1.5")
+
+    def test_positive_float_accepts_positive(self):
+        self.assertAlmostEqual(_positive_float("2.5"), 2.5)
+
+    def test_tcp_port_rejects_zero(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _tcp_port("0")
+
+    def test_tcp_port_rejects_negative(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _tcp_port("-1")
+
+    def test_tcp_port_rejects_too_large(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _tcp_port("65536")
+
+    def test_tcp_port_accepts_valid(self):
+        self.assertEqual(_tcp_port("6666"), 6666)
+        self.assertEqual(_tcp_port("1"), 1)
+        self.assertEqual(_tcp_port("65535"), 65535)
+
+    def test_trigger_sequence_malformed_json_gives_type_error(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _parse_trigger_sequence("{not valid json")
+
+    def test_trigger_sequence_missing_file_gives_type_error(self):
+        # Pass a string that looks like a path but doesn't exist (and isn't valid JSON)
+        with self.assertRaises((argparse.ArgumentTypeError, Exception)):
+            _parse_trigger_sequence("{bad json")
+
+
+class RpcSqModeValidationTests(unittest.TestCase):
+    """Tests for stor_qual_mode validation in RPC _build_config."""
+
+    def test_valid_modes_accepted(self):
+        for mode in (0, 1, 2):
+            self.assertEqual(RpcServer._validated_sq_mode(mode), mode)
+
+    def test_invalid_mode_rejected(self):
+        for mode in (-1, 3, 99):
+            with self.assertRaises(ValueError):
+                RpcServer._validated_sq_mode(mode)
 
 
 class CliTests(unittest.TestCase):

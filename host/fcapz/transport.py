@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import socket
 import subprocess
@@ -10,6 +11,11 @@ import threading
 from abc import ABC, abstractmethod
 
 from typing import List
+
+# Characters safe for TCL interpolation in JTAG target filters and file paths.
+# Rejects quotes, brackets, backslashes, semicolons, and control characters
+# that could break or inject into TCL strings.
+_TCL_SAFE_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 
 
 class Transport(ABC):
@@ -166,7 +172,8 @@ class OpenOcdTransport(Transport):
             self._sock = None
 
     def _cmd(self, tcl: str) -> str:
-        assert self._sock, "not connected"
+        if not self._sock:
+            raise RuntimeError("not connected — call connect() first")
         self._sock.sendall((tcl + "\x1a").encode())
         buf = b""
         while not buf.endswith(b"\x1a"):
@@ -257,6 +264,14 @@ class XilinxHwServerTransport(Transport):
         bitfile: str | None = None,
         ir_table: dict[int, int] | None = None,
     ):
+        if not _TCL_SAFE_RE.match(fpga_name):
+            raise ValueError(
+                f"fpga_name contains unsafe characters for TCL: {fpga_name!r}"
+            )
+        if bitfile and not _TCL_SAFE_RE.match(bitfile):
+            raise ValueError(
+                f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
+            )
         self.host = host
         self.port = port
         self.fpga_name = fpga_name
@@ -301,6 +316,10 @@ class XilinxHwServerTransport(Transport):
 
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
+        if not _TCL_SAFE_RE.match(bitfile):
+            raise ValueError(
+                f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
+            )
         self._send(f'targets -set -filter {{name =~ "{self.fpga_name}"}}')
         self._send(f"fpga -file {{{bitfile}}}")
         self._send("after 500")
@@ -624,7 +643,8 @@ class XilinxHwServerTransport(Transport):
         return "\n".join(lines)
 
     def _drain_stderr(self) -> None:
-        assert self._proc and self._proc.stderr
+        if not self._proc or not self._proc.stderr:
+            raise RuntimeError("xsdb process not initialized")
         for raw in self._proc.stderr:
             self._stderr_lines.append(raw.rstrip("\n\r"))
 

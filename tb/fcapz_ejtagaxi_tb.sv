@@ -472,14 +472,15 @@ module fcapz_ejtagaxi_tb;
         check("S9: VERSION=0x00000001", rdata == 32'h0000_0001);
         cdc_wait();
 
-        // FEATURES: {16'd0, DATA_W[7:0]=32, ADDR_W[7:0]=32} = 0x00002020
+        // FEATURES: {8'd0, (FIFO_DEPTH-1)[7:0]=15, DATA_W[7:0]=32, ADDR_W[7:0]=32}
+        // = 0x000F2020 (default FIFO_DEPTH=16)
         scan_in = make_cmd(CMD_CONFIG, 32'h0000_002C, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         cdc_wait();
         scan_in = make_cmd(CMD_NOP, 32'h0, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         rdata = get_rdata(scan_out);
-        check("S9: FEATURES=0x00002020", rdata == 32'h0000_2020);
+        check("S9: FEATURES=0x000F2020", rdata == 32'h000F_2020);
         cdc_wait();
 
         // ==================================================================

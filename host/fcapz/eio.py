@@ -75,7 +75,17 @@ class EioController:
             self._t.write_reg(_ADDR_OUT_BASE + i * 4, word)
 
     def read_outputs(self) -> int:
-        """Read back the currently programmed probe_out value."""
+        """Read back the currently programmed probe_out value.
+
+        Returns the full OUT_W-bit value that was last written to the output
+        registers via write_outputs() or set_bit().  Reads live hardware
+        registers rather than a local cache, so the value reflects any
+        external reset or JTAG-level reset that may have cleared the outputs.
+
+        Returns:
+            Current output register value as an unsigned integer, zero-padded
+            to OUT_W bits (bits above OUT_W are masked off).
+        """
         words = (self.out_w + 31) // 32
         value = 0
         for i in range(words):
@@ -86,7 +96,19 @@ class EioController:
 
     # ------------------------------------------------------------------
     def set_bit(self, bit: int, level: int) -> None:
-        """Set a single output bit without disturbing others."""
+        """Set or clear a single output bit without disturbing other bits.
+
+        Performs a read-modify-write: reads the current output register,
+        updates the requested bit, and writes the result back.  This is not
+        atomic — concurrent accesses from another host session can race.
+
+        Args:
+            bit:   Bit index to modify (0 = LSB).  Must be in [0, OUT_W).
+            level: 1 to set the bit, 0 to clear it.  Any non-zero value sets.
+
+        Raises:
+            ValueError: If *bit* is outside [0, OUT_W).
+        """
         if not (0 <= bit < self.out_w):
             raise ValueError(f"bit {bit} out of range (OUT_W={self.out_w})")
         current = self.read_outputs()
@@ -97,7 +119,17 @@ class EioController:
         self.write_outputs(current)
 
     def get_bit(self, bit: int) -> int:
-        """Read a single input bit."""
+        """Read a single input bit from probe_in.
+
+        Args:
+            bit: Bit index to read (0 = LSB).  Must be in [0, IN_W).
+
+        Returns:
+            0 or 1.
+
+        Raises:
+            ValueError: If *bit* is outside [0, IN_W).
+        """
         if not (0 <= bit < self.in_w):
             raise ValueError(f"bit {bit} out of range (IN_W={self.in_w})")
         return (self.read_inputs() >> bit) & 1

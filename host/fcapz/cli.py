@@ -15,6 +15,38 @@ from .events import ProbeDefinition, summarize
 from .transport import OpenOcdTransport, XilinxHwServerTransport
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: strictly positive integer."""
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {n}")
+    return n
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse type: non-negative integer (>=0)."""
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
+
+
+def _positive_float(value: str) -> float:
+    """argparse type: strictly positive float."""
+    f = float(value)
+    if f <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {f}")
+    return f
+
+
+def _tcp_port(value: str) -> int:
+    """argparse type: valid TCP port (1-65535)."""
+    n = int(value)
+    if not (1 <= n <= 65535):
+        raise argparse.ArgumentTypeError(f"port must be 1-65535, got {n}")
+    return n
+
+
 def _parse_probes(spec: str) -> list[ProbeSpec]:
     """Parse ``name:width:lsb,name:width:lsb,...`` into ProbeSpec list."""
     probes = []
@@ -32,11 +64,14 @@ def _parse_trigger_sequence(raw: str) -> list[SequencerStage]:
     """Parse a JSON file path or inline JSON string into SequencerStage list."""
     import os
 
-    if os.path.isfile(raw):
-        with open(raw, encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = json.loads(raw)
+    try:
+        if os.path.isfile(raw):
+            with open(raw, encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = json.loads(raw)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise argparse.ArgumentTypeError(f"--trigger-sequence: {exc}") from exc
 
     if not isinstance(data, list):
         raise argparse.ArgumentTypeError("--trigger-sequence must be a JSON array")
@@ -108,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fcapz", description="fpgacapZero host CLI")
     p.add_argument("--backend", choices=["openocd", "hw_server"], default="openocd")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=6666)
+    p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
     p.add_argument(
         "--program",
@@ -139,8 +174,15 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--depth", type=int, default=1024)
         parser.add_argument("--sample-clock-hz", type=int, default=100_000_000)
         parser.add_argument("--channel", type=int, default=0, help="Probe mux channel index")
-        parser.add_argument("--decimation", type=int, default=0, help="Sample decimation ratio (0=every cycle, N=every N+1)")
-        parser.add_argument("--ext-trigger-mode", default="disabled", choices=["disabled", "or", "and"], help="Ext trigger: disabled, or, and")
+        parser.add_argument(
+            "--decimation", type=int, default=0,
+            help="Sample decimation ratio (0=every cycle, N=every N+1)",
+        )
+        parser.add_argument(
+            "--ext-trigger-mode", default="disabled",
+            choices=["disabled", "or", "and"],
+            help="Ext trigger: disabled, or, and",
+        )
         parser.add_argument(
             "--probes",
             default=None,
@@ -161,7 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
             "--stor-qual-mode",
             type=int,
             default=0,
-            help="Storage qualification mode: 0=disabled, 1=store-when-match, 2=store-when-no-match",
+            help="Storage qualification mode: 0=disabled, "
+            "1=store-when-match, 2=store-when-no-match",
         )
         parser.add_argument(
             "--stor-qual-value",
@@ -176,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="Storage qualification mask (hex or decimal)",
         )
 
-    cap.add_argument("--timeout", type=float, default=10.0)
+    cap.add_argument("--timeout", type=_positive_float, default=10.0)
     cap.add_argument("--out", required=True)
     cap.add_argument("--format", choices=["json", "csv", "vcd"], default="json")
     cap.add_argument(
@@ -198,31 +241,64 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- AXI subcommands ---------------------------------------------------
     axi_read = sub.add_parser("axi-read", help="Single AXI read via JTAG-to-AXI bridge")
-    axi_read.add_argument("--addr", type=lambda x: int(x, 0), required=True, help="AXI address (hex)")
+    axi_read.add_argument(
+        "--addr", type=lambda x: int(x, 0), required=True,
+        help="AXI address (hex)",
+    )
     axi_read.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
 
     axi_write = sub.add_parser("axi-write", help="Single AXI write via JTAG-to-AXI bridge")
-    axi_write.add_argument("--addr", type=lambda x: int(x, 0), required=True, help="AXI address (hex)")
-    axi_write.add_argument("--data", type=lambda x: int(x, 0), required=True, help="Write data (hex)")
-    axi_write.add_argument("--wstrb", type=lambda x: int(x, 0), default=0xF, help="Write strobe (hex, default 0xf)")
+    axi_write.add_argument(
+        "--addr", type=lambda x: int(x, 0), required=True,
+        help="AXI address (hex)",
+    )
+    axi_write.add_argument(
+        "--data", type=lambda x: int(x, 0), required=True,
+        help="Write data (hex)",
+    )
+    axi_write.add_argument(
+        "--wstrb", type=lambda x: int(x, 0), default=0xF,
+        help="Write strobe (hex, default 0xf)",
+    )
     axi_write.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
 
     axi_dump = sub.add_parser("axi-dump", help="Read block of AXI words")
-    axi_dump.add_argument("--addr", type=lambda x: int(x, 0), required=True, help="Start address (hex)")
-    axi_dump.add_argument("--count", type=int, required=True, help="Number of 32-bit words to read")
+    axi_dump.add_argument(
+        "--addr", type=lambda x: int(x, 0), required=True,
+        help="Start address (hex)",
+    )
+    axi_dump.add_argument(
+        "--count", type=_positive_int, required=True,
+        help="Number of 32-bit words to read",
+    )
     axi_dump.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
     axi_dump.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
 
     axi_fill = sub.add_parser("axi-fill", help="Fill AXI memory with a pattern")
-    axi_fill.add_argument("--addr", type=lambda x: int(x, 0), required=True, help="Start address (hex)")
-    axi_fill.add_argument("--count", type=int, required=True, help="Number of 32-bit words to fill")
-    axi_fill.add_argument("--pattern", type=lambda x: int(x, 0), required=True, help="Fill pattern (hex)")
+    axi_fill.add_argument(
+        "--addr", type=lambda x: int(x, 0), required=True,
+        help="Start address (hex)",
+    )
+    axi_fill.add_argument(
+        "--count", type=_positive_int, required=True,
+        help="Number of 32-bit words to fill",
+    )
+    axi_fill.add_argument(
+        "--pattern", type=lambda x: int(x, 0), required=True,
+        help="Fill pattern (hex)",
+    )
     axi_fill.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
     axi_fill.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
 
     axi_load = sub.add_parser("axi-load", help="Load binary file into AXI memory")
-    axi_load.add_argument("--addr", type=lambda x: int(x, 0), required=True, help="Start address (hex)")
-    axi_load.add_argument("--file", type=argparse.FileType("rb"), required=True, help="Binary file to load")
+    axi_load.add_argument(
+        "--addr", type=lambda x: int(x, 0), required=True,
+        help="Start address (hex)",
+    )
+    axi_load.add_argument(
+        "--file", type=argparse.FileType("rb"), required=True,
+        help="Binary file to load",
+    )
     axi_load.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
     axi_load.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
 
@@ -232,17 +308,32 @@ def build_parser() -> argparse.ArgumentParser:
     uart_send_src = uart_send.add_mutually_exclusive_group(required=True)
     uart_send_src.add_argument("--data", type=str, help="String data to send")
     uart_send_src.add_argument("--file", type=argparse.FileType("rb"), help="Binary file to send")
-    uart_send_src.add_argument("--hex", type=str, help="Hex-encoded bytes to send (e.g. 48656C6C6F)")
+    uart_send_src.add_argument(
+        "--hex", type=str,
+        help="Hex-encoded bytes to send (e.g. 48656C6C6F)",
+    )
 
-    uart_recv = sub.add_parser("uart-recv", help="Receive data from UART RX via JTAG-to-UART bridge")
+    uart_recv = sub.add_parser(
+        "uart-recv",
+        help="Receive data from UART RX via JTAG-to-UART bridge",
+    )
     uart_recv.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
-    uart_recv.add_argument("--count", type=int, default=0, help="Number of bytes to receive (0=all available)")
-    uart_recv.add_argument("--timeout", type=float, default=1.0, help="Receive timeout in seconds")
+    uart_recv.add_argument(
+        "--count", type=_non_negative_int, default=0,
+        help="Number of bytes to receive (0=all available)",
+    )
+    uart_recv.add_argument(
+        "--timeout", type=_positive_float, default=1.0,
+        help="Receive timeout in seconds",
+    )
     uart_recv.add_argument("--line", action="store_true", help="Receive until newline")
 
     uart_monitor = sub.add_parser("uart-monitor", help="Continuous UART receive (Ctrl+C to stop)")
     uart_monitor.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
-    uart_monitor.add_argument("--timeout", type=float, default=0.5, help="Per-poll timeout in seconds")
+    uart_monitor.add_argument(
+        "--timeout", type=_positive_float, default=0.5,
+        help="Per-poll timeout in seconds",
+    )
 
     return p
 

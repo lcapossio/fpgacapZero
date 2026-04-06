@@ -13,6 +13,8 @@ DR format (72 bits, LSB first):
 
 from __future__ import annotations
 
+import warnings
+
 from .transport import Transport
 
 # Command codes
@@ -52,6 +54,7 @@ class EjtagAxiController:
     def __init__(self, transport: Transport, chain: int = 4):
         self._transport = transport
         self._chain = chain
+        self._fifo_depth: int = 0  # populated by connect() from FEATURES
 
     def _encode(self, cmd: int, addr: int = 0, payload: int = 0,
                 wstrb: int = 0xF) -> int:
@@ -126,12 +129,16 @@ class EjtagAxiController:
         _, _, features, _  = self._scan(CMD_NOP)
         if bridge_id != _BRIDGE_ID:
             raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
+        # FEATURES[23:16] = (FIFO_DEPTH - 1), AXI4 awlen convention.
+        # Add 1 back to recover the true depth (max supported burst beats).
+        self._fifo_depth = ((features >> 16) & 0xFF) + 1
         return {
             "bridge_id": bridge_id,
             "version_major": version >> 16,
             "version_minor": version & 0xFFFF,
             "addr_w": features & 0xFF,
             "data_w": (features >> 8) & 0xFF,
+            "fifo_depth": self._fifo_depth,
         }
 
     def axi_write(self, addr: int, data: int, wstrb: int = 0xF) -> int:
@@ -206,8 +213,23 @@ class EjtagAxiController:
 
     def burst_write(self, base_addr: int, data: list[int],
                     wstrb: int = 0xF) -> None:
-        """AXI4 burst write. N+2 scans."""
-        burst_len = len(data) - 1
+        """AXI4 burst write. N+2 scans.
+
+        Raises:
+            ValueError: If ``len(data)`` is 0, exceeds 256 (AXI4 max burst),
+                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+        """
+        n = len(data)
+        if n == 0:
+            raise ValueError("burst_write: data must not be empty")
+        if n > 256:
+            raise ValueError(f"burst_write: count {n} exceeds AXI4 max burst (256)")
+        if self._fifo_depth and n > self._fifo_depth:
+            raise ValueError(
+                f"burst_write: count {n} exceeds bridge FIFO_DEPTH "
+                f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
+            )
+        burst_len = n - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         self._scan(CMD_BURST_SETUP, addr=base_addr, payload=config)
         for i, word in enumerate(data):
@@ -225,7 +247,23 @@ class EjtagAxiController:
         scan sets last_cmd but doesn't capture FIFO data (because last_cmd
         was still BURST_RSTART at CAPTURE time). The second scan captures
         fifo[0]. So we need a priming scan before the data scans.
+
+        Raises:
+            ValueError: If ``count`` is <=0, exceeds 256 (AXI4 max burst),
+                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+                The bridge cannot buffer more beats than its FIFO holds —
+                rebuild the bitstream with a larger FIFO_DEPTH parameter
+                if longer bursts are required.
         """
+        if count <= 0:
+            raise ValueError(f"burst_read: count must be > 0, got {count}")
+        if count > 256:
+            raise ValueError(f"burst_read: count {count} exceeds AXI4 max burst (256)")
+        if self._fifo_depth and count > self._fifo_depth:
+            raise ValueError(
+                f"burst_read: count {count} exceeds bridge FIFO_DEPTH "
+                f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
+            )
         burst_len = count - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         self._scan(CMD_BURST_SETUP, addr=base_addr, payload=config)
@@ -257,6 +295,11 @@ class EjtagAxiController:
                     break
             # Re-issue RESET now that we're idle — this one propagates
             self._scan(CMD_RESET)
-        except Exception:
-            pass  # best-effort reset before closing transport
+        except Exception as exc:
+            warnings.warn(
+                f"EjtagAxiController.close(): reset failed ({exc}); "
+                "transport may be in an unknown state",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self._transport.close()

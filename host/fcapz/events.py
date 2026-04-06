@@ -24,6 +24,12 @@ class ProbeDefinition:
     width: int
     lsb: int  # bit offset from sample LSB
 
+    def __post_init__(self) -> None:
+        if self.width <= 0:
+            raise ValueError(f"ProbeDefinition '{self.name}': width must be > 0, got {self.width}")
+        if self.lsb < 0:
+            raise ValueError(f"ProbeDefinition '{self.name}': lsb must be >= 0, got {self.lsb}")
+
     def extract(self, sample: int) -> int:
         return (sample >> self.lsb) & ((1 << self.width) - 1)
 
@@ -231,6 +237,9 @@ def summarize(
             "unique_values": len(set(values)),
             "edge_count": len(edges),
             "burst_count": len(bursts),
+            "longest_burst": None,
+            "first_edge": None,
+            "last_edge": None,
         }
 
         if bursts:

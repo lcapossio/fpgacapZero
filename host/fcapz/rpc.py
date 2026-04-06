@@ -61,23 +61,36 @@ class RpcServer:
         if isinstance(raw, str):
             probes = []
             for part in raw.split(","):
-                name, width, lsb = part.strip().split(":")
-                probes.append(ProbeSpec(name=name, width=int(width), lsb=int(lsb)))
+                name, width_s, lsb_s = part.strip().split(":")
+                width = int(width_s)
+                lsb = int(lsb_s)
+                if width <= 0:
+                    raise ValueError(f"probe '{name}' width must be > 0, got {width}")
+                if lsb < 0:
+                    raise ValueError(f"probe '{name}' lsb must be >= 0, got {lsb}")
+                probes.append(ProbeSpec(name=name, width=width, lsb=lsb))
             return probes
         if isinstance(raw, list):
             probes = []
             for item in raw:
                 if not isinstance(item, dict):
                     raise ValueError("probe entries must be objects")
-                probes.append(
-                    ProbeSpec(
-                        name=str(item["name"]),
-                        width=int(item["width"]),
-                        lsb=int(item.get("lsb", 0)),
-                    )
-                )
+                name = str(item["name"])
+                width = int(item["width"])
+                lsb = int(item.get("lsb", 0))
+                if width <= 0:
+                    raise ValueError(f"probe '{name}' width must be > 0, got {width}")
+                if lsb < 0:
+                    raise ValueError(f"probe '{name}' lsb must be >= 0, got {lsb}")
+                probes.append(ProbeSpec(name=name, width=width, lsb=lsb))
             return probes
         raise ValueError("probes must be a string or a list of objects")
+
+    @staticmethod
+    def _validated_sq_mode(mode: int) -> int:
+        if mode not in (0, 1, 2):
+            raise ValueError(f"stor_qual_mode must be 0, 1, or 2, got {mode}")
+        return mode
 
     @classmethod
     def _build_config(cls, req: Dict[str, Any]) -> CaptureConfig:
@@ -96,7 +109,7 @@ class RpcServer:
             channel=int(req.get("channel", 0)),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
-            stor_qual_mode=int(req.get("stor_qual_mode", 0)),
+            stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
             stor_qual_value=int(req.get("stor_qual_value", 0)),
             stor_qual_mask=int(req.get("stor_qual_mask", 0)),
         )

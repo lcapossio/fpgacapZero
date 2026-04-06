@@ -114,6 +114,24 @@ module fcapz_ejtagaxi #(
 
     // ---- Async FIFO pointer width --------------------------------------------
     localparam FIFO_AW = $clog2(FIFO_DEPTH);
+    // Encoded into FEATURES[23:16] as (FIFO_DEPTH-1) so 256 fits in 8 bits.
+    localparam [7:0] FIFO_DEPTH_ENC = FIFO_DEPTH - 1;
+
+    // ---- Parameter assertions ------------------------------------------------
+    // FIFO_DEPTH bounds: must be >=1, <=256 (AXI4 burst max), and power of 2
+    // (required by the async FIFO).  Synthesis-safe trap + sim $error.
+    generate
+        if (FIFO_DEPTH < 1 || FIFO_DEPTH > 256)
+            FIFO_DEPTH_must_be_between_1_and_256 _fifo_depth_check_FAILED();
+        if (FIFO_DEPTH & (FIFO_DEPTH - 1))
+            FIFO_DEPTH_must_be_power_of_2 _fifo_depth_pow2_check_FAILED();
+    endgenerate
+    initial begin
+        if (FIFO_DEPTH < 1 || FIFO_DEPTH > 256)
+            $error("fcapz_ejtagaxi: FIFO_DEPTH must be 1..256 (got %0d)", FIFO_DEPTH);
+        if (FIFO_DEPTH & (FIFO_DEPTH - 1))
+            $error("fcapz_ejtagaxi: FIFO_DEPTH must be a power of 2 (got %0d)", FIFO_DEPTH);
+    end
 
     // ========================================================================
     //  TCK domain registers
@@ -365,7 +383,13 @@ module fcapz_ejtagaxi #(
                         case (sr_addr[15:0])
                             CFG_BRIDGE_ID: config_rdata <= 32'h454A4158;
                             CFG_VERSION:   config_rdata <= {16'd0, 16'd1};
-                            CFG_FEATURES:  config_rdata <= {16'd0, DATA_W[7:0], ADDR_W[7:0]};
+                            // FEATURES: [7:0]=ADDR_W, [15:8]=DATA_W,
+                            // [23:16]=(FIFO_DEPTH-1)  (AXI4 awlen convention,
+                            // so FIFO_DEPTH=256 fits as 0xFF; host adds 1)
+                            CFG_FEATURES:  config_rdata <= {8'd0,
+                                                            FIFO_DEPTH_ENC,
+                                                            DATA_W[7:0],
+                                                            ADDR_W[7:0]};
                             default:       config_rdata <= 32'h0;
                         endcase
                     end

@@ -25,7 +25,14 @@ __all__ = [
     "EjtagUartController",
 ]
 
-from .analyzer import Analyzer, CaptureConfig, CaptureResult, ProbeSpec, SequencerStage, TriggerConfig
+from .analyzer import (
+    Analyzer,
+    CaptureConfig,
+    CaptureResult,
+    ProbeSpec,
+    SequencerStage,
+    TriggerConfig,
+)
 from .eio import EioController
 from .ejtagaxi import AXIError, EjtagAxiController
 from .ejtaguart import EjtagUartController

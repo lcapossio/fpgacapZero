@@ -113,7 +113,15 @@ module fcapz_ela #(
             $error("fcapz_ela: TRIG_STAGES must be 1-4 (got %0d)", TRIG_STAGES);
         if (SAMPLE_W < 1)
             $error("fcapz_ela: SAMPLE_W must be >= 1");
+        if (SAMPLE_W > 256)
+            $error("fcapz_ela: SAMPLE_W must be <= 256 (got %0d)", SAMPLE_W);
     end
+
+    // Synthesis-safe upper-bound trap for SAMPLE_W
+    generate
+        if (SAMPLE_W > 256)
+            SAMPLE_W_must_be_at_most_256 _sample_w_check_FAILED();
+    endgenerate
 
     localparam PTR_W = $clog2(DEPTH);
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;

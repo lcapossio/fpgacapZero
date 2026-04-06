@@ -24,7 +24,7 @@ where = ["."]
 include = ["host*"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.4.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -37,4 +37,3 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
-ignore = ["E501"]  # line length enforced by formatter, not lint

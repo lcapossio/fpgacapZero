@@ -185,6 +185,8 @@ class Analyzer:
             )
 
         # Auto-detect hw capabilities
+        hw_features = int(_read(_ADDR_FEATURES))
+        hw_trig_stages = hw_features & 0xF  # bits[3:0]
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
 
@@ -219,6 +221,15 @@ class Analyzer:
             self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask)
 
         if config.sequence is not None:
+            if hw_trig_stages == 0:
+                raise ValueError(
+                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
+                )
+            if len(config.sequence) > hw_trig_stages:
+                raise ValueError(
+                    f"sequence has {len(config.sequence)} stages but hw supports "
+                    f"only {hw_trig_stages}"
+                )
             for idx, stage in enumerate(config.sequence):
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())

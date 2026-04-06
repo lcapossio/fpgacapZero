@@ -51,6 +51,19 @@ class EjtagUartController:
         """Open transport, select chain, probe identity.
 
         Probe is 10 scans: 5 for UART_ID + 5 for VERSION.
+
+        Returns:
+            dict with keys:
+
+            * ``"id"`` (int) — bridge identity word; always ``0x454A5552``
+              (ASCII ``"EJUR"``) for a valid core.
+            * ``"version"`` (int) — packed version register
+              ``{major[15:0], minor[15:0]}``.
+
+        Raises:
+            RuntimeError: If the identity word does not match (wrong chain,
+                wrong bitstream, or core not loaded).
+            RuntimeError: If the transport cannot connect.
         """
         self._transport.connect()
         self._transport.select_chain(self._chain)

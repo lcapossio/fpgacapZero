@@ -28,7 +28,7 @@ class FakeTransport(Transport):
                 0x0010: 1024,         # DEPTH
                 0x0008: 0x4,          # STATUS done
                 0x00A4: 1,            # NUM_CHAN
-                0x003C: 0x0001_0160,  # FEATURES (NUM_SEG=1, NUM_CH=1, HAS_*)
+                0x003C: 0x0001_0164,  # FEATURES: TRIG_STAGES=4, HAS_DECIM=1, HAS_EXT=1
                 0x00C4: 0,            # TIMESTAMP_W
                 0x00B8: 1,            # NUM_SEGMENTS
             },
@@ -171,8 +171,12 @@ class SequencerTests(unittest.TestCase):
         regs = transport.regs
 
         # Stage 0: SEQ_BASE=0x0040, stride=20
-        # SEQ_CFG = cmp_a(0) | cmp_b(1)<<4 | combine(2)<<8 | next(1)<<10 | final(0)<<12 | count(3)<<16
-        expected_cfg0 = (0 & 0xF) | ((1 & 0xF) << 4) | ((2 & 0x3) << 8) | ((1 & 0x3) << 10) | (0 << 12) | (3 << 16)
+        # SEQ_CFG = cmp_a(0) | cmp_b(1)<<4 | combine(2)<<8
+        #         | next(1)<<10 | final(0)<<12 | count(3)<<16
+        expected_cfg0 = (
+            (0 & 0xF) | ((1 & 0xF) << 4) | ((2 & 0x3) << 8)
+            | ((1 & 0x3) << 10) | (0 << 12) | (3 << 16)
+        )
         self.assertEqual(regs[0x0040], expected_cfg0)
         self.assertEqual(regs[0x0044], 0x55)      # value_a
         self.assertEqual(regs[0x0048], 0xFF)       # mask_a
@@ -180,7 +184,10 @@ class SequencerTests(unittest.TestCase):
         self.assertEqual(regs[0x0050], 0xF0)       # mask_b
 
         # Stage 1: base = 0x0040 + 20 = 0x0054
-        expected_cfg1 = (6 & 0xF) | ((0 & 0xF) << 4) | ((0 & 0x3) << 8) | ((0 & 0x3) << 10) | (1 << 12) | (1 << 16)
+        expected_cfg1 = (
+            (6 & 0xF) | ((0 & 0xF) << 4) | ((0 & 0x3) << 8)
+            | ((0 & 0x3) << 10) | (1 << 12) | (1 << 16)
+        )
         self.assertEqual(regs[0x0054], expected_cfg1)
         self.assertEqual(regs[0x0058], 0x80)       # value_a
         self.assertEqual(regs[0x005C], 0x80)       # mask_a
@@ -308,7 +315,7 @@ class MultiSegmentTests(unittest.TestCase):
         t._chain_regs[1][0x003C] = (
             (4 << 16) |   # NUM_SEGMENTS field in FEATURES[23:16]
             (1 << 8)  |   # NUM_CHANNELS field in FEATURES[15:8]
-            0x60          # HAS_TIMESTAMP=0, HAS_EXT=1, HAS_DECIM=1
+            0x64          # TRIG_STAGES=4, HAS_EXT=1, HAS_DECIM=1
         )
         # Pre-fill data memory with distinct per-segment patterns
         # capture_segment() reads from ADDR_DATA_BASE (0x0100)
@@ -385,6 +392,127 @@ class MultiSegmentTests(unittest.TestCase):
         analyzer.connect()
         done = analyzer.wait_all_segments_done(timeout=0.05)
         self.assertTrue(done)
+
+
+class WideSampleCaptureTests(unittest.TestCase):
+    """Tests for capture() sample reassembly at edge SAMPLE_W values."""
+
+    def _make_transport(self, sample_w: int, data: list) -> FakeTransport:
+        t = FakeTransport()
+        t._chain_regs[1][0x000C] = sample_w   # SAMPLE_W
+        t._chain_regs[1][0x0010] = 1024        # DEPTH
+        t._chain_regs[1][0x001C] = len(data) // max(1, (sample_w + 31) // 32)
+        t.data = list(data)
+        return t
+
+    def _configure_and_capture(self, transport, sample_w: int, n_samples: int):
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=n_samples - 1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0x1),
+            sample_width=sample_w,
+            depth=1024,
+        )
+        analyzer.configure(cfg)
+        analyzer.arm()
+        return analyzer.capture(timeout=0.01)
+
+    def test_sample_w1_masks_to_1_bit(self):
+        # 1-bit samples: each word contributes one sample, masked to 1 bit
+        transport = self._make_transport(sample_w=1, data=[1, 0, 1, 0])
+        result = self._configure_and_capture(transport, sample_w=1, n_samples=4)
+        self.assertEqual(result.samples, [1, 0, 1, 0])
+
+    def test_sample_w1_high_bits_discarded(self):
+        # Words with garbage high bits — only bit 0 should survive
+        transport = self._make_transport(sample_w=1, data=[0xFF, 0xFE, 0xFD, 0xFC])
+        result = self._configure_and_capture(transport, sample_w=1, n_samples=4)
+        self.assertEqual(result.samples, [1, 0, 1, 0])
+
+    def test_sample_w256_reassembles_from_8_words(self):
+        # 256-bit sample: 8 × 32-bit words, little-endian
+        # Build one known sample value
+        words = [0x11111111, 0x22222222, 0x33333333, 0x44444444,
+                 0x55555555, 0x66666666, 0x77777777, 0x88888888]
+        expected = 0
+        for i, w in enumerate(words):
+            expected |= (w & 0xFFFF_FFFF) << (i * 32)
+        expected &= (1 << 256) - 1
+
+        transport = self._make_transport(sample_w=256, data=words)
+        transport._chain_regs[1][0x001C] = 1  # CAPTURE_LEN = 1 sample
+        result = self._configure_and_capture(transport, sample_w=256, n_samples=1)
+        self.assertEqual(len(result.samples), 1)
+        self.assertEqual(result.samples[0], expected)
+
+    def test_sample_w256_two_samples(self):
+        # 2 × 256-bit samples = 16 words
+        w0 = [0xA0 + i for i in range(8)]  # sample 0
+        w1 = [0xB0 + i for i in range(8)]  # sample 1
+        transport = self._make_transport(sample_w=256, data=w0 + w1)
+        transport._chain_regs[1][0x001C] = 2
+        result = self._configure_and_capture(transport, sample_w=256, n_samples=2)
+        self.assertEqual(len(result.samples), 2)
+        expected0 = sum((w0[i] & 0xFFFF_FFFF) << (i * 32) for i in range(8))
+        expected1 = sum((w1[i] & 0xFFFF_FFFF) << (i * 32) for i in range(8))
+        self.assertEqual(result.samples[0], expected0 & ((1 << 256) - 1))
+        self.assertEqual(result.samples[1], expected1 & ((1 << 256) - 1))
+
+
+class SequencerBoundsTests(unittest.TestCase):
+    """Tests for TRIG_STAGES bounds enforcement in configure()."""
+
+    def _make_transport_with_stages(self, trig_stages: int) -> FakeTransport:
+        t = FakeTransport()
+        features = t._chain_regs[1][0x003C]
+        t._chain_regs[1][0x003C] = (features & ~0xF) | (trig_stages & 0xF)
+        return t
+
+    def test_sequence_exceeds_hw_stages_raises(self):
+        transport = self._make_transport_with_stages(2)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[SequencerStage(), SequencerStage(), SequencerStage()],  # 3 > 2
+        )
+        with self.assertRaises(ValueError):
+            analyzer.configure(cfg)
+
+    def test_sequence_absent_hw_stages_zero_raises(self):
+        transport = self._make_transport_with_stages(0)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[SequencerStage()],
+        )
+        with self.assertRaises(ValueError):
+            analyzer.configure(cfg)
+
+    def test_sequence_within_hw_stages_succeeds(self):
+        transport = self._make_transport_with_stages(4)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[SequencerStage(is_final=True), SequencerStage()],  # 2 <= 4
+        )
+        analyzer.configure(cfg)  # must not raise
 
 
 class ChainSelectionTests(unittest.TestCase):

@@ -105,9 +105,9 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
                 t.connect()
 
     def test_send_raises_if_not_connected(self):
-        """_cmd() asserts if called before connect()."""
+        """_cmd() raises RuntimeError if called before connect()."""
         t = OpenOcdTransport()
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             t._cmd("version")
 
     def test_connection_closed_mid_read_raises(self):
@@ -272,6 +272,56 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # Decode addr (bits 32-47)
         decoded_addr = sum(int(frame[32 + i]) << i for i in range(16))
         self.assertEqual(decoded_addr, addr)
+
+
+class TclInjectionTests(unittest.TestCase):
+    """Tests for TCL command injection prevention in XilinxHwServerTransport."""
+
+    def test_fpga_name_with_quotes_rejected(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(fpga_name='xc7a100t"; puts "pwned')
+
+    def test_fpga_name_with_brackets_rejected(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(fpga_name="xc7a[exec rm -rf /]")
+
+    def test_fpga_name_with_semicolon_rejected(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(fpga_name="xc7a; exec rm -rf /")
+
+    def test_bitfile_with_brackets_rejected(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(fpga_name="xc7a100t", bitfile="[exec evil_cmd]")
+
+    def test_bitfile_with_backslash_rejected(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(fpga_name="xc7a100t", bitfile="C:\\evil\\path.bit")
+
+    def test_bitfile_validated_at_program_time(self):
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        with self.assertRaises(ValueError):
+            t.program("[exec evil_cmd]")
+
+    def test_safe_fpga_name_accepted(self):
+        """Normal FPGA target names pass validation."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        self.assertEqual(t.fpga_name, "xc7a100t")
+
+        t2 = XilinxHwServerTransport(fpga_name="xczu9eg")
+        self.assertEqual(t2.fpga_name, "xczu9eg")
+
+    def test_safe_bitfile_path_accepted(self):
+        t = XilinxHwServerTransport(
+            fpga_name="xc7a100t",
+            bitfile="/home/user/build/top.bit",
+        )
+        self.assertEqual(t.bitfile, "/home/user/build/top.bit")
+
+        t2 = XilinxHwServerTransport(
+            fpga_name="xc7a100t",
+            bitfile="path/with spaces/file.bit",
+        )
+        self.assertEqual(t2.bitfile, "path/with spaces/file.bit")
 
 
 if __name__ == "__main__":
