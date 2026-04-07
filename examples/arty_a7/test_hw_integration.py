@@ -72,10 +72,9 @@ class TestProbe(unittest.TestCase):
         a = Analyzer(t)
         try:
             a.connect()
-            # First read after programming may return zeros; retry once.
+            # XilinxHwServerTransport.connect() now waits until the FPGA
+            # responds with valid data; no retry needed here.
             info = a.probe()
-            if info["version_major"] == 0:
-                info = a.probe()
             self.assertEqual(info["version_major"], 1)
             self.assertEqual(info["version_minor"], 1)
             self.assertEqual(info["sample_width"], 8)
@@ -91,8 +90,6 @@ class TestRegisterRoundTrip(unittest.TestCase):
     def setUp(self):
         self.t = _make_transport()
         self.t.connect()
-        # Warm up: first read after connect may return stale data
-        self.t.read_reg(0x0000)
 
     def tearDown(self):
         self.t.close()
@@ -135,9 +132,6 @@ class TestCapture(unittest.TestCase):
         self.t = _make_transport()
         self.a = Analyzer(self.t)
         self.a.connect()
-        # Warm up: flush stale JTAG state from previous sessions
-        self.t.read_reg(0x0000)
-        self.t.read_reg(0x0000)
 
     def tearDown(self):
         self.a.close()
@@ -239,7 +233,6 @@ class TestExportFormats(unittest.TestCase):
         self.t = _make_transport()
         self.a = Analyzer(self.t)
         self.a.connect()
-        self.t.read_reg(0x0000)
 
     def tearDown(self):
         self.a.close()

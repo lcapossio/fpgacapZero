@@ -271,6 +271,8 @@ class XilinxHwServerTransport(Transport):
         xsdb_path: str | None = None,
         bitfile: str | None = None,
         ir_table: dict[int, int] | None = None,
+        ready_probe_addr: int | None = 0x0000,
+        ready_probe_timeout: float = 2.0,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -286,6 +288,8 @@ class XilinxHwServerTransport(Transport):
         self.bitfile = bitfile
         self._xsdb_path = xsdb_path
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
+        self.ready_probe_addr = ready_probe_addr
+        self.ready_probe_timeout = ready_probe_timeout
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -320,6 +324,46 @@ class XilinxHwServerTransport(Transport):
 
         self._send(
             f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
+        )
+
+        # Wait for the JTAG chain to respond with valid (non-zero) data on
+        # the configured probe register.  After fpga -file the bitstream is
+        # uploaded but the FPGA's startup sequence (DONE assertion, BSCAN
+        # bring-up, internal config logic settling) can run a few hundred
+        # ms longer.  Reading too early returns all-zero scans.  Polling
+        # here pushes the entire "is the chain alive yet?" concern into the
+        # transport, so callers can rely on connect() returning a working
+        # session.  Pass ready_probe_addr=None to skip (e.g. when the
+        # bitstream cannot guarantee a non-zero response at any address).
+        if self.ready_probe_addr is not None and self.bitfile:
+            self._wait_until_ready()
+
+    def _wait_until_ready(self) -> None:
+        """Poll the configured probe register until it returns non-zero.
+
+        Raises ConnectionError if the deadline elapses.  Uses the chain
+        currently active (default chain 1 / USER1).
+        """
+        import time
+
+        deadline = time.monotonic() + self.ready_probe_timeout
+        attempts = 0
+        last_value = 0
+        while time.monotonic() < deadline:
+            try:
+                last_value = self.read_reg(self.ready_probe_addr)
+            except Exception:
+                last_value = 0
+            attempts += 1
+            if last_value != 0:
+                return
+            time.sleep(0.05)
+        raise ConnectionError(
+            f"FPGA did not become ready within {self.ready_probe_timeout}s "
+            f"after program() (probe addr=0x{self.ready_probe_addr:04X}, "
+            f"last_value=0x{last_value:08X}, attempts={attempts}). "
+            "Either the bitstream failed to load, the wrong fpga_name was "
+            "selected, or the probe register address is wrong for this design."
         )
 
     def program(self, bitfile: str) -> None:
