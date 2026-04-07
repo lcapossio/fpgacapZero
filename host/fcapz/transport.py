@@ -12,10 +12,18 @@ from abc import ABC, abstractmethod
 
 from typing import List
 
-# Characters safe for TCL interpolation in JTAG target filters and file paths.
-# Rejects quotes, brackets, backslashes, semicolons, and control characters
-# that could break or inject into TCL strings.
-_TCL_SAFE_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
+# Character whitelist for the JTAG target filter (XSDB `jtag targets -set
+# -filter {name =~ "..."}`).  This value is interpolated inside a
+# double-quoted TCL string, so we reject every character that could end the
+# string or trigger substitution: " [ ] { } $ ; \ <newline> <tab>.
+_TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
+
+# Character whitelist for bitfile paths (XSDB `fpga -file {...}`).  The path
+# is wrapped in TCL braces which disable substitution, so the only unsafe
+# characters are unbalanced braces and characters that could terminate the
+# brace group.  We accept typical Windows/Unix path characters including
+# backslash.  Anything outside this set is rejected outright.
+_TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
 
 class Transport(ABC):
@@ -264,11 +272,11 @@ class XilinxHwServerTransport(Transport):
         bitfile: str | None = None,
         ir_table: dict[int, int] | None = None,
     ):
-        if not _TCL_SAFE_RE.match(fpga_name):
+        if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
                 f"fpga_name contains unsafe characters for TCL: {fpga_name!r}"
             )
-        if bitfile and not _TCL_SAFE_RE.match(bitfile):
+        if bitfile and not _TCL_PATH_RE.match(bitfile):
             raise ValueError(
                 f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
             )
@@ -316,7 +324,7 @@ class XilinxHwServerTransport(Transport):
 
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
-        if not _TCL_SAFE_RE.match(bitfile):
+        if not _TCL_PATH_RE.match(bitfile):
             raise ValueError(
                 f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
             )

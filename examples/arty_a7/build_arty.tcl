@@ -11,7 +11,11 @@ set part         xc7a100tcsg324-1
 set example_dir  [file normalize [file dirname [info script]]]
 set root         [file normalize $example_dir/../..]
 
-# ── Create project ────────────────────────────────────────────
+# ── Create project (force overwrites any existing project) ────
+# If a stale project is open from a previous run, close it first.
+if {[llength [current_project -quiet]] > 0} {
+    close_project
+}
 create_project $project_name $root/vivado/$project_name \
     -part $part -force
 

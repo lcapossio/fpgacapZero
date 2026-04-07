@@ -293,9 +293,19 @@ class TclInjectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             XilinxHwServerTransport(fpga_name="xc7a100t", bitfile="[exec evil_cmd]")
 
-    def test_bitfile_with_backslash_rejected(self):
+    def test_bitfile_with_brace_rejected(self):
+        # Unbalanced braces would terminate the TCL {path} group early.
         with self.assertRaises(ValueError):
-            XilinxHwServerTransport(fpga_name="xc7a100t", bitfile="C:\\evil\\path.bit")
+            XilinxHwServerTransport(fpga_name="xc7a100t", bitfile="C:/evil}.bit")
+
+    def test_windows_bitfile_accepted(self):
+        # Backslashes are part of legitimate Windows paths and must be allowed
+        # (the path is interpolated inside TCL braces which disable substitution).
+        t = XilinxHwServerTransport(
+            fpga_name="xc7a100t",
+            bitfile=r"C:\Projects\fpgacapZero\examples\arty_a7\arty_a7_top.bit",
+        )
+        self.assertIn("\\", t.bitfile)
 
     def test_bitfile_validated_at_program_time(self):
         t = XilinxHwServerTransport(fpga_name="xc7a100t")
