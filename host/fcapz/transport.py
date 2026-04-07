@@ -374,7 +374,11 @@ class XilinxHwServerTransport(Transport):
                     if line[i] == "1":
                         result |= 1 << i
                 return result
-        raise RuntimeError(f"xsdb: no bit string in raw_dr_scan output: {out!r}")
+        raise RuntimeError(
+            "xsdb: no bit string in raw_dr_scan output. "
+            f"stdout={out!r}; "
+            f"recent stderr={self._stderr_lines[-10:]!r}"
+        )
 
     # -- register access -----------------------------------------------------
 
@@ -610,7 +614,11 @@ class XilinxHwServerTransport(Transport):
             line = line.strip()
             if line and set(line) <= {"0", "1"} and len(line) >= 32:
                 return self._bits_to_int(line, 0, 32)
-        raise RuntimeError(f"xsdb: no bit string in output: {output!r}")
+        raise RuntimeError(
+            "xsdb: no bit string in output. "
+            f"stdout={output!r}; "
+            f"recent stderr={self._stderr_lines[-10:]!r}"
+        )
 
     def _parse_block_bits(self, output: str, expected: int) -> List[int]:
         """Extract *expected* 32-bit values from bit-string tokens."""
@@ -622,7 +630,9 @@ class XilinxHwServerTransport(Transport):
                 values.append(self._bits_to_int(token, 0, 32))
         if len(values) < expected:
             raise RuntimeError(
-                f"xsdb: expected {expected} results, got {len(values)}"
+                f"xsdb: expected {expected} results, got {len(values)}. "
+                f"stdout={output[:500]!r}; "
+                f"recent stderr={self._stderr_lines[-10:]!r}"
             )
         return values[:expected]
 
