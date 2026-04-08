@@ -53,9 +53,9 @@ FPGA = "xc7a100t"
 
 def _make_transport():
     if _BACKEND == "openocd":
-        from host.fcapz.transport import OpenOcdTransport
+        from fcapz.transport import OpenOcdTransport
         return OpenOcdTransport(port=_OPENOCD_PORT, tap=_OPENOCD_TAP)
-    from host.fcapz.transport import XilinxHwServerTransport
+    from fcapz.transport import XilinxHwServerTransport
     return XilinxHwServerTransport(
         port=PORT, fpga_name=FPGA, bitfile=BITFILE,
     )
@@ -66,7 +66,7 @@ class TestProbe(unittest.TestCase):
     """Basic connectivity: read identity registers."""
 
     def test_probe_returns_valid_identity(self):
-        from host.fcapz.analyzer import Analyzer
+        from fcapz.analyzer import Analyzer
 
         t = _make_transport()
         a = Analyzer(t)
@@ -127,7 +127,7 @@ class TestCapture(unittest.TestCase):
     """End-to-end capture with various configurations."""
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer
+        from fcapz.analyzer import Analyzer
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -137,7 +137,7 @@ class TestCapture(unittest.TestCase):
         self.a.close()
 
     def _capture(self, pretrig, posttrig, trig_val=0, trig_mask=0xFF, mode="value_match"):
-        from host.fcapz.analyzer import CaptureConfig, TriggerConfig
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
 
         cfg = CaptureConfig(
             pretrigger=pretrig,
@@ -156,6 +156,55 @@ class TestCapture(unittest.TestCase):
         expected_total = 4 + 1 + 8  # pre + trigger + post
         self.assertEqual(len(result.samples), expected_total)
         self.assertFalse(result.overflow)
+
+    def test_trigger_delay_shifts_window(self):
+        """Trigger on value=0x10 with TRIG_DELAY=4 — captured trigger sample
+        should be 4 cycles later (= 0x14) since the probe is a free-running
+        8-bit counter incrementing every sample clock."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=2,
+            posttrigger=3,
+            trigger=TriggerConfig(mode="value_match", value=0x10, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            trigger_delay=4,
+        )
+        self.a.configure(cfg)
+        self.a.arm()
+        result = self.a.capture(timeout=5.0)
+        self.assertEqual(len(result.samples), 6)
+        # Trigger sample is at index pretrigger=2.  Counter advanced by 4
+        # cycles between cause (0x10) and commit, so the value should be
+        # 0x14 (one comparator pipeline cycle may shift it by ±1).
+        trig_sample = result.samples[2] & 0xFF
+        self.assertIn(
+            trig_sample, (0x14, 0x15),
+            f"trigger sample = 0x{trig_sample:02X}, expected 0x14 or 0x15",
+        )
+
+    def test_trigger_delay_zero_equivalence(self):
+        """trigger_delay=0 must reproduce the legacy capture window."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=2,
+            posttrigger=3,
+            trigger=TriggerConfig(mode="value_match", value=0x20, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            trigger_delay=0,
+        )
+        self.a.configure(cfg)
+        self.a.arm()
+        result = self.a.capture(timeout=5.0)
+        self.assertEqual(len(result.samples), 6)
+        trig_sample = result.samples[2] & 0xFF
+        self.assertIn(
+            trig_sample, (0x20, 0x21),
+            f"trigger sample = 0x{trig_sample:02X}, expected 0x20 or 0x21",
+        )
 
     def test_minimal_capture(self):
         """Minimum pretrigger=0, posttrigger=0."""
@@ -228,7 +277,7 @@ class TestExportFormats(unittest.TestCase):
     """Capture and export to all three formats."""
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer
+        from fcapz.analyzer import Analyzer
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -238,7 +287,7 @@ class TestExportFormats(unittest.TestCase):
         self.a.close()
 
     def _capture_result(self):
-        from host.fcapz.analyzer import CaptureConfig, TriggerConfig
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
 
         cfg = CaptureConfig(
             pretrigger=2, posttrigger=4,
@@ -295,7 +344,7 @@ class TestDecimation(unittest.TestCase):
     """ELA decimation: verify fewer samples are stored with DECIM > 0."""
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -348,7 +397,7 @@ class TestTimestamps(unittest.TestCase):
     """ELA timestamps: verify monotonic timestamps are captured."""
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -405,7 +454,7 @@ class TestSegmentedCapture(unittest.TestCase):
     """ELA segmented memory: verify multi-segment auto-rearm capture."""
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -479,7 +528,7 @@ class TestExtTrigger(unittest.TestCase):
     """
 
     def setUp(self):
-        from host.fcapz.analyzer import Analyzer
+        from fcapz.analyzer import Analyzer
 
         self.t = _make_transport()
         self.a = Analyzer(self.t)
@@ -495,7 +544,7 @@ class TestExtTrigger(unittest.TestCase):
 
     def test_ext_trigger_disabled_normal_capture(self):
         """With ext_trigger_mode=0 (disabled), normal capture works."""
-        from host.fcapz.analyzer import CaptureConfig, TriggerConfig
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
 
         cfg = CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
@@ -517,7 +566,7 @@ class TestEioProbe(unittest.TestCase):
     """EIO: probe identity and widths on chain 3."""
 
     def test_eio_probe(self):
-        from host.fcapz.eio import EioController
+        from fcapz.eio import EioController
 
         t = _make_transport()
         eio = EioController(t, chain=3)
@@ -534,7 +583,7 @@ class TestEioReadWrite(unittest.TestCase):
     """EIO: read inputs and write outputs via JTAG USER3."""
 
     def setUp(self):
-        from host.fcapz.eio import EioController
+        from fcapz.eio import EioController
 
         self.eio = EioController(_make_transport(), chain=3)
         self.eio.connect()
@@ -593,7 +642,7 @@ class TestEjtagAxiProbe(unittest.TestCase):
     """EJTAG-AXI bridge: probe identity."""
 
     def test_bridge_probe(self):
-        from host.fcapz.ejtagaxi import EjtagAxiController
+        from fcapz.ejtagaxi import EjtagAxiController
 
         t = _make_transport()
         bridge = EjtagAxiController(t, chain=4)
@@ -611,7 +660,7 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
     """EJTAG-AXI bridge: single and block read/write via on-chip test slave."""
 
     def setUp(self):
-        from host.fcapz.ejtagaxi import EjtagAxiController
+        from fcapz.ejtagaxi import EjtagAxiController
 
         self.bridge = EjtagAxiController(_make_transport(), chain=4)
         self.bridge.connect()
@@ -659,7 +708,7 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
     def test_error_on_error_addr(self):
         """Write to test slave's ERROR_ADDR (0xFFFFFFFC) → AXIError."""
-        from host.fcapz.ejtagaxi import AXIError
+        from fcapz.ejtagaxi import AXIError
 
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0x1234)
@@ -691,7 +740,7 @@ class TestEjtagUartProbe(unittest.TestCase):
     """EJTAG-UART bridge: probe identity on chain 3 (loopback bitstream)."""
 
     def test_uart_probe(self):
-        from host.fcapz.ejtaguart import EjtagUartController
+        from fcapz.ejtaguart import EjtagUartController
 
         t = _make_transport()
         uart = EjtagUartController(t, chain=3)
@@ -708,7 +757,7 @@ class TestEjtagUartLoopback(unittest.TestCase):
     """EJTAG-UART bridge: loopback tests (TX wired to RX in bitstream)."""
 
     def setUp(self):
-        from host.fcapz.ejtaguart import EjtagUartController
+        from fcapz.ejtaguart import EjtagUartController
 
         self.uart = EjtagUartController(_make_transport(), chain=3)
         self.uart.connect()

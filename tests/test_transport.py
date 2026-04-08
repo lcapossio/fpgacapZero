@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
 
 
 # ---------------------------------------------------------------------------

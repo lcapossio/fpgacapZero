@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fpgacapzero"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -17,11 +17,11 @@ classifiers = [
 ]
 
 [project.scripts]
-fcapz = "host.fcapz.cli:main"
+fcapz = "fcapz.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["host*"]
+where = ["host"]
+include = ["fcapz*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.4.0"]

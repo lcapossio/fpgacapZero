@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from typing import List
 
-from host.fcapz.ejtaguart import (
+from fcapz.ejtaguart import (
     CMD_CONFIG,
     CMD_NOP,
     CMD_RESET,
@@ -17,7 +17,7 @@ from host.fcapz.ejtaguart import (
     EjtagUartController,
     _UART_ID,
 )
-from host.fcapz.transport import Transport
+from fcapz.transport import Transport
 
 
 # Config register byte map (matches RTL)
@@ -373,8 +373,8 @@ class EjtagUartTests(unittest.TestCase):
             return orig_scan(bits, width, chain=chain)
         t.raw_dr_scan = injecting_scan
 
-        with patch("host.fcapz.ejtaguart.time.monotonic", fake_monotonic), \
-             patch("host.fcapz.ejtaguart.time.sleep"):
+        with patch("fcapz.ejtaguart.time.monotonic", fake_monotonic), \
+             patch("fcapz.ejtaguart.time.sleep"):
             data = ctrl.recv(count=2, timeout=0.01)
 
         self.assertEqual(data, b"AB")

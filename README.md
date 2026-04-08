@@ -109,7 +109,7 @@ python sim/run_sim.py
 ```
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
-`python -m host.fcapz.cli` form still works, but the package install path is
+`python -m fcapz.cli` form still works, but the package install path is
 what contributors should rely on. GitHub Actions runs a subset of these checks
 (see [CI](#ci)); run `pytest tests/ -v` locally before pushing so CLI, RPC, and
 event-helper tests run too.
@@ -225,9 +225,9 @@ fcapz [global options] <command> [command options]
 ### Python API
 
 ```python
-from host.fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
-from host.fcapz import XilinxHwServerTransport
-from host.fcapz import summarize, find_edges, ProbeDefinition
+from fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
+from fcapz import XilinxHwServerTransport
+from fcapz import summarize, find_edges, ProbeDefinition
 
 transport = XilinxHwServerTransport(port=3121)
 analyzer = Analyzer(transport)
@@ -262,8 +262,8 @@ for result in analyzer.capture_continuous(count=3):
 analyzer.close()
 
 # Embedded I/O
-from host.fcapz.eio import EioController
-from host.fcapz import XilinxHwServerTransport  # reuse same transport type
+from fcapz.eio import EioController
+from fcapz import XilinxHwServerTransport  # reuse same transport type
 
 eio = EioController(XilinxHwServerTransport(port=3121))
 eio.connect()
@@ -324,7 +324,7 @@ uart.close()
 For LLM-driven or scripted ELA control:
 
 ```bash
-python -m host.fcapz.rpc
+python -m fcapz.rpc
 ```
 
 Send JSON commands on stdin, receive responses on stdout. Responses now carry
@@ -341,15 +341,6 @@ optional `channel`, `probes`, and `summarize` fields.
 ```
 
 ## Integrating the core into your design
-
-Detailed specifications live in [`no_commit/specs/`](no_commit/specs/):
-
-| Document | Contents |
-|----------|----------|
-| [architecture.md](no_commit/specs/architecture.md) | Core block diagram, clock domains, data flow |
-| [register_map.md](no_commit/specs/register_map.md) | Full ELA / EIO / EJTAG-AXI register map with bit-field descriptions |
-| [transport_api.md](no_commit/specs/transport_api.md) | Transport abstract interface contract and extension guide |
-| [waveform_schema.md](no_commit/specs/waveform_schema.md) | JSON export format, VCD mapping, CSV layout |
 
 ### RTL instantiation
 
@@ -500,9 +491,9 @@ OpenOCD and hw_server backends.
 | **Storage qualification** | Yes | Yes | Yes | -- | -- | Subsampling |
 | **Buffer type** | BRAM (any vendor) | BRAM/URAM | BRAM | EBR | BSRAM | BRAM |
 | **Channel mux** | Yes (runtime) | Multiple cores | Runtime mux | Multiple cores | Up to 16 AO | Groups |
-| **Readback** | JTAG burst (49 KB/s)\* | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
+| **Readback** | JTAG burst  | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
 
-\* Measured on Arty A7 with onboard FT2232H via Xilinx hw_server/XSDB (TCK up to 30 MHz, 0.64 ms/scan XSDB overhead).
+\* 
 | **Host interface** | Python API + CLI + JSON-RPC | GUI + Tcl + ChipScoPy | GUI + Tcl | GUI | GUI | Python + CLI |
 | **Export formats** | JSON, CSV, VCD | CSV, VCD | CSV, VCD, TBL | Proprietary | CSV, VCD, PRN | VCD, CSV, SR |
 | **Virtual I/O** | EIO core | VIO | In-System Sources | -- | GVIO | LiteScopeIO |

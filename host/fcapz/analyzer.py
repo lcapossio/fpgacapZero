@@ -36,6 +36,7 @@ _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
+_ADDR_TRIG_DELAY = 0x00D4
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
@@ -110,6 +111,10 @@ class CaptureConfig:
     stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
     stor_qual_value: int = 0   # storage qualification comparison value
     stor_qual_mask: int = 0    # storage qualification mask
+    trigger_delay: int = 0     # post-trigger delay in sample-clock cycles
+                               # (0..65535) — shifts the committed trigger
+                               # sample N cycles after the trigger event,
+                               # compensating for upstream pipeline latency
 
 
 @dataclass
@@ -164,6 +169,10 @@ class Analyzer:
             raise ValueError("pre+post+1 exceeds configured depth")
         if config.sample_clock_hz <= 0:
             raise ValueError("sample_clock_hz must be > 0")
+        if not (0 <= config.trigger_delay <= 0xFFFF):
+            raise ValueError(
+                f"trigger_delay must be 0..65535, got {config.trigger_delay}"
+            )
 
         self._validate_probes(config.probes, config.sample_width)
 
@@ -215,6 +224,7 @@ class Analyzer:
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
         self.transport.write_reg(_ADDR_PROBE_SEL, config.probe_sel)
+        self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
         if config.stor_qual_mode:
             self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
             self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
