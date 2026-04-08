@@ -9,6 +9,64 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Configurable trigger delay (TRIG_DELAY)**
+- New ELA register `ADDR_TRIG_DELAY` (`0x00D4`, RW, 16-bit, default 0)
+- When non-zero, the committed trigger sample is shifted N sample-clock
+  cycles after the trigger event, compensating for upstream pipeline
+  latency between a cause signal and its visible effect on the probe bus
+- RTL: `trig_delay`/`trig_delay_count`/`trig_delay_pending` state in the
+  sample-clock domain; routed through the existing 2-FF sync chain;
+  latched on arm; on `trigger_hit` the FSM either commits immediately
+  (delay=0, legacy behavior) or enters a per-cycle countdown that
+  commits `trig_ptr <= wr_ptr` at terminal count. Buffer recording
+  unaffected during the delay window. Cleared on `reset_pulse` and on
+  segmented re-arm.
+- Host API: `CaptureConfig.trigger_delay` field, validated 0..65535 in
+  `Analyzer.configure()`
+- CLI: `--trigger-delay` argument (decimal or hex) on both `configure`
+  and `capture` subparsers, backed by a new `_uint16` validator
+- RPC: `trigger_delay` field in `_build_config`, validated by
+  `_validated_trigger_delay`
+- Testbench: 3 new ELA TB scenarios (round-trip, delay=0 equivalence
+  with legacy capture window, delay=4 with verified sample alignment).
+  ELA TB now 58/0 passing.
+- Hardware integration tests: `test_trigger_delay_shifts_window`
+  (TRIG_DELAY=4) and `test_trigger_delay_zero_equivalence` — both pass
+  on real Arty A7-100T silicon.
+- Register map doc updated.
+
+**Package rename: `host.fcapz` → `fcapz`**
+- `pyproject.toml` package discovery now uses `where = ["host"]`,
+  `include = ["fcapz*"]` so editable installs (`pip install -e .`)
+  expose the importable name as `fcapz` — matching the existing CLI
+  binary name.
+- Project version bumped to `0.2.0`.
+- All tests, examples, and the README updated from `host.fcapz`
+  to `fcapz`. Two README import lines that already used the bare
+  `from fcapz import ...` form (and silently broke before this
+  refactor) now actually work.
+- New `conftest.py` at the repo root inserts `host/` into `sys.path`
+  so `from fcapz import …` resolves when running tests directly
+  without `pip install`.
+- `host/fcapz/*.py` is unchanged (already used relative imports).
+
+**Build infrastructure**
+- New `examples/arty_a7/build.py` Python launcher for Vivado batch
+  builds: orphan helper-process cleanup (`vrs.exe`,
+  `parallel_synth_helper`), file-lock detection via
+  `_runs_dir_is_deletable()`, and automatic sidestep to a fresh
+  sibling project directory when the canonical path is locked by a
+  zombie Vivado run on Windows.
+- `examples/arty_a7/build_arty.tcl` reuses an existing project (with
+  `reset_run` on stale runs) instead of always recreating, and honors
+  `FPGACAP_PROJECT_DIR` from the launcher.
+
+---
+
+## [0.2.0] — 2026-04-07
+
+### Added
+
 **EJTAG-AXI Bridge (`rtl/fcapz_ejtagaxi.v`)**
 - New module: JTAG-to-AXI4 master bridge on USER4 (CHAIN=4)
 - 72-bit pipelined streaming DR — one AXI transaction per scan, zero polling

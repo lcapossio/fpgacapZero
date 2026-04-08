@@ -41,6 +41,10 @@ The core RTL and Python host stack are fully portable.
 - **Flexible trigger** -- 2 comparators per stage with 9 compare modes
   (==, !=, <, >, <=, >=, rising, falling, changed), boolean combine
   (AND/OR), and optional multi-stage sequencer (2-4 states)
+- **Configurable trigger delay** (`TRIG_DELAY`, 0-65535 sample clocks) --
+  shifts the committed trigger sample N cycles after the trigger event
+  to compensate for upstream pipeline latency between a cause signal
+  and its visible effect on the probe bus
 - **Circular buffer** with pre/post-trigger lengths and optional storage
   qualification (10x effective depth for sparse signals, +21 LUTs)
 - **Burst readback** -- 256-bit USER2 DR packs multiple samples per scan,
@@ -210,6 +214,7 @@ fcapz [global options] <command> [command options]
 | `--trigger-mode` | `value_match` | `value_match`, `edge_detect`, or `both` |
 | `--trigger-value` | `0` | Trigger compare value |
 | `--trigger-mask` | `0xFF` | Bit mask (hex) |
+| `--trigger-delay` | `0` | Post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event |
 | `--sample-width` | `8` | Bits per sample |
 | `--depth` | `1024` | Buffer depth |
 | `--sample-clock-hz` | `100000000` | For VCD timescale |
