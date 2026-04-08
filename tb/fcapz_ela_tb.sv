@@ -3,6 +3,12 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines (auto-generated from
+// the canonical VERSION file).  Pulling them in here means Test 1 stays
+// in sync with the RTL automatically; bumping VERSION + re-running
+// tools/sync_version.py is the only place a release version lives.
+`include "fcapz_version.vh"
+
 // ELA core simulation testbench.
 // Targets iverilog -g2012; concurrent SVA assertions are gated behind
 // `ifdef SVA_ENABLED so the file compiles cleanly without a full SV tool.
@@ -324,14 +330,20 @@ module fcapz_ela_tb;
         repeat (4) @(posedge jtag_clk);
 
         // ---- Test 1: Identity registers ------------------------------------
-        // VERSION = {major[7:0]=0x00, minor[7:0]=0x02, core_id[15:0]="LA"=0x4C41}
-        $display("\n=== Test 1: Identity registers ===");
+        // Both the RTL and this testbench reference `FCAPZ_ELA_VERSION_REG
+        // from rtl/fcapz_version.vh, so bumping VERSION updates both
+        // automatically with one git diff.
+        $display("\n=== Test 1: Identity registers (VERSION = %s) ===",
+                 `FCAPZ_VERSION_STRING);
         jtag_read(16'h0000, version);
-        check("VERSION = 0x00024C41 (major=0, minor=2, id='LA')",
-              version == 32'h0002_4C41);
-        check("VERSION core_id == 'LA'",       version[15:0]  == 16'h4C41);
-        check("VERSION minor    == 0x02",      version[23:16] == 8'h02);
-        check("VERSION major    == 0x00",      version[31:24] == 8'h00);
+        check("VERSION matches `FCAPZ_ELA_VERSION_REG",
+              version == `FCAPZ_ELA_VERSION_REG);
+        check("VERSION core_id == `FCAPZ_ELA_CORE_ID ('LA')",
+              version[15:0]  == `FCAPZ_ELA_CORE_ID);
+        check("VERSION minor   == `FCAPZ_VERSION_MINOR",
+              version[23:16] == `FCAPZ_VERSION_MINOR);
+        check("VERSION major   == `FCAPZ_VERSION_MAJOR",
+              version[31:24] == `FCAPZ_VERSION_MAJOR);
         jtag_read(16'h000C, sample_w_reg);
         check($sformatf("SAMPLE_W = %0d", sample_w_reg), sample_w_reg == SAMPLE_W);
         jtag_read(16'h0010, depth_reg);

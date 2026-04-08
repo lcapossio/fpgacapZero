@@ -9,7 +9,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fcapz.analyzer import Analyzer, CaptureConfig, CaptureResult, ProbeSpec, TriggerConfig
+from fcapz.analyzer import (
+    Analyzer,
+    CaptureConfig,
+    CaptureResult,
+    ProbeSpec,
+    TriggerConfig,
+    expected_ela_version_reg,
+)
 from fcapz.cli import (
     _build_config,
     _non_negative_int,
@@ -34,8 +41,8 @@ from fcapz.transport import Transport
 class FakeTransport(Transport):
     def __init__(self, *, sample_w: int = 8, depth: int = 1024, num_chan: int = 2, data=None):
         self.regs = {
-            # VERSION: major=0x00, minor=0x02, core_id="LA"=0x4C41
-            0x0000: 0x0002_4C41,
+            # VERSION computed from canonical fcapz.__version__
+            0x0000: expected_ela_version_reg(),
             0x0008: 0x4,
             0x000C: sample_w,
             0x0010: depth,

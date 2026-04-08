@@ -9,13 +9,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
 
+from ._version import _version_tuple
 from .transport import Transport
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
 # identity magic.  Hosts must reject any bitstream that does not present
 # this magic before touching any other ELA register on the same chain.
-_ELA_CORE_ID = 0x4C41
+ELA_CORE_ID = 0x4C41
+_ELA_CORE_ID = ELA_CORE_ID  # in-module alias
+
+
+def expected_ela_version_reg() -> int:
+    """Compute the VERSION register value the bitstream should report.
+
+    Layout:  {major[7:0], minor[7:0], core_id[15:0]}, derived from
+    ``fcapz.__version__`` (which itself reads the canonical VERSION
+    file at the repo root via setuptools' dynamic version mechanism).
+    Used by tests so nobody hardcodes the constant in multiple files;
+    bumping VERSION + re-running ``tools/sync_version.py`` is the only
+    place a release version lives.
+    """
+    major, minor, _patch = _version_tuple()
+    return (
+        ((major & 0xFF) << 24)
+        | ((minor & 0xFF) << 16)
+        | (ELA_CORE_ID & 0xFFFF)
+    )
+
+
 _ADDR_CTRL = 0x0004
 _ADDR_STATUS = 0x0008
 _ADDR_SAMPLE_W = 0x000C

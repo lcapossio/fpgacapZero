@@ -4,7 +4,7 @@
 """Host-side controller for the fcapz_eio JTAG Embedded I/O core.
 
 Register map (USER3, same 49-bit DR protocol as ELA):
-  0x0000  EIO_ID    (R)  0x56494F01
+  0x0000  VERSION   (R)  {major[7:0], minor[7:0], core_id[15:0]="IO"=0x494F}
   0x0004  EIO_IN_W  (R)  input probe width
   0x0008  EIO_OUT_W (R)  output probe width
   0x0010  IN[0]     (R)  probe_in[31:0]   (synchronised to jtag_clk)
@@ -13,15 +13,25 @@ Register map (USER3, same 49-bit DR protocol as ELA):
   0x0100  OUT[0]    (RW) probe_out[31:0]
   0x0104  OUT[1]    (RW) probe_out[63:32]
   ...
+
+The VERSION register is the EIO core's identity.  ``connect()`` reads it
+and raises ``RuntimeError`` if the low-16 magic does not equal 0x494F
+('IO').  This rejects an unprogrammed FPGA, a wrong JTAG chain, or a
+non-fcapz bitstream before any other EIO register is touched — the same
+contract as ``Analyzer.probe()``.  The decoded major/minor are exposed
+on the ``EioController`` instance as ``version_major`` /
+``version_minor`` and should match ``fcapz.__version__``.
 """
 
 from __future__ import annotations
 
 from .transport import Transport
 
-_EIO_ID       = 0x56494F01
+# ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
+# a valid bitstream.  Same encoding scheme as the ELA core's "LA" magic.
+EIO_CORE_ID = 0x494F
 
-_ADDR_EIO_ID   = 0x0000
+_ADDR_VERSION  = 0x0000
 _ADDR_IN_W     = 0x0004
 _ADDR_OUT_W    = 0x0008
 _ADDR_IN_BASE  = 0x0010
@@ -36,18 +46,35 @@ class EioController:
         self._chain = chain
         self.in_w: int = 0
         self.out_w: int = 0
+        self.version_major: int = 0
+        self.version_minor: int = 0
+        self.core_id: int = 0
 
     # ------------------------------------------------------------------
     def connect(self) -> None:
-        """Connect transport and read core parameters."""
+        """Connect transport, verify EIO core identity, read parameters.
+
+        Reads VERSION at 0x0000 and asserts that the low-16 magic equals
+        ``EIO_CORE_ID`` (ASCII "IO" = 0x494F).  Raises ``RuntimeError``
+        on mismatch with a remediation hint that covers the three common
+        failure modes (wrong chain, wrong bitstream / unprogrammed FPGA,
+        wrong core).  Decoded ``version_major`` / ``version_minor`` are
+        cached on the instance for the caller; they should match
+        ``fcapz.__version__``.
+        """
         self._t.connect()
         self._t.select_chain(self._chain)
-        vid = self._t.read_reg(_ADDR_EIO_ID)
-        if vid != _EIO_ID:
+        version = int(self._t.read_reg(_ADDR_VERSION))
+        core_id = version & 0xFFFF
+        if core_id != EIO_CORE_ID:
             raise RuntimeError(
-                f"EIO ID mismatch: expected 0x{_EIO_ID:08X}, got 0x{vid:08X}. "
-                "Wrong JTAG chain / core not loaded?"
+                f"EIO core identity check failed at VERSION[15:0]: "
+                f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
+        self.version_major = (version >> 24) & 0xFF
+        self.version_minor = (version >> 16) & 0xFF
+        self.core_id = core_id
         self.in_w  = self._t.read_reg(_ADDR_IN_W)
         self.out_w = self._t.read_reg(_ADDR_OUT_W)
 

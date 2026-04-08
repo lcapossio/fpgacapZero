@@ -76,6 +76,18 @@ if {[file exists $project_xpr]} {
     if {[get_runs -quiet synth_1] ne {}} {
         reset_run synth_1
     }
+    # Make sure the auto-generated version header is registered as a
+    # global Verilog include in this project.  Re-running the script
+    # after rtl/fcapz_version.vh appeared (option-B v0.3.0) needs this
+    # one-shot upgrade or the build fails with `FCAPZ_ELA_VERSION_REG
+    # macro undefined`.
+    if {[llength [get_files -quiet $root/rtl/fcapz_version.vh]] == 0} {
+        add_files $root/rtl/fcapz_version.vh
+        set_property file_type "Verilog Header" \
+            [get_files $root/rtl/fcapz_version.vh]
+        set_property is_global_include true \
+            [get_files $root/rtl/fcapz_version.vh]
+    }
 } else {
     # No .xpr but partial peripheral dirs may exist from a killed build.
     # Use -force to clear them now that we've removed the stale locks.
@@ -83,6 +95,7 @@ if {[file exists $project_xpr]} {
 
     # ── Sources (only added on initial creation) ──────────────
     add_files [list \
+        $root/rtl/fcapz_version.vh \
         $root/rtl/dpram.v \
         $root/rtl/trig_compare.v \
         $root/rtl/fcapz_ela.v \
@@ -98,6 +111,13 @@ if {[file exists $project_xpr]} {
         $root/tb/axi4_test_slave.v \
         $example_dir/arty_a7_top.v \
     ]
+    # Mark the version header as a global include so every Verilog source
+    # in the project can reference it without needing per-file -I.
+    set_property file_type "Verilog Header" \
+        [get_files $root/rtl/fcapz_version.vh]
+    set_property is_global_include true \
+        [get_files $root/rtl/fcapz_version.vh]
+
     add_files -fileset constrs_1 $example_dir/arty_a7.xdc
     set_property top arty_a7_top [current_fileset]
 }

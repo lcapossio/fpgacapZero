@@ -486,7 +486,7 @@ OpenOCD and hw_server backends.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | EIO_ID | R | `0x56494F01` — identifies EIO core |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — `core_id` = ASCII `"IO"` (`0x494F`). Hosts must verify the low-16 magic. Same encoding as the ELA core's `VERSION`. |
 | `0x0004` | EIO_IN_W | R | Input probe width in bits |
 | `0x0008` | EIO_OUT_W | R | Output probe width in bits |
 | `0x0010+i×4` | IN[i] | R | probe_in chunk i (bits [i×32+31 : i×32]), synced to jtag_clk |

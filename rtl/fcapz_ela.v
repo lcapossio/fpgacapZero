@@ -3,6 +3,11 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines.  AUTO-generated from
+// the canonical VERSION file at the repo root by tools/sync_version.py.
+// CI verifies this header is in sync (`python tools/sync_version.py --check`).
+`include "fcapz_version.vh"
+
 // ELA-style capture core with optional advanced features.
 //
 // Parameters:
@@ -1027,13 +1032,14 @@ module fcapz_ela #(
     always @(*) begin
         jtag_rdata = 32'h0;
         case (jtag_addr)
-            // VERSION layout:
-            //   [31:24] = major (0x00)
-            //   [23:16] = minor (0x02)
-            //   [15:0]  = core_id, ASCII "LA" = 0x4C41 (Logic Analyzer)
-            // Hosts must read [15:0] and confirm it equals 0x4C41 before
+            // VERSION layout (defined in rtl/fcapz_version.vh, generated
+            // from the repo-root VERSION file by tools/sync_version.py):
+            //   [31:24] = `FCAPZ_VERSION_MAJOR (8-bit)
+            //   [23:16] = `FCAPZ_VERSION_MINOR (8-bit)
+            //   [15:0]  = `FCAPZ_ELA_CORE_ID  = ASCII "LA" = 0x4C41
+            // Hosts must verify VERSION[15:0] equals the LA magic before
             // trusting any other ELA register on this chain.
-            ADDR_VERSION:     jtag_rdata = 32'h0002_4C41;
+            ADDR_VERSION:     jtag_rdata = `FCAPZ_ELA_VERSION_REG;
             ADDR_CTRL:        jtag_rdata = jtag_ctrl;
             ADDR_STATUS:      jtag_rdata = {28'h0, overflow, done, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata = SAMPLE_W;

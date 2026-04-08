@@ -3,6 +3,10 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines.  AUTO-generated from
+// the canonical VERSION file at the repo root by tools/sync_version.py.
+`include "fcapz_version.vh"
+
 // Embedded I/O core — JTAG-accessible input/output probes.
 //
 // Parameters:
@@ -19,7 +23,9 @@
 //             synchroniser stage after instantiation.
 //
 // Register map (49-bit DR, same protocol as jtag_reg_iface):
-//   0x0000  EIO_ID    (R)  32'h5649_4F01 — "EIO" + version 1
+//   0x0000  VERSION   (R)  {major[7:0], minor[7:0], core_id[15:0]="IO"=0x494F}
+//                          Hosts must verify VERSION[15:0] == 0x494F before
+//                          touching any other EIO register on this chain.
 //   0x0004  EIO_IN_W  (R)  IN_W
 //   0x0008  EIO_OUT_W (R)  OUT_W
 //   0x0010  IN[0]     (R)  probe_in[31:0]   (synced to jtag_clk)
@@ -53,7 +59,7 @@ module fcapz_eio #(
     localparam IN_PAD  = IN_WORDS  * 32;
     localparam OUT_PAD = OUT_WORDS * 32;
 
-    localparam ADDR_EIO_ID   = 16'h0000;
+    localparam ADDR_VERSION  = 16'h0000;
     localparam ADDR_IN_W     = 16'h0004;
     localparam ADDR_OUT_W    = 16'h0008;
     localparam ADDR_IN_BASE  = 16'h0010;
@@ -97,8 +103,10 @@ module fcapz_eio #(
     always @(*) begin : p_rdata
         integer i;
         jtag_rdata = 32'h0;
-        if (jtag_addr == ADDR_EIO_ID) begin
-            jtag_rdata = 32'h5649_4F01;
+        if (jtag_addr == ADDR_VERSION) begin
+            // {major[7:0], minor[7:0], core_id[15:0]="IO"=0x494F}, generated
+            // from rtl/fcapz_version.vh by tools/sync_version.py
+            jtag_rdata = `FCAPZ_EIO_VERSION_REG;
         end else if (jtag_addr == ADDR_IN_W) begin
             jtag_rdata = IN_W;
         end else if (jtag_addr == ADDR_OUT_W) begin

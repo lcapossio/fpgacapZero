@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fpgacapzero"
-version = "0.2.0"
+# Single source of truth: VERSION file at the repo root.
+# tools/sync_version.py also reads it to regenerate rtl/fcapz_version.vh
+# so the Python package, the RTL VERSION register, and the ELA testbench
+# all share one number.  CI runs the sync script with --check to block
+# merges that would let them drift.
+dynamic = ["version"]
 description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -18,6 +23,9 @@ classifiers = [
 
 [project.scripts]
 fcapz = "fcapz.cli:main"
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["host"]

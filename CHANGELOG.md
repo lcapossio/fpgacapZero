@@ -53,7 +53,21 @@ Get-ChildItem -Recurse -File | Select-String -Pattern 'host\.fcapz' -List |
                    Set-Content $_.Path }
 ```
 
-**2. ELA `VERSION` register layout changed**
+**2. EIO `VERSION` register replaces `EIO_ID`**
+
+The 32-bit register at EIO address `0x0000` was previously a flat
+32-bit identity word `0x56494F01` (`"EIO"` + literal `0x01`).  It is
+now the same `{major, minor, core_id}` layout as the ELA core, with
+`core_id = ASCII "IO" = 0x494F`.  ``EioController.connect()`` now
+raises ``RuntimeError`` on a wrong / missing core_id, exposes
+``version_major`` / ``version_minor`` / ``core_id`` on the controller
+instance, and the old hardcoded `EIO_ID = 0x56494F01` constant is
+gone.
+
+Pre-v0.3.0 EIO bitstreams will fail the new magic check and need to
+be rebuilt.
+
+**3. ELA `VERSION` register layout changed**
 
 The 32-bit register at address `0x0000` no longer encodes
 `{major[15:0], minor[15:0]}`. The new layout is:
@@ -87,6 +101,47 @@ the new probe magic check rejects. **Rebuild the bitstream** when
 upgrading the host.
 
 ### Added
+
+**Single source of truth for the project version**
+- New ``VERSION`` text file at the repo root holds the canonical
+  ``MAJOR.MINOR.PATCH`` semver string.
+- New ``tools/sync_version.py`` reads it and regenerates
+  ``rtl/fcapz_version.vh``, a Verilog header that exposes the version
+  fields and per-core ASCII identifiers as `\`define`s
+  (``FCAPZ_VERSION_MAJOR``, ``FCAPZ_VERSION_MINOR``,
+  ``FCAPZ_ELA_VERSION_REG``, ``FCAPZ_EIO_VERSION_REG``, etc.).
+- ``rtl/fcapz_ela.v`` and ``rtl/fcapz_eio.v`` ``\`include`` the
+  generated header and use ``FCAPZ_*_VERSION_REG`` instead of
+  hardcoded constants in their ``ADDR_VERSION`` read-mux paths.
+- The ELA and EIO testbenches reference the same defines so a
+  version bump propagates from the VERSION file → header →
+  RTL → TB in one ``python tools/sync_version.py`` invocation.
+- ``pyproject.toml`` declares ``dynamic = ["version"]`` and reads
+  the same VERSION file via setuptools, so the Python package
+  version, the RTL VERSION register constants, and the testbench
+  expectations all share one number.
+- New ``host/fcapz/_version.py`` exposes ``__version__`` via
+  ``importlib.metadata`` (after ``pip install``) with a fallback
+  that reads the VERSION file directly so editable / dev runs
+  still work.  ``fcapz._version_tuple()`` returns
+  ``(major, minor, patch)`` for tests and probe comparisons.
+- New ``analyzer.expected_ela_version_reg()`` and
+  ``_expected_eio_version_reg()`` test helpers compute the
+  packed VERSION register from the canonical version, so
+  ``FakeTransport`` instances stay in sync automatically.
+- New ``test_probe_matches_canonical_version`` and
+  ``test_connect_decodes_version_fields`` regression tests fail
+  loudly if the RTL header and Python ``__version__`` ever drift.
+- ``sim/run_sim.py`` adds ``-I rtl`` so iverilog finds
+  ``fcapz_version.vh``.
+- ``examples/arty_a7/build_arty.tcl`` registers
+  ``rtl/fcapz_version.vh`` as a global Verilog include and
+  upgrades existing on-disk projects in place so post-v0.3.0
+  rebuilds don't need a fresh project dir.
+- ``.github/workflows/ci.yml`` gains a ``version-sync`` job that
+  runs ``tools/sync_version.py --check`` and fails the build if
+  the generated header has drifted from VERSION (e.g. someone
+  bumped the file but forgot to re-run the script).
 
 **Configurable trigger delay (TRIG_DELAY)**
 - New ELA register `ADDR_TRIG_DELAY` (`0x00D4`, RW, 16-bit, default 0)

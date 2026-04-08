@@ -8,14 +8,32 @@ import unittest
 import uuid
 from pathlib import Path
 
+from fcapz import _version_tuple
 from fcapz.analyzer import (
     Analyzer,
     CaptureConfig,
+    ELA_CORE_ID,
     SequencerStage,
     TriggerConfig,
+    expected_ela_version_reg,
 )
+from fcapz.eio import EIO_CORE_ID, EioController
 from fcapz.transport import Transport
-from fcapz.eio import EioController
+
+
+def _expected_eio_version_reg() -> int:
+    """Compute EIO VERSION constant from canonical fcapz.__version__.
+
+    Mirrors the ELA helper but for the EIO core_id ('IO' = 0x494F).
+    Tests use this so the FakeVioTransport stays coupled to whatever
+    the VERSION file says, just like the RTL is via fcapz_version.vh.
+    """
+    major, minor, _patch = _version_tuple()
+    return (
+        ((major & 0xFF) << 24)
+        | ((minor & 0xFF) << 16)
+        | (EIO_CORE_ID & 0xFFFF)
+    )
 
 
 class FakeTransport(Transport):
@@ -23,8 +41,9 @@ class FakeTransport(Transport):
         # Per-chain register banks; chain=None is the default (chain 1)
         self._chain_regs: dict[int, dict[int, int]] = {
             1: {
-                # VERSION: major=0x00, minor=0x02, core_id="LA"=0x4C41
-                0x0000: 0x0002_4C41,
+                # VERSION computed from canonical fcapz.__version__ so this
+                # fake stays in sync when VERSION is bumped.
+                0x0000: expected_ela_version_reg(),
                 0x000C: 8,            # SAMPLE_W
                 0x0010: 1024,         # DEPTH
                 0x0008: 0x4,          # STATUS done
@@ -250,6 +269,23 @@ class SequencerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "core identity"):
             analyzer.probe()
 
+    def test_probe_matches_canonical_version(self):
+        """probe() returns the major/minor from fcapz.__version__.
+
+        This is the regression guard for option-B drift: if VERSION is
+        bumped but tools/sync_version.py was not re-run, the RTL header
+        and the Python __version__ will disagree, the FakeTransport's
+        expected_ela_version_reg() will return one value, and the test
+        will tell you exactly which two sources are out of step.
+        """
+        major, minor, _patch = _version_tuple()
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        info = analyzer.probe()
+        self.assertEqual(info["version_major"], major)
+        self.assertEqual(info["version_minor"], minor)
+        self.assertEqual(info["core_id"], ELA_CORE_ID)
+
     def test_trigger_delay_written(self):
         transport = FakeTransport()
         analyzer = Analyzer(transport)
@@ -300,13 +336,13 @@ class SequencerTests(unittest.TestCase):
 class FakeVioTransport(Transport):
     """Fake transport simulating a fcapz_eio with IN_W=8, OUT_W=8."""
 
-    EIO_ID = 0x56494F01
-
     def __init__(self, probe_in: int = 0xAB):
         self._probe_in = probe_in
         self._active_chain: int = 1
         self.regs = {
-            0x0000: self.EIO_ID,
+            # VERSION computed from canonical fcapz.__version__ so this
+            # fake stays in sync when VERSION is bumped.
+            0x0000: _expected_eio_version_reg(),
             0x0004: 8,   # IN_W
             0x0008: 8,   # OUT_W
             0x0010: probe_in & 0xFF,  # IN[0]
@@ -372,11 +408,28 @@ class EioControllerTests(unittest.TestCase):
         self.assertEqual(eio.get_bit(2), 0)   # bit2=0
 
     def test_bad_id_raises(self):
+        """Wrong VERSION[15:0] magic must be rejected."""
         transport = FakeVioTransport()
-        transport.regs[0x0000] = 0xDEAD_BEEF
+        transport.regs[0x0000] = 0xDEAD_BEEF  # core_id=0xBEEF, not 0x494F
         eio = EioController(transport)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "core identity"):
             eio.connect()
+
+    def test_zero_version_rejected(self):
+        """Unprogrammed FPGA reads zeros — must be rejected, not accepted."""
+        transport = FakeVioTransport()
+        transport.regs[0x0000] = 0x0000_0000
+        eio = EioController(transport)
+        with self.assertRaisesRegex(RuntimeError, "core identity"):
+            eio.connect()
+
+    def test_connect_decodes_version_fields(self):
+        """connect() exposes version_major / version_minor / core_id from VERSION."""
+        major, minor, _patch = _version_tuple()
+        eio = self._make_eio()
+        self.assertEqual(eio.version_major, major)
+        self.assertEqual(eio.version_minor, minor)
+        self.assertEqual(eio.core_id, EIO_CORE_ID)
 
     def test_repr(self):
         eio = self._make_eio()
