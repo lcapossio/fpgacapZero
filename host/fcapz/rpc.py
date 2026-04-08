@@ -92,6 +92,12 @@ class RpcServer:
             raise ValueError(f"stor_qual_mode must be 0, 1, or 2, got {mode}")
         return mode
 
+    @staticmethod
+    def _validated_trigger_delay(delay: int) -> int:
+        if not (0 <= delay <= 0xFFFF):
+            raise ValueError(f"trigger_delay must be 0..65535, got {delay}")
+        return delay
+
     @classmethod
     def _build_config(cls, req: Dict[str, Any]) -> CaptureConfig:
         return CaptureConfig(
@@ -112,6 +118,7 @@ class RpcServer:
             stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
             stor_qual_value=int(req.get("stor_qual_value", 0)),
             stor_qual_mask=int(req.get("stor_qual_mask", 0)),
+            trigger_delay=cls._validated_trigger_delay(int(req.get("trigger_delay", 0))),
         )
 
     @staticmethod

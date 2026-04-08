@@ -9,9 +9,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
 
+from ._version import _version_tuple
 from .transport import Transport
 
 _ADDR_VERSION = 0x0000
+# ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
+# identity magic.  Hosts must reject any bitstream that does not present
+# this magic before touching any other ELA register on the same chain.
+ELA_CORE_ID = 0x4C41
+_ELA_CORE_ID = ELA_CORE_ID  # in-module alias
+
+
+def expected_ela_version_reg() -> int:
+    """Compute the VERSION register value the bitstream should report.
+
+    Layout:  {major[7:0], minor[7:0], core_id[15:0]}, derived from
+    ``fcapz.__version__`` (which itself reads the canonical VERSION
+    file at the repo root via setuptools' dynamic version mechanism).
+    Used by tests so nobody hardcodes the constant in multiple files;
+    bumping VERSION + re-running ``tools/sync_version.py`` is the only
+    place a release version lives.
+    """
+    major, minor, _patch = _version_tuple()
+    return (
+        ((major & 0xFF) << 24)
+        | ((minor & 0xFF) << 16)
+        | (ELA_CORE_ID & 0xFFFF)
+    )
+
+
 _ADDR_CTRL = 0x0004
 _ADDR_STATUS = 0x0008
 _ADDR_SAMPLE_W = 0x000C
@@ -36,6 +62,7 @@ _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
+_ADDR_TRIG_DELAY = 0x00D4
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
@@ -110,6 +137,10 @@ class CaptureConfig:
     stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
     stor_qual_value: int = 0   # storage qualification comparison value
     stor_qual_mask: int = 0    # storage qualification mask
+    trigger_delay: int = 0     # post-trigger delay in sample-clock cycles
+                               # (0..65535) — shifts the committed trigger
+                               # sample N cycles after the trigger event,
+                               # compensating for upstream pipeline latency
 
 
 @dataclass
@@ -164,6 +195,10 @@ class Analyzer:
             raise ValueError("pre+post+1 exceeds configured depth")
         if config.sample_clock_hz <= 0:
             raise ValueError("sample_clock_hz must be > 0")
+        if not (0 <= config.trigger_delay <= 0xFFFF):
+            raise ValueError(
+                f"trigger_delay must be 0..65535, got {config.trigger_delay}"
+            )
 
         self._validate_probes(config.probes, config.sample_width)
 
@@ -215,6 +250,7 @@ class Analyzer:
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
         self.transport.write_reg(_ADDR_PROBE_SEL, config.probe_sel)
+        self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
         if config.stor_qual_mode:
             self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
             self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
@@ -489,8 +525,25 @@ class Analyzer:
             yielded += 1
 
     def probe(self) -> Dict:
+        """Read the ELA identity and feature registers.
+
+        Verifies the VERSION register's low-16 magic equals the ASCII
+        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
+        RuntimeError on mismatch so the caller cannot accidentally
+        drive a non-fcapz bitstream.
+
+        Returns a dict with `version_major`, `version_minor`, `core_id`
+        (always 0x4C41 on success), and the rest of the feature flags.
+        """
         _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = _read(_ADDR_VERSION)
+        version = int(_read(_ADDR_VERSION))
+        core_id = version & 0xFFFF
+        if core_id != _ELA_CORE_ID:
+            raise RuntimeError(
+                f"ELA core identity check failed at VERSION[15:0]: "
+                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+            )
         sample_w = _read(_ADDR_SAMPLE_W)
         depth = _read(_ADDR_DEPTH)
         num_chan = int(_read(_ADDR_NUM_CHAN))
@@ -499,8 +552,9 @@ class Analyzer:
         num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
         probe_mux_w = int(_read(_ADDR_PROBE_MUX_W))
         return {
-            "version_major": (version >> 16) & 0xFFFF,
-            "version_minor": version & 0xFFFF,
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+            "core_id": core_id,
             "sample_width": sample_w,
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,

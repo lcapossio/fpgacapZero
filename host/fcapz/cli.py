@@ -47,6 +47,14 @@ def _tcp_port(value: str) -> int:
     return n
 
 
+def _uint16(value: str) -> int:
+    """argparse type: 16-bit unsigned integer (0..65535)."""
+    n = int(value, 0)  # accept decimal or hex
+    if not (0 <= n <= 0xFFFF):
+        raise argparse.ArgumentTypeError(f"must be 0..65535, got {n}")
+    return n
+
+
 def _parse_probes(spec: str) -> list[ProbeSpec]:
     """Parse ``name:width:lsb,name:width:lsb,...`` into ProbeSpec list."""
     probes = []
@@ -125,6 +133,7 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
         stor_qual_mode=getattr(args, "stor_qual_mode", 0),
         stor_qual_value=getattr(args, "stor_qual_value", 0),
         stor_qual_mask=getattr(args, "stor_qual_mask", 0),
+        trigger_delay=getattr(args, "trigger_delay", 0),
     )
 
 
@@ -217,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
             type=lambda x: int(x, 0),
             default=0,
             help="Storage qualification mask (hex or decimal)",
+        )
+        parser.add_argument(
+            "--trigger-delay",
+            type=_uint16,
+            default=0,
+            help=(
+                "Post-trigger delay in sample-clock cycles (0..65535). "
+                "Shifts the committed trigger sample N cycles after the "
+                "trigger event to compensate for upstream pipeline latency."
+            ),
         )
 
     cap.add_argument("--timeout", type=_positive_float, default=10.0)

@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
 
 # Vivado project and generated tool state
 .Xil/

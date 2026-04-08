@@ -3,6 +3,10 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines (auto-generated from
+// the canonical VERSION file by tools/sync_version.py).
+`include "fcapz_version.vh"
+
 // EIO core simulation testbench.
 // Exercises read-input / write-output paths, CDC sync, and register map.
 
@@ -87,10 +91,21 @@ module fcapz_eio_tb;
         repeat (2) @(posedge jtag_clk);
 
         // ---- Test 1: Identity registers ------------------------------------
-        $display("\n=== Test 1: Identity registers ===");
+        // Both the RTL and this testbench reference `FCAPZ_EIO_VERSION_REG
+        // from rtl/fcapz_version.vh, so bumping VERSION updates them
+        // together with one git diff.
+        $display("\n=== Test 1: Identity registers (VERSION = %s) ===",
+                 `FCAPZ_VERSION_STRING);
 
         vio_read(16'h0000, rdata);
-        check("EIO_ID = 0x56494F01", rdata == 32'h5649_4F01);
+        check("VERSION matches `FCAPZ_EIO_VERSION_REG",
+              rdata == `FCAPZ_EIO_VERSION_REG);
+        check("VERSION core_id == `FCAPZ_EIO_CORE_ID ('IO')",
+              rdata[15:0]  == `FCAPZ_EIO_CORE_ID);
+        check("VERSION minor   == `FCAPZ_VERSION_MINOR",
+              rdata[23:16] == `FCAPZ_VERSION_MINOR);
+        check("VERSION major   == `FCAPZ_VERSION_MAJOR",
+              rdata[31:24] == `FCAPZ_VERSION_MAJOR);
 
         vio_read(16'h0004, rdata);
         check($sformatf("EIO_IN_W = %0d", rdata), rdata == IN_W);

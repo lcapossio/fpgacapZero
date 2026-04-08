@@ -9,9 +9,10 @@ read/write of fabric signals, and a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
 memory-mapped bus access — all over JTAG. Drop them into any FPGA design and
 export captures to JSON, CSV, or VCD.
 
-Includes single-instantiation wrappers for **Xilinx 7-series / UltraScale**,
-**Lattice ECP5**, **Intel / Altera**, and **Gowin** in both Verilog and VHDL.
-The core RTL and Python host stack are fully portable.
+Includes single-instantiation wrappers for **Xilinx 7-series**, **Xilinx
+UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**, and
+**Gowin** in both Verilog and VHDL. The core RTL and Python host stack
+are fully portable.
 
 ## Contents
 
@@ -41,6 +42,10 @@ The core RTL and Python host stack are fully portable.
 - **Flexible trigger** -- 2 comparators per stage with 9 compare modes
   (==, !=, <, >, <=, >=, rising, falling, changed), boolean combine
   (AND/OR), and optional multi-stage sequencer (2-4 states)
+- **Configurable trigger delay** (`TRIG_DELAY`, 0-65535 sample clocks) --
+  shifts the committed trigger sample N cycles after the trigger event
+  to compensate for upstream pipeline latency between a cause signal
+  and its visible effect on the probe bus
 - **Circular buffer** with pre/post-trigger lengths and optional storage
   qualification (10x effective depth for sparse signals, +21 LUTs)
 - **Burst readback** -- 256-bit USER2 DR packs multiple samples per scan,
@@ -77,8 +82,10 @@ The core RTL and Python host stack are fully portable.
 
 | Area | Status |
 |------|--------|
-| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 |
+| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
 | OpenOCD backend | Implemented, needs more hardware validation |
+| Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
+| Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
 | Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
 | EIO over real transports | Implemented — transport chain selection supports USER3 |
@@ -109,7 +116,7 @@ python sim/run_sim.py
 ```
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
-`python -m host.fcapz.cli` form still works, but the package install path is
+`python -m fcapz.cli` form still works, but the package install path is
 what contributors should rely on. GitHub Actions runs a subset of these checks
 (see [CI](#ci)); run `pytest tests/ -v` locally before pushing so CLI, RPC, and
 event-helper tests run too.
@@ -134,13 +141,19 @@ Expected output:
 
 ```json
 {
-  "version_major": 1,
-  "version_minor": 1,
+  "version_major": 0,
+  "version_minor": 2,
+  "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
   "num_channels": 1
 }
 ```
+
+`core_id` is the ASCII string `"LA"` packed as `0x4C41` (= 19521).
+`Analyzer.probe()` raises `RuntimeError` if this magic does not match,
+so a wrong-chain / wrong-bitstream / unprogrammed FPGA is rejected
+before any other ELA register is touched.
 
 ### Capture a waveform
 
@@ -210,6 +223,7 @@ fcapz [global options] <command> [command options]
 | `--trigger-mode` | `value_match` | `value_match`, `edge_detect`, or `both` |
 | `--trigger-value` | `0` | Trigger compare value |
 | `--trigger-mask` | `0xFF` | Bit mask (hex) |
+| `--trigger-delay` | `0` | Post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event |
 | `--sample-width` | `8` | Bits per sample |
 | `--depth` | `1024` | Buffer depth |
 | `--sample-clock-hz` | `100000000` | For VCD timescale |
@@ -225,10 +239,18 @@ fcapz [global options] <command> [command options]
 ### Python API
 
 ```python
-from host.fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
-from host.fcapz import XilinxHwServerTransport
-from host.fcapz import summarize, find_edges, ProbeDefinition
+from fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
+from fcapz import XilinxHwServerTransport
+from fcapz import summarize, find_edges, ProbeDefinition
 
+# Default ir_table is the Xilinx 7-series preset (USER1=0x02, USER2=0x03,
+# USER3=0x22, USER4=0x23).  For an UltraScale / UltraScale+ board, pass
+# the named UltraScale preset instead — the IR opcodes differ:
+#     transport = XilinxHwServerTransport(
+#         port=3121,
+#         fpga_name="xcku040",
+#         ir_table=XilinxHwServerTransport.IR_TABLE_US,  # USER1=0x24, ...
+#     )
 transport = XilinxHwServerTransport(port=3121)
 analyzer = Analyzer(transport)
 analyzer.connect()
@@ -262,8 +284,8 @@ for result in analyzer.capture_continuous(count=3):
 analyzer.close()
 
 # Embedded I/O
-from host.fcapz.eio import EioController
-from host.fcapz import XilinxHwServerTransport  # reuse same transport type
+from fcapz.eio import EioController
+from fcapz import XilinxHwServerTransport  # reuse same transport type
 
 eio = EioController(XilinxHwServerTransport(port=3121))
 eio.connect()
@@ -324,7 +346,7 @@ uart.close()
 For LLM-driven or scripted ELA control:
 
 ```bash
-python -m host.fcapz.rpc
+python -m fcapz.rpc
 ```
 
 Send JSON commands on stdin, receive responses on stdout. Responses now carry
@@ -342,25 +364,22 @@ optional `channel`, `probes`, and `summarize` fields.
 
 ## Integrating the core into your design
 
-Detailed specifications live in [`no_commit/specs/`](no_commit/specs/):
-
-| Document | Contents |
-|----------|----------|
-| [architecture.md](no_commit/specs/architecture.md) | Core block diagram, clock domains, data flow |
-| [register_map.md](no_commit/specs/register_map.md) | Full ELA / EIO / EJTAG-AXI register map with bit-field descriptions |
-| [transport_api.md](no_commit/specs/transport_api.md) | Transport abstract interface contract and extension guide |
-| [waveform_schema.md](no_commit/specs/waveform_schema.md) | JSON export format, VCD mapping, CSV layout |
-
 ### RTL instantiation
 
 Pick the wrapper for your FPGA vendor — one instantiation each for ELA and EIO:
 
 ```verilog
 // Swap the wrapper suffix to port to another FPGA:
-//   fcapz_ela_xilinx7 / fcapz_eio_xilinx7  — Xilinx 7-series, UltraScale+
-//   fcapz_ela_ecp5    / fcapz_eio_ecp5     — Lattice ECP5
-//   fcapz_ela_intel   / fcapz_eio_intel    — Intel / Altera
-//   fcapz_ela_gowin   / fcapz_eio_gowin    — Gowin GW1N / GW2A
+//   fcapz_ela_xilinx7  / fcapz_eio_xilinx7   — Xilinx 7-series (Artix-7,
+//                                              Kintex-7, Virtex-7,
+//                                              Spartan-7, Zynq-7000)
+//   fcapz_ela_xilinxus / fcapz_eio_xilinxus  — Xilinx UltraScale and
+//                                              UltraScale+ (Kintex/Virtex
+//                                              UltraScale, Artix/Kintex/
+//                                              Virtex/Zynq UltraScale+)
+//   fcapz_ela_ecp5     / fcapz_eio_ecp5      — Lattice ECP5
+//   fcapz_ela_intel    / fcapz_eio_intel     — Intel / Altera
+//   fcapz_ela_gowin    / fcapz_eio_gowin     — Gowin GW1N / GW2A
 
 wire [127:0] my_signals;  // up to 256+ bits
 
@@ -448,7 +467,7 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[15:0], minor[15:0]}` |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — current value `0x0002_4C41` (major=0, minor=2, core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
 | `0x0004` | CTRL | W | bit 0 = arm, bit 1 = reset |
 | `0x0008` | STATUS | R | bit 0 = armed, 1 = triggered, 2 = done, 3 = overflow |
 | `0x000C` | SAMPLE_W | R | Sample width in bits |
@@ -471,6 +490,8 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 | `0x00BC` | SEG_STATUS | R | Segment index + all_done flag |
 | `0x00C0` | SEG_SEL | RW | Segment select for readback |
 | `0x00C4` | TIMESTAMP_W | R | Timestamp counter width in bits (0 if disabled) |
+| `0x00D0` | PROBE_MUX_W | R | Probe mux width parameter (0 if disabled) |
+| `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (16-bit, 0..65535) — shifts the committed trigger sample N cycles after the trigger event |
 | `0x0100+` | DATA | R | Sample data window (per-word, via USER1) |
 | dynamic | TS_DATA | R | Timestamp readback (base = `0x0100 + DEPTH * words_per_sample * 4`, requires TIMESTAMP_W>0) |
 
@@ -482,7 +503,7 @@ OpenOCD and hw_server backends.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | EIO_ID | R | `0x56494F01` — identifies EIO core |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — `core_id` = ASCII `"IO"` (`0x494F`). Hosts must verify the low-16 magic. Same encoding as the ELA core's `VERSION`. |
 | `0x0004` | EIO_IN_W | R | Input probe width in bits |
 | `0x0008` | EIO_OUT_W | R | Output probe width in bits |
 | `0x0010+i×4` | IN[i] | R | probe_in chunk i (bits [i×32+31 : i×32]), synced to jtag_clk |
@@ -500,9 +521,9 @@ OpenOCD and hw_server backends.
 | **Storage qualification** | Yes | Yes | Yes | -- | -- | Subsampling |
 | **Buffer type** | BRAM (any vendor) | BRAM/URAM | BRAM | EBR | BSRAM | BRAM |
 | **Channel mux** | Yes (runtime) | Multiple cores | Runtime mux | Multiple cores | Up to 16 AO | Groups |
-| **Readback** | JTAG burst (49 KB/s)\* | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
+| **Readback** | JTAG burst  | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
 
-\* Measured on Arty A7 with onboard FT2232H via Xilinx hw_server/XSDB (TCK up to 30 MHz, 0.64 ms/scan XSDB overhead).
+\* 
 | **Host interface** | Python API + CLI + JSON-RPC | GUI + Tcl + ChipScoPy | GUI + Tcl | GUI | GUI | Python + CLI |
 | **Export formats** | JSON, CSV, VCD | CSV, VCD | CSV, VCD, TBL | Proprietary | CSV, VCD, PRN | VCD, CSV, SR |
 | **Virtual I/O** | EIO core | VIO | In-System Sources | -- | GVIO | LiteScopeIO |
@@ -621,22 +642,27 @@ fpgacapZero/
     fcapz_eio.v              EIO core (vendor-agnostic)
     jtag_reg_iface.v         JTAG-to-register bridge
     jtag_burst_read.v        Burst data readout (256-bit DR)
-    fcapz_ela_xilinx7.v      ELA wrapper — Xilinx 7-series / UltraScale
-    fcapz_ela_ecp5.v         ELA wrapper — Lattice ECP5
-    fcapz_ela_intel.v        ELA wrapper — Intel / Altera
-    fcapz_ela_gowin.v        ELA wrapper — Gowin
-    fcapz_eio_xilinx7.v      EIO wrapper — Xilinx 7-series / UltraScale
-    fcapz_eio_ecp5.v         EIO wrapper — Lattice ECP5
-    fcapz_eio_intel.v        EIO wrapper — Intel / Altera
-    fcapz_eio_gowin.v        EIO wrapper — Gowin
-    fcapz_ejtagaxi.v         EJTAG-AXI bridge core (vendor-agnostic)
-    fcapz_ejtagaxi_xilinx7.v EJTAG-AXI wrapper — Xilinx 7-series / UltraScale
-    fcapz_ejtagaxi_intel.v   EJTAG-AXI wrapper — Intel / Altera
-    fcapz_ejtaguart.v        EJTAG-UART bridge core (vendor-agnostic)
-    fcapz_ejtaguart_xilinx7.v EJTAG-UART wrapper — Xilinx 7-series / UltraScale
-    fcapz_ejtaguart_intel.v  EJTAG-UART wrapper — Intel / Altera
+    fcapz_ela_xilinx7.v       ELA wrapper — Xilinx 7-series
+    fcapz_ela_xilinxus.v      ELA wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ela_ecp5.v          ELA wrapper — Lattice ECP5
+    fcapz_ela_intel.v         ELA wrapper — Intel / Altera
+    fcapz_ela_gowin.v         ELA wrapper — Gowin
+    fcapz_eio_xilinx7.v       EIO wrapper — Xilinx 7-series
+    fcapz_eio_xilinxus.v      EIO wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_eio_ecp5.v          EIO wrapper — Lattice ECP5
+    fcapz_eio_intel.v         EIO wrapper — Intel / Altera
+    fcapz_eio_gowin.v         EIO wrapper — Gowin
+    fcapz_ejtagaxi.v          EJTAG-AXI bridge core (vendor-agnostic)
+    fcapz_ejtagaxi_xilinx7.v  EJTAG-AXI wrapper — Xilinx 7-series
+    fcapz_ejtagaxi_xilinxus.v EJTAG-AXI wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ejtagaxi_intel.v    EJTAG-AXI wrapper — Intel / Altera
+    fcapz_ejtaguart.v         EJTAG-UART bridge core (vendor-agnostic)
+    fcapz_ejtaguart_xilinx7.v EJTAG-UART wrapper — Xilinx 7-series
+    fcapz_ejtaguart_xilinxus.v EJTAG-UART wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ejtaguart_intel.v   EJTAG-UART wrapper — Intel / Altera
     jtag_tap/
-      jtag_tap_xilinx7.v    TAP primitive — Xilinx (BSCANE2)
+      jtag_tap_xilinx7.v    TAP primitive — Xilinx 7-series (BSCANE2)
+      jtag_tap_xilinxus.v   TAP primitive — Xilinx UltraScale / UltraScale+ (BSCANE2)
       jtag_tap_ecp5.v       TAP primitive — Lattice (JTAGG)
       jtag_tap_intel.v      TAP primitive — Intel (sld_virtual_jtag)
       jtag_tap_gowin.v      TAP primitive — Gowin (JTAG)

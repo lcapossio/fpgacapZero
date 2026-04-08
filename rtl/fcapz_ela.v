@@ -3,6 +3,11 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines.  AUTO-generated from
+// the canonical VERSION file at the repo root by tools/sync_version.py.
+// CI verifies this header is in sync (`python tools/sync_version.py --check`).
+`include "fcapz_version.vh"
+
 // ELA-style capture core with optional advanced features.
 //
 // Parameters:
@@ -100,6 +105,10 @@ module fcapz_ela #(
     // Probe mux registers (only used when PROBE_MUX_W > 0)
     localparam ADDR_PROBE_SEL   = 16'h00AC;  // RW: [7:0] slice index
     localparam ADDR_PROBE_MUX_W = 16'h00D0;  // RO: PROBE_MUX_W parameter
+    localparam ADDR_TRIG_DELAY  = 16'h00D4;  // RW: [15:0] post-trigger delay
+                                             // (sample-clock cycles between
+                                             // trigger event and committed
+                                             // trigger sample; default 0)
 
     localparam ADDR_DATA_BASE   = 16'h0100;
 
@@ -160,6 +169,7 @@ module fcapz_ela #(
     reg [31:0] jtag_trig_mode;   // legacy: [0]=value_match [1]=edge_detect
     reg [31:0] jtag_trig_value;  // legacy: comparator A value (stage 0)
     reg [31:0] jtag_trig_mask;   // legacy: comparator A mask (stage 0)
+    reg [15:0] jtag_trig_delay;  // post-trigger delay (sample clocks)
     // Zero-extended to SAMPLE_W for sync pipeline.
     // SAMPLE_W <= 32: direct truncation (Verilog replication count cannot be 0,
     //   so the ternary trick is avoided — assign from a wider intermediate).
@@ -249,6 +259,7 @@ module fcapz_ela #(
     reg [SAMPLE_W-1:0] trig_mask_sync1,    trig_mask_sync2;
     reg [7:0]          chan_sel_sync1,     chan_sel_sync2;
     reg [7:0]          probe_sel_sync1,   probe_sel_sync2;
+    reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
 
     // ---- Channel mux (sample_clk domain) -----------------------------------
     reg [7:0] chan_sel;   // active channel, latched on arm
@@ -297,6 +308,14 @@ module fcapz_ela #(
     reg [PTR_W-1:0] post_count;
     reg [PTR_W:0]   capture_len;  // one extra bit: can equal DEPTH (= 2^PTR_W)
     reg [SAMPLE_W-1:0] probe_prev;
+    // Trigger delay: when the comparator fires, count down trig_delay
+    // sample-clock cycles before committing trig_ptr.  During the
+    // countdown the FSM stays in the "armed, not yet triggered" branch,
+    // so the circular buffer keeps recording.  trig_delay = 0 reproduces
+    // the legacy zero-delay behavior exactly.
+    reg [15:0] trig_delay;
+    reg [15:0] trig_delay_count;
+    reg        trig_delay_pending;
 
     // Phase 1: decimation state (sample domain)
     // When DECIM_EN=0, decim_tick is tied high and all counter logic optimizes away.
@@ -502,6 +521,7 @@ module fcapz_ela #(
             jtag_trig_ext      <= 2'h0;
             jtag_seg_sel       <= {SEG_IDX_W{1'b0}};
             jtag_probe_sel     <= 8'h0;
+            jtag_trig_delay    <= 16'h0;
             arm_toggle_jtag    <= 1'b0;
             reset_toggle_jtag  <= 1'b0;
             rd_req_toggle_jtag <= 1'b0;
@@ -537,6 +557,7 @@ module fcapz_ela #(
                     ADDR_DECIM:      jtag_decim        <= jtag_wdata[23:0];
                     ADDR_TRIG_EXT:   jtag_trig_ext     <= jtag_wdata[1:0];
                     ADDR_PROBE_SEL:  jtag_probe_sel    <= jtag_wdata[7:0];
+                    ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
                     ADDR_SEG_SEL:    jtag_seg_sel      <= jtag_wdata[SEG_IDX_W-1:0];
                     ADDR_BURST_PTR: begin
                         // Direct read of seg_start_ptr (stable after
@@ -594,6 +615,7 @@ module fcapz_ela #(
             trig_mask_sync1    <= 0; trig_mask_sync2    <= 0;
             chan_sel_sync1     <= 0; chan_sel_sync2     <= 0;
             probe_sel_sync1   <= 0; probe_sel_sync2   <= 0;
+            trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
         end else begin
             pretrig_len_sync1  <= jtag_pretrig_len[PTR_W-1:0];
             pretrig_len_sync2  <= pretrig_len_sync1;
@@ -609,6 +631,8 @@ module fcapz_ela #(
             chan_sel_sync2     <= chan_sel_sync1;
             probe_sel_sync1   <= jtag_probe_sel;
             probe_sel_sync2   <= probe_sel_sync1;
+            trig_delay_sync1  <= jtag_trig_delay;
+            trig_delay_sync2  <= trig_delay_sync1;
         end
     end
 
@@ -644,6 +668,7 @@ module fcapz_ela #(
             probe_sel        <= 8'h0;
             decim_ratio      <= 24'h0;
             ext_trig_mode    <= 2'h0;
+            trig_delay       <= 16'h0;
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
                 seq_mode_a[si]       <= 4'd0;
                 seq_mode_b[si]       <= 4'd0;
@@ -689,6 +714,8 @@ module fcapz_ela #(
             decim_ratio      <= jtag_decim;
             // Phase 2: external trigger
             ext_trig_mode    <= jtag_trig_ext;
+            // Trigger delay (sample clocks) — latched on arm
+            trig_delay       <= trig_delay_sync2;
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
                 seq_mode_a[si]       <= jtag_seq_cfg[si][3:0];
@@ -764,6 +791,8 @@ module fcapz_ela #(
             capture_len <= {PTR_W+1{1'b0}};
             seq_state   <= {SEQ_STATE_W{1'b0}};
             seq_counter <= 16'h0;
+            trig_delay_pending <= 1'b0;
+            trig_delay_count   <= 16'h0;
             cur_segment <= {SEG_IDX_W{1'b0}};
             seg_count   <= {SEG_IDX_W{1'b0}};
             all_seg_done <= 1'b0;
@@ -778,6 +807,8 @@ module fcapz_ela #(
                 wr_ptr      <= {PTR_W{1'b0}};
                 post_count  <= {PTR_W{1'b0}};
                 capture_len <= {PTR_W+1{1'b0}};
+                trig_delay_pending <= 1'b0;
+                trig_delay_count   <= 16'h0;
                 cur_segment <= {SEG_IDX_W{1'b0}};
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
@@ -793,6 +824,8 @@ module fcapz_ela #(
                 post_count  <= {PTR_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
+                trig_delay_pending <= 1'b0;
+                trig_delay_count   <= 16'h0;
                 cur_segment <= {SEG_IDX_W{1'b0}};
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
@@ -818,11 +851,36 @@ module fcapz_ela #(
 
                 // Trigger / sequencer evaluation (runs every cycle, NOT gated by decimation)
                 if (!triggered) begin
-                    if (trigger_hit) begin
-                        triggered   <= 1'b1;
-                        trig_ptr    <= wr_ptr;
-                        post_count  <= {PTR_W{1'b0}};
-                        capture_len <= pretrig_len + posttrig_len + 1'b1;
+                    if (trig_delay_pending) begin
+                        // Counting down sample-clock cycles between the
+                        // trigger event and the committed trigger sample.
+                        // Buffer continues to record (gated by store_enable
+                        // above).  At terminal count, commit trig_ptr from
+                        // the *current* wr_ptr — this is now `trig_delay`
+                        // store events later than the original cause.
+                        if (trig_delay_count == 16'h0) begin
+                            triggered          <= 1'b1;
+                            trig_ptr           <= wr_ptr;
+                            post_count         <= {PTR_W{1'b0}};
+                            capture_len        <= pretrig_len + posttrig_len + 1'b1;
+                            trig_delay_pending <= 1'b0;
+                        end else begin
+                            trig_delay_count <= trig_delay_count - 1'b1;
+                        end
+                    end else if (trigger_hit) begin
+                        if (trig_delay == 16'h0) begin
+                            // Zero delay: legacy behavior, commit immediately.
+                            triggered   <= 1'b1;
+                            trig_ptr    <= wr_ptr;
+                            post_count  <= {PTR_W{1'b0}};
+                            capture_len <= pretrig_len + posttrig_len + 1'b1;
+                        end else begin
+                            // Enter delay countdown.  trig_delay_count is
+                            // the number of *additional* cycles after this
+                            // one before commit, so subtract 1.
+                            trig_delay_pending <= 1'b1;
+                            trig_delay_count   <= trig_delay - 16'h1;
+                        end
                     end else if (seq_advance) begin
                         seq_state   <= seq_next_state[seq_state];
                         seq_counter <= 16'h0;
@@ -851,6 +909,8 @@ module fcapz_ela #(
                                     post_count  <= {PTR_W{1'b0}};
                                     seq_state   <= {SEQ_STATE_W{1'b0}};
                                     seq_counter <= 16'h0;
+                                    trig_delay_pending <= 1'b0;
+                                    trig_delay_count   <= 16'h0;
                                     // Set wr_ptr to next segment base
                                     wr_ptr      <= (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
                                 end
@@ -972,7 +1032,14 @@ module fcapz_ela #(
     always @(*) begin
         jtag_rdata = 32'h0;
         case (jtag_addr)
-            ADDR_VERSION:     jtag_rdata = 32'h0001_0001;
+            // VERSION layout (defined in rtl/fcapz_version.vh, generated
+            // from the repo-root VERSION file by tools/sync_version.py):
+            //   [31:24] = `FCAPZ_VERSION_MAJOR (8-bit)
+            //   [23:16] = `FCAPZ_VERSION_MINOR (8-bit)
+            //   [15:0]  = `FCAPZ_ELA_CORE_ID  = ASCII "LA" = 0x4C41
+            // Hosts must verify VERSION[15:0] equals the LA magic before
+            // trusting any other ELA register on this chain.
+            ADDR_VERSION:     jtag_rdata = `FCAPZ_ELA_VERSION_REG;
             ADDR_CTRL:        jtag_rdata = jtag_ctrl;
             ADDR_STATUS:      jtag_rdata = {28'h0, overflow, done, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata = SAMPLE_W;
@@ -1001,6 +1068,7 @@ module fcapz_ela #(
                                 : {{(32-PTR_W){1'b0}}, start_ptr};
             ADDR_PROBE_SEL:   jtag_rdata = {24'h0, jtag_probe_sel};
             ADDR_PROBE_MUX_W: jtag_rdata = PROBE_MUX_W;
+            ADDR_TRIG_DELAY:  jtag_rdata = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata = TIMESTAMP_W;
             default: begin
                 if (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]) begin

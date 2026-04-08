@@ -8,6 +8,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-root_str = str(ROOT)
-if root_str not in sys.path:
-    sys.path.insert(0, root_str)
+# The fcapz package lives at host/fcapz/, so make `host/` the import root.
+# This lets `from fcapz import ...` resolve in editable installs and during
+# direct test runs from the repo without needing pip install.
+HOST = ROOT / "host"
+host_str = str(HOST)
+if host_str not in sys.path:
+    sys.path.insert(0, host_str)

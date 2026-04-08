@@ -3,6 +3,12 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines (auto-generated from
+// the canonical VERSION file).  Pulling them in here means Test 1 stays
+// in sync with the RTL automatically; bumping VERSION + re-running
+// tools/sync_version.py is the only place a release version lives.
+`include "fcapz_version.vh"
+
 // ELA core simulation testbench.
 // Targets iverilog -g2012; concurrent SVA assertions are gated behind
 // `ifdef SVA_ENABLED so the file compiles cleanly without a full SV tool.
@@ -324,9 +330,20 @@ module fcapz_ela_tb;
         repeat (4) @(posedge jtag_clk);
 
         // ---- Test 1: Identity registers ------------------------------------
-        $display("\n=== Test 1: Identity registers ===");
+        // Both the RTL and this testbench reference `FCAPZ_ELA_VERSION_REG
+        // from rtl/fcapz_version.vh, so bumping VERSION updates both
+        // automatically with one git diff.
+        $display("\n=== Test 1: Identity registers (VERSION = %s) ===",
+                 `FCAPZ_VERSION_STRING);
         jtag_read(16'h0000, version);
-        check("VERSION = 0x00010001", version == 32'h0001_0001);
+        check("VERSION matches `FCAPZ_ELA_VERSION_REG",
+              version == `FCAPZ_ELA_VERSION_REG);
+        check("VERSION core_id == `FCAPZ_ELA_CORE_ID ('LA')",
+              version[15:0]  == `FCAPZ_ELA_CORE_ID);
+        check("VERSION minor   == `FCAPZ_VERSION_MINOR",
+              version[23:16] == `FCAPZ_VERSION_MINOR);
+        check("VERSION major   == `FCAPZ_VERSION_MAJOR",
+              version[31:24] == `FCAPZ_VERSION_MAJOR);
         jtag_read(16'h000C, sample_w_reg);
         check($sformatf("SAMPLE_W = %0d", sample_w_reg), sample_w_reg == SAMPLE_W);
         jtag_read(16'h0010, depth_reg);
@@ -870,6 +887,96 @@ module fcapz_ela_tb;
         jtag_write_pmux(16'h00AC, 32'd3);
         jtag_read_pmux(16'h00AC, sample_word);
         check("PROBE_SEL round-trip", sample_word == 32'd3);
+
+        // ---- Test 23: TRIG_DELAY register round-trip ------------------------
+        $display("\n=== Test 23: TRIG_DELAY register round-trip ===");
+        jtag_write(16'h00D4, 32'd5);
+        jtag_read(16'h00D4, sample_word);
+        check("TRIG_DELAY round-trip = 5", sample_word == 32'd5);
+        jtag_write(16'h00D4, 32'd0);  // restore
+        jtag_read(16'h00D4, sample_word);
+        check("TRIG_DELAY round-trip = 0", sample_word == 32'd0);
+
+        // ---- Test 24: TRIG_DELAY=0 equivalence with legacy capture ----------
+        // With delay=0 the captured window must be identical to Test 3.
+        $display("\n=== Test 24: TRIG_DELAY=0 equivalence ===");
+        jtag_write(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write(16'h0014, 32'd2);    // PRETRIG_LEN = 2
+        jtag_write(16'h0018, 32'd3);    // POSTTRIG_LEN = 3
+        jtag_write(16'h0020, 32'h1);    // TRIG_MODE: value_match
+        jtag_write(16'h0024, 32'd8);    // TRIG_VALUE = 8
+        jtag_write(16'h0028, 32'hFF);
+        jtag_write(16'h00D4, 32'd0);    // TRIG_DELAY = 0
+        jtag_write(16'h0004, 32'h1);    // ARM
+        probe_in = '0;
+        repeat (16) begin
+            @(posedge sample_clk);
+            probe_in <= probe_in + 1'b1;
+        end
+        cycles = 0;
+        while (cycles < 100) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+        jtag_read(16'h0008, status);
+        check("Delay=0: done",      status[2] == 1'b1);
+        jtag_read(16'h001C, cap_len);
+        check($sformatf("Delay=0: CAPTURE_LEN=6 (got %0d)", cap_len), cap_len == 6);
+        // The trigger sample (index 2 in the 6-sample window) should be 8.
+        jtag_read(16'h0100 + 2*4, sample_word);
+        check($sformatf("Delay=0: trig sample = 8 (got 0x%02x)",
+              sample_word[7:0]),
+              sample_word[SAMPLE_W-1:0] == 8'd8);
+
+        // ---- Test 25: TRIG_DELAY=4 shifts trigger sample by 4 cycles --------
+        // Same stimulus as Test 24 but TRIG_DELAY=4.  The committed trigger
+        // sample should be the value 4 cycles after the cause (counter = 8),
+        // so the sample at the trigger index should be 12.
+        $display("\n=== Test 25: TRIG_DELAY=4 ===");
+        jtag_write(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write(16'h0014, 32'd2);    // PRETRIG_LEN = 2
+        jtag_write(16'h0018, 32'd3);    // POSTTRIG_LEN = 3
+        jtag_write(16'h0020, 32'h1);    // TRIG_MODE: value_match
+        jtag_write(16'h0024, 32'd8);    // TRIG_VALUE = 8 (cause)
+        jtag_write(16'h0028, 32'hFF);
+        jtag_write(16'h00D4, 32'd4);    // TRIG_DELAY = 4
+        jtag_write(16'h0004, 32'h1);    // ARM
+        probe_in = '0;
+        repeat (24) begin
+            @(posedge sample_clk);
+            probe_in <= probe_in + 1'b1;
+        end
+        cycles = 0;
+        while (cycles < 100) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+        jtag_read(16'h0008, status);
+        check("Delay=4: done", status[2] == 1'b1);
+        jtag_read(16'h001C, cap_len);
+        check($sformatf("Delay=4: CAPTURE_LEN=6 (got %0d)", cap_len), cap_len == 6);
+        // The captured window should contain values 10..15: trigger sample
+        // is at index 2 with value 12 (= 8 + delay 4).  Pre = 10, 11; post
+        // = 13, 14, 15.
+        jtag_read(16'h0100 + 2*4, sample_word);
+        check($sformatf("Delay=4: trig sample = 12 (got 0x%02x)",
+              sample_word[7:0]),
+              sample_word[SAMPLE_W-1:0] == 8'd12);
+        jtag_read(16'h0100 + 0*4, sample_word);
+        check($sformatf("Delay=4: pre[0] = 10 (got 0x%02x)",
+              sample_word[7:0]),
+              sample_word[SAMPLE_W-1:0] == 8'd10);
+        jtag_read(16'h0100 + 5*4, sample_word);
+        check($sformatf("Delay=4: post[2] = 15 (got 0x%02x)",
+              sample_word[7:0]),
+              sample_word[SAMPLE_W-1:0] == 8'd15);
+
+        // Restore TRIG_DELAY = 0 for any later tests
+        jtag_write(16'h0004, 32'h2);    // RESET
+        repeat (4) @(posedge sample_clk);
+        jtag_write(16'h00D4, 32'd0);
 
         // ---- Summary -------------------------------------------------------
         $display("\n=== Summary: %0d passed, %0d failed ===",

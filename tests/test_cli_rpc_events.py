@@ -9,31 +9,40 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host.fcapz.analyzer import Analyzer, CaptureConfig, CaptureResult, ProbeSpec, TriggerConfig
-from host.fcapz.cli import (
+from fcapz.analyzer import (
+    Analyzer,
+    CaptureConfig,
+    CaptureResult,
+    ProbeSpec,
+    TriggerConfig,
+    expected_ela_version_reg,
+)
+from fcapz.cli import (
     _build_config,
     _non_negative_int,
     _parse_trigger_sequence,
     _positive_float,
     _positive_int,
     _tcp_port,
+    _uint16,
     build_parser,
 )
-from host.fcapz.events import (
+from fcapz.events import (
     ProbeDefinition,
     find_bursts,
     find_edges,
     frequency_estimate,
     summarize,
 )
-from host.fcapz.rpc import RpcServer
-from host.fcapz.transport import Transport
+from fcapz.rpc import RpcServer
+from fcapz.transport import Transport
 
 
 class FakeTransport(Transport):
     def __init__(self, *, sample_w: int = 8, depth: int = 1024, num_chan: int = 2, data=None):
         self.regs = {
-            0x0000: 0x0001_0001,
+            # VERSION computed from canonical fcapz.__version__
+            0x0000: expected_ela_version_reg(),
             0x0008: 0x4,
             0x000C: sample_w,
             0x0010: depth,
@@ -415,6 +424,19 @@ class CliArgValidatorTests(unittest.TestCase):
         self.assertEqual(_tcp_port("1"), 1)
         self.assertEqual(_tcp_port("65535"), 65535)
 
+    def test_uint16_accepts_zero_and_max(self):
+        self.assertEqual(_uint16("0"), 0)
+        self.assertEqual(_uint16("65535"), 0xFFFF)
+        self.assertEqual(_uint16("0xABCD"), 0xABCD)
+
+    def test_uint16_rejects_negative(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _uint16("-1")
+
+    def test_uint16_rejects_too_large(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _uint16("65536")
+
     def test_trigger_sequence_malformed_json_gives_type_error(self):
         with self.assertRaises(argparse.ArgumentTypeError):
             _parse_trigger_sequence("{not valid json")
@@ -436,6 +458,19 @@ class RpcSqModeValidationTests(unittest.TestCase):
         for mode in (-1, 3, 99):
             with self.assertRaises(ValueError):
                 RpcServer._validated_sq_mode(mode)
+
+
+class RpcTriggerDelayValidationTests(unittest.TestCase):
+    """Tests for trigger_delay validation in RPC _build_config."""
+
+    def test_valid_values_accepted(self):
+        for v in (0, 1, 1234, 0xFFFF):
+            self.assertEqual(RpcServer._validated_trigger_delay(v), v)
+
+    def test_invalid_values_rejected(self):
+        for v in (-1, 0x10000, 0x7FFFFFFF):
+            with self.assertRaises(ValueError):
+                RpcServer._validated_trigger_delay(v)
 
 
 class CliTests(unittest.TestCase):

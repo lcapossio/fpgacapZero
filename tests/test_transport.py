@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +139,26 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t.select_chain(2)
         self.assertEqual(t._active_chain, 2)
 
+    def test_ir_table_xilinx7_default(self):
+        """Default ir_table matches the Xilinx 7-series preset."""
+        t = OpenOcdTransport()
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
+
+    def test_ir_table_ultrascale_preset(self):
+        """Constructing with the UltraScale preset switches the IR codes."""
+        t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_US)
+        self.assertEqual(t.ir_table[1], 0x24)  # USER1
+        self.assertEqual(t.ir_table[2], 0x25)  # USER2
+        self.assertEqual(t.ir_table[3], 0x26)  # USER3
+        self.assertEqual(t.ir_table[4], 0x27)  # USER4
+
+    def test_ir_table_alias(self):
+        """IR_TABLE_US is the same dict as IR_TABLE_XILINX_ULTRASCALE."""
+        self.assertIs(
+            OpenOcdTransport.IR_TABLE_US,
+            OpenOcdTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+
     def test_read_reg_sends_two_scans(self):
         """read_reg() issues irscan + drscan + runtest + irscan + drscan."""
         cmds: list[str] = []
@@ -224,6 +244,21 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport()
         t.select_chain(3)
         self.assertEqual(t._active_chain, 3)
+
+    def test_ir_table_xilinx7_default(self):
+        """Default ir_table matches the Xilinx 7-series preset."""
+        t = XilinxHwServerTransport()
+        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX7)
+
+    def test_ir_table_ultrascale_preset(self):
+        """Constructing with the UltraScale preset switches the IR codes."""
+        t = XilinxHwServerTransport(
+            ir_table=XilinxHwServerTransport.IR_TABLE_US,
+        )
+        self.assertEqual(t.ir_table[1], 0x24)
+        self.assertEqual(t.ir_table[2], 0x25)
+        self.assertEqual(t.ir_table[3], 0x26)
+        self.assertEqual(t.ir_table[4], 0x27)
 
     def test_parse_bits_u32_raises_on_no_bit_string(self):
         """_parse_bits_u32() raises RuntimeError on malformed xsdb output."""

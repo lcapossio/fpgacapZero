@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from typing import List
 
-from host.fcapz.ejtagaxi import (
+from fcapz.ejtagaxi import (
     AXIError,
     CMD_BURST_RDATA,
     CMD_BURST_RSTART,
@@ -24,7 +24,7 @@ from host.fcapz.ejtagaxi import (
     EjtagAxiController,
     _BRIDGE_ID,
 )
-from host.fcapz.transport import Transport
+from fcapz.transport import Transport
 
 
 # AXI response codes

@@ -5,7 +5,239 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [v0.3.0]
+
+### ⚠ Breaking changes
+
+**1. Python package renamed: `host.fcapz` → `fcapz`**
+
+Any external code that imports from `host.fcapz.*` will break with
+`ModuleNotFoundError: No module named 'host'` after upgrading. There is
+no compatibility shim — this is a hard rename. The fix is mechanical:
+
+```diff
+- from host.fcapz import Analyzer, CaptureConfig, TriggerConfig
+- from host.fcapz.transport import XilinxHwServerTransport
+- from host.fcapz.eio import EioController
+- from host.fcapz.ejtagaxi import EjtagAxiController, AXIError
+- from host.fcapz.ejtaguart import EjtagUartController
++ from fcapz import Analyzer, CaptureConfig, TriggerConfig
++ from fcapz.transport import XilinxHwServerTransport
++ from fcapz.eio import EioController
++ from fcapz.ejtagaxi import EjtagAxiController, AXIError
++ from fcapz.ejtaguart import EjtagUartController
+```
+
+CLI entry point form also changes:
+
+```diff
+- python -m host.fcapz.cli ...
+- python -m host.fcapz.rpc
++ python -m fcapz.cli ...
++ python -m fcapz.rpc
+```
+
+The installed `fcapz` console script (`pip install -e .` then run
+`fcapz`) is unchanged. The on-disk path `host/fcapz/` is unchanged
+— only the importable name moved.
+
+One-shot migration on a checkout:
+
+```bash
+# Linux / macOS
+grep -rl 'host\.fcapz' . | xargs sed -i 's/host\.fcapz/fcapz/g'
+
+# Windows PowerShell
+Get-ChildItem -Recurse -File | Select-String -Pattern 'host\.fcapz' -List |
+  ForEach-Object { (Get-Content $_.Path) -replace 'host\.fcapz', 'fcapz' |
+                   Set-Content $_.Path }
+```
+
+**2. EIO `VERSION` register replaces `EIO_ID`**
+
+The 32-bit register at EIO address `0x0000` was previously a flat
+32-bit identity word `0x56494F01` (`"EIO"` + literal `0x01`).  It is
+now the same `{major, minor, core_id}` layout as the ELA core, with
+`core_id = ASCII "IO" = 0x494F`.  ``EioController.connect()`` now
+raises ``RuntimeError`` on a wrong / missing core_id, exposes
+``version_major`` / ``version_minor`` / ``core_id`` on the controller
+instance, and the old hardcoded `EIO_ID = 0x56494F01` constant is
+gone.
+
+Pre-v0.3.0 EIO bitstreams will fail the new magic check and need to
+be rebuilt.
+
+**3. ELA `VERSION` register layout changed**
+
+The 32-bit register at address `0x0000` no longer encodes
+`{major[15:0], minor[15:0]}`. The new layout is:
+
+| Bits | Field | Value (v0.3.0) |
+|------|-------|----------------|
+| `[31:24]` | `major` (8-bit) | `0x00` |
+| `[23:16]` | `minor` (8-bit) | `0x02` |
+| `[15:0]`  | `core_id` (ASCII `"LA"`) | `0x4C41` |
+
+Constant: `0x0002_4C41`.
+
+`Analyzer.probe()` now raises `RuntimeError` on a wrong / missing
+core_id, so an unprogrammed FPGA, a wrong JTAG chain, or a
+non-fcapz bitstream is rejected before any other ELA register is
+read. The returned dict gains a new `core_id` key.
+
+Hosts that decoded `version` by hand must update:
+
+```diff
+- version_major = (version >> 16) & 0xFFFF
+- version_minor = version & 0xFFFF
++ version_major = (version >> 24) & 0xFF
++ version_minor = (version >> 16) & 0xFF
++ core_id       = version & 0xFFFF        # must equal 0x4C41
+```
+
+Bitstreams built before v0.3.0 will report `core_id = 0x0001`
+(because the old encoding put `minor=1` in the low half), which
+the new probe magic check rejects. **Rebuild the bitstream** when
+upgrading the host.
+
+### Added
+
+**Xilinx UltraScale / UltraScale+ wrappers**
+- Five new wrapper files that target UltraScale and UltraScale+
+  devices.  Because BSCANE2 is the same primitive on 7-series,
+  UltraScale, and UltraScale+ (verified against UG570 / UG574),
+  the new files are **thin shims** that instantiate the existing
+  `_xilinx7` modules.  This avoids duplicating ~280 LOC of wrapper
+  body across two files; any change to the 7-series wrappers
+  automatically applies to the UltraScale path.
+  * `rtl/jtag_tap/jtag_tap_xilinxus.v` — instantiates `jtag_tap_xilinx7`
+  * `rtl/fcapz_ela_xilinxus.v` — instantiates `fcapz_ela_xilinx7`
+  * `rtl/fcapz_eio_xilinxus.v` — instantiates `fcapz_eio_xilinx7`
+  * `rtl/fcapz_ejtagaxi_xilinxus.v` — instantiates `fcapz_ejtagaxi_xilinx7`
+  * `rtl/fcapz_ejtaguart_xilinxus.v` — instantiates `fcapz_ejtaguart_xilinx7`
+- Distinct module names give users an unambiguous per-vendor
+  entry point in their Vivado source-file list and in `set_property
+  top` calls, while the underlying definition lives in one place.
+- Confirmed device families documented at the top of
+  `jtag_tap_xilinxus.v`:
+  * UltraScale: Kintex / Virtex UltraScale
+  * UltraScale+: Artix / Kintex / Virtex / Zynq UltraScale+
+- USER chain → IR opcode mapping for UltraScale (UG570 / UG574):
+  USER1=`0x24`, USER2=`0x25`, USER3=`0x26`, USER4=`0x27` —
+  different from the 7-series codes.
+- Host: `OpenOcdTransport` and `XilinxHwServerTransport` gain
+  named `IR_TABLE_XILINX7`, `IR_TABLE_XILINX_ULTRASCALE`, and
+  `IR_TABLE_US` (alias) presets so UltraScale users don't have
+  to look the codes up.  Pass via the existing `ir_table=...`
+  constructor parameter.  README example updated.
+- CI: `lint-rtl` job adds 5 new iverilog elaboration steps for the
+  new wrappers (using the existing BSCANE2 sim stub).  Shared
+  `IVFLAGS` now includes `-I rtl` so `\`include "fcapz_version.vh"`
+  resolves on the runner.
+- README support matrix and project structure updated to list the
+  UltraScale wrappers separately from 7-series.
+- Versal devices (XCVM/VC/VP/VE/VH) are explicitly NOT covered;
+  they need a separate wrapper that targets their TAP primitive.
+- Status: implemented in RTL, lint-clean under `iverilog -Wall`,
+  IR-table presets unit-tested (5 new tests, total 177).  Not yet
+  hardware-validated (no UltraScale board on hand).
+
+**Single source of truth for the project version**
+- New ``VERSION`` text file at the repo root holds the canonical
+  ``MAJOR.MINOR.PATCH`` semver string.
+- New ``tools/sync_version.py`` reads it and regenerates
+  ``rtl/fcapz_version.vh``, a Verilog header that exposes the version
+  fields and per-core ASCII identifiers as `\`define`s
+  (``FCAPZ_VERSION_MAJOR``, ``FCAPZ_VERSION_MINOR``,
+  ``FCAPZ_ELA_VERSION_REG``, ``FCAPZ_EIO_VERSION_REG``, etc.).
+- ``rtl/fcapz_ela.v`` and ``rtl/fcapz_eio.v`` ``\`include`` the
+  generated header and use ``FCAPZ_*_VERSION_REG`` instead of
+  hardcoded constants in their ``ADDR_VERSION`` read-mux paths.
+- The ELA and EIO testbenches reference the same defines so a
+  version bump propagates from the VERSION file → header →
+  RTL → TB in one ``python tools/sync_version.py`` invocation.
+- ``pyproject.toml`` declares ``dynamic = ["version"]`` and reads
+  the same VERSION file via setuptools, so the Python package
+  version, the RTL VERSION register constants, and the testbench
+  expectations all share one number.
+- New ``host/fcapz/_version.py`` exposes ``__version__`` via
+  ``importlib.metadata`` (after ``pip install``) with a fallback
+  that reads the VERSION file directly so editable / dev runs
+  still work.  ``fcapz._version_tuple()`` returns
+  ``(major, minor, patch)`` for tests and probe comparisons.
+- New ``analyzer.expected_ela_version_reg()`` and
+  ``_expected_eio_version_reg()`` test helpers compute the
+  packed VERSION register from the canonical version, so
+  ``FakeTransport`` instances stay in sync automatically.
+- New ``test_probe_matches_canonical_version`` and
+  ``test_connect_decodes_version_fields`` regression tests fail
+  loudly if the RTL header and Python ``__version__`` ever drift.
+- ``sim/run_sim.py`` adds ``-I rtl`` so iverilog finds
+  ``fcapz_version.vh``.
+- ``examples/arty_a7/build_arty.tcl`` registers
+  ``rtl/fcapz_version.vh`` as a global Verilog include and
+  upgrades existing on-disk projects in place so post-v0.3.0
+  rebuilds don't need a fresh project dir.
+- ``.github/workflows/ci.yml`` gains a ``version-sync`` job that
+  runs ``tools/sync_version.py --check`` and fails the build if
+  the generated header has drifted from VERSION (e.g. someone
+  bumped the file but forgot to re-run the script).
+
+**Configurable trigger delay (TRIG_DELAY)**
+- New ELA register `ADDR_TRIG_DELAY` (`0x00D4`, RW, 16-bit, default 0)
+- When non-zero, the committed trigger sample is shifted N sample-clock
+  cycles after the trigger event, compensating for upstream pipeline
+  latency between a cause signal and its visible effect on the probe bus
+- RTL: `trig_delay`/`trig_delay_count`/`trig_delay_pending` state in the
+  sample-clock domain; routed through the existing 2-FF sync chain;
+  latched on arm; on `trigger_hit` the FSM either commits immediately
+  (delay=0, legacy behavior) or enters a per-cycle countdown that
+  commits `trig_ptr <= wr_ptr` at terminal count. Buffer recording
+  unaffected during the delay window. Cleared on `reset_pulse` and on
+  segmented re-arm.
+- Host API: `CaptureConfig.trigger_delay` field, validated 0..65535 in
+  `Analyzer.configure()`
+- CLI: `--trigger-delay` argument (decimal or hex) on both `configure`
+  and `capture` subparsers, backed by a new `_uint16` validator
+- RPC: `trigger_delay` field in `_build_config`, validated by
+  `_validated_trigger_delay`
+- Testbench: 3 new ELA TB scenarios (round-trip, delay=0 equivalence
+  with legacy capture window, delay=4 with verified sample alignment).
+  ELA TB now 58/0 passing.
+- Hardware integration tests: `test_trigger_delay_shifts_window`
+  (TRIG_DELAY=4) and `test_trigger_delay_zero_equivalence` — both pass
+  on real Arty A7-100T silicon.
+- Register map doc updated.
+
+**Package rename: `host.fcapz` → `fcapz`**
+- `pyproject.toml` package discovery now uses `where = ["host"]`,
+  `include = ["fcapz*"]` so editable installs (`pip install -e .`)
+  expose the importable name as `fcapz` — matching the existing CLI
+  binary name.
+- Project version bumped to `0.2.0`.
+- All tests, examples, and the README updated from `host.fcapz`
+  to `fcapz`. Two README import lines that already used the bare
+  `from fcapz import ...` form (and silently broke before this
+  refactor) now actually work.
+- New `conftest.py` at the repo root inserts `host/` into `sys.path`
+  so `from fcapz import …` resolves when running tests directly
+  without `pip install`.
+- `host/fcapz/*.py` is unchanged (already used relative imports).
+
+**Build infrastructure**
+- New `examples/arty_a7/build.py` Python launcher for Vivado batch
+  builds: orphan helper-process cleanup (`vrs.exe`,
+  `parallel_synth_helper`), file-lock detection via
+  `_runs_dir_is_deletable()`, and automatic sidestep to a fresh
+  sibling project directory when the canonical path is locked by a
+  zombie Vivado run on Windows.
+- `examples/arty_a7/build_arty.tcl` reuses an existing project (with
+  `reset_run` on stale runs) instead of always recreating, and honors
+  `FPGACAP_PROJECT_DIR` from the launcher.
+
+---
+
+## [0.2.0] — 2026-04-07
 
 ### Added
 
@@ -17,23 +249,128 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Async FIFO (Gray-coded pointers, configurable `FIFO_DEPTH`) for burst reads
 - Per-beat toggle handshake for burst writes (no inter-beat timeout)
 - Parameters: `ADDR_W`, `DATA_W`, `FIFO_DEPTH`, `TIMEOUT`
+- `FIFO_DEPTH` exposed in `FEATURES[23:16]` as `(FIFO_DEPTH-1)` (AXI4 awlen
+  convention so 256 fits in 8 bits) and validated at elaboration time
 - Vendor wrappers: `fcapz_ejtagaxi_xilinx7.v`, `fcapz_ejtagaxi_intel.v`
 - Reusable AXI4 test slave: `tb/axi4_test_slave.v`
 - Testbench: `tb/fcapz_ejtagaxi_tb.sv` (29 assertions)
-- Hardware-validated on Arty A7-100T (8/8 tests pass)
+- Hardware-validated on Arty A7-100T
+
+**EJTAG-UART Bridge (`rtl/fcapz_ejtaguart.v`)**
+- New module: JTAG-to-UART bridge with bidirectional TX/RX async FIFOs
+- 32-bit pipelined DR; commands: NOP, TX_PUSH, RX_POP, TXRX, CONFIG, RESET
+- ~1.5 KB/s per direction (Arty A7 / FT2232H / XSDB)
+- Use cases: debug console, firmware upload, printf-over-JTAG
+- Vendor wrappers: `fcapz_ejtaguart_xilinx7.v`, `fcapz_ejtaguart_intel.v`
+- Testbench `tb/fcapz_ejtaguart_tb.sv` and `host/fcapz/ejtaguart.py`
+- CLI: `uart-send`, `uart-recv`, `uart-monitor`
+
+**Async FIFO (`rtl/fcapz_async_fifo.v`)**
+- Vendor-agnostic async FIFO with two implementations:
+  `USE_BEHAV_ASYNC_FIFO=1` portable Gray-coded pointer FIFO (default)
+  and `USE_BEHAV_ASYNC_FIFO=0` Xilinx XPM wrapper
+- Equivalence testbench `tb/fcapz_async_fifo_equiv_tb.v` +
+  `tb/xpm_fifo_async_stub.v` so the XPM branch elaborates and runs
+  under iverilog without a vendor install
+- Python regression test `tests/test_rtl_fifo_equiv.py` runs the
+  equivalence sim via subprocess (skipped when iverilog not on PATH)
+
+**ELA capture engine — advanced features**
+- Storage qualification (STOR_QUAL): record only samples that match a
+  secondary comparator, +21 LUTs for 10x effective depth on sparse
+  signals; new RW registers `SQ_MODE` (0x0030), `SQ_VALUE` (0x0034),
+  `SQ_MASK` (0x0038), exposed in Python API and CLI
+- Sample decimation (DECIM_EN=1): /N divider, captures every N+1 cycles
+- External trigger I/O (EXT_TRIG_EN=1): `trigger_in`/`trigger_out` ports
+  with disabled / OR / AND combine modes
+- Per-sample timestamp counter (TIMESTAMP_W=32 or 48), exported to VCD
+- Segmented memory (NUM_SEGMENTS>1): auto-rearm after each segment
+  fills, capturing multiple trigger events in a single run
+- Runtime probe mux (PROBE_MUX_W>0): one ELA observes a wide bus and
+  selects a SAMPLE_W slice at runtime via `PROBE_SEL` (0x00AC)
+
+**Transport chain selection and hardening**
+- `Transport` ABC: `select_chain()`, `raw_dr_scan()`, `raw_dr_scan_batch()`
+- Both OpenOCD and hw_server transports support dynamic IR/chain selection
+- Verified IR codes on xc7a100t: USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23
+- `XilinxHwServerTransport.connect()` now waits until the FPGA responds
+  with valid data after `program()` (configurable `ready_probe_addr` /
+  `ready_probe_timeout`); raises `ConnectionError` on timeout with the
+  last value, attempt count, and remediation hints
+- `fpga_name` and `bitfile` validated against TCL-safe regexes to
+  prevent command injection through XSDB session strings
+- Parser failures now include the last 10 lines of captured xsdb stderr
+  for diagnosability
+- `assert` statements in `_cmd()` and `_drain_stderr()` replaced with
+  `RuntimeError` (safe under `python -O`)
+
+**Host API hardening**
+- `analyzer.configure()` rejects sequences exceeding hardware
+  `TRIG_STAGES`
+- `ejtagaxi.close()` warns instead of swallowing reset failures silently
+- `ejtagaxi.connect()` caches `FIFO_DEPTH` from FEATURES;
+  `burst_read`/`burst_write` reject counts exceeding the bridge FIFO
+  or AXI4 max (256)
+- `rpc._parse_probes()` rejects negative `lsb` / non-positive `width`
+- `rpc` validates `stor_qual_mode` in `{0, 1, 2}`
+- `events.ProbeDefinition` validates `width > 0` and `lsb >= 0`
+- `events.summarize()` always emits `longest_burst` / `first_edge` /
+  `last_edge` keys for a stable output schema
+
+**CLI hardening**
+- `--port` validated to TCP range 1-65535
+- `--timeout` validated `> 0`
+- `--count` validated (positive on `axi-dump`/`axi-fill`,
+  non-negative on `uart-recv`)
+- `--trigger-sequence` JSON / file errors wrapped in
+  `argparse.ArgumentTypeError`
+
+**RTL parameter validation**
+- `fcapz_ela.v`: `DEPTH` power-of-2, `TRIG_STAGES` 1..4, `SAMPLE_W` 1..256
+- `fcapz_ejtagaxi.v`: `FIFO_DEPTH` 1..256 power-of-2
+- `fcapz_async_fifo.v`: `DEPTH` power-of-2, `DATA_W >= 1`
+- `fcapz_ejtaguart.v`: TX/RX FIFO depths power-of-2, baud / clock ratio
+- All checks via `generate` synthesis traps + `initial $error` for sims
 
 **Host software**
 - `host/fcapz/ejtagaxi.py`: `EjtagAxiController` — `connect`, `axi_read`,
   `axi_write`, `read_block`, `write_block`, `burst_read`, `burst_write`, `close`
 - `write_block`/`read_block` use `raw_dr_scan_batch` for throughput
 - CLI: `axi-read`, `axi-write`, `axi-dump`, `axi-fill`, `axi-load`
-- RPC: `axi_connect`, `axi_close`, `axi_read`, `axi_write`, `axi_dump`, `axi_write_block`
+- RPC: `axi_connect`, `axi_close`, `axi_read`, `axi_write`, `axi_dump`,
+  `axi_write_block`
+- `EioController` uses `chain=3` and `select_chain()` — EIO hardware access
+  unblocked
 
-**Transport chain selection**
-- `Transport` ABC: `select_chain()`, `raw_dr_scan()`, `raw_dr_scan_batch()`
-- Both OpenOCD and hw_server transports support dynamic IR/chain selection
-- Verified IR codes on xc7a100t: USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23
-- `EioController` now uses `chain=3` and `select_chain()` — EIO hardware access unblocked
+**Tests**
+- 158 Python unit tests (was 91 in v0.1.0): added coverage for
+  `Transport` ABC, OpenOCD/XilinxHwServer failure modes, multi-segment
+  capture, wide-sample (1-bit and 256-bit) reassembly, sequencer
+  bounds, CLI argument validators, trigger-sequence JSON edge cases,
+  ProbeDefinition extract edge cases, frequency_estimate corner cases,
+  TCL injection rejection, burst FIFO_DEPTH guard rails, async FIFO
+  equivalence
+
+**Documentation**
+- `CONTRIBUTING.md` with testing guidelines, OpenOCD validation gaps,
+  multi-vendor board support
+- `docs/specs/register_map.md` updated for SQ, FIFO_DEPTH encoding,
+  ext trigger, timestamps, segmented memory, probe mux
+- `README.md` linked to `no_commit/specs/` documents
+
+**Build / lint**
+- `ruff` added to dev deps and `E501` (line length, max 100) enforced
+- All 24 pre-existing line-length violations fixed
+
+### Fixed
+- `jtag_trig_value_w`/`jtag_trig_mask_w` width mismatch for `SAMPLE_W != 32`
+  (replaced one-line ternary with `generate` block)
+- Same width mismatch for SQ and per-stage sequencer registers at
+  `SAMPLE_W <= 32` (replication count went negative inside `always` blocks)
+- TCL-safe regex split into `_TCL_NAME_RE` (strict, for the JTAG target
+  filter inside double quotes) and `_TCL_PATH_RE` (permissive, allows
+  backslash for Windows bitfile paths inside TCL braces) — the original
+  combined regex rejected every Windows bitfile path
 
 ---
 
