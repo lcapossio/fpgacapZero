@@ -9,9 +9,10 @@ read/write of fabric signals, and a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
 memory-mapped bus access — all over JTAG. Drop them into any FPGA design and
 export captures to JSON, CSV, or VCD.
 
-Includes single-instantiation wrappers for **Xilinx 7-series / UltraScale**,
-**Lattice ECP5**, **Intel / Altera**, and **Gowin** in both Verilog and VHDL.
-The core RTL and Python host stack are fully portable.
+Includes single-instantiation wrappers for **Xilinx 7-series**, **Xilinx
+UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**, and
+**Gowin** in both Verilog and VHDL. The core RTL and Python host stack
+are fully portable.
 
 ## Contents
 
@@ -81,8 +82,10 @@ The core RTL and Python host stack are fully portable.
 
 | Area | Status |
 |------|--------|
-| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 |
+| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
 | OpenOCD backend | Implemented, needs more hardware validation |
+| Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
+| Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
 | Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
 | EIO over real transports | Implemented — transport chain selection supports USER3 |
@@ -359,10 +362,16 @@ Pick the wrapper for your FPGA vendor — one instantiation each for ELA and EIO
 
 ```verilog
 // Swap the wrapper suffix to port to another FPGA:
-//   fcapz_ela_xilinx7 / fcapz_eio_xilinx7  — Xilinx 7-series, UltraScale+
-//   fcapz_ela_ecp5    / fcapz_eio_ecp5     — Lattice ECP5
-//   fcapz_ela_intel   / fcapz_eio_intel    — Intel / Altera
-//   fcapz_ela_gowin   / fcapz_eio_gowin    — Gowin GW1N / GW2A
+//   fcapz_ela_xilinx7  / fcapz_eio_xilinx7   — Xilinx 7-series (Artix-7,
+//                                              Kintex-7, Virtex-7,
+//                                              Spartan-7, Zynq-7000)
+//   fcapz_ela_xilinxus / fcapz_eio_xilinxus  — Xilinx UltraScale and
+//                                              UltraScale+ (Kintex/Virtex
+//                                              UltraScale, Artix/Kintex/
+//                                              Virtex/Zynq UltraScale+)
+//   fcapz_ela_ecp5     / fcapz_eio_ecp5      — Lattice ECP5
+//   fcapz_ela_intel    / fcapz_eio_intel     — Intel / Altera
+//   fcapz_ela_gowin    / fcapz_eio_gowin     — Gowin GW1N / GW2A
 
 wire [127:0] my_signals;  // up to 256+ bits
 
@@ -625,22 +634,27 @@ fpgacapZero/
     fcapz_eio.v              EIO core (vendor-agnostic)
     jtag_reg_iface.v         JTAG-to-register bridge
     jtag_burst_read.v        Burst data readout (256-bit DR)
-    fcapz_ela_xilinx7.v      ELA wrapper — Xilinx 7-series / UltraScale
-    fcapz_ela_ecp5.v         ELA wrapper — Lattice ECP5
-    fcapz_ela_intel.v        ELA wrapper — Intel / Altera
-    fcapz_ela_gowin.v        ELA wrapper — Gowin
-    fcapz_eio_xilinx7.v      EIO wrapper — Xilinx 7-series / UltraScale
-    fcapz_eio_ecp5.v         EIO wrapper — Lattice ECP5
-    fcapz_eio_intel.v        EIO wrapper — Intel / Altera
-    fcapz_eio_gowin.v        EIO wrapper — Gowin
-    fcapz_ejtagaxi.v         EJTAG-AXI bridge core (vendor-agnostic)
-    fcapz_ejtagaxi_xilinx7.v EJTAG-AXI wrapper — Xilinx 7-series / UltraScale
-    fcapz_ejtagaxi_intel.v   EJTAG-AXI wrapper — Intel / Altera
-    fcapz_ejtaguart.v        EJTAG-UART bridge core (vendor-agnostic)
-    fcapz_ejtaguart_xilinx7.v EJTAG-UART wrapper — Xilinx 7-series / UltraScale
-    fcapz_ejtaguart_intel.v  EJTAG-UART wrapper — Intel / Altera
+    fcapz_ela_xilinx7.v       ELA wrapper — Xilinx 7-series
+    fcapz_ela_xilinxus.v      ELA wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ela_ecp5.v          ELA wrapper — Lattice ECP5
+    fcapz_ela_intel.v         ELA wrapper — Intel / Altera
+    fcapz_ela_gowin.v         ELA wrapper — Gowin
+    fcapz_eio_xilinx7.v       EIO wrapper — Xilinx 7-series
+    fcapz_eio_xilinxus.v      EIO wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_eio_ecp5.v          EIO wrapper — Lattice ECP5
+    fcapz_eio_intel.v         EIO wrapper — Intel / Altera
+    fcapz_eio_gowin.v         EIO wrapper — Gowin
+    fcapz_ejtagaxi.v          EJTAG-AXI bridge core (vendor-agnostic)
+    fcapz_ejtagaxi_xilinx7.v  EJTAG-AXI wrapper — Xilinx 7-series
+    fcapz_ejtagaxi_xilinxus.v EJTAG-AXI wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ejtagaxi_intel.v    EJTAG-AXI wrapper — Intel / Altera
+    fcapz_ejtaguart.v         EJTAG-UART bridge core (vendor-agnostic)
+    fcapz_ejtaguart_xilinx7.v EJTAG-UART wrapper — Xilinx 7-series
+    fcapz_ejtaguart_xilinxus.v EJTAG-UART wrapper — Xilinx UltraScale / UltraScale+
+    fcapz_ejtaguart_intel.v   EJTAG-UART wrapper — Intel / Altera
     jtag_tap/
-      jtag_tap_xilinx7.v    TAP primitive — Xilinx (BSCANE2)
+      jtag_tap_xilinx7.v    TAP primitive — Xilinx 7-series (BSCANE2)
+      jtag_tap_xilinxus.v   TAP primitive — Xilinx UltraScale / UltraScale+ (BSCANE2)
       jtag_tap_ecp5.v       TAP primitive — Lattice (JTAGG)
       jtag_tap_intel.v      TAP primitive — Intel (sld_virtual_jtag)
       jtag_tap_gowin.v      TAP primitive — Gowin (JTAG)

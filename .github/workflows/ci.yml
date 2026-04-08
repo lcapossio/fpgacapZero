@@ -90,7 +90,8 @@ jobs:
     name: RTL elaboration (iverilog -Wall)
     runs-on: ubuntu-latest
     env:
-      IVFLAGS: "-Wall -g2012 -y rtl -y rtl/jtag_tap -y sim sim/bscane2_stub.v sim/xpm_fifo_async_stub.v"
+      # -I rtl is required so `include "fcapz_version.vh"` resolves
+      IVFLAGS: "-Wall -g2012 -I rtl -y rtl -y rtl/jtag_tap -y sim sim/bscane2_stub.v sim/xpm_fifo_async_stub.v"
     steps:
       - uses: actions/checkout@v4
       - name: Install iverilog
@@ -131,6 +132,20 @@ jobs:
         run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtaguart.v
       - name: Lint fcapz_ejtaguart_xilinx7.v (wrapper)
         run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtaguart_xilinx7.v
+
+      # Xilinx UltraScale / UltraScale+ wrappers (added v0.3.0).  Same
+      # BSCANE2 primitive as 7-series; lint via the same stub so we can
+      # at least confirm the wrappers elaborate without a vendor install.
+      - name: Lint jtag_tap_xilinxus.v (UltraScale TAP)
+        run: iverilog $IVFLAGS -o /dev/null rtl/jtag_tap/jtag_tap_xilinxus.v
+      - name: Lint fcapz_ela_xilinxus.v (UltraScale wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ela_xilinxus.v
+      - name: Lint fcapz_eio_xilinxus.v (UltraScale wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_eio_xilinxus.v
+      - name: Lint fcapz_ejtagaxi_xilinxus.v (UltraScale wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtagaxi_xilinxus.v
+      - name: Lint fcapz_ejtaguart_xilinxus.v (UltraScale wrapper)
+        run: iverilog $IVFLAGS -o /dev/null rtl/fcapz_ejtaguart_xilinxus.v
 
   # ── 5. RTL simulation (iverilog + vvp) ───────────────────────────
   sim:

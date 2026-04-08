@@ -102,6 +102,46 @@ upgrading the host.
 
 ### Added
 
+**Xilinx UltraScale / UltraScale+ wrappers**
+- Five new wrapper files that target UltraScale and UltraScale+
+  devices.  Because BSCANE2 is the same primitive on 7-series,
+  UltraScale, and UltraScale+ (verified against UG570 / UG574),
+  the new files are **thin shims** that instantiate the existing
+  `_xilinx7` modules.  This avoids duplicating ~280 LOC of wrapper
+  body across two files; any change to the 7-series wrappers
+  automatically applies to the UltraScale path.
+  * `rtl/jtag_tap/jtag_tap_xilinxus.v` — instantiates `jtag_tap_xilinx7`
+  * `rtl/fcapz_ela_xilinxus.v` — instantiates `fcapz_ela_xilinx7`
+  * `rtl/fcapz_eio_xilinxus.v` — instantiates `fcapz_eio_xilinx7`
+  * `rtl/fcapz_ejtagaxi_xilinxus.v` — instantiates `fcapz_ejtagaxi_xilinx7`
+  * `rtl/fcapz_ejtaguart_xilinxus.v` — instantiates `fcapz_ejtaguart_xilinx7`
+- Distinct module names give users an unambiguous per-vendor
+  entry point in their Vivado source-file list and in `set_property
+  top` calls, while the underlying definition lives in one place.
+- Confirmed device families documented at the top of
+  `jtag_tap_xilinxus.v`:
+  * UltraScale: Kintex / Virtex UltraScale
+  * UltraScale+: Artix / Kintex / Virtex / Zynq UltraScale+
+- USER chain → IR opcode mapping for UltraScale (UG570 / UG574):
+  USER1=`0x24`, USER2=`0x25`, USER3=`0x26`, USER4=`0x27` —
+  different from the 7-series codes.
+- Host: `OpenOcdTransport` and `XilinxHwServerTransport` gain
+  named `IR_TABLE_XILINX7`, `IR_TABLE_XILINX_ULTRASCALE`, and
+  `IR_TABLE_US` (alias) presets so UltraScale users don't have
+  to look the codes up.  Pass via the existing `ir_table=...`
+  constructor parameter.  README example updated.
+- CI: `lint-rtl` job adds 5 new iverilog elaboration steps for the
+  new wrappers (using the existing BSCANE2 sim stub).  Shared
+  `IVFLAGS` now includes `-I rtl` so `\`include "fcapz_version.vh"`
+  resolves on the runner.
+- README support matrix and project structure updated to list the
+  UltraScale wrappers separately from 7-series.
+- Versal devices (XCVM/VC/VP/VE/VH) are explicitly NOT covered;
+  they need a separate wrapper that targets their TAP primitive.
+- Status: implemented in RTL, lint-clean under `iverilog -Wall`,
+  IR-table presets unit-tested (5 new tests, total 177).  Not yet
+  hardware-validated (no UltraScale board on hand).
+
 **Single source of truth for the project version**
 - New ``VERSION`` text file at the repo root holds the canonical
   ``MAJOR.MINOR.PATCH`` semver string.
