@@ -5,7 +5,86 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [v0.3.0]
+
+### ⚠ Breaking changes
+
+**1. Python package renamed: `host.fcapz` → `fcapz`**
+
+Any external code that imports from `host.fcapz.*` will break with
+`ModuleNotFoundError: No module named 'host'` after upgrading. There is
+no compatibility shim — this is a hard rename. The fix is mechanical:
+
+```diff
+- from host.fcapz import Analyzer, CaptureConfig, TriggerConfig
+- from host.fcapz.transport import XilinxHwServerTransport
+- from host.fcapz.eio import EioController
+- from host.fcapz.ejtagaxi import EjtagAxiController, AXIError
+- from host.fcapz.ejtaguart import EjtagUartController
++ from fcapz import Analyzer, CaptureConfig, TriggerConfig
++ from fcapz.transport import XilinxHwServerTransport
++ from fcapz.eio import EioController
++ from fcapz.ejtagaxi import EjtagAxiController, AXIError
++ from fcapz.ejtaguart import EjtagUartController
+```
+
+CLI entry point form also changes:
+
+```diff
+- python -m host.fcapz.cli ...
+- python -m host.fcapz.rpc
++ python -m fcapz.cli ...
++ python -m fcapz.rpc
+```
+
+The installed `fcapz` console script (`pip install -e .` then run
+`fcapz`) is unchanged. The on-disk path `host/fcapz/` is unchanged
+— only the importable name moved.
+
+One-shot migration on a checkout:
+
+```bash
+# Linux / macOS
+grep -rl 'host\.fcapz' . | xargs sed -i 's/host\.fcapz/fcapz/g'
+
+# Windows PowerShell
+Get-ChildItem -Recurse -File | Select-String -Pattern 'host\.fcapz' -List |
+  ForEach-Object { (Get-Content $_.Path) -replace 'host\.fcapz', 'fcapz' |
+                   Set-Content $_.Path }
+```
+
+**2. ELA `VERSION` register layout changed**
+
+The 32-bit register at address `0x0000` no longer encodes
+`{major[15:0], minor[15:0]}`. The new layout is:
+
+| Bits | Field | Value (v0.3.0) |
+|------|-------|----------------|
+| `[31:24]` | `major` (8-bit) | `0x00` |
+| `[23:16]` | `minor` (8-bit) | `0x02` |
+| `[15:0]`  | `core_id` (ASCII `"LA"`) | `0x4C41` |
+
+Constant: `0x0002_4C41`.
+
+`Analyzer.probe()` now raises `RuntimeError` on a wrong / missing
+core_id, so an unprogrammed FPGA, a wrong JTAG chain, or a
+non-fcapz bitstream is rejected before any other ELA register is
+read. The returned dict gains a new `core_id` key.
+
+Hosts that decoded `version` by hand must update:
+
+```diff
+- version_major = (version >> 16) & 0xFFFF
+- version_minor = version & 0xFFFF
++ version_major = (version >> 24) & 0xFF
++ version_minor = (version >> 16) & 0xFF
++ core_id       = version & 0xFFFF        # must equal 0x4C41
+```
+
+Bitstreams built before v0.3.0 will report `core_id = 0x0001`
+(because the old encoding put `minor=1` in the low half), which
+the new probe magic check rejects. **Rebuild the bitstream** when
+upgrading the host.
 
 ### Added
 

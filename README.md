@@ -138,13 +138,19 @@ Expected output:
 
 ```json
 {
-  "version_major": 1,
-  "version_minor": 1,
+  "version_major": 0,
+  "version_minor": 2,
+  "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
   "num_channels": 1
 }
 ```
+
+`core_id` is the ASCII string `"LA"` packed as `0x4C41` (= 19521).
+`Analyzer.probe()` raises `RuntimeError` if this magic does not match,
+so a wrong-chain / wrong-bitstream / unprogrammed FPGA is rejected
+before any other ELA register is touched.
 
 ### Capture a waveform
 
@@ -444,7 +450,7 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[15:0], minor[15:0]}` |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — current value `0x0002_4C41` (major=0, minor=2, core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
 | `0x0004` | CTRL | W | bit 0 = arm, bit 1 = reset |
 | `0x0008` | STATUS | R | bit 0 = armed, 1 = triggered, 2 = done, 3 = overflow |
 | `0x000C` | SAMPLE_W | R | Sample width in bits |
@@ -467,6 +473,8 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 | `0x00BC` | SEG_STATUS | R | Segment index + all_done flag |
 | `0x00C0` | SEG_SEL | RW | Segment select for readback |
 | `0x00C4` | TIMESTAMP_W | R | Timestamp counter width in bits (0 if disabled) |
+| `0x00D0` | PROBE_MUX_W | R | Probe mux width parameter (0 if disabled) |
+| `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (16-bit, 0..65535) — shifts the committed trigger sample N cycles after the trigger event |
 | `0x0100+` | DATA | R | Sample data window (per-word, via USER1) |
 | dynamic | TS_DATA | R | Timestamp readback (base = `0x0100 + DEPTH * words_per_sample * 4`, requires TIMESTAMP_W>0) |
 
