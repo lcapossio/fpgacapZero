@@ -12,6 +12,10 @@ from typing import Dict, List
 from .transport import Transport
 
 _ADDR_VERSION = 0x0000
+# ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
+# identity magic.  Hosts must reject any bitstream that does not present
+# this magic before touching any other ELA register on the same chain.
+_ELA_CORE_ID = 0x4C41
 _ADDR_CTRL = 0x0004
 _ADDR_STATUS = 0x0008
 _ADDR_SAMPLE_W = 0x000C
@@ -499,8 +503,25 @@ class Analyzer:
             yielded += 1
 
     def probe(self) -> Dict:
+        """Read the ELA identity and feature registers.
+
+        Verifies the VERSION register's low-16 magic equals the ASCII
+        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
+        RuntimeError on mismatch so the caller cannot accidentally
+        drive a non-fcapz bitstream.
+
+        Returns a dict with `version_major`, `version_minor`, `core_id`
+        (always 0x4C41 on success), and the rest of the feature flags.
+        """
         _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = _read(_ADDR_VERSION)
+        version = int(_read(_ADDR_VERSION))
+        core_id = version & 0xFFFF
+        if core_id != _ELA_CORE_ID:
+            raise RuntimeError(
+                f"ELA core identity check failed at VERSION[15:0]: "
+                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+            )
         sample_w = _read(_ADDR_SAMPLE_W)
         depth = _read(_ADDR_DEPTH)
         num_chan = int(_read(_ADDR_NUM_CHAN))
@@ -509,8 +530,9 @@ class Analyzer:
         num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
         probe_mux_w = int(_read(_ADDR_PROBE_MUX_W))
         return {
-            "version_major": (version >> 16) & 0xFFFF,
-            "version_minor": version & 0xFFFF,
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+            "core_id": core_id,
             "sample_width": sample_w,
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,

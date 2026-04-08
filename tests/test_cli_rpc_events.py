@@ -34,7 +34,8 @@ from fcapz.transport import Transport
 class FakeTransport(Transport):
     def __init__(self, *, sample_w: int = 8, depth: int = 1024, num_chan: int = 2, data=None):
         self.regs = {
-            0x0000: 0x0001_0001,
+            # VERSION: major=0x00, minor=0x02, core_id="LA"=0x4C41
+            0x0000: 0x0002_4C41,
             0x0008: 0x4,
             0x000C: sample_w,
             0x0010: depth,

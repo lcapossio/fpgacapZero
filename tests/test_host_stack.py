@@ -23,7 +23,8 @@ class FakeTransport(Transport):
         # Per-chain register banks; chain=None is the default (chain 1)
         self._chain_regs: dict[int, dict[int, int]] = {
             1: {
-                0x0000: 0x0001_0001,  # VERSION
+                # VERSION: major=0x00, minor=0x02, core_id="LA"=0x4C41
+                0x0000: 0x0002_4C41,
                 0x000C: 8,            # SAMPLE_W
                 0x0010: 1024,         # DEPTH
                 0x0008: 0x4,          # STATUS done
@@ -217,6 +218,37 @@ class SequencerTests(unittest.TestCase):
         analyzer.connect()
         info = analyzer.probe()
         self.assertEqual(info["probe_mux_w"], 32)
+
+    def test_probe_decodes_version_fields(self):
+        """probe() splits VERSION into 8-bit major, 8-bit minor, 16-bit core_id."""
+        transport = FakeTransport()
+        # Set major=0x12, minor=0x34, core_id="LA"=0x4C41 → 0x12344C41
+        transport._chain_regs[1][0x0000] = 0x1234_4C41
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        info = analyzer.probe()
+        self.assertEqual(info["version_major"], 0x12)
+        self.assertEqual(info["version_minor"], 0x34)
+        self.assertEqual(info["core_id"], 0x4C41)
+
+    def test_probe_rejects_wrong_core_id(self):
+        """probe() raises RuntimeError if VERSION[15:0] is not 'LA'."""
+        transport = FakeTransport()
+        # Wrong magic: keep major/minor but corrupt core_id
+        transport._chain_regs[1][0x0000] = 0x0002_DEAD
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        with self.assertRaisesRegex(RuntimeError, "core identity"):
+            analyzer.probe()
+
+    def test_probe_rejects_zero_version(self):
+        """probe() raises RuntimeError if VERSION reads as 0 (unprogrammed FPGA)."""
+        transport = FakeTransport()
+        transport._chain_regs[1][0x0000] = 0x0000_0000
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        with self.assertRaisesRegex(RuntimeError, "core identity"):
+            analyzer.probe()
 
     def test_trigger_delay_written(self):
         transport = FakeTransport()

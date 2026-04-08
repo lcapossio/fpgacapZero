@@ -75,8 +75,9 @@ class TestProbe(unittest.TestCase):
             # XilinxHwServerTransport.connect() now waits until the FPGA
             # responds with valid data; no retry needed here.
             info = a.probe()
-            self.assertEqual(info["version_major"], 1)
-            self.assertEqual(info["version_minor"], 1)
+            self.assertEqual(info["version_major"], 0)
+            self.assertEqual(info["version_minor"], 2)
+            self.assertEqual(info["core_id"], 0x4C41)  # ASCII "LA"
             self.assertEqual(info["sample_width"], 8)
             self.assertEqual(info["depth"], 1024)
         finally:

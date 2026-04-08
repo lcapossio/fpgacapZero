@@ -1027,7 +1027,13 @@ module fcapz_ela #(
     always @(*) begin
         jtag_rdata = 32'h0;
         case (jtag_addr)
-            ADDR_VERSION:     jtag_rdata = 32'h0001_0001;
+            // VERSION layout:
+            //   [31:24] = major (0x00)
+            //   [23:16] = minor (0x02)
+            //   [15:0]  = core_id, ASCII "LA" = 0x4C41 (Logic Analyzer)
+            // Hosts must read [15:0] and confirm it equals 0x4C41 before
+            // trusting any other ELA register on this chain.
+            ADDR_VERSION:     jtag_rdata = 32'h0002_4C41;
             ADDR_CTRL:        jtag_rdata = jtag_ctrl;
             ADDR_STATUS:      jtag_rdata = {28'h0, overflow, done, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata = SAMPLE_W;
