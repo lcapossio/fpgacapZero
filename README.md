@@ -243,6 +243,14 @@ from fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
 from fcapz import XilinxHwServerTransport
 from fcapz import summarize, find_edges, ProbeDefinition
 
+# Default ir_table is the Xilinx 7-series preset (USER1=0x02, USER2=0x03,
+# USER3=0x22, USER4=0x23).  For an UltraScale / UltraScale+ board, pass
+# the named UltraScale preset instead — the IR opcodes differ:
+#     transport = XilinxHwServerTransport(
+#         port=3121,
+#         fpga_name="xcku040",
+#         ir_table=XilinxHwServerTransport.IR_TABLE_US,  # USER1=0x24, ...
+#     )
 transport = XilinxHwServerTransport(port=3121)
 analyzer = Analyzer(transport)
 analyzer.connect()

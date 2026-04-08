@@ -145,6 +145,19 @@ class OpenOcdTransport(Transport):
     # Verified on xc7a100t (Arty A7): USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
     DEFAULT_IR_TABLE: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
 
+    # Named IR-table presets for the Xilinx families this transport
+    # supports out of the box.  Pass via the ``ir_table`` constructor
+    # argument or assign one of these to ``ir_table`` after construction.
+    # The 7-series preset is the default and matches DEFAULT_IR_TABLE
+    # above; the UltraScale preset is documented in UG570 / UG574 and
+    # used by the rtl/jtag_tap_xilinxus.v wrapper instantiations.
+    IR_TABLE_XILINX7: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
+    IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
+        1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
+    }
+    # Alias so callers can write IR_TABLE_US for brevity.
+    IR_TABLE_US = IR_TABLE_XILINX_ULTRASCALE
+
     USER1_IR = 0x02
     READ_IDLE_CYCLES = 20
 
@@ -253,6 +266,19 @@ class XilinxHwServerTransport(Transport):
     # USER1 (0x02) and USER2 (0x03) are verified.
     # Verified on xc7a100t (Arty A7): USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
     DEFAULT_IR_TABLE: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
+
+    # Named IR-table presets for the Xilinx families this transport
+    # supports out of the box.  Pass via the ``ir_table`` constructor
+    # argument or assign one of these to ``ir_table`` after construction.
+    # The 7-series preset is the default and matches DEFAULT_IR_TABLE
+    # above; the UltraScale preset is documented in UG570 / UG574 and
+    # used by the rtl/jtag_tap_xilinxus.v wrapper instantiations.
+    IR_TABLE_XILINX7: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
+    IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
+        1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
+    }
+    # Alias so callers can write IR_TABLE_US for brevity.
+    IR_TABLE_US = IR_TABLE_XILINX_ULTRASCALE
 
     USER1_IR = 0x02
     USER2_IR = 0x03
