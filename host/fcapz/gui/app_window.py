@@ -458,10 +458,21 @@ class MainWindow(QMainWindow):
         # Icon-only avoids text+icon fighting for width on Windows styles (overlapping buttons).
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         tb.setIconSize(QSize(24, 24))
+        # Movable toolbar grip + tight native sizing can crush the first button; enforce
+        # hit-box and margins, and leave a gap after the handle.
+        tb.setStyleSheet(
+            "#mainToolbar QToolButton {\n"
+            "  min-width: 36px;\n"
+            "  min-height: 30px;\n"
+            "  padding: 5px;\n"
+            "  margin-left: 3px;\n"
+            "  margin-right: 3px;\n"
+            "}\n",
+        )
         lay = tb.layout()
         if lay is not None:
-            lay.setSpacing(6)
-            lay.setContentsMargins(4, 2, 4, 2)
+            lay.setSpacing(2)
+            lay.setContentsMargins(6, 4, 8, 4)
 
         sty = self.style()
 
@@ -475,9 +486,10 @@ class MainWindow(QMainWindow):
             act = tb.addAction(sty.standardIcon(icon_pixmap), text, slot)
             act.setToolTip(text)
 
+        tb.addWidget(_tb_spacer(14))
         _add(QStyle.StandardPixmap.SP_ComputerIcon, "Connect", self._conn.request_connect)
         _add(QStyle.StandardPixmap.SP_DialogCancelButton, "Disconnect", self._on_disconnect)
-        tb.addWidget(_tb_spacer())
+        tb.addWidget(_tb_spacer(10))
         tb.addSeparator()
         _add(
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
