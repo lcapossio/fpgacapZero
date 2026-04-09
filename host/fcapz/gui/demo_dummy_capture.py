@@ -5,7 +5,9 @@
 
 Patches the connect worker so **Connect** completes like a real ELA session. The
 window opens and immediately starts a mock connect; use **Capture** / **Arm**
-as usual. Your normal ``gui.toml`` (viewers, paths) is still loaded.
+as usual. Each **Capture** fills the buffer with **random** sample words
+(sized from your configured sample width and pre/post depth).
+Your normal ``gui.toml`` (viewers, paths) is still loaded.
 At least one viewer (e.g. Surfer or GTKWave) must be on ``PATH`` or configured
 in Settings, or the viewer dropdown stays empty.
 
@@ -18,6 +20,7 @@ Requires PySide6 (``pip install 'fpgacapzero[gui]'``).
 
 from __future__ import annotations
 
+import random
 import sys
 from contextlib import ExitStack
 from typing import Any
@@ -72,11 +75,16 @@ def _install_demo_hw_mocks() -> tuple[ExitStack, MagicMock]:
 
     def _capture(_timeout: float) -> CaptureResult:
         cfg = last_cfg["cfg"]
-        return CaptureResult(
-            config=cfg,
-            samples=[0xAA, 0x55, 0x33, 0xCC] * 8,
-            overflow=False,
+        sw = max(1, min(int(getattr(cfg, "sample_width", 8)), 64))
+        depth = max(1, int(getattr(cfg, "depth", 1024)))
+        window = (
+            int(getattr(cfg, "pretrigger", 0))
+            + int(getattr(cfg, "posttrigger", 0))
+            + 1
         )
+        n = max(1, min(window, depth))
+        samples = [random.getrandbits(sw) for _ in range(n)]
+        return CaptureResult(config=cfg, samples=samples, overflow=False)
 
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture

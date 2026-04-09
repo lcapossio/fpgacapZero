@@ -28,3 +28,22 @@ def test_demo_mock_write_vcd_creates_file(tmp_path: Path) -> None:
         assert "$dumpvars" in text
     finally:
         ex.close()
+
+
+def test_demo_mock_capture_randomizes_samples() -> None:
+    ex, mock_an = _install_demo_hw_mocks()
+    try:
+        cfg = CaptureConfig(
+            pretrigger=4,
+            posttrigger=4,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=255),
+            sample_width=8,
+            depth=128,
+        )
+        mock_an.configure(cfg)
+        a = mock_an.capture(1.0)
+        b = mock_an.capture(1.0)
+        assert len(a.samples) == len(b.samples) == 9
+        assert a.samples != b.samples
+    finally:
+        ex.close()
