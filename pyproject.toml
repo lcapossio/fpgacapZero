@@ -37,14 +37,18 @@ where = ["host"]
 include = ["fcapz*"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
+dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider -m \"not hw\""
 norecursedirs = ["tests/_tmp"]
+markers = [
+    "gui: Qt GUI integration tests (mocked JTAG; needs PySide6 + pytest-qt)",
+    "hw: real hardware tests (opt-in: pytest -m hw; not run in default CI)",
+]
 
 [tool.ruff]
 line-length = 100

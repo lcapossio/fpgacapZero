@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 try:
     import PySide6  # noqa: F401
 except ImportError:
@@ -12,10 +14,16 @@ except ImportError:
 
 from fcapz.analyzer import CaptureConfig, CaptureResult, ProbeSpec, TriggerConfig
 
+pytestmark = pytest.mark.gui
+
 if PySide6 is not None:
     import numpy as np
 
-    from fcapz.gui.waveform_preview import _x_axis_and_label, _x_edges_for_step_plot, lanes_from_capture
+    from fcapz.gui.waveform_preview import (
+        _x_axis_and_label,
+        _x_edges_for_step_plot,
+        lanes_from_capture,
+    )
 
 
 @unittest.skipUnless(PySide6 is not None, "PySide6 not installed")

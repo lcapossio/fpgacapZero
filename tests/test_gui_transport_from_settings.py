@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
 from fcapz.gui.settings import ConnectionSettings
 from fcapz.gui.transport_from_settings import transport_from_connection
 from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
+
+pytestmark = pytest.mark.gui
 
 
 class TestTransportFromSettings(unittest.TestCase):

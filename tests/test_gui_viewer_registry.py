@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
 from fcapz.gui.settings import GuiSettings
 from fcapz.gui.viewer_registry import viewers_for_settings
+
+pytestmark = pytest.mark.gui
 
 
 class TestViewerRegistry(unittest.TestCase):

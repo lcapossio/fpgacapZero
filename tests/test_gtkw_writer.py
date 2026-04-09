@@ -7,8 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
 from fcapz.analyzer import CaptureConfig, CaptureResult, ProbeSpec, TriggerConfig
 from fcapz.gui.gtkw_writer import write_gtkw_for_capture
+
+pytestmark = pytest.mark.gui
 
 
 class TestGtkwWriter(unittest.TestCase):

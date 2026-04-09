@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fcapz.gui.viewers import (
     CustomCommandViewer,
     GtkWaveViewer,
@@ -16,6 +17,8 @@ from fcapz.gui.viewers import (
     default_viewer_factories,
     viewer_by_name,
 )
+
+pytestmark = pytest.mark.gui
 
 
 class TestGtkWaveViewer(unittest.TestCase):

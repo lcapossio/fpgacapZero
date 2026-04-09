@@ -103,6 +103,14 @@ These tests run against a `FakeTransport` (no hardware required) and cover the
 CLI, RPC server, event-extraction helpers, EJTAG-AXI, and EJTAG-UART layers.
 They must pass before any push.
 
+Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".[dev,gui]"`):
+
+```bash
+pip install -e ".[dev,gui]"
+```
+
+**Markers:** default pytest excludes `@pytest.mark.hw` (see `pyproject.toml`). GUI-related tests under `tests/` are marked `@pytest.mark.gui` so you can run `pytest -m gui` or `pytest -m "not gui"` as needed.
+
 ### RTL simulation
 
 ```bash

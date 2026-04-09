@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
+pytestmark = pytest.mark.gui
+
 try:
     import PySide6  # noqa: F401
     _HAVE_PYSIDE = True

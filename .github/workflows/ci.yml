@@ -80,8 +80,8 @@ jobs:
           python-version: "3.11"
       - name: Install iverilog (needed by test_rtl_fifo_equiv)
         run: sudo apt-get install -y iverilog
-      - name: Install package
-        run: pip install -e ".[dev]"
+      - name: Install package (dev + GUI deps for mocked Qt tests)
+        run: pip install -e ".[dev,gui]"
       - name: Run full unit test suite
         run: pytest tests/ -v --tb=short
 
