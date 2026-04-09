@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QPushButton, QVBoxLayout, QWidget
 
 
 class CollapsibleSection(QFrame):
     """Header row toggles visibility of a content widget (no space when collapsed)."""
+
+    expandedChanged = Signal(bool)
 
     def __init__(
         self,
@@ -47,8 +49,12 @@ class CollapsibleSection(QFrame):
         self._expanded = not self._expanded
         self._content.setVisible(self._expanded)
         self._update_toggle_text()
+        self.expandedChanged.emit(self._expanded)
 
     def setExpanded(self, expanded: bool) -> None:
         if expanded == self._expanded:
             return
         self._flip()
+
+    def isExpanded(self) -> bool:
+        return self._expanded

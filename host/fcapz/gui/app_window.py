@@ -4,19 +4,24 @@
 from __future__ import annotations
 
 import logging
+import re
 import signal
 import sys
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QByteArray, QMetaObject, QSettings, QThread, QTimer, Qt, QUrl
+from PySide6.QtCore import QByteArray, QMetaObject, QSettings, QSize, QThread, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
+    QInputDialog,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    QStyle,
+    QToolBar,
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult
@@ -57,6 +62,19 @@ _DOCK_FEATURES = (
 _WINDOW_STATE_VERSION = 3
 
 
+def _sanitize_user_layout_key(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip()).strip("_")[:48]
+    return s or "layout"
+
+
+def _qsettings_to_qbytearray(val: object) -> QByteArray | None:
+    if isinstance(val, QByteArray):
+        return None if val.isEmpty() else val
+    if isinstance(val, (bytes, bytearray)) and len(val) > 0:
+        return QByteArray(bytes(val))
+    return None
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -70,6 +88,8 @@ class MainWindow(QMainWindow):
         self._gui_log_handler: logging.Handler | None = None
         self._persist_window_layout = persist_window_layout
         self._initial_post_show_layout = False
+        self._m_user_load: QMenu | None = None
+        self._m_user_delete: QMenu | None = None
 
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
@@ -80,6 +100,11 @@ class MainWindow(QMainWindow):
         self._persist_layout_timer.setSingleShot(True)
         self._persist_layout_timer.setInterval(400)
         self._persist_layout_timer.timeout.connect(self._save_window_layout_to_settings)
+
+        self._ui_prefs_timer = QTimer(self)
+        self._ui_prefs_timer.setSingleShot(True)
+        self._ui_prefs_timer.setInterval(300)
+        self._ui_prefs_timer.timeout.connect(self._save_collapsible_ui_prefs)
 
         self._config_path = default_gui_config_path()
         self._analyzer: Analyzer | None = None
@@ -120,7 +145,12 @@ class MainWindow(QMainWindow):
         _fcapz_log.addHandler(self._gui_log_handler)
         if _fcapz_log.level == logging.NOTSET:
             _fcapz_log.setLevel(logging.INFO)
+        self._log_panel.set_qt_handler(self._gui_log_handler)
         _log.info("fcapz-gui started")
+
+        _ui_st = self._window_qsettings()
+        self._capture.load_collapsible_ui_prefs(_ui_st)
+        self._probe.load_collapsible_ui_prefs(_ui_st)
 
         self.setDockOptions(
             QMainWindow.DockOption.AnimatedDocks
@@ -209,7 +239,11 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
 
+        self._build_toolbar()
         self._build_menus()
+
+        self._capture.wire_collapsible_persistence(self._schedule_ui_prefs_save)
+        self._probe.wire_collapsible_persistence(self._schedule_ui_prefs_save)
 
         settings = load_gui_settings(self._config_path)
         self._conn.load_from_settings(settings.connection)
@@ -364,6 +398,145 @@ class MainWindow(QMainWindow):
         st.setValue("mainWindow/stateSchema", _WINDOW_STATE_VERSION)
         st.sync()
 
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Main actions", self)
+        tb.setObjectName("mainToolbar")
+        tb.setMovable(True)
+        tb.setIconSize(QSize(22, 22))
+        sty = self.style()
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+            "Connect",
+            self._conn.request_connect,
+        )
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton),
+            "Disconnect",
+            self._on_disconnect,
+        )
+        tb.addSeparator()
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            "Configure",
+            self._on_configure,
+        )
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_MediaPlay),
+            "Arm",
+            self._on_arm,
+        )
+        tb.addSeparator()
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
+            "Capture",
+            self._on_capture_clicked,
+        )
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+            "Continuous",
+            self._on_continuous_clicked,
+        )
+        tb.addAction(
+            sty.standardIcon(QStyle.StandardPixmap.SP_MediaStop),
+            "Stop",
+            self._on_stop_continuous,
+        )
+        self.addToolBar(tb)
+
+    def _schedule_ui_prefs_save(self) -> None:
+        self._ui_prefs_timer.start()
+
+    def _save_collapsible_ui_prefs(self) -> None:
+        st = self._window_qsettings()
+        self._capture.save_collapsible_ui_prefs(st)
+        self._probe.save_collapsible_ui_prefs(st)
+        st.sync()
+
+    def _user_layout_keys(self) -> list[str]:
+        st = self._window_qsettings()
+        st.beginGroup("userLayouts")
+        keys = sorted(st.childKeys())
+        st.endGroup()
+        return keys
+
+    def _refresh_user_layout_menus(self) -> None:
+        if self._m_user_load is None or self._m_user_delete is None:
+            return
+        self._m_user_load.clear()
+        self._m_user_delete.clear()
+        keys = self._user_layout_keys()
+        if not keys:
+            na = QAction("(none)", self)
+            na.setEnabled(False)
+            self._m_user_load.addAction(na)
+            nb = QAction("(none)", self)
+            nb.setEnabled(False)
+            self._m_user_delete.addAction(nb)
+            return
+        for key in keys:
+            disp = key.replace("_", " ")
+            act_load = QAction(disp, self)
+            act_load.triggered.connect(
+                lambda _checked=False, k=key: self._restore_user_layout(k),
+            )
+            self._m_user_load.addAction(act_load)
+            act_del = QAction(disp, self)
+            act_del.triggered.connect(
+                lambda _checked=False, k=key: self._on_delete_user_layout(k),
+            )
+            self._m_user_delete.addAction(act_del)
+
+    def _on_save_user_layout(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save layout", "Layout name:")
+        if not ok or not name.strip():
+            return
+        key = _sanitize_user_layout_key(name)
+        st = self._window_qsettings()
+        st.beginGroup("userLayouts")
+        st.setValue(key, self.saveState(_WINDOW_STATE_VERSION))
+        st.endGroup()
+        st.sync()
+        self._refresh_user_layout_menus()
+        _log.info("Saved user layout %r", key)
+
+    def _restore_user_layout(self, key: str) -> None:
+        st = self._window_qsettings()
+        st.beginGroup("userLayouts")
+        raw = st.value(key)
+        st.endGroup()
+        blob = _qsettings_to_qbytearray(raw)
+        if blob is None:
+            QMessageBox.warning(self, "User layout", f"No saved data for {key!r}.")
+            return
+        ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
+        if not ok:
+            for legacy in (2, 1, 0):
+                if self.restoreState(blob, legacy):
+                    ok = True
+                    break
+        if not ok:
+            QMessageBox.warning(self, "User layout", "Saved layout could not be restored.")
+            return
+        self._schedule_dock_reflow()
+        self._schedule_persist_layout()
+
+    def _on_delete_user_layout(self, key: str) -> None:
+        r = QMessageBox.question(
+            self,
+            "Delete layout",
+            f"Delete saved layout {key!r}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        st = self._window_qsettings()
+        st.beginGroup("userLayouts")
+        st.remove(key)
+        st.endGroup()
+        st.sync()
+        self._refresh_user_layout_menus()
+
     def _build_menus(self) -> None:
         m_file = self.menuBar().addMenu("&File")
         act_settings = QAction("&Settings…", self)
@@ -406,6 +579,14 @@ class MainWindow(QMainWindow):
         act_diag.setStatusTip("Show every dock (workbench tabs, connection, identity, log).")
         act_diag.triggered.connect(self._layout_preset_diagnostics)
         m_layouts.addAction(act_diag)
+
+        m_window.addSeparator()
+        act_save_ul = QAction("Save layout &as…", self)
+        act_save_ul.triggered.connect(self._on_save_user_layout)
+        m_window.addAction(act_save_ul)
+        self._m_user_load = m_window.addMenu("Load &user layout")
+        self._m_user_delete = m_window.addMenu("Delete &user layout")
+        self._refresh_user_layout_menus()
 
         m_help = self.menuBar().addMenu("&Help")
         act_about = QAction("&About fcapz-gui", self)
@@ -696,8 +877,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self._reflow_timer.stop()
         self._persist_layout_timer.stop()
+        self._ui_prefs_timer.stop()
+        self._save_collapsible_ui_prefs()
         if self._persist_window_layout:
             self._save_window_layout_to_settings()
+        self._log_panel.shutdown()
         if self._gui_log_handler is not None:
             logging.getLogger("fcapz").removeHandler(self._gui_log_handler)
             self._gui_log_handler = None
@@ -773,6 +957,9 @@ def _install_ctrl_c_quit(app: QApplication) -> tuple[QTimer, Any | None]:
 def run_app(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     app = QApplication(args)
+    app.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough,
+    )
     app.setApplicationName("fcapz-gui")
     app.setOrganizationName("fpgacapzero")
     _wake, _win_cb = _install_ctrl_c_quit(app)

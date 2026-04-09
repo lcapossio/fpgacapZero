@@ -116,6 +116,10 @@ class ConnectionPanel(QGroupBox):
             return
         self.connect_requested.emit()
 
+    def request_connect(self) -> None:
+        """Same as clicking Connect (runs validation, then emits ``connect_requested``)."""
+        self._on_connect_clicked()
+
     def _validate(self) -> str | None:
         host = self._host.text().strip()
         if not host:

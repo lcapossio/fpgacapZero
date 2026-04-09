@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Mapping
 
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QGroupBox, QLabel, QPlainTextEdit, QVBoxLayout, QWidget
 
@@ -80,3 +82,13 @@ class ProbePanel(QGroupBox):
     def clear(self) -> None:
         self._summary.setText("Connect to load a short hardware summary.")
         self._raw.clear()
+
+    def wire_collapsible_persistence(self, callback: Callable[[], None]) -> None:
+        self._raw_section.expandedChanged.connect(lambda _e: callback())
+
+    def save_collapsible_ui_prefs(self, st: QSettings) -> None:
+        st.setValue("ui/probe_raw_open", self._raw_section.isExpanded())
+
+    def load_collapsible_ui_prefs(self, st: QSettings) -> None:
+        if st.contains("ui/probe_raw_open"):
+            self._raw_section.setExpanded(bool(st.value("ui/probe_raw_open")))

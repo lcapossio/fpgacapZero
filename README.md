@@ -140,7 +140,11 @@ Connect over **hw_server** or **OpenOCD**, capture from the **ELA** tab, inspect
 waveforms in the embedded preview, or open captures in **GTKWave** (`.gtkw`
 sidecar) or **Surfer** (`--command-file` sidecar, `*.surfer.txt`). Settings and
 probe profiles live in `%APPDATA%\\fpgacapzero\\gui.toml` (Windows) or
-`~/.config/fpgacapzero/gui.toml` (Unix).
+`~/.config/fpgacapzero/gui.toml` (Unix). Next to that file, `fcapz-gui-window.ini`
+stores main-window geometry, dock/tab layout, expandable section state, and any
+**Window → Save layout as…** presets. Docks are detachable and tabbable; the log
+dock supports level filter, substring search, optional stderr mirroring, and
+Clear / Copy all from the **File** menu.
 
 CLI capture can spawn a viewer after export (VCD only):
 

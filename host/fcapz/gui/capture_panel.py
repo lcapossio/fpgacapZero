@@ -7,7 +7,7 @@ import argparse
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QSignalBlocker
+from PySide6.QtCore import QSettings, QSignalBlocker
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -606,6 +606,20 @@ class CapturePanel(QGroupBox):
             stor_qual_mask=sqm,
             trigger_delay=int(self._trig_delay.value()),
         )
+
+    def wire_collapsible_persistence(self, callback: Callable[[], None]) -> None:
+        self._adv_section.expandedChanged.connect(lambda _e: callback())
+        self._seq_section.expandedChanged.connect(lambda _e: callback())
+
+    def save_collapsible_ui_prefs(self, st: QSettings) -> None:
+        st.setValue("ui/capture_adv_open", self._adv_section.isExpanded())
+        st.setValue("ui/capture_seq_open", self._seq_section.isExpanded())
+
+    def load_collapsible_ui_prefs(self, st: QSettings) -> None:
+        if st.contains("ui/capture_adv_open"):
+            self._adv_section.setExpanded(bool(st.value("ui/capture_adv_open")))
+        if st.contains("ui/capture_seq_open"):
+            self._seq_section.setExpanded(bool(st.value("ui/capture_seq_open")))
 
     def wire_handlers(
         self,
