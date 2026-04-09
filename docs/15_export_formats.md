@@ -1,0 +1,434 @@
+# 15 — Export formats
+
+> **Goal**: understand every file format `Analyzer` can write, what
+> each contains, when to use which, how the auto-generated `.gtkw`
+> waveform-viewer layout file works, and the practical embedding
+> caveats for the four supported viewers.
+>
+> **Audience**: anyone who wants to feed captured data into another
+> tool — a waveform viewer, a Python notebook, an LLM, a regression
+> harness, a spreadsheet.
+
+## Three formats, one capture
+
+Every `CaptureResult` can be written to three different file
+formats via the `Analyzer.write_*` helpers (or via the equivalent
+`fcapz capture --format ...` CLI flag):
+
+| Format | Method | Use when |
+|---|---|---|
+| **JSON** | `analyzer.write_json(result, "out.json")` | Programmatic consumption, LLM context, regression-test golden vectors |
+| **CSV** | `analyzer.write_csv(result, "out.csv")` | Spreadsheets, Pandas, ad-hoc analysis |
+| **VCD** | `analyzer.write_vcd(result, "out.vcd")` | Waveform viewers (GTKWave, Surfer, WaveTrace, etc.) |
+
+The same `CaptureResult` can be exported to all three — the
+`export_*_text()` / `export_json()` helpers return strings/dicts so
+you can write to a file, send over a network, or hold in memory.
+
+The full schema for each format is in
+[`specs/waveform_schema.md`](specs/waveform_schema.md) — that file
+is the canonical reference if a tool you use has trouble parsing
+the output.
+
+## JSON
+
+The JSON format is the **richest** of the three.  It contains the
+full `CaptureConfig` that produced the capture (so a downstream
+tool knows the trigger, decimation, sample width, etc.), the
+sample array, and timestamps if present.
+
+```json
+{
+  "version": "1.0",
+  "sample_clock_hz": 100000000,
+  "sample_width": 8,
+  "depth": 1024,
+  "pretrigger": 8,
+  "posttrigger": 16,
+  "channel": 0,
+  "decimation": 0,
+  "ext_trigger_mode": 0,
+  "trigger": {
+    "mode": "value_match",
+    "value": 66,
+    "mask": 255
+  },
+  "overflow": false,
+  "segment": 0,
+  "samples": [
+    {"index": 0, "value": 58},
+    {"index": 1, "value": 59},
+    {"index": 2, "value": 60},
+    ...
+    {"index": 8, "value": 66},   <-- trigger sample (index = pretrigger)
+    ...
+  ],
+  "timestamps": [
+    {"index": 0, "value": 12345600},
+    {"index": 1, "value": 12345601},
+    ...
+  ]
+}
+```
+
+`samples` is always present.  `timestamps` is present **only** if
+the bitstream was built with `TIMESTAMP_W > 0`.
+
+### When to use it
+
+- **LLM context**: feed the JSON straight into an LLM with "find
+  the anomaly in this capture" or "summarize what happened
+  around the trigger".  The structure is regular and the field
+  names are self-documenting.
+- **Regression tests**: golden-vector tests that compare a fresh
+  capture's JSON against a known-good file.  The
+  `Analyzer.export_json()` output is deterministic for a given
+  capture.
+- **Cross-language consumption**: anything that can parse JSON
+  (and that's everything) can read the file.
+
+### Reading it back
+
+```python
+import json
+with open("capture.json") as f:
+    data = json.load(f)
+
+print(f"trigger sample: {data['samples'][data['pretrigger']]}")
+print(f"sample width:   {data['sample_width']} bits")
+print(f"overflow:       {data['overflow']}")
+```
+
+There is no `read_json()` helper in `Analyzer` — the JSON is
+intended for **export only**, not round-tripping into a fresh
+controller.  If you need to re-process a captured file in Python,
+read it directly with the `json` module.
+
+## CSV
+
+The CSV format is the **simplest** — one row per sample, two or
+three columns.
+
+Without timestamps:
+
+```csv
+index,value
+0,58
+1,59
+2,60
+...
+8,66
+...
+```
+
+With timestamps (when `TIMESTAMP_W > 0`):
+
+```csv
+index,value,timestamp
+0,58,12345600
+1,59,12345601
+...
+```
+
+### When to use it
+
+- **Spreadsheets**: import directly into Excel, LibreOffice, or
+  Google Sheets and chart the captured signal.
+- **Pandas / NumPy**: `pd.read_csv("capture.csv")` and you're
+  off to the races.
+- **Quick visual inspection**: `head capture.csv` or `column -t -s,`
+  in a terminal.
+
+### What it does NOT contain
+
+CSV has no header metadata, no trigger config, no
+`sample_clock_hz`.  If you need that context, export JSON
+alongside or check the original `CaptureConfig`.
+
+## VCD
+
+VCD (Value Change Dump) is the **standard waveform format** for
+digital simulation.  Every serious waveform viewer reads it.  The
+`Analyzer.write_vcd()` helper produces a fully spec-compliant
+VCD with:
+
+- A `$timescale` based on `sample_clock_hz` (e.g. 10 ns for 100 MHz)
+- One `$var wire` declaration per `ProbeSpec` from the
+  `CaptureConfig` (or one giant `sample` signal if no probes
+  were defined)
+- A `$var wire` declaration for the timestamp counter if
+  `TIMESTAMP_W > 0`
+- Per-cycle value-change records using the actual cycle number
+  (or sample index, when no timestamps are present)
+
+### Example output
+
+For a capture with `--probes addr:4:0,data:4:4` (two named lanes
+inside an 8-bit sample):
+
+```vcd
+$date
+  generated by fcapz
+$end
+$version
+  fcapz-mvp
+$end
+$timescale
+  10 ns
+$end
+$scope module logic $end
+$var wire 4 a addr $end
+$var wire 4 b data $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+b0000 a
+b0000 b
+$end
+#0
+b0000 a
+b0001 b
+#1
+b0001 a
+b0001 b
+...
+```
+
+The single-letter `var_id` codes (`a`, `b`, ...) are how VCD
+references signals; the viewer ignores them and just shows the
+human names (`addr`, `data`).
+
+### Why named probes matter
+
+Without `--probes`, you get one giant `sample` signal:
+
+```bash
+fcapz capture --pretrigger 8 --posttrigger 16 \
+    --trigger-value 0x42 \
+    --format vcd --out unnamed.vcd
+# → one signal called "sample" with the full sample word
+```
+
+In GTKWave you see one row, all 8 bits packed into a single
+hex/binary blob.  Workable but ugly.
+
+With `--probes lo:4:0,hi:4:4`:
+
+```bash
+fcapz capture --pretrigger 8 --posttrigger 16 \
+    --trigger-value 0x42 \
+    --probes lo:4:0,hi:4:4 \
+    --format vcd --out named.vcd
+# → two signals "lo" and "hi"
+```
+
+In GTKWave you see two rows with meaningful names.  Much
+nicer.
+
+### Auto-generated `.gtkw` layout file (GUI only)
+
+The desktop GUI's "Open in viewer (GTKWave)" button writes a
+**`.gtkw` layout file** alongside the `.vcd` so GTKWave opens with
+the signals already added to the waveform pane, in the order you
+defined them in your `ProbeSpec` list, with sensible radixes (hex
+for wide buses, binary for 1-bit signals).
+
+The generator is at
+[`host/fcapz/gui/gtkw_writer.py`](../host/fcapz/gui/gtkw_writer.py)
+— ~75 lines.  It's invoked automatically when you click "Open in
+viewer (GTKWave)" but you can also use it from your own scripts:
+
+```python
+from fcapz.gui.gtkw_writer import write_gtkw_for_capture
+write_gtkw_for_capture(result, vcd_path="cap.vcd", gtkw_path="cap.gtkw")
+```
+
+GTKWave then opens with the layout pre-loaded:
+
+```bash
+gtkwave cap.vcd --save cap.gtkw
+```
+
+A future commit could generate Surfer's state file the same way
+— see the GUI plan in `no_commit/plans/qt_gui_plan.md`.
+
+## Waveform viewer integration
+
+The GUI's "Open in viewer" dropdown launches one of four built-in
+viewer wrappers.  All four spawn the viewer as a **separate
+top-level process** in a new window — see "Embedding caveat"
+below.
+
+### Built-in viewer classes
+
+| Class | Detects | Launch | Layout file |
+|---|---|---|---|
+| `GtkWaveViewer` | `gtkwave` on PATH | `subprocess.Popen([gtkwave, vcd, "--save", gtkw])` | yes (`.gtkw`) |
+| `SurferViewer` | `surfer` on PATH | `subprocess.Popen([surfer, vcd])` | not yet (planned) |
+| `WaveTraceViewer` | `wavetrace` on PATH | `subprocess.Popen([wavetrace, vcd])` | no |
+| `CustomCommandViewer` | n/a | substitute `{VCD}` and `{GTKW}` in user template, spawn | depends on user template |
+
+The custom command variant is the escape hatch for anything not
+covered by the built-ins:
+
+```toml
+# in ~/.config/fpgacapzero/gui.toml
+[viewers.custom]
+command = "myviewer --vcd {VCD}"
+```
+
+Then "Open in viewer (Custom command)" appears in the GUI
+dropdown alongside the auto-detected ones.
+
+### Auto-detection
+
+At GUI startup, [`viewer_registry.py`](../host/fcapz/gui/viewer_registry.py)
+calls each `WaveformViewer` subclass's `detect_executable()`
+classmethod (which uses `shutil.which()`) and only enables the
+ones it finds.  Missing viewers are grayed out in the dropdown
+with a tooltip explaining how to install them.
+
+You can override the auto-detected path in **Settings →
+Viewers** if your install lives somewhere unusual:
+
+```toml
+[viewers.gtkwave]
+path = "/opt/gtkwave/bin/gtkwave"
+```
+
+### Embedding caveat
+
+**The external waveform viewers are NOT embedded inside the
+fcapz-gui window.**  This is a property of how those viewers are
+built, not a fcapz design choice:
+
+| Viewer | Toolkit | Embeddable in Qt? |
+|---|---|---|
+| GTKWave | GTK | **No** — separate process, no embedding API |
+| Surfer (desktop) | wgpu/egui Rust | **No** — no embedding API |
+| Surfer (web build, WASM) | WebAssembly in a browser | **Yes**, via `QtWebEngineWidgets` (planned, optional `[gui-surfer-web]` extra, not yet shipped) |
+| WaveTrace | VS Code extension or Electron | **No** — opens in user's VS Code or its standalone window |
+| Vivado XSim wave viewer | Tcl/Tk | **No** — spawns Vivado |
+| Custom command | whatever | usually no |
+| **Embedded `pyqtgraph` preview** | **native Qt** | **Yes** — lives inside the History panel |
+
+The **only** waveform widget actually embedded inside fcapz-gui
+today is the `pyqtgraph` quick-preview pane (see
+[chapter 12](12_gui.md)).  External viewers are launched as
+separate top-level windows; the user arranges them side-by-side
+with fcapz-gui (snap left + snap right is the typical pattern).
+
+This isn't a workaround — it's the same pattern every FPGA dev
+already uses: Vivado + GTKWave side by side, ChipScope + an
+external editor side by side, etc.  The `pyqtgraph` preview
+covers the "instant feedback inside the same window" case for
+80% of debug sessions; external viewers handle the 20% where you
+need search, decode, save layouts, scripted analysis, etc.
+
+The full reasoning is in `no_commit/plans/qt_gui_plan.md` if you
+want the deep dive on why GTKWave can't be `XEmbed`-ed and why
+the Surfer-web embedding is technically possible but nontrivial.
+
+## Worked example: capture → JSON → LLM summary
+
+```python
+from fcapz import (
+    XilinxHwServerTransport, Analyzer,
+    CaptureConfig, TriggerConfig, ProbeSpec,
+    summarize, ProbeDefinition,
+)
+import json
+
+# Configure + capture
+t = XilinxHwServerTransport(port=3121, fpga_name="xc7a100t",
+                            bitfile="examples/arty_a7/arty_a7_top.bit")
+a = Analyzer(t)
+a.connect()
+
+cfg = CaptureConfig(
+    pretrigger=8, posttrigger=16,
+    trigger=TriggerConfig(mode="value_match", value=0x42, mask=0xFF),
+    sample_width=8, depth=1024,
+    probes=[ProbeSpec(name="counter", width=8, lsb=0)],
+)
+a.configure(cfg); a.arm()
+result = a.capture(timeout=5.0)
+
+# Export to all three formats
+a.write_json(result, "cap.json")
+a.write_csv(result, "cap.csv")
+a.write_vcd(result, "cap.vcd")
+
+# Plus an LLM-friendly structured summary
+summary = summarize(result, [ProbeDefinition("counter", 8, 0)])
+with open("cap_summary.json", "w") as f:
+    json.dump(summary, f, indent=2)
+
+a.close()
+```
+
+`cap.json` is the raw export.  `cap_summary.json` is the
+LLM-friendly structured summary that flattens the capture into
+"how many edges, how many bursts, longest burst, first/last edge"
+fields — much shorter than the raw sample list and much more
+useful as LLM context.  See [chapter 09](09_python_api.md) "the
+events module".
+
+## Worked example: VCD → GTKWave with named probes
+
+```bash
+fcapz capture \
+    --pretrigger 8 --posttrigger 16 \
+    --trigger-value 0x42 --trigger-mask 0xFF \
+    --probes counter:8:0 \
+    --format vcd \
+    --out cap.vcd
+
+gtkwave cap.vcd
+```
+
+Then in GTKWave, double-click `counter` in the SST tree to add
+it to the waveform pane.  Right-click → "Data Format" → "Hex" if
+you want hex display.
+
+If you launch via the desktop GUI ("Open in viewer (GTKWave)"
+button), the auto-generated `.gtkw` layout takes care of the
+add-and-format step automatically.
+
+## Worked example: CSV into pandas
+
+```python
+import pandas as pd
+
+df = pd.read_csv("cap.csv")
+print(df.describe())
+print(f"trigger sample: {df.iloc[8]}")     # pretrigger=8
+df.plot(x="index", y="value")
+```
+
+CSV is the path of least friction for ad-hoc analysis.
+
+## Format comparison
+
+| Question | JSON | CSV | VCD |
+|---|---|---|---|
+| Includes trigger config? | ✅ | ❌ | partial (`$comment`) |
+| Includes timestamps? | ✅ if `TIMESTAMP_W>0` | ✅ if `TIMESTAMP_W>0` | ✅ via `$timescale` |
+| Named probes? | ✅ | ❌ | ✅ if `--probes` set |
+| Round-trippable into Python? | as a dict | as a DataFrame | as text only |
+| Suitable for waveform viewer? | ❌ | ❌ | ✅ |
+| Suitable for spreadsheet? | awkward | ✅ | ❌ |
+| Suitable for LLM context? | ✅ | ✅ (smaller) | ❌ (too verbose) |
+| File size (25 samples) | ~1 KB | ~150 B | ~1 KB |
+| File size (1024 samples) | ~30 KB | ~6 KB | ~25 KB |
+
+## What's next
+
+- [Chapter 16 — Versioning](16_versioning_and_release.md): the
+  `version` field in the JSON header and how it relates to the
+  per-core identity magic
+- [Chapter 17 — Troubleshooting](17_troubleshooting.md): VCD
+  doesn't open / waveform looks wrong / GTKWave can't find the
+  layout file
+- [`specs/waveform_schema.md`](specs/waveform_schema.md): the
+  canonical format spec
