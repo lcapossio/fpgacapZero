@@ -9,9 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess, QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -46,11 +48,15 @@ class HistoryEntry:
 class HistoryPanel(QGroupBox):
     """Capture history, embedded preview, export, and external viewer launch."""
 
+    status_message = Signal(str)
+    open_after_capture_changed = Signal(bool)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Capture history & waveform preview", parent)
         self._entries: list[HistoryEntry] = []
         self._viewer_rows: list[tuple[str, WaveformViewer]] = []
         self._analyzer_ref: Analyzer | None = None
+        self._viewer_processes: list[QProcess] = []
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Time", "Samples", "Flags"])
@@ -65,6 +71,12 @@ class HistoryPanel(QGroupBox):
         self._open_btn = QPushButton("Open in viewer")
         self._open_btn.clicked.connect(self._on_open_viewer)
 
+        self._reveal_btn = QPushButton("Open capture folder")
+        self._reveal_btn.clicked.connect(self._on_reveal_folder)
+
+        self._open_after_capture = QCheckBox("Open viewer after capture")
+        self._open_after_capture.toggled.connect(self.open_after_capture_changed.emit)
+
         self._exp_json = QPushButton("Export JSON…")
         self._exp_json.clicked.connect(lambda: self._export_format("json"))
         self._exp_csv = QPushButton("Export CSV…")
@@ -72,13 +84,18 @@ class HistoryPanel(QGroupBox):
         self._exp_vcd = QPushButton("Export VCD…")
         self._exp_vcd.clicked.connect(lambda: self._export_format("vcd"))
 
-        for b in (self._open_btn, self._exp_json, self._exp_csv, self._exp_vcd):
+        for b in (self._open_btn, self._reveal_btn, self._exp_json, self._exp_csv, self._exp_vcd):
             b.setEnabled(False)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Viewer:"))
         row1.addWidget(self._viewer_combo, stretch=1)
         row1.addWidget(self._open_btn)
+        row1.addWidget(self._reveal_btn)
+
+        row1b = QHBoxLayout()
+        row1b.addWidget(self._open_after_capture)
+        row1b.addStretch(1)
 
         row2 = QHBoxLayout()
         row2.addWidget(self._exp_json)
@@ -93,6 +110,7 @@ class HistoryPanel(QGroupBox):
         uv.setContentsMargins(0, 0, 0, 0)
         uv.addWidget(self._table)
         uv.addLayout(row1)
+        uv.addLayout(row1b)
         uv.addLayout(row2)
 
         split = QSplitter(Qt.Orientation.Vertical)
@@ -107,6 +125,11 @@ class HistoryPanel(QGroupBox):
 
         self._table.itemSelectionChanged.connect(self._sync_buttons)
 
+    def set_open_viewer_after_capture(self, enabled: bool) -> None:
+        self._open_after_capture.blockSignals(True)
+        self._open_after_capture.setChecked(enabled)
+        self._open_after_capture.blockSignals(False)
+
     def set_viewer_choices(self, choices: list[tuple[str, WaveformViewer]]) -> None:
         self._viewer_rows = list(choices)
         self._viewer_combo.clear()
@@ -117,6 +140,20 @@ class HistoryPanel(QGroupBox):
     def select_viewer_index(self, index: int) -> None:
         if 0 <= index < self._viewer_combo.count():
             self._viewer_combo.setCurrentIndex(index)
+
+    def stop_viewer_processes(self) -> None:
+        for proc in list(self._viewer_processes):
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.terminate()
+                if not proc.waitForFinished(3000):
+                    proc.kill()
+                    proc.waitForFinished(1000)
+            try:
+                self._viewer_processes.remove(proc)
+            except ValueError:
+                pass
+            proc.deleteLater()
+        self._viewer_processes.clear()
 
     def add_capture(self, analyzer: Analyzer, result: CaptureResult) -> None:
         work = Path(tempfile.mkdtemp(prefix="fcapz-gui-cap-"))
@@ -145,6 +182,10 @@ class HistoryPanel(QGroupBox):
         self._table.selectRow(row)
         self._sync_buttons()
 
+        if self._open_after_capture.isChecked() and self._viewer_combo.count() > 0:
+            i = self._viewer_combo.currentIndex()
+            self._launch_viewer_for_entry(ent, i, silent=True)
+
     def selected_entry(self) -> HistoryEntry | None:
         rows = self._table.selectionModel().selectedRows()
         if not rows:
@@ -159,6 +200,7 @@ class HistoryPanel(QGroupBox):
         has_viewer = self._viewer_combo.count() > 0
         can_export = has_row
         self._open_btn.setEnabled(has_row and has_viewer)
+        self._reveal_btn.setEnabled(has_row)
         self._exp_json.setEnabled(can_export)
         self._exp_csv.setEnabled(can_export)
         self._exp_vcd.setEnabled(can_export)
@@ -171,35 +213,105 @@ class HistoryPanel(QGroupBox):
         else:
             self._preview.show_result(ent.result)
 
+    def _prepare_sidecars(self, viewer: WaveformViewer, ent: HistoryEntry) -> Path | None:
+        if isinstance(viewer, GtkWaveViewer):
+            gtkw = ent.work_dir / "capture.gtkw"
+            write_gtkw_for_capture(ent.result, ent.vcd_path, gtkw)
+            return gtkw
+        if isinstance(viewer, SurferViewer):
+            scmd = ent.work_dir / "capture.surfer.txt"
+            write_surfer_command_file_for_capture(ent.result, scmd)
+            return scmd
+        return None
+
+    def _launch_viewer_for_entry(
+        self,
+        ent: HistoryEntry,
+        combo_index: int,
+        *,
+        silent: bool,
+    ) -> None:
+        if combo_index < 0 or combo_index >= len(self._viewer_rows):
+            return
+        label, viewer = self._viewer_rows[combo_index]
+        save_path: Path | None = None
+        try:
+            save_path = self._prepare_sidecars(viewer, ent)
+        except OSError as exc:
+            title = (
+                "GTKWave layout"
+                if isinstance(viewer, GtkWaveViewer)
+                else "Surfer command file"
+                if isinstance(viewer, SurferViewer)
+                else "Viewer sidecar"
+            )
+            if silent:
+                self.status_message.emit(f"{title}: {exc}")
+            else:
+                QMessageBox.warning(self, title, str(exc))
+            return
+        try:
+            argv = viewer.launch_argv(ent.vcd_path, save_file=save_path)
+        except (OSError, ValueError) as exc:
+            if silent:
+                self.status_message.emit(str(exc))
+            else:
+                QMessageBox.warning(self, "Viewer", str(exc))
+            return
+        self._start_viewer_process(label, argv, silent=silent)
+
+    def _start_viewer_process(self, viewer_label: str, argv: list[str], *, silent: bool) -> None:
+        if not argv or not argv[0]:
+            msg = "Viewer command line is empty."
+            self.status_message.emit(msg)
+            if not silent:
+                QMessageBox.warning(self, "Viewer", msg)
+            return
+        proc = QProcess(self)
+        proc.setProgram(argv[0])
+        proc.setArguments(argv[1:])
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+
+        def _on_started() -> None:
+            self._viewer_processes.append(proc)
+            self.status_message.emit(f"Started {viewer_label} (separate window)")
+
+        def _on_error(_e: QProcess.ProcessError) -> None:
+            err = (proc.errorString() or "Viewer failed to start").strip()
+            self.status_message.emit(err)
+            if not silent:
+                QMessageBox.warning(self, "Viewer", err)
+
+        def _on_finished(_exit_code: int, _status: QProcess.ExitStatus) -> None:
+            try:
+                self._viewer_processes.remove(proc)
+            except ValueError:
+                pass
+            proc.deleteLater()
+
+        proc.started.connect(_on_started)
+        proc.errorOccurred.connect(_on_error)
+        proc.finished.connect(_on_finished)
+        proc.start()
+
     def _on_open_viewer(self) -> None:
         ent = self.selected_entry()
         if ent is None:
             return
         i = self._viewer_combo.currentIndex()
-        if i < 0 or i >= len(self._viewer_rows):
+        self._launch_viewer_for_entry(ent, i, silent=False)
+
+    def _on_reveal_folder(self) -> None:
+        ent = self.selected_entry()
+        if ent is None:
             return
-        _, viewer = self._viewer_rows[i]
-        save_path: Path | None = None
-        if isinstance(viewer, GtkWaveViewer):
-            gtkw = ent.work_dir / "capture.gtkw"
-            try:
-                write_gtkw_for_capture(ent.result, ent.vcd_path, gtkw)
-                save_path = gtkw
-            except OSError as exc:
-                QMessageBox.warning(self, "GTKWave layout", str(exc))
-        elif isinstance(viewer, SurferViewer):
-            scmd = ent.work_dir / "capture.surfer.txt"
-            try:
-                write_surfer_command_file_for_capture(ent.result, scmd)
-                save_path = scmd
-            except OSError as exc:
-                QMessageBox.warning(self, "Surfer command file", str(exc))
-        try:
-            viewer.open(ent.vcd_path, save_file=save_path)
-        except OSError as exc:
-            QMessageBox.warning(self, "Viewer", str(exc))
-        except ValueError as exc:
-            QMessageBox.warning(self, "Viewer", str(exc))
+        url = QUrl.fromLocalFile(str(ent.work_dir.resolve()))
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(
+                self,
+                "Open folder",
+                "Could not open the capture folder in the file manager.",
+            )
 
     def _export_format(self, fmt: str) -> None:
         ent = self.selected_entry()

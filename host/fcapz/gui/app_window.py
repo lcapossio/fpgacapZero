@@ -145,6 +145,10 @@ class MainWindow(QMainWindow):
         )
 
         self._history = HistoryPanel()
+        self._history.status_message.connect(self.statusBar().showMessage)
+        self._history.open_after_capture_changed.connect(
+            self._on_open_viewer_after_capture_changed,
+        )
 
         self._eio_panel = EioPanel()
         self._eio_panel.attach_requested.connect(self._on_eio_attach)
@@ -265,6 +269,9 @@ class MainWindow(QMainWindow):
         self._capture.set_probe_profiles(settings.probe_profiles)
         self._capture.set_trigger_history(settings.trigger_history)
         self._apply_viewer_choices(settings)
+        self._history.set_open_viewer_after_capture(
+            settings.viewers.open_viewer_after_capture,
+        )
 
     def _apply_viewer_choices(self, gui_settings: GuiSettings) -> None:
         choices = viewers_for_settings(gui_settings)
@@ -274,6 +281,11 @@ class MainWindow(QMainWindow):
             if label.lower() == default or default in label.lower():
                 self._history.select_viewer_index(i)
                 break
+
+    def _on_open_viewer_after_capture_changed(self, checked: bool) -> None:
+        gui = load_gui_settings(self._config_path)
+        gui.viewers.open_viewer_after_capture = checked
+        save_gui_settings(gui, self._config_path)
 
     def _capture_running(self) -> bool:
         return self._cap_thread is not None and self._cap_thread.isRunning()
@@ -330,6 +342,7 @@ class MainWindow(QMainWindow):
         gui.connection = conn
         save_gui_settings(gui, self._config_path)
         self._apply_viewer_choices(gui)
+        self._history.set_open_viewer_after_capture(gui.viewers.open_viewer_after_capture)
         self._capture.set_probe_profiles(gui.probe_profiles)
         self._capture.set_trigger_history(gui.trigger_history)
 
@@ -726,6 +739,7 @@ class MainWindow(QMainWindow):
         merged = dlg.merged_settings()
         save_gui_settings(merged, self._config_path)
         self._apply_viewer_choices(merged)
+        self._history.set_open_viewer_after_capture(merged.viewers.open_viewer_after_capture)
         self._capture.set_probe_profiles(merged.probe_profiles)
         self._capture.set_trigger_history(merged.trigger_history)
 
@@ -975,6 +989,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
             self._analyzer = None
+        self._history.stop_viewer_processes()
         self._history.cleanup_temp_dirs()
         self._clear_subsidiary_controllers()
         self._probe.clear()

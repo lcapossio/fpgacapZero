@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -78,6 +79,11 @@ class SettingsDialog(QDialog):
         if settings.viewers.custom_argv:
             self._custom.setPlainText("\n".join(settings.viewers.custom_argv))
 
+        self._open_after_capture = QCheckBox(
+            "Open external viewer automatically after each capture",
+        )
+        self._open_after_capture.setChecked(settings.viewers.open_viewer_after_capture)
+
         viewers_tab = QWidget()
         vf = QFormLayout(viewers_tab)
         vf.addRow("Default viewer", self._default_viewer)
@@ -85,6 +91,7 @@ class SettingsDialog(QDialog):
         vf.addRow("Surfer", self._path_row(self._surf, self._browse_btn(self._surf)))
         vf.addRow("WaveTrace", self._path_row(self._wt, self._browse_btn(self._wt)))
         vf.addRow("Custom argv", self._custom)
+        vf.addRow("", self._open_after_capture)
 
         path_lbl = QLabel(f"Config file: {self._config_path_hint()}")
         path_lbl.setWordWrap(True)
@@ -195,6 +202,7 @@ class SettingsDialog(QDialog):
             surfer_executable=_empty_to_none(self._surf.text()),
             wavetrace_executable=_empty_to_none(self._wt.text()),
             custom_argv=custom_lines,
+            open_viewer_after_capture=self._open_after_capture.isChecked(),
         )
         profiles: dict[str, ProbeProfile] = {}
         for r in range(self._prof_table.rowCount()):

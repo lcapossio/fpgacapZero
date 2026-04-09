@@ -62,6 +62,8 @@ class ViewerSettings:
     surfer_executable: str | None = None
     wavetrace_executable: str | None = None
     custom_argv: list[str] = field(default_factory=list)
+    #: GUI: spawn the selected external viewer after each new capture lands in history.
+    open_viewer_after_capture: bool = False
 
 
 @dataclass
@@ -140,12 +142,18 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         custom_list = [str(x) for x in custom]
     else:
         custom_list = []
+    ovc = vraw.get("open_viewer_after_capture")
+    if isinstance(ovc, bool):
+        open_after = ovc
+    else:
+        open_after = str(ovc or "").strip().lower() in ("1", "true", "yes")
     viewers = ViewerSettings(
         default_viewer=str(vraw.get("default", "gtkwave")),
         gtkwave_executable=_opt_viewer_key("gtkwave_executable"),
         surfer_executable=_opt_viewer_key("surfer_executable"),
         wavetrace_executable=_opt_viewer_key("wavetrace_executable"),
         custom_argv=custom_list,
+        open_viewer_after_capture=open_after,
     )
 
     profiles: dict[str, ProbeProfile] = {}
@@ -196,6 +204,7 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "surfer_executable": _none_to_str(settings.viewers.surfer_executable),
             "wavetrace_executable": _none_to_str(settings.viewers.wavetrace_executable),
             "custom_argv": list(settings.viewers.custom_argv),
+            "open_viewer_after_capture": settings.viewers.open_viewer_after_capture,
         },
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),

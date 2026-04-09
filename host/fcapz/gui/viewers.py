@@ -25,8 +25,12 @@ class WaveformViewer(ABC):
         """Return the viewer binary if found on ``PATH``, else ``None``."""
 
     @abstractmethod
+    def launch_argv(self, vcd_path: Path, *, save_file: Path | None = None) -> list[str]:
+        """Build command line for ``vcd_path``; raises like :meth:`open`."""
+
     def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
         """Open ``vcd_path`` in the viewer; optionally pass a layout save file."""
+        self._spawn(self.launch_argv(vcd_path, save_file=save_file))
 
     def _spawn(self, argv: Sequence[str]) -> None:
         subprocess.Popen(list(argv), start_new_session=True)
@@ -54,13 +58,13 @@ class GtkWaveViewer(WaveformViewer):
     def detect_executable() -> Path | None:
         return _which("gtkwave")
 
-    def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
+    def launch_argv(self, vcd_path: Path, *, save_file: Path | None = None) -> list[str]:
         if not vcd_path.is_file():
             raise FileNotFoundError(vcd_path)
         cmd = [str(self._executable), str(vcd_path)]
         if save_file is not None:
             cmd += ["--save", str(save_file)]
-        self._spawn(cmd)
+        return cmd
 
 
 class SurferViewer(WaveformViewer):
@@ -79,7 +83,7 @@ class SurferViewer(WaveformViewer):
     def detect_executable() -> Path | None:
         return _which("surfer")
 
-    def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
+    def launch_argv(self, vcd_path: Path, *, save_file: Path | None = None) -> list[str]:
         if not vcd_path.is_file():
             raise FileNotFoundError(vcd_path)
         if save_file is not None and not save_file.is_file():
@@ -88,7 +92,7 @@ class SurferViewer(WaveformViewer):
         if save_file is not None:
             cmd += ["--command-file", str(save_file)]
         cmd.append(str(vcd_path))
-        self._spawn(cmd)
+        return cmd
 
 
 class WaveTraceViewer(WaveformViewer):
@@ -105,12 +109,12 @@ class WaveTraceViewer(WaveformViewer):
     def detect_executable() -> Path | None:
         return _which("wavetrace", "WaveTrace")
 
-    def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
+    def launch_argv(self, vcd_path: Path, *, save_file: Path | None = None) -> list[str]:
         if save_file is not None:
             raise ValueError("WaveTrace viewer does not support save_file in this binding")
         if not vcd_path.is_file():
             raise FileNotFoundError(vcd_path)
-        self._spawn([str(self._executable), str(vcd_path)])
+        return [str(self._executable), str(vcd_path)]
 
 
 class CustomCommandViewer(WaveformViewer):
@@ -132,17 +136,16 @@ class CustomCommandViewer(WaveformViewer):
     def detect_executable() -> Path | None:
         return None
 
-    def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
+    def launch_argv(self, vcd_path: Path, *, save_file: Path | None = None) -> list[str]:
         if not vcd_path.is_file():
             raise FileNotFoundError(vcd_path)
         if save_file is None and any("{SAVE}" in p for p in self._argv_template):
             raise ValueError("template references {SAVE} but save_file was not provided")
         save_str = str(save_file) if save_file is not None else ""
-        cmd = [
+        return [
             p.replace("{VCD}", str(vcd_path)).replace("{SAVE}", save_str)
             for p in self._argv_template
         ]
-        self._spawn(cmd)
 
 
 BUILTIN_VIEWER_CLASSES: tuple[type[WaveformViewer], ...] = (
