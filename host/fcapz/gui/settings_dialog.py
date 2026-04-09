@@ -84,6 +84,11 @@ class SettingsDialog(QDialog):
         )
         self._open_after_capture.setChecked(settings.viewers.open_viewer_after_capture)
 
+        self._reuse_viewer = QCheckBox(
+            "Reuse one external viewer (overwrite live wave folder; Surfer auto-reloads)",
+        )
+        self._reuse_viewer.setChecked(settings.viewers.reuse_external_viewer)
+
         viewers_tab = QWidget()
         vf = QFormLayout(viewers_tab)
         vf.addRow("Default viewer", self._default_viewer)
@@ -92,6 +97,7 @@ class SettingsDialog(QDialog):
         vf.addRow("WaveTrace", self._path_row(self._wt, self._browse_btn(self._wt)))
         vf.addRow("Custom argv", self._custom)
         vf.addRow("", self._open_after_capture)
+        vf.addRow("", self._reuse_viewer)
 
         path_lbl = QLabel(f"Config file: {self._config_path_hint()}")
         path_lbl.setWordWrap(True)
@@ -203,6 +209,7 @@ class SettingsDialog(QDialog):
             wavetrace_executable=_empty_to_none(self._wt.text()),
             custom_argv=custom_lines,
             open_viewer_after_capture=self._open_after_capture.isChecked(),
+            reuse_external_viewer=self._reuse_viewer.isChecked(),
         )
         profiles: dict[str, ProbeProfile] = {}
         for r in range(self._prof_table.rowCount()):

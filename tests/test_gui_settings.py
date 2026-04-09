@@ -45,6 +45,7 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
         s.connection.program = None
         s.viewers.default_viewer = "surfer"
         s.viewers.open_viewer_after_capture = True
+        s.viewers.reuse_external_viewer = True
         s.viewers.gtkwave_executable = r"C:\Tools\gtkwave.exe"
         s.probe_profiles["demo"] = ProbeProfile(name="demo", probes="clk:1:0,data:8:1")
         s.trigger_history = [{"pretrigger": 4, "posttrigger": 8}]
@@ -57,6 +58,7 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             self.assertIsNone(loaded.connection.program)
             self.assertEqual(loaded.viewers.default_viewer, "surfer")
             self.assertTrue(loaded.viewers.open_viewer_after_capture)
+            self.assertTrue(loaded.viewers.reuse_external_viewer)
             self.assertEqual(loaded.viewers.gtkwave_executable, r"C:\Tools\gtkwave.exe")
             self.assertEqual(loaded.probe_profiles["demo"].probes, "clk:1:0,data:8:1")
             self.assertEqual(len(loaded.trigger_history), 1)

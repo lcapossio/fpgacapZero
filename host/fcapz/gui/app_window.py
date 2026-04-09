@@ -53,6 +53,7 @@ from .settings import (
     GuiSettings,
     append_trigger_history,
     default_gui_config_path,
+    live_wave_dir,
     load_gui_settings,
     save_gui_settings,
     trigger_history_entry_from_config,
@@ -145,9 +146,13 @@ class MainWindow(QMainWindow):
         )
 
         self._history = HistoryPanel()
+        self._history.set_live_wave_root(live_wave_dir(self._config_path))
         self._history.status_message.connect(self.statusBar().showMessage)
         self._history.open_after_capture_changed.connect(
             self._on_open_viewer_after_capture_changed,
+        )
+        self._history.reuse_external_viewer_changed.connect(
+            self._on_reuse_external_viewer_changed,
         )
 
         self._eio_panel = EioPanel()
@@ -272,6 +277,7 @@ class MainWindow(QMainWindow):
         self._history.set_open_viewer_after_capture(
             settings.viewers.open_viewer_after_capture,
         )
+        self._history.set_reuse_external_viewer(settings.viewers.reuse_external_viewer)
 
     def _apply_viewer_choices(self, gui_settings: GuiSettings) -> None:
         choices = viewers_for_settings(gui_settings)
@@ -285,6 +291,11 @@ class MainWindow(QMainWindow):
     def _on_open_viewer_after_capture_changed(self, checked: bool) -> None:
         gui = load_gui_settings(self._config_path)
         gui.viewers.open_viewer_after_capture = checked
+        save_gui_settings(gui, self._config_path)
+
+    def _on_reuse_external_viewer_changed(self, checked: bool) -> None:
+        gui = load_gui_settings(self._config_path)
+        gui.viewers.reuse_external_viewer = checked
         save_gui_settings(gui, self._config_path)
 
     def _capture_running(self) -> bool:
@@ -343,6 +354,7 @@ class MainWindow(QMainWindow):
         save_gui_settings(gui, self._config_path)
         self._apply_viewer_choices(gui)
         self._history.set_open_viewer_after_capture(gui.viewers.open_viewer_after_capture)
+        self._history.set_reuse_external_viewer(gui.viewers.reuse_external_viewer)
         self._capture.set_probe_profiles(gui.probe_profiles)
         self._capture.set_trigger_history(gui.trigger_history)
 
@@ -740,6 +752,7 @@ class MainWindow(QMainWindow):
         save_gui_settings(merged, self._config_path)
         self._apply_viewer_choices(merged)
         self._history.set_open_viewer_after_capture(merged.viewers.open_viewer_after_capture)
+        self._history.set_reuse_external_viewer(merged.viewers.reuse_external_viewer)
         self._capture.set_probe_profiles(merged.probe_profiles)
         self._capture.set_trigger_history(merged.trigger_history)
 

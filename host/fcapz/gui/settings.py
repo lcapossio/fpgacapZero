@@ -27,6 +27,11 @@ def default_gui_config_path() -> Path:
     return Path.home() / ".config" / "fpgacapzero" / "gui.toml"
 
 
+def live_wave_dir(gui_config_path: Path) -> Path:
+    """Directory for ``capture.vcd`` + sidecars when reusing one external viewer instance."""
+    return gui_config_path.parent / "live-wave"
+
+
 def ir_table_preset(name: str) -> dict[int, int]:
     """
     Map a short preset name to an IR-length table for OpenOCD / hw_server transports.
@@ -64,6 +69,8 @@ class ViewerSettings:
     custom_argv: list[str] = field(default_factory=list)
     #: GUI: spawn the selected external viewer after each new capture lands in history.
     open_viewer_after_capture: bool = False
+    #: GUI: keep one viewer process; overwrite a fixed ``live-wave`` tree so viewers can reload.
+    reuse_external_viewer: bool = False
 
 
 @dataclass
@@ -147,6 +154,11 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         open_after = ovc
     else:
         open_after = str(ovc or "").strip().lower() in ("1", "true", "yes")
+    rev = vraw.get("reuse_external_viewer")
+    if isinstance(rev, bool):
+        reuse_ev = rev
+    else:
+        reuse_ev = str(rev or "").strip().lower() in ("1", "true", "yes")
     viewers = ViewerSettings(
         default_viewer=str(vraw.get("default", "gtkwave")),
         gtkwave_executable=_opt_viewer_key("gtkwave_executable"),
@@ -154,6 +166,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         wavetrace_executable=_opt_viewer_key("wavetrace_executable"),
         custom_argv=custom_list,
         open_viewer_after_capture=open_after,
+        reuse_external_viewer=reuse_ev,
     )
 
     profiles: dict[str, ProbeProfile] = {}
@@ -205,6 +218,7 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "wavetrace_executable": _none_to_str(settings.viewers.wavetrace_executable),
             "custom_argv": list(settings.viewers.custom_argv),
             "open_viewer_after_capture": settings.viewers.open_viewer_after_capture,
+            "reuse_external_viewer": settings.viewers.reuse_external_viewer,
         },
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from ..analyzer import Analyzer, CaptureResult
 from .gtkw_writer import write_gtkw_for_capture
+from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
 from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
@@ -50,6 +51,7 @@ class HistoryPanel(QGroupBox):
 
     status_message = Signal(str)
     open_after_capture_changed = Signal(bool)
+    reuse_external_viewer_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Capture history & waveform preview", parent)
@@ -57,6 +59,8 @@ class HistoryPanel(QGroupBox):
         self._viewer_rows: list[tuple[str, WaveformViewer]] = []
         self._analyzer_ref: Analyzer | None = None
         self._viewer_processes: list[QProcess] = []
+        self._last_viewer_program: str | None = None
+        self._live_wave_root = live_wave_dir(default_gui_config_path())
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Time", "Samples", "Flags"])
@@ -77,6 +81,13 @@ class HistoryPanel(QGroupBox):
         self._open_after_capture = QCheckBox("Open viewer after capture")
         self._open_after_capture.toggled.connect(self.open_after_capture_changed.emit)
 
+        self._reuse_viewer = QCheckBox("Reuse external viewer (live wave folder)")
+        self._reuse_viewer.setToolTip(
+            "Keeps one viewer process. Each open overwrites files under the live-wave "
+            "folder next to gui.toml (Surfer watches and reloads; GTKWave: use Reload).",
+        )
+        self._reuse_viewer.toggled.connect(self.reuse_external_viewer_changed.emit)
+
         self._exp_json = QPushButton("Export JSON…")
         self._exp_json.clicked.connect(lambda: self._export_format("json"))
         self._exp_csv = QPushButton("Export CSV…")
@@ -95,6 +106,7 @@ class HistoryPanel(QGroupBox):
 
         row1b = QHBoxLayout()
         row1b.addWidget(self._open_after_capture)
+        row1b.addWidget(self._reuse_viewer)
         row1b.addStretch(1)
 
         row2 = QHBoxLayout()
@@ -130,6 +142,14 @@ class HistoryPanel(QGroupBox):
         self._open_after_capture.setChecked(enabled)
         self._open_after_capture.blockSignals(False)
 
+    def set_reuse_external_viewer(self, enabled: bool) -> None:
+        self._reuse_viewer.blockSignals(True)
+        self._reuse_viewer.setChecked(enabled)
+        self._reuse_viewer.blockSignals(False)
+
+    def set_live_wave_root(self, root: Path) -> None:
+        self._live_wave_root = root
+
     def set_viewer_choices(self, choices: list[tuple[str, WaveformViewer]]) -> None:
         self._viewer_rows = list(choices)
         self._viewer_combo.clear()
@@ -154,6 +174,7 @@ class HistoryPanel(QGroupBox):
                 pass
             proc.deleteLater()
         self._viewer_processes.clear()
+        self._last_viewer_program = None
 
     def add_capture(self, analyzer: Analyzer, result: CaptureResult) -> None:
         work = Path(tempfile.mkdtemp(prefix="fcapz-gui-cap-"))
@@ -213,16 +234,32 @@ class HistoryPanel(QGroupBox):
         else:
             self._preview.show_result(ent.result)
 
-    def _prepare_sidecars(self, viewer: WaveformViewer, ent: HistoryEntry) -> Path | None:
+    def _prepare_sidecars(
+        self,
+        viewer: WaveformViewer,
+        ent: HistoryEntry,
+        *,
+        vcd_path: Path,
+        work_dir: Path,
+    ) -> Path | None:
         if isinstance(viewer, GtkWaveViewer):
-            gtkw = ent.work_dir / "capture.gtkw"
-            write_gtkw_for_capture(ent.result, ent.vcd_path, gtkw)
+            gtkw = work_dir / "capture.gtkw"
+            write_gtkw_for_capture(ent.result, vcd_path, gtkw)
             return gtkw
         if isinstance(viewer, SurferViewer):
-            scmd = ent.work_dir / "capture.surfer.txt"
+            scmd = work_dir / "capture.surfer.txt"
             write_surfer_command_file_for_capture(ent.result, scmd)
             return scmd
         return None
+
+    def _analyzer_for_wave_write(self) -> Analyzer:
+        a = self._analyzer_ref
+        if a is not None:
+            return a
+        from ..analyzer import Analyzer
+        from ..transport import VendorStubTransport
+
+        return Analyzer(VendorStubTransport("export-only"))
 
     def _launch_viewer_for_entry(
         self,
@@ -234,9 +271,31 @@ class HistoryPanel(QGroupBox):
         if combo_index < 0 or combo_index >= len(self._viewer_rows):
             return
         label, viewer = self._viewer_rows[combo_index]
+        if self._reuse_viewer.isChecked():
+            root = self._live_wave_root
+            root.mkdir(parents=True, exist_ok=True)
+            vcd_path = root / "capture.vcd"
+            try:
+                self._analyzer_for_wave_write().write_vcd(ent.result, str(vcd_path))
+            except OSError as exc:
+                if silent:
+                    self.status_message.emit(f"Live wave export: {exc}")
+                else:
+                    QMessageBox.warning(self, "Live wave export", str(exc))
+                return
+            work_dir = root
+        else:
+            vcd_path = ent.vcd_path
+            work_dir = ent.work_dir
+
         save_path: Path | None = None
         try:
-            save_path = self._prepare_sidecars(viewer, ent)
+            save_path = self._prepare_sidecars(
+                viewer,
+                ent,
+                vcd_path=vcd_path,
+                work_dir=work_dir,
+            )
         except OSError as exc:
             title = (
                 "GTKWave layout"
@@ -251,7 +310,7 @@ class HistoryPanel(QGroupBox):
                 QMessageBox.warning(self, title, str(exc))
             return
         try:
-            argv = viewer.launch_argv(ent.vcd_path, save_file=save_path)
+            argv = viewer.launch_argv(vcd_path, save_file=save_path)
         except (OSError, ValueError) as exc:
             if silent:
                 self.status_message.emit(str(exc))
@@ -260,6 +319,16 @@ class HistoryPanel(QGroupBox):
             return
         self._start_viewer_process(label, argv, silent=silent)
 
+    def _running_viewer_process(self) -> QProcess | None:
+        for p in self._viewer_processes:
+            st = p.state()
+            if st in (
+                QProcess.ProcessState.Running,
+                QProcess.ProcessState.Starting,
+            ):
+                return p
+        return None
+
     def _start_viewer_process(self, viewer_label: str, argv: list[str], *, silent: bool) -> None:
         if not argv or not argv[0]:
             msg = "Viewer command line is empty."
@@ -267,7 +336,19 @@ class HistoryPanel(QGroupBox):
             if not silent:
                 QMessageBox.warning(self, "Viewer", msg)
             return
-        # At most one external viewer: close the previous before starting another.
+        prog_resolved = str(Path(argv[0]).resolve())
+        reuse_same = (
+            self._reuse_viewer.isChecked()
+            and self._running_viewer_process() is not None
+            and self._last_viewer_program == prog_resolved
+        )
+        if reuse_same:
+            self.status_message.emit(
+                f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
+            )
+            return
+
+        # Different viewer binary, or not reusing, or no running process: replace.
         self.stop_viewer_processes()
         proc = QProcess(self)
         proc.setProgram(argv[0])
@@ -276,6 +357,7 @@ class HistoryPanel(QGroupBox):
 
         def _on_started() -> None:
             self._viewer_processes.append(proc)
+            self._last_viewer_program = prog_resolved
             self.status_message.emit(f"Started {viewer_label} (separate window)")
 
         def _on_error(_e: QProcess.ProcessError) -> None:
@@ -289,6 +371,8 @@ class HistoryPanel(QGroupBox):
                 self._viewer_processes.remove(proc)
             except ValueError:
                 pass
+            if not self._viewer_processes:
+                self._last_viewer_program = None
             proc.deleteLater()
 
         proc.started.connect(_on_started)
