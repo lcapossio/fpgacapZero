@@ -267,6 +267,8 @@ class HistoryPanel(QGroupBox):
             if not silent:
                 QMessageBox.warning(self, "Viewer", msg)
             return
+        # At most one external viewer: close the previous before starting another.
+        self.stop_viewer_processes()
         proc = QProcess(self)
         proc.setProgram(argv[0])
         proc.setArguments(argv[1:])
