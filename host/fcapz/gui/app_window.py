@@ -1016,13 +1016,31 @@ def _install_ctrl_c_quit(app: QApplication) -> tuple[QTimer, Any | None]:
     return wake, win_cb
 
 
+def _windows_set_taskbar_app_identity() -> None:
+    """Give this process its own taskbar entry (not grouped under generic python.exe)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+    except ImportError:
+        return
+    # Must run before any top-level window / QApplication (MSDN); stable ID for grouping.
+    app_id = "fpgacapZero.fcapz.gui.1"
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except (AttributeError, OSError):
+        pass
+
+
 def run_app(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough,
     )
+    _windows_set_taskbar_app_identity()
     app = QApplication(args)
     app.setApplicationName("fcapz-gui")
+    app.setApplicationDisplayName("fcapz-gui")
     app.setOrganizationName("fpgacapzero")
     _wake, _win_cb = _install_ctrl_c_quit(app)
     w = MainWindow()
