@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,8 +84,9 @@ class HistoryPanel(QGroupBox):
 
         self._reuse_viewer = QCheckBox("Reuse external viewer (live wave folder)")
         self._reuse_viewer.setToolTip(
-            "Keeps one viewer process. Each open overwrites files under the live-wave "
-            "folder next to gui.toml (Surfer watches and reloads; GTKWave: use Reload).",
+            "Keeps one viewer process when possible. Each open overwrites the live-wave "
+            "folder next to gui.toml. On Linux/macOS, Surfer can hot-reload; on Windows "
+            "Surfer has no file watcher, so the GUI restarts the viewer to pick up changes.",
         )
         self._reuse_viewer.toggled.connect(self.reuse_external_viewer_changed.emit)
 
@@ -337,8 +339,12 @@ class HistoryPanel(QGroupBox):
                 QMessageBox.warning(self, "Viewer", msg)
             return
         prog_resolved = str(Path(argv[0]).resolve())
+        # Surfer ships a no-op FileWatcher on Windows (notify-rs issues), so
+        # SuggestReloadWaveform never fires; respawn the process to load the new VCD.
+        can_skip_respawn = sys.platform != "win32"
         reuse_same = (
             self._reuse_viewer.isChecked()
+            and can_skip_respawn
             and self._running_viewer_process() is not None
             and self._last_viewer_program == prog_resolved
         )

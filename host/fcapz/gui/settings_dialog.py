@@ -85,7 +85,7 @@ class SettingsDialog(QDialog):
         self._open_after_capture.setChecked(settings.viewers.open_viewer_after_capture)
 
         self._reuse_viewer = QCheckBox(
-            "Reuse one external viewer (overwrite live wave folder; Surfer auto-reloads)",
+            "Reuse one external viewer (live-wave folder; hot-reload on Unix, respawn on Windows)",
         )
         self._reuse_viewer.setChecked(settings.viewers.reuse_external_viewer)
 
