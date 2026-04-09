@@ -9,7 +9,7 @@ import logging
 import sys
 from collections import deque
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -96,13 +96,6 @@ class LogPanel(QGroupBox):
         copy = QPushButton("Copy all")
         copy.clicked.connect(self._copy_all)
 
-        hint = QLabel(
-            "Python logging for namespace <code>fcapz</code>. "
-            "Level filters this panel; root <code>fcapz</code> logger level may also apply.",
-        )
-        hint.setTextFormat(Qt.TextFormat.RichText)
-        hint.setWordWrap(True)
-
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Level:"))
         row1.addWidget(self._level)
@@ -116,7 +109,6 @@ class LogPanel(QGroupBox):
         row2.addWidget(copy)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(hint)
         lay.addLayout(row1)
         lay.addWidget(self._filter)
         lay.addLayout(row2)
