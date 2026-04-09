@@ -9,9 +9,7 @@
 > if you adapt the build script), a USB cable to your PC, Vivado
 > 2025.2 (or 2022.2+) with `hw_server` and `xsdb` on PATH, GTKWave
 > on PATH, and a working `fcapz` install per [chapter 02](02_install.md).
->
-> **What you don't need**: any RTL of your own.  This walkthrough
-> uses the reference design that ships with the repository.
+
 
 ## Step 1: build the reference bitstream
 

@@ -15,7 +15,7 @@ Xilinx ChipScope (now Vivado ILA/VIO), Intel SignalTap, and Lattice
 Reveal.  Those tools work well, but they lock you to one vendor, one
 toolchain, and one workflow.  fpgacapZero gives you the same
 capability — observe and drive signals on a running FPGA from a host
-PC over JTAG — without the lock-in.
+PC over JTAG — freely and without the lock-in.
 
 ## The four cores
 
@@ -102,9 +102,6 @@ A7-100T at ~5-8 KB/s with the batched-scan transport.  Full chapter:
 [chapter 07](07_ejtag_axi_bridge.md).
 
 ### 4. EJTAG-UART — JTAG-to-UART Bridge
-
-> **What it replaces**: Xilinx STDIO over JTAG (XSDB `mrd`/`mwr` games),
-> Intel system console serial pipe.
 
 This bridge gives the host PC a **bidirectional UART** to your design
 over JTAG, with TX and RX async FIFOs.  You can use it as a debug
