@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QSizePolicy,
     QStyle,
     QToolBar,
+    QWidget,
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult
@@ -402,45 +404,41 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main actions", self)
         tb.setObjectName("mainToolbar")
         tb.setMovable(True)
-        tb.setIconSize(QSize(22, 22))
+        # Icon-only avoids text+icon fighting for width on Windows styles (overlapping buttons).
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        tb.setIconSize(QSize(24, 24))
+        lay = tb.layout()
+        if lay is not None:
+            lay.setSpacing(6)
+            lay.setContentsMargins(4, 2, 4, 2)
+
         sty = self.style()
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
-            "Connect",
-            self._conn.request_connect,
-        )
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton),
-            "Disconnect",
-            self._on_disconnect,
-        )
+
+        def _tb_spacer(px: int = 8) -> QWidget:
+            w = QWidget()
+            w.setFixedWidth(px)
+            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.MinimumExpanding)
+            return w
+
+        def _add(icon_pixmap: QStyle.StandardPixmap, text: str, slot: object) -> None:
+            act = tb.addAction(sty.standardIcon(icon_pixmap), text, slot)
+            act.setToolTip(text)
+
+        _add(QStyle.StandardPixmap.SP_ComputerIcon, "Connect", self._conn.request_connect)
+        _add(QStyle.StandardPixmap.SP_DialogCancelButton, "Disconnect", self._on_disconnect)
+        tb.addWidget(_tb_spacer())
         tb.addSeparator()
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
+        _add(
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
             "Configure",
             self._on_configure,
         )
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_MediaPlay),
-            "Arm",
-            self._on_arm,
-        )
+        _add(QStyle.StandardPixmap.SP_MediaPlay, "Arm", self._on_arm)
+        tb.addWidget(_tb_spacer())
         tb.addSeparator()
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
-            "Capture",
-            self._on_capture_clicked,
-        )
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
-            "Continuous",
-            self._on_continuous_clicked,
-        )
-        tb.addAction(
-            sty.standardIcon(QStyle.StandardPixmap.SP_MediaStop),
-            "Stop",
-            self._on_stop_continuous,
-        )
+        _add(QStyle.StandardPixmap.SP_ArrowDown, "Capture", self._on_capture_clicked)
+        _add(QStyle.StandardPixmap.SP_BrowserReload, "Continuous", self._on_continuous_clicked)
+        _add(QStyle.StandardPixmap.SP_MediaStop, "Stop", self._on_stop_continuous)
         self.addToolBar(tb)
 
     def _schedule_ui_prefs_save(self) -> None:
