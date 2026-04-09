@@ -49,7 +49,7 @@ def _enter_successful_connect_mocks(ex: ExitStack, gui_path: Path) -> MagicMock:
     mock_transport = MagicMock(name="transport")
     ex.enter_context(
         patch(
-            "fcapz.gui.app_window.transport_from_connection",
+            "fcapz.gui.worker.transport_from_connection",
             return_value=mock_transport,
         ),
     )
@@ -82,7 +82,7 @@ def _enter_successful_connect_mocks(ex: ExitStack, gui_path: Path) -> MagicMock:
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture
 
-    ex.enter_context(patch("fcapz.gui.app_window.Analyzer", return_value=mock_an))
+    ex.enter_context(patch("fcapz.gui.worker.Analyzer", return_value=mock_an))
     return mock_an
 
 
@@ -141,7 +141,7 @@ def test_connect_failure_does_not_leave_analyzer(qtbot: Any, tmp_path: Path) -> 
         ex.enter_context(patch("fcapz.gui.app_window.save_gui_settings"))
         ex.enter_context(
             patch(
-                "fcapz.gui.app_window.transport_from_connection",
+                "fcapz.gui.worker.transport_from_connection",
                 side_effect=OSError("no cable"),
             ),
         )
@@ -150,5 +150,5 @@ def test_connect_failure_does_not_leave_analyzer(qtbot: Any, tmp_path: Path) -> 
         w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
         qtbot.addWidget(w)
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
-        QApplication.processEvents()
+        qtbot.waitUntil(lambda: w._connect_thread is None, timeout=5000)
         assert w._analyzer is None

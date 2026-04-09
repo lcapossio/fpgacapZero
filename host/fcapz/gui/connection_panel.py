@@ -120,6 +120,15 @@ class ConnectionPanel(QGroupBox):
         """Same as clicking Connect (runs validation, then emits ``connect_requested``)."""
         self._on_connect_clicked()
 
+    def set_connect_in_progress(self, busy: bool) -> None:
+        """Disable both buttons while an async connect attempt is running."""
+        if busy:
+            self._connect_btn.setEnabled(False)
+            self._disconnect_btn.setEnabled(False)
+        else:
+            self._connect_btn.setEnabled(not self._connected)
+            self._disconnect_btn.setEnabled(self._connected)
+
     def _validate(self) -> str | None:
         host = self._host.text().strip()
         if not host:

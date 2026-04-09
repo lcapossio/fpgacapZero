@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Background capture runs so the Qt UI stays responsive."""
+"""Background capture and connect so the Qt event loop stays responsive."""
 
 from __future__ import annotations
 
@@ -10,8 +10,11 @@ import logging
 from PySide6.QtCore import QObject, Signal
 
 from ..analyzer import Analyzer, CaptureConfig
+from .settings import ConnectionSettings
+from .transport_from_settings import transport_from_connection
 
 _log = logging.getLogger("fcapz.gui.capture")
+_conn_log = logging.getLogger("fcapz.gui.connect")
 
 
 class CaptureWorker(QObject):
@@ -57,3 +60,28 @@ class CaptureWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             _log.exception("Continuous capture failed")
             self.failed.emit(str(exc))
+
+
+class ConnectWorker(QObject):
+    """Background connect: build transport, ``Analyzer.connect()``, ``probe()``."""
+
+    finished = Signal(object, object)
+    """``(analyzer, probe_info)`` on success."""
+
+    failed = Signal(str)
+
+    def __init__(self, conn: ConnectionSettings) -> None:
+        super().__init__()
+        self._conn = conn
+
+    def run(self) -> None:
+        try:
+            transport = transport_from_connection(self._conn)
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            info = analyzer.probe()
+        except Exception as exc:  # noqa: BLE001 — surfaced via GUI
+            _conn_log.exception("Connect worker failed")
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(analyzer, info)

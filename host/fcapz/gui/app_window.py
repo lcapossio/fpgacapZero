@@ -9,10 +9,21 @@ import signal
 import sys
 from functools import partial
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
-from PySide6.QtCore import QByteArray, QMetaObject, QSettings, QSize, QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtCore import (
+    QByteArray,
+    QElapsedTimer,
+    QMetaObject,
+    QSettings,
+    QSize,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+)
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -48,9 +59,8 @@ from .settings import (
 )
 from .scroll_wrap import scroll_wrap
 from .settings_dialog import SettingsDialog
-from .transport_from_settings import transport_from_connection
 from .viewer_registry import viewers_for_settings
-from .worker import CaptureWorker
+from .worker import CaptureWorker, ConnectWorker
 
 _log = logging.getLogger("fcapz.gui")
 
@@ -112,6 +122,8 @@ class MainWindow(QMainWindow):
         self._analyzer: Analyzer | None = None
         self._cap_thread: QThread | None = None
         self._cap_worker: CaptureWorker | None = None
+        self._connect_thread: QThread | None = None
+        self._connect_worker: ConnectWorker | None = None
         self._continuous_mode = False
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
@@ -266,24 +278,35 @@ class MainWindow(QMainWindow):
         return self._cap_thread is not None and self._cap_thread.isRunning()
 
     def _on_connect(self) -> None:
+        if self._connect_thread is not None and self._connect_thread.isRunning():
+            return
         conn = self._conn.connection_settings()
         self.statusBar().showMessage("Connecting…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._conn.set_connect_in_progress(True)
+        _log.info("Connecting (backend=%s host=%s port=%s)", conn.backend, conn.host, conn.port)
 
-        try:
-            _log.info("Connecting (backend=%s host=%s port=%s)", conn.backend, conn.host, conn.port)
-            transport = transport_from_connection(conn)
-            analyzer = Analyzer(transport)
-            analyzer.connect()
-            info = analyzer.probe()
-        except Exception as exc:  # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage("Connect failed")
-            _log.error("Connection failed: %s", exc)
-            QMessageBox.critical(self, "Connection failed", str(exc))
-            return
+        thread = QThread()
+        worker = ConnectWorker(conn)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_connect_worker_finished)
+        worker.failed.connect(self._on_connect_worker_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._on_connect_thread_finished)
 
+        self._connect_thread = thread
+        self._connect_worker = worker
+        thread.start()
+
+    def _on_connect_worker_finished(
+        self,
+        analyzer: Analyzer,
+        info: Mapping[str, Any],
+    ) -> None:
         QApplication.restoreOverrideCursor()
+        conn = self._conn.connection_settings()
         _log.info(
             "Connected: %d-bit samples depth=%d trig_stages=%d",
             int(info.get("sample_width", 0)),
@@ -306,6 +329,34 @@ class MainWindow(QMainWindow):
         self._apply_viewer_choices(gui)
         self._capture.set_probe_profiles(gui.probe_profiles)
         self._capture.set_trigger_history(gui.trigger_history)
+
+    def _on_connect_worker_failed(self, message: str) -> None:
+        QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage("Connect failed")
+        _log.error("Connection failed: %s", message)
+        QMessageBox.critical(self, "Connection failed", message)
+
+    def _on_connect_thread_finished(self) -> None:
+        self._conn.set_connect_in_progress(False)
+        w, self._connect_worker = self._connect_worker, None
+        t, self._connect_thread = self._connect_thread, None
+        if w is not None:
+            w.deleteLater()
+        if t is not None:
+            t.deleteLater()
+
+    def _join_connect_thread(self) -> None:
+        """Wait for an in-flight connect without deadlocking the GUI thread."""
+        t = self._connect_thread
+        if t is None or not t.isRunning():
+            return
+        timer = QElapsedTimer()
+        timer.start()
+        while t.isRunning() and timer.elapsed() < 15_000:
+            QApplication.processEvents()
+            t.wait(50)
+        if t.isRunning():
+            _log.warning("Connect thread did not finish before window close")
 
     def _window_settings_path(self) -> Path:
         d = self._config_path.parent
@@ -883,6 +934,7 @@ class MainWindow(QMainWindow):
         if self._gui_log_handler is not None:
             logging.getLogger("fcapz").removeHandler(self._gui_log_handler)
             self._gui_log_handler = None
+        self._join_connect_thread()
         self._stop_capture_thread()
         if self._analyzer is not None:
             try:
@@ -954,10 +1006,10 @@ def _install_ctrl_c_quit(app: QApplication) -> tuple[QTimer, Any | None]:
 
 def run_app(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
-    app = QApplication(args)
-    app.setHighDpiScaleFactorRoundingPolicy(
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough,
     )
+    app = QApplication(args)
     app.setApplicationName("fcapz-gui")
     app.setOrganizationName("fpgacapzero")
     _wake, _win_cb = _install_ctrl_c_quit(app)
