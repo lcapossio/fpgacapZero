@@ -1,0 +1,182 @@
+# JTAG Register Map — v0.3.0
+
+## Overview
+Registers are memory-mapped via a simple JTAG-accessible address space. All registers are 32-bit.
+
+## Address Map
+- `0x0000`: `VERSION` (ro) - Core identity and version. `[15:0]` is the
+  ASCII core identifier `"LA"` (`0x4C41`, Logic Analyzer); `[23:16]` is
+  the minor version; `[31:24]` is the major version. Hosts must verify
+  the low-16 magic before trusting any other ELA register on this
+  chain. Current value: `0x0002_4C41` (major=0, minor=2, id="LA").
+- `0x0004`: `CTRL` (rw) - Control (arm, reset)
+- `0x0008`: `STATUS` (ro) - Status (armed, triggered, done)
+- `0x000C`: `SAMPLE_W` (ro) - Sample width in bits
+- `0x0010`: `DEPTH` (ro) - Total capture depth in samples
+- `0x0014`: `PRETRIG_LEN` (rw) - Pre-trigger samples
+- `0x0018`: `POSTTRIG_LEN` (rw) - Post-trigger samples
+- `0x001C`: `CAPTURE_LEN` (ro) - Captured sample count for current/last run
+- `0x0020`: `TRIG_MODE` (rw) - Trigger mode
+- `0x0024`: `TRIG_VALUE` (rw) - Compare value
+- `0x0028`: `TRIG_MASK` (rw) - Mask bits
+- `0x002C`: `BURST_PTR` (wo) - Write to initiate burst read from `start_ptr` via USER2
+- `0x0030`: `SQ_MODE` (rw) - Storage qualification mode (0=off, 1=value, 2=edge, 3=both; STOR_QUAL=1 only)
+- `0x0034`: `SQ_VALUE` (rw) - Storage qualification match value
+- `0x0038`: `SQ_MASK` (rw) - Storage qualification match mask
+- `0x00D4`: `TRIG_DELAY` (rw) - Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample is shifted N cycles after the trigger event, compensating for upstream pipeline latency. The pre/post-trigger sample counts and the buffer wrap behavior are unchanged — only the position of the "trigger" anchor moves forward.
+- `0x003C`: `FEATURES` (ro) - Feature flags: `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL
+- `0x0040+N*20+0`:  `SEQ_STAGE_N_CFG` (rw) - See encoding below
+- `0x0040+N*20+4`:  `SEQ_STAGE_N_VALUE_A` (rw) - Comparator A match value
+- `0x0040+N*20+8`:  `SEQ_STAGE_N_MASK_A` (rw) - Comparator A mask
+- `0x0040+N*20+12`: `SEQ_STAGE_N_VALUE_B` (rw) - Comparator B match value
+- `0x0040+N*20+16`: `SEQ_STAGE_N_MASK_B` (rw) - Comparator B mask
+
+### SEQ_STAGE_N_CFG encoding
+- `[3:0]`   comparator A mode
+- `[7:4]`   comparator B mode
+- `[9:8]`   combine (0=A only, 1=B only, 2=A AND B, 3=A OR B)
+- `[12]`    is_final (1 = this stage fires the trigger)
+- `[31:16]` occurrence count target
+
+### Compare modes (4 bits)
+| Value | Mode | Operation |
+|------:|------|-----------|
+| 0 | EQ | `(probe & mask) == (value & mask)` |
+| 1 | NEQ | `(probe & mask) != (value & mask)` |
+| 2 | LT | `(probe & mask) <  (value & mask)` unsigned |
+| 3 | GT | `(probe & mask) >  (value & mask)` unsigned |
+| 4 | LEQ | `(probe & mask) <= (value & mask)` unsigned |
+| 5 | GEQ | `(probe & mask) >= (value & mask)` unsigned |
+| 6 | RISING | masked bits: all-zero → non-zero |
+| 7 | FALLING | masked bits: non-zero → all-zero |
+| 8 | CHANGED | any masked bit changed from previous sample |
+- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1)
+
+## Bitfields
+### VERSION
+- [31:24] `major` (8-bit)
+- [23:16] `minor` (8-bit)
+- [15:0]  `core_id` — ASCII `"LA"` (`0x4C41`, Logic Analyzer) for the
+  fcapz ELA core. Constant per-instance; never zero on a valid
+  bitstream. Hosts use this as the core identity check.
+
+### CTRL
+- [0] `arm` (write 1 to arm)
+- [1] `reset` (write 1 to reset)
+- [31:2] reserved
+
+### STATUS
+- [0] `armed`
+- [1] `triggered`
+- [2] `done`
+- [3] `overflow`
+- [31:4] reserved
+
+### TRIG_MODE
+- [0] `value_match` (1 = compare TRIG_VALUE with mask)
+- [1] `edge_detect` (1 = detect rising edge)
+- [31:2] reserved
+
+## DATA Window Readout (USER1, per-word)
+- For SAMPLE_W <= 32: read from `0x0100 + (index * 4)` returns sample `index`, zero-padded.
+- For SAMPLE_W > 32: each sample spans `ceil(SAMPLE_W / 32)` consecutive 32-bit words.
+  Read `0x0100 + (index * words_per_sample + chunk) * 4` for chunk 0..N-1.
+  Chunk 0 = bits[31:0], chunk 1 = bits[63:32], etc.
+- Sample order is oldest to newest within the captured window.
+
+## Burst Readout (USER2, 256-bit DR)
+- Write any value to `BURST_PTR` (0x002C) via USER1 to start burst from `start_ptr`.
+- Switch IR to USER2 (0x03) and perform 256-bit DR scans.
+- Each scan returns `256 / SAMPLE_W` packed samples (e.g. 32 for 8-bit probes).
+- Read pointer auto-increments; staging buffer is pre-filled during SHIFT phase.
+- Throughput: ~49 KB/s actual sample data (0.64 ms/scan, limited by XSDB
+  overhead).  Measured on Arty A7 with onboard FT2232H via Xilinx
+  hw_server/XSDB (TCK up to 30 MHz).
+
+## EIO Core Register Map (USER3, CHAIN=3)
+
+The EIO core uses the same 49-bit DR protocol as the ELA control interface,
+but on a separate JTAG USER chain (CHAIN=3, IR=`0x04`) so it coexists with
+ELA USER1 and USER2.
+
+### Address Map
+- `0x0000`: `VERSION` (ro) — `{major[7:0], minor[7:0], core_id[15:0]}`,
+  where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as the
+  ELA core's VERSION at `0x0000`. Hosts must verify the low-16 magic.
+- `0x0004`: `EIO_IN_W` (ro) — Input probe width in bits
+- `0x0008`: `EIO_OUT_W` (ro) — Output probe width in bits
+- `0x0010 + i×4`: `IN[i]` (ro) — probe_in bits [(i+1)×32−1 : i×32], synchronised to jtag_clk via 2-FF
+- `0x0100 + i×4`: `OUT[i]` (rw) — probe_out bits [(i+1)×32−1 : i×32], in jtag_clk domain
+
+Number of IN words = ⌈IN_W / 32⌉; number of OUT words = ⌈OUT_W / 32⌉.
+
+### Clock domains
+- `probe_in` may be driven from any fabric clock. It passes through a 2-FF synchroniser into jtag_clk before being readable. For a debug/control tool this is acceptable.
+- `probe_out` lives entirely in jtag_clk. If connecting to fast logic in a different clock domain, add a synchroniser stage after the `fcapz_eio` output.
+
+### Reset behaviour
+On `jtag_rst`: all OUT registers are cleared to zero. IN registers are not affected (they reflect the synchronised fabric value).
+
+## EJTAG-AXI Bridge DR Format (USER4, CHAIN=4)
+
+The EJTAG-AXI bridge uses a 72-bit pipelined streaming DR. Each scan shifts
+in a new command and shifts out the result of the **previous** command — zero
+polling required.
+
+### Shift-in (host → FPGA), 72 bits LSB-first
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[31:0]` | addr | AXI address or config register address |
+| `[63:32]` | payload | Write data or burst config |
+| `[67:64]` | wstrb | AXI write strobes (byte enables) |
+| `[71:68]` | cmd | Command code (see table below) |
+
+### Shift-out (FPGA → host), 72 bits
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[31:0]` | rdata | Read data from previous command |
+| `[63:32]` | info | Additional info (address echo, burst count) |
+| `[65:64]` | resp | AXI response code (OKAY=0, SLVERR=2, DECERR=3) |
+| `[67:66]` | rsvd | Reserved |
+| `[71:68]` | status | Status bits (see below) |
+
+### Command table
+
+| Code | Mnemonic | Description |
+|-----:|----------|-------------|
+| 0x0 | NOP | No operation; retrieves previous result |
+| 0x1 | WRITE | Single AXI write at addr |
+| 0x2 | READ | Single AXI read at addr |
+| 0x3 | WRITE_INC | Write at auto-increment address |
+| 0x4 | READ_INC | Read at auto-increment address |
+| 0x5 | SET_ADDR | Set auto-increment base address |
+| 0x6 | BURST_SETUP | Configure burst (len, size, type in payload) |
+| 0x7 | BURST_WDATA | Push one word into burst write buffer |
+| 0x8 | BURST_RDATA | Pop one word from burst read FIFO |
+| 0x9 | BURST_RSTART | Initiate burst read (addr channel) |
+| 0xE | CONFIG | Read bridge config register (addr selects register) |
+| 0xF | RESET | Reset bridge state machines |
+
+### Status bits `[71:68]`
+
+| Bit | Meaning |
+|----:|---------|
+| 0 | `prev_valid` — rdata/resp are from a completed operation |
+| 1 | `busy` — AXI transaction in flight (should not normally be seen) |
+| 2 | `error` — sticky, last operation got non-OKAY AXI response |
+| 3 | `fifo_notempty` — burst read FIFO has data available |
+
+**Note:** Timeout applies only to AXI handshake waits (wready, bvalid,
+arready, rvalid). Inter-beat timing in burst writes is host-paced via
+JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
+delay — the host sends a priming `BURST_RDATA` before reading N words.
+
+### Config registers (CMD_CONFIG)
+
+| Address | Name | Value | Description |
+|---------|------|-------|-------------|
+| `0x0000` | BRIDGE_ID | `0x454A4158` | ASCII `"EJAX"` — identifies bridge core |
+| `0x0004` | VERSION | `0x00010000` | `{major[15:0], minor[15:0]}` |
+| `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |

@@ -696,11 +696,17 @@ fpgacapZero/
     test_host_stack.py     Python unit tests
     test_cli_rpc_events.py CLI, RPC, and event helper tests
     test_ejtaguart.py      EJTAG-UART controller unit tests
-  no_commit/specs/
-    architecture.md        Core block diagram
-    register_map.md        Register map specification
-    transport_api.md       Transport interface spec
-    waveform_schema.md     Export format spec
+  docs/
+    README.md              User-manual index (chapters 01_*–17_*)
+    01_overview.md         What fpgacapZero is, the four cores, vendor matrix
+    02_install.md          Python install, optional GUI extras, prereqs
+    03_first_capture.md    10-minute walkthrough on Arty A7
+    ...                    (see docs/README.md for the full chapter list)
+    specs/                 Canonical reference docs
+      architecture.md      Core block diagram
+      register_map.md      Register map specification (ground truth)
+      transport_api.md     Transport interface spec
+      waveform_schema.md   Export format spec
 ```
 
 ## Author
