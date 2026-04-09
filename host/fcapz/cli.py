@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from .analyzer import Analyzer, CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
 from .eio import EioController
@@ -150,7 +151,14 @@ def _make_transport(args: argparse.Namespace):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fcapz", description="fpgacapZero host CLI")
-    p.add_argument("--backend", choices=["openocd", "hw_server"], default="openocd")
+    p.add_argument(
+        "--gui-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to gui.toml (default: per-user fpgacapzero config directory)",
+    )
+    p.add_argument("--backend", choices=["openocd", "hw_server"], default="hw_server")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
@@ -237,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "trigger event to compensate for upstream pipeline latency."
             ),
         )
+        parser.add_argument(
+            "--profile",
+            default=None,
+            metavar="NAME",
+            help="Use named probe list from gui.toml section [probe_profiles.NAME]",
+        )
 
     cap.add_argument("--timeout", type=_positive_float, default=10.0)
     cap.add_argument("--out", required=True)
@@ -245,6 +259,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--summarize",
         action="store_true",
         help="Print LLM-friendly capture summary to stdout",
+    )
+    cap.add_argument(
+        "--open-in",
+        default=None,
+        metavar="VIEWER",
+        help=(
+            "After capture, open the dump in a waveform viewer (requires "
+            "--format vcd). Names: gtkwave, surfer, wavetrace, custom (needs "
+            "gui.toml custom_argv)."
+        ),
     )
 
     # -- EIO subcommands ---------------------------------------------------
@@ -492,6 +516,29 @@ def main() -> int:
             print("armed")
             return 0
 
+        if args.cmd in ("configure", "capture"):
+            profile_name = getattr(args, "profile", None)
+            if profile_name:
+                from .gui.settings import (
+                    apply_probe_profile,
+                    default_gui_config_path,
+                    load_gui_settings,
+                )
+
+                gpath = (
+                    args.gui_config
+                    if args.gui_config is not None
+                    else default_gui_config_path()
+                )
+                err = apply_probe_profile(
+                    args,
+                    profile_name=profile_name,
+                    settings=load_gui_settings(gpath),
+                )
+                if err:
+                    print(f"error: {err}", file=sys.stderr)
+                    return 2
+
         cfg = _build_config(args)
         analyzer.configure(cfg)
 
@@ -520,6 +567,61 @@ def main() -> int:
                     for probe in cfg.probes
                 ]
             print(json.dumps(summarize(result, probe_defs), indent=2))
+
+        open_in = getattr(args, "open_in", None)
+        if open_in:
+            if args.format != "vcd":
+                print("error: --open-in requires --format vcd", file=sys.stderr)
+                return 2
+            from pathlib import Path as _Path
+
+            from .gui.gtkw_writer import write_gtkw_for_capture
+            from .gui.settings import (
+                default_gui_config_path,
+                load_gui_settings,
+                viewer_executable_override,
+            )
+            from .gui.viewers import GtkWaveViewer, viewer_by_name
+
+            vcd = _Path(args.out)
+            gpath = args.gui_config if args.gui_config is not None else default_gui_config_path()
+            st_gui = load_gui_settings(gpath)
+            custom_argv = None
+            if open_in.strip().lower() in ("custom", "customcommand"):
+                custom_argv = list(st_gui.viewers.custom_argv)
+                if not custom_argv:
+                    print(
+                        "error: custom viewer requires viewers.custom_argv in gui.toml",
+                        file=sys.stderr,
+                    )
+                    return 2
+            try:
+                viewer = viewer_by_name(open_in, custom_argv=custom_argv)
+            except (KeyError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if isinstance(viewer, GtkWaveViewer):
+                ovr = viewer_executable_override(st_gui, "gtkwave")
+                if ovr is not None:
+                    viewer = GtkWaveViewer(executable=ovr)
+            if isinstance(viewer, GtkWaveViewer):
+                gtkw = vcd.with_suffix(".gtkw")
+                try:
+                    write_gtkw_for_capture(result, vcd, gtkw)
+                except OSError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                try:
+                    viewer.open(vcd, save_file=gtkw)
+                except (OSError, ValueError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+            else:
+                try:
+                    viewer.open(vcd)
+                except (OSError, ValueError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
 
         return 0
 

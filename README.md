@@ -142,12 +142,12 @@ openocd -f examples/arty_a7/arty_a7.cfg &
 fcapz --backend openocd --port 6666 probe
 ```
 
-Expected output:
+Sample output:
 
 ```json
 {
   "version_major": 0,
-  "version_minor": 2,
+  "version_minor": 3,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -201,7 +201,7 @@ fcapz [global options] <command> [command options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--backend` | `openocd` | `openocd` or `hw_server` |
+| `--backend` | `hw_server` | `openocd` or `hw_server` |
 | `--host` | `127.0.0.1` | Server address |
 | `--port` | `6666` | `6666` for OpenOCD, `3121` for hw_server |
 | `--tap` | `xc7a100t.tap` | JTAG TAP name |
@@ -472,7 +472,7 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — current value `0x0002_4C41` (major=0, minor=2, core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — (core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
 | `0x0004` | CTRL | W | bit 0 = arm, bit 1 = reset |
 | `0x0008` | STATUS | R | bit 0 = armed, 1 = triggered, 2 = done, 3 = overflow |
 | `0x000C` | SAMPLE_W | R | Sample width in bits |

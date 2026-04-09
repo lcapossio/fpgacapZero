@@ -84,6 +84,26 @@ class EjtagUartController:
             self._transport.close()
             raise
 
+    def attach(self) -> dict:
+        """Like :meth:`connect` but assume the transport is already open.
+
+        Restores JTAG chain 1 before returning. Does not close the transport on
+        failure.
+        """
+        self._transport.select_chain(self._chain)
+        try:
+            uid = self._config_read_u32(0x00)
+            if uid != self.UART_ID:
+                self._scan(cmd=self.CMD_NOP)
+                self._scan(cmd=self.CMD_NOP)
+                uid = self._config_read_u32(0x00)
+            if uid != self.UART_ID:
+                raise RuntimeError(f"Bad UART ID: 0x{uid:08X}")
+            version = self._config_read_u32(0x04)
+            return {"id": uid, "version": version}
+        finally:
+            self._transport.select_chain(1)
+
     def close(self) -> None:
         """Reset bridge, drain to ensure reset completes, close transport.
 

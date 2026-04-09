@@ -37,7 +37,7 @@ class RpcServer:
         return self._analyzer
 
     def _build_transport(self, req: Dict[str, Any]):
-        backend = req.get("backend", "openocd")
+        backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
         if backend == "openocd":
             return OpenOcdTransport(

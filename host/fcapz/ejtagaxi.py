@@ -141,6 +141,32 @@ class EjtagAxiController:
             "fifo_depth": self._fifo_depth,
         }
 
+    def attach(self) -> dict:
+        """Like :meth:`connect` but assume the transport is already open.
+
+        Restores JTAG chain 1 (ELA) before returning so a shared session can
+        continue using USER1 register access.
+        """
+        self._transport.select_chain(self._chain)
+        try:
+            self._scan(CMD_CONFIG, addr=0x0000)
+            _, _, bridge_id, _ = self._scan(CMD_CONFIG, addr=0x0004)
+            _, _, version, _ = self._scan(CMD_CONFIG, addr=0x002C)
+            _, _, features, _ = self._scan(CMD_NOP)
+            if bridge_id != _BRIDGE_ID:
+                raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
+            self._fifo_depth = ((features >> 16) & 0xFF) + 1
+            return {
+                "bridge_id": bridge_id,
+                "version_major": version >> 16,
+                "version_minor": version & 0xFFFF,
+                "addr_w": features & 0xFF,
+                "data_w": (features >> 8) & 0xFF,
+                "fifo_depth": self._fifo_depth,
+            }
+        finally:
+            self._transport.select_chain(1)
+
     def axi_write(self, addr: int, data: int, wstrb: int = 0xF) -> int:
         """Single AXI write. 2 scans. Returns resp code."""
         self._scan(CMD_WRITE, addr=addr, payload=data, wstrb=wstrb)

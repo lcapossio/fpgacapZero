@@ -50,6 +50,11 @@ class EioController:
         self.version_minor: int = 0
         self.core_id: int = 0
 
+    @property
+    def bscan_chain(self) -> int:
+        """BSCANE2 USER chain index used for this core (default 3 = USER3)."""
+        return self._chain
+
     # ------------------------------------------------------------------
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
@@ -77,6 +82,31 @@ class EioController:
         self.core_id = core_id
         self.in_w  = self._t.read_reg(_ADDR_IN_W)
         self.out_w = self._t.read_reg(_ADDR_OUT_W)
+
+    def attach(self) -> None:
+        """Use an already-connected transport (e.g. shared with the ELA analyzer).
+
+        Selects the EIO USER chain, verifies identity, reads widths, then restores
+        chain 1 (ELA / USER1) before returning. Does not call :meth:`Transport.connect`
+        or :meth:`Transport.close`.
+        """
+        self._t.select_chain(self._chain)
+        try:
+            version = int(self._t.read_reg(_ADDR_VERSION))
+            core_id = version & 0xFFFF
+            if core_id != EIO_CORE_ID:
+                raise RuntimeError(
+                    f"EIO core identity check failed at VERSION[15:0]: "
+                    f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
+                    f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+                )
+            self.version_major = (version >> 24) & 0xFF
+            self.version_minor = (version >> 16) & 0xFF
+            self.core_id = core_id
+            self.in_w = self._t.read_reg(_ADDR_IN_W)
+            self.out_w = self._t.read_reg(_ADDR_OUT_W)
+        finally:
+            self._t.select_chain(1)
 
     def close(self) -> None:
         self._t.close()
