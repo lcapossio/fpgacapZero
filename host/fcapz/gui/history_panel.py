@@ -326,7 +326,7 @@ class HistoryPanel(QGroupBox):
             from ..analyzer import Analyzer
             from ..transport import VendorStubTransport
 
-            a = Analyzer(VendorStubTransport())
+            a = Analyzer(VendorStubTransport("export-only"))
         try:
             if fmt == "json":
                 a.write_json(ent.result, path)
