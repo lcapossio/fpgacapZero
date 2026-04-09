@@ -28,6 +28,7 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.port, 7777)
         self.assertEqual(t.tap, "foo.tap")
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_US)
+        self.assertEqual(t._connect_timeout_sec, 60.0)
 
     def test_hw_server_port_remap_and_fpga_name(self) -> None:
         c = ConnectionSettings(
@@ -42,12 +43,24 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertIsInstance(t, XilinxHwServerTransport)
         self.assertEqual(t.port, 3121)
         self.assertEqual(t.fpga_name, "xc7a35t")
+        self.assertEqual(t.ready_probe_timeout, 2.0)
 
     def test_hw_server_tap_without_suffix(self) -> None:
         c = ConnectionSettings(backend="hw_server", tap="myfpga")
         t = transport_from_connection(c)
         self.assertIsInstance(t, XilinxHwServerTransport)
         self.assertEqual(t.fpga_name, "myfpga")
+
+    def test_hw_server_ready_timeout_when_program_set(self) -> None:
+        c = ConnectionSettings(
+            backend="hw_server",
+            tap="xc7a100t",
+            program="/tmp/x.bit",
+            hw_ready_timeout_sec=90.0,
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, XilinxHwServerTransport)
+        self.assertEqual(t.ready_probe_timeout, 90.0)
 
     def test_unknown_backend(self) -> None:
         c = ConnectionSettings(backend="nope")

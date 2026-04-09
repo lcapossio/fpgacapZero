@@ -49,6 +49,10 @@ class ConnectionSettings:
     tap: str = "xc7a100t.tap"
     program: str | None = None
     ir_table: str = "xilinx7"
+    #: OpenOCD TCP ``create_connection`` timeout (seconds).
+    connect_timeout_sec: float = 60.0
+    #: After ``fpga -file``, poll until VERSION non-zero (seconds); GUI default is patient.
+    hw_ready_timeout_sec: float = 60.0
 
 
 @dataclass
@@ -120,6 +124,8 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         tap=str(conn_raw.get("tap", "xc7a100t.tap")),
         program=program,
         ir_table=str(conn_raw.get("ir_table", "xilinx7")),
+        connect_timeout_sec=float(conn_raw.get("connect_timeout_sec", 60.0)),
+        hw_ready_timeout_sec=float(conn_raw.get("hw_ready_timeout_sec", 60.0)),
     )
 
     vraw = dict(data.get("viewers") or {})
@@ -181,6 +187,8 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "tap": settings.connection.tap,
             "program": _none_to_str(settings.connection.program),
             "ir_table": settings.connection.ir_table,
+            "connect_timeout_sec": settings.connection.connect_timeout_sec,
+            "hw_ready_timeout_sec": settings.connection.hw_ready_timeout_sec,
         },
         "viewers": {
             "default": settings.viewers.default_viewer,

@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self._conn = ConnectionPanel()
         self._conn.connect_requested.connect(self._on_connect)
         self._conn.disconnect_requested.connect(self._on_disconnect)
+        self._conn.connect_cancel_requested.connect(self._on_cancel_connect_requested)
 
         self._probe = ProbePanel()
         self._capture = CapturePanel()
@@ -292,8 +293,10 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_connect_worker_finished)
         worker.failed.connect(self._on_connect_worker_failed)
+        worker.cancelled.connect(self._on_connect_worker_cancelled)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._on_connect_thread_finished)
 
         self._connect_thread = thread
@@ -335,6 +338,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Connect failed")
         _log.error("Connection failed: %s", message)
         QMessageBox.critical(self, "Connection failed", message)
+
+    def _on_cancel_connect_requested(self) -> None:
+        if self._connect_worker is not None:
+            self._connect_worker.request_cancel()
+
+    def _on_connect_worker_cancelled(self) -> None:
+        QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage("Connect cancelled")
+        _log.info("Connect cancelled")
+        QMessageBox.information(
+            self,
+            "Connect cancelled",
+            "The connect attempt was stopped.\n\n"
+            "If hw_server or OpenOCD was hung, TCP/JTAG can take a few seconds to release "
+            "before you connect again.",
+        )
 
     def _on_connect_thread_finished(self) -> None:
         self._conn.set_connect_in_progress(False)
@@ -946,6 +965,8 @@ class MainWindow(QMainWindow):
         if self._gui_log_handler is not None:
             logging.getLogger("fcapz").removeHandler(self._gui_log_handler)
             self._gui_log_handler = None
+        if self._connect_worker is not None:
+            self._connect_worker.request_cancel()
         self._join_connect_thread()
         self._stop_capture_thread()
         if self._analyzer is not None:

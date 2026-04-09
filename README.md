@@ -146,6 +146,12 @@ stores main-window geometry, dock/tab layout, expandable section state, and any
 dock supports level filter, substring search, optional stderr mirroring, and
 Clear / Copy all from the **File** menu.
 
+Connect runs in the background; **Cancel** stops the attempt by closing the
+transport (TCP/JTAG may take a moment to unwind if the server hung). The
+Connection panel sets **Connect timeout** (OpenOCD TCP, seconds) and **HW ready
+timeout** (after programming a `.bit`, seconds); both are stored in `gui.toml`
+under `[connection]` as `connect_timeout_sec` and `hw_ready_timeout_sec`.
+
 CLI capture can spawn a viewer after export (VCD only):
 
 ```bash

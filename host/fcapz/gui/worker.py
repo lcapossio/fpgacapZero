@@ -10,6 +10,7 @@ import logging
 from PySide6.QtCore import QObject, Signal
 
 from ..analyzer import Analyzer, CaptureConfig
+from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
 from .transport_from_settings import transport_from_connection
 
@@ -69,19 +70,55 @@ class ConnectWorker(QObject):
     """``(analyzer, probe_info)`` on success."""
 
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, conn: ConnectionSettings) -> None:
         super().__init__()
         self._conn = conn
+        self._cancel_requested = False
+        self._transport: object | None = None
+
+    def request_cancel(self) -> None:
+        """Ask the worker to stop; closes the transport from any thread (may unblock I/O)."""
+        self._cancel_requested = True
+        t = self._transport
+        if t is not None:
+            try:
+                close = getattr(t, "close", None)
+                if callable(close):
+                    close()
+            except OSError:
+                pass
 
     def run(self) -> None:
+        if self._cancel_requested:
+            self.cancelled.emit()
+            return
+        analyzer: Analyzer | None = None
         try:
             transport = transport_from_connection(self._conn)
+            self._transport = transport
+            if self._cancel_requested:
+                transport.close()
+                self.cancelled.emit()
+                return
             analyzer = Analyzer(transport)
             analyzer.connect()
+            if self._cancel_requested:
+                analyzer.close()
+                self.cancelled.emit()
+                return
             info = analyzer.probe()
         except Exception as exc:  # noqa: BLE001 — surfaced via GUI
+            if self._cancel_requested:
+                if analyzer is not None:
+                    try:
+                        analyzer.close()
+                    except OSError:
+                        pass
+                self.cancelled.emit()
+                return
             _conn_log.exception("Connect worker failed")
-            self.failed.emit(str(exc))
+            self.failed.emit(format_connect_error(exc, self._conn))
             return
         self.finished.emit(analyzer, info)

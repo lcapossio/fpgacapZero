@@ -59,6 +59,19 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             self.assertEqual(loaded.probe_profiles["demo"].probes, "clk:1:0,data:8:1")
             self.assertEqual(len(loaded.trigger_history), 1)
             self.assertEqual(loaded.trigger_history[0]["pretrigger"], 4)
+            self.assertEqual(loaded.connection.connect_timeout_sec, 60.0)
+            self.assertEqual(loaded.connection.hw_ready_timeout_sec, 60.0)
+
+    def test_connection_timeouts_roundtrip(self) -> None:
+        s = GuiSettings()
+        s.connection.connect_timeout_sec = 42.0
+        s.connection.hw_ready_timeout_sec = 99.0
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gui.toml"
+            save_gui_settings(s, path)
+            loaded = load_gui_settings(path)
+            self.assertEqual(loaded.connection.connect_timeout_sec, 42.0)
+            self.assertEqual(loaded.connection.hw_ready_timeout_sec, 99.0)
 
     def test_missing_file_is_default(self) -> None:
         p = Path("__no_such_gui__.toml")
