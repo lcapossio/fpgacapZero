@@ -117,6 +117,34 @@ class TestTriggerHistory(unittest.TestCase):
         self.assertEqual(len(g.trigger_history), 10)
         self.assertEqual(g.trigger_history[0]["i"], 14)
 
+    def test_save_load_preserves_empty_trigger_sequence(self) -> None:
+        """tomli_w cannot encode None; entries use [] when no sequencer."""
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=255),
+            sample_width=8,
+            depth=512,
+            sample_clock_hz=50_000_000,
+            probes=[],
+            channel=0,
+            decimation=0,
+            ext_trigger_mode=0,
+            sequence=None,
+            probe_sel=0,
+            stor_qual_mode=0,
+            stor_qual_value=0,
+            stor_qual_mask=0,
+            trigger_delay=0,
+        )
+        g = GuiSettings()
+        append_trigger_history(g, trigger_history_entry_from_config(cfg))
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gui.toml"
+            save_gui_settings(g, path)
+            loaded = load_gui_settings(path)
+        self.assertEqual(loaded.trigger_history[0].get("trigger_sequence"), [])
+
 
 class TestFromMapping(unittest.TestCase):
     def test_probe_profiles_table(self) -> None:
@@ -167,7 +195,7 @@ class TestTriggerHistoryEntry(unittest.TestCase):
         self.assertEqual(d["probes"], "lo:4:0")
         self.assertEqual(d["probe_sel"], 2)
         self.assertEqual(d["trigger_delay"], 3)
-        self.assertIsNone(d["trigger_sequence"])
+        self.assertEqual(d["trigger_sequence"], [])
 
     def test_serializes_trigger_sequence_when_set(self) -> None:
         cfg = CaptureConfig(

@@ -268,25 +268,21 @@ def trigger_history_entry_from_config(cfg: CaptureConfig) -> dict[str, Any]:
         "stor_qual_mask": int(cfg.stor_qual_mask),
         "trigger_delay": int(cfg.trigger_delay),
         "probes": probes,
-        "trigger_sequence": (
-            [
-                {
-                    "cmp_a": int(s.cmp_mode_a),
-                    "cmp_b": int(s.cmp_mode_b),
-                    "combine": int(s.combine),
-                    "next_state": int(s.next_state),
-                    "is_final": bool(s.is_final),
-                    "count": int(s.count_target),
-                    "value_a": int(s.value_a),
-                    "mask_a": int(s.mask_a),
-                    "value_b": int(s.value_b),
-                    "mask_b": int(s.mask_b),
-                }
-                for s in cfg.sequence
-            ]
-            if cfg.sequence
-            else None
-        ),
+        "trigger_sequence": [
+            {
+                "cmp_a": int(s.cmp_mode_a),
+                "cmp_b": int(s.cmp_mode_b),
+                "combine": int(s.combine),
+                "next_state": int(s.next_state),
+                "is_final": bool(s.is_final),
+                "count": int(s.count_target),
+                "value_a": int(s.value_a),
+                "mask_a": int(s.mask_a),
+                "value_b": int(s.value_b),
+                "mask_b": int(s.mask_b),
+            }
+            for s in (cfg.sequence or [])
+        ],
     }
 
 
