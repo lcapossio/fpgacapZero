@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fcapz.analyzer import CaptureConfig, ProbeSpec, TriggerConfig
+from fcapz.analyzer import CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
 from fcapz.gui.settings import (
     GuiSettings,
     ProbeProfile,
@@ -150,6 +150,49 @@ class TestTriggerHistoryEntry(unittest.TestCase):
         self.assertEqual(d["probes"], "lo:4:0")
         self.assertEqual(d["probe_sel"], 2)
         self.assertEqual(d["trigger_delay"], 3)
+        self.assertIsNone(d["trigger_sequence"])
+
+    def test_serializes_trigger_sequence_when_set(self) -> None:
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=255),
+            sample_width=8,
+            depth=512,
+            sample_clock_hz=100_000_000,
+            probes=[],
+            channel=0,
+            decimation=0,
+            ext_trigger_mode=0,
+            sequence=[
+                SequencerStage(
+                    cmp_mode_a=1,
+                    cmp_mode_b=0,
+                    combine=2,
+                    next_state=1,
+                    is_final=True,
+                    count_target=3,
+                    value_a=0x10,
+                    mask_a=0xFF,
+                    value_b=0,
+                    mask_b=0xFFFFFFFF,
+                ),
+            ],
+            probe_sel=0,
+            stor_qual_mode=0,
+            stor_qual_value=0,
+            stor_qual_mask=0,
+            trigger_delay=0,
+        )
+        d = trigger_history_entry_from_config(cfg)
+        self.assertIsInstance(d["trigger_sequence"], list)
+        self.assertEqual(len(d["trigger_sequence"]), 1)
+        s0 = d["trigger_sequence"][0]
+        self.assertEqual(s0["cmp_a"], 1)
+        self.assertEqual(s0["combine"], 2)
+        self.assertEqual(s0["count"], 3)
+        self.assertTrue(s0["is_final"])
+        self.assertEqual(s0["value_a"], 0x10)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ except ImportError:
     _HAVE_PYSIDE = False
 
 if _HAVE_PYSIDE:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QCheckBox, QLineEdit, QTableWidget
 
     from fcapz.gui.capture_panel import CapturePanel
 
@@ -59,6 +59,92 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
         self.assertEqual(cfg.ext_trigger_mode, 1)
         self.assertEqual(len(cfg.probes), 1)
         self.assertEqual(cfg.probes[0].name, "a")
+
+    def test_build_capture_config_sequencer_disabled_no_sequence(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {
+                "sample_width": 8,
+                "depth": 1024,
+                "num_channels": 1,
+                "trig_stages": 4,
+            },
+        )
+        cfg = p.build_capture_config()
+        self.assertIsNone(cfg.sequence)
+
+    def test_build_capture_config_with_sequencer(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {
+                "sample_width": 8,
+                "depth": 1024,
+                "num_channels": 1,
+                "trig_stages": 2,
+            },
+        )
+        enable = p.findChild(QCheckBox, "fcapz_capture_seq_enable")
+        self.assertIsNotNone(enable)
+        enable.setChecked(True)
+        table = p.findChild(QTableWidget, "fcapz_capture_seq_table")
+        self.assertIsNotNone(table)
+        self.assertEqual(table.rowCount(), 1)
+        va = table.cellWidget(0, 6)
+        self.assertIsInstance(va, QLineEdit)
+        va.setText("0x10")
+        cfg = p.build_capture_config()
+        self.assertIsNotNone(cfg.sequence)
+        self.assertEqual(len(cfg.sequence), 1)
+        self.assertEqual(cfg.sequence[0].value_a, 0x10)
+
+    def test_apply_trigger_history_restores_sequence(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {
+                "sample_width": 8,
+                "depth": 1024,
+                "num_channels": 1,
+                "trig_stages": 2,
+            },
+        )
+        p.apply_trigger_history_entry(
+            {
+                "pretrigger": 1,
+                "posttrigger": 2,
+                "trigger_mode": "value_match",
+                "trigger_value": 0,
+                "trigger_mask": 255,
+                "sample_clock_hz": 100_000_000,
+                "channel": 0,
+                "decimation": 0,
+                "probe_sel": 0,
+                "ext_trigger_mode": "disabled",
+                "stor_qual_mode": 0,
+                "stor_qual_value": 0,
+                "stor_qual_mask": 0,
+                "trigger_delay": 0,
+                "probes": "",
+                "trigger_sequence": [
+                    {
+                        "cmp_a": 2,
+                        "cmp_b": 0,
+                        "combine": 0,
+                        "next_state": 0,
+                        "is_final": True,
+                        "count": 5,
+                        "value_a": 3,
+                        "mask_a": 0xF0,
+                        "value_b": 0,
+                        "mask_b": 0xFFFFFFFF,
+                    },
+                ],
+            },
+        )
+        cfg = p.build_capture_config()
+        self.assertIsNotNone(cfg.sequence)
+        self.assertEqual(cfg.sequence[0].cmp_mode_a, 2)
+        self.assertEqual(cfg.sequence[0].count_target, 5)
+        self.assertTrue(cfg.sequence[0].is_final)
 
 
 if __name__ == "__main__":

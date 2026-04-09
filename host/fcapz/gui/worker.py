@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, Signal
 
 from ..analyzer import Analyzer, CaptureConfig
+
+_log = logging.getLogger("fcapz.gui.capture")
 
 
 class CaptureWorker(QObject):
@@ -38,6 +42,7 @@ class CaptureWorker(QObject):
             result = self._analyzer.capture(timeout)
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 — surfaced via GUI
+            _log.exception("Single capture failed")
             self.failed.emit(str(exc))
 
     def run_continuous(self, cfg: CaptureConfig, timeout: float) -> None:
@@ -50,4 +55,5 @@ class CaptureWorker(QObject):
                 self.progress.emit(result)
             self.finished.emit(None)
         except Exception as exc:  # noqa: BLE001
+            _log.exception("Continuous capture failed")
             self.failed.emit(str(exc))

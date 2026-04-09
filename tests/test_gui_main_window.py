@@ -68,6 +68,7 @@ def _enter_successful_connect_mocks(ex: ExitStack, gui_path: Path) -> MagicMock:
         "timestamp_width": 32,
         "num_segments": 4,
         "probe_mux_w": 0,
+        "trig_stages": 4,
     }
     mock_an.transport = mock_transport
     last_cfg: dict = {}
@@ -92,7 +93,7 @@ def test_connect_and_disconnect_mocked(qtbot: Any, tmp_path: Path) -> None:
         _enter_successful_connect_mocks(ex, gui_path)
         ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
 
-        w = MainWindow()
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
         qtbot.addWidget(w)
 
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
@@ -111,7 +112,7 @@ def test_single_capture_updates_history_mocked(qtbot: Any, tmp_path: Path) -> No
         for meth in ("critical", "warning", "about"):
             ex.enter_context(patch(f"fcapz.gui.app_window.QMessageBox.{meth}"))
 
-        w = MainWindow()
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
         qtbot.addWidget(w)
 
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
@@ -146,7 +147,7 @@ def test_connect_failure_does_not_leave_analyzer(qtbot: Any, tmp_path: Path) -> 
         )
         ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
 
-        w = MainWindow()
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
         qtbot.addWidget(w)
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
         QApplication.processEvents()
