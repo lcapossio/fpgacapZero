@@ -80,16 +80,16 @@ class LogPanel(QWidget):
         ):
             self._level.addItem(label, lev)
         self._level.setCurrentIndex(1)
-        self._level.setMaximumWidth(88)
-        self._level.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon,
-        )
+        self._level.setMinimumContentsLength(8)
+        self._level.setMinimumWidth(120)
+        self._level.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._level.setToolTip("Minimum log level shown in this panel")
         self._level.currentIndexChanged.connect(self._on_level_changed)
 
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter…")
-        self._filter.setMaximumWidth(200)
+        self._filter.setMinimumWidth(280)
+        self._filter.setMaximumWidth(520)
         self._filter.textChanged.connect(lambda _: self._refresh_display())
 
         self._mirror_stderr = QCheckBox("Stderr")
@@ -112,8 +112,7 @@ class LogPanel(QWidget):
         row1.setSpacing(4)
         row1.addWidget(QLabel("Lv."))
         row1.addWidget(self._level)
-        row1.addWidget(self._filter)
-        row1.addStretch(1)
+        row1.addWidget(self._filter, stretch=1)
         row1.addWidget(self._mirror_stderr)
 
         row2 = QHBoxLayout()
