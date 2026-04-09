@@ -14,12 +14,12 @@ from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -48,11 +48,11 @@ class QtGuiLogHandler(logging.Handler):
             self.handleError(record)
 
 
-class LogPanel(QGroupBox):
+class LogPanel(QWidget):
     """Read-only log for ``fcapz``; filter, level, and optional stderr mirror."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Log", parent)
+        super().__init__(parent)
         self._signaler = _LogSignaler()
         self._signaler.line.connect(self._on_line_received)
 
@@ -66,9 +66,10 @@ class LogPanel(QGroupBox):
         self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         font = self._edit.font()
         font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(max(8, font.pointSize() - 1))
+        font.setPointSize(max(7, font.pointSize() - 2))
         self._edit.setFont(font)
-        self._edit.setMinimumHeight(64)
+        self._edit.setMinimumHeight(40)
+        self._edit.document().setDocumentMargin(2)
 
         self._level = QComboBox()
         for label, lev in (
@@ -79,40 +80,55 @@ class LogPanel(QGroupBox):
         ):
             self._level.addItem(label, lev)
         self._level.setCurrentIndex(1)
+        self._level.setMaximumWidth(88)
+        self._level.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self._level.setToolTip("Minimum log level shown in this panel")
         self._level.currentIndexChanged.connect(self._on_level_changed)
 
         self._filter = QLineEdit()
-        self._filter.setPlaceholderText("Filter lines (substring, case-insensitive)…")
+        self._filter.setPlaceholderText("Filter…")
+        self._filter.setMaximumHeight(24)
         self._filter.textChanged.connect(lambda _: self._refresh_display())
 
-        self._mirror_stderr = QCheckBox("Mirror to stderr")
+        self._mirror_stderr = QCheckBox("Stderr")
+        self._mirror_stderr.setToolTip("Mirror log lines to stderr")
         self._mirror_stderr.toggled.connect(self._on_mirror_stderr_toggled)
 
-        self._autoscroll = QCheckBox("Auto-scroll")
+        self._autoscroll = QCheckBox("Tail")
+        self._autoscroll.setToolTip("Auto-scroll to newest lines")
         self._autoscroll.setChecked(True)
 
         clear = QPushButton("Clear")
+        clear.setMaximumHeight(24)
         clear.clicked.connect(self.clear)
-        copy = QPushButton("Copy all")
+        copy = QPushButton("Copy")
+        copy.setMaximumHeight(24)
+        copy.setToolTip("Copy all visible log text")
         copy.clicked.connect(self._copy_all)
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Level:"))
+        row1.setSpacing(4)
+        row1.addWidget(QLabel("Lv."))
         row1.addWidget(self._level)
-        row1.addStretch(1)
+        row1.addWidget(self._filter, stretch=1)
         row1.addWidget(self._mirror_stderr)
 
         row2 = QHBoxLayout()
+        row2.setSpacing(4)
         row2.addWidget(self._autoscroll)
         row2.addStretch(1)
         row2.addWidget(clear)
         row2.addWidget(copy)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
         lay.addLayout(row1)
-        lay.addWidget(self._filter)
         lay.addLayout(row2)
         lay.addWidget(self._edit, stretch=1)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_qt_handler(self, handler: QtGuiLogHandler) -> None:
         self._qt_handler = handler

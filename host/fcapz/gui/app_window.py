@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
         self._dock_log = QDockWidget("Log", self)
         self._dock_log.setObjectName("dock_log")
         self._dock_log.setWidget(
-            scroll_wrap(self._log_panel, min_width=260, min_height=160),
+            scroll_wrap(self._log_panel, min_width=220, min_height=100),
         )
         self._dock_log.setFeatures(_DOCK_FEATURES)
 
@@ -406,7 +406,7 @@ class MainWindow(QMainWindow):
             self.resizeDocks([top_rep], [h_top], Qt.Orientation.Vertical)
 
         if self._dock_log.isVisible() and not self._dock_log.isFloating():
-            h_bottom = max(120, min(360, h // 4))
+            h_bottom = max(88, min(280, h // 5))
             self.resizeDocks([self._dock_log], [h_bottom], Qt.Orientation.Vertical)
 
     def _apply_post_show_layout(self) -> None:
