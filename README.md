@@ -14,6 +14,11 @@ UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**, and
 **Gowin** in both Verilog and VHDL. The core RTL and Python host stack
 are fully portable.
 
+📖 **[User manual](docs/README.md)** — full walkthrough of the RTL cores,
+host stack, CLI, RPC server, and desktop GUI, plus canonical
+[register map](docs/specs/register_map.md) and
+[transport API](docs/specs/transport_api.md) specs.
+
 ## Contents
 
 - [Features](#features)
