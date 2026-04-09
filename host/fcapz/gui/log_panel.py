@@ -89,7 +89,7 @@ class LogPanel(QWidget):
 
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter…")
-        self._filter.setMaximumHeight(24)
+        self._filter.setMaximumWidth(200)
         self._filter.textChanged.connect(lambda _: self._refresh_display())
 
         self._mirror_stderr = QCheckBox("Stderr")
@@ -101,10 +101,10 @@ class LogPanel(QWidget):
         self._autoscroll.setChecked(True)
 
         clear = QPushButton("Clear")
-        clear.setMaximumHeight(24)
+        clear.setMinimumSize(72, 28)
         clear.clicked.connect(self.clear)
         copy = QPushButton("Copy")
-        copy.setMaximumHeight(24)
+        copy.setMinimumSize(72, 28)
         copy.setToolTip("Copy all visible log text")
         copy.clicked.connect(self._copy_all)
 
@@ -112,7 +112,8 @@ class LogPanel(QWidget):
         row1.setSpacing(4)
         row1.addWidget(QLabel("Lv."))
         row1.addWidget(self._level)
-        row1.addWidget(self._filter, stretch=1)
+        row1.addWidget(self._filter)
+        row1.addStretch(1)
         row1.addWidget(self._mirror_stderr)
 
         row2 = QHBoxLayout()
