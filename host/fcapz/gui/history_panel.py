@@ -34,6 +34,7 @@ from ..analyzer import Analyzer, CaptureResult
 from .gtkw_writer import write_gtkw_for_capture
 from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
+from .viewer_tile import schedule_vertical_split_with_viewer
 from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
 
@@ -365,6 +366,7 @@ class HistoryPanel(QGroupBox):
             self._viewer_processes.append(proc)
             self._last_viewer_program = prog_resolved
             self.status_message.emit(f"Started {viewer_label} (separate window)")
+            schedule_vertical_split_with_viewer(self, proc)
 
         def _on_error(_e: QProcess.ProcessError) -> None:
             err = (proc.errorString() or "Viewer failed to start").strip()
