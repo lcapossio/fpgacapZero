@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
 
 from ..analyzer import Analyzer, CaptureResult
 from .gtkw_writer import write_gtkw_for_capture
-from .viewers import GtkWaveViewer, WaveformViewer
+from .surfer_command_writer import write_surfer_command_file_for_capture
+from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
 
 
@@ -156,7 +157,7 @@ class HistoryPanel(QGroupBox):
     def _sync_buttons(self) -> None:
         has_row = self.selected_entry() is not None
         has_viewer = self._viewer_combo.count() > 0
-        can_export = has_row and self._analyzer_ref is not None
+        can_export = has_row
         self._open_btn.setEnabled(has_row and has_viewer)
         self._exp_json.setEnabled(can_export)
         self._exp_csv.setEnabled(can_export)
@@ -186,6 +187,13 @@ class HistoryPanel(QGroupBox):
                 save_path = gtkw
             except OSError as exc:
                 QMessageBox.warning(self, "GTKWave layout", str(exc))
+        elif isinstance(viewer, SurferViewer):
+            scmd = ent.work_dir / "capture.surfer.txt"
+            try:
+                write_surfer_command_file_for_capture(ent.result, scmd)
+                save_path = scmd
+            except OSError as exc:
+                QMessageBox.warning(self, "Surfer command file", str(exc))
         try:
             viewer.open(ent.vcd_path, save_file=save_path)
         except OSError as exc:
@@ -195,13 +203,18 @@ class HistoryPanel(QGroupBox):
 
     def _export_format(self, fmt: str) -> None:
         ent = self.selected_entry()
-        if ent is None or self._analyzer_ref is None:
+        if ent is None:
             return
         filt = {"json": "JSON (*.json)", "csv": "CSV (*.csv)", "vcd": "VCD (*.vcd)"}[fmt]
         path, _ = QFileDialog.getSaveFileName(self, f"Export {fmt.upper()}", "", filt)
         if not path:
             return
         a = self._analyzer_ref
+        if a is None:
+            from ..analyzer import Analyzer
+            from ..transport import VendorStubTransport
+
+            a = Analyzer(VendorStubTransport())
         try:
             if fmt == "json":
                 a.write_json(ent.result, path)

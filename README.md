@@ -24,6 +24,7 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
 - [Features](#features)
 - [Support status](#support-status)
 - [Quick start](#quick-start)
+  - [Desktop GUI (fcapz-gui)](#desktop-gui-fcapz-gui)
 - [Usage](#usage)
   - [CLI reference](#cli-reference)
   - [Python API](#python-api)
@@ -58,8 +59,8 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
   Xilinx hw_server/XSDB, TCK up to 30 MHz, bottlenecked by XSDB command
   overhead at ~0.64 ms/scan)
 - **Two JTAG backends** -- OpenOCD (cross-platform) and Xilinx hw_server/XSDB
-- **Python host stack** -- ELA CLI, programmatic API, JSON-RPC server, and
-  LLM event extraction helpers
+- **Python host stack** -- ELA CLI, optional **PySide6 desktop GUI** (`fcapz-gui`),
+  programmatic API, JSON-RPC server, and LLM event extraction helpers
 - **Embedded I/O (EIO)** -- RTL cores and Python controller for runtime
   read/write of fabric signals via JTAG USER3
 - **JTAG-to-AXI4 Bridge (EJTAG-AXI)** -- 72-bit pipelined DR for single
@@ -125,6 +126,28 @@ Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 what contributors should rely on. GitHub Actions runs a subset of these checks
 (see [CI](#ci)); run `pytest tests/ -v` locally before pushing so CLI, RPC, and
 event-helper tests run too.
+
+### Desktop GUI (fcapz-gui)
+
+Install the GUI extra (PySide6, pyqtgraph, GTKWave/Surfer/WaveTrace optional on PATH):
+
+```bash
+pip install -e ".[gui]"
+fcapz-gui
+```
+
+Connect over **hw_server** or **OpenOCD**, capture from the **ELA** tab, inspect
+waveforms in the embedded preview, or open captures in **GTKWave** (`.gtkw`
+sidecar) or **Surfer** (`--command-file` sidecar, `*.surfer.txt`). Settings and
+probe profiles live in `%APPDATA%\\fpgacapzero\\gui.toml` (Windows) or
+`~/.config/fpgacapzero/gui.toml` (Unix).
+
+CLI capture can spawn a viewer after export (VCD only):
+
+```bash
+fcapz capture --format vcd --out dump.vcd --open-in gtkwave ...
+fcapz capture --format vcd --out dump.vcd --open-in surfer ...
+```
 
 ### Probe the core
 
@@ -240,6 +263,8 @@ fcapz [global options] <command> [command options]
 | `--decimation` | `0` | Decimation ratio (capture every N+1 cycles; 0=off, requires DECIM_EN) |
 | `--ext-trigger-mode` | `disabled` | External trigger mode: `disabled`, `or`, `and` (requires EXT_TRIG_EN) |
 | `--summarize` | off | Print LLM-friendly capture summary (capture only) |
+| `--open-in` | *(none)* | After VCD capture, open viewer: `gtkwave` (`.gtkw`), `surfer` (`.surfer.txt`), `wavetrace`, or `custom` |
+| `--gui-config` | per-user path | `gui.toml` for viewer paths and custom argv |
 
 ### Python API
 

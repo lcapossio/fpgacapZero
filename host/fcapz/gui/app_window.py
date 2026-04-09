@@ -213,8 +213,8 @@ class MainWindow(QMainWindow):
                 self._analyzer.close()
             except OSError:
                 pass
-            self._history.set_analyzer_ref(self._analyzer)
             self._analyzer = None
+        self._history.set_analyzer_ref(None)
         self._clear_subsidiary_controllers()
         self._probe.clear()
         self._capture.clear_hw()

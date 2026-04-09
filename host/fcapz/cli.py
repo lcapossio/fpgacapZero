@@ -576,12 +576,13 @@ def main() -> int:
             from pathlib import Path as _Path
 
             from .gui.gtkw_writer import write_gtkw_for_capture
+            from .gui.surfer_command_writer import write_surfer_command_file_for_capture
             from .gui.settings import (
                 default_gui_config_path,
                 load_gui_settings,
                 viewer_executable_override,
             )
-            from .gui.viewers import GtkWaveViewer, viewer_by_name
+            from .gui.viewers import GtkWaveViewer, SurferViewer, viewer_by_name
 
             vcd = _Path(args.out)
             gpath = args.gui_config if args.gui_config is not None else default_gui_config_path()
@@ -613,6 +614,21 @@ def main() -> int:
                     return 1
                 try:
                     viewer.open(vcd, save_file=gtkw)
+                except (OSError, ValueError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+            elif isinstance(viewer, SurferViewer):
+                ovr = viewer_executable_override(st_gui, "surfer")
+                if ovr is not None:
+                    viewer = SurferViewer(executable=ovr)
+                scmd = vcd.with_suffix(".surfer.txt")
+                try:
+                    write_surfer_command_file_for_capture(result, scmd)
+                except OSError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                try:
+                    viewer.open(vcd, save_file=scmd)
                 except (OSError, ValueError) as exc:
                     print(f"error: {exc}", file=sys.stderr)
                     return 1

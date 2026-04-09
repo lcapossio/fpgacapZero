@@ -67,7 +67,7 @@ class SurferViewer(WaveformViewer):
     """Surfer desktop (wgpu/egui); spawned as its own window."""
 
     name = "Surfer"
-    supports_save_file = False
+    supports_save_file = True
 
     def __init__(self, executable: Path | None = None) -> None:
         exe = executable or self.detect_executable()
@@ -80,11 +80,15 @@ class SurferViewer(WaveformViewer):
         return _which("surfer")
 
     def open(self, vcd_path: Path, *, save_file: Path | None = None) -> None:
-        if save_file is not None:
-            raise ValueError("Surfer desktop viewer does not support save_file in this binding")
         if not vcd_path.is_file():
             raise FileNotFoundError(vcd_path)
-        self._spawn([str(self._executable), str(vcd_path)])
+        if save_file is not None and not save_file.is_file():
+            raise FileNotFoundError(save_file)
+        cmd = [str(self._executable)]
+        if save_file is not None:
+            cmd += ["--command-file", str(save_file)]
+        cmd.append(str(vcd_path))
+        self._spawn(cmd)
 
 
 class WaveTraceViewer(WaveformViewer):

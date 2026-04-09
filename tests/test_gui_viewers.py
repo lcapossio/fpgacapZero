@@ -63,15 +63,23 @@ class TestGtkWaveViewer(unittest.TestCase):
 
 
 class TestSurferAndWaveTrace(unittest.TestCase):
-    def test_surfer_rejects_save_file(self) -> None:
+    def test_surfer_open_with_command_file(self) -> None:
         vcd = Path("s.vcd")
+        cmd = Path("s.surfer.txt")
         vcd.write_text("x", encoding="utf-8")
+        cmd.write_text("add_variables logic.sample\n", encoding="utf-8")
         try:
-            viewer = SurferViewer(executable=Path("/bin/surfer"))
-            with self.assertRaises(ValueError):
-                viewer.open(vcd, save_file=Path("x.surf"))
+            exe = Path("/bin/surfer")
+            viewer = SurferViewer(executable=exe)
+            with patch("fcapz.gui.viewers.subprocess.Popen") as popen:
+                viewer.open(vcd, save_file=cmd)
+            self.assertEqual(
+                popen.call_args[0][0],
+                [str(exe), "--command-file", str(cmd), str(vcd)],
+            )
         finally:
             vcd.unlink()
+            cmd.unlink()
 
     def test_surfer_open(self) -> None:
         vcd = Path("s2.vcd")

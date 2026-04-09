@@ -104,6 +104,7 @@ class WaveformPreviewWidget(QWidget):
         plot.setLabel("left", "Lanes (stacked)")
         pi = plot.getPlotItem()
         pi.showAxis("right", False)
+        pi.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         layout.addWidget(plot)
         self._plot_widget = plot
         self._plot = plot
