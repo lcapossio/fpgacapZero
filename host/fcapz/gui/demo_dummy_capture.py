@@ -6,6 +6,8 @@
 Patches the connect worker so **Connect** completes like a real ELA session. The
 window opens and immediately starts a mock connect; use **Capture** / **Arm**
 as usual. Your normal ``gui.toml`` (viewers, paths) is still loaded.
+At least one viewer (e.g. Surfer or GTKWave) must be on ``PATH`` or configured
+in Settings, or the viewer dropdown stays empty.
 
 Run with the package on ``PYTHONPATH`` or an editable install::
 
@@ -21,7 +23,8 @@ from contextlib import ExitStack
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from ..analyzer import CaptureResult
+from ..analyzer import Analyzer, CaptureResult
+from ..transport import VendorStubTransport
 
 
 def _probe_info() -> dict[str, Any]:
@@ -77,6 +80,13 @@ def _install_demo_hw_mocks() -> tuple[ExitStack, MagicMock]:
 
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture
+
+    # History / live-wave / exports call write_vcd (etc.) on the connected analyzer.
+    # A bare MagicMock never touches disk, so "Open in viewer" sees missing files.
+    _export_only = Analyzer(VendorStubTransport("demo"))
+    mock_an.write_vcd = MagicMock(side_effect=_export_only.write_vcd)
+    mock_an.write_json = MagicMock(side_effect=_export_only.write_json)
+    mock_an.write_csv = MagicMock(side_effect=_export_only.write_csv)
 
     ex.enter_context(patch("fcapz.gui.worker.Analyzer", return_value=mock_an))
     return ex, mock_an
