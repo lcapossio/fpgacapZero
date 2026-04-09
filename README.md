@@ -152,6 +152,12 @@ Connection panel sets **Connect timeout** (OpenOCD TCP, seconds) and **HW ready
 timeout** (after programming a `.bit`, seconds); both are stored in `gui.toml`
 under `[connection]` as `connect_timeout_sec` and `hw_ready_timeout_sec`.
 
+**Surfer:** the GUI opens the native **Surfer** binary in its **own window** (same as
+GTKWave). Upstream does not expose a supported way to dock the native Surfer UI inside
+the Qt main window; true in-app embedding would mean a **WebEngine** surface (Surfer’s
+WASM/web API) or **server** mode, not the current `Popen` path. When `surfer` is on
+`PATH`, `pytest tests/test_surfer_integration_smoke.py` runs a small CLI smoke check.
+
 CLI capture can spawn a viewer after export (VCD only):
 
 ```bash

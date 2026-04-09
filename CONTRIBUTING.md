@@ -109,7 +109,7 @@ Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".
 pip install -e ".[dev,gui]"
 ```
 
-**Markers:** default pytest excludes `@pytest.mark.hw` (see `pyproject.toml`). GUI-related tests under `tests/` are marked `@pytest.mark.gui` so you can run `pytest -m gui` or `pytest -m "not gui"` as needed. GUI tests use `pytest-qt` (`qtbot`); they do not require a visible display when CI uses an offscreen platform plugin. Pure helpers (e.g. `tests/test_connect_errors.py` for connect error text) run with the default suite and are not GUI-marked.
+**Markers:** default pytest excludes `@pytest.mark.hw` (see `pyproject.toml`). GUI-related tests under `tests/` are marked `@pytest.mark.gui` so you can run `pytest -m gui` or `pytest -m "not gui"` as needed. GUI tests use `pytest-qt` (`qtbot`); they do not require a visible display when CI uses an offscreen platform plugin. Pure helpers (e.g. `tests/test_connect_errors.py` for connect error text) run with the default suite and are not GUI-marked. `tests/test_surfer_integration_smoke.py` is skipped unless `surfer` is on `PATH` (checks `surfer --help` for CLI stability / embed feasibility).
 
 Window state for `fcapz-gui` is persisted in `fcapz-gui-window.ini` beside `gui.toml` (same config directory as in the README). When adding UI that must survive restarts, extend that INI via `QSettings` rather than inventing a new path.
 
