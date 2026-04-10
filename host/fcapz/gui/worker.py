@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import logging
+import time
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from ..analyzer import Analyzer, CaptureConfig
 from .connect_errors import format_connect_error
@@ -28,16 +29,59 @@ class CaptureWorker(QObject):
     progress = Signal(object)
     """Emitted for each completed capture in continuous mode."""
 
-    def __init__(self, analyzer: Analyzer) -> None:
+    def __init__(
+        self,
+        analyzer: Analyzer,
+        *,
+        inter_cycle_delay_s: float = 0.0,
+    ) -> None:
         super().__init__()
         self._analyzer = analyzer
         self._cancel_cont = False
+        self._inter_cycle_delay_s = max(0.0, float(inter_cycle_delay_s))
+        self._pending_cfg: CaptureConfig | None = None
+        self._pending_timeout: float = 1.0
+        self._pending_continuous: bool = False
+
+    def set_pending_run(
+        self,
+        cfg: CaptureConfig,
+        timeout: float,
+        *,
+        continuous: bool,
+    ) -> None:
+        """Read by :meth:`thread_started` after ``QThread.started`` (do not use ``partial``)."""
+        self._pending_cfg = cfg
+        self._pending_timeout = float(timeout)
+        self._pending_continuous = continuous
+
+    @Slot()
+    def thread_started(self) -> None:
+        cfg = self._pending_cfg
+        if cfg is None:
+            _log.warning("CaptureWorker.thread_started with no pending config")
+            return
+        timeout = self._pending_timeout
+        if self._pending_continuous:
+            self.run_continuous(cfg, timeout)
+        else:
+            self.run_single(cfg, timeout)
 
     def reset_cancel(self) -> None:
         self._cancel_cont = False
 
     def cancel_continuous(self) -> None:
         self._cancel_cont = True
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        if seconds <= 0.0:
+            return
+        end = time.monotonic() + seconds
+        while not self._cancel_cont and time.monotonic() < end:
+            remaining = end - time.monotonic()
+            if remaining <= 0.0:
+                break
+            time.sleep(min(0.05, remaining))
 
     def run_single(self, cfg: CaptureConfig, timeout: float) -> None:
         try:
@@ -57,6 +101,7 @@ class CaptureWorker(QObject):
                 self._analyzer.arm()
                 result = self._analyzer.capture(timeout)
                 self.progress.emit(result)
+                self._sleep_interruptible(self._inter_cycle_delay_s)
             self.finished.emit(None)
         except Exception as exc:  # noqa: BLE001
             _log.exception("Continuous capture failed")

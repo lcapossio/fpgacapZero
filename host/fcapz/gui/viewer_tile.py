@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Tile the primary monitor work area when an external viewer starts.
+"""Tile the primary monitor when an external viewer starts.
 
 The main window is resized to the bottom half. On Windows the viewer's largest
 top-level window is moved to the top half; elsewhere only the GUI is repositioned.
+
+Horizontally, both halves use the screen's full :meth:`~PySide6.QtGui.QScreen.geometry`
+width (entire monitor width). Vertically, the split follows
+:meth:`~PySide6.QtGui.QScreen.availableGeometry` so windows stay in the work area.
 """
 
 from __future__ import annotations
@@ -23,11 +27,13 @@ def _primary_vertical_halves() -> tuple[_Rect, _Rect] | None:
     screen = QGuiApplication.primaryScreen()
     if screen is None:
         return None
+    geo = screen.geometry()
     ag = screen.availableGeometry()
     h2 = max(1, ag.height() // 2)
-    x, y, w, full_h = ag.x(), ag.y(), ag.width(), ag.height()
-    top = (x, y, w, h2)
-    bottom = (x, y + h2, w, full_h - h2)
+    x_full, w_full = geo.x(), geo.width()
+    y0, full_h = ag.y(), ag.height()
+    top = (x_full, y0, w_full, h2)
+    bottom = (x_full, y0 + h2, w_full, full_h - h2)
     return top, bottom
 
 

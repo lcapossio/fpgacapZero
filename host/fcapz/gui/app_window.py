@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import signal
 import sys
-from functools import partial
+import weakref
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 from PySide6.QtCore import (
     QByteArray,
     QElapsedTimer,
+    QEvent,
     QMetaObject,
     QSettings,
     QSize,
@@ -22,6 +24,7 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
     QUrl,
+    Slot,
 )
 from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
@@ -32,7 +35,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSizePolicy,
-    QStyle,
+    QStyleFactory,
     QToolBar,
     QWidget,
 )
@@ -60,10 +63,20 @@ from .settings import (
 )
 from .scroll_wrap import scroll_wrap
 from .settings_dialog import SettingsDialog
+from .toolbar_icons import main_toolbar_icon
 from .viewer_registry import viewers_for_settings
 from .worker import CaptureWorker, ConnectWorker
 
 _log = logging.getLogger("fcapz.gui")
+
+# Preferred first-run size; clamped to the primary screen in _fit_initial_geometry().
+_DEFAULT_WINDOW_SIZE = QSize(1280, 820)
+
+# Explicit area: default addToolBar() placement can look empty on some Windows setups.
+_TOP_TOOLBAR_AREA = Qt.ToolBarArea.TopToolBarArea
+
+# Weak ref so SIGINT / Windows Ctrl+C can tear down external viewers before quitting.
+_main_window_ref: weakref.ref[MainWindow] | None = None
 
 _DOCK_FEATURES = (
     QDockWidget.DockWidgetFeature.DockWidgetClosable
@@ -73,6 +86,19 @@ _DOCK_FEATURES = (
 
 # Bump when dock object names / layout schema change so old blobs are not restored.
 _WINDOW_STATE_VERSION = 3
+
+# Continuous capture: max rate for history / preview / viewer refresh (coalesces bursts).
+_CONTINUOUS_UI_REFRESH_MS = 333
+
+
+def _settings_bool(val: object) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (bytes, bytearray)):
+        val = val.decode("ascii", errors="ignore")
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
 
 
 def _sanitize_user_layout_key(name: str) -> str:
@@ -94,10 +120,14 @@ class MainWindow(QMainWindow):
         *,
         restore_saved_layout: bool = True,
         persist_window_layout: bool = True,
+        demo_continuous_cycle_delay_s: float = 0.0,
     ) -> None:
         super().__init__()
         self.setWindowTitle("fcapz-gui")
-        self.resize(1000, 820)
+        # Narrow laptops: docks use scroll areas; toolbar may use » overflow below ~900px.
+        self.setMinimumSize(720, 480)
+        self._fit_initial_geometry()
+        self._demo_continuous_cycle_delay_s = max(0.0, float(demo_continuous_cycle_delay_s))
         self._gui_log_handler: logging.Handler | None = None
         self._persist_window_layout = persist_window_layout
         self._initial_post_show_layout = False
@@ -119,6 +149,12 @@ class MainWindow(QMainWindow):
         self._ui_prefs_timer.setInterval(300)
         self._ui_prefs_timer.timeout.connect(self._save_collapsible_ui_prefs)
 
+        self._cont_ui_timer = QTimer(self)
+        self._cont_ui_timer.setSingleShot(True)
+        self._cont_ui_timer.setInterval(_CONTINUOUS_UI_REFRESH_MS)
+        self._cont_ui_timer.timeout.connect(self._flush_continuous_progress_ui)
+        self._cont_pending_result: CaptureResult | None = None
+
         self._config_path = default_gui_config_path()
         self._analyzer: Analyzer | None = None
         self._cap_thread: QThread | None = None
@@ -126,6 +162,15 @@ class MainWindow(QMainWindow):
         self._connect_thread: QThread | None = None
         self._connect_worker: ConnectWorker | None = None
         self._continuous_mode = False
+        self._console_interrupt_shutdown = False
+        self._main_toolbar: QToolBar | None = None
+        self._tb_act_connect: QAction | None = None
+        self._tb_act_disconnect: QAction | None = None
+        self._tb_act_configure: QAction | None = None
+        self._tb_act_arm: QAction | None = None
+        self._tb_act_capture: QAction | None = None
+        self._tb_act_continuous: QAction | None = None
+        self._tb_act_stop: QAction | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
         self._uart: EjtagUartController | None = None
@@ -187,23 +232,23 @@ class MainWindow(QMainWindow):
         self._dock_capture = QDockWidget("ELA capture", self)
         self._dock_capture.setObjectName("dock_elacapture")
         self._dock_capture.setWidget(
-            scroll_wrap(self._capture, min_width=300, min_height=300),
+            scroll_wrap(self._capture, min_width=260, min_height=220),
         )
         self._dock_capture.setFeatures(_DOCK_FEATURES)
 
         self._dock_eio = QDockWidget("EIO", self)
         self._dock_eio.setObjectName("dock_eio")
-        self._dock_eio.setWidget(scroll_wrap(self._eio_panel, min_width=280, min_height=260))
+        self._dock_eio.setWidget(scroll_wrap(self._eio_panel, min_width=240, min_height=200))
         self._dock_eio.setFeatures(_DOCK_FEATURES)
 
         self._dock_axi = QDockWidget("AXI", self)
         self._dock_axi.setObjectName("dock_axi")
-        self._dock_axi.setWidget(scroll_wrap(self._axi_panel, min_width=280, min_height=280))
+        self._dock_axi.setWidget(scroll_wrap(self._axi_panel, min_width=240, min_height=220))
         self._dock_axi.setFeatures(_DOCK_FEATURES)
 
         self._dock_uart = QDockWidget("UART", self)
         self._dock_uart.setObjectName("dock_uart")
-        self._dock_uart.setWidget(scroll_wrap(self._uart_panel, min_width=280, min_height=220))
+        self._dock_uart.setWidget(scroll_wrap(self._uart_panel, min_width=240, min_height=180))
         self._dock_uart.setFeatures(_DOCK_FEATURES)
 
         self._workbench_docks: list[QDockWidget] = [
@@ -216,23 +261,25 @@ class MainWindow(QMainWindow):
         self._dock_conn = QDockWidget("Connection", self)
         self._dock_conn.setObjectName("dock_connection")
         self._dock_conn.setWidget(
-            scroll_wrap(self._conn, min_width=220, min_height=180),
+            scroll_wrap(self._conn, min_width=200, min_height=160),
         )
         self._dock_conn.setFeatures(_DOCK_FEATURES)
 
         self._dock_probe = QDockWidget("ELA identity", self)
         self._dock_probe.setObjectName("dock_identity")
         self._dock_probe.setWidget(
-            scroll_wrap(self._probe, min_width=240, min_height=120),
+            scroll_wrap(self._probe, min_width=200, min_height=100),
         )
         self._dock_probe.setFeatures(_DOCK_FEATURES)
 
         self._dock_log = QDockWidget("Log", self)
         self._dock_log.setObjectName("dock_log")
         self._dock_log.setWidget(
-            scroll_wrap(self._log_panel, min_width=220, min_height=100),
+            scroll_wrap(self._log_panel, min_width=200, min_height=96),
         )
         self._dock_log.setFeatures(_DOCK_FEATURES)
+        # Keep a visible log strip; reflow used to squeeze this to a few pixels.
+        self._dock_log.setMinimumHeight(112)
 
         self._tool_docks: list[QDockWidget] = [
             *self._workbench_docks,
@@ -257,14 +304,20 @@ class MainWindow(QMainWindow):
             _dock.topLevelChanged.connect(self._on_tool_dock_geometry_changed)
             _dock.dockLocationChanged.connect(self._on_tool_dock_geometry_changed)
 
+        # Toolbar must exist before saveState/restoreState so Qt never applies a layout that
+        # omits or hides it (otherwise the bar can look empty after restore).
+        self._build_toolbar()
         self._layout_default_state = self.saveState(_WINDOW_STATE_VERSION)
         if restore_saved_layout:
             self._restore_window_layout_from_settings()
+            # Saved state can leave another workbench tab (e.g. UART) on top; match first-run UX.
+            self._dock_capture.raise_()
+        self._ensure_main_toolbar_visible()
 
         self.statusBar().showMessage("Ready")
 
-        self._build_toolbar()
         self._build_menus()
+        self._sync_toolbar_actions()
 
         self._capture.wire_collapsible_persistence(self._schedule_ui_prefs_save)
         self._probe.wire_collapsible_persistence(self._schedule_ui_prefs_save)
@@ -299,7 +352,9 @@ class MainWindow(QMainWindow):
         save_gui_settings(gui, self._config_path)
 
     def _capture_running(self) -> bool:
-        return self._cap_thread is not None and self._cap_thread.isRunning()
+        # True for the whole capture lifecycle, including after QThread creation but
+        # before start() returns (toolbar used to sync before start and saw isRunning()=False).
+        return self._cap_thread is not None
 
     def _on_connect(self) -> None:
         if self._connect_thread is not None and self._connect_thread.isRunning():
@@ -324,6 +379,7 @@ class MainWindow(QMainWindow):
 
         self._connect_thread = thread
         self._connect_worker = worker
+        self._sync_toolbar_actions()
         thread.start()
 
     def _on_connect_worker_finished(
@@ -357,12 +413,14 @@ class MainWindow(QMainWindow):
         self._history.set_reuse_external_viewer(gui.viewers.reuse_external_viewer)
         self._capture.set_probe_profiles(gui.probe_profiles)
         self._capture.set_trigger_history(gui.trigger_history)
+        self._sync_toolbar_actions()
 
     def _on_connect_worker_failed(self, message: str) -> None:
         QApplication.restoreOverrideCursor()
         self.statusBar().showMessage("Connect failed")
         _log.error("Connection failed: %s", message)
         QMessageBox.critical(self, "Connection failed", message)
+        self._sync_toolbar_actions()
 
     def _on_cancel_connect_requested(self) -> None:
         if self._connect_worker is not None:
@@ -379,6 +437,7 @@ class MainWindow(QMainWindow):
             "If hw_server or OpenOCD was hung, TCP/JTAG can take a few seconds to release "
             "before you connect again.",
         )
+        self._sync_toolbar_actions()
 
     def _on_connect_thread_finished(self) -> None:
         self._conn.set_connect_in_progress(False)
@@ -388,6 +447,7 @@ class MainWindow(QMainWindow):
             w.deleteLater()
         if t is not None:
             t.deleteLater()
+        self._sync_toolbar_actions()
 
     def _join_connect_thread(self) -> None:
         """Wait for an in-flight connect without deadlocking the GUI thread."""
@@ -396,7 +456,8 @@ class MainWindow(QMainWindow):
             return
         timer = QElapsedTimer()
         timer.start()
-        while t.isRunning() and timer.elapsed() < 15_000:
+        limit_ms = 2_000 if self._console_interrupt_shutdown else 15_000
+        while t.isRunning() and timer.elapsed() < limit_ms:
             QApplication.processEvents()
             t.wait(50)
         if t.isRunning():
@@ -406,6 +467,24 @@ class MainWindow(QMainWindow):
         d = self._config_path.parent
         d.mkdir(parents=True, exist_ok=True)
         return d / "fcapz-gui-window.ini"
+
+    def _fit_initial_geometry(self) -> None:
+        """Size the window to the primary screen; keep usable on small laptops."""
+        screen = QGuiApplication.primaryScreen()
+        margin = 24
+        tw, th = _DEFAULT_WINDOW_SIZE.width(), _DEFAULT_WINDOW_SIZE.height()
+        if screen is None:
+            self.resize(tw, th)
+            return
+        ag = screen.availableGeometry()
+        min_w = max(1, self.minimumWidth())
+        min_h = max(1, self.minimumHeight())
+        max_w = max(min_w, ag.width() - 2 * margin)
+        max_h = max(min_h, ag.height() - 2 * margin)
+        self.resize(min(tw, max_w), min(th, max_h))
+        fr = self.frameGeometry()
+        fr.moveCenter(ag.center())
+        self.move(fr.topLeft())
 
     def _window_qsettings(self) -> QSettings:
         """INI next to ``gui.toml`` so layout survives restarts reliably (incl. QByteArray)."""
@@ -432,10 +511,10 @@ class MainWindow(QMainWindow):
             if d.isVisible() and not d.isFloating()
         ]
         if len(left) == 2:
-            h_each = max(180, min(420, (h - 96) // 2))
+            h_each = max(140, min(360, (h - 120) // 2))
             self.resizeDocks(left, [h_each, h_each], Qt.Orientation.Vertical)
         elif len(left) == 1:
-            self.resizeDocks(left, [max(220, min(520, (h - 96) * 2 // 5))], Qt.Orientation.Vertical)
+            self.resizeDocks(left, [max(180, min(440, (h - 120) * 2 // 5))], Qt.Orientation.Vertical)
 
         top_rep = next(
             (
@@ -446,11 +525,11 @@ class MainWindow(QMainWindow):
             None,
         )
         if top_rep is not None:
-            h_top = max(260, min(560, (h * 2) // 5))
+            h_top = max(200, min(480, (h * 2) // 5))
             self.resizeDocks([top_rep], [h_top], Qt.Orientation.Vertical)
 
         if self._dock_log.isVisible() and not self._dock_log.isFloating():
-            h_bottom = max(88, min(280, h // 5))
+            h_bottom = max(120, min(340, h // 4))
             self.resizeDocks([self._dock_log], [h_bottom], Qt.Orientation.Vertical)
 
     def _apply_post_show_layout(self) -> None:
@@ -476,21 +555,24 @@ class MainWindow(QMainWindow):
             blob = ws
         elif isinstance(ws, bytes) and len(ws) > 0:
             blob = QByteArray(ws)
-        if blob is None:
-            return
-        ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
-        for legacy_ver in (2, 1, 0):
-            if ok:
-                break
-            ok = self.restoreState(blob, legacy_ver)
-        if not ok:
-            _log.warning("Saved dock layout was rejected; using built-in default.")
+        if blob is not None:
+            ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
+            for legacy_ver in (2, 1, 0):
+                if ok:
+                    break
+                ok = self.restoreState(blob, legacy_ver)
+            if not ok:
+                _log.warning("Saved dock layout was rejected; using built-in default.")
+
+        if _settings_bool(st.value("mainWindow/maximized")):
+            self.showMaximized()
 
     def _save_window_layout_to_settings(self) -> None:
         if not self._persist_window_layout:
             return
         st = self._window_qsettings()
         st.setValue("mainWindow/geometry", self.saveGeometry())
+        st.setValue("mainWindow/maximized", self.isMaximized())
         st.setValue("mainWindow/windowState", self.saveState(_WINDOW_STATE_VERSION))
         st.setValue("mainWindow/stateSchema", _WINDOW_STATE_VERSION)
         st.sync()
@@ -499,26 +581,13 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main actions", self)
         tb.setObjectName("mainToolbar")
         tb.setMovable(True)
-        # Icon-only avoids text+icon fighting for width on Windows styles (overlapping buttons).
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        # Do not set a stylesheet on QToolButton: Qt often stops painting icons/text for them.
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         tb.setIconSize(QSize(24, 24))
-        # Movable toolbar grip + tight native sizing can crush the first button; enforce
-        # hit-box and margins, and leave a gap after the handle.
-        tb.setStyleSheet(
-            "#mainToolbar QToolButton {\n"
-            "  min-width: 36px;\n"
-            "  min-height: 30px;\n"
-            "  padding: 5px;\n"
-            "  margin-left: 3px;\n"
-            "  margin-right: 3px;\n"
-            "}\n",
-        )
         lay = tb.layout()
         if lay is not None:
-            lay.setSpacing(2)
-            lay.setContentsMargins(6, 4, 8, 4)
-
-        sty = self.style()
+            lay.setSpacing(4)
+            lay.setContentsMargins(4, 2, 6, 2)
 
         def _tb_spacer(px: int = 8) -> QWidget:
             w = QWidget()
@@ -526,27 +595,90 @@ class MainWindow(QMainWindow):
             w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.MinimumExpanding)
             return w
 
-        def _add(icon_pixmap: QStyle.StandardPixmap, text: str, slot: object) -> None:
-            act = tb.addAction(sty.standardIcon(icon_pixmap), text, slot)
-            act.setToolTip(text)
+        pal = tb.palette()
 
-        tb.addWidget(_tb_spacer(14))
-        _add(QStyle.StandardPixmap.SP_ComputerIcon, "Connect", self._conn.request_connect)
-        _add(QStyle.StandardPixmap.SP_DialogCancelButton, "Disconnect", self._on_disconnect)
+        def _add(which: str, text: str, slot: object) -> QAction:
+            act = QAction(main_toolbar_icon(which, toolbar_palette=pal), text, self)
+            act.setToolTip(text)
+            act.setStatusTip(text)
+            act.triggered.connect(slot)
+            tb.addAction(act)
+            return act
+
+        tb.addWidget(_tb_spacer(8))
+        self._tb_act_connect = _add("connect", "Connect", self._conn.request_connect)
+        self._tb_act_disconnect = _add("disconnect", "Disconnect", self._on_disconnect)
         tb.addWidget(_tb_spacer(10))
         tb.addSeparator()
-        _add(
-            QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            "Configure",
-            self._on_configure,
-        )
-        _add(QStyle.StandardPixmap.SP_MediaPlay, "Arm", self._on_arm)
+        self._tb_act_configure = _add("configure", "Configure", self._on_configure)
+        self._tb_act_arm = _add("arm", "Arm", self._on_arm)
         tb.addWidget(_tb_spacer())
         tb.addSeparator()
-        _add(QStyle.StandardPixmap.SP_ArrowDown, "Capture", self._on_capture_clicked)
-        _add(QStyle.StandardPixmap.SP_BrowserReload, "Continuous", self._on_continuous_clicked)
-        _add(QStyle.StandardPixmap.SP_MediaStop, "Stop", self._on_stop_continuous)
-        self.addToolBar(tb)
+        self._tb_act_capture = _add("capture", "Capture", self._on_capture_clicked)
+        self._tb_act_continuous = _add("continuous", "Continuous", self._on_continuous_clicked)
+        self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
+        self.addToolBar(_TOP_TOOLBAR_AREA, tb)
+        tb.setVisible(True)
+        self._main_toolbar = tb
+
+    def _sync_toolbar_actions(self) -> None:
+        """Mirror Connection + capture panel enablement (disabled actions render grayed out)."""
+        acts = (
+            self._tb_act_connect,
+            self._tb_act_disconnect,
+            self._tb_act_configure,
+            self._tb_act_arm,
+            self._tb_act_capture,
+            self._tb_act_continuous,
+            self._tb_act_stop,
+        )
+        if any(a is None for a in acts):
+            return
+        assert self._tb_act_connect is not None
+        assert self._tb_act_disconnect is not None
+        assert self._tb_act_configure is not None
+        assert self._tb_act_arm is not None
+        assert self._tb_act_capture is not None
+        assert self._tb_act_continuous is not None
+        assert self._tb_act_stop is not None
+
+        connected = self._analyzer is not None
+        # Thread may still spin down after success; once we have an analyzer we are connected.
+        connecting = (
+            not connected
+            and self._connect_thread is not None
+            and self._connect_thread.isRunning()
+        )
+        busy = self._capture_running()
+        cont = self._continuous_mode
+
+        self._tb_act_connect.setEnabled(not connected and not connecting)
+        self._tb_act_disconnect.setEnabled(connected and not connecting)
+
+        can_elact = connected and not busy
+        self._tb_act_configure.setEnabled(can_elact)
+        self._tb_act_arm.setEnabled(can_elact)
+        self._tb_act_capture.setEnabled(can_elact)
+        self._tb_act_continuous.setEnabled(can_elact)
+        self._tb_act_stop.setEnabled(busy and cont)
+
+        # Match ELA dock buttons to toolbar (single source of truth).
+        self._capture.set_busy(busy, continuous=cont)
+
+    def changeEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self._persist_window_layout
+        ):
+            self._schedule_persist_layout()
+
+    def _ensure_main_toolbar_visible(self) -> None:
+        tb = self._main_toolbar
+        if tb is None:
+            return
+        tb.setVisible(True)
+        tb.show()
 
     def _schedule_ui_prefs_save(self) -> None:
         self._ui_prefs_timer.start()
@@ -623,6 +755,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "User layout", "Saved layout could not be restored.")
             return
         self._schedule_dock_reflow()
+        self._ensure_main_toolbar_visible()
         self._schedule_persist_layout()
 
     def _on_delete_user_layout(self, key: str) -> None:
@@ -662,6 +795,10 @@ class MainWindow(QMainWindow):
         act_show_all = QAction("Show &all panels", self)
         act_show_all.triggered.connect(self._show_all_tool_docks)
         m_window.addAction(act_show_all)
+        act_show_tb = QAction("Show main &toolbar", self)
+        act_show_tb.setStatusTip("Bring back the Connect / Capture toolbar if it was closed.")
+        act_show_tb.triggered.connect(self._ensure_main_toolbar_visible)
+        m_window.addAction(act_show_tb)
         m_window.addSeparator()
         m_layouts = m_window.addMenu("Layout &presets")
         act_def = QAction("&Default", self)
@@ -712,6 +849,7 @@ class MainWindow(QMainWindow):
             _log.warning("Could not restore default layout bytes.")
         self._dock_capture.raise_()
         self._dock_log.raise_()
+        self._ensure_main_toolbar_visible()
         self._schedule_dock_reflow()
         self._schedule_persist_layout()
 
@@ -791,6 +929,7 @@ class MainWindow(QMainWindow):
         self._conn.set_connected(False)
         self.statusBar().showMessage("Disconnected")
         _log.info("Disconnected")
+        self._sync_toolbar_actions()
 
     def _clear_subsidiary_controllers(self) -> None:
         self._eio = None
@@ -916,16 +1055,13 @@ class MainWindow(QMainWindow):
         assert self._analyzer is not None
         self._continuous_mode = continuous
         self._cap_thread = QThread()
-        self._cap_worker = CaptureWorker(self._analyzer)
+        self._cap_worker = CaptureWorker(
+            self._analyzer,
+            inter_cycle_delay_s=self._demo_continuous_cycle_delay_s if continuous else 0.0,
+        )
+        self._cap_worker.set_pending_run(cfg, timeout, continuous=continuous)
         self._cap_worker.moveToThread(self._cap_thread)
-        if continuous:
-            self._cap_thread.started.connect(
-                partial(self._cap_worker.run_continuous, cfg, timeout),
-            )
-        else:
-            self._cap_thread.started.connect(
-                partial(self._cap_worker.run_single, cfg, timeout),
-            )
+        self._cap_thread.started.connect(self._cap_worker.thread_started)
         self._cap_worker.finished.connect(self._on_worker_finished)
         self._cap_worker.finished.connect(self._cap_thread.quit)
         self._cap_worker.failed.connect(self._on_worker_failed)
@@ -933,14 +1069,43 @@ class MainWindow(QMainWindow):
         self._cap_worker.progress.connect(self._on_worker_progress)
         self._cap_thread.finished.connect(self._on_thread_finished)
         self._capture.set_busy(True, continuous=continuous)
+        self._sync_toolbar_actions()
         self._cap_thread.start()
 
     def _on_worker_progress(self, result: CaptureResult) -> None:
-        if self._analyzer is not None:
+        if self._analyzer is None:
+            return
+        if not self._continuous_mode:
             self._history.add_capture(self._analyzer, result)
+            return
+        self._cont_pending_result = result
+        if not self._cont_ui_timer.isActive():
+            self._cont_ui_timer.start()
+
+    def _flush_continuous_progress_ui(self) -> None:
+        if self._analyzer is None:
+            return
+        pending = self._cont_pending_result
+        self._cont_pending_result = None
+        if pending is not None:
+            self._history.add_capture(self._analyzer, pending)
+        if self._continuous_mode and self._cont_pending_result is not None:
+            self._cont_ui_timer.start()
+
+    def _drain_continuous_progress_pending(self) -> None:
+        self._cont_ui_timer.stop()
+        if self._analyzer is None:
+            self._cont_pending_result = None
+            return
+        pending = self._cont_pending_result
+        self._cont_pending_result = None
+        if pending is not None:
+            self._history.add_capture(self._analyzer, pending)
 
     def _on_worker_finished(self, result: CaptureResult | None) -> None:
         was_cont = self._continuous_mode
+        if was_cont:
+            self._drain_continuous_progress_pending()
         self._continuous_mode = False
         if (
             not was_cont
@@ -956,11 +1121,15 @@ class MainWindow(QMainWindow):
             self._persist_trigger_snapshot(result.config)
         elif was_cont and result is None:
             _log.info("Continuous capture stopped")
+        self._sync_toolbar_actions()
 
     def _on_worker_failed(self, message: str) -> None:
         _log.error("Capture worker failed: %s", message)
-        QMessageBox.warning(self, "Capture", message)
+        if self._continuous_mode:
+            self._drain_continuous_progress_pending()
         self._continuous_mode = False
+        QMessageBox.warning(self, "Capture", message)
+        self._sync_toolbar_actions()
 
     def _on_thread_finished(self) -> None:
         w, self._cap_worker = self._cap_worker, None
@@ -970,21 +1139,34 @@ class MainWindow(QMainWindow):
         if t is not None:
             t.deleteLater()
         self._capture.set_busy(False, continuous=False)
+        self._sync_toolbar_actions()
 
     def _stop_capture_thread(self) -> None:
         if self._cap_worker is not None:
             self._cap_worker.cancel_continuous()
         if self._cap_thread is not None and self._cap_thread.isRunning():
             self._cap_thread.quit()
-            self._cap_thread.wait(8000)
+            cap_wait_ms = 2_000 if self._console_interrupt_shutdown else 8_000
+            self._cap_thread.wait(cap_wait_ms)
         QApplication.processEvents()
+        self._drain_continuous_progress_pending()
         self._on_thread_finished()
         self._continuous_mode = False
+
+    @Slot()
+    def stop_viewers_for_console_quit(self) -> None:
+        """Runs on the GUI thread when the user presses Ctrl+C in a terminal."""
+        self._console_interrupt_shutdown = True
+        self._history.stop_viewer_processes(aggressive=True)
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self._reflow_timer.stop()
         self._persist_layout_timer.stop()
         self._ui_prefs_timer.stop()
+        self._cont_ui_timer.stop()
         self._save_collapsible_ui_prefs()
         if self._persist_window_layout:
             self._save_window_layout_to_settings()
@@ -1015,6 +1197,23 @@ def _request_quit(app: QApplication) -> None:
     QMetaObject.invokeMethod(app, "quit", Qt.ConnectionType.QueuedConnection)
 
 
+def _stop_external_viewers_then_quit(app: QApplication) -> None:
+    """Terminate Surfer/GTKWave so Ctrl+C can exit even when a viewer holds focus."""
+    ref = _main_window_ref
+    if ref is not None:
+        w = ref()
+        if w is not None:
+            # One queued call: aggressive viewer kill + quit() on the GUI thread (no
+            # extra queued app.quit after a slow terminate wait).
+            QMetaObject.invokeMethod(
+                w,
+                "stop_viewers_for_console_quit",
+                Qt.ConnectionType.QueuedConnection,
+            )
+            return
+    _request_quit(app)
+
+
 def _install_windows_console_ctrl_handler(app: QApplication) -> Any | None:
     """
     Windows: Ctrl+C is delivered via SetConsoleCtrlHandler, not reliably as SIGINT
@@ -1035,7 +1234,7 @@ def _install_windows_console_ctrl_handler(app: QApplication) -> Any | None:
 
     def _handler(ctrl_type: int) -> bool:
         if ctrl_type in (CTRL_C_EVENT, CTRL_BREAK_EVENT):
-            _request_quit(app)
+            _stop_external_viewers_then_quit(app)
             return True
         return False
 
@@ -1049,20 +1248,36 @@ def _install_ctrl_c_quit(app: QApplication) -> tuple[QTimer, Any | None]:
     """
     Quit on Ctrl+C from a terminal.
 
-    - Unix: SIGINT + a short wake timer so Python can run the handler while Qt
+    - Unix: SIGINT + a short wake timer (25 ms) so Python can run the handler while Qt
       owns the event loop.
     - Windows: add a console control handler (SIGINT alone is often unreliable).
     """
 
     def _on_sigint(_signum: int, _frame: object | None) -> None:
-        _request_quit(app)
+        _stop_external_viewers_then_quit(app)
 
     signal.signal(signal.SIGINT, _on_sigint)
     wake = QTimer()
     wake.timeout.connect(lambda: None)
-    wake.start(50)
+    # Short interval so SIGINT is picked up promptly while Qt owns the event loop.
+    wake.start(25)
     win_cb = _install_windows_console_ctrl_handler(app)
     return wake, win_cb
+
+
+def apply_gui_application_style(app: QApplication) -> None:
+    """
+    Windows: default to the Fusion style so toolbars and custom icons paint reliably.
+
+    Set ``FCAPZ_GUI_NATIVE_STYLE=1`` to keep the native Qt style (e.g. Windows 11).
+    """
+    if sys.platform != "win32":
+        return
+    if os.environ.get("FCAPZ_GUI_NATIVE_STYLE", "").strip().lower() in ("1", "true", "yes"):
+        return
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
 
 
 def _windows_set_taskbar_app_identity() -> None:
@@ -1082,17 +1297,20 @@ def _windows_set_taskbar_app_identity() -> None:
 
 
 def run_app(argv: list[str] | None = None) -> int:
+    global _main_window_ref
     args = argv if argv is not None else sys.argv
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough,
     )
     _windows_set_taskbar_app_identity()
     app = QApplication(args)
+    apply_gui_application_style(app)
     app.setApplicationName("fcapz-gui")
     app.setApplicationDisplayName("fcapz-gui")
     app.setOrganizationName("fpgacapzero")
     _wake, _win_cb = _install_ctrl_c_quit(app)
     w = MainWindow()
+    _main_window_ref = weakref.ref(w)
     w.show()
     try:
         return app.exec()

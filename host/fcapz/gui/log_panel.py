@@ -88,7 +88,7 @@ class LogPanel(QWidget):
 
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter…")
-        self._filter.setMinimumWidth(280)
+        self._filter.setMinimumWidth(160)
         self._filter.setMaximumWidth(520)
         self._filter.textChanged.connect(lambda _: self._refresh_display())
 

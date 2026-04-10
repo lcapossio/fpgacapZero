@@ -71,9 +71,9 @@ class TestLanesFromCapture(unittest.TestCase):
         r = CaptureResult(config=cfg, samples=[1, 2], timestamps=[10, 20])
         x, label = _x_axis_and_label(r)
         self.assertEqual(label, "Time (s)")
-        # 100 MHz -> 10 ns timescale; 10 ticks -> 100e-9 s
-        self.assertAlmostEqual(x[0], 100e-9)
-        self.assertAlmostEqual(x[1], 200e-9)
+        # Zero-based like VCD #: Δ10 cycles @ 100 MHz -> 100 ns
+        self.assertAlmostEqual(x[0], 0.0)
+        self.assertAlmostEqual(x[1], 100e-9)
 
     def test_x_edges_for_step_plot(self) -> None:
         e = _x_edges_for_step_plot(np.array([0.0, 1.0, 2.0, 3.0]))

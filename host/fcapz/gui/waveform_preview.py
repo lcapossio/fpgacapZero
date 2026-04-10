@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from ..analyzer import CaptureResult
+from ..analyzer import CaptureResult, vcd_simulation_times
 
 try:
     import numpy as np
@@ -67,10 +67,12 @@ def _x_edges_for_step_plot(x: np.ndarray) -> np.ndarray:
 def _x_axis_and_label(result: CaptureResult) -> tuple[list[float], str]:
     cfg = result.config
     n = len(result.samples)
-    timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+    hz = max(1.0, float(cfg.sample_clock_hz))
     if result.timestamps and len(result.timestamps) == n:
-        scale_s = timescale_ns * 1e-9
-        return [float(t) * scale_s for t in result.timestamps], "Time (s)"
+        # Match VCD: times are zero-based per capture so continuous updates do not
+        # pan the preview to a wildly different absolute counter range each shot.
+        scale_s = 1.0 / hz
+        return [float(t) * scale_s for t in vcd_simulation_times(result)], "Time (s)"
     return [float(i) for i in range(n)], "Sample index"
 
 
@@ -99,7 +101,7 @@ class WaveformPreviewWidget(QWidget):
         pg.setConfigOption("background", "w")
         pg.setConfigOption("foreground", "k")
         plot = pg.PlotWidget()
-        plot.setMinimumHeight(220)
+        plot.setMinimumHeight(160)
         plot.showGrid(x=True, y=True, alpha=0.3)
         plot.setLabel("left", "Lanes (stacked)")
         pi = plot.getPlotItem()

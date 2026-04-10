@@ -74,7 +74,10 @@ class CapturePanel(QGroupBox):
         self._hw_num_chan: int | None = None
         self._hw_trig_stages: int = 0
 
-        self._hw_label = QLabel("Connect to load sample width / depth from hardware.")
+        self._hw_label = QLabel(
+            "Connect first (toolbar or Connection panel). "
+            "Then sample width and depth load from hardware and the capture buttons unlock.",
+        )
         self._hw_label.setWordWrap(True)
 
         self._profiles: dict[str, ProbeProfile] = {}
@@ -134,7 +137,9 @@ class CapturePanel(QGroupBox):
 
         self._timeout = QLineEdit("10.0")
 
-        self._seq_status = QLabel("Connect to see hardware trigger sequencer depth (FEATURES[3:0]).")
+        self._seq_status = QLabel(
+            "Connect to see hardware trigger sequencer depth (FEATURES[3:0]).",
+        )
         self._seq_status.setWordWrap(True)
         self._seq_enable = QCheckBox("Use trigger sequencer")
         self._seq_enable.setObjectName("fcapz_capture_seq_enable")
@@ -159,7 +164,7 @@ class CapturePanel(QGroupBox):
             QHeaderView.ResizeMode.Interactive
         )
         self._seq_table.horizontalHeader().setStretchLastSection(True)
-        self._seq_table.setMinimumHeight(140)
+        self._seq_table.setMinimumHeight(96)
 
         self._btn_cfg = QPushButton("Configure")
         self._btn_arm = QPushButton("Arm")
@@ -240,7 +245,10 @@ class CapturePanel(QGroupBox):
         self._hw_num_chan = None
         self._hw_trig_stages = 0
         self._btn_stop.setEnabled(False)
-        self._hw_label.setText("Connect to load sample width / depth from hardware.")
+        self._hw_label.setText(
+            "Connect first (toolbar or Connection panel). "
+            "Then sample width and depth load from hardware and the capture buttons unlock.",
+        )
         for b in (self._btn_cfg, self._btn_arm, self._btn_cap, self._btn_cont):
             b.setEnabled(False)
         with QSignalBlocker(self._seq_enable):

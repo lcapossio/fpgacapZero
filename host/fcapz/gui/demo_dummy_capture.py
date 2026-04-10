@@ -117,9 +117,15 @@ def main(_argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.aboutToQuit.connect(ex.close)
 
-    from .app_window import MainWindow
+    from .app_window import MainWindow, apply_gui_application_style
 
-    w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+    apply_gui_application_style(app)
+
+    w = MainWindow(
+        restore_saved_layout=False,
+        persist_window_layout=False,
+        demo_continuous_cycle_delay_s=0.5,
+    )
     w.setWindowTitle("fcapz-gui (demo — mock hardware)")
 
     w.show()

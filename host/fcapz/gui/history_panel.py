@@ -34,6 +34,7 @@ from ..analyzer import Analyzer, CaptureResult
 from .gtkw_writer import write_gtkw_for_capture
 from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
+from .surfer_wcp import SurferWcpBridge
 from .viewer_tile import schedule_vertical_split_with_viewer
 from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
@@ -63,6 +64,7 @@ class HistoryPanel(QGroupBox):
         self._viewer_processes: list[QProcess] = []
         self._last_viewer_program: str | None = None
         self._live_wave_root = live_wave_dir(default_gui_config_path())
+        self._surfer_wcp = SurferWcpBridge(self)
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Time", "Samples", "Flags"])
@@ -72,7 +74,7 @@ class HistoryPanel(QGroupBox):
         self._table.doubleClicked.connect(lambda _i: self._on_open_viewer())
 
         self._viewer_combo = QComboBox()
-        self._viewer_combo.setMinimumWidth(160)
+        self._viewer_combo.setMinimumWidth(120)
 
         self._open_btn = QPushButton("Open in viewer")
         self._open_btn.clicked.connect(self._on_open_viewer)
@@ -86,8 +88,8 @@ class HistoryPanel(QGroupBox):
         self._reuse_viewer = QCheckBox("Reuse external viewer (live wave folder)")
         self._reuse_viewer.setToolTip(
             "Keeps one viewer process when possible. Each open overwrites the live-wave "
-            "folder next to gui.toml. On Linux/macOS, Surfer can hot-reload; on Windows "
-            "Surfer has no file watcher, so the GUI restarts the viewer to pick up changes.",
+            "folder next to gui.toml. Surfer uses WCP reload when launched from here; "
+            "GTKWave relies on OS file watching where available.",
         )
         self._reuse_viewer.toggled.connect(self.reuse_external_viewer_changed.emit)
 
@@ -133,7 +135,7 @@ class HistoryPanel(QGroupBox):
         split.addWidget(self._preview)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
-        split.setSizes([260, 340])
+        split.setSizes([220, 260])
 
         grid = QGridLayout(self)
         grid.addWidget(split, 0, 0)
@@ -164,13 +166,23 @@ class HistoryPanel(QGroupBox):
         if 0 <= index < self._viewer_combo.count():
             self._viewer_combo.setCurrentIndex(index)
 
-    def stop_viewer_processes(self) -> None:
+    def stop_viewer_processes(self, *, aggressive: bool = False) -> None:
+        """Stop external waveform viewer processes.
+
+        ``aggressive=True`` (Ctrl+C / console interrupt): hard-kill with a short wait
+        so the GUI can exit quickly instead of waiting up to 3s per ``terminate()``.
+        """
+        kill_wait_ms = 400 if aggressive else 1000
         for proc in list(self._viewer_processes):
             if proc.state() != QProcess.ProcessState.NotRunning:
-                proc.terminate()
-                if not proc.waitForFinished(3000):
+                if aggressive:
                     proc.kill()
-                    proc.waitForFinished(1000)
+                    proc.waitForFinished(kill_wait_ms)
+                else:
+                    proc.terminate()
+                    if not proc.waitForFinished(3000):
+                        proc.kill()
+                        proc.waitForFinished(kill_wait_ms)
             try:
                 self._viewer_processes.remove(proc)
             except ValueError:
@@ -178,6 +190,7 @@ class HistoryPanel(QGroupBox):
             proc.deleteLater()
         self._viewer_processes.clear()
         self._last_viewer_program = None
+        self._surfer_wcp.shutdown()
 
     def add_capture(self, analyzer: Analyzer, result: CaptureResult) -> None:
         work = Path(tempfile.mkdtemp(prefix="fcapz-gui-cap-"))
@@ -320,7 +333,12 @@ class HistoryPanel(QGroupBox):
             else:
                 QMessageBox.warning(self, "Viewer", str(exc))
             return
-        self._start_viewer_process(label, argv, silent=silent)
+        self._start_viewer_process(
+            label,
+            argv,
+            silent=silent,
+            surfer_wcp=isinstance(viewer, SurferViewer) and self._reuse_viewer.isChecked(),
+        )
 
     def _running_viewer_process(self) -> QProcess | None:
         for p in self._viewer_processes:
@@ -332,7 +350,14 @@ class HistoryPanel(QGroupBox):
                 return p
         return None
 
-    def _start_viewer_process(self, viewer_label: str, argv: list[str], *, silent: bool) -> None:
+    def _start_viewer_process(
+        self,
+        viewer_label: str,
+        argv: list[str],
+        *,
+        silent: bool,
+        surfer_wcp: bool = False,
+    ) -> None:
         if not argv or not argv[0]:
             msg = "Viewer command line is empty."
             self.status_message.emit(msg)
@@ -340,23 +365,34 @@ class HistoryPanel(QGroupBox):
                 QMessageBox.warning(self, "Viewer", msg)
             return
         prog_resolved = str(Path(argv[0]).resolve())
-        # Surfer ships a no-op FileWatcher on Windows (notify-rs issues), so
-        # SuggestReloadWaveform never fires; respawn the process to load the new VCD.
         can_skip_respawn = sys.platform != "win32"
+        wcp_ready = surfer_wcp and self._surfer_wcp.can_reload()
+        # With WCP, Surfer reload is explicit; do not fall back to "assume file watcher" on Unix.
+        unix_file_watcher_ok = can_skip_respawn and not surfer_wcp
         reuse_same = (
             self._reuse_viewer.isChecked()
-            and can_skip_respawn
             and self._running_viewer_process() is not None
             and self._last_viewer_program == prog_resolved
+            and (wcp_ready or unix_file_watcher_ok)
         )
         if reuse_same:
-            self.status_message.emit(
-                f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
-            )
+            if wcp_ready:
+                self._surfer_wcp.send_reload()
+                self.status_message.emit(
+                    f"Updated live wave for {viewer_label} — reloaded in Surfer (WCP).",
+                )
+            else:
+                self.status_message.emit(
+                    f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
+                )
             return
 
         # Different viewer binary, or not reusing, or no running process: replace.
         self.stop_viewer_processes()
+        if surfer_wcp:
+            port = self._surfer_wcp.prepare_listener()
+            if port is not None:
+                argv = [argv[0], "--wcp-initiate", str(port)] + argv[1:]
         proc = QProcess(self)
         proc.setProgram(argv[0])
         proc.setArguments(argv[1:])
