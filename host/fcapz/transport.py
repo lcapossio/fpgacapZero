@@ -167,16 +167,22 @@ class OpenOcdTransport(Transport):
         port: int = 6666,
         tap: str = "xc7a100t.tap",
         ir_table: dict[int, int] | None = None,
+        *,
+        connect_timeout_sec: float = 5.0,
     ):
         self.host = host
         self.port = port
         self.tap = tap
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
+        self._connect_timeout_sec = float(connect_timeout_sec)
         self._active_chain: int = 1
         self._sock: socket.socket | None = None
 
     def connect(self) -> None:
-        self._sock = socket.create_connection((self.host, self.port), timeout=5)
+        self._sock = socket.create_connection(
+            (self.host, self.port),
+            timeout=self._connect_timeout_sec,
+        )
         self._sock.settimeout(0.2)
         try:
             self._sock.recv(4096)
@@ -414,6 +420,30 @@ class XilinxHwServerTransport(Transport):
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+
+    def close_fast(self) -> None:
+        """Kill ``xsdb`` quickly for console interrupt; normal :meth:`close` may wait 5s."""
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.write("exit\n")
+                    proc.stdin.flush()
+                except OSError:
+                    pass
+        except (OSError, ValueError):
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
+        self._proc = None
 
     # -- chain selection -----------------------------------------------------
 

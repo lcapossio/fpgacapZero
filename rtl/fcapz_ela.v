@@ -141,6 +141,13 @@ module fcapz_ela #(
     localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam SEG_IDX_W = (NUM_SEGMENTS > 1) ? $clog2(NUM_SEGMENTS) : 1;
 
+    // Static assert: SEG_DEPTH must be a power-of-two (bitmask wrap arithmetic)
+    generate
+        if (SEG_DEPTH != 0 && (SEG_DEPTH & (SEG_DEPTH - 1)) != 0) begin : g_bad_seg_depth
+            SEG_DEPTH_must_be_power_of_two invalid();
+        end
+    endgenerate
+
     // Phase 3: timestamp data base address
     localparam ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
     // Timestamp words per entry
@@ -893,7 +900,10 @@ module fcapz_ela #(
                         if (post_count >= posttrig_len) begin
                             // Segment complete
                             if (NUM_SEGMENTS > 1) begin
-                                seg_start_ptr[cur_segment] <= trig_ptr - pretrig_len;
+                                // Ring start within this segment (not raw subtract; avoids host/burst
+                                // linear read crossing into the next segment's RAM).
+                                seg_start_ptr[cur_segment] <= seg_base
+                                    + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
                                 if (cur_segment == NUM_SEGMENTS - 1) begin
                                     // All segments done
                                     done      <= 1'b1;
@@ -917,7 +927,8 @@ module fcapz_ela #(
                             end else begin
                                 done      <= 1'b1;
                                 armed     <= 1'b0;
-                                start_ptr <= trig_ptr - pretrig_len;
+                                start_ptr <= seg_base
+                                    + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
                             end
                         end else begin
                             post_count <= post_count + 1'b1;
@@ -933,6 +944,16 @@ module fcapz_ela #(
     // Registered lookup of seg_start_ptr to avoid combinational CDC path
     reg [PTR_W-1:0] seg_start_ptr_rd;
     wire [PTR_W-1:0] rd_start_ptr = (NUM_SEGMENTS > 1) ? seg_start_ptr_rd : start_ptr;
+    // Physical RAM base for the segment being read (ring readback must stay in-segment).
+    wire [PTR_W-1:0] seg_rd_base;
+
+    generate
+        if (NUM_SEGMENTS > 1) begin : g_seg_rd_base
+            assign seg_rd_base = {rd_start_ptr[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+        end else begin : g_seg_rd_base_flat
+            assign seg_rd_base = {PTR_W{1'b0}};
+        end
+    endgenerate
 
     // ---- CDC: data readback (via dpram port A read) -------------------------
     reg [1:0] rd_phase;
@@ -979,7 +1000,8 @@ module fcapz_ela #(
                     word_index   = (rd_addr_sync1 - ADDR_TS_DATA_BASE[15:0]) >> 2;
                     sample_index = word_index / TS_WORDS;
                     if (sample_index < capture_len) begin
-                        idx <= rd_start_ptr + sample_index[PTR_W-1:0];
+                        idx <= seg_rd_base
+                            + ((rd_start_ptr - seg_rd_base + sample_index) & (SEG_DEPTH - 1));
                         mem_rd_pending <= 1'b1;
                         rd_phase <= 2'b01;
                         rd_is_ts <= 1'b1;
@@ -991,7 +1013,8 @@ module fcapz_ela #(
                     word_index   = (rd_addr_sync1 - ADDR_DATA_BASE) >> 2;
                     sample_index = word_index / WORDS_PER_SAMPLE;
                     if (sample_index < capture_len) begin
-                        idx <= rd_start_ptr + sample_index[PTR_W-1:0];
+                        idx <= seg_rd_base
+                            + ((rd_start_ptr - seg_rd_base + sample_index) & (SEG_DEPTH - 1));
                         mem_rd_pending <= 1'b1;
                         rd_phase <= 2'b01;
                         rd_is_ts <= 1'b0;

@@ -50,6 +50,52 @@ _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
 PORT = 3121
 FPGA = "xc7a100t"
 
+_ROOT = Path(__file__).resolve().parents[2]
+
+# RTL and design sources that feed the bitstream (must match build_arty.tcl)
+_BITSTREAM_SOURCES = [
+    _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "dpram.v",
+    _ROOT / "rtl" / "trig_compare.v",
+    _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
+    _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_burst_read.v",
+    _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_async_fifo.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio.v",
+    _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "tb" / "axi4_test_slave.v",
+    Path(__file__).resolve().parent / "arty_a7_top.v",
+    Path(__file__).resolve().parent / "arty_a7.xdc",
+]
+
+
+def _check_bitstream_freshness() -> str | None:
+    """Return an error message if any source is newer than the bitfile."""
+    bitpath = Path(BITFILE)
+    if not bitpath.exists():
+        return f"bitfile not found: {BITFILE}"
+    bit_mtime = bitpath.stat().st_mtime
+    stale = []
+    for src in _BITSTREAM_SOURCES:
+        if src.exists() and src.stat().st_mtime > bit_mtime:
+            stale.append(src.name)
+    if stale:
+        return (
+            f"bitstream is stale — these sources are newer than "
+            f"{bitpath.name}: {', '.join(stale)}. "
+            f"Re-run: python examples/arty_a7/build.py"
+        )
+    return None
+
+
+_STALE_MSG = _check_bitstream_freshness()
+if _STALE_MSG and not _SKIP:
+    raise RuntimeError(_STALE_MSG)
+
 
 def _make_transport():
     if _BACKEND == "openocd":
