@@ -172,7 +172,7 @@ class HistoryPanel(QGroupBox):
         ``aggressive=True`` (Ctrl+C / console interrupt): hard-kill with a short wait
         so the GUI can exit quickly instead of waiting up to 3s per ``terminate()``.
         """
-        kill_wait_ms = 400 if aggressive else 1000
+        kill_wait_ms = 120 if aggressive else 1000
         for proc in list(self._viewer_processes):
             if proc.state() != QProcess.ProcessState.NotRunning:
                 if aggressive:

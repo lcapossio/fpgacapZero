@@ -117,8 +117,14 @@ def main(_argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.aboutToQuit.connect(ex.close)
 
-    from .app_window import MainWindow, apply_gui_application_style
+    from .app_window import (
+        MainWindow,
+        apply_application_ui_font,
+        apply_gui_application_style,
+    )
+    from .settings import load_gui_settings
 
+    apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
 
     w = MainWindow(

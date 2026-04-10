@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Edit ``gui.toml`` viewer paths, default viewer, and probe profiles."""
+"""Edit ``gui.toml`` viewers, probe profiles, and UI appearance."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .settings import GuiSettings, ProbeProfile, ViewerSettings
+from .settings import GuiSettings, ProbeProfile, UiSettings, ViewerSettings
 
 
 class SettingsDialog(QDialog):
@@ -89,6 +90,28 @@ class SettingsDialog(QDialog):
         )
         self._reuse_viewer.setChecked(settings.viewers.reuse_external_viewer)
 
+        self._font_pt = QSpinBox()
+        self._font_pt.setRange(8, 20)
+        self._font_pt.setSuffix(" pt")
+        self._font_pt.setValue(int(settings.ui.font_size_pt))
+        self._font_pt.setToolTip(
+            "Application-wide default font size. Restart is not required; "
+            "takes effect when you click OK.",
+        )
+
+        appearance_tab = QWidget()
+        af = QFormLayout(appearance_tab)
+        af.addRow(
+            "UI font size",
+            self._font_pt,
+        )
+        _hint = QLabel(
+            "Smaller values make docks and tables fit better on small screens. "
+            "Default 9 pt is slightly compact.",
+        )
+        _hint.setWordWrap(True)
+        af.addRow(_hint)
+
         viewers_tab = QWidget()
         vf = QFormLayout(viewers_tab)
         vf.addRow("Default viewer", self._default_viewer)
@@ -129,6 +152,7 @@ class SettingsDialog(QDialog):
         pl.addLayout(prof_btns)
 
         tabs = QTabWidget()
+        tabs.addTab(appearance_tab, "Appearance")
         tabs.addTab(viewers_tab, "Viewers")
         tabs.addTab(profiles_tab, "Probe profiles")
 
@@ -222,9 +246,12 @@ class SettingsDialog(QDialog):
             if not name:
                 continue
             profiles[name] = ProbeProfile(name=name, probes=probes)
+        font_pt = max(8, min(24, int(self._font_pt.value())))
+        ui = UiSettings(font_size_pt=font_pt)
         return GuiSettings(
             connection=self._base.connection,
             viewers=viewers,
+            ui=ui,
             probe_profiles=profiles,
             trigger_history=list(self._base.trigger_history),
         )

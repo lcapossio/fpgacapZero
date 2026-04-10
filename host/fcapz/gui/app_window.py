@@ -26,7 +26,7 @@ from PySide6.QtCore import (
     QUrl,
     Slot,
 )
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
             return
         timer = QElapsedTimer()
         timer.start()
-        limit_ms = 2_000 if self._console_interrupt_shutdown else 15_000
+        limit_ms = 400 if self._console_interrupt_shutdown else 15_000
         while t.isRunning() and timer.elapsed() < limit_ms:
             QApplication.processEvents()
             t.wait(50)
@@ -888,6 +888,7 @@ class MainWindow(QMainWindow):
             return
         merged = dlg.merged_settings()
         save_gui_settings(merged, self._config_path)
+        apply_application_ui_font(QApplication.instance(), merged.ui.font_size_pt)
         self._apply_viewer_choices(merged)
         self._history.set_open_viewer_after_capture(merged.viewers.open_viewer_after_capture)
         self._history.set_reuse_external_viewer(merged.viewers.reuse_external_viewer)
@@ -1146,7 +1147,7 @@ class MainWindow(QMainWindow):
             self._cap_worker.cancel_continuous()
         if self._cap_thread is not None and self._cap_thread.isRunning():
             self._cap_thread.quit()
-            cap_wait_ms = 2_000 if self._console_interrupt_shutdown else 8_000
+            cap_wait_ms = 400 if self._console_interrupt_shutdown else 8_000
             self._cap_thread.wait(cap_wait_ms)
         QApplication.processEvents()
         self._drain_continuous_progress_pending()
@@ -1180,11 +1181,11 @@ class MainWindow(QMainWindow):
         self._stop_capture_thread()
         if self._analyzer is not None:
             try:
-                self._analyzer.close()
+                self._analyzer.close(fast=self._console_interrupt_shutdown)
             except OSError:
                 pass
             self._analyzer = None
-        self._history.stop_viewer_processes()
+        self._history.stop_viewer_processes(aggressive=self._console_interrupt_shutdown)
         self._history.cleanup_temp_dirs()
         self._clear_subsidiary_controllers()
         self._probe.clear()
@@ -1260,9 +1261,19 @@ def _install_ctrl_c_quit(app: QApplication) -> tuple[QTimer, Any | None]:
     wake = QTimer()
     wake.timeout.connect(lambda: None)
     # Short interval so SIGINT is picked up promptly while Qt owns the event loop.
-    wake.start(25)
+    wake.start(10)
     win_cb = _install_windows_console_ctrl_handler(app)
     return wake, win_cb
+
+
+def apply_application_ui_font(app: QApplication | None, size_pt: int) -> None:
+    """Apply persisted UI font size; most widgets inherit :meth:`QApplication.font`."""
+    if app is None:
+        return
+    pt = max(8, min(24, int(size_pt)))
+    f = QFont(app.font())
+    f.setPointSize(pt)
+    app.setFont(f)
 
 
 def apply_gui_application_style(app: QApplication) -> None:
@@ -1304,6 +1315,7 @@ def run_app(argv: list[str] | None = None) -> int:
     )
     _windows_set_taskbar_app_identity()
     app = QApplication(args)
+    apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
     app.setApplicationName("fcapz-gui")
     app.setApplicationDisplayName("fcapz-gui")

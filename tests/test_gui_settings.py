@@ -65,6 +65,16 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             self.assertEqual(loaded.trigger_history[0]["pretrigger"], 4)
             self.assertEqual(loaded.connection.connect_timeout_sec, 60.0)
             self.assertEqual(loaded.connection.hw_ready_timeout_sec, 60.0)
+            self.assertEqual(loaded.ui.font_size_pt, 9)
+
+    def test_ui_font_roundtrip(self) -> None:
+        s = GuiSettings()
+        s.ui.font_size_pt = 11
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gui.toml"
+            save_gui_settings(s, path)
+            loaded = load_gui_settings(path)
+            self.assertEqual(loaded.ui.font_size_pt, 11)
 
     def test_connection_timeouts_roundtrip(self) -> None:
         s = GuiSettings()
@@ -83,6 +93,7 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
         g = load_gui_settings(p)
         self.assertEqual(g.connection.backend, "hw_server")
         self.assertEqual(g.probe_profiles, {})
+        self.assertEqual(g.ui.font_size_pt, 9)
 
 
 class TestApplyProbeProfile(unittest.TestCase):

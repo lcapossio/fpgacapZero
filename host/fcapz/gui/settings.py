@@ -61,6 +61,14 @@ class ConnectionSettings:
 
 
 @dataclass
+class UiSettings:
+    """GUI chrome (fonts, density)."""
+
+    #: Default 9 pt is slightly below typical Qt defaults so layouts fit better on laptops.
+    font_size_pt: int = 9
+
+
+@dataclass
 class ViewerSettings:
     default_viewer: str = "gtkwave"
     gtkwave_executable: str | None = None
@@ -85,6 +93,7 @@ class ProbeProfile:
 class GuiSettings:
     connection: ConnectionSettings = field(default_factory=ConnectionSettings)
     viewers: ViewerSettings = field(default_factory=ViewerSettings)
+    ui: UiSettings = field(default_factory=UiSettings)
     probe_profiles: dict[str, ProbeProfile] = field(default_factory=dict)
     trigger_history: list[dict[str, Any]] = field(default_factory=list)
 
@@ -186,9 +195,18 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
             if isinstance(entry, dict):
                 trigger_history.append(dict(entry))
 
+    ui_raw = dict(data.get("ui") or {})
+    try:
+        font_pt = int(ui_raw.get("font_size_pt", UiSettings().font_size_pt))
+    except (TypeError, ValueError):
+        font_pt = UiSettings().font_size_pt
+    font_pt = max(8, min(24, font_pt))
+    ui = UiSettings(font_size_pt=font_pt)
+
     return GuiSettings(
         connection=conn,
         viewers=viewers,
+        ui=ui,
         probe_profiles=profiles,
         trigger_history=trigger_history[:_TRIGGER_HISTORY_MAX],
     )
@@ -220,6 +238,7 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "open_viewer_after_capture": settings.viewers.open_viewer_after_capture,
             "reuse_external_viewer": settings.viewers.reuse_external_viewer,
         },
+        "ui": {"font_size_pt": int(settings.ui.font_size_pt)},
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),
     }
