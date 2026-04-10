@@ -152,6 +152,36 @@ class CaptureResult:
     segment: int = 0  # which segment this result is from
 
 
+def vcd_simulation_times(result: CaptureResult) -> list[int]:
+    """Per-sample times for VCD ``#`` lines (``len(result.samples)`` entries).
+
+    Without hardware timestamps this is ``0 .. n-1`` (one time unit per stored
+    sample, matching the historical behaviour).
+
+    With timestamps, values are **shifted by the first sample** so each dump
+    starts at 0 while preserving relative spacing. Raw counters often jump
+    between successive captures (continuous mode / live VCD reload); using
+    absolute values as ``#`` time made the viewer timeline and timescale look
+    broken. The ``timestamp`` wire in the VCD still carries raw hardware values.
+
+    Times are forced **non-decreasing** so the file stays valid if the buffer
+    has duplicate or slightly regressed counter values.
+    """
+    n = len(result.samples)
+    ts = result.timestamps
+    if ts and len(ts) == n:
+        base = int(ts[0])
+        out: list[int] = []
+        last = -1
+        for i in range(n):
+            rel = int(ts[i]) - base
+            t = max(rel, last + 1, 0)
+            out.append(t)
+            last = t
+        return out
+    return list(range(n))
+
+
 class Analyzer:
     def __init__(self, transport: Transport):
         self.transport = transport
@@ -162,7 +192,13 @@ class Analyzer:
     def connect(self) -> None:
         self.transport.connect()
 
-    def close(self) -> None:
+    def close(self, *, fast: bool = False) -> None:
+        """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
+        if fast:
+            closer = getattr(self.transport, "close_fast", None)
+            if callable(closer):
+                closer()
+                return
         self.transport.close()
 
     def reset(self) -> None:
@@ -488,11 +524,9 @@ class Analyzer:
             lines.append(f"b{'0' * ts_w} {ts_var_id}")
         lines.append("$end")
 
+        sim_times = vcd_simulation_times(result)
         for i, sample in enumerate(result.samples):
-            if result.timestamps and i < len(result.timestamps):
-                lines.append(f"#{result.timestamps[i]}")
-            else:
-                lines.append(f"#{i}")
+            lines.append(f"#{sim_times[i]}")
             for var_id, _, width, lsb in signals:
                 val = (sample >> lsb) & ((1 << width) - 1)
                 bits = format(val, f"0{width}b")
@@ -533,7 +567,8 @@ class Analyzer:
         drive a non-fcapz bitstream.
 
         Returns a dict with `version_major`, `version_minor`, `core_id`
-        (always 0x4C41 on success), and the rest of the feature flags.
+        (always 0x4C41 on success), `trig_stages` (FEATURES[3:0]: hardware
+        trigger sequencer depth, 0 if absent), and the rest of the feature flags.
         """
         _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         version = int(_read(_ADDR_VERSION))
@@ -558,6 +593,7 @@ class Analyzer:
             "sample_width": sample_w,
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
+            "trig_stages": int(features & 0xF),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),
