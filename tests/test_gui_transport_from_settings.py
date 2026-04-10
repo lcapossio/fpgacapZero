@@ -62,6 +62,32 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertIsInstance(t, XilinxHwServerTransport)
         self.assertEqual(t.ready_probe_timeout, 90.0)
 
+    def test_hw_server_program_disabled_skips_bitfile(self) -> None:
+        c = ConnectionSettings(
+            backend="hw_server",
+            tap="xc7a100t",
+            program="/tmp/x.bit",
+            program_on_connect=False,
+            hw_ready_timeout_sec=90.0,
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, XilinxHwServerTransport)
+        self.assertIsNone(t.bitfile)
+        self.assertEqual(t.ready_probe_timeout, 2.0)
+
+    def test_hw_server_post_program_and_poll_from_settings(self) -> None:
+        c = ConnectionSettings(
+            backend="hw_server",
+            tap="xc7a100t",
+            program="/tmp/x.bit",
+            hw_post_program_delay_ms=350,
+            hw_ready_poll_interval_ms=40,
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, XilinxHwServerTransport)
+        self.assertEqual(t.post_program_delay_ms, 350)
+        self.assertAlmostEqual(t.ready_poll_interval_sec, 0.04)
+
     def test_unknown_backend(self) -> None:
         c = ConnectionSettings(backend="nope")
         with self.assertRaises(ValueError):

@@ -81,6 +81,12 @@ class FakeTransport(Transport):
     def read_reg(self, addr: int) -> int:
         return self.regs.get(addr, 0)
 
+    def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+        """Match Xilinx batched probe path (:meth:`Analyzer.probe`)."""
+        out = [self.read_reg(a) for a in addrs]
+        self.read_reg(0x0000)
+        return out
+
     def write_reg(self, addr: int, value: int) -> None:
         self.regs[addr] = value
 

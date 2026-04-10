@@ -65,7 +65,11 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             self.assertEqual(loaded.trigger_history[0]["pretrigger"], 4)
             self.assertEqual(loaded.connection.connect_timeout_sec, 60.0)
             self.assertEqual(loaded.connection.hw_ready_timeout_sec, 60.0)
-            self.assertEqual(loaded.ui.font_size_pt, 9)
+            self.assertEqual(loaded.connection.hw_post_program_delay_ms, 200)
+            self.assertEqual(loaded.connection.hw_ready_poll_interval_ms, 20)
+            self.assertFalse(loaded.connection.program_on_connect)
+            self.assertEqual(loaded.ui.font_size_pt, 8)
+            self.assertEqual(loaded.ui.log_font_size_pt, 10)
 
     def test_ui_font_roundtrip(self) -> None:
         s = GuiSettings()
@@ -76,16 +80,31 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             loaded = load_gui_settings(path)
             self.assertEqual(loaded.ui.font_size_pt, 11)
 
+    def test_log_font_roundtrip(self) -> None:
+        s = GuiSettings()
+        s.ui.log_font_size_pt = 12
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gui.toml"
+            save_gui_settings(s, path)
+            loaded = load_gui_settings(path)
+            self.assertEqual(loaded.ui.log_font_size_pt, 12)
+
     def test_connection_timeouts_roundtrip(self) -> None:
         s = GuiSettings()
         s.connection.connect_timeout_sec = 42.0
         s.connection.hw_ready_timeout_sec = 99.0
+        s.connection.hw_post_program_delay_ms = 150
+        s.connection.hw_ready_poll_interval_ms = 33
+        s.connection.program_on_connect = False
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "gui.toml"
             save_gui_settings(s, path)
             loaded = load_gui_settings(path)
             self.assertEqual(loaded.connection.connect_timeout_sec, 42.0)
             self.assertEqual(loaded.connection.hw_ready_timeout_sec, 99.0)
+            self.assertEqual(loaded.connection.hw_post_program_delay_ms, 150)
+            self.assertEqual(loaded.connection.hw_ready_poll_interval_ms, 33)
+            self.assertFalse(loaded.connection.program_on_connect)
 
     def test_missing_file_is_default(self) -> None:
         p = Path("__no_such_gui__.toml")
@@ -93,7 +112,8 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
         g = load_gui_settings(p)
         self.assertEqual(g.connection.backend, "hw_server")
         self.assertEqual(g.probe_profiles, {})
-        self.assertEqual(g.ui.font_size_pt, 9)
+        self.assertEqual(g.ui.font_size_pt, 8)
+        self.assertEqual(g.ui.log_font_size_pt, 10)
 
 
 class TestApplyProbeProfile(unittest.TestCase):

@@ -99,15 +99,27 @@ class SettingsDialog(QDialog):
             "takes effect when you click OK.",
         )
 
+        self._log_font_pt = QSpinBox()
+        self._log_font_pt.setRange(7, 24)
+        self._log_font_pt.setSuffix(" pt")
+        self._log_font_pt.setValue(int(settings.ui.log_font_size_pt))
+        self._log_font_pt.setToolTip(
+            "Monospace font size for the Log dock only. Takes effect when you click OK.",
+        )
+
         appearance_tab = QWidget()
         af = QFormLayout(appearance_tab)
         af.addRow(
             "UI font size",
             self._font_pt,
         )
+        af.addRow(
+            "Log font size",
+            self._log_font_pt,
+        )
         _hint = QLabel(
-            "Smaller values make docks and tables fit better on small screens. "
-            "Default 9 pt is slightly compact.",
+            "Smaller UI values help on small screens (default 9 pt). "
+            "Log font size applies only to the bottom Log dock (monospace).",
         )
         _hint.setWordWrap(True)
         af.addRow(_hint)
@@ -225,7 +237,7 @@ class SettingsDialog(QDialog):
 
     def merged_settings(self) -> GuiSettings:
         custom_lines = [ln.strip() for ln in self._custom.toPlainText().splitlines() if ln.strip()]
-        dv = str(self._default_viewer.currentData() or "gtkwave")
+        dv = str(self._default_viewer.currentData() or ViewerSettings().default_viewer)
         viewers = ViewerSettings(
             default_viewer=dv,
             gtkwave_executable=_empty_to_none(self._gtkw.text()),
@@ -247,7 +259,8 @@ class SettingsDialog(QDialog):
                 continue
             profiles[name] = ProbeProfile(name=name, probes=probes)
         font_pt = max(8, min(24, int(self._font_pt.value())))
-        ui = UiSettings(font_size_pt=font_pt)
+        log_font_pt = max(7, min(24, int(self._log_font_pt.value())))
+        ui = UiSettings(font_size_pt=font_pt, log_font_size_pt=log_font_pt)
         return GuiSettings(
             connection=self._base.connection,
             viewers=viewers,

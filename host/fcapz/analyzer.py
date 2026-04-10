@@ -63,6 +63,18 @@ _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
 _ADDR_TRIG_DELAY = 0x00D4
+
+# Order matches :meth:`Analyzer.probe` field extraction (hw_server pipelined read).
+_ELA_PROBE_ADDRS: tuple[int, ...] = (
+    _ADDR_VERSION,
+    _ADDR_SAMPLE_W,
+    _ADDR_DEPTH,
+    _ADDR_NUM_CHAN,
+    _ADDR_FEATURES,
+    _ADDR_TIMESTAMP_W,
+    _ADDR_NUM_SEGMENTS,
+    _ADDR_PROBE_MUX_W,
+)
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
@@ -566,12 +578,36 @@ class Analyzer:
         RuntimeError on mismatch so the caller cannot accidentally
         drive a non-fcapz bitstream.
 
+        When the transport exposes :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
+        (hw_server), all probe registers share **one** XSDB ``_send`` plus a pipeline flush read.
+        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
+        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+
         Returns a dict with `version_major`, `version_minor`, `core_id`
         (always 0x4C41 on success), `trig_stages` (FEATURES[3:0]: hardware
         trigger sequencer depth, 0 if absent), and the rest of the feature flags.
         """
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = int(_read(_ADDR_VERSION))
+        piped = getattr(self.transport, "read_regs_pipelined_user1", None)
+        if callable(piped):
+            vals = piped(list(_ELA_PROBE_ADDRS))
+            version = int(vals[0])
+            sample_w = int(vals[1])
+            depth = int(vals[2])
+            num_chan = int(vals[3])
+            features = int(vals[4])
+            timestamp_w = int(vals[5])
+            num_segments = max(1, int(vals[6]))
+            probe_mux_w = int(vals[7])
+        else:
+            _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            version = int(_vread(_ADDR_VERSION))
+            sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
+            depth = int(self.transport.read_reg(_ADDR_DEPTH))
+            num_chan = int(self.transport.read_reg(_ADDR_NUM_CHAN))
+            features = int(self.transport.read_reg(_ADDR_FEATURES))
+            timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
+            num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
+            probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
         core_id = version & 0xFFFF
         if core_id != _ELA_CORE_ID:
             raise RuntimeError(
@@ -579,13 +615,6 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        sample_w = _read(_ADDR_SAMPLE_W)
-        depth = _read(_ADDR_DEPTH)
-        num_chan = int(_read(_ADDR_NUM_CHAN))
-        features = int(_read(_ADDR_FEATURES))
-        timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
-        num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
-        probe_mux_w = int(_read(_ADDR_PROBE_MUX_W))
         return {
             "version_major": (version >> 24) & 0xFF,
             "version_minor": (version >> 16) & 0xFF,

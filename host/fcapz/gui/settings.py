@@ -53,32 +53,40 @@ class ConnectionSettings:
     port: int = 6666
     tap: str = "xc7a100t.tap"
     program: str | None = None
+    #: hw_server: if True and ``program`` is set, run ``fpga -file`` on connect.
+    program_on_connect: bool = False
     ir_table: str = "xilinx7"
     #: OpenOCD TCP ``create_connection`` timeout (seconds).
     connect_timeout_sec: float = 60.0
     #: After ``fpga -file``, poll until VERSION non-zero (seconds); GUI default is patient.
     hw_ready_timeout_sec: float = 60.0
+    #: Tcl ``after`` (ms) following ``fpga -file`` before ready polling (smaller = faster connect if the device is ready).
+    hw_post_program_delay_ms: int = 200
+    #: Sleep between non-ready polls while waiting for the probe register (ms).
+    hw_ready_poll_interval_ms: int = 20
 
 
 @dataclass
 class UiSettings:
     """GUI chrome (fonts, density)."""
 
-    #: Default 9 pt is slightly below typical Qt defaults so layouts fit better on laptops.
-    font_size_pt: int = 9
+    #: Application UI font (pt); 8 pt keeps dense docks readable on laptops.
+    font_size_pt: int = 8
+    #: Monospace point size for the bottom Log dock (independent of UI font).
+    log_font_size_pt: int = 10
 
 
 @dataclass
 class ViewerSettings:
-    default_viewer: str = "gtkwave"
+    default_viewer: str = "surfer"
     gtkwave_executable: str | None = None
     surfer_executable: str | None = None
     wavetrace_executable: str | None = None
     custom_argv: list[str] = field(default_factory=list)
     #: GUI: spawn the selected external viewer after each new capture lands in history.
-    open_viewer_after_capture: bool = False
+    open_viewer_after_capture: bool = True
     #: GUI: keep one viewer process; overwrite a fixed ``live-wave`` tree so viewers can reload.
-    reuse_external_viewer: bool = False
+    reuse_external_viewer: bool = True
 
 
 @dataclass
@@ -135,15 +143,34 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         program = _empty_to_none(str(conn_raw.get("program", "")))
     else:
         program = None
+    try:
+        post_ms = int(conn_raw.get("hw_post_program_delay_ms", 200))
+    except (TypeError, ValueError):
+        post_ms = 200
+    post_ms = max(0, min(30_000, post_ms))
+    try:
+        poll_ms = int(conn_raw.get("hw_ready_poll_interval_ms", 20))
+    except (TypeError, ValueError):
+        poll_ms = 20
+    poll_ms = max(5, min(500, poll_ms))
+    _conn_defaults = ConnectionSettings()
+    poc_raw = conn_raw.get("program_on_connect", _conn_defaults.program_on_connect)
+    if isinstance(poc_raw, bool):
+        program_on_connect = poc_raw
+    else:
+        program_on_connect = str(poc_raw or "").strip().lower() in ("1", "true", "yes")
     conn = ConnectionSettings(
         backend=str(conn_raw.get("backend", "hw_server")),
         host=str(conn_raw.get("host", "127.0.0.1")),
         port=int(conn_raw.get("port", 6666)),
         tap=str(conn_raw.get("tap", "xc7a100t.tap")),
         program=program,
+        program_on_connect=program_on_connect,
         ir_table=str(conn_raw.get("ir_table", "xilinx7")),
         connect_timeout_sec=float(conn_raw.get("connect_timeout_sec", 60.0)),
         hw_ready_timeout_sec=float(conn_raw.get("hw_ready_timeout_sec", 60.0)),
+        hw_post_program_delay_ms=post_ms,
+        hw_ready_poll_interval_ms=poll_ms,
     )
 
     vraw = dict(data.get("viewers") or {})
@@ -158,18 +185,25 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         custom_list = [str(x) for x in custom]
     else:
         custom_list = []
-    ovc = vraw.get("open_viewer_after_capture")
-    if isinstance(ovc, bool):
-        open_after = ovc
+    _view_defaults = ViewerSettings()
+    if "open_viewer_after_capture" in vraw:
+        ovc = vraw["open_viewer_after_capture"]
+        if isinstance(ovc, bool):
+            open_after = ovc
+        else:
+            open_after = str(ovc or "").strip().lower() in ("1", "true", "yes")
     else:
-        open_after = str(ovc or "").strip().lower() in ("1", "true", "yes")
-    rev = vraw.get("reuse_external_viewer")
-    if isinstance(rev, bool):
-        reuse_ev = rev
+        open_after = _view_defaults.open_viewer_after_capture
+    if "reuse_external_viewer" in vraw:
+        rev = vraw["reuse_external_viewer"]
+        if isinstance(rev, bool):
+            reuse_ev = rev
+        else:
+            reuse_ev = str(rev or "").strip().lower() in ("1", "true", "yes")
     else:
-        reuse_ev = str(rev or "").strip().lower() in ("1", "true", "yes")
+        reuse_ev = _view_defaults.reuse_external_viewer
     viewers = ViewerSettings(
-        default_viewer=str(vraw.get("default", "gtkwave")),
+        default_viewer=str(vraw.get("default", _view_defaults.default_viewer)),
         gtkwave_executable=_opt_viewer_key("gtkwave_executable"),
         surfer_executable=_opt_viewer_key("surfer_executable"),
         wavetrace_executable=_opt_viewer_key("wavetrace_executable"),
@@ -201,7 +235,12 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
     except (TypeError, ValueError):
         font_pt = UiSettings().font_size_pt
     font_pt = max(8, min(24, font_pt))
-    ui = UiSettings(font_size_pt=font_pt)
+    try:
+        log_font_pt = int(ui_raw.get("log_font_size_pt", UiSettings().log_font_size_pt))
+    except (TypeError, ValueError):
+        log_font_pt = UiSettings().log_font_size_pt
+    log_font_pt = max(7, min(24, log_font_pt))
+    ui = UiSettings(font_size_pt=font_pt, log_font_size_pt=log_font_pt)
 
     return GuiSettings(
         connection=conn,
@@ -225,9 +264,12 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "port": settings.connection.port,
             "tap": settings.connection.tap,
             "program": _none_to_str(settings.connection.program),
+            "program_on_connect": settings.connection.program_on_connect,
             "ir_table": settings.connection.ir_table,
             "connect_timeout_sec": settings.connection.connect_timeout_sec,
             "hw_ready_timeout_sec": settings.connection.hw_ready_timeout_sec,
+            "hw_post_program_delay_ms": int(settings.connection.hw_post_program_delay_ms),
+            "hw_ready_poll_interval_ms": int(settings.connection.hw_ready_poll_interval_ms),
         },
         "viewers": {
             "default": settings.viewers.default_viewer,
@@ -238,7 +280,10 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "open_viewer_after_capture": settings.viewers.open_viewer_after_capture,
             "reuse_external_viewer": settings.viewers.reuse_external_viewer,
         },
-        "ui": {"font_size_pt": int(settings.ui.font_size_pt)},
+        "ui": {
+            "font_size_pt": int(settings.ui.font_size_pt),
+            "log_font_size_pt": int(settings.ui.log_font_size_pt),
+        },
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),
     }

@@ -21,8 +21,8 @@ def scroll_wrap(
     **minimum** size; when the dock viewport is smaller, scroll bars appear instead of
     squashing the form.
 
-    Do **not** wrap the central ELA splitter panes here: ``False``-style fixed content
-    sizes break :class:`QSplitter` share and panels that contain their own splitters.
+    Do **not** wrap panels that host a :class:`QSplitter` (e.g. capture history +
+    waveform preview): fixed inner minimums break splitter share.
     """
     scroll = QScrollArea()
     scroll.setObjectName("fcapz_scroll_area")

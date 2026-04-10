@@ -27,13 +27,18 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
         port = conn.port
         if port == 6666:
             port = 3121
-        ready_to = conn.hw_ready_timeout_sec if conn.program else 2.0
+        bitfile = (
+            conn.program if (conn.program_on_connect and conn.program) else None
+        )
+        ready_to = conn.hw_ready_timeout_sec if bitfile else 2.0
         return XilinxHwServerTransport(
             host=conn.host,
             port=port,
             fpga_name=fpga,
-            bitfile=conn.program,
+            bitfile=bitfile,
             ir_table=ir,
             ready_probe_timeout=ready_to,
+            post_program_delay_ms=conn.hw_post_program_delay_ms,
+            ready_poll_interval_sec=conn.hw_ready_poll_interval_ms / 1000.0,
         )
     raise ValueError(f"unknown backend {conn.backend!r}")

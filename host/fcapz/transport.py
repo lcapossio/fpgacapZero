@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import socket
@@ -24,6 +25,8 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
+
+_hw_log = logging.getLogger("fcapz.transport.hw_server")
 
 
 class Transport(ABC):
@@ -305,6 +308,9 @@ class XilinxHwServerTransport(Transport):
         ir_table: dict[int, int] | None = None,
         ready_probe_addr: int | None = 0x0000,
         ready_probe_timeout: float = 2.0,
+        *,
+        post_program_delay_ms: int = 200,
+        ready_poll_interval_sec: float = 0.02,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -322,6 +328,10 @@ class XilinxHwServerTransport(Transport):
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
         self.ready_probe_addr = ready_probe_addr
         self.ready_probe_timeout = ready_probe_timeout
+        self.post_program_delay_ms = int(max(0, min(30_000, post_program_delay_ms)))
+        self.ready_poll_interval_sec = float(
+            max(0.005, min(0.5, ready_poll_interval_sec))
+        )
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -352,7 +362,17 @@ class XilinxHwServerTransport(Transport):
         self._send(f"connect -url tcp:{self.host}:{self.port}")
 
         if self.bitfile:
+            _hw_log.info(
+                "Programming FPGA from bitfile (fpga -file): %s",
+                self.bitfile,
+            )
             self.program(self.bitfile)
+        else:
+            _hw_log.info(
+                "Skipping fpga -file — using the configuration already in the FPGA. "
+                "Uncheck 'Program on connect' or clear the bitfile path in Connection "
+                "when you do not want to reprogram.",
+            )
 
         self._send(
             f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
@@ -368,7 +388,13 @@ class XilinxHwServerTransport(Transport):
         # session.  Pass ready_probe_addr=None to skip (e.g. when the
         # bitstream cannot guarantee a non-zero response at any address).
         if self.ready_probe_addr is not None and self.bitfile:
+            _hw_log.info(
+                "Waiting for FPGA ready (probe register 0x%04X, timeout %.1fs)",
+                self.ready_probe_addr,
+                self.ready_probe_timeout,
+            )
             self._wait_until_ready()
+            _hw_log.info("FPGA ready probe succeeded.")
 
     def _wait_until_ready(self) -> None:
         """Poll the configured probe register until it returns non-zero.
@@ -389,7 +415,10 @@ class XilinxHwServerTransport(Transport):
             attempts += 1
             if last_value != 0:
                 return
-            time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.ready_poll_interval_sec, remaining))
         raise ConnectionError(
             f"FPGA did not become ready within {self.ready_probe_timeout}s "
             f"after program() (probe addr=0x{self.ready_probe_addr:04X}, "
@@ -406,7 +435,7 @@ class XilinxHwServerTransport(Transport):
             )
         self._send(f'targets -set -filter {{name =~ "{self.fpga_name}"}}')
         self._send(f"fpga -file {{{bitfile}}}")
-        self._send("after 500")
+        self._send(f"after {int(self.post_program_delay_ms)}")
 
     def close(self) -> None:
         if self._proc and self._proc.stdin:
@@ -647,6 +676,40 @@ class XilinxHwServerTransport(Transport):
         )
         parts.append("puts [$_q run -bits]; $_q delete")
         return "; ".join(parts)
+
+    def read_regs_pipelined_user1(self, addrs: List[int]) -> List[int]:
+        """Read several CSR addresses in one ``jtag sequence`` / :meth:`_send` round-trip.
+
+        Uses the same USER1 pipelined capture pattern as :meth:`_burst_read_tcl`
+        (IR+DR per step; capture carries the previous address's data).  A final
+        :meth:`read_reg` to VERSION flushes the JTAG pipeline for later accesses.
+        """
+        if not addrs:
+            return []
+        ir = f"{self.ir_table[self._active_chain]:02x}"
+        n = self.DR_BITS
+        frames = [self._frame_bits(addr=a, data=0, write=False) for a in addrs]
+        count = len(frames)
+        parts: list[str] = [
+            "set _pq [jtag sequence]",
+            f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+            f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
+        ]
+        for i in range(1, count):
+            parts.append(
+                f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+                f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
+            )
+        parts.append(
+            f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+            f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
+        )
+        parts.append("puts [$_pq run -bits]; $_pq delete")
+        tcl = "; ".join(parts)
+        out = self._send(tcl)
+        vals = self._parse_block_bits(out, count)
+        self.read_reg(0x0000)
+        return vals
 
 
     # -- frame helpers -------------------------------------------------------

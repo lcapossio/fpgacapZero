@@ -36,6 +36,7 @@ class TestConnectionPanel(unittest.TestCase):
             port=3121,
             tap="xc7.tap",
             program=r"C:\demo\design.bit",
+            program_on_connect=False,
             ir_table="ultrascale",
             connect_timeout_sec=45.0,
             hw_ready_timeout_sec=120.0,
@@ -47,6 +48,7 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertEqual(out.port, src.port)
         self.assertEqual(out.tap, src.tap)
         self.assertEqual(out.program, src.program)
+        self.assertFalse(out.program_on_connect)
         self.assertEqual(out.ir_table, src.ir_table)
         self.assertEqual(out.connect_timeout_sec, 45.0)
         self.assertEqual(out.hw_ready_timeout_sec, 120.0)

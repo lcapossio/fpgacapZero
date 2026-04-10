@@ -148,6 +148,17 @@ class ConnectWorker(QObject):
                 self.cancelled.emit()
                 return
             analyzer = Analyzer(transport)
+            c = self._conn
+            if c.backend == "hw_server":
+                if c.program_on_connect and c.program:
+                    _conn_log.info("hw_server: will program bitfile on connect: %s", c.program)
+                elif c.program and not c.program_on_connect:
+                    _conn_log.info(
+                        "hw_server: program on connect is off (bitfile path kept for later): %s",
+                        c.program,
+                    )
+                else:
+                    _conn_log.info("hw_server: no bitfile path; connect without fpga -file")
             analyzer.connect()
             if self._cancel_requested:
                 analyzer.close()

@@ -11,15 +11,16 @@ from collections import deque
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QFont, QTextCursor
+
+from .settings import UiSettings
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -64,10 +65,7 @@ class LogPanel(QWidget):
         self._edit.setReadOnly(True)
         self._edit.setObjectName("fcapz_log_plain")
         self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = self._edit.font()
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(max(7, font.pointSize() - 2))
-        self._edit.setFont(font)
+        self.set_log_font_point_size(UiSettings().log_font_size_pt)
         self._edit.setMinimumHeight(40)
         self._edit.document().setDocumentMargin(2)
 
@@ -80,55 +78,67 @@ class LogPanel(QWidget):
         ):
             self._level.addItem(label, lev)
         self._level.setCurrentIndex(1)
-        self._level.setMinimumContentsLength(8)
-        self._level.setMinimumWidth(120)
         self._level.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._level.setToolTip("Minimum log level shown in this panel")
+        self._level.setMaximumWidth(128)
+        self._level.setToolTip("Minimum level shown in the log pane")
         self._level.currentIndexChanged.connect(self._on_level_changed)
 
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter…")
-        self._filter.setMinimumWidth(160)
-        self._filter.setMaximumWidth(520)
+        self._filter.setMinimumWidth(64)
+        self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(lambda _: self._refresh_display())
 
-        self._mirror_stderr = QCheckBox("Stderr")
-        self._mirror_stderr.setToolTip("Mirror log lines to stderr")
+        self._mirror_stderr = QToolButton()
+        self._mirror_stderr.setCheckable(True)
+        self._mirror_stderr.setText("stderr")
+        self._mirror_stderr.setToolTip("Mirror log lines to the process stderr")
+        self._mirror_stderr.setAutoRaise(True)
         self._mirror_stderr.toggled.connect(self._on_mirror_stderr_toggled)
 
-        self._autoscroll = QCheckBox("Tail")
-        self._autoscroll.setToolTip("Auto-scroll to newest lines")
+        self._autoscroll = QToolButton()
+        self._autoscroll.setCheckable(True)
         self._autoscroll.setChecked(True)
+        self._autoscroll.setText("tail")
+        self._autoscroll.setToolTip("Auto-scroll to the newest lines")
+        self._autoscroll.setAutoRaise(True)
+        self._autoscroll.toggled.connect(self._on_tail_toggled)
 
         clear = QPushButton("Clear")
-        clear.setMinimumSize(72, 28)
+        clear.setMaximumHeight(26)
         clear.clicked.connect(self.clear)
         copy = QPushButton("Copy")
-        copy.setMinimumSize(72, 28)
+        copy.setMaximumHeight(26)
         copy.setToolTip("Copy all visible log text")
         copy.clicked.connect(self._copy_all)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(4)
-        row1.addWidget(QLabel("Lv."))
-        row1.addWidget(self._level)
-        row1.addWidget(self._filter, stretch=1)
-        row1.addWidget(self._mirror_stderr)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(4)
-        row2.addWidget(self._autoscroll)
-        row2.addStretch(1)
-        row2.addWidget(clear)
-        row2.addWidget(copy)
+        bar = QWidget()
+        bar.setMaximumHeight(30)
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._level)
+        row.addWidget(self._filter, stretch=1)
+        row.addWidget(self._autoscroll)
+        row.addWidget(self._mirror_stderr)
+        row.addWidget(clear)
+        row.addWidget(copy)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(2)
-        lay.addLayout(row1)
-        lay.addLayout(row2)
+        lay.addWidget(bar, 0)
         lay.addWidget(self._edit, stretch=1)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_log_font_point_size(self, pt: int) -> None:
+        """Apply monospace font size to the log text (clamped 7–24 pt)."""
+        size = max(7, min(24, int(pt)))
+        font = QFont(self._edit.font())
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(size)
+        self._edit.setFont(font)
 
     def set_qt_handler(self, handler: QtGuiLogHandler) -> None:
         self._qt_handler = handler
@@ -151,6 +161,11 @@ class LogPanel(QWidget):
         lev = self._level.currentData()
         if isinstance(lev, int):
             self._qt_handler.setLevel(lev)
+
+    def _on_tail_toggled(self, checked: bool) -> None:
+        if checked:
+            sb = self._edit.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     def _on_mirror_stderr_toggled(self, checked: bool) -> None:
         lg = logging.getLogger("fcapz")

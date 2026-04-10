@@ -33,7 +33,8 @@ def format_connect_error(exc: BaseException, conn: ConnectionSettings) -> str:
             return (
                 f"{msg}\n\n"
                 "If you programmed a bitstream: check the .bit path, TAP/target name, "
-                f'and try increasing "HW ready timeout" (now {conn.hw_ready_timeout_sec:g}s).'
+                f'and try increasing "HW ready timeout" (now {conn.hw_ready_timeout_sec:g}s) '
+                f'or "Post-program delay" (now {conn.hw_post_program_delay_ms} ms).'
             )
         if "xsdb process exited" in msg.lower():
             return (

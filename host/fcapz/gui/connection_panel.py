@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -53,8 +54,20 @@ class ConnectionPanel(QGroupBox):
         self._ir.addItem("Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
 
+        self._program_on_connect = QCheckBox("Program on connect")
+        self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)
+        self._program_on_connect.setToolTip(
+            "When checked, Connect runs XSDB fpga -file on the path below. "
+            "Uncheck to attach over JTAG only (FPGA must already hold the right image)."
+        )
+        self._program_on_connect.stateChanged.connect(lambda _s: self._refresh_timeout_row_state())
+
         self._program = QLineEdit()
-        self._program.setPlaceholderText("Optional .bit path (hw_server only)")
+        self._program.setPlaceholderText("Path to .bit (required if program on connect is checked)")
+        self._program.setToolTip(
+            "Bitstream used when “Program on connect” is checked. "
+            "You can keep a path here and uncheck the box to reconnect without reprogramming."
+        )
         self._program.textChanged.connect(self._refresh_timeout_row_state)
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse_bitfile)
@@ -95,6 +108,21 @@ class ConnectionPanel(QGroupBox):
         self._hw_ready.setToolTip(
             "After programming a .bit, maximum wait for the FPGA to answer on JTAG.",
         )
+        self._post_program_ms = QSpinBox()
+        self._post_program_ms.setRange(0, 3000)
+        self._post_program_ms.setValue(200)
+        self._post_program_ms.setSuffix(" ms")
+        self._post_program_ms.setToolTip(
+            "Tcl wait after fpga -file before probing for readiness. Lower speeds up connect "
+            "if your bitstream comes up quickly; raise if connect fails right after program.",
+        )
+        self._ready_poll_ms = QSpinBox()
+        self._ready_poll_ms.setRange(5, 500)
+        self._ready_poll_ms.setValue(20)
+        self._ready_poll_ms.setSuffix(" ms")
+        self._ready_poll_ms.setToolTip(
+            "Delay between JTAG reads while waiting for a non-zero probe. Lower is snappier.",
+        )
 
         btn_row = QWidget()
         bl = QHBoxLayout(btn_row)
@@ -110,9 +138,12 @@ class ConnectionPanel(QGroupBox):
         form.addRow("Port", self._port)
         form.addRow("TAP / target", self._tap)
         form.addRow("IR table", self._ir)
-        form.addRow("Program bitfile", prog_row)
+        form.addRow("", self._program_on_connect)
+        form.addRow("Bitfile path", prog_row)
         form.addRow("Connect timeout", self._tcp_timeout)
         form.addRow("HW ready timeout", self._hw_ready)
+        form.addRow("Post-program delay", self._post_program_ms)
+        form.addRow("Ready poll interval", self._ready_poll_ms)
 
         grid = QGridLayout(self)
         grid.addLayout(form, 0, 0)
@@ -124,13 +155,22 @@ class ConnectionPanel(QGroupBox):
 
     def _on_backend_changed(self) -> None:
         is_hw = self._backend.currentData() == "hw_server"
+        self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
         self._refresh_timeout_row_state()
 
+    def _will_program_bitfile(self) -> bool:
+        return (
+            self._backend.currentData() == "hw_server"
+            and self._program_on_connect.isChecked()
+            and bool(self._program.text().strip())
+        )
+
     def _refresh_timeout_row_state(self) -> None:
-        is_hw = self._backend.currentData() == "hw_server"
-        has_bit = bool(self._program.text().strip())
-        self._hw_ready.setEnabled(is_hw and has_bit)
+        en_prog = self._will_program_bitfile()
+        self._hw_ready.setEnabled(en_prog)
+        self._post_program_ms.setEnabled(en_prog)
+        self._ready_poll_ms.setEnabled(en_prog)
 
     def _browse_bitfile(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -157,7 +197,10 @@ class ConnectionPanel(QGroupBox):
         """While connecting: show Cancel; freeze Connect/Disconnect and timeout edits."""
         self._cancel_btn.setVisible(busy)
         self._tcp_timeout.setEnabled(not busy)
-        self._hw_ready.setEnabled(not busy and self._refresh_hw_ready_enabled())
+        en = not busy and self._refresh_hw_ready_enabled()
+        self._hw_ready.setEnabled(en)
+        self._post_program_ms.setEnabled(en)
+        self._ready_poll_ms.setEnabled(en)
         if busy:
             self._connect_btn.setEnabled(False)
             self._disconnect_btn.setEnabled(False)
@@ -167,8 +210,7 @@ class ConnectionPanel(QGroupBox):
             self._refresh_timeout_row_state()
 
     def _refresh_hw_ready_enabled(self) -> bool:
-        is_hw = self._backend.currentData() == "hw_server"
-        return is_hw and bool(self._program.text().strip())
+        return self._will_program_bitfile()
 
     def _validate(self) -> str | None:
         host = self._host.text().strip()
@@ -178,9 +220,12 @@ class ConnectionPanel(QGroupBox):
         if not tap:
             return "TAP / target must not be empty."
         if self._backend.currentData() == "hw_server":
-            raw = self._program.text().strip()
-            if raw and not Path(raw).is_file():
-                return f"Bitfile not found: {raw}"
+            if self._program_on_connect.isChecked():
+                raw = self._program.text().strip()
+                if not raw:
+                    return "Program on connect is checked but the bitfile path is empty."
+                if not Path(raw).is_file():
+                    return f"Bitfile not found: {raw}"
         return None
 
     def connection_settings(self) -> ConnectionSettings:
@@ -191,9 +236,12 @@ class ConnectionPanel(QGroupBox):
             port=int(self._port.value()),
             tap=self._tap.text().strip(),
             program=program_raw if program_raw else None,
+            program_on_connect=self._program_on_connect.isChecked(),
             ir_table=str(self._ir.currentData()),
             connect_timeout_sec=float(self._tcp_timeout.value()),
             hw_ready_timeout_sec=float(self._hw_ready.value()),
+            hw_post_program_delay_ms=int(self._post_program_ms.value()),
+            hw_ready_poll_interval_ms=int(self._ready_poll_ms.value()),
         )
 
     def load_from_settings(self, conn: ConnectionSettings) -> None:
@@ -207,8 +255,15 @@ class ConnectionPanel(QGroupBox):
         if ir_idx >= 0:
             self._ir.setCurrentIndex(ir_idx)
         self._program.setText(conn.program or "")
+        self._program_on_connect.setChecked(conn.program_on_connect)
         self._tcp_timeout.setValue(int(max(3, min(600, round(conn.connect_timeout_sec)))))
         self._hw_ready.setValue(int(max(5, min(600, round(conn.hw_ready_timeout_sec)))))
+        self._post_program_ms.setValue(
+            int(max(0, min(3000, round(conn.hw_post_program_delay_ms))))
+        )
+        self._ready_poll_ms.setValue(
+            int(max(5, min(500, round(conn.hw_ready_poll_interval_ms))))
+        )
         self._on_backend_changed()
 
     def set_connected(self, connected: bool, message: str | None = None) -> None:
@@ -221,15 +276,14 @@ class ConnectionPanel(QGroupBox):
         self._port.setEnabled(editable)
         self._tap.setEnabled(editable)
         self._ir.setEnabled(editable)
-        self._program.setEnabled(
-            editable and self._backend.currentData() == "hw_server",
-        )
+        is_hw = self._backend.currentData() == "hw_server"
+        self._program_on_connect.setEnabled(editable and is_hw)
+        self._program.setEnabled(editable and is_hw)
         self._tcp_timeout.setEnabled(editable)
-        self._hw_ready.setEnabled(
-            editable
-            and self._backend.currentData() == "hw_server"
-            and bool(self._program.text().strip()),
-        )
+        hw_prog = editable and self._will_program_bitfile()
+        self._hw_ready.setEnabled(hw_prog)
+        self._post_program_ms.setEnabled(hw_prog)
+        self._ready_poll_ms.setEnabled(hw_prog)
         if message is not None:
             self._status.setText(message)
         elif connected:

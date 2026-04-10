@@ -166,7 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--program",
         metavar="BITFILE",
         default=None,
-        help="Program FPGA with bitfile before running command (hw_server)",
+        help=(
+            "hw_server only: run fpga -file on this .bit before the command (slow). "
+            "Omit to attach to the FPGA without reprogramming (already-loaded bitstream)."
+        ),
     )
 
     sub = p.add_subparsers(dest="cmd", required=True)

@@ -85,7 +85,7 @@ _DOCK_FEATURES = (
 )
 
 # Bump when dock object names / layout schema change so old blobs are not restored.
-_WINDOW_STATE_VERSION = 3
+_WINDOW_STATE_VERSION = 6
 
 # Continuous capture: max rate for history / preview / viewer refresh (coalesces bursts).
 _CONTINUOUS_UI_REFRESH_MS = 333
@@ -227,7 +227,15 @@ class MainWindow(QMainWindow):
             | QMainWindow.DockOption.AllowNestedDocks
         )
 
-        self.setCentralWidget(self._history)
+        # QMainWindow requires a central widget; keep this hidden so dock areas share the
+        # space (no empty “gutter” between left probe and right capture history).
+        self._central_placeholder = QWidget()
+        self._central_placeholder.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Ignored,
+        )
+        self._central_placeholder.setMinimumSize(0, 0)
+        self.setCentralWidget(self._central_placeholder)
 
         self._dock_capture = QDockWidget("ELA capture", self)
         self._dock_capture.setObjectName("dock_elacapture")
@@ -281,21 +289,35 @@ class MainWindow(QMainWindow):
         # Keep a visible log strip; reflow used to squeeze this to a few pixels.
         self._dock_log.setMinimumHeight(112)
 
+        self._dock_history = QDockWidget("Capture history", self)
+        self._dock_history.setObjectName("dock_history")
+        self._dock_history.setWidget(self._history)
+        self._dock_history.setFeatures(_DOCK_FEATURES)
+        self._dock_history.setMinimumWidth(320)
+
         self._tool_docks: list[QDockWidget] = [
             *self._workbench_docks,
             self._dock_conn,
             self._dock_probe,
+            self._dock_history,
             self._dock_log,
         ]
 
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_conn)
-        self.splitDockWidget(self._dock_conn, self._dock_probe, Qt.Orientation.Vertical)
-
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self._dock_capture)
+        # Top band: Connection | ELA capture (+ EIO / AXI / UART tabs) above probe + history dock.
+        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self._dock_conn)
+        self.splitDockWidget(
+            self._dock_conn,
+            self._dock_capture,
+            Qt.Orientation.Horizontal,
+        )
+        # Default workbench tabs (one tile east of Connection): ELA capture, EIO, AXI, UART.
         self.tabifyDockWidget(self._dock_capture, self._dock_eio)
         self.tabifyDockWidget(self._dock_capture, self._dock_axi)
         self.tabifyDockWidget(self._dock_capture, self._dock_uart)
         self._dock_capture.raise_()
+
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_probe)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_history)
 
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_log)
 
@@ -307,11 +329,13 @@ class MainWindow(QMainWindow):
         # Toolbar must exist before saveState/restoreState so Qt never applies a layout that
         # omits or hides it (otherwise the bar can look empty after restore).
         self._build_toolbar()
+        self._ensure_no_central_gutter()
         self._layout_default_state = self.saveState(_WINDOW_STATE_VERSION)
         if restore_saved_layout:
             self._restore_window_layout_from_settings()
             # Saved state can leave another workbench tab (e.g. UART) on top; match first-run UX.
             self._dock_capture.raise_()
+        self._ensure_no_central_gutter()
         self._ensure_main_toolbar_visible()
 
         self.statusBar().showMessage("Ready")
@@ -331,6 +355,7 @@ class MainWindow(QMainWindow):
             settings.viewers.open_viewer_after_capture,
         )
         self._history.set_reuse_external_viewer(settings.viewers.reuse_external_viewer)
+        self._log_panel.set_log_font_point_size(settings.ui.log_font_size_pt)
 
     def _apply_viewer_choices(self, gui_settings: GuiSettings) -> None:
         choices = viewers_for_settings(gui_settings)
@@ -494,6 +519,10 @@ class MainWindow(QMainWindow):
         self._schedule_dock_reflow()
         self._schedule_persist_layout()
 
+    def _ensure_no_central_gutter(self) -> None:
+        """Keep the central stub hidden so docks absorb the main area (Qt expands side docks)."""
+        self._central_placeholder.hide()
+
     def _schedule_dock_reflow(self) -> None:
         self._reflow_timer.start()
 
@@ -503,18 +532,24 @@ class MainWindow(QMainWindow):
         self._persist_layout_timer.start()
 
     def _reflow_dock_areas(self) -> None:
-        """After docks show/hide, nudge Qt sizes so the central area and docks stay usable."""
+        """After docks show/hide, nudge Qt sizes only when a strip is unrealistically small.
+
+        Avoid forcing heights on every reflow: that capped the top workbench dock at 480px
+        and overwrote splitter drags. We only resize when the current dock is clearly
+        squashed so the capture history dock can stay usable without fighting the user.
+        """
         h = max(1, self.height())
         left = [
             d
-            for d in (self._dock_conn, self._dock_probe)
+            for d in (self._dock_probe,)
             if d.isVisible() and not d.isFloating()
         ]
-        if len(left) == 2:
-            h_each = max(140, min(360, (h - 120) // 2))
-            self.resizeDocks(left, [h_each, h_each], Qt.Orientation.Vertical)
-        elif len(left) == 1:
-            self.resizeDocks(left, [max(180, min(440, (h - 120) * 2 // 5))], Qt.Orientation.Vertical)
+        if len(left) == 1 and left[0].height() < 140:
+            self.resizeDocks(
+                left,
+                [max(180, min(440, (h - 120) * 2 // 5))],
+                Qt.Orientation.Vertical,
+            )
 
         top_rep = next(
             (
@@ -525,14 +560,30 @@ class MainWindow(QMainWindow):
             None,
         )
         if top_rep is not None:
-            h_top = max(200, min(480, (h * 2) // 5))
-            self.resizeDocks([top_rep], [h_top], Qt.Orientation.Vertical)
+            if (
+                self._dock_conn.isVisible()
+                and not self._dock_conn.isFloating()
+                and self._dock_conn.width() < 200
+            ):
+                w_win = max(1, self.width())
+                w_conn = max(260, min(380, w_win // 3))
+                w_bench = max(320, w_win - w_conn - 80)
+                self.resizeDocks(
+                    [self._dock_conn, top_rep],
+                    [w_conn, w_bench],
+                    Qt.Orientation.Horizontal,
+                )
+            if top_rep.height() < 180:
+                h_top = max(220, min(max(280, h - 320), (h * 2) // 5))
+                self.resizeDocks([top_rep], [h_top], Qt.Orientation.Vertical)
 
         if self._dock_log.isVisible() and not self._dock_log.isFloating():
-            h_bottom = max(120, min(340, h // 4))
-            self.resizeDocks([self._dock_log], [h_bottom], Qt.Orientation.Vertical)
+            if self._dock_log.height() < 96:
+                h_bottom = max(120, min(340, h // 4))
+                self.resizeDocks([self._dock_log], [h_bottom], Qt.Orientation.Vertical)
 
     def _apply_post_show_layout(self) -> None:
+        self._ensure_no_central_gutter()
         self._reflow_dock_areas()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -557,7 +608,7 @@ class MainWindow(QMainWindow):
             blob = QByteArray(ws)
         if blob is not None:
             ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
-            for legacy_ver in (2, 1, 0):
+            for legacy_ver in (5, 4, 3, 2, 1, 0):
                 if ok:
                     break
                 ok = self.restoreState(blob, legacy_ver)
@@ -747,13 +798,14 @@ class MainWindow(QMainWindow):
             return
         ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
         if not ok:
-            for legacy in (2, 1, 0):
+            for legacy in (5, 4, 3, 2, 1, 0):
                 if self.restoreState(blob, legacy):
                     ok = True
                     break
         if not ok:
             QMessageBox.warning(self, "User layout", "Saved layout could not be restored.")
             return
+        self._ensure_no_central_gutter()
         self._schedule_dock_reflow()
         self._ensure_main_toolbar_visible()
         self._schedule_persist_layout()
@@ -807,7 +859,7 @@ class MainWindow(QMainWindow):
         m_layouts.addAction(act_def)
         act_min = QAction("&Minimal", self)
         act_min.setStatusTip(
-            "Connection, ELA capture tab, and history; hide EIO/AXI/UART, identity, and log.",
+            "Connection beside ELA capture, history, and identity; hide EIO/AXI/UART tabs and log.",
         )
         act_min.triggered.connect(self._layout_preset_minimal)
         m_layouts.addAction(act_min)
@@ -818,7 +870,9 @@ class MainWindow(QMainWindow):
         act_wave.triggered.connect(self._layout_preset_waveform_focus)
         m_layouts.addAction(act_wave)
         act_diag = QAction("&Diagnostics", self)
-        act_diag.setStatusTip("Show every dock (workbench tabs, connection, identity, log).")
+        act_diag.setStatusTip(
+            "Show every dock (connection + workbench tabs in the top band, identity, log).",
+        )
         act_diag.triggered.connect(self._layout_preset_diagnostics)
         m_layouts.addAction(act_diag)
 
@@ -847,6 +901,7 @@ class MainWindow(QMainWindow):
             d.show()
         if not self.restoreState(self._layout_default_state, _WINDOW_STATE_VERSION):
             _log.warning("Could not restore default layout bytes.")
+        self._ensure_no_central_gutter()
         self._dock_capture.raise_()
         self._dock_log.raise_()
         self._ensure_main_toolbar_visible()
@@ -871,6 +926,8 @@ class MainWindow(QMainWindow):
         for d in self._workbench_docks:
             d.hide()
         self._dock_log.hide()
+        self._dock_history.show()
+        self._dock_history.raise_()
         self._schedule_dock_reflow()
         self._schedule_persist_layout()
 
@@ -889,6 +946,7 @@ class MainWindow(QMainWindow):
         merged = dlg.merged_settings()
         save_gui_settings(merged, self._config_path)
         apply_application_ui_font(QApplication.instance(), merged.ui.font_size_pt)
+        self._log_panel.set_log_font_point_size(merged.ui.log_font_size_pt)
         self._apply_viewer_choices(merged)
         self._history.set_open_viewer_after_capture(merged.viewers.open_viewer_after_capture)
         self._history.set_reuse_external_viewer(merged.viewers.reuse_external_viewer)

@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -49,15 +48,15 @@ class HistoryEntry:
     work_dir: Path
 
 
-class HistoryPanel(QGroupBox):
-    """Capture history, embedded preview, export, and external viewer launch."""
+class HistoryPanel(QWidget):
+    """Capture history table, embedded lane preview, export, and external viewer launch."""
 
     status_message = Signal(str)
     open_after_capture_changed = Signal(bool)
     reuse_external_viewer_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Capture history & waveform preview", parent)
+        super().__init__(parent)
         self._entries: list[HistoryEntry] = []
         self._viewer_rows: list[tuple[str, WaveformViewer]] = []
         self._analyzer_ref: Analyzer | None = None
@@ -121,8 +120,10 @@ class HistoryPanel(QGroupBox):
         row2.addStretch(1)
 
         self._preview = WaveformPreviewWidget()
+        self._preview.setMinimumWidth(240)
 
         upper = QWidget()
+        upper.setMinimumWidth(280)
         uv = QVBoxLayout(upper)
         uv.setContentsMargins(0, 0, 0, 0)
         uv.addWidget(self._table)
@@ -130,12 +131,12 @@ class HistoryPanel(QGroupBox):
         uv.addLayout(row1b)
         uv.addLayout(row2)
 
-        split = QSplitter(Qt.Orientation.Vertical)
+        split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(upper)
         split.addWidget(self._preview)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
-        split.setSizes([220, 260])
+        split.setSizes([380, 520])
 
         grid = QGridLayout(self)
         grid.addWidget(split, 0, 0)
