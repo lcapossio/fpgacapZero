@@ -578,8 +578,10 @@ class Analyzer:
         RuntimeError on mismatch so the caller cannot accidentally
         drive a non-fcapz bitstream.
 
-        When the transport exposes :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
-        (hw_server), all probe registers share **one** XSDB ``_send`` plus a pipeline flush read.
+        When the transport exposes
+        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
+        (hw_server), all probe registers share **one** XSDB ``_send`` plus
+        a pipeline flush read.
         Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
         then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
 

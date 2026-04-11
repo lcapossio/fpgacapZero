@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Wrap panels in :class:`QScrollArea` so tight docks splitters scroll instead of squashing forms."""
+"""Wrap panels in :class:`QScrollArea` so tight dock splitters scroll.
+
+They scroll instead of squashing forms.
+"""
 
 from __future__ import annotations
 

@@ -31,7 +31,8 @@ _Rect = tuple[int, int, int, int]
 _VIEWER_HEIGHT_FRACTION = 0.50
 # Minimum host strip height (px) so capture / docks stay usable.
 _HOST_MIN_HEIGHT_PX = 300
-# Also reserve at least this fraction of work-area height for the host (takes precedence on tall screens).
+# Also reserve at least this fraction of work-area height for the host
+# (takes precedence on tall screens).
 _HOST_MIN_HEIGHT_FRACTION = 0.38
 # Preferred minimum height (px) for the viewer; may be reduced if the work area is small.
 _VIEWER_MIN_HEIGHT_PX = 120
@@ -56,7 +57,8 @@ def split_work_area_vertical(
     """
     if h < 2 or w < 1:
         return None
-    # Host strip must be tall enough for the capture GUI; on large screens also use a % of work area.
+    # Host strip must be tall enough for the capture GUI; on large
+    # screens also use a % of work area.
     min_host = max(
         min(host_min_height_px, h - 1),
         max(96, int(h * _HOST_MIN_HEIGHT_FRACTION)),
@@ -258,7 +260,10 @@ def _try_vertical_split(host: QWidget, proc: QProcess) -> bool:
 
 
 def schedule_vertical_split_with_viewer(host: QWidget, proc: QProcess) -> None:
-    """Call after ``QProcess.started``; retries until the viewer window exists (wgpu/egui can be slow)."""
+    """Call after ``QProcess.started``.
+
+    Retries until the viewer window exists (wgpu/egui can be slow).
+    """
     remaining = [14]
 
     def _tick() -> None:

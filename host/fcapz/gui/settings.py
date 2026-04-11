@@ -60,7 +60,8 @@ class ConnectionSettings:
     connect_timeout_sec: float = 60.0
     #: After ``fpga -file``, poll until VERSION non-zero (seconds); GUI default is patient.
     hw_ready_timeout_sec: float = 60.0
-    #: Tcl ``after`` (ms) following ``fpga -file`` before ready polling (smaller = faster connect if the device is ready).
+    #: Tcl ``after`` (ms) following ``fpga -file`` before ready polling.
+    #: Smaller means faster connect if the device is already ready.
     hw_post_program_delay_ms: int = 200
     #: Sleep between non-ready polls while waiting for the probe register (ms).
     hw_ready_poll_interval_ms: int = 20

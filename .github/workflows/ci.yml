@@ -73,13 +73,17 @@ jobs:
   test-host:
     name: Host unit tests (pytest)
     runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install iverilog (needed by test_rtl_fifo_equiv)
-        run: sudo apt-get install -y iverilog
+      - name: Install system packages (iverilog + Qt runtime libs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog libegl1 libgl1
       - name: Install package (dev + GUI deps for mocked Qt tests)
         run: pip install -e ".[dev,gui]"
       - name: Run full unit test suite
