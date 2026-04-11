@@ -7,6 +7,33 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- ELA capture now commits the trigger-cycle sample even when decimation or
+  storage qualification would otherwise skip that cycle, so
+  `samples[pretrigger]` remains the actual trigger sample.
+- ELA full-depth pre/post windows no longer write one extra post-trigger
+  sample or advance the start pointer incorrectly at the end of capture.
+- ELA sequencer stages with `count_target=1` now advance or fire on the
+  first matching occurrence.
+- ELA 48-bit timestamp readback and wide sample readback now zero-extend
+  partially used 32-bit chunks instead of truncating or leaking stale bits.
+
+### Tests
+
+- Added `tb/fcapz_ela_bug_probe_tb.sv` as a normal regression testbench for
+  the ELA capture-window, decimated-trigger, sequencer-count, timestamp, and
+  wide-sample readback cases.
+- `sim/run_sim.py` now runs a shared `iverilog -Wall` RTL lint pass before the
+  default simulation regression, and supports `--lint-only` for local and CI
+  lint-only runs.
+
+### CI
+
+- GitHub Actions now invokes `python sim/run_sim.py --lint-only` for RTL lint,
+  while the simulation job runs `python sim/run_sim.py`, so `iverilog -Wall`
+  is part of both the standalone lint job and the full regression path.
+
 ### Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [README.md](README.md) now describe the

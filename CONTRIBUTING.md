@@ -128,12 +128,16 @@ Window state for `fcapz-gui` is persisted in `fcapz-gui-window.ini` beside `gui.
 ### RTL simulation
 
 ```bash
-python sim/run_sim.py            # run all testbenches
-python sim/run_sim.py fcapz_ela  # single testbench
+python sim/run_sim.py              # run RTL lint, then all testbenches
+python sim/run_sim.py --lint-only  # run only the shared iverilog -Wall lint set
+python sim/run_sim.py fcapz_ela    # lint, then one testbench
 ```
 
 Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog`
-and `vvp`) on PATH. All testbenches must pass before push.
+and `vvp`) on PATH. The default regression always runs `iverilog -Wall`
+before simulation.  CI calls the same runner for both the standalone RTL lint
+job and the full simulation job, so update `sim/run_sim.py` when adding or
+removing RTL lint targets.
 
 ### Hardware tests — hw_server backend
 
@@ -274,7 +278,8 @@ def transport(request):
   module `tests/test_gui_hw_capture.py` is an exception: it is gated by
   `FPGACAP_GUI_HW` and `@pytest.mark.hw` and must not run in default CI.
 - New RTL modules must have a testbench in `tb/` and a sim entry in
-  `sim/run_sim.py`.
+  `sim/run_sim.py`.  Add them to the lint target list too if they should be
+  elaborated by the shared `iverilog -Wall` regression.
 - New Python modules must have at least basic unit test coverage in `tests/`.
 - All new test files must carry the SPDX header described above.
 
@@ -437,7 +442,7 @@ Before pushing to a remote or opening a PR, confirm all of the following:
 - [ ] `pytest tests/ -v` passes with zero failures (default config excludes
       `@pytest.mark.hw`; run [GUI + hardware](#gui--hardware-opt-in) locally
       when you change that path)
-- [ ] `python sim/run_sim.py` passes all testbenches
+- [ ] `python sim/run_sim.py` passes RTL lint and all testbenches
 - [ ] `ruff check .` reports no errors
 - [ ] `examples/arty_a7/test_hw_integration.py` passes on a connected board,
       or `FPGACAP_SKIP_HW=1` with justification in the PR description (GUI+hardware

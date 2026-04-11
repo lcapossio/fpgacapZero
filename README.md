@@ -121,6 +121,10 @@ pytest tests/ -v
 python sim/run_sim.py
 ```
 
+`python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
+first, then the default simulation regression.  Use
+`python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
 what contributors should rely on. GitHub Actions runs a subset of these checks
@@ -643,8 +647,8 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on `host/` and `tests/` |
 | `test-host` | `pytest tests/test_host_stack.py -v` — no hardware (does not yet run `test_cli_rpc_events.py`) |
-| `lint-rtl` | `iverilog -Wall` elaboration of the core RTL files (`dpram`, `trig_compare`, `jtag_reg_iface`, `jtag_burst_read`, `fcapz_ela`, `fcapz_eio`, `fcapz_ejtagaxi`, `fcapz_ejtaguart`) plus **Xilinx 7-series** wrappers (stubs in `sim/`); other vendor wrappers are not elaborated in CI |
-| `sim` | `python sim/run_sim.py` — ELA, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
+| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, Xilinx 7-series / UltraScale wrappers, and simulation stubs |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then ELA, ELA regression probe, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
@@ -664,7 +668,12 @@ Produces `examples/arty_a7/arty_a7_top.bit`.
 
 ```bash
 python sim/run_sim.py
+python sim/run_sim.py --lint-only
 ```
+
+The default command runs `iverilog -Wall` lint before compiling and running
+the testbenches.  CI uses the same runner so local regressions and GitHub
+Actions exercise the same RTL lint target list.
 
 ### Tests
 
@@ -723,7 +732,8 @@ fpgacapZero/
       fcapz_ela_*.vhd       VHDL ELA wrappers (one per vendor)
       fcapz_eio_*.vhd       VHDL EIO wrappers (one per vendor)
   tb/
-    fcapz_ela_tb.sv          ELA core testbench (6 scenarios, 17 checks)
+    fcapz_ela_tb.sv          ELA core testbench
+    fcapz_ela_bug_probe_tb.sv ELA regression probe for capture-window edge cases
     fcapz_eio_tb.sv          EIO core testbench (7 scenarios, 18 checks)
     chan_mux_tb.sv           Channel mux (NUM_CHANNELS) testbench
     fcapz_ejtagaxi_tb.sv    EJTAG-AXI bridge testbench

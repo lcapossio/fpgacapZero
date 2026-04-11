@@ -214,14 +214,17 @@ encoding.
 
 ```bash
 pytest tests/                          # 218 unit tests, ~3 seconds
-python sim/run_sim.py                  # 3 RTL testbenches via iverilog
+python sim/run_sim.py                  # RTL lint + simulation regression
+python sim/run_sim.py --lint-only      # RTL lint only
 python tools/sync_version.py --check   # version-sync regression guard
 ruff check .                           # lint
 ```
 
-If all four pass, your install is healthy.  The unit tests do not
+If these pass, your install is healthy.  The unit tests do not
 need any hardware or transport — they exercise the controllers
-against fake transports.  The sim suite needs `iverilog`.
+against fake transports.  The sim suite needs `iverilog` and runs
+`iverilog -Wall` before the testbenches, matching the CI RTL lint
+job.
 
 For the **hardware integration tests** (which need a real board, a
 running `hw_server`, and a programmed bitstream):

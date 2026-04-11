@@ -112,5 +112,6 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 | Level | Command | Coverage |
 |-------|---------|----------|
 | Unit (Python) | `pytest tests/test_host_stack.py` | Transport, Analyzer, EioController |
-| Simulation | `python sim/run_sim.py` | ELA: 17 checks; EIO: 18 checks; EJTAG-AXI: TB |
+| RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
+| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA, ELA regression probe, EIO, and channel-mux testbenches |
 | Hardware | `pytest tests/test_hw_integration.py` | 15 tests, Arty A7-100T |
