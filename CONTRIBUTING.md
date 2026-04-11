@@ -54,6 +54,9 @@ Vivado/XSDB are optional and only needed for hardware tests.
 - The repository must remain runnable from a clean checkout at all times.
 - Update `README.md` (and any relevant section) before your PR is ready for
   review. Do not merge documentation-free feature commits.
+- Update the **user manual** when user-visible behaviour changes: the manual
+  lives under `docs/` (chapter index: `docs/README.md`). Touch the chapters that
+  describe what you changed (workflows, CLI, registers, GUI, transports, …).
 
 ---
 
@@ -443,6 +446,9 @@ Before pushing to a remote or opening a PR, confirm all of the following:
 - [ ] All new / modified source files have the SPDX header
 - [ ] No build artifacts or absolute paths introduced
 - [ ] `README.md` updated if behaviour, CLI flags, or resource usage changed
+- [ ] User manual (`docs/`, see `docs/README.md`) updated if workflows, CLI,
+      register maps, GUI, or other end-user documentation should reflect your
+      changes
 - [ ] CHANGELOG.md entry added for user-visible changes
 
 ---
