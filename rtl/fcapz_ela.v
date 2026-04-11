@@ -313,6 +313,7 @@ module fcapz_ela #(
     reg [SAMPLE_W-1:0] trig_value_b, trig_mask_b;
     reg [PTR_W-1:0] wr_ptr, trig_ptr, start_ptr;
     reg [PTR_W-1:0] post_count;
+    reg [PTR_W:0]   pre_count;
     reg [PTR_W:0]   capture_len;  // one extra bit: can equal DEPTH (= 2^PTR_W)
     reg [SAMPLE_W-1:0] probe_prev;
     // Trigger delay: when the comparator fires, count down trig_delay
@@ -476,6 +477,7 @@ module fcapz_ela #(
 
     wire seq_count_reached = (seq_count_target[seq_state] == 16'h0) ||
                              ((seq_counter + 16'h1) >= seq_count_target[seq_state]);
+    wire pretrigger_ready = pre_count >= {1'b0, pretrig_len};
 
     // Internal trigger signal (before ext trigger combination)
     wire internal_trigger_hit = (TRIG_STAGES == 1) ? simple_trigger_hit :
@@ -766,7 +768,7 @@ module fcapz_ela #(
 
     // ---- Capture state machine ---------------------------------------------
     reg mem_rd_pending;
-    wire trigger_commit_now = armed && !done && !triggered &&
+    wire trigger_commit_now = armed && !done && !triggered && pretrigger_ready &&
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
@@ -786,7 +788,7 @@ module fcapz_ela #(
         if (sample_rst)
             trigger_out_r <= 1'b0;
         else
-            trigger_out_r <= (armed && !triggered && trigger_hit) ? 1'b1 : 1'b0;
+            trigger_out_r <= (armed && !triggered && pretrigger_ready && trigger_hit) ? 1'b1 : 1'b0;
     end
 
     // Phase 4: segment base address
@@ -804,6 +806,7 @@ module fcapz_ela #(
             trig_ptr    <= {PTR_W{1'b0}};
             start_ptr   <= {PTR_W{1'b0}};
             post_count  <= {PTR_W{1'b0}};
+            pre_count   <= {PTR_W+1{1'b0}};
             capture_len <= {PTR_W+1{1'b0}};
             seq_state   <= {SEQ_STATE_W{1'b0}};
             seq_counter <= 16'h0;
@@ -822,6 +825,7 @@ module fcapz_ela #(
                 overflow    <= 1'b0;
                 wr_ptr      <= {PTR_W{1'b0}};
                 post_count  <= {PTR_W{1'b0}};
+                pre_count   <= {PTR_W+1{1'b0}};
                 capture_len <= {PTR_W+1{1'b0}};
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
@@ -838,6 +842,7 @@ module fcapz_ela #(
                 done        <= 1'b0;
                 wr_ptr      <= (NUM_SEGMENTS > 1) ? ({PTR_W{1'b0}}) : {PTR_W{1'b0}};
                 post_count  <= {PTR_W{1'b0}};
+                pre_count   <= {PTR_W+1{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
                 trig_delay_pending <= 1'b0;
@@ -867,6 +872,8 @@ module fcapz_ela #(
                             wr_ptr <= wr_ptr + 1'b1;
                     end
                 end
+                if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready)
+                    pre_count <= pre_count + 1'b1;
 
                 // Trigger / sequencer evaluation (runs every cycle, NOT gated by decimation)
                 if (!triggered) begin
@@ -886,7 +893,7 @@ module fcapz_ela #(
                         end else begin
                             trig_delay_count <= trig_delay_count - 1'b1;
                         end
-                    end else if (trigger_hit) begin
+                    end else if (pretrigger_ready && trigger_hit) begin
                         if (trig_delay == 16'h0) begin
                             // Zero delay: legacy behavior, commit immediately.
                             triggered   <= 1'b1;
@@ -900,10 +907,10 @@ module fcapz_ela #(
                             trig_delay_pending <= 1'b1;
                             trig_delay_count   <= trig_delay - 16'h1;
                         end
-                    end else if (seq_advance) begin
+                    end else if (pretrigger_ready && seq_advance) begin
                         seq_state   <= seq_next_state[seq_state];
                         seq_counter <= 16'h0;
-                    end else if (TRIG_STAGES > 1 && seq_stage_hit) begin
+                    end else if (pretrigger_ready && TRIG_STAGES > 1 && seq_stage_hit) begin
                         seq_counter <= seq_counter + 1'b1;
                     end
                 end else begin
@@ -928,6 +935,7 @@ module fcapz_ela #(
                                 seg_count   <= seg_count + 1'b1;
                                 triggered   <= 1'b0;
                                 post_count  <= {PTR_W{1'b0}};
+                                pre_count   <= {PTR_W+1{1'b0}};
                                 seq_state   <= {SEQ_STATE_W{1'b0}};
                                 seq_counter <= 16'h0;
                                 trig_delay_pending <= 1'b0;
@@ -962,6 +970,7 @@ module fcapz_ela #(
                                     seg_count   <= seg_count + 1'b1;
                                     triggered   <= 1'b0;
                                     post_count  <= {PTR_W{1'b0}};
+                                    pre_count   <= {PTR_W+1{1'b0}};
                                     seq_state   <= {SEQ_STATE_W{1'b0}};
                                     seq_counter <= 16'h0;
                                     trig_delay_pending <= 1'b0;

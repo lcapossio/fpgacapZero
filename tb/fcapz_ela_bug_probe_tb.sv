@@ -280,7 +280,33 @@ module fcapz_ela_bug_probe_tb;
         $display("  status=0x%08x trigger-index sample=0x%02x", status, word0[7:0]);
         check("decimation trigger index is 19", status[2] && (word0[7:0] == 8'd19));
 
-        $display("\n=== Regression 3: sequencer count_target=1 fires on first hit ===");
+        $display("\n=== Regression 3: early trigger waits for pretrigger fill ===");
+        write_dec(16'h0004, 32'h2);     // reset this DUT, but leave RAM contents intact
+        wait_sample(6);
+        write_dec(16'h00B0, 32'd3);     // store every fourth cycle
+        write_dec(16'h0014, 32'd2);
+        write_dec(16'h0018, 32'd2);
+        write_dec(16'h0020, 32'h1);
+        write_dec(16'h0024, 32'd1);     // first hit after arm is too early
+        write_dec(16'h0028, 32'hFF);
+        probe_dec = '0;
+        write_dec(16'h0004, 32'h1);
+        repeat (290) begin
+            @(posedge sample_clk);
+            probe_dec <= probe_dec + 1'b1;
+        end
+        wait_sample(40);
+        read_dec(16'h0008, status);
+        read_dec(16'h0100, word0);
+        read_dec(16'h0100 + 1*4, word1);
+        read_dec(16'h0100 + 2*4, word2);
+        $display("  status=0x%08x samples[0..2]=0x%02x 0x%02x 0x%02x",
+                 status, word0[7:0], word1[7:0], word2[7:0]);
+        check("early hit ignored until two pretrigger samples exist",
+              status[2] && (word0[7:0] == 8'd250) &&
+              (word1[7:0] == 8'd254) && (word2[7:0] == 8'd1));
+
+        $display("\n=== Regression 4: sequencer count_target=1 fires on first hit ===");
         write_seq(16'h0014, 32'd0);
         write_seq(16'h0018, 32'd0);
         write_seq(16'h0040, 32'h0001_1000); // count=1, final, A-only EQ
@@ -295,7 +321,7 @@ module fcapz_ela_bug_probe_tb;
         read_seq(16'h0008, status);
         check("one sequencer hit with count_target=1 fires", status[2] == 1'b1);
 
-        $display("\n=== Regression 4: TIMESTAMP_W=48 upper word readback ===");
+        $display("\n=== Regression 5: TIMESTAMP_W=48 upper word readback ===");
         write_ts(16'h0014, 32'd0);
         write_ts(16'h0018, 32'd1);
         write_ts(16'h0020, 32'h1);
@@ -314,7 +340,7 @@ module fcapz_ela_bug_probe_tb;
         $display("  ts[0] low=0x%08x high=0x%08x", word0, word1);
         check("48-bit timestamp upper word is 0x0001", word1 === 32'h0000_0001);
 
-        $display("\n=== Regression 5: SAMPLE_W=48 final data word readback ===");
+        $display("\n=== Regression 6: SAMPLE_W=48 final data word readback ===");
         write_w48(16'h0014, 32'd0);
         write_w48(16'h0018, 32'd1);
         write_w48(16'h0020, 32'h1);

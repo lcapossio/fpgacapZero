@@ -18,6 +18,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   first matching occurrence.
 - ELA 48-bit timestamp readback and wide sample readback now zero-extend
   partially used 32-bit chunks instead of truncating or leaking stale bits.
+- ELA triggers now wait until the requested pretrigger history has been filled,
+  preventing stale RAM/timestamp entries from appearing at the front of captures
+  when a trigger fires immediately after arm, especially with decimation enabled.
 
 ### Tests
 
