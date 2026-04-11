@@ -426,22 +426,35 @@ class TestDecimation(unittest.TestCase):
         self.assertTrue(all(d == 1 for d in diffs), f"Non-consecutive: {result.samples}")
 
     def test_decim_3_stores_every_4th(self):
-        """DECIM=3 captures every 4th cycle; samples differ by 4."""
+        """DECIM=3 stores decimated history and anchors the trigger sample."""
+        pretrigger = 2
+        trigger_value = 0x20
         cfg = self.CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
-            pretrigger=2, posttrigger=5,
-            trigger=self.TriggerConfig(mode="value_match", value=0x20, mask=0xFF),
+            pretrigger=pretrigger, posttrigger=5,
+            trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
         )
         self.a.configure(cfg)
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 8)
-        # With decimation=3, consecutive stored samples should differ by 4
+        self.assertEqual(result.samples[pretrigger], trigger_value)
+
+        # The post window away from the forced trigger anchor keeps the /4 cadence.
+        # The oldest pre-history slot can be an initial buffer value if the
+        # free-running counter reaches the trigger soon after arm.
         diffs = [(result.samples[i+1] - result.samples[i]) & 0xFF
                  for i in range(len(result.samples)-1)]
-        for d in diffs:
-            self.assertEqual(d, 4, f"Expected diff 4, got {d}. Samples: {result.samples}")
+        for d in diffs[pretrigger + 1:]:
+            self.assertEqual(d, 4, f"Expected decimated post-window: {result.samples}")
+
+        # The intervals adjacent to the trigger can be shorter because the
+        # trigger-cycle sample is force-stored even if it falls between
+        # decimation ticks.
+        for d in diffs[pretrigger - 1:pretrigger + 1]:
+            self.assertGreaterEqual(d, 1, f"Trigger anchor gap too small: {result.samples}")
+            self.assertLessEqual(d, 4, f"Trigger anchor gap too large: {result.samples}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -482,23 +495,29 @@ class TestTimestamps(unittest.TestCase):
                                f"Non-monotonic at index {i}: {result.timestamps}")
 
     def test_timestamps_with_decimation(self):
-        """Decimated timestamps show gaps proportional to decimation ratio."""
+        """Decimated timestamps stay monotonic with the trigger anchor inserted."""
+        pretrigger = 1
+        trigger_value = 0x40
         cfg = self.CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
-            pretrigger=1, posttrigger=4,
-            trigger=self.TriggerConfig(mode="value_match", value=0x40, mask=0xFF),
+            pretrigger=pretrigger, posttrigger=4,
+            trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
         )
         self.a.configure(cfg)
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertGreater(len(result.timestamps), 1)
-        # Timestamp gaps should be ~4 (decimation=3 means every 4th cycle)
+        self.assertEqual(result.samples[pretrigger], trigger_value)
+
         gaps = [result.timestamps[i+1] - result.timestamps[i]
                 for i in range(len(result.timestamps)-1)]
         for g in gaps:
-            self.assertGreaterEqual(g, 3, f"Gap too small: {g}. Timestamps: {result.timestamps}")
-            self.assertLessEqual(g, 6, f"Gap too large: {g}. Timestamps: {result.timestamps}")
+            self.assertGreater(g, 0, f"Non-monotonic timestamps: {result.timestamps}")
+            self.assertLessEqual(g, 4, f"Gap too large: {g}. Timestamps: {result.timestamps}")
+
+        for g in gaps[pretrigger + 1:]:
+            self.assertEqual(g, 4, f"Expected decimated post timestamps: {result.timestamps}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
