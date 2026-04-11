@@ -14,6 +14,7 @@ coverage.
   - [Unit and integration tests (pytest)](#unit-and-integration-tests-pytest)
   - [RTL simulation](#rtl-simulation)
   - [Hardware tests — hw_server backend](#hardware-tests--hw_server-backend)
+  - [GUI + hardware (opt-in)](#gui--hardware-opt-in)
   - [Hardware tests — OpenOCD backend](#hardware-tests--openocd-backend)
 - [Adding new tests](#adding-new-tests)
   - [Where OpenOCD coverage is most needed](#where-openocd-coverage-is-most-needed)
@@ -103,6 +104,14 @@ These tests run against a `FakeTransport` (no hardware required) and cover the
 CLI, RPC server, event-extraction helpers, EJTAG-AXI, and EJTAG-UART layers.
 They must pass before any push.
 
+**Default pytest filter:** `[tool.pytest.ini_options]` in `pyproject.toml` sets
+`addopts` to include `-m "not hw"`, so tests marked `@pytest.mark.hw` are
+**not selected** when you run `pytest tests/ -v`. That keeps CI and machines
+without boards green. To collect `hw`-marked tests as well, override the option
+(for example `--override-ini='addopts=-p no:cacheprovider'`). The GUI+hardware
+module still **skips at runtime** unless you set `FPGACAP_GUI_HW=1`; see
+[GUI + hardware (opt-in)](#gui--hardware-opt-in).
+
 Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".[dev,gui]"`):
 
 ```bash
@@ -137,6 +146,35 @@ FPGACAP_SKIP_HW=1 pytest examples/arty_a7/test_hw_integration.py -v
 
 Set `FPGACAP_SKIP_HW=1` in CI or when no board is available; the suite will
 skip gracefully.
+
+### GUI + hardware (opt-in)
+
+`tests/test_gui_hw_capture.py` exercises **fcapz-gui** (`MainWindow`) against
+real JTAG: connect from the UI, then single and continuous captures with the
+same Arty-style counter sanity checks as the integration suite. Tests are
+marked `@pytest.mark.gui` and `@pytest.mark.hw`.
+
+They are **skipped** unless `FPGACAP_GUI_HW` is set to `1`, `true`, or `yes`.
+If `FPGACAP_SKIP_HW` is set, they skip (same convention as
+`test_hw_integration.py`). Full environment contract and optional variables
+(`FPGACAP_BACKEND`, `FPGACAP_BITFILE`, ports, tap, `FPGACAP_CONTINUOUS_CAPTURES`,
+…) are documented in the module docstring at the top of that file.
+
+Because of the default `-m "not hw"` in `pyproject.toml`, pass an override when
+you want pytest to collect this module:
+
+```bash
+# Linux / macOS
+FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
+  --override-ini='addopts=-p no:cacheprovider'
+```
+
+```powershell
+# Windows PowerShell
+$env:FPGACAP_GUI_HW = '1'
+python -m pytest tests/test_gui_hw_capture.py -v --tb=short `
+  --override-ini='addopts=-p no:cacheprovider'
+```
 
 ### Hardware tests — OpenOCD backend
 
@@ -229,7 +267,9 @@ def transport(request):
 - Unit tests go in `tests/`. They must use `FakeTransport` or mocks and must
   not require any hardware or network connectivity.
 - Hardware tests go alongside the example they exercise
-  (e.g. `examples/arty_a7/test_hw_integration.py`).
+  (e.g. `examples/arty_a7/test_hw_integration.py`). The **opt-in** GUI+hardware
+  module `tests/test_gui_hw_capture.py` is an exception: it is gated by
+  `FPGACAP_GUI_HW` and `@pytest.mark.hw` and must not run in default CI.
 - New RTL modules must have a testbench in `tb/` and a sim entry in
   `sim/run_sim.py`.
 - New Python modules must have at least basic unit test coverage in `tests/`.
@@ -391,11 +431,15 @@ updated and your board added to the validated list.
 
 Before pushing to a remote or opening a PR, confirm all of the following:
 
-- [ ] `pytest tests/ -v` passes with zero failures
+- [ ] `pytest tests/ -v` passes with zero failures (default config excludes
+      `@pytest.mark.hw`; run [GUI + hardware](#gui--hardware-opt-in) locally
+      when you change that path)
 - [ ] `python sim/run_sim.py` passes all testbenches
 - [ ] `ruff check .` reports no errors
-- [ ] Hardware tests pass (or `FPGACAP_SKIP_HW=1` set with a justification in
-      the PR description)
+- [ ] `examples/arty_a7/test_hw_integration.py` passes on a connected board,
+      or `FPGACAP_SKIP_HW=1` with justification in the PR description (GUI+hardware
+      tests in `tests/test_gui_hw_capture.py` are optional and opt-in via
+      `FPGACAP_GUI_HW=1`)
 - [ ] All new / modified source files have the SPDX header
 - [ ] No build artifacts or absolute paths introduced
 - [ ] `README.md` updated if behaviour, CLI flags, or resource usage changed

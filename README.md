@@ -647,6 +647,8 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `sim` | `python sim/run_sim.py` — ELA, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
+Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
+documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 
 ## Building from source
 
@@ -675,6 +677,11 @@ python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 # Force-skip hardware integration tests (e.g. laptop without board)
 FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# GUI + real JTAG (fcapz-gui) — opt-in; requires PySide6, pytest-qt, and a board.
+# Default pytest excludes @pytest.mark.hw; see CONTRIBUTING.md for details.
+FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
+  --override-ini='addopts=-p no:cacheprovider'
 ```
 
 ## Project structure

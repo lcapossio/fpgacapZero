@@ -5,6 +5,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Documentation
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [README.md](README.md) now describe the
+  default pytest `-m "not hw"` filter, how to override it, and the opt-in
+  GUI+hardware suite (`tests/test_gui_hw_capture.py`, `FPGACAP_GUI_HW=1`).
+  Pre-push checklist distinguishes Arty integration tests from GUI+hardware.
+
+---
+
 ## [v0.3.0]
 
 ### ⚠ Breaking changes
