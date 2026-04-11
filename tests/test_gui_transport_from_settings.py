@@ -56,6 +56,7 @@ class TestTransportFromSettings(unittest.TestCase):
             backend="hw_server",
             tap="xc7a100t",
             program="/tmp/x.bit",
+            program_on_connect=True,
             hw_ready_timeout_sec=90.0,
         )
         t = transport_from_connection(c)

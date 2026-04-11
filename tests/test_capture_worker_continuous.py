@@ -12,7 +12,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication, QObject, QThread, Slot
+from PySide6.QtCore import QObject, QThread, Slot
+from PySide6.QtWidgets import QApplication
 
 from fcapz.analyzer import CaptureConfig, CaptureResult, TriggerConfig
 from fcapz.gui import worker as worker_mod
@@ -33,7 +34,7 @@ class _ProgressCtrl(QObject):
 
 
 def test_continuous_capture_sleeps_between_cycles() -> None:
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
 
     cfg = CaptureConfig(
         pretrigger=0,

@@ -11,6 +11,7 @@ Stroke color follows light/dark so glyphs stay visible on the native toolbar.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 
 from PySide6.QtCore import QPointF, Qt
@@ -30,13 +31,22 @@ _Draw = Callable[[QPainter, int, QColor], None]
 
 
 def _fallback_stroke_color() -> QColor:
-    hints = QGuiApplication.styleHints()
+    # Offscreen/minimal platforms can crash in native palette/style-hint code (Windows AV).
+    qpa = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+    if qpa in ("offscreen", "minimal"):
+        return QColor(28, 32, 42)
+
+    inst = QGuiApplication.instance()
+    if inst is None:
+        return QColor(28, 32, 42)
+
+    hints = inst.styleHints()
     scheme = hints.colorScheme() if hasattr(hints, "colorScheme") else Qt.ColorScheme.Unknown
     if scheme == Qt.ColorScheme.Dark:
         return QColor(240, 242, 248)
     if scheme == Qt.ColorScheme.Light:
         return QColor(28, 32, 42)
-    pal = QGuiApplication.palette()
+    pal = inst.palette()
     win = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window)
     if win.lightness() < 128:
         return QColor(240, 242, 248)
