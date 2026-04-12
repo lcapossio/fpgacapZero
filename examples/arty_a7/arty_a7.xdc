@@ -16,11 +16,13 @@ set_property -dict {PACKAGE_PIN C9  IOSTANDARD LVCMOS33} [get_ports {btn[1]}]
 set_property -dict {PACKAGE_PIN B9  IOSTANDARD LVCMOS33} [get_ports {btn[2]}]
 set_property -dict {PACKAGE_PIN B8  IOSTANDARD LVCMOS33} [get_ports {btn[3]}]
 
-# ── Green LEDs ─────────────────────────────────────────────────
-set_property -dict {PACKAGE_PIN H17 IOSTANDARD LVCMOS33} [get_ports {led[0]}]
-set_property -dict {PACKAGE_PIN K15 IOSTANDARD LVCMOS33} [get_ports {led[1]}]
-set_property -dict {PACKAGE_PIN J13 IOSTANDARD LVCMOS33} [get_ports {led[2]}]
-set_property -dict {PACKAGE_PIN N14 IOSTANDARD LVCMOS33} [get_ports {led[3]}]
+# ── Discrete LEDs (LD4–LD7 on silk; Digilent calls them led[4]–[7] in sch) ──
+# Must match Digilent Arty-A7-100-Master.xdc (Rev D / E). Older wrong pins
+# (H17/K15/J13/N14) were not wired to these LEDs — EIO JTAG worked but nothing lit.
+set_property -dict {PACKAGE_PIN H5  IOSTANDARD LVCMOS33} [get_ports {led[0]}]
+set_property -dict {PACKAGE_PIN J5  IOSTANDARD LVCMOS33} [get_ports {led[1]}]
+set_property -dict {PACKAGE_PIN T9  IOSTANDARD LVCMOS33} [get_ports {led[2]}]
+set_property -dict {PACKAGE_PIN T10 IOSTANDARD LVCMOS33} [get_ports {led[3]}]
 
 # ── BSCANE2 TCK / CDC ──────────────────────────────────────────
 # Vivado auto-creates a clock for the BSCANE2 TCK output.

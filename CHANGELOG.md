@@ -46,6 +46,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   after writes; tooltips plus [`docs/06_eio_core.md`](docs/06_eio_core.md) and
   [`docs/12_gui.md`](docs/12_gui.md) clarify Attach, **Poll inputs** (inputs
   only) vs **Outputs** (fabric / board LEDs on the Arty reference).
+- **Arty A7-100T constraints:** `arty_a7.xdc` mapped `led[0:3]` to the wrong
+  package pins; they now match Digilent’s reference (**H5, J5, T9, T10**).
+  Rebuild the bitstream for EIO → LED feedback on the board.
+- **Arty reference (`arty_a7_top`):** Resynchronize `probe_out[3:0]` from the
+  EIO `jtag_clk` domain into `sys_clk` before driving the green LEDs.
 - **hw_server / OpenOCD:** Serialize transport I/O with a mutex so concurrent
   JTAG users (e.g. EIO input polling on a timer plus ELA capture on a worker
   thread) no longer corrupt the xsdb or OpenOCD protocol stream, which used to
