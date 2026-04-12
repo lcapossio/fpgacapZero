@@ -63,13 +63,27 @@ What `connect()` does:
    otherwise looks on `PATH`).
 2. Sends `connect -url tcp:HOST:PORT` to xsdb's stdin.
 3. If `bitfile` is set: sends `targets -set -filter {name =~ "FPGA_NAME"}`
-   then `fpga -file {BITFILE}` then `after 500`.
+   then `fpga -file {BITFILE}` then `after <ms>` (GUI default 200 ms post-program delay).
 4. Sends another `jtag targets -set -filter` to lock onto the
    actual FPGA target (not just any device on the chain).
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the
 subprocess dies.
+
+**Why `connect()` can feel slow:** `fpga -file` dominates (bitstream size
+and USB/JTAG speed — often tens of seconds). After that, the readiness
+poll issues one full JTAG register read per interval until `VERSION` is
+non-zero (GUI default timeout 60 s, interval 20 ms). Spawning `xsdb` and
+`connect -url tcp:…` is usually sub-second on a warm `hw_server`.
+
+**Profiling (no cProfile required):** set environment variable
+`FCAPZ_LOG_CONNECT_TIMING=1` before starting the GUI or CLI. Logger
+`fcapz.transport.hw_server` then emits phase timings for
+`XilinxHwServerTransport.connect()` (spawn, TCP attach, programming,
+JTAG target select, ready poll). The GUI connect worker also logs
+`transport_build`, `transport.connect`, and `probe()` durations on
+logger `fcapz.gui.connect`.
 
 ### `OpenOcdTransport`
 

@@ -12,6 +12,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Docs:** JTAG register map spec — in-document index, ↑ Top anchors, and
   clarified per-core “address map” scope ([`docs/specs/register_map.md`](docs/specs/register_map.md));
   chapter 13 stub updated ([`docs/13_register_map.md`](docs/13_register_map.md)).
+- **Transport:** Optional `FCAPZ_LOG_CONNECT_TIMING=1` logs hw_server connect
+  phases (socket open, hello, target open, JTAG open) to stderr for diagnosing
+  slow or stuck connects; GUI worker enables it when the env var is set.
 - **GUI:** `Analyzer.immediate_variant()` and **Trigger Immediate** (was Capture)
   — force a waveform as soon as pre-trigger is ready (always-true compare;
   sequencer bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture

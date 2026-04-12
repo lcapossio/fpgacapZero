@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import socket
+import time
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -27,6 +29,19 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+
+
+def connect_timing_logs_enabled() -> bool:
+    """If true, log connect phase durations (hw_server + GUI worker).
+
+    Set environment variable ``FCAPZ_LOG_CONNECT_TIMING`` to ``1``, ``true``,
+    or ``yes``.
+    """
+    return os.environ.get("FCAPZ_LOG_CONNECT_TIMING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 class Transport(ABC):
@@ -348,6 +363,12 @@ class XilinxHwServerTransport(Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        timing = connect_timing_logs_enabled()
+        marks: list[tuple[str, float]] = [("start", time.monotonic())]
+
+        def mark(label: str) -> None:
+            marks.append((label, time.monotonic()))
+
         xsdb = self._xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
         if not xsdb:
             raise RuntimeError(
@@ -366,8 +387,10 @@ class XilinxHwServerTransport(Transport):
             target=self._drain_stderr, daemon=True
         )
         self._stderr_thread.start()
+        mark("xsdb_spawned")
 
         self._send(f"connect -url tcp:{self.host}:{self.port}")
+        mark("hw_server_tcp")
 
         if self.bitfile:
             _hw_log.info(
@@ -375,16 +398,19 @@ class XilinxHwServerTransport(Transport):
                 self.bitfile,
             )
             self.program(self.bitfile)
+            mark("fpga_file_done")
         else:
             _hw_log.info(
                 "Skipping fpga -file — using the configuration already in the FPGA. "
                 "Uncheck 'Program on connect' or clear the bitfile path in Connection "
                 "when you do not want to reprogram.",
             )
+            mark("fpga_skipped")
 
         self._send(
             f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
         )
+        mark("jtag_target_set")
 
         # Wait for the JTAG chain to respond with valid (non-zero) data on
         # the configured probe register.  After fpga -file the bitstream is
@@ -401,17 +427,40 @@ class XilinxHwServerTransport(Transport):
                 self.ready_probe_addr,
                 self.ready_probe_timeout,
             )
-            self._wait_until_ready()
+            attempts = self._wait_until_ready()
+            mark("fpga_ready")
             _hw_log.info("FPGA ready probe succeeded.")
+            if timing:
+                _hw_log.info(
+                    "hw_server connect: ready_poll attempts=%d (see fpga_ready delta)",
+                    attempts,
+                )
+        else:
+            mark("ready_skipped")
 
-    def _wait_until_ready(self) -> None:
+        mark("connect_done")
+        if timing and len(marks) >= 2:
+            parts = []
+            for i in range(1, len(marks)):
+                label, t = marks[i]
+                dt = t - marks[i - 1][1]
+                parts.append(f"{label}={dt:.3f}s")
+            total = marks[-1][1] - marks[0][1]
+            _hw_log.info(
+                "hw_server connect timing (FCAPZ_LOG_CONNECT_TIMING): %s | total=%.3fs",
+                " ".join(parts),
+                total,
+            )
+
+    def _wait_until_ready(self) -> int:
         """Poll the configured probe register until it returns non-zero.
 
         Raises ConnectionError if the deadline elapses.  Uses the chain
         currently active (default chain 1 / USER1).
-        """
-        import time
 
+        Returns:
+            Number of probe read attempts (including the successful one).
+        """
         deadline = time.monotonic() + self.ready_probe_timeout
         attempts = 0
         last_value = 0
@@ -422,7 +471,7 @@ class XilinxHwServerTransport(Transport):
                 last_value = 0
             attempts += 1
             if last_value != 0:
-                return
+                return attempts
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

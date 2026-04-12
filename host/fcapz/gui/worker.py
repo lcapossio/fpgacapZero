@@ -11,6 +11,7 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..analyzer import Analyzer, CaptureConfig
+from ..transport import connect_timing_logs_enabled
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
 from .transport_from_settings import transport_from_connection
@@ -146,7 +147,9 @@ class ConnectWorker(QObject):
             return
         analyzer: Analyzer | None = None
         try:
+            t0 = time.monotonic()
             transport = transport_from_connection(self._conn)
+            t_build = time.monotonic()
             self._transport = transport
             if self._cancel_requested:
                 transport.close()
@@ -165,11 +168,22 @@ class ConnectWorker(QObject):
                 else:
                     _conn_log.info("hw_server: no bitfile path; connect without fpga -file")
             analyzer.connect()
+            t_connect = time.monotonic()
             if self._cancel_requested:
                 analyzer.close()
                 self.cancelled.emit()
                 return
             info = analyzer.probe()
+            t_probe = time.monotonic()
+            if connect_timing_logs_enabled():
+                _conn_log.info(
+                    "GUI connect worker timing: transport_build=%.3fs transport.connect=%.3fs "
+                    "probe=%.3fs total=%.3fs",
+                    t_build - t0,
+                    t_connect - t_build,
+                    t_probe - t_connect,
+                    t_probe - t0,
+                )
         except Exception as exc:  # noqa: BLE001 — surfaced via GUI
             if self._cancel_requested:
                 if analyzer is not None:

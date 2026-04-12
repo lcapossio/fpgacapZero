@@ -27,6 +27,7 @@ from .transport import (
     Transport,
     VendorStubTransport,
     XilinxHwServerTransport,
+    connect_timing_logs_enabled,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "OpenOcdTransport",
     "XilinxHwServerTransport",
     "VendorStubTransport",
+    "connect_timing_logs_enabled",
     "find_edges",
     "find_rising_edges",
     "find_falling_edges",
