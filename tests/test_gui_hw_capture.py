@@ -6,7 +6,8 @@ Real **GUI + hardware** capture checks (opt-in).
 
 Drives :class:`~fcapz.gui.app_window.MainWindow` like a user: connect, then captures
 from the ELA panel, and asserts stable sample geometry plus **Arty reference
-counter** sanity (longest +1 mod-256 run and trigger sample ~match), matching
+counter** sanity (every adjacent sample increments by +1 mod 256, and the
+trigger sample ~matches), matching
 ``examples/arty_a7/test_hw_integration.py::TestCapture.test_samples_are_counter_values``.
 For continuous mode, the same payload checks run on **every** ``progress`` result.
 
@@ -85,6 +86,15 @@ def _best_sequential_counter_run_low8(samples: list[int]) -> int:
     return max(best_run, current_run)
 
 
+def _counter_step_errors_low8(samples: list[int]) -> list[tuple[int, int, int]]:
+    vals = [s & 0xFF for s in samples]
+    return [
+        (i - 1, vals[i - 1], vals[i])
+        for i in range(1, len(vals))
+        if ((vals[i] - vals[i - 1]) & 0xFF) != 1
+    ]
+
+
 def _assert_capture_matches_arty_counter(
     result: CaptureResult,
     *,
@@ -95,6 +105,11 @@ def _assert_capture_matches_arty_counter(
     """Same ideas as ``TestCapture.test_samples_are_counter_values`` + trigger anchor."""
     samples = result.samples
     note = f" {context}" if context else ""
+    step_errors = _counter_step_errors_low8(samples)
+    assert not step_errors, (
+        f"counter must increment by +1 every captured sample{note}; "
+        f"errors={step_errors[:8]} low8={[x & 0xFF for x in samples]}"
+    )
     br = _best_sequential_counter_run_low8(samples)
     assert br >= pre + 1, (
         f"expected sequential counter run >= {pre + 1}, got {br}{note}; "

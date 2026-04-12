@@ -88,6 +88,15 @@ jobs:
         run: pip install -e ".[dev,gui]"
       - name: Run full unit test suite
         run: pytest tests/ -v --tb=short
+      - name: Run JTAG readback pipeline regression tests
+        run: |
+          pytest \
+            tests/test_transport.py::XilinxHwServerConnectFailureTests::test_parse_block_bits_can_skip_priming_word \
+            tests/test_transport.py::XilinxHwServerConnectFailureTests::test_parse_burst_bits_can_skip_priming_scan \
+            tests/test_transport.py::XilinxHwServerConnectFailureTests::test_read_block_burst_primes_user2_before_returned_scans \
+            tests/test_transport.py::XilinxHwServerConnectFailureTests::test_user1_block_read_has_idle_before_each_capture \
+            tests/test_host_stack.py::AnalyzerTests::test_capture_rereads_unstable_timestamp_block \
+            -v --tb=short
 
   # ── 4. RTL elaboration (iverilog -Wall) ──────────────────────────
   lint-rtl:

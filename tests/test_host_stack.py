@@ -119,6 +119,41 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
 
+    def test_capture_rereads_unstable_timestamp_block(self):
+        """A stale first timestamp block is discarded before export/GUI use."""
+
+        class TimestampRetryTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self.data = [10, 11, 12]
+                self.timestamp_reads = 0
+
+            def read_block(self, addr: int, words: int):
+                if addr == 0x0100:
+                    return self.data[:words]
+                if addr == 0x1100:
+                    self.timestamp_reads += 1
+                    reads = [
+                        [0, 101, 102],
+                        [100, 101, 102],
+                        [100, 101, 102],
+                    ]
+                    return reads[min(self.timestamp_reads - 1, len(reads) - 1)][:words]
+                return super().read_block(addr, words)
+
+        transport = TimestampRetryTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.timestamps, [100, 101, 102])
+        self.assertEqual(transport.timestamp_reads, 3)
+
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""
         from fcapz.analyzer import vcd_simulation_times

@@ -296,32 +296,21 @@ class TestCapture(unittest.TestCase):
         self.assertEqual(len(result.samples), 7)
 
     def test_samples_are_counter_values(self):
-        """Verify captured samples contain a sequential counter run.
+        """Verify every captured sample follows the Arty counter.
 
         The Arty reference design probes a free-running 8-bit counter.
-        We check that we find a contiguous run of at least
-        (pretrigger + 1) consecutive values somewhere in the readback.
+        With decimation disabled, every adjacent stored sample must increment
+        by exactly +1 modulo 256.
         """
         pretrig, posttrig = 4, 8
         result = self._capture(pretrig=pretrig, posttrig=posttrig)
         samples = [s & 0xFF for s in result.samples]
-        # Find the longest run of consecutive +1 (mod 256) transitions.
-        best_run = 0
-        current_run = 1
-        for i in range(1, len(samples)):
-            if (samples[i] - samples[i - 1]) & 0xFF == 1:
-                current_run += 1
-            else:
-                best_run = max(best_run, current_run)
-                current_run = 1
-        best_run = max(best_run, current_run)
-        # We must see at least (pretrigger + 1) sequential samples around
-        # the trigger point.
-        self.assertGreaterEqual(
-            best_run, pretrig + 1,
-            f"expected sequential counter run >= {pretrig + 1}, "
-            f"got best_run={best_run} samples={samples}",
-        )
+        errors = [
+            (i - 1, samples[i - 1], samples[i])
+            for i in range(1, len(samples))
+            if ((samples[i] - samples[i - 1]) & 0xFF) != 1
+        ]
+        self.assertEqual(errors, [], f"counter step errors in samples={samples}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

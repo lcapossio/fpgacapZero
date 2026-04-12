@@ -645,14 +645,17 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 
 | Job | What it checks |
 |-----|----------------|
-| `lint-python` | `ruff` E/F/W rules on `host/` and `tests/` |
-| `test-host` | `pytest tests/test_host_stack.py -v` — no hardware (does not yet run `test_cli_rpc_events.py`) |
+| `lint-python` | `ruff` E/F/W rules on the whole repo |
+| `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression step for USER1/USER2 priming and timestamp stabilization |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, Xilinx 7-series / UltraScale wrappers, and simulation stubs |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then ELA, ELA regression probe, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
+Those board-level checks now require every adjacent Arty counter sample to
+increment by +1 when decimation is disabled, so partial burst readback
+corruption is caught instead of hidden by a shorter valid prefix.
 
 ## Building from source
 

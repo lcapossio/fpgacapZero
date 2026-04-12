@@ -107,6 +107,14 @@ These tests run against a `FakeTransport` (no hardware required) and cover the
 CLI, RPC server, event-extraction helpers, EJTAG-AXI, and EJTAG-UART layers.
 They must pass before any push.
 
+The default suite also contains host-side regressions for JTAG readback
+pipeline behavior.  In particular, `tests/test_transport.py` verifies that
+USER1 block reads and USER2 burst reads discard their priming captures, and
+`tests/test_host_stack.py` verifies that unstable timestamp blocks are re-read
+before the GUI/VCD path sees them.  CI runs those tests explicitly after the
+full default suite so stale readback words cannot quietly become a viewer issue
+again.
+
 **Default pytest filter:** `[tool.pytest.ini_options]` in `pyproject.toml` sets
 `addopts` to include `-m "not hw"`, so tests marked `@pytest.mark.hw` are
 **not selected** when you run `pytest tests/ -v`. That keeps CI and machines
@@ -160,6 +168,11 @@ skip gracefully.
 real JTAG: connect from the UI, then single and continuous captures with the
 same Arty-style counter sanity checks as the integration suite. Tests are
 marked `@pytest.mark.gui` and `@pytest.mark.hw`.
+
+For the Arty reference counter, the hardware and GUI+hardware tests require
+every adjacent captured sample to increment by +1 when decimation is disabled.
+This is intentionally stricter than checking for a long valid prefix: a stale
+or partially primed burst word near the end of the capture must fail the test.
 
 They are **skipped** unless `FPGACAP_GUI_HW` is set to `1`, `true`, or `yes`.
 If `FPGACAP_SKIP_HW` is set, they skip (same convention as
