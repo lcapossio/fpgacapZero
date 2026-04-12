@@ -98,7 +98,7 @@ A single 72-bit pipelined DR scan is one AXI transaction; the host
 side caches the bridge's `FIFO_DEPTH` from the FEATURES register and
 rejects oversized bursts at the API boundary so a buggy host can
 never overflow the on-chip read FIFO.  Hardware-validated on Arty
-A7-100T at ~5-8 KB/s with the batched-scan transport.  Full chapter:
+A7-100T with the batched-scan transport.  Full chapter:
 [chapter 07](07_ejtag_axi_bridge.md).
 
 ### 4. EJTAG-UART — JTAG-to-UART Bridge
@@ -195,7 +195,7 @@ The host stack supports two JTAG transports out of the box:
 
 Both transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To
-add a third (e.g. raw TCF for ~10× the throughput, or USB-Blaster
+add a third (e.g. raw TCF for lower per-scan overhead, or USB-Blaster
 direct), implement the ABC and you are done — no other code changes
 needed.  See [chapter 14](14_transports.md) and
 [`specs/transport_api.md`](specs/transport_api.md).

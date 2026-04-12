@@ -59,6 +59,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- README and user manual (`docs/`, including specs) no longer quote fixed
+  KB/s (or similar) throughput numbers; they describe batching, round trips,
+  and tool/adapter dependence instead.
 - [docs/12_gui.md](docs/12_gui.md) and [docs/06_eio_core.md](docs/06_eio_core.md)
   describe the EIO panel as implemented (attach, **Poll inputs**, ms-period
   combo, per-bit toggles); troubleshooting notes concurrent poll + capture.

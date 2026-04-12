@@ -18,7 +18,7 @@ What it replaces:
 
 | Tool | Comparison |
 |---|---|
-| Xilinx STDIO over JTAG (XSDB `mrd`/`mwr` games) | Same outcome, ~10× faster, real bidirectional FIFO instead of polled mailbox |
+| Xilinx STDIO over JTAG (XSDB `mrd`/`mwr` games) | Same outcome; dedicated bidirectional FIFO instead of polled mailbox |
 | Vivado AXI UART Lite + JTAG-to-AXI | Two cores instead of one; you'd need both the AXI bridge AND a soft UART; more LUTs and more host complexity |
 | Real USB-serial adapter on a physical pin | Better latency and throughput, but uses a pin you may not have, and requires the user to know which COM port to open |
 
@@ -163,8 +163,8 @@ timeout is an **idle timeout**: the deadline resets every time a
 byte is successfully received, so a slow-but-steady stream will
 not time out mid-message.
 
-The implementation uses **pipelined RX_POP** for ~1 byte per
-JTAG scan throughput (~1.5 KB/s).  Each `RX_POP` scan returns
+The implementation uses **pipelined RX_POP** so steady streaming
+approaches about **one byte per JTAG round trip**.  Each `RX_POP` scan returns
 the result of the previous pop, so back-to-back pops achieve
 "one byte per round-trip" instead of "one byte per two
 round-trips".

@@ -85,7 +85,7 @@ host can queue the next.
 **Burst timing:** The AXI-side timeout (`TIMEOUT` parameter) applies only
 to AXI handshake waits (wready, bvalid, arready, rvalid). It does NOT
 apply between burst write beats in `ST_BURST_W`, because inter-beat pacing
-is host-controlled via JTAG scans (~0.5 ms per beat) — far longer than
+is host-controlled via JTAG scans — far longer than
 any AXI-side timeout.
 
 **Burst read pipeline:** The FIFO read has a 1-scan pipeline delay: the
@@ -93,13 +93,13 @@ first `BURST_RDATA` scan sets `last_cmd` but does not capture FIFO data
 (because `last_cmd` was still `BURST_RSTART` at CAPTURE time). The host
 sends a priming `BURST_RDATA`, then N data scans for N words.
 
-**Throughput (Arty A7, onboard FT2232H, Xilinx hw_server/XSDB, TCK up to
-30 MHz):** ~0.6 KB/s sequential (single `raw_dr_scan` per word, dominated
-by 0.64 ms XSDB round-trip), ~5-8 KB/s with `raw_dr_scan_batch`.
+**Host pacing:** Single-word paths issue roughly one JTAG round trip per
+`raw_dr_scan`; auto-increment blocks and batched APIs amortise tool
+overhead via `raw_dr_scan_batch` where the transport implements it.
 Hardware-validated on Arty A7-100T: single read/write, auto-increment
 blocks, and AXI4 burst read/write all pass.  Different JTAG adapters or
-a raw TCF transport (bypassing XSDB) would significantly change these
-numbers.
+a raw TCF transport (bypassing XSDB) change how much of the cable's
+bandwidth you actually see.
 
 Parameters: `ADDR_W` (default 32), `DATA_W` (default 32), `FIFO_DEPTH`
 (default 16), `TIMEOUT` (default 4096 axi_clk cycles).

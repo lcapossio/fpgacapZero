@@ -354,22 +354,23 @@ something new.
    `XilinxHwServerTransport`, or sanitize differently for your
    target language.
 
-## Performance comparison
+## Latency and batching (illustrative)
 
-Measured on Arty A7-100T, FT2232H onboard JTAG, TCK ~30 MHz:
+Measured on Arty A7-100T, FT2232H onboard JTAG, TCK ~30 MHz.  These are
+**per-call or wall-clock examples**, not a spec — your adapter and host
+load will differ.
 
 | Operation | hw_server | OpenOCD |
 |---|---|---|
 | `read_reg()` (single 32-bit) | ~1.5 ms / call | ~3-5 ms / call |
 | `read_block()` (16 words via `raw_dr_scan_batch`) | ~3 ms total | ~50 ms (no batch support) |
-| `burst_read()` (16 beats AXI) | ~6-10 KB/s | ~1-2 KB/s |
+| `burst_read()` (16 beats AXI) | uses batched DR where available | one scan at a time (slower) |
 | `Analyzer.capture()` of 1024 samples (USER2 burst) | ~50 ms | ~500 ms |
 
-The bottleneck in both cases is JTAG round-trip latency, not the
-RTL.  The fastest path today is hw_server with batched scans.  A
-future raw-TCF transport (bypassing xsdb) would close the gap to
-the cable's wire-speed limit, ~10× faster on Xilinx boards.  See
-the TODO roadmap.
+The bottleneck in both cases is JTAG round-trip latency through the
+tooling, not the RTL.  The fastest path today is hw_server with batched
+scans.  A future raw-TCF transport (bypassing xsdb) could cut per-scan
+overhead further on Xilinx boards.  See the TODO roadmap.
 
 ## What's next
 

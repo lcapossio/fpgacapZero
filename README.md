@@ -54,21 +54,20 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
   and its visible effect on the probe bus
 - **Circular buffer** with pre/post-trigger lengths and optional storage
   qualification (10x effective depth for sparse signals, +21 LUTs)
-- **Burst readback** -- 256-bit USER2 DR packs multiple samples per scan,
-  ~49 KB/s sustained for any sample width (Arty A7 onboard FT2232H via
-  Xilinx hw_server/XSDB, TCK up to 30 MHz, bottlenecked by XSDB command
-  overhead at ~0.64 ms/scan)
+- **Burst readback** -- 256-bit USER2 DR packs multiple samples per scan so
+  readback amortises host round-trips; observed rate depends on the adapter,
+  tool chain, and whether the transport batches DR scans
 - **Two JTAG backends** -- OpenOCD (cross-platform) and Xilinx hw_server/XSDB
 - **Python host stack** -- ELA CLI, optional **PySide6 desktop GUI** (`fcapz-gui`),
   programmatic API, JSON-RPC server, and LLM event extraction helpers
 - **Embedded I/O (EIO)** -- RTL cores and Python controller for runtime
   read/write of fabric signals via JTAG USER3
 - **JTAG-to-AXI4 Bridge (EJTAG-AXI)** -- 72-bit pipelined DR for single
-  and burst AXI4 transactions over JTAG; 0.6 KB/s measured sequential,
-  higher with `raw_dr_scan_batch` (Arty A7 / FT2232H / XSDB)
+  and burst AXI4 transactions over JTAG; block and burst paths use
+  `raw_dr_scan_batch` where the transport supports it to amortise scan overhead
 - **JTAG-to-UART Bridge (EJTAG-UART)** -- 32-bit pipelined DR for
-  bidirectional UART over JTAG; TX/RX async FIFOs, ~1.5 KB/s per
-  direction (Arty A7 / FT2232H / XSDB). Use cases: debug console,
+  bidirectional UART over JTAG; TX/RX async FIFOs (effective rate is
+  dominated by JTAG round-trip latency). Use cases: debug console,
   firmware upload, printf-over-JTAG without a physical UART pin
 - **Three export formats** -- JSON (LLM-friendly), CSV, VCD
 - **Multi-signal probes** -- named sub-signals in VCD export and capture

@@ -89,9 +89,9 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
 - Switch IR to USER2 (0x03) and perform 256-bit DR scans.
 - Each scan returns `256 / SAMPLE_W` packed samples (e.g. 32 for 8-bit probes).
 - Read pointer auto-increments; staging buffer is pre-filled during SHIFT phase.
-- Throughput: ~49 KB/s actual sample data (0.64 ms/scan, limited by XSDB
-  overhead).  Measured on Arty A7 with onboard FT2232H via Xilinx
-  hw_server/XSDB (TCK up to 30 MHz).
+- Effective sample delivery rate depends on the host transport and cable;
+  the burst path returns multiple samples per 256-bit DR scan to amortise
+  round trips.
 
 ## EIO Core Register Map (USER3, CHAIN=3)
 
