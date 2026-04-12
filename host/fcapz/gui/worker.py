@@ -115,10 +115,10 @@ class CaptureWorker(QObject):
 
 
 class ConnectWorker(QObject):
-    """Background connect: build transport, ``Analyzer.connect()``, ``probe()``."""
+    """Background connect: build transport, ``Analyzer.connect()``, ``probe_optional()``."""
 
     finished = Signal(object, object)
-    """``(analyzer, probe_info)`` on success."""
+    """``(analyzer, probe_info)`` on success; ``probe_info`` is ``None`` if USER1 has no ELA."""
 
     failed = Signal(str)
     cancelled = Signal()
@@ -173,8 +173,13 @@ class ConnectWorker(QObject):
                 analyzer.close()
                 self.cancelled.emit()
                 return
-            info = analyzer.probe()
+            info = analyzer.probe_optional()
             t_probe = time.monotonic()
+            if info is None:
+                _conn_log.info(
+                    "USER1 has no fcapz ELA ('LA' core id); JTAG session open for "
+                    "subsidiary chains (EIO, EJTAG-AXI, UART, …).",
+                )
             if connect_timing_logs_enabled():
                 _conn_log.info(
                     "GUI connect worker timing: transport_build=%.3fs transport.connect=%.3fs "
@@ -195,5 +200,10 @@ class ConnectWorker(QObject):
                 return
             _conn_log.exception("Connect worker failed")
             self.failed.emit(format_connect_error(exc, self._conn))
+            if analyzer is not None:
+                try:
+                    analyzer.close()
+                except OSError:
+                    pass
             return
         self.finished.emit(analyzer, info)

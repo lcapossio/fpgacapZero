@@ -361,6 +361,22 @@ class SequencerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "core identity"):
             analyzer.probe()
 
+    def test_probe_optional_none_when_no_ela(self):
+        """probe_optional() returns None when USER1 is not an fcapz ELA."""
+        transport = FakeTransport()
+        transport._chain_regs[1][0x0000] = 0x0002_DEAD
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        self.assertIsNone(analyzer.probe_optional())
+
+    def test_probe_optional_matches_probe_when_ela_present(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        opt = analyzer.probe_optional()
+        self.assertIsNotNone(opt)
+        self.assertEqual(opt, analyzer.probe())
+
     def test_probe_rejects_zero_version(self):
         """probe() raises RuntimeError if VERSION reads as 0 (unprogrammed FPGA)."""
         transport = FakeTransport()

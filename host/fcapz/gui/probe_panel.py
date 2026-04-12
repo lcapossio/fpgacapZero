@@ -77,9 +77,20 @@ class ProbePanel(QGroupBox):
         lay.addWidget(self._summary)
         lay.addWidget(self._raw_section)
 
-    def set_probe_info(self, info: Mapping[str, Any]) -> None:
+    def set_probe_info(self, info: Mapping[str, Any] | None) -> None:
+        if info is None:
+            self._summary.setText(
+                "JTAG is connected, but USER1 does not report an fcapz ELA (VERSION "
+                "lacks the 'LA' core id). ELA capture and identity details are disabled. "
+                "You can still use EIO, EJTAG-AXI, or UART from their docks on the "
+                "correct BSCAN chains if your bitstream includes those cores.",
+            )
+            self._raw.clear()
+            self._raw.setPlaceholderText("No ELA — probe JSON not available.")
+            return
         self._summary.setText(_format_probe_summary(info))
         self._raw.setPlainText(json.dumps(dict(info), indent=2))
+        self._raw.setPlaceholderText("Full JSON from probe() …")
 
     def clear(self) -> None:
         self._summary.setText("Connect to load a short hardware summary.")

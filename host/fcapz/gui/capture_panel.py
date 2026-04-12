@@ -730,7 +730,29 @@ class CapturePanel(QGroupBox):
         raw = self._trig_val_radix.currentData()
         return int(raw) if raw is not None else 16
 
-    def set_hw_probe_info(self, info: Mapping[str, Any]) -> None:
+    def set_hw_probe_info(self, info: Mapping[str, Any] | None) -> None:
+        if info is None:
+            self._hw_sample_w = None
+            self._hw_depth = None
+            self._hw_num_chan = None
+            self._hw_trig_stages = 0
+            self._hw_has_decimation = True
+            self._hw_has_ext_trigger = True
+            self._hw_has_storage_qual = True
+            self._hw_probe_mux_w = 0
+            self._btn_stop.setEnabled(False)
+            self._hw_label.setText(
+                "JTAG connected — no fcapz ELA on USER1. Capture controls stay disabled; "
+                "attach EIO, EJTAG-AXI, or UART on their chains if your design includes them.",
+            )
+            for b in (self._btn_cfg, self._btn_arm, self._btn_cap):
+                b.setEnabled(False)
+            with QSignalBlocker(self._seq_enable):
+                self._seq_enable.setChecked(False)
+            self._seq_table.setRowCount(0)
+            self._refresh_seq_ui_state()
+            self._apply_hw_feature_availability()
+            return
         sw = int(info["sample_width"])
         depth = int(info["depth"])
         nch = int(info.get("num_channels", 1))

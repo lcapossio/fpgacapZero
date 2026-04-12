@@ -38,11 +38,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   exposes `has_storage_qualification` (FEATURES[4]).
 - **GUI:** EIO panel — small combo box next to “Poll inputs” to choose the
   poll period (25–1000 ms presets; default 250 ms).
+- **GUI / API:** `Analyzer.probe_optional()` — same USER1 reads as `probe()` but
+  returns `None` when VERSION is not the fcapz ELA (`'LA'`). The connect worker
+  uses it so **Connect** succeeds without an ELA; ELA capture and toolbar
+  actions stay off while EIO / EJTAG-AXI / UART docks can still attach on their
+  chains. CLI behaviour unchanged (`probe()` still requires ELA).
 
 ### Fixed
 
 - **GUI / EIO:** Probe UI stays disabled until **Attach EIO**; **All outputs on**
-  writes the full output width; output checkboxes sync from hardware readback
+  / **All outputs off** buttons write the full output width to all 1s or all 0s;
+  output checkboxes sync from hardware readback
   after writes; tooltips plus [`docs/06_eio_core.md`](docs/06_eio_core.md) and
   [`docs/12_gui.md`](docs/12_gui.md) clarify Attach, **Poll inputs** (inputs
   only) vs **Outputs** (fabric / board LEDs on the Arty reference).

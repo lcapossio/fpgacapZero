@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ._version import _version_tuple
 from .transport import Transport
@@ -614,26 +614,10 @@ class Analyzer:
             yield result
             yielded += 1
 
-    def probe(self) -> Dict:
-        """Read the ELA identity and feature registers.
-
-        Verifies the VERSION register's low-16 magic equals the ASCII
-        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
-        RuntimeError on mismatch so the caller cannot accidentally
-        drive a non-fcapz bitstream.
-
-        When the transport exposes
-        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
-        (hw_server), all probe registers share **one** XSDB ``_send`` plus
-        a pipeline flush read.
-        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
-        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
-
-        Returns a dict with `version_major`, `version_minor`, `core_id`
-        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
-        trigger sequencer depth, 0 if absent), `has_storage_qualification`
-        (FEATURES[4]), and the rest of the feature flags.
-        """
+    def _read_ela_probe_registers_raw(
+        self,
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        """Read USER1 ELA identity / feature registers (may be a non-ELA core)."""
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -655,13 +639,29 @@ class Analyzer:
             timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
             num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
+        return (
+            version,
+            sample_w,
+            depth,
+            num_chan,
+            features,
+            timestamp_w,
+            num_segments,
+            probe_mux_w,
+        )
+
+    @staticmethod
+    def _probe_dict_from_raw(
+        version: int,
+        sample_w: int,
+        depth: int,
+        num_chan: int,
+        features: int,
+        timestamp_w: int,
+        num_segments: int,
+        probe_mux_w: int,
+    ) -> Dict:
         core_id = version & 0xFFFF
-        if core_id != _ELA_CORE_ID:
-            raise RuntimeError(
-                f"ELA core identity check failed at VERSION[15:0]: "
-                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
-            )
         return {
             "version_major": (version >> 24) & 0xFF,
             "version_minor": (version >> 16) & 0xFF,
@@ -678,3 +678,45 @@ class Analyzer:
             "num_segments": num_segments,
             "probe_mux_w": probe_mux_w,
         }
+
+    def probe_optional(self) -> Optional[Dict]:
+        """Like :meth:`probe` but returns ``None`` if USER1 is not an fcapz ELA.
+
+        Use this when the host should stay connected for subsidiary BSCAN cores
+        (EIO, EJTAG-AXI, UART, …) even if the primary USER1 register window does
+        not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
+        """
+        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        if (version & 0xFFFF) != _ELA_CORE_ID:
+            return None
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)
+
+    def probe(self) -> Dict:
+        """Read the ELA identity and feature registers.
+
+        Verifies the VERSION register's low-16 magic equals the ASCII
+        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
+        RuntimeError on mismatch so the caller cannot accidentally
+        drive a non-fcapz bitstream.
+
+        When the transport exposes
+        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
+        (hw_server), all probe registers share **one** XSDB ``_send`` plus
+        a pipeline flush read.
+        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
+        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+
+        Returns a dict with `version_major`, `version_minor`, `core_id`
+        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
+        trigger sequencer depth, 0 if absent), `has_storage_qualification`
+        (FEATURES[4]), and the rest of the feature flags.
+        """
+        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        core_id = version & 0xFFFF
+        if core_id != _ELA_CORE_ID:
+            raise RuntimeError(
+                f"ELA core identity check failed at VERSION[15:0]: "
+                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+            )
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)

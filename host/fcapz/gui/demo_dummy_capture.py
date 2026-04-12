@@ -124,6 +124,7 @@ def main(_argv: list[str] | None = None) -> int:
         apply_application_ui_font,
         apply_gui_application_style,
     )
+    from .branding import GUI_DISPLAY_TITLE
     from .reject_spin_combo_wheel import install_reject_spin_combo_wheel_filter
     from .settings import load_gui_settings
 
@@ -136,7 +137,7 @@ def main(_argv: list[str] | None = None) -> int:
         persist_window_layout=False,
         demo_continuous_cycle_delay_s=0.5,
     )
-    w.setWindowTitle("fcapz-gui (demo — mock hardware)")
+    w.setWindowTitle(f"{GUI_DISPLAY_TITLE} (demo — mock hardware)")
 
     w.show()
     # Defer so ConnectionPanel and threads wire up before connect runs.

@@ -46,6 +46,7 @@ from ..analyzer import Analyzer, CaptureConfig, CaptureResult
 from ..eio import EioController
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
+from .branding import GUI_DISPLAY_TITLE
 from .axi_panel import AxiPanel
 from .capture_panel import CapturePanel
 from .connection_panel import ConnectionPanel
@@ -126,7 +127,7 @@ class MainWindow(QMainWindow):
         demo_continuous_cycle_delay_s: float = 0.0,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("fcapz-gui")
+        self.setWindowTitle(GUI_DISPLAY_TITLE)
         # Narrow laptops: docks use scroll areas; toolbar may use » overflow below ~900px.
         self.setMinimumSize(720, 480)
         self._fit_initial_geometry()
@@ -160,6 +161,7 @@ class MainWindow(QMainWindow):
 
         self._config_path = default_gui_config_path()
         self._analyzer: Analyzer | None = None
+        self._ela_present: bool = False
         self._cap_thread: QThread | None = None
         self._cap_worker: CaptureWorker | None = None
         self._connect_thread: QThread | None = None
@@ -415,24 +417,41 @@ class MainWindow(QMainWindow):
     def _on_connect_worker_finished(
         self,
         analyzer: Analyzer,
-        info: Mapping[str, Any],
+        info: Mapping[str, Any] | None,
     ) -> None:
         QApplication.restoreOverrideCursor()
         conn = self._conn.connection_settings()
-        _log.info(
-            "Connected: %d-bit samples depth=%d trig_stages=%d",
-            int(info.get("sample_width", 0)),
-            int(info.get("depth", 0)),
-            int(info.get("trig_stages", 0)),
-        )
+        self._ela_present = info is not None
+        if info is not None:
+            _log.info(
+                "Connected: %d-bit samples depth=%d trig_stages=%d",
+                int(info.get("sample_width", 0)),
+                int(info.get("depth", 0)),
+                int(info.get("trig_stages", 0)),
+            )
+        else:
+            _log.info(
+                "Connected: JTAG up, no ELA on USER1 — use EIO / EJTAG-AXI / UART "
+                "docks on their BSCAN chains if present.",
+            )
         self._analyzer = analyzer
-        self._probe.set_probe_info(info)
-        self._capture.set_hw_probe_info(info)
+        if info is not None:
+            self._probe.set_probe_info(info)
+            self._capture.set_hw_probe_info(info)
+        else:
+            self._probe.set_probe_info(None)
+            self._capture.set_hw_probe_info(None)
         self._history.set_analyzer_ref(analyzer)
         self._eio_panel.set_transport(analyzer.transport)
         self._axi_panel.set_transport_available(True)
         self._uart_panel.set_transport_available(True)
-        self._conn.set_connected(True, "Connected — ELA identity OK.")
+        if info is not None:
+            self._conn.set_connected(True, "Connected — ELA identity OK.")
+        else:
+            self._conn.set_connected(
+                True,
+                "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available).",
+            )
         self.statusBar().showMessage("Connected")
 
         gui = load_gui_settings(self._config_path)
@@ -728,7 +747,7 @@ class MainWindow(QMainWindow):
         self._tb_act_connect.setEnabled(not connected and not connecting)
         self._tb_act_disconnect.setEnabled(connected and not connecting)
 
-        can_elact = connected and not busy
+        can_elact = connected and not busy and self._ela_present
         self._tb_act_configure.setEnabled(can_elact)
         self._tb_act_arm.setEnabled(can_elact)
         self._tb_act_capture.setEnabled(can_elact)
@@ -933,7 +952,7 @@ class MainWindow(QMainWindow):
         self._refresh_user_layout_menus()
 
         m_help = self.menuBar().addMenu("&Help")
-        act_about = QAction("&About fcapz-gui", self)
+        act_about = QAction(f"&About {GUI_DISPLAY_TITLE}", self)
         act_about.triggered.connect(self._on_about)
         m_help.addAction(act_about)
 
@@ -1009,8 +1028,8 @@ class MainWindow(QMainWindow):
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
-            "About fcapz-gui",
-            "<p><b>fcapz-gui</b> — fpgacapZero desktop control panel.</p>"
+            f"About {GUI_DISPLAY_TITLE}",
+            f"<p><b>{GUI_DISPLAY_TITLE}</b> — fpgacapZero desktop control panel.</p>"
             "<p>Connect to an ELA over JTAG, capture, and inspect waveforms "
             "(embedded preview or external viewers).</p>",
         )
@@ -1029,6 +1048,7 @@ class MainWindow(QMainWindow):
 
     def _on_disconnect(self) -> None:
         self._stop_capture_thread()
+        self._ela_present = False
         if self._analyzer is not None:
             try:
                 self._analyzer.close()
@@ -1100,7 +1120,7 @@ class MainWindow(QMainWindow):
         _log.info("UART bridge attached (chain=%d)", self._uart_panel.chain())
 
     def _on_configure(self) -> None:
-        if self._analyzer is None:
+        if self._analyzer is None or not self._ela_present:
             return
         try:
             cfg = self._capture.build_capture_config()
@@ -1117,7 +1137,7 @@ class MainWindow(QMainWindow):
         _log.info("ELA configured")
 
     def _on_arm_clicked(self) -> None:
-        if self._analyzer is None or self._capture_running():
+        if self._analyzer is None or not self._ela_present or self._capture_running():
             return
         try:
             cfg = self._capture.build_capture_config()
@@ -1135,7 +1155,7 @@ class MainWindow(QMainWindow):
         self._spawn_capture_thread(cfg, timeout, immediate=False, auto_rearm=ar)
 
     def _on_capture_clicked(self) -> None:
-        if self._analyzer is None or self._capture_running():
+        if self._analyzer is None or not self._ela_present or self._capture_running():
             return
         try:
             cfg = self._capture.build_capture_config()
@@ -1432,7 +1452,7 @@ def run_app(argv: list[str] | None = None) -> int:
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
     app.setApplicationName("fcapz-gui")
-    app.setApplicationDisplayName("fcapz-gui")
+    app.setApplicationDisplayName(GUI_DISPLAY_TITLE)
     app.setOrganizationName("fpgacapzero")
     _wake, _win_cb = _install_ctrl_c_quit(app)
     w = MainWindow()

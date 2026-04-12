@@ -75,12 +75,19 @@ class EioPanel(QGroupBox):
         self._out_layout = QGridLayout(self._out_grid)
         self._out_checks: list[QCheckBox] = []
 
-        self._all_outputs_cb = QCheckBox("All outputs on")
-        self._all_outputs_cb.setToolTip(
-            "Write every probe_out bit at once: checked = all 1s, unchecked = all 0s "
+        self._all_outputs_on_btn = QPushButton("All outputs on")
+        self._all_outputs_on_btn.setToolTip(
+            "Write every probe_out bit to 1 at once "
             f"(full OUT_W, not only the first {_MAX_BITS_UI} UI bits).",
         )
-        self._all_outputs_cb.toggled.connect(self._on_all_outputs_toggled)
+        self._all_outputs_on_btn.clicked.connect(self._on_all_outputs_on_clicked)
+
+        self._all_outputs_off_btn = QPushButton("All outputs off")
+        self._all_outputs_off_btn.setToolTip(
+            "Write every probe_out bit to 0 at once "
+            f"(full OUT_W, not only the first {_MAX_BITS_UI} UI bits).",
+        )
+        self._all_outputs_off_btn.clicked.connect(self._on_all_outputs_off_clicked)
 
         self._in_scroll = QScrollArea()
         self._in_scroll.setWidgetResizable(True)
@@ -114,7 +121,11 @@ class EioPanel(QGroupBox):
         out_block = QWidget()
         out_block_layout = QVBoxLayout(out_block)
         out_block_layout.setContentsMargins(0, 0, 0, 0)
-        out_block_layout.addWidget(self._all_outputs_cb)
+        out_master_row = QHBoxLayout()
+        out_master_row.addWidget(self._all_outputs_on_btn)
+        out_master_row.addWidget(self._all_outputs_off_btn)
+        out_master_row.addStretch(1)
+        out_block_layout.addLayout(out_master_row)
         out_block_layout.addWidget(self._out_scroll)
         form.addRow(out_lbl, out_block)
 
@@ -132,9 +143,6 @@ class EioPanel(QGroupBox):
         self._info.setText("Not attached.")
         self._rebuild_bits(0, 0)
         self._attach_btn.setEnabled(False)
-        self._all_outputs_cb.blockSignals(True)
-        self._all_outputs_cb.setChecked(False)
-        self._all_outputs_cb.blockSignals(False)
         self._apply_attach_ui_state(False)
 
     def set_transport(self, transport: Transport | None) -> None:
@@ -165,7 +173,7 @@ class EioPanel(QGroupBox):
                 outv = eio.read_outputs()
         except (OSError, RuntimeError):
             outv = 0
-        self._set_output_widgets_from_value(outv, sync_master=True)
+        self._set_output_widgets_from_value(outv)
         if self._poll_enable.isChecked():
             self._poll_tick()
 
@@ -181,7 +189,9 @@ class EioPanel(QGroupBox):
         self._in_scroll.setEnabled(attached)
         self._out_scroll.setEnabled(attached)
         out_bits = len(self._out_checks)
-        self._all_outputs_cb.setEnabled(attached and out_bits > 0)
+        can_out = attached and out_bits > 0
+        self._all_outputs_on_btn.setEnabled(can_out)
+        self._all_outputs_off_btn.setEnabled(can_out)
         for cb in self._out_checks:
             cb.setEnabled(attached)
 
@@ -190,7 +200,7 @@ class EioPanel(QGroupBox):
             return 0
         return (1 << self._eio.out_w) - 1
 
-    def _set_output_widgets_from_value(self, outv: int, *, sync_master: bool) -> None:
+    def _set_output_widgets_from_value(self, outv: int) -> None:
         for i, cb in enumerate(self._out_checks):
             v = (outv >> i) & 1
             cb.blockSignals(True)
@@ -198,12 +208,6 @@ class EioPanel(QGroupBox):
                 Qt.CheckState.Checked if v else Qt.CheckState.Unchecked,
             )
             cb.blockSignals(False)
-        if sync_master and self._eio is not None:
-            full = self._full_output_mask()
-            all_on = (outv & full) == full
-            self._all_outputs_cb.blockSignals(True)
-            self._all_outputs_cb.setChecked(all_on)
-            self._all_outputs_cb.blockSignals(False)
 
     def _on_poll_toggled(self, on: bool) -> None:
         if on and self._eio is not None:
@@ -268,24 +272,26 @@ class EioPanel(QGroupBox):
             cb.setCheckState(
                 Qt.CheckState.Checked if v else Qt.CheckState.Unchecked,
             )
-        self._set_output_widgets_from_value(outv, sync_master=True)
+        self._set_output_widgets_from_value(outv)
 
-    def _on_all_outputs_toggled(self, checked: bool) -> None:
+    def _write_full_probe_out(self, value: int) -> bool:
         if self._eio is None or self._transport is None:
-            return
-        mask = self._full_output_mask()
-        value = mask if checked else 0
+            return False
         try:
             with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain):
                 self._eio.write_outputs(value)
                 outv = self._eio.read_outputs()
         except (OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, "EIO outputs", str(exc))
-            self._all_outputs_cb.blockSignals(True)
-            self._all_outputs_cb.setChecked(not checked)
-            self._all_outputs_cb.blockSignals(False)
-            return
-        self._set_output_widgets_from_value(outv, sync_master=True)
+            return False
+        self._set_output_widgets_from_value(outv)
+        return True
+
+    def _on_all_outputs_on_clicked(self) -> None:
+        self._write_full_probe_out(self._full_output_mask())
+
+    def _on_all_outputs_off_clicked(self) -> None:
+        self._write_full_probe_out(0)
 
     def _on_output_toggled(self, bit: int, high: bool) -> None:
         if self._eio is None or self._transport is None:
@@ -303,9 +309,9 @@ class EioPanel(QGroupBox):
                 except (OSError, RuntimeError, ValueError):
                     pass
                 else:
-                    self._set_output_widgets_from_value(outv, sync_master=True)
+                    self._set_output_widgets_from_value(outv)
             return
-        self._set_output_widgets_from_value(outv, sync_master=True)
+        self._set_output_widgets_from_value(outv)
 
     def _on_out_bit_state(self, bit: int, state: int) -> None:
         on = Qt.CheckState(state) == Qt.CheckState.Checked

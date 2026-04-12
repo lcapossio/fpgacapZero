@@ -93,11 +93,16 @@ When you click **Connect**:
 2. Calls `transport.connect()`, which spawns `xsdb` (or talks to
    OpenOCD), programs the FPGA if a bitfile is set, runs the
    readiness probe.
-3. On success, all the other panels become enabled.
-4. On failure, an error dialog pops up with the underlying
-   exception's message — typically a `RuntimeError` from the
-   identity check or a `ConnectionError` from the readiness wait.
-   See [chapter 17](17_troubleshooting.md).
+3. Reads the USER1 register window with `Analyzer.probe_optional()`.
+   If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
+   and the probe summary are enabled.  If not (EIO-only / AXI-only
+   designs, or USER1 unused), the session still **connects**: JTAG
+   stays open so you can use **EIO**, **EJTAG-AXI**, and **UART** from
+   their docks on the correct BSCAN chains; ELA toolbar actions and
+   capture controls stay disabled.
+4. On transport or readiness failure, an error dialog pops up with the
+   underlying exception — typically a `ConnectionError` from the
+   readiness wait.  See [chapter 17](17_troubleshooting.md).
 
 The connection settings are persisted across runs in
 `~/.config/fpgacapzero/gui.toml` (Linux/macOS) or
@@ -106,8 +111,8 @@ re-type them every launch.
 
 ### Probe summary panel
 
-After connecting, this panel shows the live `Analyzer.probe()`
-output:
+After connecting **with** an ELA on USER1, this panel shows the live
+`Analyzer.probe()` output:
 
 ```
 Version : 0.3
@@ -118,10 +123,11 @@ Channels: 1
 Features: decimation, ext-trigger, timestamps (32-bit), 4 segments
 ```
 
-If the bitstream is wrong (no fcapz core, wrong chain), the
-underlying `Analyzer.probe()` raises and the panel shows the error
-in red instead of the values.  This is the same magic check as
-[chapter 05](05_ela_core.md) "Identity check".
+If USER1 does not present the ELA core id, the GUI still connects
+and this panel explains that ELA capture is unavailable; subsidiary
+cores use their own **Attach** flows.  The CLI `fcapz` tool still
+uses `Analyzer.probe()`, which **raises** on a missing ELA — same
+magic check as [chapter 05](05_ela_core.md) "Identity check".
 
 ### ELA capture panel
 
@@ -429,8 +435,9 @@ the same arrangement.
     **Inputs** checkboxes — they mirror `btn[3:0]` and the counter
     nibbles; they do **not** light the board by themselves. Use the
     **Outputs** checkboxes to drive `probe_out`; on Arty, bits **0–3**
-    drive the four **green** LEDs (active high). **All outputs on**
-    sets every `probe_out` bit in one write (unchecked clears all bits).
+    drive the four **green** LEDs (active high). **All outputs on** /
+    **All outputs off** set every `probe_out` bit to all 1s or all 0s in one
+    write each (full width, not only the visible grid).
     Until **Attach EIO** succeeds, poll controls and the I/O grids stay
     disabled.
 11. Click the **EJTAG-AXI** tab, type `0x40000000` into the address
