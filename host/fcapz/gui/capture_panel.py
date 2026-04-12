@@ -232,6 +232,11 @@ class CapturePanel(QGroupBox):
         self._btn_arm = QPushButton("Arm")
         self._btn_cap = QPushButton("Capture")
         self._btn_cont = QPushButton("Continuous")
+        self._btn_cont.setToolTip(
+            "Repeated capture with auto re-arm: after each waveform finishes, "
+            "the core is armed again for the next trigger (like continuous mode "
+            "in many ILAs). Stop ends the loop.",
+        )
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.setEnabled(False)
 

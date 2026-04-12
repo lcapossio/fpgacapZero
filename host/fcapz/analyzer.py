@@ -569,8 +569,11 @@ class Analyzer:
     ):
         """Generator that yields successive ``CaptureResult`` objects.
 
-        After each capture completes, the core is automatically re-armed.
-        Yields *count* results, or runs indefinitely if *count* is 0.
+        After each capture completes, the core is **automatically re-armed**
+        (same idea as “continuous” / auto re-arm in many vendor ILAs): each
+        iteration calls :meth:`arm`, then :meth:`capture` to wait for the next
+        trigger and read back. Yields *count* results, or runs indefinitely if
+        *count* is 0.
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture_continuous()")

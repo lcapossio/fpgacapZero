@@ -668,6 +668,11 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self._tb_act_capture = _add("capture", "Capture", self._on_capture_clicked)
         self._tb_act_continuous = _add("continuous", "Continuous", self._on_continuous_clicked)
+        self._tb_act_continuous.setToolTip(
+            "Continuous capture with auto re-arm after each completed waveform (ILA-style). "
+            "Stop ends the loop.",
+        )
+        self._tb_act_continuous.setStatusTip(self._tb_act_continuous.toolTip())
         self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
         self.addToolBar(_TOP_TOOLBAR_AREA, tb)
         tb.setVisible(True)
