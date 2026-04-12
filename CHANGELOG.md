@@ -59,6 +59,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- README and manual resource tables refreshed against Vivado 2025.2
+  synthesis reports (`scripts/resource_comparison.tcl` harness + Apr 2026
+  `arty_a7_top` place & route): corrected baseline slice LUTs (~1,595 vs
+  stale ~1,990), sequencer/SQ rows, reference top (~2.7k LUT / 1.5 BRAM /
+  optional ELA features + EIO + AXI), and WNS for `sys_clk`.  Spec
+  architecture parameters list extended for decimation, timestamps, segments,
+  etc.; `resource_comparison.tcl` resolves repo root from its path (or
+  `FPGACAP_ROOT`).
 - README and user manual (`docs/`, including specs) no longer quote fixed
   KB/s (or similar) throughput numbers; they describe batching, round trips,
   and tool/adapter dependence instead.

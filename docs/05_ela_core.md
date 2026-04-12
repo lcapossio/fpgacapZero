@@ -515,15 +515,24 @@ decoded form.
 
 ## Resource usage
 
-| Configuration | LUTs | BRAM | Notes |
-|---|---|---|---|
-| `SAMPLE_W=8, DEPTH=1024`, baseline | ~1,594 | 0.5 | smallest useful config |
-| Above + `TRIG_STAGES=4 + STOR_QUAL=1` | ~2,500 | 0.5 | full advanced trigger |
-| Above + `TIMESTAMP_W=32` | ~2,700 | 1.0 | one extra BRAM for timestamps |
-| `SAMPLE_W=32, DEPTH=4096` | ~2,000 | 4.0 | wider, deeper |
+Vivado **synthesis**, **xc7a100t**, 2025.2 — **Slice LUTs** (same
+measurement as `scripts/resource_comparison.tcl`). BRAM is Block RAM
+tiles (18K granularity counts as 0.5 where applicable).
 
-These are baseline numbers from xc7a100t.  Your synthesis tool +
-device family will vary.
+| Configuration | Slice LUTs | FFs | BRAM | Notes |
+|---|---:|---:|---:|---|
+| `SAMPLE_W=8`, `DEPTH=1024`, baseline | 1,595 | 1,478 | 0.5 | `TRIG_STAGES=1`, `STOR_QUAL=0` |
+| Above + `STOR_QUAL=1` | 1,616 | 1,497 | 0.5 | +21 LUT |
+| Above + `TRIG_STAGES=4` (no SQ) | 2,098 | 1,878 | 0.5 | 4-stage sequencer |
+| Above + `TRIG_STAGES=4` + `STOR_QUAL=1` | 2,095 | 1,897 | 0.5 | seq + storage qualification |
+| `SAMPLE_W=8`, `DEPTH=4096`, baseline | 1,541 | 1,490 | 1.0 | deeper buffer |
+| `SAMPLE_W=32`, `DEPTH=1024`, baseline | 1,548 | 1,740 | 1.0 | wider samples |
+
+The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
+`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
+with EIO and EJTAG-AXI — **post-place** that top-level uses about **2.7k
+slice LUTs** and **1.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
+Your tool and family will vary.
 
 ## What's next
 

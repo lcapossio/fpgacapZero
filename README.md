@@ -43,7 +43,8 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
 
 ## Features
 
-- **Tiny, parameterizable RTL core** -- 1,594 LUTs + 0.5 BRAM baseline;
+- **Tiny, parameterizable RTL core** -- ~1,595 slice LUTs + 0.5 BRAM baseline
+  (8b × 1024, dual comparators, Vivado 2025.2 synth on xc7a100t);
   configurable sample width (1-256+ bits) and buffer depth (16-16M samples)
 - **Flexible trigger** -- 2 comparators per stage with 9 compare modes
   (==, !=, <, >, <=, >=, rising, falling, changed), boolean combine
@@ -577,7 +578,7 @@ OpenOCD and hw_server backends.
 | **Export formats** | JSON, CSV, VCD | CSV, VCD | CSV, VCD, TBL | Proprietary | CSV, VCD, PRN | VCD, CSV, SR |
 | **Virtual I/O** | EIO core | VIO | In-System Sources | -- | GVIO | LiteScopeIO |
 | **LLM-friendly** | Yes (JSON-RPC, summaries) | Moderate (Tcl) | Moderate (Tcl) | Limited | Limited | Good (Python) |
-| **Baseline LUTs** | ~2,000 | ~1,000+ | Varies | Varies | Varies | Small |
+| **Baseline LUTs** | ~1,600 | ~1,000+ | Varies | Varies | Varies | Small |
 
 **Key differentiators:**
 
@@ -595,27 +596,33 @@ OpenOCD and hw_server backends.
 All features are compile-time optional via parameters. The sample buffer
 uses dual-port BRAM, so scaling wider or deeper adds BRAM, not LUTs.
 
-| Config | LUTs | FFs | BRAM | Notes |
+Numbers below are **Slice LUTs** and **FFs** from Vivado **synthesis**
+reports on **xc7a100t** (2025.2), except the last row, which uses the
+same **post–place & route** totals as the shipped `arty_a7_top`
+reference (Apr 2026). Regenerate ELA-only rows with
+`vivado -mode batch -source scripts/resource_comparison.tcl` (set
+`FPGACAP_ROOT` if the repo is not next to `scripts/`).
+
+| Config | Slice LUTs | FFs | BRAM | Notes |
 |--------|-----:|----:|-----:|-------|
-| 8b × 1024, baseline | 1,990 | 1,562 | 0.5 | Dual comparators, 9 modes |
-| 8b × 1024, +storage qual | ~2,010 | ~1,580 | 0.5 | +~20 LUT |
-| 8b × 1024, +4-stage seq | ~2,500 | ~1,960 | 0.5 | +~500 LUT |
-| 8b × 1024, full featured | ~2,500 | ~1,960 | 0.5 | Seq + SQ |
-| 8b × 4096 | 1,540 | 1,490 | 1.0 | 4x deeper: +0.5 BRAM |
-| 32b × 1024 | 1,547 | 1,740 | 1.0 | 4x wider: +0.5 BRAM |
-| **ELA + EJTAG-AXI + test slave** | **2,567** | **2,537** | **0.5** | **Without UART** |
-| **ELA + EJTAG-AXI + EJTAG-UART + test slave** | **2,926** | **2,841** | **0.5** | **Full Arty example** |
+| 8b × 1024, baseline | 1,595 | 1,478 | 0.5 | Dual comparators, 9 modes; `TRIG_STAGES=1`, `STOR_QUAL=0` |
+| 8b × 1024, +storage qual | 1,616 | 1,497 | 0.5 | +21 LUT |
+| 8b × 1024, +4-stage seq | 2,098 | 1,878 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=0` |
+| 8b × 1024, seq + SQ | 2,095 | 1,897 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=1` |
+| 8b × 4096 | 1,541 | 1,490 | 1.0 | Deeper buffer (+0.5 BRAM tile vs 1024) |
+| 32b × 1024 | 1,548 | 1,740 | 1.0 | Wider samples (+0.5 BRAM tile vs 8b×1024) |
+| **`arty_a7_top` (placed)** | **2,701** | **2,743** | **1.5** | ELA with `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave` (no UART in this bitstream) |
 
-The EJTAG-AXI bridge adds ~577 LUTs and ~975 FFs over the ELA baseline
-(includes the `axi4_test_slave` used for validation). The bridge core
-alone is ~400 LUTs / ~800 FFs with FIFO_DEPTH=16.
+Optional ELA parameters (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`,
+`NUM_SEGMENTS`, channel mux, etc.) add registers, comparators, and
+extra BRAM (e.g. timestamp storage); the reference row above is the
+authoritative “full validation” footprint for that combination.
+Per-core deltas are not additive in synthesis because Vivado optimises
+across hierarchy.
 
-The EJTAG-UART bridge adds ~359 LUTs and ~304 FFs (with 256-byte TX and
-RX FIFOs using distributed RAM).
-
-**Fmax:** 137 MHz on xc7a100t (100 MHz constrained, WNS = 2.7 ns after
-place & route). JTAG TCK constrained at 10 MHz (actual TCK is adapter-
-dependent, up to ~30 MHz).
+**Fmax (reference build):** `sys_clk` @ 100 MHz with WNS ≈ 1.13 ns after
+route on `arty_a7_top` (xc7a100t, same build). JTAG `tck_bscan` is
+constrained at 10 MHz (adapter-dependent in practice, often higher).
 
 Both the EJTAG-AXI and EJTAG-UART cores use `fcapz_async_fifo`, a
 reusable async FIFO module with per-domain reset (`wr_rst` + `rd_rst`).
@@ -623,7 +630,7 @@ reusable async FIFO module with per-domain reset (`wr_rst` + `rd_rst`).
 pointer FIFO; `USE_BEHAV_ASYNC_FIFO=0` wraps a vendor primitive (Xilinx
 `xpm_fifo_async`). The Xilinx wrappers set it to 0 automatically.
 
-Synth/P&R results from Vivado 2025.2, xc7a100t (Arty A7). Fits on even
+Synthesis / P&R from Vivado 2025.2, xc7a100t (Arty A7). Fits on even
 the smallest Artix-7.
 
 ```verilog

@@ -115,9 +115,12 @@ register file declarations.  The wrapper takes care of:
 - Instantiating `fcapz_ela` (the actual capture core)
 - Wiring everything together
 
-Resource usage: ~1,594 LUTs + 0.5 BRAM on Artix-7 for the baseline
-config (8b × 1024).  See [`specs/architecture.md`](specs/architecture.md)
-for the full table.
+Resource usage: ~1,595 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
+synthesis) for the baseline config (8b × 1024, dual comparators).  See
+[`specs/architecture.md`](specs/architecture.md) and the
+[README resource table](../README.md#resource-usage) for sequencer,
+storage qualification, width/depth scaling, and the full `arty_a7_top`
+reference.
 
 ## Adding more cores in the same design
 
@@ -156,6 +159,10 @@ fcapz_ejtagaxi_xilinx7 #(
     // ... 30 AXI signals connected to your AXI slave or interconnect ...
 );
 ```
+
+The checked-in [Arty top](../examples/arty_a7/arty_a7_top.v) enables more
+ELA options (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`, `NUM_SEGMENTS`) and
+ties `trigger_in` to an EIO output for hardware tests.
 
 Each core uses a different USER chain so they don't collide.  The
 default chain assignments are:
