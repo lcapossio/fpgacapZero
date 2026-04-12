@@ -89,6 +89,7 @@ def _install_demo_hw_mocks() -> tuple[ExitStack, MagicMock]:
 
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture
+    mock_an.immediate_variant.side_effect = lambda c: c
 
     # History / live-wave / exports call write_vcd (etc.) on the connected analyzer.
     # A bare MagicMock never touches disk, so "Open in viewer" sees missing files.

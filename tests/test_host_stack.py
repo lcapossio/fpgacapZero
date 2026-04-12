@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from fcapz import _version_tuple
@@ -106,6 +107,29 @@ class AnalyzerTests(unittest.TestCase):
             depth=1024,
             sample_clock_hz=100_000_000,
         )
+
+    def test_immediate_variant_sequencer_vs_simple(self):
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        base = replace(
+            self._make_cfg(),
+            ext_trigger_mode=2,
+            sequence=[SequencerStage(mask_a=0xFF, is_final=True)],
+        )
+        imm = analyzer.immediate_variant(base)
+        self.assertEqual(imm.trigger.mask, 0)
+        self.assertEqual(imm.ext_trigger_mode, 0)
+        self.assertIsNotNone(imm.sequence)
+        self.assertEqual(len(imm.sequence), 1)
+        self.assertTrue(imm.sequence[0].is_final)
+
+        t2 = FakeTransport()
+        t2.regs[0x003C] = (int(t2.regs[0x003C]) & ~0xF) | 1
+        a2 = Analyzer(t2)
+        a2.connect()
+        imm2 = a2.immediate_variant(self._make_cfg())
+        self.assertIsNone(imm2.sequence)
+        self.assertEqual(imm2.trigger.mask, 0)
 
     def test_capture_and_export_json(self):
         analyzer = Analyzer(FakeTransport())

@@ -60,7 +60,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 from fcapz.analyzer import CaptureResult
 from fcapz.gui.app_window import MainWindow
@@ -254,10 +254,10 @@ def test_gui_three_captures_consistent(qtbot: Any, tmp_path: Path) -> None:
 @pytest.mark.gui
 def test_gui_continuous_many_captures_consistent(qtbot: Any, tmp_path: Path) -> None:
     """
-    Continuous mode: validate **every** ``CaptureWorker.progress`` result (N times).
+    Auto re-arm: validate **every** ``CaptureWorker.progress`` result (N times).
 
-    The stock GUI coalesces continuous progress into occasional history rows; this
-    test replaces ``_on_worker_progress`` **before** starting continuous capture so
+    The stock GUI coalesces auto-rearm progress into occasional history rows; this
+    test replaces ``_on_worker_progress`` **before** starting capture so
     each hardware result is checked without creating N temp VCD trees.
     """
     count = int(os.environ.get("FPGACAP_CONTINUOUS_CAPTURES", "1000"))
@@ -313,8 +313,11 @@ def test_gui_continuous_many_captures_consistent(qtbot: Any, tmp_path: Path) -> 
         w._on_worker_progress = types.MethodType(_tracked_progress, w)
 
         try:
-            cont_btn = _button_in_widget(w._capture, "Continuous")
-            qtbot.mouseClick(cont_btn, Qt.MouseButton.LeftButton)
+            arm_cb = w._capture.findChild(QCheckBox, "fcapz_capture_auto_rearm")
+            assert arm_cb is not None
+            arm_cb.setChecked(True)
+            arm_btn = _button_in_widget(w._capture, "Arm")
+            qtbot.mouseClick(arm_btn, Qt.MouseButton.LeftButton)
             qtbot.waitUntil(
                 lambda: w._cap_thread is not None,
                 timeout=30_000,

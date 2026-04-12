@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List
 
@@ -323,6 +323,36 @@ class Analyzer:
                 self.transport.write_reg(base + 16, stage.mask_b)
 
         self._config = config
+
+    def immediate_variant(self, base: CaptureConfig) -> CaptureConfig:
+        """Return a config that commits the trigger as soon as pretrigger is ready.
+
+        Uses value-match with **mask 0** (``(probe & 0) == (value & 0)`` is always
+        true).  When the bitstream has a multi-stage trigger sequencer, programs a
+        single always-true final stage so the sequencer path also fires immediately.
+
+        External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
+        cannot block an immediate run.
+        """
+        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        hw_features = int(_read(_ADDR_FEATURES))
+        hw_trig_stages = int(hw_features & 0xF)
+        trig = TriggerConfig(mode="value_match", value=0, mask=0)
+        if hw_trig_stages <= 1:
+            return replace(base, trigger=trig, sequence=None, ext_trigger_mode=0)
+        imm_stage = SequencerStage(
+            cmp_mode_a=0,
+            cmp_mode_b=0,
+            combine=0,
+            next_state=0,
+            is_final=True,
+            count_target=1,
+            value_a=0,
+            mask_a=0,
+            value_b=0,
+            mask_b=0,
+        )
+        return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
 
     def arm(self) -> None:
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)

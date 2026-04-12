@@ -9,6 +9,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **GUI:** `Analyzer.immediate_variant()` and **Capture** button — force a
+  waveform as soon as pre-trigger is ready (always-true compare; sequencer
+  bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture on a
+  worker thread. **Auto re-arm** checkbox replaces the Continuous button and
+  applies to both paths; toolbar no longer has a separate Continuous action.
 - **Windows:** Minimizing the `fcapz-gui` main window also minimizes external
   waveform viewer windows started from the History panel; restoring the GUI
   restores them (same PID/window association as vertical tiling).

@@ -41,19 +41,22 @@ class CaptureWorker(QObject):
         self._inter_cycle_delay_s = max(0.0, float(inter_cycle_delay_s))
         self._pending_cfg: CaptureConfig | None = None
         self._pending_timeout: float = 1.0
-        self._pending_continuous: bool = False
+        self._pending_auto_rearm: bool = False
+        self._pending_immediate: bool = False
 
     def set_pending_run(
         self,
         cfg: CaptureConfig,
         timeout: float,
         *,
-        continuous: bool,
+        auto_rearm: bool,
+        immediate: bool,
     ) -> None:
         """Read by :meth:`thread_started` after ``QThread.started`` (do not use ``partial``)."""
         self._pending_cfg = cfg
         self._pending_timeout = float(timeout)
-        self._pending_continuous = continuous
+        self._pending_auto_rearm = auto_rearm
+        self._pending_immediate = immediate
 
     @Slot()
     def thread_started(self) -> None:
@@ -62,10 +65,10 @@ class CaptureWorker(QObject):
             _log.warning("CaptureWorker.thread_started with no pending config")
             return
         timeout = self._pending_timeout
-        if self._pending_continuous:
-            self.run_continuous(cfg, timeout)
+        if self._pending_auto_rearm:
+            self.run_auto_rearm(cfg, timeout, immediate=self._pending_immediate)
         else:
-            self.run_single(cfg, timeout)
+            self.run_single(cfg, timeout, immediate=self._pending_immediate)
 
     def reset_cancel(self) -> None:
         self._cancel_cont = False
@@ -83,9 +86,10 @@ class CaptureWorker(QObject):
                 break
             time.sleep(min(0.05, remaining))
 
-    def run_single(self, cfg: CaptureConfig, timeout: float) -> None:
+    def run_single(self, cfg: CaptureConfig, timeout: float, *, immediate: bool) -> None:
         try:
-            self._analyzer.configure(cfg)
+            use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+            self._analyzer.configure(use)
             self._analyzer.arm()
             result = self._analyzer.capture(timeout)
             self.finished.emit(result)
@@ -93,18 +97,19 @@ class CaptureWorker(QObject):
             _log.exception("Single capture failed")
             self.failed.emit(str(exc))
 
-    def run_continuous(self, cfg: CaptureConfig, timeout: float) -> None:
+    def run_auto_rearm(self, cfg: CaptureConfig, timeout: float, *, immediate: bool) -> None:
         try:
             self.reset_cancel()
-            self._analyzer.configure(cfg)
             while not self._cancel_cont:
+                use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+                self._analyzer.configure(use)
                 self._analyzer.arm()
                 result = self._analyzer.capture(timeout)
                 self.progress.emit(result)
                 self._sleep_interruptible(self._inter_cycle_delay_s)
             self.finished.emit(None)
         except Exception as exc:  # noqa: BLE001
-            _log.exception("Continuous capture failed")
+            _log.exception("Auto re-arm capture failed")
             self.failed.emit(str(exc))
 
 

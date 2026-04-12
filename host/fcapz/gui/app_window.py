@@ -170,7 +170,6 @@ class MainWindow(QMainWindow):
         self._tb_act_configure: QAction | None = None
         self._tb_act_arm: QAction | None = None
         self._tb_act_capture: QAction | None = None
-        self._tb_act_continuous: QAction | None = None
         self._tb_act_stop: QAction | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
@@ -185,9 +184,8 @@ class MainWindow(QMainWindow):
         self._capture = CapturePanel()
         self._capture.wire_handlers(
             on_configure=self._on_configure,
-            on_arm=self._on_arm,
+            on_arm=self._on_arm_clicked,
             on_capture=self._on_capture_clicked,
-            on_continuous=self._on_continuous_clicked,
             on_stop=self._on_stop_continuous,
         )
 
@@ -663,16 +661,20 @@ class MainWindow(QMainWindow):
         tb.addWidget(_tb_spacer(10))
         tb.addSeparator()
         self._tb_act_configure = _add("configure", "Configure", self._on_configure)
-        self._tb_act_arm = _add("arm", "Arm", self._on_arm)
+        self._tb_act_arm = _add("arm", "Arm", self._on_arm_clicked)
+        self._tb_act_arm.setToolTip(
+            "Normal capture: selected trigger, arm, wait until it fires, read back. "
+            "Enable Auto re-arm in the capture panel to repeat.",
+        )
+        self._tb_act_arm.setStatusTip(self._tb_act_arm.toolTip())
         tb.addWidget(_tb_spacer())
         tb.addSeparator()
         self._tb_act_capture = _add("capture", "Capture", self._on_capture_clicked)
-        self._tb_act_continuous = _add("continuous", "Continuous", self._on_continuous_clicked)
-        self._tb_act_continuous.setToolTip(
-            "Continuous capture with auto re-arm after each completed waveform (ILA-style). "
-            "Stop ends the loop.",
+        self._tb_act_capture.setToolTip(
+            "Immediate capture: force trigger when pre-trigger is ready. "
+            "Enable Auto re-arm in the capture panel to repeat.",
         )
-        self._tb_act_continuous.setStatusTip(self._tb_act_continuous.toolTip())
+        self._tb_act_capture.setStatusTip(self._tb_act_capture.toolTip())
         self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
         self.addToolBar(_TOP_TOOLBAR_AREA, tb)
         tb.setVisible(True)
@@ -686,7 +688,6 @@ class MainWindow(QMainWindow):
             self._tb_act_configure,
             self._tb_act_arm,
             self._tb_act_capture,
-            self._tb_act_continuous,
             self._tb_act_stop,
         )
         if any(a is None for a in acts):
@@ -696,7 +697,6 @@ class MainWindow(QMainWindow):
         assert self._tb_act_configure is not None
         assert self._tb_act_arm is not None
         assert self._tb_act_capture is not None
-        assert self._tb_act_continuous is not None
         assert self._tb_act_stop is not None
 
         connected = self._analyzer is not None
@@ -716,7 +716,6 @@ class MainWindow(QMainWindow):
         self._tb_act_configure.setEnabled(can_elact)
         self._tb_act_arm.setEnabled(can_elact)
         self._tb_act_capture.setEnabled(can_elact)
-        self._tb_act_continuous.setEnabled(can_elact)
         self._tb_act_stop.setEnabled(busy and cont)
 
         # Match ELA dock buttons to toolbar (single source of truth).
@@ -1080,17 +1079,23 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configured")
         _log.info("ELA configured")
 
-    def _on_arm(self) -> None:
-        if self._analyzer is None:
+    def _on_arm_clicked(self) -> None:
+        if self._analyzer is None or self._capture_running():
             return
         try:
-            self._analyzer.arm()
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("Arm failed: %s", exc)
+            cfg = self._capture.build_capture_config()
+            timeout = self._capture.timeout_seconds()
+        except ValueError as exc:
+            _log.warning("Arm: invalid config: %s", exc)
             QMessageBox.warning(self, "Arm", str(exc))
             return
-        self.statusBar().showMessage("Armed")
-        _log.info("ELA armed")
+        ar = self._capture.auto_rearm()
+        _log.info(
+            "Starting normal capture (timeout=%.1fs, auto_rearm=%s)",
+            timeout,
+            ar,
+        )
+        self._spawn_capture_thread(cfg, timeout, immediate=False, auto_rearm=ar)
 
     def _on_capture_clicked(self) -> None:
         if self._analyzer is None or self._capture_running():
@@ -1102,21 +1107,13 @@ class MainWindow(QMainWindow):
             _log.warning("Capture: invalid config: %s", exc)
             QMessageBox.warning(self, "Capture", str(exc))
             return
-        _log.info("Starting single capture (timeout=%.1fs)", timeout)
-        self._spawn_capture_thread(cfg, timeout, continuous=False)
-
-    def _on_continuous_clicked(self) -> None:
-        if self._analyzer is None or self._capture_running():
-            return
-        try:
-            cfg = self._capture.build_capture_config()
-            timeout = self._capture.timeout_seconds()
-        except ValueError as exc:
-            _log.warning("Continuous capture: invalid config: %s", exc)
-            QMessageBox.warning(self, "Continuous capture", str(exc))
-            return
-        _log.info("Starting continuous capture (timeout=%.1fs per run)", timeout)
-        self._spawn_capture_thread(cfg, timeout, continuous=True)
+        ar = self._capture.auto_rearm()
+        _log.info(
+            "Starting immediate capture (timeout=%.1fs, auto_rearm=%s)",
+            timeout,
+            ar,
+        )
+        self._spawn_capture_thread(cfg, timeout, immediate=True, auto_rearm=ar)
 
     def _on_stop_continuous(self) -> None:
         if self._cap_worker is not None:
@@ -1127,16 +1124,19 @@ class MainWindow(QMainWindow):
         cfg: CaptureConfig,
         timeout: float,
         *,
-        continuous: bool,
+        immediate: bool,
+        auto_rearm: bool,
     ) -> None:
         assert self._analyzer is not None
-        self._continuous_mode = continuous
+        self._continuous_mode = auto_rearm
         self._cap_thread = QThread()
         self._cap_worker = CaptureWorker(
             self._analyzer,
-            inter_cycle_delay_s=self._demo_continuous_cycle_delay_s if continuous else 0.0,
+            inter_cycle_delay_s=self._demo_continuous_cycle_delay_s if auto_rearm else 0.0,
         )
-        self._cap_worker.set_pending_run(cfg, timeout, continuous=continuous)
+        self._cap_worker.set_pending_run(
+            cfg, timeout, immediate=immediate, auto_rearm=auto_rearm
+        )
         self._cap_worker.moveToThread(self._cap_thread)
         self._cap_thread.started.connect(self._cap_worker.thread_started)
         self._cap_worker.finished.connect(self._on_worker_finished)
@@ -1145,7 +1145,7 @@ class MainWindow(QMainWindow):
         self._cap_worker.failed.connect(self._cap_thread.quit)
         self._cap_worker.progress.connect(self._on_worker_progress)
         self._cap_thread.finished.connect(self._on_thread_finished)
-        self._capture.set_busy(True, continuous=continuous)
+        self._capture.set_busy(True, continuous=auto_rearm)
         self._sync_toolbar_actions()
         self._cap_thread.start()
 
@@ -1197,7 +1197,7 @@ class MainWindow(QMainWindow):
             self._history.add_capture(self._analyzer, result)
             self._persist_trigger_snapshot(result.config)
         elif was_cont and result is None:
-            _log.info("Continuous capture stopped")
+            _log.info("Auto re-arm capture stopped")
         self._sync_toolbar_actions()
 
     def _on_worker_failed(self, message: str) -> None:
