@@ -12,6 +12,7 @@ from fcapz import _version_tuple
 from fcapz.analyzer import (
     Analyzer,
     CaptureConfig,
+    CaptureResult,
     ELA_CORE_ID,
     SequencerStage,
     TriggerConfig,
@@ -80,6 +81,12 @@ class FakeTransport(Transport):
     def read_reg(self, addr: int) -> int:
         return self.regs.get(addr, 0)
 
+    def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+        """Match Xilinx batched probe path (:meth:`Analyzer.probe`)."""
+        out = [self.read_reg(a) for a in addrs]
+        self.read_reg(0x0000)
+        return out
+
     def write_reg(self, addr: int, value: int) -> None:
         self.regs[addr] = value
 
@@ -112,6 +119,58 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
 
+    def test_capture_rereads_unstable_timestamp_block(self):
+        """A stale first timestamp block is discarded before export/GUI use."""
+
+        class TimestampRetryTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self.data = [10, 11, 12]
+                self.timestamp_reads = 0
+
+            def read_block(self, addr: int, words: int):
+                if addr == 0x0100:
+                    return self.data[:words]
+                if addr == 0x1100:
+                    self.timestamp_reads += 1
+                    reads = [
+                        [0, 101, 102],
+                        [100, 101, 102],
+                        [100, 101, 102],
+                    ]
+                    return reads[min(self.timestamp_reads - 1, len(reads) - 1)][:words]
+                return super().read_block(addr, words)
+
+        transport = TimestampRetryTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.timestamps, [100, 101, 102])
+        self.assertEqual(transport.timestamp_reads, 3)
+
+    def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
+        """Continuous / live reload: VCD # times must not use raw counter offsets."""
+        from fcapz.analyzer import vcd_simulation_times
+        from fcapz.transport import VendorStubTransport
+
+        cfg = self._make_cfg()
+        r = CaptureResult(
+            config=cfg,
+            samples=[1, 2, 3],
+            timestamps=[1_000_000, 1_000_001, 1_000_005],
+        )
+        self.assertEqual(vcd_simulation_times(r), [0, 1, 5])
+        text = Analyzer(VendorStubTransport("export")).export_vcd_text(r)
+        self.assertRegex(text, r"(?m)^#0$")
+        self.assertRegex(text, r"(?m)^#5$")
+        self.assertNotRegex(text, r"(?m)^#1000000$")
+
     def test_export_files(self):
         analyzer = Analyzer(FakeTransport())
         analyzer.connect()
@@ -143,6 +202,16 @@ class AnalyzerTests(unittest.TestCase):
             for p in sorted(tmp_root.glob("*"), reverse=True):
                 p.unlink(missing_ok=True)
             tmp_root.rmdir()
+
+    def test_probe_reports_storage_qualification_flag(self):
+        """FEATURES[4] is exposed as has_storage_qualification."""
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        transport.regs[0x003C] = int(transport.regs[0x003C]) | (1 << 4)
+        self.assertTrue(analyzer.probe()["has_storage_qualification"])
+        transport.regs[0x003C] = int(transport.regs[0x003C]) & ~(1 << 4)
+        self.assertFalse(analyzer.probe()["has_storage_qualification"])
 
 
 class SequencerTests(unittest.TestCase):
@@ -237,6 +306,14 @@ class SequencerTests(unittest.TestCase):
         analyzer.connect()
         info = analyzer.probe()
         self.assertEqual(info["probe_mux_w"], 32)
+
+    def test_probe_reports_trig_stages(self):
+        """FEATURES[3:0] is exposed as trig_stages for GUI / tooling."""
+        transport = FakeTransport()
+        transport.regs[0x003C] = (transport.regs[0x003C] & ~0xF) | 7
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        self.assertEqual(analyzer.probe()["trig_stages"], 7)
 
     def test_probe_decodes_version_fields(self):
         """probe() splits VERSION into 8-bit major, 8-bit minor, 16-bit core_id."""
@@ -434,6 +511,16 @@ class EioControllerTests(unittest.TestCase):
     def test_repr(self):
         eio = self._make_eio()
         self.assertIn("in_w=8", repr(eio))
+
+    def test_attach_restores_default_chain(self):
+        """attach() must not leave the transport on the EIO USER chain."""
+        t = FakeVioTransport()
+        self.assertEqual(t._active_chain, 1)
+        eio = EioController(t, chain=3)
+        eio.attach()
+        self.assertEqual(t._active_chain, 1)
+        self.assertEqual(eio.in_w, 8)
+        self.assertEqual(eio.bscan_chain, 3)
 
 
 class MultiSegmentTests(unittest.TestCase):

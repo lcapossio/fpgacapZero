@@ -63,6 +63,18 @@ _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
 _ADDR_TRIG_DELAY = 0x00D4
+
+# Order matches :meth:`Analyzer.probe` field extraction (hw_server pipelined read).
+_ELA_PROBE_ADDRS: tuple[int, ...] = (
+    _ADDR_VERSION,
+    _ADDR_SAMPLE_W,
+    _ADDR_DEPTH,
+    _ADDR_NUM_CHAN,
+    _ADDR_FEATURES,
+    _ADDR_TIMESTAMP_W,
+    _ADDR_NUM_SEGMENTS,
+    _ADDR_PROBE_MUX_W,
+)
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
@@ -152,6 +164,36 @@ class CaptureResult:
     segment: int = 0  # which segment this result is from
 
 
+def vcd_simulation_times(result: CaptureResult) -> list[int]:
+    """Per-sample times for VCD ``#`` lines (``len(result.samples)`` entries).
+
+    Without hardware timestamps this is ``0 .. n-1`` (one time unit per stored
+    sample, matching the historical behaviour).
+
+    With timestamps, values are **shifted by the first sample** so each dump
+    starts at 0 while preserving relative spacing. Raw counters often jump
+    between successive captures (continuous mode / live VCD reload); using
+    absolute values as ``#`` time made the viewer timeline and timescale look
+    broken. The ``timestamp`` wire in the VCD still carries raw hardware values.
+
+    Times are forced **non-decreasing** so the file stays valid if the buffer
+    has duplicate or slightly regressed counter values.
+    """
+    n = len(result.samples)
+    ts = result.timestamps
+    if ts and len(ts) == n:
+        base = int(ts[0])
+        out: list[int] = []
+        last = -1
+        for i in range(n):
+            rel = int(ts[i]) - base
+            t = max(rel, last + 1, 0)
+            out.append(t)
+            last = t
+        return out
+    return list(range(n))
+
+
 class Analyzer:
     def __init__(self, transport: Transport):
         self.transport = transport
@@ -162,7 +204,13 @@ class Analyzer:
     def connect(self) -> None:
         self.transport.connect()
 
-    def close(self) -> None:
+    def close(self, *, fast: bool = False) -> None:
+        """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
+        if fast:
+            closer = getattr(self.transport, "close_fast", None)
+            if callable(closer):
+                closer()
+                return
         self.transport.close()
 
     def reset(self) -> None:
@@ -296,7 +344,18 @@ class Analyzer:
         words_per_sample = (sw + 31) // 32
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
         ts_words_per = (self._hw_timestamp_w + 31) // 32
-        raw = self.transport.read_block(ts_base, total * ts_words_per)
+        ts_word_count = total * ts_words_per
+        # Timestamp RAM is stable once capture is done, but the hardware
+        # USER1 readback path can return one stale word immediately after the
+        # USER2 sample burst.  Read twice and require stability; a third read
+        # resolves the rare case where only the second block is transient.
+        raw_a = self.transport.read_block(ts_base, ts_word_count)
+        raw_b = self.transport.read_block(ts_base, ts_word_count)
+        if raw_a == raw_b:
+            raw = raw_b
+        else:
+            raw_c = self.transport.read_block(ts_base, ts_word_count)
+            raw = raw_c if raw_b != raw_c else raw_b
         timestamps = []
         mask = (1 << self._hw_timestamp_w) - 1
         if ts_words_per == 1:
@@ -488,11 +547,9 @@ class Analyzer:
             lines.append(f"b{'0' * ts_w} {ts_var_id}")
         lines.append("$end")
 
+        sim_times = vcd_simulation_times(result)
         for i, sample in enumerate(result.samples):
-            if result.timestamps and i < len(result.timestamps):
-                lines.append(f"#{result.timestamps[i]}")
-            else:
-                lines.append(f"#{i}")
+            lines.append(f"#{sim_times[i]}")
             for var_id, _, width, lsb in signals:
                 val = (sample >> lsb) & ((1 << width) - 1)
                 bits = format(val, f"0{width}b")
@@ -532,11 +589,39 @@ class Analyzer:
         RuntimeError on mismatch so the caller cannot accidentally
         drive a non-fcapz bitstream.
 
+        When the transport exposes
+        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
+        (hw_server), all probe registers share **one** XSDB ``_send`` plus
+        a pipeline flush read.
+        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
+        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+
         Returns a dict with `version_major`, `version_minor`, `core_id`
-        (always 0x4C41 on success), and the rest of the feature flags.
+        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
+        trigger sequencer depth, 0 if absent), `has_storage_qualification`
+        (FEATURES[4]), and the rest of the feature flags.
         """
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = int(_read(_ADDR_VERSION))
+        piped = getattr(self.transport, "read_regs_pipelined_user1", None)
+        if callable(piped):
+            vals = piped(list(_ELA_PROBE_ADDRS))
+            version = int(vals[0])
+            sample_w = int(vals[1])
+            depth = int(vals[2])
+            num_chan = int(vals[3])
+            features = int(vals[4])
+            timestamp_w = int(vals[5])
+            num_segments = max(1, int(vals[6]))
+            probe_mux_w = int(vals[7])
+        else:
+            _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            version = int(_vread(_ADDR_VERSION))
+            sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
+            depth = int(self.transport.read_reg(_ADDR_DEPTH))
+            num_chan = int(self.transport.read_reg(_ADDR_NUM_CHAN))
+            features = int(self.transport.read_reg(_ADDR_FEATURES))
+            timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
+            num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
+            probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
         core_id = version & 0xFFFF
         if core_id != _ELA_CORE_ID:
             raise RuntimeError(
@@ -544,13 +629,6 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        sample_w = _read(_ADDR_SAMPLE_W)
-        depth = _read(_ADDR_DEPTH)
-        num_chan = int(_read(_ADDR_NUM_CHAN))
-        features = int(_read(_ADDR_FEATURES))
-        timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
-        num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
-        probe_mux_w = int(_read(_ADDR_PROBE_MUX_W))
         return {
             "version_major": (version >> 24) & 0xFF,
             "version_minor": (version >> 16) & 0xFF,
@@ -558,6 +636,8 @@ class Analyzer:
             "sample_width": sample_w,
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
+            "trig_stages": int(features & 0xF),
+            "has_storage_qualification": bool(features & (1 << 4)),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),

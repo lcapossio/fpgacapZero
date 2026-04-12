@@ -3,11 +3,31 @@
 
 `timescale 1ns/1ps
 
-// Arty A7-100T top-level for fpgacapZero reference design.
-// Probes a free-running 8-bit counter via the ELA wrapper.
+// Arty A7-100T hardware-validation top-level for fpgacapZero.
 //
-// Single wrapper instantiation — all JTAG TAPs, register interface,
-// and burst read engine are bundled inside fcapz_ela_xilinx7.
+// The design is intentionally small and self-stimulating so the Python
+// hardware tests can run without external fabric logic:
+//
+// - ELA on USER1/USER2 captures a free-running 8-bit counter.
+//   Enabled ELA options:
+//     DECIM_EN=1       runtime sample decimation register
+//     EXT_TRIG_EN=1    external trigger input from EIO probe_out[4]
+//     TIMESTAMP_W=32   per-sample timestamp RAM/readback
+//     NUM_SEGMENTS=4   segmented capture with auto-rearm
+//   Baseline trigger sequencer/storage qualification settings stay at
+//   wrapper defaults unless overridden in the wrapper parameters.
+//
+// - EIO on USER3 exposes {btn[3:0], counter[3:0]} as probe_in and drives
+//   the four constrained green LEDs from probe_out[3:0].  probe_out[4]
+//   feeds ELA trigger_in, so a host write can make a manual trigger edge.
+//   probe_out[7:5] remains readable/writable over JTAG but is not bonded
+//   to LEDs here.
+//
+// - EJTAG-AXI on USER4 connects to axi4_test_slave so hardware tests can
+//   verify single AXI accesses, partial strobes, bursts, and error paths.
+//
+// All vendor TAP plumbing, JTAG register interfaces, and burst engines are
+// contained in the fcapz_*_xilinx7 wrapper instances below.
 
 module arty_a7_top (
     input  wire       clk,
@@ -23,6 +43,11 @@ module arty_a7_top (
     wire rst;
 
     reg [SAMPLE_W-1:0] counter;
+    wire trigger_out_w;
+    wire [7:0] eio_probe_in;
+    wire [7:0] eio_probe_out;
+
+    assign eio_probe_in = {btn, counter[3:0]};
 
     // ---- Reset ----
     always @(posedge clk) begin
@@ -37,8 +62,6 @@ module arty_a7_top (
         else
             counter <= counter + 1'b1;
     end
-    wire trigger_out_w;
-    assign led = {trigger_out_w, counter[2:0]};
 
     // ---- ELA (all features enabled for HW validation) ----
     fcapz_ela_xilinx7 #(
@@ -52,8 +75,8 @@ module arty_a7_top (
         .sample_clk (clk),
         .sample_rst (rst),
         .probe_in   (counter),
-        .trigger_in (btn[1]),         // btn[1] as external trigger
-        .trigger_out(trigger_out_w)   // led[3] pulses on trigger
+        .trigger_in (eio_probe_out[4]), // JTAG-driven manual trigger via EIO
+        .trigger_out(trigger_out_w)
     );
 
     // ---- EJTAGAXI: JTAG-to-AXI4 bridge (USER4) ----
@@ -110,19 +133,18 @@ module arty_a7_top (
     );
 
     // ---- EIO: Embedded I/O (USER3) ----
-    // Reads the counter as probe_in, drives 4 LEDs via probe_out.
-    // EIO probe_out directly replaces the counter-driven LEDs when
-    // written via JTAG, giving the host read/write access to fabric
-    // signals for HW validation.
+    // Reads buttons plus the counter as probe_in, and drives the four
+    // constrained green LEDs via probe_out.  The upper EIO output bits
+    // still read back over JTAG, but are not bonded to LEDs in this XDC.
 
-    wire [7:0] eio_probe_out;
+    assign led = eio_probe_out[3:0];
 
     fcapz_eio_xilinx7 #(
-        .IN_W  (8),     // 8-bit counter input
-        .OUT_W (8),     // 8-bit output (directly visible)
+        .IN_W  (8),     // btn[3:0] + counter[3:0]
+        .OUT_W (8),     // lower 4 bits drive physical LEDs
         .CHAIN (3)
     ) u_eio (
-        .probe_in  (counter),
+        .probe_in  (eio_probe_in),
         .probe_out (eio_probe_out)
     );
 

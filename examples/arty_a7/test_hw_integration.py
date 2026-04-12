@@ -50,6 +50,52 @@ _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
 PORT = 3121
 FPGA = "xc7a100t"
 
+_ROOT = Path(__file__).resolve().parents[2]
+
+# RTL and design sources that feed the bitstream (must match build_arty.tcl)
+_BITSTREAM_SOURCES = [
+    _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "dpram.v",
+    _ROOT / "rtl" / "trig_compare.v",
+    _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
+    _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_burst_read.v",
+    _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_async_fifo.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio.v",
+    _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "tb" / "axi4_test_slave.v",
+    Path(__file__).resolve().parent / "arty_a7_top.v",
+    Path(__file__).resolve().parent / "arty_a7.xdc",
+]
+
+
+def _check_bitstream_freshness() -> str | None:
+    """Return an error message if any source is newer than the bitfile."""
+    bitpath = Path(BITFILE)
+    if not bitpath.exists():
+        return f"bitfile not found: {BITFILE}"
+    bit_mtime = bitpath.stat().st_mtime
+    stale = []
+    for src in _BITSTREAM_SOURCES:
+        if src.exists() and src.stat().st_mtime > bit_mtime:
+            stale.append(src.name)
+    if stale:
+        return (
+            f"bitstream is stale — these sources are newer than "
+            f"{bitpath.name}: {', '.join(stale)}. "
+            f"Re-run: python examples/arty_a7/build.py"
+        )
+    return None
+
+
+_STALE_MSG = _check_bitstream_freshness()
+if _STALE_MSG and not _SKIP:
+    raise RuntimeError(_STALE_MSG)
+
 
 def _make_transport():
     if _BACKEND == "openocd":
@@ -250,32 +296,21 @@ class TestCapture(unittest.TestCase):
         self.assertEqual(len(result.samples), 7)
 
     def test_samples_are_counter_values(self):
-        """Verify captured samples contain a sequential counter run.
+        """Verify every captured sample follows the Arty counter.
 
         The Arty reference design probes a free-running 8-bit counter.
-        We check that we find a contiguous run of at least
-        (pretrigger + 1) consecutive values somewhere in the readback.
+        With decimation disabled, every adjacent stored sample must increment
+        by exactly +1 modulo 256.
         """
         pretrig, posttrig = 4, 8
         result = self._capture(pretrig=pretrig, posttrig=posttrig)
         samples = [s & 0xFF for s in result.samples]
-        # Find the longest run of consecutive +1 (mod 256) transitions.
-        best_run = 0
-        current_run = 1
-        for i in range(1, len(samples)):
-            if (samples[i] - samples[i - 1]) & 0xFF == 1:
-                current_run += 1
-            else:
-                best_run = max(best_run, current_run)
-                current_run = 1
-        best_run = max(best_run, current_run)
-        # We must see at least (pretrigger + 1) sequential samples around
-        # the trigger point.
-        self.assertGreaterEqual(
-            best_run, pretrig + 1,
-            f"expected sequential counter run >= {pretrig + 1}, "
-            f"got best_run={best_run} samples={samples}",
-        )
+        errors = [
+            (i - 1, samples[i - 1], samples[i])
+            for i in range(1, len(samples))
+            if ((samples[i] - samples[i - 1]) & 0xFF) != 1
+        ]
+        self.assertEqual(errors, [], f"counter step errors in samples={samples}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -380,22 +415,35 @@ class TestDecimation(unittest.TestCase):
         self.assertTrue(all(d == 1 for d in diffs), f"Non-consecutive: {result.samples}")
 
     def test_decim_3_stores_every_4th(self):
-        """DECIM=3 captures every 4th cycle; samples differ by 4."""
+        """DECIM=3 stores decimated history and anchors the trigger sample."""
+        pretrigger = 2
+        trigger_value = 0x20
         cfg = self.CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
-            pretrigger=2, posttrigger=5,
-            trigger=self.TriggerConfig(mode="value_match", value=0x20, mask=0xFF),
+            pretrigger=pretrigger, posttrigger=5,
+            trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
         )
         self.a.configure(cfg)
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 8)
-        # With decimation=3, consecutive stored samples should differ by 4
+        self.assertEqual(result.samples[pretrigger], trigger_value)
+
+        # The post window away from the forced trigger anchor keeps the /4 cadence.
+        # The oldest pre-history slot can be an initial buffer value if the
+        # free-running counter reaches the trigger soon after arm.
         diffs = [(result.samples[i+1] - result.samples[i]) & 0xFF
                  for i in range(len(result.samples)-1)]
-        for d in diffs:
-            self.assertEqual(d, 4, f"Expected diff 4, got {d}. Samples: {result.samples}")
+        for d in diffs[pretrigger + 1:]:
+            self.assertEqual(d, 4, f"Expected decimated post-window: {result.samples}")
+
+        # The intervals adjacent to the trigger can be shorter because the
+        # trigger-cycle sample is force-stored even if it falls between
+        # decimation ticks.
+        for d in diffs[pretrigger - 1:pretrigger + 1]:
+            self.assertGreaterEqual(d, 1, f"Trigger anchor gap too small: {result.samples}")
+            self.assertLessEqual(d, 4, f"Trigger anchor gap too large: {result.samples}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -436,23 +484,29 @@ class TestTimestamps(unittest.TestCase):
                                f"Non-monotonic at index {i}: {result.timestamps}")
 
     def test_timestamps_with_decimation(self):
-        """Decimated timestamps show gaps proportional to decimation ratio."""
+        """Decimated timestamps stay monotonic with the trigger anchor inserted."""
+        pretrigger = 1
+        trigger_value = 0x40
         cfg = self.CaptureConfig(
             sample_width=8, depth=1024, sample_clock_hz=100e6,
-            pretrigger=1, posttrigger=4,
-            trigger=self.TriggerConfig(mode="value_match", value=0x40, mask=0xFF),
+            pretrigger=pretrigger, posttrigger=4,
+            trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
         )
         self.a.configure(cfg)
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertGreater(len(result.timestamps), 1)
-        # Timestamp gaps should be ~4 (decimation=3 means every 4th cycle)
+        self.assertEqual(result.samples[pretrigger], trigger_value)
+
         gaps = [result.timestamps[i+1] - result.timestamps[i]
                 for i in range(len(result.timestamps)-1)]
         for g in gaps:
-            self.assertGreaterEqual(g, 3, f"Gap too small: {g}. Timestamps: {result.timestamps}")
-            self.assertLessEqual(g, 6, f"Gap too large: {g}. Timestamps: {result.timestamps}")
+            self.assertGreater(g, 0, f"Non-monotonic timestamps: {result.timestamps}")
+            self.assertLessEqual(g, 4, f"Gap too large: {g}. Timestamps: {result.timestamps}")
+
+        for g in gaps[pretrigger + 1:]:
+            self.assertEqual(g, 4, f"Expected decimated post timestamps: {result.timestamps}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

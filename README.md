@@ -24,6 +24,7 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
 - [Features](#features)
 - [Support status](#support-status)
 - [Quick start](#quick-start)
+  - [Desktop GUI (fcapz-gui)](#desktop-gui-fcapz-gui)
 - [Usage](#usage)
   - [CLI reference](#cli-reference)
   - [Python API](#python-api)
@@ -58,8 +59,8 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
   Xilinx hw_server/XSDB, TCK up to 30 MHz, bottlenecked by XSDB command
   overhead at ~0.64 ms/scan)
 - **Two JTAG backends** -- OpenOCD (cross-platform) and Xilinx hw_server/XSDB
-- **Python host stack** -- ELA CLI, programmatic API, JSON-RPC server, and
-  LLM event extraction helpers
+- **Python host stack** -- ELA CLI, optional **PySide6 desktop GUI** (`fcapz-gui`),
+  programmatic API, JSON-RPC server, and LLM event extraction helpers
 - **Embedded I/O (EIO)** -- RTL cores and Python controller for runtime
   read/write of fabric signals via JTAG USER3
 - **JTAG-to-AXI4 Bridge (EJTAG-AXI)** -- 72-bit pipelined DR for single
@@ -120,11 +121,53 @@ pytest tests/ -v
 python sim/run_sim.py
 ```
 
+`python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
+first, then the default simulation regression.  Use
+`python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
 what contributors should rely on. GitHub Actions runs a subset of these checks
 (see [CI](#ci)); run `pytest tests/ -v` locally before pushing so CLI, RPC, and
 event-helper tests run too.
+
+### Desktop GUI (fcapz-gui)
+
+Install the GUI extra (PySide6, pyqtgraph, GTKWave/Surfer/WaveTrace optional on PATH):
+
+```bash
+pip install -e ".[gui]"
+fcapz-gui
+```
+
+Connect over **hw_server** or **OpenOCD**, capture from the **ELA** tab, inspect
+waveforms in the embedded preview, or open captures in **GTKWave** (`.gtkw`
+sidecar) or **Surfer** (`--command-file` sidecar, `*.surfer.txt`). Settings and
+probe profiles live in `%APPDATA%\\fpgacapzero\\gui.toml` (Windows) or
+`~/.config/fpgacapzero/gui.toml` (Unix). Next to that file, `fcapz-gui-window.ini`
+stores main-window geometry, dock/tab layout, expandable section state, and any
+**Window → Save layout as…** presets. Docks are detachable and tabbable; the log
+dock supports level filter, substring search, optional stderr mirroring, and
+Clear / Copy all from the **File** menu.
+
+Connect runs in the background; **Cancel** stops the attempt by closing the
+transport (TCP/JTAG may take a moment to unwind if the server hung). The
+Connection panel sets **Connect timeout** (OpenOCD TCP, seconds) and **HW ready
+timeout** (after programming a `.bit`, seconds); both are stored in `gui.toml`
+under `[connection]` as `connect_timeout_sec` and `hw_ready_timeout_sec`.
+
+**Surfer:** the GUI opens the native **Surfer** binary in its **own window** (same as
+GTKWave). Upstream does not expose a supported way to dock the native Surfer UI inside
+the Qt main window; true in-app embedding would mean a **WebEngine** surface (Surfer’s
+WASM/web API) or **server** mode, not the current `Popen` path. When `surfer` is on
+`PATH`, `pytest tests/test_surfer_integration_smoke.py` runs a small CLI smoke check.
+
+CLI capture can spawn a viewer after export (VCD only):
+
+```bash
+fcapz capture --format vcd --out dump.vcd --open-in gtkwave ...
+fcapz capture --format vcd --out dump.vcd --open-in surfer ...
+```
 
 ### Probe the core
 
@@ -142,12 +185,12 @@ openocd -f examples/arty_a7/arty_a7.cfg &
 fcapz --backend openocd --port 6666 probe
 ```
 
-Expected output:
+Sample output:
 
 ```json
 {
   "version_major": 0,
-  "version_minor": 2,
+  "version_minor": 3,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -201,7 +244,7 @@ fcapz [global options] <command> [command options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--backend` | `openocd` | `openocd` or `hw_server` |
+| `--backend` | `hw_server` | `openocd` or `hw_server` |
 | `--host` | `127.0.0.1` | Server address |
 | `--port` | `6666` | `6666` for OpenOCD, `3121` for hw_server |
 | `--tap` | `xc7a100t.tap` | JTAG TAP name |
@@ -240,6 +283,8 @@ fcapz [global options] <command> [command options]
 | `--decimation` | `0` | Decimation ratio (capture every N+1 cycles; 0=off, requires DECIM_EN) |
 | `--ext-trigger-mode` | `disabled` | External trigger mode: `disabled`, `or`, `and` (requires EXT_TRIG_EN) |
 | `--summarize` | off | Print LLM-friendly capture summary (capture only) |
+| `--open-in` | *(none)* | After VCD capture, open viewer: `gtkwave` (`.gtkw`), `surfer` (`.surfer.txt`), `wavetrace`, or `custom` |
+| `--gui-config` | per-user path | `gui.toml` for viewer paths and custom argv |
 
 ### Python API
 
@@ -472,7 +517,7 @@ Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — current value `0x0002_4C41` (major=0, minor=2, core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
+| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — (core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
 | `0x0004` | CTRL | W | bit 0 = arm, bit 1 = reset |
 | `0x0008` | STATUS | R | bit 0 = armed, 1 = triggered, 2 = done, 3 = overflow |
 | `0x000C` | SAMPLE_W | R | Sample width in bits |
@@ -600,12 +645,17 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 
 | Job | What it checks |
 |-----|----------------|
-| `lint-python` | `ruff` E/F/W rules on `host/` and `tests/` |
-| `test-host` | `pytest tests/test_host_stack.py -v` — no hardware (does not yet run `test_cli_rpc_events.py`) |
-| `lint-rtl` | `iverilog -Wall` elaboration of the core RTL files (`dpram`, `trig_compare`, `jtag_reg_iface`, `jtag_burst_read`, `fcapz_ela`, `fcapz_eio`, `fcapz_ejtagaxi`, `fcapz_ejtaguart`) plus **Xilinx 7-series** wrappers (stubs in `sim/`); other vendor wrappers are not elaborated in CI |
-| `sim` | `python sim/run_sim.py` — ELA, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
+| `lint-python` | `ruff` E/F/W rules on the whole repo |
+| `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression step for USER1/USER2 priming and timestamp stabilization |
+| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, Xilinx 7-series / UltraScale wrappers, and simulation stubs |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then ELA, ELA regression probe, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
+Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
+documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
+Those board-level checks now require every adjacent Arty counter sample to
+increment by +1 when decimation is disabled, so partial burst readback
+corruption is caught instead of hidden by a shorter valid prefix.
 
 ## Building from source
 
@@ -621,7 +671,12 @@ Produces `examples/arty_a7/arty_a7_top.bit`.
 
 ```bash
 python sim/run_sim.py
+python sim/run_sim.py --lint-only
 ```
+
+The default command runs `iverilog -Wall` lint before compiling and running
+the testbenches.  CI uses the same runner so local regressions and GitHub
+Actions exercise the same RTL lint target list.
 
 ### Tests
 
@@ -634,6 +689,11 @@ python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 # Force-skip hardware integration tests (e.g. laptop without board)
 FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# GUI + real JTAG (fcapz-gui) — opt-in; requires PySide6, pytest-qt, and a board.
+# Default pytest excludes @pytest.mark.hw; see CONTRIBUTING.md for details.
+FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
+  --override-ini='addopts=-p no:cacheprovider'
 ```
 
 ## Project structure
@@ -675,7 +735,8 @@ fpgacapZero/
       fcapz_ela_*.vhd       VHDL ELA wrappers (one per vendor)
       fcapz_eio_*.vhd       VHDL EIO wrappers (one per vendor)
   tb/
-    fcapz_ela_tb.sv          ELA core testbench (6 scenarios, 17 checks)
+    fcapz_ela_tb.sv          ELA core testbench
+    fcapz_ela_bug_probe_tb.sv ELA regression probe for capture-window edge cases
     fcapz_eio_tb.sv          EIO core testbench (7 scenarios, 18 checks)
     chan_mux_tb.sv           Channel mux (NUM_CHANNELS) testbench
     fcapz_ejtagaxi_tb.sv    EJTAG-AXI bridge testbench

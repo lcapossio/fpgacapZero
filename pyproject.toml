@@ -14,6 +14,10 @@ description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
+dependencies = [
+    "tomli>=2.0.1; python_version < '3.11'",
+    "tomli-w>=1.0.0",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: Apache Software License",
@@ -23,6 +27,7 @@ classifiers = [
 
 [project.scripts]
 fcapz = "fcapz.cli:main"
+fcapz-gui = "fcapz.gui.main:main"
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
@@ -32,12 +37,18 @@ where = ["host"]
 include = ["fcapz*"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
+dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
+gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
+gui-preview = ["fpgacapzero[gui]"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider -m \"not hw\""
 norecursedirs = ["tests/_tmp"]
+markers = [
+    "gui: Qt GUI integration tests (mocked JTAG; needs PySide6 + pytest-qt)",
+    "hw: real hardware tests (opt-in: pytest -m hw; not run in default CI)",
+]
 
 [tool.ruff]
 line-length = 100

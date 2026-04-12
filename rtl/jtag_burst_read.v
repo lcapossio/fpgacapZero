@@ -22,7 +22,9 @@
 module jtag_burst_read #(
     parameter SAMPLE_W = 8,
     parameter DEPTH    = 1024,
-    parameter BURST_W  = 256
+    parameter BURST_W  = 256,
+    // Ring depth for read pointer (DEPTH when one segment; DEPTH/NUM_SEGMENTS when split)
+    parameter SEG_DEPTH = DEPTH
 ) (
     input  wire        arst,
 
@@ -45,14 +47,33 @@ module jtag_burst_read #(
 );
 
     localparam PTR_W = $clog2(DEPTH);
+    localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam SAMPLES_PER_SCAN = BURST_W / SAMPLE_W;
     localparam LOAD_CTR_W = $clog2(SAMPLES_PER_SCAN + 1);
+
+    // Static assert: SEG_DEPTH must be a power-of-two
+    generate
+        if (SEG_DEPTH != 0 && (SEG_DEPTH & (SEG_DEPTH - 1)) != 0) begin : g_bad_seg_depth
+            SEG_DEPTH_must_be_power_of_two invalid();
+        end
+    endgenerate
 
     reg [BURST_W-1:0] sr;
     reg [BURST_W-1:0] staging;
     reg [PTR_W-1:0]   rd_ptr;
+    reg [PTR_W-1:0]   burst_seg_base;
     reg [LOAD_CTR_W-1:0] load_cnt;
     reg loading;
+
+    // Segment base address derived from burst_ptr_in (generate avoids zero-width slice)
+    wire [PTR_W-1:0] seg_base_of_ptr;
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_seg_base_flat
+            assign seg_base_of_ptr = {PTR_W{1'b0}};
+        end else begin : g_seg_base_split
+            assign seg_base_of_ptr = {burst_ptr_in[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+        end
+    endgenerate
 
     assign tdo      = sr[0];
     assign mem_addr  = rd_ptr;
@@ -62,6 +83,7 @@ module jtag_burst_read #(
             sr       <= {BURST_W{1'b0}};
             staging  <= {BURST_W{1'b0}};
             rd_ptr   <= {PTR_W{1'b0}};
+            burst_seg_base <= {PTR_W{1'b0}};
             load_cnt <= {LOAD_CTR_W{1'b0}};
             loading  <= 1'b0;
         end else begin
@@ -69,6 +91,7 @@ module jtag_burst_read #(
             // Burst start: set read pointer and begin first staging fill
             if (burst_start) begin
                 rd_ptr   <= burst_ptr_in;
+                burst_seg_base <= seg_base_of_ptr;
                 load_cnt <= {LOAD_CTR_W{1'b0}};
                 loading  <= 1'b1;
             end
@@ -95,7 +118,9 @@ module jtag_burst_read #(
                     staging[(load_cnt - 1) * SAMPLE_W +: SAMPLE_W] <= mem_data;
                     loading <= 1'b0;
                 end else begin
-                    rd_ptr   <= rd_ptr + 1'b1;
+                    // Wrap within segment (bitmask; SEG_DEPTH is power-of-two).
+                    rd_ptr <= burst_seg_base
+                        + ((rd_ptr - burst_seg_base + 1'b1) & (SEG_DEPTH - 1));
                     load_cnt <= load_cnt + 1'b1;
                 end
             end

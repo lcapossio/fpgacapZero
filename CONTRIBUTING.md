@@ -14,6 +14,7 @@ coverage.
   - [Unit and integration tests (pytest)](#unit-and-integration-tests-pytest)
   - [RTL simulation](#rtl-simulation)
   - [Hardware tests — hw_server backend](#hardware-tests--hw_server-backend)
+  - [GUI + hardware (opt-in)](#gui--hardware-opt-in)
   - [Hardware tests — OpenOCD backend](#hardware-tests--openocd-backend)
 - [Adding new tests](#adding-new-tests)
   - [Where OpenOCD coverage is most needed](#where-openocd-coverage-is-most-needed)
@@ -53,6 +54,9 @@ Vivado/XSDB are optional and only needed for hardware tests.
 - The repository must remain runnable from a clean checkout at all times.
 - Update `README.md` (and any relevant section) before your PR is ready for
   review. Do not merge documentation-free feature commits.
+- Update the **user manual** when user-visible behaviour changes: the manual
+  lives under `docs/` (chapter index: `docs/README.md`). Touch the chapters that
+  describe what you changed (workflows, CLI, registers, GUI, transports, …).
 
 ---
 
@@ -103,15 +107,45 @@ These tests run against a `FakeTransport` (no hardware required) and cover the
 CLI, RPC server, event-extraction helpers, EJTAG-AXI, and EJTAG-UART layers.
 They must pass before any push.
 
+The default suite also contains host-side regressions for JTAG readback
+pipeline behavior.  In particular, `tests/test_transport.py` verifies that
+USER1 block reads and USER2 burst reads discard their priming captures, and
+`tests/test_host_stack.py` verifies that unstable timestamp blocks are re-read
+before the GUI/VCD path sees them.  CI runs those tests explicitly after the
+full default suite so stale readback words cannot quietly become a viewer issue
+again.
+
+**Default pytest filter:** `[tool.pytest.ini_options]` in `pyproject.toml` sets
+`addopts` to include `-m "not hw"`, so tests marked `@pytest.mark.hw` are
+**not selected** when you run `pytest tests/ -v`. That keeps CI and machines
+without boards green. To collect `hw`-marked tests as well, override the option
+(for example `--override-ini='addopts=-p no:cacheprovider'`). The GUI+hardware
+module still **skips at runtime** unless you set `FPGACAP_GUI_HW=1`; see
+[GUI + hardware (opt-in)](#gui--hardware-opt-in).
+
+Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".[dev,gui]"`):
+
+```bash
+pip install -e ".[dev,gui]"
+```
+
+**Markers:** default pytest excludes `@pytest.mark.hw` (see `pyproject.toml`). GUI-related tests under `tests/` are marked `@pytest.mark.gui` so you can run `pytest -m gui` or `pytest -m "not gui"` as needed. GUI tests use `pytest-qt` (`qtbot`); they do not require a visible display when CI uses an offscreen platform plugin. Pure helpers (e.g. `tests/test_connect_errors.py` for connect error text) run with the default suite and are not GUI-marked. `tests/test_surfer_integration_smoke.py` is skipped unless `surfer` is on `PATH` (checks `surfer --help` for CLI stability / embed feasibility).
+
+Window state for `fcapz-gui` is persisted in `fcapz-gui-window.ini` beside `gui.toml` (same config directory as in the README). When adding UI that must survive restarts, extend that INI via `QSettings` rather than inventing a new path.
+
 ### RTL simulation
 
 ```bash
-python sim/run_sim.py            # run all testbenches
-python sim/run_sim.py fcapz_ela  # single testbench
+python sim/run_sim.py              # run RTL lint, then all testbenches
+python sim/run_sim.py --lint-only  # run only the shared iverilog -Wall lint set
+python sim/run_sim.py fcapz_ela    # lint, then one testbench
 ```
 
 Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog`
-and `vvp`) on PATH. All testbenches must pass before push.
+and `vvp`) on PATH. The default regression always runs `iverilog -Wall`
+before simulation.  CI calls the same runner for both the standalone RTL lint
+job and the full simulation job, so update `sim/run_sim.py` when adding or
+removing RTL lint targets.
 
 ### Hardware tests — hw_server backend
 
@@ -127,6 +161,40 @@ FPGACAP_SKIP_HW=1 pytest examples/arty_a7/test_hw_integration.py -v
 
 Set `FPGACAP_SKIP_HW=1` in CI or when no board is available; the suite will
 skip gracefully.
+
+### GUI + hardware (opt-in)
+
+`tests/test_gui_hw_capture.py` exercises **fcapz-gui** (`MainWindow`) against
+real JTAG: connect from the UI, then single and continuous captures with the
+same Arty-style counter sanity checks as the integration suite. Tests are
+marked `@pytest.mark.gui` and `@pytest.mark.hw`.
+
+For the Arty reference counter, the hardware and GUI+hardware tests require
+every adjacent captured sample to increment by +1 when decimation is disabled.
+This is intentionally stricter than checking for a long valid prefix: a stale
+or partially primed burst word near the end of the capture must fail the test.
+
+They are **skipped** unless `FPGACAP_GUI_HW` is set to `1`, `true`, or `yes`.
+If `FPGACAP_SKIP_HW` is set, they skip (same convention as
+`test_hw_integration.py`). Full environment contract and optional variables
+(`FPGACAP_BACKEND`, `FPGACAP_BITFILE`, ports, tap, `FPGACAP_CONTINUOUS_CAPTURES`,
+…) are documented in the module docstring at the top of that file.
+
+Because of the default `-m "not hw"` in `pyproject.toml`, pass an override when
+you want pytest to collect this module:
+
+```bash
+# Linux / macOS
+FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
+  --override-ini='addopts=-p no:cacheprovider'
+```
+
+```powershell
+# Windows PowerShell
+$env:FPGACAP_GUI_HW = '1'
+python -m pytest tests/test_gui_hw_capture.py -v --tb=short `
+  --override-ini='addopts=-p no:cacheprovider'
+```
 
 ### Hardware tests — OpenOCD backend
 
@@ -219,9 +287,12 @@ def transport(request):
 - Unit tests go in `tests/`. They must use `FakeTransport` or mocks and must
   not require any hardware or network connectivity.
 - Hardware tests go alongside the example they exercise
-  (e.g. `examples/arty_a7/test_hw_integration.py`).
+  (e.g. `examples/arty_a7/test_hw_integration.py`). The **opt-in** GUI+hardware
+  module `tests/test_gui_hw_capture.py` is an exception: it is gated by
+  `FPGACAP_GUI_HW` and `@pytest.mark.hw` and must not run in default CI.
 - New RTL modules must have a testbench in `tb/` and a sim entry in
-  `sim/run_sim.py`.
+  `sim/run_sim.py`.  Add them to the lint target list too if they should be
+  elaborated by the shared `iverilog -Wall` regression.
 - New Python modules must have at least basic unit test coverage in `tests/`.
 - All new test files must carry the SPDX header described above.
 
@@ -381,14 +452,21 @@ updated and your board added to the validated list.
 
 Before pushing to a remote or opening a PR, confirm all of the following:
 
-- [ ] `pytest tests/ -v` passes with zero failures
-- [ ] `python sim/run_sim.py` passes all testbenches
+- [ ] `pytest tests/ -v` passes with zero failures (default config excludes
+      `@pytest.mark.hw`; run [GUI + hardware](#gui--hardware-opt-in) locally
+      when you change that path)
+- [ ] `python sim/run_sim.py` passes RTL lint and all testbenches
 - [ ] `ruff check .` reports no errors
-- [ ] Hardware tests pass (or `FPGACAP_SKIP_HW=1` set with a justification in
-      the PR description)
+- [ ] `examples/arty_a7/test_hw_integration.py` passes on a connected board,
+      or `FPGACAP_SKIP_HW=1` with justification in the PR description (GUI+hardware
+      tests in `tests/test_gui_hw_capture.py` are optional and opt-in via
+      `FPGACAP_GUI_HW=1`)
 - [ ] All new / modified source files have the SPDX header
 - [ ] No build artifacts or absolute paths introduced
 - [ ] `README.md` updated if behaviour, CLI flags, or resource usage changed
+- [ ] User manual (`docs/`, see `docs/README.md`) updated if workflows, CLI,
+      register maps, GUI, or other end-user documentation should reflect your
+      changes
 - [ ] CHANGELOG.md entry added for user-visible changes
 
 ---

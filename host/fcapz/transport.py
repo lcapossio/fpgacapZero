@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import socket
@@ -24,6 +25,8 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
+
+_hw_log = logging.getLogger("fcapz.transport.hw_server")
 
 
 class Transport(ABC):
@@ -167,16 +170,22 @@ class OpenOcdTransport(Transport):
         port: int = 6666,
         tap: str = "xc7a100t.tap",
         ir_table: dict[int, int] | None = None,
+        *,
+        connect_timeout_sec: float = 5.0,
     ):
         self.host = host
         self.port = port
         self.tap = tap
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
+        self._connect_timeout_sec = float(connect_timeout_sec)
         self._active_chain: int = 1
         self._sock: socket.socket | None = None
 
     def connect(self) -> None:
-        self._sock = socket.create_connection((self.host, self.port), timeout=5)
+        self._sock = socket.create_connection(
+            (self.host, self.port),
+            timeout=self._connect_timeout_sec,
+        )
         self._sock.settimeout(0.2)
         try:
             self._sock.recv(4096)
@@ -299,6 +308,9 @@ class XilinxHwServerTransport(Transport):
         ir_table: dict[int, int] | None = None,
         ready_probe_addr: int | None = 0x0000,
         ready_probe_timeout: float = 2.0,
+        *,
+        post_program_delay_ms: int = 200,
+        ready_poll_interval_sec: float = 0.02,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -316,6 +328,10 @@ class XilinxHwServerTransport(Transport):
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
         self.ready_probe_addr = ready_probe_addr
         self.ready_probe_timeout = ready_probe_timeout
+        self.post_program_delay_ms = int(max(0, min(30_000, post_program_delay_ms)))
+        self.ready_poll_interval_sec = float(
+            max(0.005, min(0.5, ready_poll_interval_sec))
+        )
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -346,7 +362,17 @@ class XilinxHwServerTransport(Transport):
         self._send(f"connect -url tcp:{self.host}:{self.port}")
 
         if self.bitfile:
+            _hw_log.info(
+                "Programming FPGA from bitfile (fpga -file): %s",
+                self.bitfile,
+            )
             self.program(self.bitfile)
+        else:
+            _hw_log.info(
+                "Skipping fpga -file — using the configuration already in the FPGA. "
+                "Uncheck 'Program on connect' or clear the bitfile path in Connection "
+                "when you do not want to reprogram.",
+            )
 
         self._send(
             f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
@@ -362,7 +388,13 @@ class XilinxHwServerTransport(Transport):
         # session.  Pass ready_probe_addr=None to skip (e.g. when the
         # bitstream cannot guarantee a non-zero response at any address).
         if self.ready_probe_addr is not None and self.bitfile:
+            _hw_log.info(
+                "Waiting for FPGA ready (probe register 0x%04X, timeout %.1fs)",
+                self.ready_probe_addr,
+                self.ready_probe_timeout,
+            )
             self._wait_until_ready()
+            _hw_log.info("FPGA ready probe succeeded.")
 
     def _wait_until_ready(self) -> None:
         """Poll the configured probe register until it returns non-zero.
@@ -383,7 +415,10 @@ class XilinxHwServerTransport(Transport):
             attempts += 1
             if last_value != 0:
                 return
-            time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.ready_poll_interval_sec, remaining))
         raise ConnectionError(
             f"FPGA did not become ready within {self.ready_probe_timeout}s "
             f"after program() (probe addr=0x{self.ready_probe_addr:04X}, "
@@ -400,7 +435,7 @@ class XilinxHwServerTransport(Transport):
             )
         self._send(f'targets -set -filter {{name =~ "{self.fpga_name}"}}')
         self._send(f"fpga -file {{{bitfile}}}")
-        self._send("after 500")
+        self._send(f"after {int(self.post_program_delay_ms)}")
 
     def close(self) -> None:
         if self._proc and self._proc.stdin:
@@ -414,6 +449,30 @@ class XilinxHwServerTransport(Transport):
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+
+    def close_fast(self) -> None:
+        """Kill ``xsdb`` quickly for console interrupt; normal :meth:`close` may wait 5s."""
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.write("exit\n")
+                    proc.stdin.flush()
+                except OSError:
+                    pass
+        except (OSError, ValueError):
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
+        self._proc = None
 
     # -- chain selection -----------------------------------------------------
 
@@ -536,8 +595,10 @@ class XilinxHwServerTransport(Transport):
             # Idle so staging buffer fills (~33 TCK needed, extra margin)
             "$_bq delay 80",
         ]
-        # N burst scans on USER2 (IR shift before each to ensure SEL)
-        for _ in range(n_scans):
+        # Prime USER2 once, then perform the scans returned to the caller.
+        # The burst RTL fills its staging buffer from USER2 TCKs during SHIFT,
+        # so the first capture after selecting USER2 may be only partially fresh.
+        for _ in range(n_scans + 1):
             parts.append(
                 f"$_bq irshift -state IRUPDATE -hex 6 {ir2}; "
                 f"$_bq drshift -state DRUPDATE -capture -bits {dr_bits} {zeros}"
@@ -546,21 +607,32 @@ class XilinxHwServerTransport(Transport):
         tcl = "; ".join(parts)
 
         out = self._send(tcl)
-        return self._parse_burst_bits(out, words)
+        return self._parse_burst_bits(out, words, skip_scans=1)
 
-    def _parse_burst_bits(self, output: str, total_words: int) -> List[int]:
+    def _parse_burst_bits(
+        self,
+        output: str,
+        total_words: int,
+        *,
+        skip_scans: int = 0,
+    ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
         """
         sps = self._burst_samples_per_scan
         sw = self.BURST_DR_BITS // sps  # bits per sample
         values: list[int] = []
+        scan_idx = 0
         for token in output.replace("{", " ").replace("}", " ").split():
             token = token.strip()
             if not token or len(token) < self.BURST_DR_BITS:
                 continue
             if set(token) - {"0", "1"}:
                 continue
+            if scan_idx < skip_scans:
+                scan_idx += 1
+                continue
+            scan_idx += 1
             for s in range(sps):
                 if len(values) >= total_words:
                     break
@@ -577,7 +649,7 @@ class XilinxHwServerTransport(Transport):
             chunk_size = end - start
             tcl = self._burst_read_tcl(addr, start, chunk_size)
             out = self._send(tcl)
-            results.extend(self._parse_block_bits(out, chunk_size))
+            results.extend(self._parse_block_bits(out, chunk_size, skip_words=1))
         # Flush JTAG pipeline
         self.read_reg(0x0000)
         return results
@@ -585,13 +657,15 @@ class XilinxHwServerTransport(Transport):
     def _burst_read_tcl(self, base_addr: int, offset: int, count: int) -> str:
         """Generate TCL for burst block read using a single jtag sequence.
 
-        All N+1 scans (1 address-setup + N capture) go into one sequence
-        object with zero idle between scans.  The IR shift time (~13 TCK
-        cycles) exceeds the CDC round-trip (~7 TCK cycles), so data is
-        ready before each CAPTURE phase.
+        All scans go into one sequence object: one address setup, one
+        discarded priming capture, then N returned captures.  A short idle
+        follows each address update before the next capture so the
+        fabric-domain read request can cross, read RAM, and resynchronize
+        before CAPTURE samples jtag_rdata.
         """
         ir = f"{self.USER1_IR:02x}"
         n = self.DR_BITS
+        idle = self.READ_IDLE_CYCLES
         frames: list[str] = []
         for i in range(count):
             frames.append(
@@ -603,6 +677,12 @@ class XilinxHwServerTransport(Transport):
             # Scan 0: set first address, no capture
             f"$_q irshift -state IRUPDATE -hex 6 {ir}; "
             f"$_q drshift -state DRUPDATE -bits {n} {frames[0]}",
+            f"$_q delay {idle}",
+            # Prime capture: discard this word.  Hardware/XSDB can leave the
+            # first captured USER1 word stale after a previous pipelined read.
+            f"$_q irshift -state IRUPDATE -hex 6 {ir}; "
+            f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[0]}",
+            f"$_q delay {idle}",
         ]
         # Scans 1..N-1: capture previous AND set next address
         for i in range(1, count):
@@ -610,6 +690,7 @@ class XilinxHwServerTransport(Transport):
                 f"$_q irshift -state IRUPDATE -hex 6 {ir}; "
                 f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
+            parts.append(f"$_q delay {idle}")
         # Final scan: capture last result
         parts.append(
             f"$_q irshift -state IRUPDATE -hex 6 {ir}; "
@@ -617,6 +698,40 @@ class XilinxHwServerTransport(Transport):
         )
         parts.append("puts [$_q run -bits]; $_q delete")
         return "; ".join(parts)
+
+    def read_regs_pipelined_user1(self, addrs: List[int]) -> List[int]:
+        """Read several CSR addresses in one ``jtag sequence`` / :meth:`_send` round-trip.
+
+        Uses the same USER1 pipelined capture pattern as :meth:`_burst_read_tcl`
+        (IR+DR per step; capture carries the previous address's data).  A final
+        :meth:`read_reg` to VERSION flushes the JTAG pipeline for later accesses.
+        """
+        if not addrs:
+            return []
+        ir = f"{self.ir_table[self._active_chain]:02x}"
+        n = self.DR_BITS
+        frames = [self._frame_bits(addr=a, data=0, write=False) for a in addrs]
+        count = len(frames)
+        parts: list[str] = [
+            "set _pq [jtag sequence]",
+            f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+            f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
+        ]
+        for i in range(1, count):
+            parts.append(
+                f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+                f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
+            )
+        parts.append(
+            f"$_pq irshift -state IRUPDATE -hex 6 {ir}; "
+            f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
+        )
+        parts.append("puts [$_pq run -bits]; $_pq delete")
+        tcl = "; ".join(parts)
+        out = self._send(tcl)
+        vals = self._parse_block_bits(out, count)
+        self.read_reg(0x0000)
+        return vals
 
 
     # -- frame helpers -------------------------------------------------------
@@ -690,13 +805,24 @@ class XilinxHwServerTransport(Transport):
             f"recent stderr={self._stderr_lines[-10:]!r}"
         )
 
-    def _parse_block_bits(self, output: str, expected: int) -> List[int]:
+    def _parse_block_bits(
+        self,
+        output: str,
+        expected: int,
+        *,
+        skip_words: int = 0,
+    ) -> List[int]:
         """Extract *expected* 32-bit values from bit-string tokens."""
         values: list[int] = []
+        seen = 0
         # Split on whitespace and braces (TCL list elements)
         for token in output.replace("{", " ").replace("}", " ").split():
             token = token.strip()
             if token and set(token) <= {"0", "1"} and len(token) >= 32:
+                if seen < skip_words:
+                    seen += 1
+                    continue
+                seen += 1
                 values.append(self._bits_to_int(token, 0, 32))
         if len(values) < expected:
             raise RuntimeError(

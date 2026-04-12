@@ -286,6 +286,72 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t._parse_block_bits(bit_str, 4)
 
+    def test_parse_block_bits_can_skip_priming_word(self):
+        """USER1 block parsing can discard a stale priming capture."""
+        t = XilinxHwServerTransport()
+        tokens = []
+        for value in [0xDEAD_BEEF, 1, 2, 3]:
+            tokens.append("".join("1" if (value >> i) & 1 else "0" for i in range(32)))
+
+        self.assertEqual(
+            t._parse_block_bits(" ".join(tokens), 3, skip_words=1),
+            [1, 2, 3],
+        )
+
+    @staticmethod
+    def _burst_token(values: list[int], sample_w: int = 8) -> str:
+        """Pack values into one LSB-first USER2 burst token."""
+        bits = ["0"] * XilinxHwServerTransport.BURST_DR_BITS
+        for sample_idx, value in enumerate(values):
+            base = sample_idx * sample_w
+            for bit_idx in range(sample_w):
+                bits[base + bit_idx] = "1" if (value >> bit_idx) & 1 else "0"
+        return "".join(bits)
+
+    def test_parse_burst_bits_can_skip_priming_scan(self):
+        """USER2 burst parsing discards the priming scan when requested."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+
+        vals = t._parse_burst_bits(f"{stale} {fresh}", 13, skip_scans=1)
+
+        self.assertEqual(vals, list(range(13)))
+
+    def test_read_block_burst_primes_user2_before_returned_scans(self):
+        """Burst reads issue one extra USER2 scan and discard its data.
+
+        The USER2 burst RTL fills staging during SHIFT, so the first capture
+        after selecting USER2 is a pipeline prime, not returned sample data.
+        """
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32)
+        fresh0 = self._burst_token(list(range(32)))
+        fresh1 = self._burst_token(list(range(32, 64)))
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh0} {fresh1}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(33)
+
+        self.assertEqual(vals, list(range(33)))
+        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
+
+    def test_user1_block_read_has_idle_before_each_capture(self):
+        """USER1 pipelined reads leave CDC time before every captured word."""
+        t = XilinxHwServerTransport()
+
+        tcl = t._burst_read_tcl(0x0100, 0, 4)
+
+        self.assertEqual(tcl.count(f"delay {t.READ_IDLE_CYCLES}"), 5)
+        self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 5)
+
     def test_frame_bits_write_flag(self):
         """_frame_bits() sets bit 48 (write flag) correctly."""
         frame = XilinxHwServerTransport._frame_bits(addr=0, data=0, write=True)

@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# Headless Qt for widget tests (CI, SSH). Override with QT_QPA_PLATFORM=windows etc. if needed.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 ROOT = Path(__file__).resolve().parent.parent

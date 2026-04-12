@@ -241,6 +241,12 @@ The trigger logic still runs every cycle (not gated by decimation), so
 you can still trigger on a single-cycle event even when storing every
 10th sample.
 
+When a trigger fires on a non-store cycle, the trigger sample is still
+committed into the capture buffer at `samples[pretrigger]`.  That keeps
+the host-visible capture shape stable: pre-trigger samples are the stored
+history before the event, index `pretrigger` is the actual trigger-cycle
+sample, and the post-trigger window starts after that sample.
+
 The captured timestamps (if `TIMESTAMP_W > 0`) reflect the real cycle
 counter, so a downstream tool can reconstruct the gaps between
 samples accurately.
@@ -313,6 +319,11 @@ Use cases:
 Cost: one extra BRAM the same depth as the sample BRAM.  Bigger
 counters (`TIMESTAMP_W=48`) are only useful if you need more than
 ~43 seconds of run-time without wrapping (at 100 MHz).
+
+Timestamp readback is width-aware.  A 48-bit timestamp is returned as
+two 32-bit words, with the upper word zero-extended in bits `[31:16]`.
+The same zero-extension rule applies to wide sample readback when the
+last 32-bit chunk is only partially used.
 
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 

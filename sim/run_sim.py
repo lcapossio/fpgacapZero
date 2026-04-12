@@ -5,11 +5,13 @@
 """Compile and run RTL simulations with iverilog + vvp.
 
 Usage:
-    python sim/run_sim.py            # run all testbenches
+    python sim/run_sim.py            # run RTL lint + all testbenches
+    python sim/run_sim.py --lint-only
     python sim/run_sim.py fcapz_ela   # run specific testbench
     python sim/run_sim.py fcapz_eio
 """
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,14 @@ SIM  = ROOT / "sim"
 TESTBENCHES = {
     "fcapz_ela": (
         TB / "fcapz_ela_tb.sv",
+        [
+            RTL / "fcapz_ela.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+        ],
+    ),
+    "fcapz_ela_bug_probe": (
+        TB / "fcapz_ela_bug_probe_tb.sv",
         [
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
@@ -45,10 +55,43 @@ TESTBENCHES = {
     ),
 }
 
+DEFAULT_TESTBENCHES = [
+    "fcapz_ela",
+    "fcapz_ela_bug_probe",
+    "fcapz_eio",
+    "chan_mux",
+]
+
+LINT_TARGETS = [
+    RTL / "dpram.v",
+    RTL / "trig_compare.v",
+    RTL / "jtag_reg_iface.v",
+    RTL / "jtag_burst_read.v",
+    RTL / "fcapz_async_fifo.v",
+    RTL / "fcapz_ela.v",
+    RTL / "fcapz_ela_xilinx7.v",
+    RTL / "fcapz_eio.v",
+    RTL / "fcapz_eio_xilinx7.v",
+    RTL / "fcapz_ejtagaxi.v",
+    RTL / "fcapz_ejtagaxi_xilinx7.v",
+    RTL / "fcapz_ejtaguart.v",
+    RTL / "fcapz_ejtaguart_xilinx7.v",
+    RTL / "jtag_tap" / "jtag_tap_xilinxus.v",
+    RTL / "fcapz_ela_xilinxus.v",
+    RTL / "fcapz_eio_xilinxus.v",
+    RTL / "fcapz_ejtagaxi_xilinxus.v",
+    RTL / "fcapz_ejtaguart_xilinxus.v",
+]
+
+LINT_STUBS = [
+    SIM / "bscane2_stub.v",
+    SIM / "xpm_fifo_async_stub.v",
+]
+
 
 def run_cmd(cmd: list[str], label: str) -> bool:
     """Run a command, return True on success."""
-    print(f"[sim] {label}: {' '.join(str(c) for c in cmd)}")
+    print(f"[sim] {label}: {' '.join(str(c) for c in cmd)}", flush=True)
     result = subprocess.run(cmd, text=True)
     if result.returncode != 0:
         print(f"[sim] FAILED: {label}")
@@ -78,10 +121,52 @@ def run_tb(name: str) -> bool:
     return run_cmd(["vvp", str(out_vvp)], f"simulate {name}")
 
 
+def run_rtl_lint() -> bool:
+    out_vvp = SIM / "_lint.vvp"
+    common = [
+        "iverilog",
+        "-Wall",
+        "-g2012",
+        "-I",
+        str(RTL),
+        "-y",
+        str(RTL),
+        "-y",
+        str(RTL / "jtag_tap"),
+        "-y",
+        str(SIM),
+        "-o",
+        str(out_vvp),
+    ]
+
+    ok = True
+    for src in LINT_TARGETS:
+        cmd = [*common, *[str(s) for s in LINT_STUBS], str(src)]
+        if not run_cmd(cmd, f"lint {src.relative_to(ROOT)}"):
+            ok = False
+    return ok
+
+
 def main() -> None:
     SIM.mkdir(parents=True, exist_ok=True)
 
-    requested = sys.argv[1:]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("testbench", nargs="*", help="testbench name(s) to run")
+    parser.add_argument(
+        "--lint-only",
+        action="store_true",
+        help="run iverilog -Wall RTL elaboration lint and skip simulations",
+    )
+    args = parser.parse_args()
+
+    if not run_rtl_lint():
+        sys.exit(1)
+    if args.lint_only:
+        print(f"\n{'='*60}")
+        print(f"RTL lint passed for {len(LINT_TARGETS)} target(s).")
+        return
+
+    requested = args.testbench
     if requested:
         unknown = [n for n in requested if n not in TESTBENCHES]
         if unknown:
@@ -90,7 +175,7 @@ def main() -> None:
             sys.exit(1)
         targets = requested
     else:
-        targets = list(TESTBENCHES)
+        targets = DEFAULT_TESTBENCHES
 
     failures = []
     for name in targets:
