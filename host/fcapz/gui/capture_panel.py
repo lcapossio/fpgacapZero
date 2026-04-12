@@ -232,18 +232,13 @@ class CapturePanel(QGroupBox):
         self._btn_cfg.setToolTip("Write capture and trigger registers from this panel.")
         self._btn_arm = QPushButton("Arm")
         self._btn_arm.setToolTip(
-            "Normal capture: use the selected trigger, arm, wait until it fires, then read back.",
+            "Normal capture: use the selected trigger, arm, wait until it fires, then read back. "
+            "Use Auto re-arm on the toolbar to repeat.",
         )
-        self._btn_cap = QPushButton("Capture")
+        self._btn_cap = QPushButton("Trigger Immediate")
         self._btn_cap.setToolTip(
-            "Immediate capture: force trigger as soon as the pre-trigger buffer is ready "
-            "(always-true compare), then read back.",
-        )
-        self._chk_auto_rearm = QCheckBox("Auto re-arm")
-        self._chk_auto_rearm.setObjectName("fcapz_capture_auto_rearm")
-        self._chk_auto_rearm.setToolTip(
-            "After each finished capture, arm again for another. Applies to both "
-            "Arm (normal trigger) and Capture (immediate). Use Stop to end the loop.",
+            "Immediate trigger: force capture as soon as the pre-trigger buffer is ready "
+            "(always-true compare), then read back. Use Auto re-arm on the toolbar to repeat.",
         )
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.setEnabled(False)
@@ -255,13 +250,11 @@ class CapturePanel(QGroupBox):
             self._btn_stop,
         ):
             b.setEnabled(False)
-        self._chk_auto_rearm.setEnabled(False)
 
         row_btns = QHBoxLayout()
         row_btns.addWidget(self._btn_cfg)
         row_btns.addWidget(self._btn_arm)
         row_btns.addWidget(self._btn_cap)
-        row_btns.addWidget(self._chk_auto_rearm)
         row_btns.addWidget(self._btn_stop)
         row_btns.addStretch(1)
 
@@ -331,7 +324,6 @@ class CapturePanel(QGroupBox):
         )
         for b in (self._btn_cfg, self._btn_arm, self._btn_cap):
             b.setEnabled(False)
-        self._chk_auto_rearm.setEnabled(False)
         with QSignalBlocker(self._seq_enable):
             self._seq_enable.setChecked(False)
         self._seq_table.setRowCount(0)
@@ -756,7 +748,6 @@ class CapturePanel(QGroupBox):
         )
         for b in (self._btn_cfg, self._btn_arm, self._btn_cap):
             b.setEnabled(True)
-        self._chk_auto_rearm.setEnabled(True)
         while self._seq_table.rowCount() > self._hw_trig_stages > 0:
             self._seq_table.removeRow(self._seq_table.rowCount() - 1)
         self._refresh_seq_ui_state()
@@ -766,12 +757,8 @@ class CapturePanel(QGroupBox):
         self._btn_cfg.setEnabled(not busy and self._hw_sample_w is not None)
         self._btn_arm.setEnabled(not busy and self._hw_sample_w is not None)
         self._btn_cap.setEnabled(not busy and self._hw_sample_w is not None)
-        self._chk_auto_rearm.setEnabled(not busy and self._hw_sample_w is not None)
         self._btn_stop.setEnabled(busy and continuous)
         self._apply_hw_feature_availability()
-
-    def auto_rearm(self) -> bool:
-        return self._chk_auto_rearm.isChecked()
 
     def timeout_seconds(self) -> float:
         return float(self._timeout.text().strip() or "10.0")
@@ -858,7 +845,6 @@ class CapturePanel(QGroupBox):
         st.setValue("ui/capture_adv_open", self._adv_section.isExpanded())
         st.setValue("ui/capture_seq_open", self._seq_section.isExpanded())
         st.setValue("ui/trigger_value_radix", self.trigger_value_radix())
-        st.setValue("ui/capture_auto_rearm", self._chk_auto_rearm.isChecked())
 
     def load_collapsible_ui_prefs(self, st: QSettings) -> None:
         if st.contains("ui/capture_adv_open"):
@@ -876,9 +862,6 @@ class CapturePanel(QGroupBox):
                         self._trig_val_parse_base = r
             except (TypeError, ValueError):
                 pass
-        if st.contains("ui/capture_auto_rearm"):
-            with QSignalBlocker(self._chk_auto_rearm):
-                self._chk_auto_rearm.setChecked(bool(st.value("ui/capture_auto_rearm")))
 
     def wire_handlers(
         self,

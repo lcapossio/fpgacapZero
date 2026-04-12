@@ -4,8 +4,8 @@
 """Launch fcapz-gui against **mock hardware** (no JTAG).
 
 Patches the connect worker so **Connect** completes like a real ELA session. The
-window opens and immediately starts a mock connect; use **Capture** / **Arm**
-as usual. Each **Capture** fills the buffer with **random** sample words
+window opens and immediately starts a mock connect; use **Trigger Immediate** / **Arm**
+as usual. Each **Trigger Immediate** fills the buffer with **random** sample words
 (sized from your configured sample width and pre/post depth).
 Your normal ``gui.toml`` (viewers, paths) is still loaded.
 At least one viewer (e.g. Surfer or GTKWave) must be on ``PATH`` or configured

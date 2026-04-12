@@ -19,6 +19,7 @@ from PySide6.QtCore import (
     QEvent,
     QMetaObject,
     QSettings,
+    QSignalBlocker,
     QSize,
     QThread,
     QTimer,
@@ -29,6 +30,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDockWidget,
     QInputDialog,
     QMainWindow,
@@ -171,6 +173,7 @@ class MainWindow(QMainWindow):
         self._tb_act_arm: QAction | None = None
         self._tb_act_capture: QAction | None = None
         self._tb_act_stop: QAction | None = None
+        self._tb_chk_auto_rearm: QCheckBox | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
         self._uart: EjtagUartController | None = None
@@ -664,15 +667,28 @@ class MainWindow(QMainWindow):
         self._tb_act_arm = _add("arm", "Arm", self._on_arm_clicked)
         self._tb_act_arm.setToolTip(
             "Normal capture: selected trigger, arm, wait until it fires, read back. "
-            "Enable Auto re-arm in the capture panel to repeat.",
+            "Enable Auto re-arm on the toolbar to repeat.",
         )
         self._tb_act_arm.setStatusTip(self._tb_act_arm.toolTip())
         tb.addWidget(_tb_spacer())
         tb.addSeparator()
-        self._tb_act_capture = _add("capture", "Capture", self._on_capture_clicked)
+        self._tb_chk_auto_rearm = QCheckBox("Auto re-arm")
+        self._tb_chk_auto_rearm.setObjectName("fcapz_capture_auto_rearm")
+        self._tb_chk_auto_rearm.setToolTip(
+            "After each finished capture, arm again for another. Applies to Arm "
+            "(normal trigger) and Trigger Immediate. Use Stop to end the loop.",
+        )
+        _ui = self._window_qsettings()
+        if _ui.contains("ui/capture_auto_rearm"):
+            with QSignalBlocker(self._tb_chk_auto_rearm):
+                self._tb_chk_auto_rearm.setChecked(_settings_bool(_ui.value("ui/capture_auto_rearm")))
+        self._tb_chk_auto_rearm.toggled.connect(lambda _on: self._schedule_ui_prefs_save())
+        tb.addWidget(self._tb_chk_auto_rearm)
+        tb.addWidget(_tb_spacer(6))
+        self._tb_act_capture = _add("capture", "Trigger Immediate", self._on_capture_clicked)
         self._tb_act_capture.setToolTip(
-            "Immediate capture: force trigger when pre-trigger is ready. "
-            "Enable Auto re-arm in the capture panel to repeat.",
+            "Force trigger when pre-trigger is ready (always-true compare). "
+            "Enable Auto re-arm on the toolbar to repeat.",
         )
         self._tb_act_capture.setStatusTip(self._tb_act_capture.toolTip())
         self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
@@ -717,6 +733,8 @@ class MainWindow(QMainWindow):
         self._tb_act_arm.setEnabled(can_elact)
         self._tb_act_capture.setEnabled(can_elact)
         self._tb_act_stop.setEnabled(busy and cont)
+        if self._tb_chk_auto_rearm is not None:
+            self._tb_chk_auto_rearm.setEnabled(can_elact)
 
         # Match ELA dock buttons to toolbar (single source of truth).
         self._capture.set_busy(busy, continuous=cont)
@@ -749,7 +767,14 @@ class MainWindow(QMainWindow):
         st = self._window_qsettings()
         self._capture.save_collapsible_ui_prefs(st)
         self._probe.save_collapsible_ui_prefs(st)
+        if self._tb_chk_auto_rearm is not None:
+            st.setValue("ui/capture_auto_rearm", self._tb_chk_auto_rearm.isChecked())
         st.sync()
+
+    def _auto_rearm(self) -> bool:
+        if self._tb_chk_auto_rearm is None:
+            return False
+        return self._tb_chk_auto_rearm.isChecked()
 
     def _user_layout_keys(self) -> list[str]:
         st = self._window_qsettings()
@@ -1089,7 +1114,7 @@ class MainWindow(QMainWindow):
             _log.warning("Arm: invalid config: %s", exc)
             QMessageBox.warning(self, "Arm", str(exc))
             return
-        ar = self._capture.auto_rearm()
+        ar = self._auto_rearm()
         _log.info(
             "Starting normal capture (timeout=%.1fs, auto_rearm=%s)",
             timeout,
@@ -1104,10 +1129,10 @@ class MainWindow(QMainWindow):
             cfg = self._capture.build_capture_config()
             timeout = self._capture.timeout_seconds()
         except ValueError as exc:
-            _log.warning("Capture: invalid config: %s", exc)
-            QMessageBox.warning(self, "Capture", str(exc))
+            _log.warning("Trigger Immediate: invalid config: %s", exc)
+            QMessageBox.warning(self, "Trigger Immediate", str(exc))
             return
-        ar = self._capture.auto_rearm()
+        ar = self._auto_rearm()
         _log.info(
             "Starting immediate capture (timeout=%.1fs, auto_rearm=%s)",
             timeout,

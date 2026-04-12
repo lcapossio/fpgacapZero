@@ -153,15 +153,19 @@ sub-signals.  Each row is a `name` / `width` / `lsb` triple that
 becomes a `ProbeSpec` in the `CaptureConfig`.  The probe panel
 validates as you type — overlapping bit ranges turn red.
 
-Bottom section — **action buttons** and **Auto re-arm**:
+Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
+**Auto re-arm** (checkbox), **Trigger Immediate**, **Stop**.
+
+ELA dock — bottom **action buttons**:
 
 | Control | What it does |
 |---|---|
-| **Arm** | Normal ILA-style capture: `configure` from the panel, `arm`, then `capture(timeout)` on a worker thread — wait for the selected trigger, read back, show in History. |
-| **Capture** | Immediate capture: same flow but the host programs an always-true compare (`mask=0` value-match, and a one-stage sequencer when the bitstream has `TRIG_STAGES>1`) so the core triggers as soon as the pre-trigger history is ready; external-trigger gating is cleared for that run. |
-| **Auto re-arm** (checkbox) | When checked, **Arm** or **Capture** repeats in a loop (re-configure + arm + capture each time) until **Stop** — same idea as continuous mode in many ILAs, for either normal or immediate trigger. |
+| **Arm** | Same as the toolbar: normal ILA-style capture — `configure` from the panel, `arm`, then `capture(timeout)` on a worker thread; wait for the selected trigger, read back, show in History. |
+| **Trigger Immediate** | Same as the toolbar: immediate capture — always-true compare (`mask=0` value-match, plus a one-stage sequencer when the bitstream has `TRIG_STAGES>1`) so the core triggers as soon as the pre-trigger history is ready; external-trigger gating is cleared for that run. |
 | **Stop** | Ends an auto re-arm loop (cancels the worker between captures). |
 | **Configure** | Writes registers from the panel only (`analyzer.configure(cfg)`), without arming. |
+
+**Auto re-arm** (toolbar checkbox): when checked, **Arm** or **Trigger Immediate** repeats in a loop (re-configure + arm + capture each time) until **Stop** — continuous / auto re-arm behaviour for either normal or immediate trigger.
 
 The capture itself runs on a **`QThread` worker** so the GUI
 stays responsive while waiting for the trigger.  When the worker
@@ -411,8 +415,9 @@ the same arrangement.
    Trigger value=`0x42` (radix defaults to hex; you can enter `42` without the prefix),
    Trigger mask=`0xFF`.
 6. In the **Probes** subform, add `name=counter, width=8, lsb=0`.
-7. Click **Capture**.  Watch the spinner; in <1 s the capture
-   appears in the History panel.
+7. Click **Arm** (or use the toolbar).  Watch the spinner; when the
+   counter matches `0x42`, the capture appears in the History panel.
+   (Use **Trigger Immediate** for a forced trigger without waiting.)
 8. Click the row, then click **[Quick preview ▾]** at the bottom
    to see the embedded waveform.  You should see the 8-bit
    counter incrementing past `0x42`.

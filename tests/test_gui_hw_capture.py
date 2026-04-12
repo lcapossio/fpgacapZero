@@ -215,7 +215,7 @@ def test_gui_three_captures_consistent(qtbot: Any, tmp_path: Path) -> None:
         w._capture._trig_mask.setText("0xFF")
         expected_n = pre + 1 + post
 
-        cap_btn = _button_in_widget(w._capture, "Capture")
+        cap_btn = _button_in_widget(w._capture, "Trigger Immediate")
 
         for _ in range(3):
             before = w._history._table.rowCount()
@@ -313,7 +313,7 @@ def test_gui_continuous_many_captures_consistent(qtbot: Any, tmp_path: Path) -> 
         w._on_worker_progress = types.MethodType(_tracked_progress, w)
 
         try:
-            arm_cb = w._capture.findChild(QCheckBox, "fcapz_capture_auto_rearm")
+            arm_cb = w.findChild(QCheckBox, "fcapz_capture_auto_rearm")
             assert arm_cb is not None
             arm_cb.setChecked(True)
             arm_btn = _button_in_widget(w._capture, "Arm")
