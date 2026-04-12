@@ -31,6 +31,44 @@ from ..cli import _parse_probes
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
+_TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
+    ("Hex", 16),
+    ("Dec", 10),
+    ("Oct", 8),
+    ("Bin", 2),
+)
+
+
+def _parse_trigger_value_text(text: str, base: int) -> int:
+    s = text.strip().replace("_", "")
+    if not s:
+        raise ValueError("trigger value empty")
+    if base == 16:
+        s = s.removeprefix("0x").removeprefix("0X")
+        return int(s, 16)
+    if base == 10:
+        return int(s, 10)
+    if base == 8:
+        s = s.removeprefix("0o").removeprefix("0O")
+        return int(s, 8)
+    if base == 2:
+        s = s.removeprefix("0b").removeprefix("0B")
+        return int(s, 2)
+    return int(s, 0)
+
+
+def _format_trigger_value_int(value: int, base: int) -> str:
+    u = int(value)
+    if base == 16:
+        return hex(u)
+    if base == 10:
+        return str(u)
+    if base == 8:
+        return oct(u)
+    if base == 2:
+        return bin(u)
+    return str(u)
+
 
 def _preset_label(ent: Mapping[str, Any]) -> str:
     pre = ent.get("pretrigger", "?")
@@ -73,6 +111,10 @@ class CapturePanel(QGroupBox):
         self._hw_depth: int | None = None
         self._hw_num_chan: int | None = None
         self._hw_trig_stages: int = 0
+        self._hw_has_decimation: bool = True
+        self._hw_has_ext_trigger: bool = True
+        self._hw_has_storage_qual: bool = True
+        self._hw_probe_mux_w: int = 0
 
         self._hw_label = QLabel(
             "Connect first (toolbar or Connection panel). "
@@ -101,6 +143,23 @@ class CapturePanel(QGroupBox):
         for m in ("value_match", "edge_detect", "both"):
             self._trig_mode.addItem(m)
         self._trig_val = QLineEdit("0")
+        self._trig_val.setObjectName("fcapz_capture_trig_val")
+        self._trig_val_parse_base = 16
+        trig_val_wrap = QWidget()
+        trig_val_row = QHBoxLayout(trig_val_wrap)
+        trig_val_row.setContentsMargins(0, 0, 0, 0)
+        trig_val_row.addWidget(self._trig_val, 1)
+        self._trig_val_radix = QComboBox()
+        for label, base in _TRIGGER_VALUE_RADIXES:
+            self._trig_val_radix.addItem(label, base)
+        self._trig_val_radix.setCurrentIndex(0)
+        self._trig_val_radix.setObjectName("fcapz_capture_trig_val_radix")
+        self._trig_val_radix.setToolTip(
+            "Radix for the trigger value field (value_match / edge_detect / both).",
+        )
+        trig_val_row.addWidget(self._trig_val_radix, 0)
+        self._trig_val_radix.currentIndexChanged.connect(self._on_trig_val_radix_changed)
+
         self._trig_mask = QLineEdit("0xFF")
 
         self._clock_hz = QSpinBox()
@@ -112,6 +171,7 @@ class CapturePanel(QGroupBox):
         self._channel.setValue(0)
 
         self._decim = QSpinBox()
+        self._decim.setObjectName("fcapz_capture_decim")
         self._decim.setRange(0, 65535)
         self._decim.setValue(0)
 
@@ -120,10 +180,12 @@ class CapturePanel(QGroupBox):
         self._probe_sel.setValue(0)
 
         self._ext_trig = QComboBox()
+        self._ext_trig.setObjectName("fcapz_capture_ext_trig")
         for m in ("disabled", "or", "and"):
             self._ext_trig.addItem(m)
 
         self._stor_mode = QSpinBox()
+        self._stor_mode.setObjectName("fcapz_capture_stor_mode")
         self._stor_mode.setRange(0, 2)
         self._stor_val = QLineEdit("0")
         self._stor_mask = QLineEdit("0")
@@ -197,7 +259,7 @@ class CapturePanel(QGroupBox):
         form_main.addRow("Pre-trigger samples", self._pre)
         form_main.addRow("Post-trigger samples", self._post)
         form_main.addRow("Trigger mode", self._trig_mode)
-        form_main.addRow("Trigger value", self._trig_val)
+        form_main.addRow("Trigger value", trig_val_wrap)
         form_main.addRow("Trigger mask", self._trig_mask)
         form_main.addRow("Sample clock (Hz)", self._clock_hz)
         form_main.addRow("Channel", self._channel)
@@ -238,12 +300,17 @@ class CapturePanel(QGroupBox):
         grid.addLayout(row_btns, 4, 0)
 
         self._refresh_seq_ui_state()
+        self._apply_hw_feature_availability()
 
     def clear_hw(self) -> None:
         self._hw_sample_w = None
         self._hw_depth = None
         self._hw_num_chan = None
         self._hw_trig_stages = 0
+        self._hw_has_decimation = True
+        self._hw_has_ext_trigger = True
+        self._hw_has_storage_qual = True
+        self._hw_probe_mux_w = 0
         self._btn_stop.setEnabled(False)
         self._hw_label.setText(
             "Connect first (toolbar or Connection panel). "
@@ -255,6 +322,90 @@ class CapturePanel(QGroupBox):
             self._seq_enable.setChecked(False)
         self._seq_table.setRowCount(0)
         self._refresh_seq_ui_state()
+        self._apply_hw_feature_availability()
+
+    def _apply_hw_feature_availability(self) -> None:
+        """Enable/disable advanced fields from :meth:`fcapz.analyzer.Analyzer.probe` flags."""
+        connected = self._hw_sample_w is not None
+        if not connected:
+            self._decim.setEnabled(True)
+            self._decim.setToolTip("")
+            self._ext_trig.setEnabled(True)
+            self._ext_trig.setToolTip("")
+            self._stor_mode.setEnabled(True)
+            self._stor_val.setEnabled(True)
+            self._stor_mask.setEnabled(True)
+            self._stor_mode.setToolTip("")
+            self._stor_val.setToolTip("")
+            self._stor_mask.setToolTip("")
+            with QSignalBlocker(self._probe_sel):
+                self._probe_sel.setMaximum(1023)
+            self._probe_sel.setEnabled(True)
+            self._probe_sel.setToolTip("")
+            return
+
+        if self._hw_has_decimation:
+            self._decim.setEnabled(True)
+            self._decim.setToolTip("")
+        else:
+            self._decim.setEnabled(False)
+            self._decim.setToolTip(
+                "This ELA build has no decimation (FEATURES bit 5). "
+                "Use decimation=0 or rebuild with DECIM_EN.",
+            )
+
+        if self._hw_has_ext_trigger:
+            self._ext_trig.setEnabled(True)
+            self._ext_trig.setToolTip("")
+        else:
+            with QSignalBlocker(self._ext_trig):
+                if self._ext_trig.currentText() != "disabled":
+                    self._ext_trig.setCurrentIndex(0)
+            self._ext_trig.setEnabled(False)
+            self._ext_trig.setToolTip(
+                "External trigger is not in this bitstream (FEATURES bit 6).",
+            )
+
+        if self._hw_has_storage_qual:
+            self._stor_mode.setEnabled(True)
+            self._stor_val.setEnabled(True)
+            self._stor_mask.setEnabled(True)
+            self._stor_mode.setToolTip("")
+            self._stor_val.setToolTip("")
+            self._stor_mask.setToolTip("")
+        else:
+            self._stor_mode.setEnabled(False)
+            self._stor_val.setEnabled(False)
+            self._stor_mask.setEnabled(False)
+            tip = (
+                "Storage qualification was compiled out (FEATURES bit 4). "
+                "Set mode to 0 or rebuild with STOR_QUAL."
+            )
+            self._stor_mode.setToolTip(tip)
+            self._stor_val.setToolTip(tip)
+            self._stor_mask.setToolTip(tip)
+
+        sw = max(1, int(self._hw_sample_w))
+        pmw = int(self._hw_probe_mux_w)
+        n_slices = max(1, pmw // sw) if pmw > sw else 1
+        if n_slices <= 1:
+            with QSignalBlocker(self._probe_sel):
+                self._probe_sel.setValue(0)
+                self._probe_sel.setMaximum(0)
+            self._probe_sel.setEnabled(False)
+            self._probe_sel.setToolTip(
+                "Only one probe mux slice (mux width ≤ sample width). Index is fixed at 0.",
+            )
+        else:
+            max_ix = n_slices - 1
+            with QSignalBlocker(self._probe_sel):
+                if self._probe_sel.value() > max_ix:
+                    self._probe_sel.setValue(max_ix)
+                self._probe_sel.setMaximum(max_ix)
+            self._probe_sel.setEnabled(True)
+            self._probe_sel.setToolTip(
+                f"Probe mux slice 0..{max_ix} ({pmw}-bit mux, {sw}-bit samples).",
+            )
 
     def set_probe_profiles(self, profiles: Mapping[str, ProbeProfile]) -> None:
         self._profiles = dict(profiles)
@@ -289,9 +440,26 @@ class CapturePanel(QGroupBox):
         idx = self._trig_mode.findText(mode)
         if idx >= 0:
             self._trig_mode.setCurrentIndex(idx)
+        radix_raw = entry.get("trigger_value_radix")
+        radix: int | None = None
+        if radix_raw is not None:
+            try:
+                r = int(radix_raw)
+                if r in (2, 8, 10, 16):
+                    radix = r
+            except (TypeError, ValueError):
+                radix = None
+        if radix is not None:
+            ri = self._trig_val_radix.findData(radix)
+            if ri >= 0:
+                with QSignalBlocker(self._trig_val_radix):
+                    self._trig_val_radix.setCurrentIndex(ri)
+                self._trig_val_parse_base = radix
         if "trigger_value" in entry:
             try:
-                self._trig_val.setText(str(int(entry["trigger_value"])))
+                v = int(entry["trigger_value"])
+                base = int(self._trig_val_radix.currentData())
+                self._trig_val.setText(_format_trigger_value_int(v, base))
             except (TypeError, ValueError):
                 self._trig_val.setText(str(entry["trigger_value"]))
         if "trigger_mask" in entry:
@@ -531,6 +699,31 @@ class CapturePanel(QGroupBox):
         if isinstance(data, dict):
             self.apply_trigger_history_entry(data)
 
+    def _on_trig_val_radix_changed(self, index: int) -> None:
+        raw = self._trig_val_radix.itemData(index)
+        new_base = int(raw) if raw is not None else 16
+        old_base = self._trig_val_parse_base
+        if new_base == old_base:
+            return
+        text = self._trig_val.text().strip()
+        if not text:
+            v = 0
+        else:
+            try:
+                v = _parse_trigger_value_text(text, old_base)
+            except ValueError:
+                try:
+                    v = int(text, 0)
+                except ValueError:
+                    self._trig_val_parse_base = new_base
+                    return
+        self._trig_val.setText(_format_trigger_value_int(v, new_base))
+        self._trig_val_parse_base = new_base
+
+    def trigger_value_radix(self) -> int:
+        raw = self._trig_val_radix.currentData()
+        return int(raw) if raw is not None else 16
+
     def set_hw_probe_info(self, info: Mapping[str, Any]) -> None:
         sw = int(info["sample_width"])
         depth = int(info["depth"])
@@ -539,6 +732,10 @@ class CapturePanel(QGroupBox):
         self._hw_depth = depth
         self._hw_num_chan = max(1, nch)
         self._hw_trig_stages = max(0, int(info.get("trig_stages", 0)))
+        self._hw_has_decimation = bool(info.get("has_decimation", True))
+        self._hw_has_ext_trigger = bool(info.get("has_ext_trigger", True))
+        self._hw_has_storage_qual = bool(info.get("has_storage_qualification", True))
+        self._hw_probe_mux_w = int(info.get("probe_mux_w", 0))
         self._channel.setMaximum(self._hw_num_chan - 1)
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
@@ -548,6 +745,7 @@ class CapturePanel(QGroupBox):
         while self._seq_table.rowCount() > self._hw_trig_stages > 0:
             self._seq_table.removeRow(self._seq_table.rowCount() - 1)
         self._refresh_seq_ui_state()
+        self._apply_hw_feature_availability()
 
     def set_busy(self, busy: bool, *, continuous: bool = False) -> None:
         self._btn_cfg.setEnabled(not busy and self._hw_sample_w is not None)
@@ -555,6 +753,7 @@ class CapturePanel(QGroupBox):
         self._btn_cap.setEnabled(not busy and self._hw_sample_w is not None)
         self._btn_cont.setEnabled(not busy and self._hw_sample_w is not None)
         self._btn_stop.setEnabled(busy and continuous)
+        self._apply_hw_feature_availability()
 
     def timeout_seconds(self) -> float:
         return float(self._timeout.text().strip() or "10.0")
@@ -563,11 +762,15 @@ class CapturePanel(QGroupBox):
         if self._hw_sample_w is None or self._hw_depth is None:
             raise ValueError("Not connected — hardware sample width / depth unknown.")
         mode = self._trig_mode.currentText().strip()
+        base = self.trigger_value_radix()
         try:
-            tval = int(self._trig_val.text().strip(), 0)
+            tval = _parse_trigger_value_text(self._trig_val.text(), base)
             tmask = int(self._trig_mask.text().strip(), 0)
         except ValueError as exc:
-            raise ValueError("Trigger value/mask must be integers (0x hex allowed).") from exc
+            raise ValueError(
+                "Trigger value must be a valid integer in the selected radix; "
+                "mask must be an integer (0x hex allowed).",
+            ) from exc
         raw_probes = self._probes.text().strip()
         try:
             probes = _parse_probes(raw_probes) if raw_probes else []
@@ -575,11 +778,24 @@ class CapturePanel(QGroupBox):
             raise ValueError(str(exc)) from exc
         ext_key = self._ext_trig.currentText().strip().lower()
         ext_mode = {"disabled": 0, "or": 1, "and": 2}[ext_key]
+        if not self._hw_has_decimation and int(self._decim.value()) != 0:
+            raise ValueError(
+                "Decimation is not available in this ELA build (FEATURES bit 5); set to 0.",
+            )
+        if not self._hw_has_ext_trigger and ext_key != "disabled":
+            raise ValueError(
+                "External trigger is not available in this ELA build (FEATURES bit 6).",
+            )
         try:
             sqv = int(self._stor_val.text().strip(), 0)
             sqm = int(self._stor_mask.text().strip(), 0)
         except ValueError as exc:
             raise ValueError("Storage qual value/mask must be integers.") from exc
+        stor_m = int(self._stor_mode.value())
+        if not self._hw_has_storage_qual and stor_m != 0:
+            raise ValueError(
+                "Storage qualification is not in this bitstream (FEATURES bit 4); set mode to 0.",
+            )
         sequence: list[SequencerStage] | None = None
         if self._seq_enable.isChecked():
             if self._hw_trig_stages <= 0:
@@ -609,7 +825,7 @@ class CapturePanel(QGroupBox):
             ext_trigger_mode=ext_mode,
             sequence=sequence,
             probe_sel=int(self._probe_sel.value()),
-            stor_qual_mode=int(self._stor_mode.value()),
+            stor_qual_mode=stor_m,
             stor_qual_value=sqv,
             stor_qual_mask=sqm,
             trigger_delay=int(self._trig_delay.value()),
@@ -618,16 +834,29 @@ class CapturePanel(QGroupBox):
     def wire_collapsible_persistence(self, callback: Callable[[], None]) -> None:
         self._adv_section.expandedChanged.connect(lambda _e: callback())
         self._seq_section.expandedChanged.connect(lambda _e: callback())
+        self._trig_val_radix.currentIndexChanged.connect(lambda _i: callback())
 
     def save_collapsible_ui_prefs(self, st: QSettings) -> None:
         st.setValue("ui/capture_adv_open", self._adv_section.isExpanded())
         st.setValue("ui/capture_seq_open", self._seq_section.isExpanded())
+        st.setValue("ui/trigger_value_radix", self.trigger_value_radix())
 
     def load_collapsible_ui_prefs(self, st: QSettings) -> None:
         if st.contains("ui/capture_adv_open"):
             self._adv_section.setExpanded(bool(st.value("ui/capture_adv_open")))
         if st.contains("ui/capture_seq_open"):
             self._seq_section.setExpanded(bool(st.value("ui/capture_seq_open")))
+        if st.contains("ui/trigger_value_radix"):
+            try:
+                r = int(st.value("ui/trigger_value_radix"))
+                if r in (2, 8, 10, 16):
+                    ri = self._trig_val_radix.findData(r)
+                    if ri >= 0:
+                        with QSignalBlocker(self._trig_val_radix):
+                            self._trig_val_radix.setCurrentIndex(ri)
+                        self._trig_val_parse_base = r
+            except (TypeError, ValueError):
+                pass
 
     def wire_handlers(
         self,

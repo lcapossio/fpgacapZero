@@ -30,6 +30,8 @@ def _format_probe_summary(info: Mapping[str, Any]) -> str:
     if ts is not None:
         lines.append(f"Trigger sequencer stages: {int(ts)}")
     flags: list[str] = []
+    if info.get("has_storage_qualification"):
+        flags.append("storage qualification")
     if info.get("has_decimation"):
         flags.append("decimation")
     if info.get("has_ext_trigger"):

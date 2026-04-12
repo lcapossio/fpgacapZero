@@ -168,6 +168,16 @@ class AnalyzerTests(unittest.TestCase):
                 p.unlink(missing_ok=True)
             tmp_root.rmdir()
 
+    def test_probe_reports_storage_qualification_flag(self):
+        """FEATURES[4] is exposed as has_storage_qualification."""
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        transport.regs[0x003C] = int(transport.regs[0x003C]) | (1 << 4)
+        self.assertTrue(analyzer.probe()["has_storage_qualification"])
+        transport.regs[0x003C] = int(transport.regs[0x003C]) & ~(1 << 4)
+        self.assertFalse(analyzer.probe()["has_storage_qualification"])
+
 
 class SequencerTests(unittest.TestCase):
     """Tests for trigger sequencer register writes via configure()."""

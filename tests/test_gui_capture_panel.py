@@ -16,7 +16,14 @@ except ImportError:
     _HAVE_PYSIDE = False
 
 if _HAVE_PYSIDE:
-    from PySide6.QtWidgets import QApplication, QCheckBox, QLineEdit, QTableWidget
+    from PySide6.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QLineEdit,
+        QSpinBox,
+        QTableWidget,
+    )
 
     from fcapz.gui.capture_panel import CapturePanel
 
@@ -59,6 +66,45 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
         self.assertEqual(cfg.ext_trigger_mode, 1)
         self.assertEqual(len(cfg.probes), 1)
         self.assertEqual(cfg.probes[0].name, "a")
+
+    def test_build_capture_config_trigger_value_radix_hex(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        trig_radix = p.findChild(QComboBox, "fcapz_capture_trig_val_radix")
+        self.assertIsNotNone(trig_radix)
+        ri = trig_radix.findData(16)
+        self.assertGreaterEqual(ri, 0)
+        trig_radix.setCurrentIndex(ri)
+        tv = p.findChild(QLineEdit, "fcapz_capture_trig_val")
+        self.assertIsNotNone(tv)
+        tv.setText("ff")
+        cfg = p.build_capture_config()
+        self.assertEqual(cfg.trigger.value, 255)
+
+    def test_hw_probe_disables_unsupported_advanced_controls(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {
+                "sample_width": 8,
+                "depth": 1024,
+                "num_channels": 1,
+                "has_decimation": False,
+                "has_ext_trigger": False,
+                "has_storage_qualification": False,
+                "probe_mux_w": 8,
+                "trig_stages": 0,
+            },
+        )
+        decim = p.findChild(QSpinBox, "fcapz_capture_decim")
+        self.assertIsNotNone(decim)
+        self.assertFalse(decim.isEnabled())
+        ext_trig = p.findChild(QComboBox, "fcapz_capture_ext_trig")
+        self.assertIsNotNone(ext_trig)
+        self.assertFalse(ext_trig.isEnabled())
+        self.assertEqual(ext_trig.currentText(), "disabled")
+        stor = p.findChild(QSpinBox, "fcapz_capture_stor_mode")
+        self.assertIsNotNone(stor)
+        self.assertFalse(stor.isEnabled())
 
     def test_build_capture_config_sequencer_disabled_no_sequence(self) -> None:
         p = CapturePanel()

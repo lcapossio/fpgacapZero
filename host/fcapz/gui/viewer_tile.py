@@ -156,6 +156,34 @@ def _place_main_bottom_half(main: QMainWindow, bottom: _Rect) -> None:
     main.raise_()
 
 
+# Win32 ShowWindow commands (minimize / restore external viewer with main window).
+_SW_MINIMIZE = 6
+_SW_RESTORE = 9
+
+
+def win32_set_external_viewer_minimized(pid: int, *, minimized: bool) -> None:
+    """
+    Minimize or restore the largest visible top-level window for ``pid``.
+
+    Used so minimizing ``fcapz-gui`` also minimizes Surfer/GTKWave started from
+    the History panel. Windows only; no-op on other platforms or if no HWND
+    matches (viewer still starting, or already closed).
+    """
+    if sys.platform != "win32" or pid <= 0:
+        return
+    hwnd = _win32_find_largest_top_level_hwnd(pid)
+    if hwnd is None:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return
+    user32 = ctypes.windll.user32
+    cmd = _SW_MINIMIZE if minimized else _SW_RESTORE
+    user32.ShowWindow(wintypes.HWND(hwnd), int(cmd))
+
+
 def _win32_find_largest_top_level_hwnd(pid: int) -> int | None:
     if sys.platform != "win32":
         return None

@@ -40,6 +40,7 @@ def _probe_info() -> dict[str, Any]:
         "num_channels": 1,
         "has_decimation": True,
         "has_ext_trigger": True,
+        "has_storage_qualification": True,
         "has_timestamp": False,
         "timestamp_width": 32,
         "num_segments": 4,

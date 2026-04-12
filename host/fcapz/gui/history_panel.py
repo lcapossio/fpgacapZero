@@ -34,7 +34,7 @@ from .gtkw_writer import write_gtkw_for_capture
 from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
 from .surfer_wcp import SurferWcpBridge
-from .viewer_tile import schedule_vertical_split_with_viewer
+from .viewer_tile import schedule_vertical_split_with_viewer, win32_set_external_viewer_minimized
 from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
 
@@ -166,6 +166,17 @@ class HistoryPanel(QWidget):
     def select_viewer_index(self, index: int) -> None:
         if 0 <= index < self._viewer_combo.count():
             self._viewer_combo.setCurrentIndex(index)
+
+    def sync_external_viewers_minimized(self, minimized: bool) -> None:
+        """Windows: minimize or restore top-level windows of running viewer processes."""
+        if sys.platform != "win32":
+            return
+        for proc in list(self._viewer_processes):
+            if proc.state() != QProcess.ProcessState.Running:
+                continue
+            pid = int(proc.processId())
+            if pid > 0:
+                win32_set_external_viewer_minimized(pid, minimized=minimized)
 
     def stop_viewer_processes(self, *, aggressive: bool = False) -> None:
         """Stop external waveform viewer processes.

@@ -135,7 +135,7 @@ Top section — **trigger**:
 | **Pretrigger** spinner (0..depth) | `pretrigger` |
 | **Posttrigger** spinner (0..depth) | `posttrigger` |
 | **Trigger mode** dropdown | `trigger.mode` (`value_match` / `edge_detect` / `both`) |
-| **Trigger value** hex input | `trigger.value` |
+| **Trigger value** + radix (default **Hex**; also Dec / Oct / Bin) | `trigger.value` (parsed in the selected base) |
 | **Trigger mask** hex input | `trigger.mask` |
 | **Trigger delay** spinner (0..65535) | `trigger_delay` (new in v0.3.0) |
 | **Decimation** spinner | `decimation` |
@@ -167,6 +167,13 @@ stays responsive while waiting for the trigger.  When the worker
 emits `captureFinished`, the History panel adds a row.  When it
 emits `captureFailed`, a non-blocking notification appears at the
 bottom of the window.
+
+After **Connect**, the **Advanced** block grays out options the
+bitstream does not implement: **decimation** (FEATURES bit 5),
+**external trigger** (bit 6), **storage qualification** (bit 4),
+and **probe mux sel** when the mux is only one slice wide.  Tooltips
+on disabled widgets explain why.  The **ELA identity** dock shows
+the same capability flags in prose.
 
 ### Capture history panel
 
@@ -303,6 +310,13 @@ closing the GUI does not kill it.  See [chapter 15](15_export_formats.md)
 "Embedding caveat" for why most external viewers cannot be
 embedded inside the Qt window.
 
+**Windows:** When you **minimize** the main `fcapz-gui` window, the GUI also
+minimizes the largest top-level window of each **external viewer process it
+started** (the same association used when tiling the viewer above the GUI).
+When you restore `fcapz-gui` from the taskbar, those viewer windows are
+restored too.  On Linux and macOS this coupling is not implemented — the viewer
+stays in whatever state you left it.
+
 When you click **Open in viewer (GTKWave)**, the GUI also writes
 an **auto-generated `.gtkw` layout file** alongside the VCD.  The
 layout file tells GTKWave to:
@@ -398,7 +412,8 @@ the same arrangement.
    probe summary panel populates.
 4. Click the **ELA capture** tab.
 5. Set Pretrigger=8, Posttrigger=16, Trigger mode=value_match,
-   Trigger value=`0x42`, Trigger mask=`0xFF`.
+   Trigger value=`0x42` (radix defaults to hex; you can enter `42` without the prefix),
+   Trigger mask=`0xFF`.
 6. In the **Probes** subform, add `name=counter, width=8, lsb=0`.
 7. Click **Capture**.  Watch the spinner; in <1 s the capture
    appears in the History panel.

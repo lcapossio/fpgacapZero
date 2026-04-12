@@ -227,6 +227,9 @@ class TestTriggerHistoryEntry(unittest.TestCase):
         self.assertEqual(d["probe_sel"], 2)
         self.assertEqual(d["trigger_delay"], 3)
         self.assertEqual(d["trigger_sequence"], [])
+        self.assertNotIn("trigger_value_radix", d)
+        d16 = trigger_history_entry_from_config(cfg, trigger_value_radix=16)
+        self.assertEqual(d16["trigger_value_radix"], 16)
 
     def test_serializes_trigger_sequence_when_set(self) -> None:
         cfg = CaptureConfig(

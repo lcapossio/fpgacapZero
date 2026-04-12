@@ -311,13 +311,17 @@ def save_gui_settings(settings: GuiSettings, path: Path | None = None) -> None:
     p.write_bytes(data)
 
 
-def trigger_history_entry_from_config(cfg: CaptureConfig) -> dict[str, Any]:
+def trigger_history_entry_from_config(
+    cfg: CaptureConfig,
+    *,
+    trigger_value_radix: int | None = None,
+) -> dict[str, Any]:
     """Serialize capture/trigger fields for ``trigger_history`` in ``gui.toml``."""
     ext = {0: "disabled", 1: "or", 2: "and"}.get(int(cfg.ext_trigger_mode), "disabled")
     probes = (
         ",".join(f"{p.name}:{p.width}:{p.lsb}" for p in cfg.probes) if cfg.probes else ""
     )
-    return {
+    out: dict[str, Any] = {
         "pretrigger": int(cfg.pretrigger),
         "posttrigger": int(cfg.posttrigger),
         "trigger_mode": str(cfg.trigger.mode),
@@ -349,6 +353,9 @@ def trigger_history_entry_from_config(cfg: CaptureConfig) -> dict[str, Any]:
             for s in (cfg.sequence or [])
         ],
     }
+    if trigger_value_radix is not None and trigger_value_radix in (2, 8, 10, 16):
+        out["trigger_value_radix"] = int(trigger_value_radix)
+    return out
 
 
 def append_trigger_history(settings: GuiSettings, entry: Mapping[str, Any]) -> None:

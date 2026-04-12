@@ -7,6 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows:** Minimizing the `fcapz-gui` main window also minimizes external
+  waveform viewer windows started from the History panel; restoring the GUI
+  restores them (same PID/window association as vertical tiling).
+- **GUI:** Trigger value: radix dropdown (hex / dec / oct / bin) next to the
+  value field (**hex** by default); choice is saved in UI prefs, in
+  trigger-history presets as `trigger_value_radix`, and passed when recording
+  captures to `gui.toml`.
+- **GUI:** After connect, advanced ELA controls are disabled when the
+  bitstream lacks the matching FEATURES bits (decimation, external trigger,
+  storage qualification) or when the probe mux has only one slice; `probe()`
+  exposes `has_storage_qualification` (FEATURES[4]).
+
 ### Fixed
 
 - ELA capture now commits the trigger-cycle sample even when decimation or

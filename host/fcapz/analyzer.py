@@ -586,8 +586,9 @@ class Analyzer:
         then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
 
         Returns a dict with `version_major`, `version_minor`, `core_id`
-        (always 0x4C41 on success), `trig_stages` (FEATURES[3:0]: hardware
-        trigger sequencer depth, 0 if absent), and the rest of the feature flags.
+        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
+        trigger sequencer depth, 0 if absent), `has_storage_qualification`
+        (FEATURES[4]), and the rest of the feature flags.
         """
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
@@ -625,6 +626,7 @@ class Analyzer:
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
             "trig_stages": int(features & 0xF),
+            "has_storage_qualification": bool(features & (1 << 4)),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),

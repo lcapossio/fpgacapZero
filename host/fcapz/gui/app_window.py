@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         self._connect_worker: ConnectWorker | None = None
         self._continuous_mode = False
         self._console_interrupt_shutdown = False
+        self._viewer_minimized_with_main = False
         self._main_toolbar: QToolBar | None = None
         self._tb_act_connect: QAction | None = None
         self._tb_act_disconnect: QAction | None = None
@@ -718,11 +719,17 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event: QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
-        if (
-            event.type() == QEvent.Type.WindowStateChange
-            and self._persist_window_layout
-        ):
-            self._schedule_persist_layout()
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self._persist_window_layout:
+                self._schedule_persist_layout()
+            min_now = bool(self.windowState() & Qt.WindowState.WindowMinimized)
+            if min_now:
+                if not self._viewer_minimized_with_main:
+                    self._history.sync_external_viewers_minimized(True)
+                    self._viewer_minimized_with_main = True
+            elif self._viewer_minimized_with_main:
+                self._history.sync_external_viewers_minimized(False)
+                self._viewer_minimized_with_main = False
 
     def _ensure_main_toolbar_visible(self) -> None:
         tb = self._main_toolbar
@@ -969,7 +976,13 @@ class MainWindow(QMainWindow):
 
     def _persist_trigger_snapshot(self, cfg: CaptureConfig) -> None:
         gui = load_gui_settings(self._config_path)
-        append_trigger_history(gui, trigger_history_entry_from_config(cfg))
+        append_trigger_history(
+            gui,
+            trigger_history_entry_from_config(
+                cfg,
+                trigger_value_radix=self._capture.trigger_value_radix(),
+            ),
+        )
         save_gui_settings(gui, self._config_path)
         self._capture.set_trigger_history(gui.trigger_history)
 
