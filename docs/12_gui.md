@@ -223,21 +223,16 @@ adjacent identical values render as a flat line, not a sawtooth.
 
 ### EIO panel
 
-For each input bit, a **read-only LED widget** that polls
-`EioController.read_inputs()` at a configurable rate (default
-10 Hz).  For each output bit, a **clickable toggle** that calls
-`EioController.set_bit()` on click.
+**JTAG chain** spin box and **Attach EIO** create an `EioController` on the
+current transport and show core identity / bus widths.
 
-Top of panel:
+For each input bit, **read-only checkboxes** update from
+`EioController.read_inputs()` while **Poll inputs** is checked.
+A small combo box next to the checkbox sets the poll period (presets
+**25–1000 ms**, default **250 ms**).  For each output bit, a **clickable
+toggle** calls `EioController.set_bit()` when its state changes.
 
-- **Polling rate** slider (1..50 Hz)
-- **Read all inputs now** button (one-shot)
-- **Write all outputs** hex input + Apply button (for setting
-  multiple bits at once instead of clicking individual toggles)
-
-The polling timer pauses when the panel is not visible, so
-switching to another tab stops the JTAG traffic — the EIO panel
-never burns bandwidth in the background.
+Uncheck **Poll inputs** or disconnect to stop periodic JTAG reads.
 
 ### EJTAG-AXI bridge panel
 

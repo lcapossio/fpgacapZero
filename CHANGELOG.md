@@ -20,9 +20,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bitstream lacks the matching FEATURES bits (decimation, external trigger,
   storage qualification) or when the probe mux has only one slice; `probe()`
   exposes `has_storage_qualification` (FEATURES[4]).
+- **GUI:** EIO panel — small combo box next to “Poll inputs” to choose the
+  poll period (25–1000 ms presets; default 250 ms).
 
 ### Fixed
 
+- **hw_server / OpenOCD:** Serialize transport I/O with a mutex so concurrent
+  JTAG users (e.g. EIO input polling on a timer plus ELA capture on a worker
+  thread) no longer corrupt the xsdb or OpenOCD protocol stream, which used to
+  surface as ``xsdb: no bit string in output`` with empty stdout.
 - ELA capture now commits the trigger-cycle sample even when decimation or
   storage qualification would otherwise skip that cycle, so
   `samples[pretrigger]` remains the actual trigger sample.
@@ -53,6 +59,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- [docs/12_gui.md](docs/12_gui.md) and [docs/06_eio_core.md](docs/06_eio_core.md)
+  describe the EIO panel as implemented (attach, **Poll inputs**, ms-period
+  combo, per-bit toggles); troubleshooting notes concurrent poll + capture.
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [README.md](README.md) now describe the
   default pytest `-m "not hw"` filter, how to override it, and the opt-in
   GUI+hardware suite (`tests/test_gui_hw_capture.py`, `FPGACAP_GUI_HW=1`).

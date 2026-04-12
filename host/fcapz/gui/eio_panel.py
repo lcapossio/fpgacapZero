@@ -8,6 +8,7 @@ from functools import partial
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -25,6 +26,8 @@ from ..transport import Transport
 from .jtag_chain_scope import subsidiary_jtag_chain
 
 _MAX_BITS_UI = 32
+_POLL_MS_PRESETS = (25, 50, 100, 250, 500, 1000)
+_DEFAULT_POLL_MS = 250
 
 
 class EioPanel(QGroupBox):
@@ -47,8 +50,16 @@ class EioPanel(QGroupBox):
         self._info.setWordWrap(True)
 
         self._poll_enable = QCheckBox("Poll inputs")
+        self._poll_ms_combo = QComboBox()
+        for ms in _POLL_MS_PRESETS:
+            self._poll_ms_combo.addItem(f"{ms} ms", ms)
+        self._poll_ms_combo.setCurrentIndex(_POLL_MS_PRESETS.index(_DEFAULT_POLL_MS))
+        self._poll_ms_combo.setMaximumWidth(88)
+        self._poll_ms_combo.setToolTip("How often to read EIO inputs while polling is on.")
+        self._poll_ms_combo.currentIndexChanged.connect(self._on_poll_interval_changed)
+
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(250)
+        self._poll_timer.setInterval(_DEFAULT_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_tick)
 
         self._in_grid = QWidget()
@@ -75,7 +86,11 @@ class EioPanel(QGroupBox):
         form = QFormLayout()
         form.addRow(row)
         form.addRow(self._info)
-        form.addRow(self._poll_enable)
+        poll_row = QHBoxLayout()
+        poll_row.addWidget(self._poll_enable)
+        poll_row.addWidget(self._poll_ms_combo)
+        poll_row.addStretch(1)
+        form.addRow(poll_row)
         form.addRow(QLabel("Inputs (read-only)"), in_scroll)
         form.addRow(QLabel("Outputs"), out_scroll)
 
@@ -126,6 +141,13 @@ class EioPanel(QGroupBox):
             self._poll_timer.start()
         else:
             self._poll_timer.stop()
+
+    def _poll_interval_ms(self) -> int:
+        data = self._poll_ms_combo.currentData()
+        return int(data) if data is not None else _DEFAULT_POLL_MS
+
+    def _on_poll_interval_changed(self, _index: int) -> None:
+        self._poll_timer.setInterval(self._poll_interval_ms())
 
     def _rebuild_bits(self, in_n: int, out_n: int) -> None:
         for c in self._in_checks:

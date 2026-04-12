@@ -134,6 +134,9 @@ class OpenOcdTransport(Transport):
     Drives the fpgacapZero BSCANE2 USER register interface via the OpenOCD
     TCL socket (default port 6666).
 
+    Socket reads and writes are serialized with a lock so concurrent use
+    (e.g. multiple GUI workers) cannot corrupt the byte stream.
+
     Protocol recap (49-bit DR, LSB-first):
         bits[31:0]  = wdata / rdata
         bits[47:32] = addr[15:0]
@@ -180,6 +183,7 @@ class OpenOcdTransport(Transport):
         self._connect_timeout_sec = float(connect_timeout_sec)
         self._active_chain: int = 1
         self._sock: socket.socket | None = None
+        self._sock_lock = threading.Lock()
 
     def connect(self) -> None:
         self._sock = socket.create_connection(
@@ -204,14 +208,15 @@ class OpenOcdTransport(Transport):
     def _cmd(self, tcl: str) -> str:
         if not self._sock:
             raise RuntimeError("not connected — call connect() first")
-        self._sock.sendall((tcl + "\x1a").encode())
-        buf = b""
-        while not buf.endswith(b"\x1a"):
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("OpenOCD closed the connection")
-            buf += chunk
-        return buf[:-1].decode().strip()
+        with self._sock_lock:
+            self._sock.sendall((tcl + "\x1a").encode())
+            buf = b""
+            while not buf.endswith(b"\x1a"):
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("OpenOCD closed the connection")
+                buf += chunk
+            return buf[:-1].decode().strip()
 
     def select_chain(self, chain: int) -> None:
         """Select BSCANE2 USER chain for subsequent register accesses."""
@@ -261,6 +266,8 @@ class XilinxHwServerTransport(Transport):
     Keeps an ``xsdb`` process alive and sends TCL commands over stdin.
     This avoids the overhead of spawning a new process per register access
     and enables efficient batched ``read_block`` operations.
+    A mutex serializes :meth:`_send` so concurrent threads (e.g. GUI EIO
+    polling and ELA capture) cannot interleave on the single process.
 
     Uses the ``-bits`` format for ``drshift`` which provides standard JTAG
     bit ordering (``-hex`` has a non-standard byte/nibble mapping in XSDB).
@@ -336,6 +343,7 @@ class XilinxHwServerTransport(Transport):
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stderr_lines: list[str] = []
+        self._xsdb_io_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -836,25 +844,26 @@ class XilinxHwServerTransport(Transport):
 
     def _send(self, tcl: str) -> str:
         """Send *tcl* to the persistent xsdb process and return output."""
-        if not self._proc or not self._proc.stdin or not self._proc.stdout:
-            raise RuntimeError("not connected — call connect() first")
-        self._proc.stdin.write(tcl + "\n")
-        self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
-        self._proc.stdin.flush()
+        with self._xsdb_io_lock:
+            if not self._proc or not self._proc.stdin or not self._proc.stdout:
+                raise RuntimeError("not connected — call connect() first")
+            self._proc.stdin.write(tcl + "\n")
+            self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
+            self._proc.stdin.flush()
 
-        lines: list[str] = []
-        while True:
-            raw = self._proc.stdout.readline()
-            if not raw:
-                stderr = "\n".join(self._stderr_lines[-20:])
-                raise ConnectionError(
-                    f"xsdb process exited unexpectedly. stderr:\n{stderr}"
-                )
-            line = raw.rstrip("\n\r")
-            if line.strip() == self._SENTINEL:
-                break
-            lines.append(line)
-        return "\n".join(lines)
+            lines: list[str] = []
+            while True:
+                raw = self._proc.stdout.readline()
+                if not raw:
+                    stderr = "\n".join(self._stderr_lines[-20:])
+                    raise ConnectionError(
+                        f"xsdb process exited unexpectedly. stderr:\n{stderr}"
+                    )
+                line = raw.rstrip("\n\r")
+                if line.strip() == self._SENTINEL:
+                    break
+                lines.append(line)
+            return "\n".join(lines)
 
     def _drain_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:

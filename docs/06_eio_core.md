@@ -323,10 +323,10 @@ See [chapter 11](11_rpc_server.md) for the full RPC protocol.
 ## GUI usage
 
 The desktop GUI ([chapter 12](12_gui.md)) has an EIO panel with
-**per-bit toggles** and a configurable polling rate, so you can
-watch input bits update in real time and click an output bit to
-toggle it.  This is the easiest way to use EIO if you have the GUI
-installed.
+**Poll inputs** (and an ms-period preset combo), read-only input
+indicators, and **per-bit output toggles**, so you can watch inputs
+update and drive outputs interactively.  This is the easiest way to
+use EIO if you have the GUI installed.
 
 ## Resource usage
 
