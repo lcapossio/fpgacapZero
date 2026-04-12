@@ -15,6 +15,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Transport:** Optional `FCAPZ_LOG_CONNECT_TIMING=1` logs hw_server connect
   phases (socket open, hello, target open, JTAG open) to stderr for diagnosing
   slow or stuck connects; GUI worker enables it when the env var is set.
+- **GUI:** Application event filter ignores the mouse wheel on spin boxes and
+  combo boxes so scrolling docks does not accidentally change values; same
+  filter in the dummy-capture demo app.
 - **GUI:** `Analyzer.immediate_variant()` and **Trigger Immediate** (was Capture)
   — force a waveform as soon as pre-trigger is ready (always-true compare;
   sequencer bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture

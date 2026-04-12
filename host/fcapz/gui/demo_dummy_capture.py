@@ -124,8 +124,10 @@ def main(_argv: list[str] | None = None) -> int:
         apply_application_ui_font,
         apply_gui_application_style,
     )
+    from .reject_spin_combo_wheel import install_reject_spin_combo_wheel_filter
     from .settings import load_gui_settings
 
+    install_reject_spin_combo_wheel_filter(app)
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
 

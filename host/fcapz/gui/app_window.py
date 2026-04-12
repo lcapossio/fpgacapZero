@@ -53,6 +53,7 @@ from .eio_panel import EioPanel
 from .history_panel import HistoryPanel
 from .log_panel import LogPanel
 from .probe_panel import ProbePanel
+from .reject_spin_combo_wheel import install_reject_spin_combo_wheel_filter
 from .uart_panel import UartPanel
 from .settings import (
     GuiSettings,
@@ -1427,6 +1428,7 @@ def run_app(argv: list[str] | None = None) -> int:
     )
     _windows_set_taskbar_app_identity()
     app = QApplication(args)
+    install_reject_spin_combo_wheel_filter(app)
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
     app.setApplicationName("fcapz-gui")
