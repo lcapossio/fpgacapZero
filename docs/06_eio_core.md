@@ -33,6 +33,18 @@ wrote 0x55
 
 — and watch the LEDs change to `0x55` immediately, no rebuild.
 
+### Arty A7 + desktop GUI
+
+The board has **no separate “input LEDs”**: the **Inputs** row in the
+EIO dock is a read-only mirror of `probe_in` in the GUI. Turn on
+**Poll inputs** so it updates. The **four green LEDs** are driven only
+from **Outputs** (`probe_out[3:0]`). You must click **Attach EIO**
+first (chain **3** for [`arty_a7_top.v`](../examples/arty_a7/arty_a7_top.v)).
+If the LEDs still ignore writes, confirm the FPGA is programmed with
+that reference bitstream and rebuild if you changed the top-level
+(after programming, `fcapz eio-write 0x0F` from the CLI is a quick
+sanity check).
+
 ## Architecture
 
 ```

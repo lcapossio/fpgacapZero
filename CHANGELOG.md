@@ -41,6 +41,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **GUI / EIO:** Probe UI stays disabled until **Attach EIO**; **All outputs on**
+  writes the full output width; output checkboxes sync from hardware readback
+  after writes; tooltips plus [`docs/06_eio_core.md`](docs/06_eio_core.md) and
+  [`docs/12_gui.md`](docs/12_gui.md) clarify Attach, **Poll inputs** (inputs
+  only) vs **Outputs** (fabric / board LEDs on the Arty reference).
 - **hw_server / OpenOCD:** Serialize transport I/O with a mutex so concurrent
   JTAG users (e.g. EIO input polling on a timer plus ELA capture on a worker
   thread) no longer corrupt the xsdb or OpenOCD protocol stream, which used to

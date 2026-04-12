@@ -154,7 +154,7 @@ becomes a `ProbeSpec` in the `CaptureConfig`.  The probe panel
 validates as you type — overlapping bit ranges turn red.
 
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
-**Auto re-arm** (checkbox), **Trigger Immediate**, **Stop**.
+**Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 
 ELA dock — bottom **action buttons**:
 
@@ -424,9 +424,15 @@ the same arrangement.
 9. Click **[Open in viewer ▾] → GTKWave**.  GTKWave opens in a
    separate window with the auto-generated `.gtkw` layout — your
    `counter` signal is already added and labelled.
-10. Click the **EIO** tab, watch the input LEDs reflect the
-    counter / button state, click an output toggle to flip an LED
-    on the board.
+10. Click the **EIO** tab, click **Attach EIO** (chain **3** on the
+    Arty reference bitstream). Turn on **Poll inputs** to refresh the
+    **Inputs** checkboxes — they mirror `btn[3:0]` and the counter
+    nibbles; they do **not** light the board by themselves. Use the
+    **Outputs** checkboxes to drive `probe_out`; on Arty, bits **0–3**
+    drive the four **green** LEDs (active high). **All outputs on**
+    sets every `probe_out` bit in one write (unchecked clears all bits).
+    Until **Attach EIO** succeeds, poll controls and the I/O grids stay
+    disabled.
 11. Click the **EJTAG-AXI** tab, type `0x40000000` into the address
     field, click **Read**.
 12. Done.  Disconnect from the Connection panel when you're
