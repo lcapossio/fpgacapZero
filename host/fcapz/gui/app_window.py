@@ -337,6 +337,8 @@ class MainWindow(QMainWindow):
             self._restore_window_layout_from_settings()
             # Saved state can leave another workbench tab (e.g. UART) on top; match first-run UX.
             self._dock_capture.raise_()
+        # restoreState() resets toolbar widgets; re-apply prefs saved in the INI.
+        self._apply_auto_rearm_pref_from_settings()
         self._ensure_no_central_gutter()
         self._ensure_main_toolbar_visible()
 
@@ -667,31 +669,28 @@ class MainWindow(QMainWindow):
         self._tb_act_arm = _add("arm", "Arm", self._on_arm_clicked)
         self._tb_act_arm.setToolTip(
             "Normal capture: selected trigger, arm, wait until it fires, read back. "
-            "Enable Auto re-arm on the toolbar to repeat.",
+            "Enable Auto re-arm on the toolbar (beside Stop) to repeat.",
         )
         self._tb_act_arm.setStatusTip(self._tb_act_arm.toolTip())
         tb.addWidget(_tb_spacer())
         tb.addSeparator()
+        self._tb_act_capture = _add("capture", "Trigger Immediate", self._on_capture_clicked)
+        self._tb_act_capture.setToolTip(
+            "Force trigger when pre-trigger is ready (always-true compare). "
+            "Enable Auto re-arm on the toolbar (beside Stop) to repeat.",
+        )
+        self._tb_act_capture.setStatusTip(self._tb_act_capture.toolTip())
+        self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
+        tb.addWidget(_tb_spacer(6))
         self._tb_chk_auto_rearm = QCheckBox("Auto re-arm")
         self._tb_chk_auto_rearm.setObjectName("fcapz_capture_auto_rearm")
         self._tb_chk_auto_rearm.setToolTip(
             "After each finished capture, arm again for another. Applies to Arm "
             "(normal trigger) and Trigger Immediate. Use Stop to end the loop.",
         )
-        _ui = self._window_qsettings()
-        if _ui.contains("ui/capture_auto_rearm"):
-            with QSignalBlocker(self._tb_chk_auto_rearm):
-                self._tb_chk_auto_rearm.setChecked(_settings_bool(_ui.value("ui/capture_auto_rearm")))
         self._tb_chk_auto_rearm.toggled.connect(lambda _on: self._schedule_ui_prefs_save())
+        self._apply_auto_rearm_pref_from_settings()
         tb.addWidget(self._tb_chk_auto_rearm)
-        tb.addWidget(_tb_spacer(6))
-        self._tb_act_capture = _add("capture", "Trigger Immediate", self._on_capture_clicked)
-        self._tb_act_capture.setToolTip(
-            "Force trigger when pre-trigger is ready (always-true compare). "
-            "Enable Auto re-arm on the toolbar to repeat.",
-        )
-        self._tb_act_capture.setStatusTip(self._tb_act_capture.toolTip())
-        self._tb_act_stop = _add("stop", "Stop", self._on_stop_continuous)
         self.addToolBar(_TOP_TOOLBAR_AREA, tb)
         tb.setVisible(True)
         self._main_toolbar = tb
@@ -771,6 +770,17 @@ class MainWindow(QMainWindow):
             st.setValue("ui/capture_auto_rearm", self._tb_chk_auto_rearm.isChecked())
         st.sync()
 
+    def _apply_auto_rearm_pref_from_settings(self) -> None:
+        """Set Auto re-arm from ``fcapz-gui-window.ini``; needed after ``restoreState`` clobbers the toolbar."""
+        chk = self._tb_chk_auto_rearm
+        if chk is None:
+            return
+        st = self._window_qsettings()
+        if not st.contains("ui/capture_auto_rearm"):
+            return
+        with QSignalBlocker(chk):
+            chk.setChecked(_settings_bool(st.value("ui/capture_auto_rearm")))
+
     def _auto_rearm(self) -> bool:
         if self._tb_chk_auto_rearm is None:
             return False
@@ -845,6 +855,7 @@ class MainWindow(QMainWindow):
         self._schedule_dock_reflow()
         self._ensure_main_toolbar_visible()
         self._schedule_persist_layout()
+        self._apply_auto_rearm_pref_from_settings()
 
     def _on_delete_user_layout(self, key: str) -> None:
         r = QMessageBox.question(

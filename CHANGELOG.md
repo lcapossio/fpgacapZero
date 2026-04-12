@@ -18,8 +18,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **GUI:** `Analyzer.immediate_variant()` and **Trigger Immediate** (was Capture)
   — force a waveform as soon as pre-trigger is ready (always-true compare;
   sequencer bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture
-  on a worker thread. **Auto re-arm** lives on the main toolbar and applies to
-  both paths; toolbar no longer has a separate Continuous action.
+  on a worker thread. **Auto re-arm** sits beside **Stop** on the main toolbar
+  and applies to both paths; toolbar no longer has a separate Continuous action.
+  After **restoreState**, the checkbox is re-applied from saved prefs so layout
+  restore does not clear it.
 - **Windows:** Minimizing the `fcapz-gui` main window also minimizes external
   waveform viewer windows started from the History panel; restoring the GUI
   restores them (same PID/window association as vertical tiling).
