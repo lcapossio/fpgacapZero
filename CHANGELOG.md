@@ -9,6 +9,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Docs:** JTAG register map spec — in-document index, ↑ Top anchors, and
+  clarified per-core “address map” scope ([`docs/specs/register_map.md`](docs/specs/register_map.md));
+  chapter 13 stub updated ([`docs/13_register_map.md`](docs/13_register_map.md)).
 - **GUI:** `Analyzer.immediate_variant()` and **Trigger Immediate** (was Capture)
   — force a waveform as soon as pre-trigger is ready (always-true compare;
   sequencer bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture

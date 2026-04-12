@@ -8,6 +8,24 @@
 > If you are reading the manual top-to-bottom, jump to that file
 > now and come back here when you're done.
 
+## What this document calls a “register map” (and “address map”)
+
+In fcapz docs, the **register map** is the contract for **how you talk to
+each on-chip debug core through JTAG**: which scan chain / `USERx`
+instruction, which **32-bit register offsets** you read and write, and
+how the fields are encoded. It is **not** your FPGA SoC’s general
+memory map (DDR, peripherals, AXI crossbar) unless you are in the
+**EJTAG-AXI** part of the spec, where the bridge’s shift format carries a
+**separate** AXI `addr` field for bus transactions.
+
+Inside [`specs/register_map.md`](specs/register_map.md), a heading
+**Address map** (or **Address Map**) is always **scoped to the section
+you are in**. The first big table is **ELA only** (logic analyzer
+control via USER1, with USER2 for burst sample data). Later sections
+give **EIO** (USER3) and the **EJTAG** bridges (USER4) their own layouts.
+Offsets like `0x0004` start over **per core** — they are not one global
+address space across the chip.
+
 ## Why this chapter is a stub
 
 Maintaining a register map in two places (a chapter and a spec) is
@@ -15,6 +33,10 @@ how documentation rots.  The spec at
 [`specs/register_map.md`](specs/register_map.md) is the **single
 source of truth** and is updated whenever the RTL changes; this
 chapter is a navigation aid that points you at it.
+
+That file begins with an **Index** of sections and subsections (HTML
+fragment IDs so links work reliably on GitHub) and places **↑ Top**
+after each major section for quick return to the title.
 
 ## What's in `specs/register_map.md`
 
