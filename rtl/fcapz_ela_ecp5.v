@@ -35,6 +35,7 @@ module fcapz_ela_ecp5 #(
     parameter STOR_QUAL    = 0,
     parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
+    parameter TIMESTAMP_W  = 0,
     parameter BURST_W      = 256,
     parameter CTRL_CHAIN   = 1,
     parameter DATA_CHAIN   = 2,
@@ -70,7 +71,9 @@ module fcapz_ela_ecp5 #(
     // Burst interface
     wire [PTR_W-1:0]    burst_rd_addr;
     wire [SAMPLE_W-1:0] burst_rd_data;
+    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
+    wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
 
     // ---- TAP wrappers ----
@@ -120,7 +123,8 @@ module fcapz_ela_ecp5 #(
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
-                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS)
+                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -129,7 +133,9 @@ module fcapz_ela_ecp5 #(
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
                 .jtag_rdata(ela_rdata),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
-                .burst_start(burst_start), .burst_start_ptr(burst_start_ptr)
+                .burst_rd_ts_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_start_ptr(burst_start_ptr)
             );
 
             fcapz_eio #(.IN_W(EIO_IN_W), .OUT_W(EIO_OUT_W)) u_eio (
@@ -143,7 +149,8 @@ module fcapz_ela_ecp5 #(
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
-                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS)
+                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -152,7 +159,9 @@ module fcapz_ela_ecp5 #(
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
                 .jtag_rdata(jtag_rdata),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
-                .burst_start(burst_start), .burst_start_ptr(burst_start_ptr)
+                .burst_rd_ts_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_start_ptr(burst_start_ptr)
             );
 
             assign eio_probe_out = {EIO_OUT_W{1'b0}};
@@ -161,14 +170,17 @@ module fcapz_ela_ecp5 #(
 
     // ---- Burst read engine ----
     jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH), .BURST_W(BURST_W)
+        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+        .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
         .arst(sample_rst),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),
-        .mem_addr(burst_rd_addr), .mem_data(burst_rd_data),
-        .burst_start(burst_start), .burst_ptr_in(burst_start_ptr)
+        .mem_addr(burst_rd_addr),
+        .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+        .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+        .burst_ptr_in(burst_start_ptr)
     );
 
 endmodule

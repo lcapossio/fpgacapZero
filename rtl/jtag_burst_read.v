@@ -21,6 +21,7 @@
 
 module jtag_burst_read #(
     parameter SAMPLE_W = 8,
+    parameter TIMESTAMP_W = 0,
     parameter DEPTH    = 1024,
     parameter BURST_W  = 256,
     // Ring depth for read pointer (DEPTH when one segment; DEPTH/NUM_SEGMENTS when split)
@@ -39,17 +40,24 @@ module jtag_burst_read #(
 
     // Dual-port memory read (tck domain)
     output wire [$clog2(DEPTH)-1:0] mem_addr,
-    input  wire [SAMPLE_W-1:0]      mem_data,
+    input  wire [SAMPLE_W-1:0]      sample_data,
+    input  wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] timestamp_data,
 
     // Control (tck domain, from ila_core via reg bus)
     input  wire                      burst_start,
+    input  wire                      burst_timestamp,
     input  wire [$clog2(DEPTH)-1:0]  burst_ptr_in
 );
 
     localparam PTR_W = $clog2(DEPTH);
     localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam SAMPLES_PER_SCAN = BURST_W / SAMPLE_W;
-    localparam LOAD_CTR_W = $clog2(SAMPLES_PER_SCAN + 1);
+    localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    localparam TS_PER_SCAN = BURST_W / TS_W_SAFE;
+    localparam MAX_PER_SCAN = (SAMPLES_PER_SCAN > TS_PER_SCAN) ? SAMPLES_PER_SCAN : TS_PER_SCAN;
+    localparam LOAD_CTR_W = $clog2(MAX_PER_SCAN + 1);
+    localparam [LOAD_CTR_W-1:0] SAMPLES_PER_SCAN_C = SAMPLES_PER_SCAN;
+    localparam [LOAD_CTR_W-1:0] TS_PER_SCAN_C = TS_PER_SCAN;
 
     // Static assert: SEG_DEPTH must be a power-of-two
     generate
@@ -63,7 +71,14 @@ module jtag_burst_read #(
     reg [PTR_W-1:0]   rd_ptr;
     reg [PTR_W-1:0]   burst_seg_base;
     reg [LOAD_CTR_W-1:0] load_cnt;
+    reg burst_timestamp_r;
     reg loading;
+    wire [LOAD_CTR_W-1:0] words_per_scan =
+        burst_timestamp_r ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+    wire [BURST_W-1:0] load_word = burst_timestamp_r
+        ? {{(BURST_W-TS_W_SAFE){1'b0}}, timestamp_data}
+        : {{(BURST_W-SAMPLE_W){1'b0}}, sample_data};
+    wire [LOAD_CTR_W-1:0] store_slot = load_cnt - 1'b1;
 
     // Segment base address derived from burst_ptr_in (generate avoids zero-width slice)
     wire [PTR_W-1:0] seg_base_of_ptr;
@@ -85,6 +100,7 @@ module jtag_burst_read #(
             rd_ptr   <= {PTR_W{1'b0}};
             burst_seg_base <= {PTR_W{1'b0}};
             load_cnt <= {LOAD_CTR_W{1'b0}};
+            burst_timestamp_r <= 1'b0;
             loading  <= 1'b0;
         end else begin
 
@@ -93,6 +109,7 @@ module jtag_burst_read #(
                 rd_ptr   <= burst_ptr_in;
                 burst_seg_base <= seg_base_of_ptr;
                 load_cnt <= {LOAD_CTR_W{1'b0}};
+                burst_timestamp_r <= burst_timestamp;
                 loading  <= 1'b1;
             end
 
@@ -108,14 +125,16 @@ module jtag_burst_read #(
                 end
             end
 
-            // Staging buffer fill: read one sample per cycle from memory
-            // mem_data is available 1 cycle after rd_ptr is set
+            // Staging buffer fill: read one word per cycle from memory.
+            // memory data is available 1 cycle after rd_ptr is set
             if (loading) begin
                 if (load_cnt > 0) begin
-                    staging[(load_cnt - 1) * SAMPLE_W +: SAMPLE_W] <= mem_data;
+                    if (burst_timestamp_r)
+                        staging[store_slot * TS_W_SAFE +: TS_W_SAFE] <= load_word[TS_W_SAFE-1:0];
+                    else
+                        staging[store_slot * SAMPLE_W +: SAMPLE_W] <= load_word[SAMPLE_W-1:0];
                 end
-                if (load_cnt == SAMPLES_PER_SCAN) begin
-                    staging[(load_cnt - 1) * SAMPLE_W +: SAMPLE_W] <= mem_data;
+                if (load_cnt == words_per_scan) begin
                     loading <= 1'b0;
                 end else begin
                     // Wrap within segment (bitmask; SEG_DEPTH is power-of-two).

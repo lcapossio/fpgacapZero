@@ -58,7 +58,9 @@ module fcapz_ela_xilinx7 #(
     // Burst interface
     wire [PTR_W-1:0]    burst_rd_addr;
     wire [SAMPLE_W-1:0] burst_rd_data;
+    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
+    wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
 
     // ---- TAP wrappers ----
@@ -103,19 +105,24 @@ module fcapz_ela_xilinx7 #(
         .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
         .jtag_rdata(jtag_rdata),
         .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
-        .burst_start(burst_start), .burst_start_ptr(burst_start_ptr)
+        .burst_rd_ts_data(burst_rd_ts_data),
+        .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+        .burst_start_ptr(burst_start_ptr)
     );
 
     // ---- Burst read engine ----
     jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
+        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+        .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
     ) u_burst (
         .arst(sample_rst),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),
-        .mem_addr(burst_rd_addr), .mem_data(burst_rd_data),
-        .burst_start(burst_start), .burst_ptr_in(burst_start_ptr)
+        .mem_addr(burst_rd_addr),
+        .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+        .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+        .burst_ptr_in(burst_start_ptr)
     );
 
 endmodule
