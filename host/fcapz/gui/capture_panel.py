@@ -122,6 +122,7 @@ class CapturePanel(QGroupBox):
         self._hw_probe_mux_w: int = 0
         self._hw_num_segments: int = 1
         self._ui_busy: bool = False
+        self._did_apply_first_connect_prepost_defaults: bool = False
 
         self._hw_label = QLabel(
             "Connect first (toolbar or Connection panel). "
@@ -877,6 +878,12 @@ class CapturePanel(QGroupBox):
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
         )
+        if not self._did_apply_first_connect_prepost_defaults:
+            usable_depth = max(1, depth // self._hw_num_segments)
+            with QSignalBlocker(self._pre), QSignalBlocker(self._post):
+                self._pre.setValue(min(8, max(0, usable_depth - 1)))
+                self._post.setValue(max(0, usable_depth - 1 - self._pre.value()))
+            self._did_apply_first_connect_prepost_defaults = True
         while self._seq_table.rowCount() > self._hw_trig_stages > 0:
             self._seq_table.removeRow(self._seq_table.rowCount() - 1)
         self._refresh_seq_ui_state()
