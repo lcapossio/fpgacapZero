@@ -52,7 +52,10 @@ in that bridge’s section.
 - `0x0020`: `TRIG_MODE` (rw) - Trigger mode
 - `0x0024`: `TRIG_VALUE` (rw) - Compare value
 - `0x0028`: `TRIG_MASK` (rw) - Mask bits
-- `0x002C`: `BURST_PTR` (wo) - Write to initiate burst read from `start_ptr` via USER2
+- `0x002C`: `BURST_PTR` (wo) - Write to initiate burst read from `start_ptr` via USER2.
+  `bit[31]` selects the source BRAM: `0` = sample data (default), `1` = timestamp data.
+  The host sets `bit[31]=1` when calling `read_timestamp_block()` to burst-read the
+  timestamp BRAM through the same USER2 path.
 - `0x0030`: `SQ_MODE` (rw) - Storage qualification mode (0=off, 1=value, 2=edge, 3=both; STOR_QUAL=1 only)
 - `0x0034`: `SQ_VALUE` (rw) - Storage qualification match value
 - `0x0038`: `SQ_MASK` (rw) - Storage qualification match mask
@@ -129,13 +132,19 @@ in that bridge’s section.
 
 <a id="regmap-burst-user2"></a>
 ## Burst Readout (USER2, 256-bit DR)
-- Write any value to `BURST_PTR` (0x002C) via USER1 to start burst from `start_ptr`.
+- Write to `BURST_PTR` (0x002C) via USER1 to start a burst from `start_ptr`.
+  - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
+  - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
 - Switch IR to USER2 (0x03) and perform 256-bit DR scans.
-- Each scan returns `256 / SAMPLE_W` packed samples (e.g. 32 for 8-bit probes).
-- Read pointer auto-increments; staging buffer is pre-filled during SHIFT phase.
-- Effective sample delivery rate depends on the host transport and cable;
-  the burst path returns multiple samples per 256-bit DR scan to amortise
-  round trips.
+- **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
+  (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
+  read `N` scans to get `N × (256/SAMPLE_W)` samples.
+- **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
+  packed LSB-first.  No priming scan; the first scan already contains valid data.
+  The host uses `read_timestamp_block()` to retrieve timestamps via this path.
+- Read pointer auto-increments; staging buffer is pre-filled during the SHIFT phase.
+- Effective delivery rate depends on the host transport and cable;
+  the burst path returns multiple words per 256-bit DR scan to amortise round trips.
 
 [↑ Top](#regmap-top)
 

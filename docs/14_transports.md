@@ -30,6 +30,12 @@ overridden by transports that want to batch round-trips for
 throughput (the Xilinx hw_server transport does this for the ELA
 burst readback).
 
+An **optional** extension method `read_timestamp_block(addr, words,
+timestamp_width)` accelerates timestamp readback via the USER2 burst
+path.  The host checks for it via `getattr(transport,
+"read_timestamp_block", None)` and falls back to `read_block` when
+absent.  See "Timestamp burst readback" below.
+
 The full ABC contract is documented in
 [`specs/transport_api.md`](specs/transport_api.md) — it's the
 spec you implement against if you're adding a new backend.
@@ -84,6 +90,33 @@ non-zero (GUI default timeout 60 s, interval 20 ms). Spawning `xsdb` and
 JTAG target select, ready poll). The GUI connect worker also logs
 `transport_build`, `transport.connect`, and `probe()` durations on
 logger `fcapz.gui.connect`.
+
+#### Timestamp burst readback
+
+`XilinxHwServerTransport` implements the optional
+`read_timestamp_block(addr, words, timestamp_width)` method, which
+reads timestamp data from the ELA's timestamp BRAM using the same
+USER2 256-bit DR burst path used for sample data.
+
+The key difference from a sample burst:
+
+- `BURST_PTR` is written with `bit[31]=1` to switch the staging mux
+  to the timestamp BRAM instead of the sample BRAM.
+- No priming scan is needed — the staging buffer is already filled
+  from the first 256-bit capture, so the first scan returns valid
+  data directly.
+- `words_per_scan = 256 // timestamp_width` (e.g. 8 words per scan
+  for 32-bit timestamps).
+
+The host `Analyzer._read_timestamps()` uses this path automatically
+when the transport supports it, avoiding the much slower per-word
+USER1 readback that previously caused duplicate/backward timestamp
+bugs (BUG-004).
+
+```python
+# Called internally by Analyzer.capture() — you don't call this directly
+timestamps = transport.read_timestamp_block(0x1100, capture_len, 32)
+```
 
 ### `OpenOcdTransport`
 

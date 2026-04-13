@@ -325,6 +325,16 @@ two 32-bit words, with the upper word zero-extended in bits `[31:16]`.
 The same zero-extension rule applies to wide sample readback when the
 last 32-bit chunk is only partially used.
 
+**Timestamp readback uses the USER2 burst path**, not the slow per-word
+USER1 register reads.  Writing `BURST_PTR` (0x002C) with `bit[31]=1`
+switches the `jtag_burst_read` staging mux from the sample BRAM to the
+timestamp BRAM; subsequent 256-bit USER2 DR scans return
+`256 / TIMESTAMP_W` packed timestamps per scan.  The host calls
+`transport.read_timestamp_block()` which handles the BRAM-select bit
+and the no-priming-scan protocol automatically.  If the transport does
+not implement that method the host falls back to the USER1 path, which
+is correct but significantly slower.
+
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 
 Segmented memory splits the buffer into N equal-sized segments and
