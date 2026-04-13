@@ -210,8 +210,8 @@ words = bridge.read_block(0x40000000, count=64)    # returns list[int]
 
 Issues one `SET_ADDR` then `count` `READ_INC` commands plus a NOP
 drain, all in **one batched JTAG sequence** via `raw_dr_scan_batch()`.
-Throughput is roughly 10× single-read because the inter-scan XSDB
-overhead is amortised.
+It is much faster than issuing one single read per word because the
+inter-scan tool overhead is amortised in one batch.
 
 ### Auto-increment block write
 
@@ -316,23 +316,17 @@ LUT/FF cost is negligible (~150 LUTs for the FIFO).  Bumping to
 
 ## Throughput
 
-Measured on Arty A7-100T with the onboard FT2232H, Vivado
-hw_server, TCK at 30 MHz:
+Sustained data rate depends on the JTAG adapter, cable, and whether the
+transport batches multiple DR shifts in one round trip
+(`raw_dr_scan_batch`).  **Single** `axi_read` / `axi_write` calls pay
+about one host round trip each.  **Auto-increment** `read_block` /
+`write_block` and **AXI4 burst** paths pack many fabric transactions
+behind fewer JTAG exchanges.  The bottleneck is **not** the bridge
+itself — the `axi_clk` FSM runs at full speed — it is JTAG-side pacing
+through the host tool.
 
-| Operation | Rate | Notes |
-|---|---|---|
-| `axi_read` (single) | ~0.6 KB/s | one read per JTAG round-trip, dominated by 0.64 ms XSDB overhead |
-| `axi_write` (single) | ~0.6 KB/s | same |
-| `read_block` (auto-increment, 16 words) | ~5-8 KB/s | uses `raw_dr_scan_batch` to amortise |
-| `write_block` (auto-increment, 16 words) | ~5-8 KB/s | same |
-| `burst_read` (16 beats) | ~6-10 KB/s | one address phase, FIFO buffers data |
-| `burst_write` (16 beats) | ~6-10 KB/s | per-beat handshake, host-paced |
-
-Different JTAG adapters or a raw TCF transport (bypassing XSDB)
-would significantly change these numbers.  The bottleneck is
-**not** the bridge itself — the `axi_clk` FSM runs at full speed —
-it's the JTAG round-trip latency.  A faster transport closes the
-gap.
+Different adapters or a transport that bypasses per-scan tool overhead
+would change what you measure on the wire.
 
 ## CLI usage
 
@@ -455,8 +449,8 @@ print("".join(received))
 bridge.close()
 ```
 
-This is a slow way to drive a UART (one JTAG round-trip per byte =
-~600 bytes/s), but it works without writing a single line of RTL
+This is a slow way to drive a UART (one JTAG round-trip per byte),
+but it works without writing a single line of RTL
 beyond the AXI peripheral itself.  For a real UART workflow, use
 the **EJTAG-UART bridge** instead — see [chapter 08](08_ejtag_uart_bridge.md).
 
@@ -475,7 +469,7 @@ exercise the bridge end-to-end on real silicon:
 | `test_burst_read` | 8-beat AXI4 burst read |
 | `test_burst_write_read` | 8-beat AXI4 burst write + verify via burst read |
 | `test_error_on_error_addr` | Slave returns SLVERR → host raises `AXIError` |
-| `test_throughput` | 256-word block write, prints KB/s |
+| `test_throughput` | 256-word block write, wall-clock timing |
 
 The on-chip test slave is in
 [`../tb/axi4_test_slave.v`](../tb/axi4_test_slave.v) — a small

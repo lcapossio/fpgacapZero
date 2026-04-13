@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ._version import _version_tuple
 from .transport import Transport
@@ -324,6 +324,36 @@ class Analyzer:
 
         self._config = config
 
+    def immediate_variant(self, base: CaptureConfig) -> CaptureConfig:
+        """Return a config that commits the trigger as soon as pretrigger is ready.
+
+        Uses value-match with **mask 0** (``(probe & 0) == (value & 0)`` is always
+        true).  When the bitstream has a multi-stage trigger sequencer, programs a
+        single always-true final stage so the sequencer path also fires immediately.
+
+        External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
+        cannot block an immediate run.
+        """
+        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        hw_features = int(_read(_ADDR_FEATURES))
+        hw_trig_stages = int(hw_features & 0xF)
+        trig = TriggerConfig(mode="value_match", value=0, mask=0)
+        if hw_trig_stages <= 1:
+            return replace(base, trigger=trig, sequence=None, ext_trigger_mode=0)
+        imm_stage = SequencerStage(
+            cmp_mode_a=0,
+            cmp_mode_b=0,
+            combine=0,
+            next_state=0,
+            is_final=True,
+            count_target=1,
+            value_a=0,
+            mask_a=0,
+            value_b=0,
+            mask_b=0,
+        )
+        return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
+
     def arm(self) -> None:
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
@@ -345,17 +375,11 @@ class Analyzer:
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
         ts_words_per = (self._hw_timestamp_w + 31) // 32
         ts_word_count = total * ts_words_per
-        # Timestamp RAM is stable once capture is done, but the hardware
-        # USER1 readback path can return one stale word immediately after the
-        # USER2 sample burst.  Read twice and require stability; a third read
-        # resolves the rare case where only the second block is transient.
-        raw_a = self.transport.read_block(ts_base, ts_word_count)
-        raw_b = self.transport.read_block(ts_base, ts_word_count)
-        if raw_a == raw_b:
-            raw = raw_b
+        timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
+        if ts_words_per == 1 and callable(timestamp_burst):
+            raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
-            raw_c = self.transport.read_block(ts_base, ts_word_count)
-            raw = raw_c if raw_b != raw_c else raw_b
+            raw = self.transport.read_block(ts_base, ts_word_count)
         timestamps = []
         mask = (1 << self._hw_timestamp_w) - 1
         if ts_words_per == 1:
@@ -569,8 +593,11 @@ class Analyzer:
     ):
         """Generator that yields successive ``CaptureResult`` objects.
 
-        After each capture completes, the core is automatically re-armed.
-        Yields *count* results, or runs indefinitely if *count* is 0.
+        After each capture completes, the core is **automatically re-armed**
+        (same idea as “continuous” / auto re-arm in many vendor ILAs): each
+        iteration calls :meth:`arm`, then :meth:`capture` to wait for the next
+        trigger and read back. Yields *count* results, or runs indefinitely if
+        *count* is 0.
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture_continuous()")
@@ -581,26 +608,10 @@ class Analyzer:
             yield result
             yielded += 1
 
-    def probe(self) -> Dict:
-        """Read the ELA identity and feature registers.
-
-        Verifies the VERSION register's low-16 magic equals the ASCII
-        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
-        RuntimeError on mismatch so the caller cannot accidentally
-        drive a non-fcapz bitstream.
-
-        When the transport exposes
-        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
-        (hw_server), all probe registers share **one** XSDB ``_send`` plus
-        a pipeline flush read.
-        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
-        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
-
-        Returns a dict with `version_major`, `version_minor`, `core_id`
-        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
-        trigger sequencer depth, 0 if absent), `has_storage_qualification`
-        (FEATURES[4]), and the rest of the feature flags.
-        """
+    def _read_ela_probe_registers_raw(
+        self,
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        """Read USER1 ELA identity / feature registers (may be a non-ELA core)."""
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -622,13 +633,29 @@ class Analyzer:
             timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
             num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
+        return (
+            version,
+            sample_w,
+            depth,
+            num_chan,
+            features,
+            timestamp_w,
+            num_segments,
+            probe_mux_w,
+        )
+
+    @staticmethod
+    def _probe_dict_from_raw(
+        version: int,
+        sample_w: int,
+        depth: int,
+        num_chan: int,
+        features: int,
+        timestamp_w: int,
+        num_segments: int,
+        probe_mux_w: int,
+    ) -> Dict:
         core_id = version & 0xFFFF
-        if core_id != _ELA_CORE_ID:
-            raise RuntimeError(
-                f"ELA core identity check failed at VERSION[15:0]: "
-                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
-            )
         return {
             "version_major": (version >> 24) & 0xFF,
             "version_minor": (version >> 16) & 0xFF,
@@ -645,3 +672,45 @@ class Analyzer:
             "num_segments": num_segments,
             "probe_mux_w": probe_mux_w,
         }
+
+    def probe_optional(self) -> Optional[Dict]:
+        """Like :meth:`probe` but returns ``None`` if USER1 is not an fcapz ELA.
+
+        Use this when the host should stay connected for subsidiary BSCAN cores
+        (EIO, EJTAG-AXI, UART, …) even if the primary USER1 register window does
+        not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
+        """
+        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        if (version & 0xFFFF) != _ELA_CORE_ID:
+            return None
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)
+
+    def probe(self) -> Dict:
+        """Read the ELA identity and feature registers.
+
+        Verifies the VERSION register's low-16 magic equals the ASCII
+        "LA" core identifier (0x4C41, Logic Analyzer).  Raises
+        RuntimeError on mismatch so the caller cannot accidentally
+        drive a non-fcapz bitstream.
+
+        When the transport exposes
+        :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
+        (hw_server), all probe registers share **one** XSDB ``_send`` plus
+        a pipeline flush read.
+        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
+        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+
+        Returns a dict with `version_major`, `version_minor`, `core_id`
+        (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
+        trigger sequencer depth, 0 if absent), `has_storage_qualification`
+        (FEATURES[4]), and the rest of the feature flags.
+        """
+        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        core_id = version & 0xFFFF
+        if core_id != _ELA_CORE_ID:
+            raise RuntimeError(
+                f"ELA core identity check failed at VERSION[15:0]: "
+                f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+            )
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)

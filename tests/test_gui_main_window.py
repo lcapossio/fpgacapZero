@@ -90,6 +90,7 @@ def _enter_successful_connect_mocks(ex: ExitStack, gui_path: Path) -> MagicMock:
 
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture
+    mock_an.immediate_variant.side_effect = lambda c: c
 
     ex.enter_context(patch("fcapz.gui.worker.Analyzer", return_value=mock_an))
     return mock_an
@@ -117,8 +118,7 @@ def test_main_toolbar_toolbuttons_visible(qtbot: Any, tmp_path: Path) -> None:
             "Disconnect",
             "Configure",
             "Arm",
-            "Capture",
-            "Continuous",
+            "Trigger Immediate",
             "Stop",
         ]
         assert [a.text() for a in tb.actions() if a.text()] == want
@@ -153,8 +153,7 @@ def test_main_toolbar_actions_grayed_when_disconnected(qtbot: Any, tmp_path: Pat
             "Disconnect",
             "Configure",
             "Arm",
-            "Capture",
-            "Continuous",
+            "Trigger Immediate",
             "Stop",
         ):
             assert not _toolbar_action(tb, label).isEnabled(), label
@@ -164,7 +163,7 @@ def test_main_toolbar_actions_grayed_when_disconnected(qtbot: Any, tmp_path: Pat
 
         assert not _toolbar_action(tb, "Connect").isEnabled()
         assert _toolbar_action(tb, "Disconnect").isEnabled()
-        for label in ("Configure", "Arm", "Capture", "Continuous"):
+        for label in ("Configure", "Arm", "Trigger Immediate"):
             assert _toolbar_action(tb, label).isEnabled(), label
         assert not _toolbar_action(tb, "Stop").isEnabled()
 
@@ -202,7 +201,7 @@ def test_single_capture_updates_history_mocked(qtbot: Any, tmp_path: Path) -> No
         qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
 
         before = w._history._table.rowCount()
-        qtbot.mouseClick(_button_with_text(w, "Capture"), Qt.MouseButton.LeftButton)
+        qtbot.mouseClick(_button_with_text(w, "Trigger Immediate"), Qt.MouseButton.LeftButton)
 
         def _done() -> bool:
             return w._history._table.rowCount() > before and not w._capture_running()

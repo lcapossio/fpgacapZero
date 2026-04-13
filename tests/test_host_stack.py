@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from fcapz import _version_tuple
@@ -107,6 +108,29 @@ class AnalyzerTests(unittest.TestCase):
             sample_clock_hz=100_000_000,
         )
 
+    def test_immediate_variant_sequencer_vs_simple(self):
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        base = replace(
+            self._make_cfg(),
+            ext_trigger_mode=2,
+            sequence=[SequencerStage(mask_a=0xFF, is_final=True)],
+        )
+        imm = analyzer.immediate_variant(base)
+        self.assertEqual(imm.trigger.mask, 0)
+        self.assertEqual(imm.ext_trigger_mode, 0)
+        self.assertIsNotNone(imm.sequence)
+        self.assertEqual(len(imm.sequence), 1)
+        self.assertTrue(imm.sequence[0].is_final)
+
+        t2 = FakeTransport()
+        t2.regs[0x003C] = (int(t2.regs[0x003C]) & ~0xF) | 1
+        a2 = Analyzer(t2)
+        a2.connect()
+        imm2 = a2.immediate_variant(self._make_cfg())
+        self.assertIsNone(imm2.sequence)
+        self.assertEqual(imm2.trigger.mask, 0)
+
     def test_capture_and_export_json(self):
         analyzer = Analyzer(FakeTransport())
         analyzer.connect()
@@ -119,31 +143,27 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
 
-    def test_capture_rereads_unstable_timestamp_block(self):
-        """A stale first timestamp block is discarded before export/GUI use."""
+    def test_capture_reads_32_bit_timestamps_via_burst_block(self):
+        """32-bit timestamp capture uses the transport-level timestamp burst path."""
 
-        class TimestampRetryTransport(FakeTransport):
+        class TimestampBurstTransport(FakeTransport):
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
                 self.regs[0x00C4] = 32      # TIMESTAMP_W
                 self.data = [10, 11, 12]
-                self.timestamp_reads = 0
+                self.timestamp_burst_args: tuple[int, int, int] | None = None
 
-            def read_block(self, addr: int, words: int):
-                if addr == 0x0100:
-                    return self.data[:words]
-                if addr == 0x1100:
-                    self.timestamp_reads += 1
-                    reads = [
-                        [0, 101, 102],
-                        [100, 101, 102],
-                        [100, 101, 102],
-                    ]
-                    return reads[min(self.timestamp_reads - 1, len(reads) - 1)][:words]
-                return super().read_block(addr, words)
+            def read_timestamp_block(
+                self,
+                addr: int,
+                words: int,
+                timestamp_width: int,
+            ) -> list[int]:
+                self.timestamp_burst_args = (addr, words, timestamp_width)
+                return [100, 101, 102][:words]
 
-        transport = TimestampRetryTransport()
+        transport = TimestampBurstTransport()
         analyzer = Analyzer(transport)
         analyzer.connect()
         analyzer.configure(self._make_cfg())
@@ -152,7 +172,7 @@ class AnalyzerTests(unittest.TestCase):
         result = analyzer.capture(timeout=0.01)
 
         self.assertEqual(result.timestamps, [100, 101, 102])
-        self.assertEqual(transport.timestamp_reads, 3)
+        self.assertEqual(transport.timestamp_burst_args, (0x1100, 3, 32))
 
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""
@@ -336,6 +356,22 @@ class SequencerTests(unittest.TestCase):
         analyzer.connect()
         with self.assertRaisesRegex(RuntimeError, "core identity"):
             analyzer.probe()
+
+    def test_probe_optional_none_when_no_ela(self):
+        """probe_optional() returns None when USER1 is not an fcapz ELA."""
+        transport = FakeTransport()
+        transport._chain_regs[1][0x0000] = 0x0002_DEAD
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        self.assertIsNone(analyzer.probe_optional())
+
+    def test_probe_optional_matches_probe_when_ela_present(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        opt = analyzer.probe_optional()
+        self.assertIsNotNone(opt)
+        self.assertEqual(opt, analyzer.probe())
 
     def test_probe_rejects_zero_version(self):
         """probe() raises RuntimeError if VERSION reads as 0 (unprogrammed FPGA)."""

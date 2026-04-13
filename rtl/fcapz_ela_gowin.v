@@ -34,6 +34,7 @@ module fcapz_ela_gowin #(
     parameter STOR_QUAL    = 0,
     parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
+    parameter TIMESTAMP_W  = 0,
     parameter CHAIN        = 1,
     // Optional EIO (shares single chain via address mux)
     parameter EIO_EN       = 0,
@@ -57,6 +58,17 @@ module fcapz_ela_gowin #(
     wire        jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
     wire [31:0] jtag_wdata, jtag_rdata;
+    localparam PTR_W = $clog2(DEPTH);
+
+    // Gowin exposes only one user chain here, so USER2 burst readout is not
+    // instantiated. Keep the core burst interface tied off; USER1 readback
+    // remains available for samples and timestamps.
+    wire [PTR_W-1:0] burst_rd_addr_dummy = {PTR_W{1'b0}};
+    wire [SAMPLE_W-1:0] burst_rd_data_unused;
+    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data_unused;
+    wire burst_start_unused;
+    wire burst_timestamp_unused;
+    wire [PTR_W-1:0] burst_start_ptr_unused;
 
     // ---- TAP wrapper ----
     jtag_tap_gowin #(.CHAIN(CHAIN)) u_tap_ctrl (
@@ -101,7 +113,8 @@ module fcapz_ela_gowin #(
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
-                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS)
+                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -109,8 +122,12 @@ module fcapz_ela_gowin #(
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
                 .jtag_rdata(ela_rdata),
-                .burst_rd_addr(), .burst_rd_data({SAMPLE_W{1'b0}}),
-                .burst_start(), .burst_start_ptr()
+                .burst_rd_addr(burst_rd_addr_dummy),
+                .burst_rd_data(burst_rd_data_unused),
+                .burst_rd_ts_data(burst_rd_ts_data_unused),
+                .burst_start(burst_start_unused),
+                .burst_timestamp(burst_timestamp_unused),
+                .burst_start_ptr(burst_start_ptr_unused)
             );
 
             fcapz_eio #(.IN_W(EIO_IN_W), .OUT_W(EIO_OUT_W)) u_eio (
@@ -124,7 +141,8 @@ module fcapz_ela_gowin #(
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
-                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS)
+                .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -132,8 +150,12 @@ module fcapz_ela_gowin #(
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
                 .jtag_rdata(jtag_rdata),
-                .burst_rd_addr(), .burst_rd_data({SAMPLE_W{1'b0}}),
-                .burst_start(), .burst_start_ptr()
+                .burst_rd_addr(burst_rd_addr_dummy),
+                .burst_rd_data(burst_rd_data_unused),
+                .burst_rd_ts_data(burst_rd_ts_data_unused),
+                .burst_start(burst_start_unused),
+                .burst_timestamp(burst_timestamp_unused),
+                .burst_start_ptr(burst_start_ptr_unused)
             );
 
             assign eio_probe_out = {EIO_OUT_W{1'b0}};

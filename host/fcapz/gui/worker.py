@@ -11,6 +11,7 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..analyzer import Analyzer, CaptureConfig
+from ..transport import connect_timing_logs_enabled
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
 from .transport_from_settings import transport_from_connection
@@ -41,19 +42,22 @@ class CaptureWorker(QObject):
         self._inter_cycle_delay_s = max(0.0, float(inter_cycle_delay_s))
         self._pending_cfg: CaptureConfig | None = None
         self._pending_timeout: float = 1.0
-        self._pending_continuous: bool = False
+        self._pending_auto_rearm: bool = False
+        self._pending_immediate: bool = False
 
     def set_pending_run(
         self,
         cfg: CaptureConfig,
         timeout: float,
         *,
-        continuous: bool,
+        auto_rearm: bool,
+        immediate: bool,
     ) -> None:
         """Read by :meth:`thread_started` after ``QThread.started`` (do not use ``partial``)."""
         self._pending_cfg = cfg
         self._pending_timeout = float(timeout)
-        self._pending_continuous = continuous
+        self._pending_auto_rearm = auto_rearm
+        self._pending_immediate = immediate
 
     @Slot()
     def thread_started(self) -> None:
@@ -62,10 +66,10 @@ class CaptureWorker(QObject):
             _log.warning("CaptureWorker.thread_started with no pending config")
             return
         timeout = self._pending_timeout
-        if self._pending_continuous:
-            self.run_continuous(cfg, timeout)
+        if self._pending_auto_rearm:
+            self.run_auto_rearm(cfg, timeout, immediate=self._pending_immediate)
         else:
-            self.run_single(cfg, timeout)
+            self.run_single(cfg, timeout, immediate=self._pending_immediate)
 
     def reset_cancel(self) -> None:
         self._cancel_cont = False
@@ -83,9 +87,10 @@ class CaptureWorker(QObject):
                 break
             time.sleep(min(0.05, remaining))
 
-    def run_single(self, cfg: CaptureConfig, timeout: float) -> None:
+    def run_single(self, cfg: CaptureConfig, timeout: float, *, immediate: bool) -> None:
         try:
-            self._analyzer.configure(cfg)
+            use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+            self._analyzer.configure(use)
             self._analyzer.arm()
             result = self._analyzer.capture(timeout)
             self.finished.emit(result)
@@ -93,26 +98,27 @@ class CaptureWorker(QObject):
             _log.exception("Single capture failed")
             self.failed.emit(str(exc))
 
-    def run_continuous(self, cfg: CaptureConfig, timeout: float) -> None:
+    def run_auto_rearm(self, cfg: CaptureConfig, timeout: float, *, immediate: bool) -> None:
         try:
             self.reset_cancel()
-            self._analyzer.configure(cfg)
             while not self._cancel_cont:
+                use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+                self._analyzer.configure(use)
                 self._analyzer.arm()
                 result = self._analyzer.capture(timeout)
                 self.progress.emit(result)
                 self._sleep_interruptible(self._inter_cycle_delay_s)
             self.finished.emit(None)
         except Exception as exc:  # noqa: BLE001
-            _log.exception("Continuous capture failed")
+            _log.exception("Auto re-arm capture failed")
             self.failed.emit(str(exc))
 
 
 class ConnectWorker(QObject):
-    """Background connect: build transport, ``Analyzer.connect()``, ``probe()``."""
+    """Background connect: build transport, ``Analyzer.connect()``, ``probe_optional()``."""
 
     finished = Signal(object, object)
-    """``(analyzer, probe_info)`` on success."""
+    """``(analyzer, probe_info)`` on success; ``probe_info`` is ``None`` if USER1 has no ELA."""
 
     failed = Signal(str)
     cancelled = Signal()
@@ -141,7 +147,9 @@ class ConnectWorker(QObject):
             return
         analyzer: Analyzer | None = None
         try:
+            t0 = time.monotonic()
             transport = transport_from_connection(self._conn)
+            t_build = time.monotonic()
             self._transport = transport
             if self._cancel_requested:
                 transport.close()
@@ -160,11 +168,27 @@ class ConnectWorker(QObject):
                 else:
                     _conn_log.info("hw_server: no bitfile path; connect without fpga -file")
             analyzer.connect()
+            t_connect = time.monotonic()
             if self._cancel_requested:
                 analyzer.close()
                 self.cancelled.emit()
                 return
-            info = analyzer.probe()
+            info = analyzer.probe_optional()
+            t_probe = time.monotonic()
+            if info is None:
+                _conn_log.info(
+                    "USER1 has no fcapz ELA ('LA' core id); JTAG session open for "
+                    "subsidiary chains (EIO, EJTAG-AXI, UART, …).",
+                )
+            if connect_timing_logs_enabled():
+                _conn_log.info(
+                    "GUI connect worker timing: transport_build=%.3fs transport.connect=%.3fs "
+                    "probe=%.3fs total=%.3fs",
+                    t_build - t0,
+                    t_connect - t_build,
+                    t_probe - t_connect,
+                    t_probe - t0,
+                )
         except Exception as exc:  # noqa: BLE001 — surfaced via GUI
             if self._cancel_requested:
                 if analyzer is not None:
@@ -176,5 +200,10 @@ class ConnectWorker(QObject):
                 return
             _conn_log.exception("Connect worker failed")
             self.failed.emit(format_connect_error(exc, self._conn))
+            if analyzer is not None:
+                try:
+                    analyzer.close()
+                except OSError:
+                    pass
             return
         self.finished.emit(analyzer, info)

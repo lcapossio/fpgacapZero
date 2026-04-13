@@ -9,6 +9,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Docs:** JTAG register map spec — in-document index, ↑ Top anchors, and
+  clarified per-core “address map” scope ([`docs/specs/register_map.md`](docs/specs/register_map.md));
+  chapter 13 stub updated ([`docs/13_register_map.md`](docs/13_register_map.md)).
+- **Transport:** Optional `FCAPZ_LOG_CONNECT_TIMING=1` logs hw_server connect
+  phases (socket open, hello, target open, JTAG open) to stderr for diagnosing
+  slow or stuck connects; GUI worker enables it when the env var is set.
+- **GUI:** Application event filter ignores the mouse wheel on spin boxes and
+  combo boxes so scrolling docks does not accidentally change values; same
+  filter in the dummy-capture demo app.
+- **GUI:** `Analyzer.immediate_variant()` and **Trigger Immediate** (was Capture)
+  — force a waveform as soon as pre-trigger is ready (always-true compare;
+  sequencer bypass when `TRIG_STAGES>1`). **Arm** runs a normal triggered capture
+  on a worker thread. **Auto re-arm** sits beside **Stop** on the main toolbar
+  and applies to both paths; toolbar no longer has a separate Continuous action.
+  After **restoreState**, the checkbox is re-applied from saved prefs so layout
+  restore does not clear it.
 - **Windows:** Minimizing the `fcapz-gui` main window also minimizes external
   waveform viewer windows started from the History panel; restoring the GUI
   restores them (same PID/window association as vertical tiling).
@@ -20,9 +36,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bitstream lacks the matching FEATURES bits (decimation, external trigger,
   storage qualification) or when the probe mux has only one slice; `probe()`
   exposes `has_storage_qualification` (FEATURES[4]).
+- **GUI:** EIO panel — small combo box next to “Poll inputs” to choose the
+  poll period (25–1000 ms presets; default 250 ms).
+- **GUI / API:** `Analyzer.probe_optional()` — same USER1 reads as `probe()` but
+  returns `None` when VERSION is not the fcapz ELA (`'LA'`). The connect worker
+  uses it so **Connect** succeeds without an ELA; ELA capture and toolbar
+  actions stay off while EIO / EJTAG-AXI / UART docks can still attach on their
+  chains. CLI behaviour unchanged (`probe()` still requires ELA).
 
 ### Fixed
 
+- **GUI / EIO:** Probe UI stays disabled until **Attach EIO**; **All outputs on**
+  / **All outputs off** buttons write the full output width to all 1s or all 0s;
+  output checkboxes sync from hardware readback
+  after writes; tooltips plus [`docs/06_eio_core.md`](docs/06_eio_core.md) and
+  [`docs/12_gui.md`](docs/12_gui.md) clarify Attach, **Poll inputs** (inputs
+  only) vs **Outputs** (fabric / board LEDs on the Arty reference).
+- **Arty A7-100T constraints:** `arty_a7.xdc` mapped `led[0:3]` to the wrong
+  package pins; they now match Digilent’s reference (**H5, J5, T9, T10**).
+  Rebuild the bitstream for EIO → LED feedback on the board.
+- **Arty reference (`arty_a7_top`):** Resynchronize `probe_out[3:0]` from the
+  EIO `jtag_clk` domain into `sys_clk` before driving the green LEDs.
+- **hw_server / OpenOCD:** Serialize transport I/O with a mutex so concurrent
+  JTAG users (e.g. EIO input polling on a timer plus ELA capture on a worker
+  thread) no longer corrupt the xsdb or OpenOCD protocol stream, which used to
+  surface as ``xsdb: no bit string in output`` with empty stdout.
 - ELA capture now commits the trigger-cycle sample even when decimation or
   storage qualification would otherwise skip that cycle, so
   `samples[pretrigger]` remains the actual trigger sample.
@@ -53,6 +91,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- README and manual resource tables refreshed against Vivado 2025.2
+  synthesis reports (`scripts/resource_comparison.tcl` harness + Apr 2026
+  `arty_a7_top` place & route): corrected baseline slice LUTs (~1,595 vs
+  stale ~1,990), sequencer/SQ rows, reference top (~2.7k LUT / 1.5 BRAM /
+  optional ELA features + EIO + AXI), and WNS for `sys_clk`.  Spec
+  architecture parameters list extended for decimation, timestamps, segments,
+  etc.; `resource_comparison.tcl` resolves repo root from its path (or
+  `FPGACAP_ROOT`).
+- README and user manual (`docs/`, including specs) no longer quote fixed
+  KB/s (or similar) throughput numbers; they describe batching, round trips,
+  and tool/adapter dependence instead.
+- [docs/12_gui.md](docs/12_gui.md) and [docs/06_eio_core.md](docs/06_eio_core.md)
+  describe the EIO panel as implemented (attach, **Poll inputs**, ms-period
+  combo, per-bit toggles); troubleshooting notes concurrent poll + capture.
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [README.md](README.md) now describe the
   default pytest `-m "not hw"` filter, how to override it, and the opt-in
   GUI+hardware suite (`tests/test_gui_hw_capture.py`, `FPGACAP_GUI_HW=1`).

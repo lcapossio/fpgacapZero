@@ -46,10 +46,11 @@ def test_continuous_capture_sleeps_between_cycles() -> None:
     an.configure = MagicMock()
     an.arm = MagicMock()
     an.capture = MagicMock(return_value=result)
+    an.immediate_variant = MagicMock(side_effect=lambda c: c)
 
     delay_s = 0.25
     cap_w = CaptureWorker(an, inter_cycle_delay_s=delay_s)
-    cap_w.set_pending_run(cfg, 1.0, continuous=True)
+    cap_w.set_pending_run(cfg, 1.0, auto_rearm=True, immediate=False)
 
     thread = QThread()
     cap_w.moveToThread(thread)

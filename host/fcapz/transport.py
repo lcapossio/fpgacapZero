@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import socket
+import time
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -27,6 +29,19 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+
+
+def connect_timing_logs_enabled() -> bool:
+    """If true, log connect phase durations (hw_server + GUI worker).
+
+    Set environment variable ``FCAPZ_LOG_CONNECT_TIMING`` to ``1``, ``true``,
+    or ``yes``.
+    """
+    return os.environ.get("FCAPZ_LOG_CONNECT_TIMING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 class Transport(ABC):
@@ -134,6 +149,9 @@ class OpenOcdTransport(Transport):
     Drives the fpgacapZero BSCANE2 USER register interface via the OpenOCD
     TCL socket (default port 6666).
 
+    Socket reads and writes are serialized with a lock so concurrent use
+    (e.g. multiple GUI workers) cannot corrupt the byte stream.
+
     Protocol recap (49-bit DR, LSB-first):
         bits[31:0]  = wdata / rdata
         bits[47:32] = addr[15:0]
@@ -180,6 +198,7 @@ class OpenOcdTransport(Transport):
         self._connect_timeout_sec = float(connect_timeout_sec)
         self._active_chain: int = 1
         self._sock: socket.socket | None = None
+        self._sock_lock = threading.Lock()
 
     def connect(self) -> None:
         self._sock = socket.create_connection(
@@ -204,14 +223,15 @@ class OpenOcdTransport(Transport):
     def _cmd(self, tcl: str) -> str:
         if not self._sock:
             raise RuntimeError("not connected — call connect() first")
-        self._sock.sendall((tcl + "\x1a").encode())
-        buf = b""
-        while not buf.endswith(b"\x1a"):
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("OpenOCD closed the connection")
-            buf += chunk
-        return buf[:-1].decode().strip()
+        with self._sock_lock:
+            self._sock.sendall((tcl + "\x1a").encode())
+            buf = b""
+            while not buf.endswith(b"\x1a"):
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("OpenOCD closed the connection")
+                buf += chunk
+            return buf[:-1].decode().strip()
 
     def select_chain(self, chain: int) -> None:
         """Select BSCANE2 USER chain for subsequent register accesses."""
@@ -261,6 +281,8 @@ class XilinxHwServerTransport(Transport):
     Keeps an ``xsdb`` process alive and sends TCL commands over stdin.
     This avoids the overhead of spawning a new process per register access
     and enables efficient batched ``read_block`` operations.
+    A mutex serializes :meth:`_send` so concurrent threads (e.g. GUI EIO
+    polling and ELA capture) cannot interleave on the single process.
 
     Uses the ``-bits`` format for ``drshift`` which provides standard JTAG
     bit ordering (``-hex`` has a non-standard byte/nibble mapping in XSDB).
@@ -336,10 +358,17 @@ class XilinxHwServerTransport(Transport):
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stderr_lines: list[str] = []
+        self._xsdb_io_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        timing = connect_timing_logs_enabled()
+        marks: list[tuple[str, float]] = [("start", time.monotonic())]
+
+        def mark(label: str) -> None:
+            marks.append((label, time.monotonic()))
+
         xsdb = self._xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
         if not xsdb:
             raise RuntimeError(
@@ -358,8 +387,10 @@ class XilinxHwServerTransport(Transport):
             target=self._drain_stderr, daemon=True
         )
         self._stderr_thread.start()
+        mark("xsdb_spawned")
 
         self._send(f"connect -url tcp:{self.host}:{self.port}")
+        mark("hw_server_tcp")
 
         if self.bitfile:
             _hw_log.info(
@@ -367,16 +398,19 @@ class XilinxHwServerTransport(Transport):
                 self.bitfile,
             )
             self.program(self.bitfile)
+            mark("fpga_file_done")
         else:
             _hw_log.info(
                 "Skipping fpga -file — using the configuration already in the FPGA. "
                 "Uncheck 'Program on connect' or clear the bitfile path in Connection "
                 "when you do not want to reprogram.",
             )
+            mark("fpga_skipped")
 
         self._send(
             f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
         )
+        mark("jtag_target_set")
 
         # Wait for the JTAG chain to respond with valid (non-zero) data on
         # the configured probe register.  After fpga -file the bitstream is
@@ -393,17 +427,40 @@ class XilinxHwServerTransport(Transport):
                 self.ready_probe_addr,
                 self.ready_probe_timeout,
             )
-            self._wait_until_ready()
+            attempts = self._wait_until_ready()
+            mark("fpga_ready")
             _hw_log.info("FPGA ready probe succeeded.")
+            if timing:
+                _hw_log.info(
+                    "hw_server connect: ready_poll attempts=%d (see fpga_ready delta)",
+                    attempts,
+                )
+        else:
+            mark("ready_skipped")
 
-    def _wait_until_ready(self) -> None:
+        mark("connect_done")
+        if timing and len(marks) >= 2:
+            parts = []
+            for i in range(1, len(marks)):
+                label, t = marks[i]
+                dt = t - marks[i - 1][1]
+                parts.append(f"{label}={dt:.3f}s")
+            total = marks[-1][1] - marks[0][1]
+            _hw_log.info(
+                "hw_server connect timing (FCAPZ_LOG_CONNECT_TIMING): %s | total=%.3fs",
+                " ".join(parts),
+                total,
+            )
+
+    def _wait_until_ready(self) -> int:
         """Poll the configured probe register until it returns non-zero.
 
         Raises ConnectionError if the deadline elapses.  Uses the chain
         currently active (default chain 1 / USER1).
-        """
-        import time
 
+        Returns:
+            Number of probe read attempts (including the successful one).
+        """
         deadline = time.monotonic() + self.ready_probe_timeout
         attempts = 0
         last_value = 0
@@ -414,7 +471,7 @@ class XilinxHwServerTransport(Transport):
                 last_value = 0
             attempts += 1
             if last_value != 0:
-                return
+                return attempts
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -568,15 +625,28 @@ class XilinxHwServerTransport(Transport):
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)
         return self._cached_sps
 
-    def _read_block_burst(self, words: int) -> List[int]:
+    def _read_block_burst(
+        self,
+        words: int,
+        *,
+        timestamp: bool = False,
+        element_width: int | None = None,
+    ) -> List[int]:
         """Read *words* samples via the USER2 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
         USER1 write to BURST_PTR → idle for staging fill → IR switch
         to USER2 → N consecutive 256-bit DR scans.  One round-trip.
         """
-        sps = self._burst_samples_per_scan
+        if timestamp:
+            if element_width is None:
+                element_width = 32
+            sps = max(1, self.BURST_DR_BITS // element_width)
+        else:
+            sps = self._burst_samples_per_scan
+            element_width = self.BURST_DR_BITS // sps
         n_scans = (words + sps - 1) // sps
+        prime_scans = 0 if timestamp else 1
 
         ir1 = f"{self.USER1_IR:02x}"
         ir2 = f"{self.USER2_IR:02x}"
@@ -584,7 +654,9 @@ class XilinxHwServerTransport(Transport):
         zeros = "0" * dr_bits
 
         burst_frame = self._frame_bits(
-            addr=self.ADDR_BURST_PTR, data=0, write=True
+            addr=self.ADDR_BURST_PTR,
+            data=(0x80000000 if timestamp else 0),
+            write=True,
         )
 
         parts = [
@@ -595,10 +667,10 @@ class XilinxHwServerTransport(Transport):
             # Idle so staging buffer fills (~33 TCK needed, extra margin)
             "$_bq delay 80",
         ]
-        # Prime USER2 once, then perform the scans returned to the caller.
-        # The burst RTL fills its staging buffer from USER2 TCKs during SHIFT,
-        # so the first capture after selecting USER2 may be only partially fresh.
-        for _ in range(n_scans + 1):
+        # Prime USER2 once for sample bursts, then perform the scans returned
+        # to the caller. Timestamp bursts use the prefilled first scan directly;
+        # otherwise short captures can read past the valid timestamp window.
+        for _ in range(n_scans + prime_scans):
             parts.append(
                 f"$_bq irshift -state IRUPDATE -hex 6 {ir2}; "
                 f"$_bq drshift -state DRUPDATE -capture -bits {dr_bits} {zeros}"
@@ -607,7 +679,24 @@ class XilinxHwServerTransport(Transport):
         tcl = "; ".join(parts)
 
         out = self._send(tcl)
-        return self._parse_burst_bits(out, words, skip_scans=1)
+        return self._parse_burst_bits(
+            out,
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+        )
+
+    def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
+        """Read timestamp words through USER2 burst mode when available."""
+        if words <= 0:
+            return []
+        if self._burst_available and timestamp_width > 0:
+            return self._read_block_burst(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
+        return self._read_block_user1(addr, words)
 
     def _parse_burst_bits(
         self,
@@ -615,12 +704,17 @@ class XilinxHwServerTransport(Transport):
         total_words: int,
         *,
         skip_scans: int = 0,
+        element_width: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
         """
-        sps = self._burst_samples_per_scan
-        sw = self.BURST_DR_BITS // sps  # bits per sample
+        if element_width is None:
+            sps = self._burst_samples_per_scan
+            sw = self.BURST_DR_BITS // sps  # bits per sample
+        else:
+            sw = element_width
+            sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         for token in output.replace("{", " ").replace("}", " ").split():
@@ -836,25 +930,26 @@ class XilinxHwServerTransport(Transport):
 
     def _send(self, tcl: str) -> str:
         """Send *tcl* to the persistent xsdb process and return output."""
-        if not self._proc or not self._proc.stdin or not self._proc.stdout:
-            raise RuntimeError("not connected — call connect() first")
-        self._proc.stdin.write(tcl + "\n")
-        self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
-        self._proc.stdin.flush()
+        with self._xsdb_io_lock:
+            if not self._proc or not self._proc.stdin or not self._proc.stdout:
+                raise RuntimeError("not connected — call connect() first")
+            self._proc.stdin.write(tcl + "\n")
+            self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
+            self._proc.stdin.flush()
 
-        lines: list[str] = []
-        while True:
-            raw = self._proc.stdout.readline()
-            if not raw:
-                stderr = "\n".join(self._stderr_lines[-20:])
-                raise ConnectionError(
-                    f"xsdb process exited unexpectedly. stderr:\n{stderr}"
-                )
-            line = raw.rstrip("\n\r")
-            if line.strip() == self._SENTINEL:
-                break
-            lines.append(line)
-        return "\n".join(lines)
+            lines: list[str] = []
+            while True:
+                raw = self._proc.stdout.readline()
+                if not raw:
+                    stderr = "\n".join(self._stderr_lines[-20:])
+                    raise ConnectionError(
+                        f"xsdb process exited unexpectedly. stderr:\n{stderr}"
+                    )
+                line = raw.rstrip("\n\r")
+                if line.strip() == self._SENTINEL:
+                    break
+                lines.append(line)
+            return "\n".join(lines)
 
     def _drain_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:

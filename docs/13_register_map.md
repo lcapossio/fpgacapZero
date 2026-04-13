@@ -8,6 +8,24 @@
 > If you are reading the manual top-to-bottom, jump to that file
 > now and come back here when you're done.
 
+## What this document calls a “register map” (and “address map”)
+
+In fcapz docs, the **register map** is the contract for **how you talk to
+each on-chip debug core through JTAG**: which scan chain / `USERx`
+instruction, which **32-bit register offsets** you read and write, and
+how the fields are encoded. It is **not** your FPGA SoC’s general
+memory map (DDR, peripherals, AXI crossbar) unless you are in the
+**EJTAG-AXI** part of the spec, where the bridge’s shift format carries a
+**separate** AXI `addr` field for bus transactions.
+
+Inside [`specs/register_map.md`](specs/register_map.md), a heading
+**Address map** (or **Address Map**) is always **scoped to the section
+you are in**. The first big table is **ELA only** (logic analyzer
+control via USER1, with USER2 for burst sample data). Later sections
+give **EIO** (USER3) and the **EJTAG** bridges (USER4) their own layouts.
+Offsets like `0x0004` start over **per core** — they are not one global
+address space across the chip.
+
 ## Why this chapter is a stub
 
 Maintaining a register map in two places (a chapter and a spec) is
@@ -15,6 +33,10 @@ how documentation rots.  The spec at
 [`specs/register_map.md`](specs/register_map.md) is the **single
 source of truth** and is updated whenever the RTL changes; this
 chapter is a navigation aid that points you at it.
+
+That file begins with an **Index** of sections and subsections (HTML
+fragment IDs so links work reliably on GitHub) and places **↑ Top**
+after each major section for quick return to the title.
 
 ## What's in `specs/register_map.md`
 
@@ -40,9 +62,11 @@ The canonical spec covers all four cores in one document:
     `FIFO_DEPTH-1` AXI4 awlen encoding)
   - Status bits and error response codes
 - **EJTAG-UART bridge** (USER4, mutually exclusive with AXI)
-  - 32-bit DR shift format with all command codes
-  - Config registers (`UART_ID`, `VERSION`, FIFO depths)
-  - RX/TX status bits and sticky error flags
+  - 32-bit DR per scan (commands `NOP` … `RESET`); not a word-addressed
+    map like ELA/EIO
+  - **CONFIG** byte addresses `0x0`–`0xF`: `UART_ID` (`EJUR`), `VERSION`,
+    `FEATURES` (parity + TX/RX FIFO depth parameters), `BAUD_DIV`
+  - Shift-out status / `tx_free` / pipelined RX and CONFIG behaviour
 
 ## Quick reference: where features live
 
@@ -56,7 +80,7 @@ The canonical spec covers all four cores in one document:
 | **EIO VERSION encoding** (`IO` core_id) | "EIO Core Register Map" → row at `0x0000` |
 | **EJTAG-AXI 72-bit DR encoding** | "EJTAG-AXI Bridge DR Format" |
 | **EJTAG-AXI FIFO_DEPTH register encoding** | "EJTAG-AXI Bridge" → "Config registers (CMD_CONFIG)" → `FEATURES` row |
-| **EJTAG-UART 32-bit DR encoding** | "EJTAG-UART Bridge DR Format" |
+| **EJTAG-UART DR + CONFIG map** | "EJTAG-UART bridge — 32-bit DR" in the spec |
 
 ## When you actually need this
 

@@ -93,11 +93,16 @@ When you click **Connect**:
 2. Calls `transport.connect()`, which spawns `xsdb` (or talks to
    OpenOCD), programs the FPGA if a bitfile is set, runs the
    readiness probe.
-3. On success, all the other panels become enabled.
-4. On failure, an error dialog pops up with the underlying
-   exception's message — typically a `RuntimeError` from the
-   identity check or a `ConnectionError` from the readiness wait.
-   See [chapter 17](17_troubleshooting.md).
+3. Reads the USER1 register window with `Analyzer.probe_optional()`.
+   If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
+   and the probe summary are enabled.  If not (EIO-only / AXI-only
+   designs, or USER1 unused), the session still **connects**: JTAG
+   stays open so you can use **EIO**, **EJTAG-AXI**, and **UART** from
+   their docks on the correct BSCAN chains; ELA toolbar actions and
+   capture controls stay disabled.
+4. On transport or readiness failure, an error dialog pops up with the
+   underlying exception — typically a `ConnectionError` from the
+   readiness wait.  See [chapter 17](17_troubleshooting.md).
 
 The connection settings are persisted across runs in
 `~/.config/fpgacapzero/gui.toml` (Linux/macOS) or
@@ -106,8 +111,8 @@ re-type them every launch.
 
 ### Probe summary panel
 
-After connecting, this panel shows the live `Analyzer.probe()`
-output:
+After connecting **with** an ELA on USER1, this panel shows the live
+`Analyzer.probe()` output:
 
 ```
 Version : 0.3
@@ -118,10 +123,11 @@ Channels: 1
 Features: decimation, ext-trigger, timestamps (32-bit), 4 segments
 ```
 
-If the bitstream is wrong (no fcapz core, wrong chain), the
-underlying `Analyzer.probe()` raises and the panel shows the error
-in red instead of the values.  This is the same magic check as
-[chapter 05](05_ela_core.md) "Identity check".
+If USER1 does not present the ELA core id, the GUI still connects
+and this panel explains that ELA capture is unavailable; subsidiary
+cores use their own **Attach** flows.  The CLI `fcapz` tool still
+uses `Analyzer.probe()`, which **raises** on a missing ELA — same
+magic check as [chapter 05](05_ela_core.md) "Identity check".
 
 ### ELA capture panel
 
@@ -153,14 +159,19 @@ sub-signals.  Each row is a `name` / `width` / `lsb` triple that
 becomes a `ProbeSpec` in the `CaptureConfig`.  The probe panel
 validates as you type — overlapping bit ranges turn red.
 
-Bottom section — **action buttons**:
+Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
+**Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 
-| Button | What it does |
+ELA dock — bottom **action buttons**:
+
+| Control | What it does |
 |---|---|
-| **Arm** | `analyzer.configure(cfg); analyzer.arm()` — leaves the ELA armed but does not capture |
-| **Capture** | `analyzer.configure(cfg); analyzer.arm(); result = analyzer.capture(timeout)` on a worker thread; result lands in the History panel |
-| **Continuous** | Same as Capture but in a loop, re-arming after each capture, until you click **Stop** |
-| **Reset** | `analyzer.reset()` — clears armed/triggered/done |
+| **Arm** | Same as the toolbar: normal ILA-style capture — `configure` from the panel, `arm`, then `capture(timeout)` on a worker thread; wait for the selected trigger, read back, show in History. |
+| **Trigger Immediate** | Same as the toolbar: immediate capture — always-true compare (`mask=0` value-match, plus a one-stage sequencer when the bitstream has `TRIG_STAGES>1`) so the core triggers as soon as the pre-trigger history is ready; external-trigger gating is cleared for that run. |
+| **Stop** | Ends an auto re-arm loop (cancels the worker between captures). |
+| **Configure** | Writes registers from the panel only (`analyzer.configure(cfg)`), without arming. |
+
+**Auto re-arm** (toolbar checkbox): when checked, **Arm** or **Trigger Immediate** repeats in a loop (re-configure + arm + capture each time) until **Stop** — continuous / auto re-arm behaviour for either normal or immediate trigger.
 
 The capture itself runs on a **`QThread` worker** so the GUI
 stays responsive while waiting for the trigger.  When the worker
@@ -223,21 +234,16 @@ adjacent identical values render as a flat line, not a sawtooth.
 
 ### EIO panel
 
-For each input bit, a **read-only LED widget** that polls
-`EioController.read_inputs()` at a configurable rate (default
-10 Hz).  For each output bit, a **clickable toggle** that calls
-`EioController.set_bit()` on click.
+**JTAG chain** spin box and **Attach EIO** create an `EioController` on the
+current transport and show core identity / bus widths.
 
-Top of panel:
+For each input bit, **read-only checkboxes** update from
+`EioController.read_inputs()` while **Poll inputs** is checked.
+A small combo box next to the checkbox sets the poll period (presets
+**25–1000 ms**, default **250 ms**).  For each output bit, a **clickable
+toggle** calls `EioController.set_bit()` when its state changes.
 
-- **Polling rate** slider (1..50 Hz)
-- **Read all inputs now** button (one-shot)
-- **Write all outputs** hex input + Apply button (for setting
-  multiple bits at once instead of clicking individual toggles)
-
-The polling timer pauses when the panel is not visible, so
-switching to another tab stops the JTAG traffic — the EIO panel
-never burns bandwidth in the background.
+Uncheck **Poll inputs** or disconnect to stop periodic JTAG reads.
 
 ### EJTAG-AXI bridge panel
 
@@ -415,17 +421,25 @@ the same arrangement.
    Trigger value=`0x42` (radix defaults to hex; you can enter `42` without the prefix),
    Trigger mask=`0xFF`.
 6. In the **Probes** subform, add `name=counter, width=8, lsb=0`.
-7. Click **Capture**.  Watch the spinner; in <1 s the capture
-   appears in the History panel.
+7. Click **Arm** (or use the toolbar).  Watch the spinner; when the
+   counter matches `0x42`, the capture appears in the History panel.
+   (Use **Trigger Immediate** for a forced trigger without waiting.)
 8. Click the row, then click **[Quick preview ▾]** at the bottom
    to see the embedded waveform.  You should see the 8-bit
    counter incrementing past `0x42`.
 9. Click **[Open in viewer ▾] → GTKWave**.  GTKWave opens in a
    separate window with the auto-generated `.gtkw` layout — your
    `counter` signal is already added and labelled.
-10. Click the **EIO** tab, watch the input LEDs reflect the
-    counter / button state, click an output toggle to flip an LED
-    on the board.
+10. Click the **EIO** tab, click **Attach EIO** (chain **3** on the
+    Arty reference bitstream). Turn on **Poll inputs** to refresh the
+    **Inputs** checkboxes — they mirror `btn[3:0]` and the counter
+    nibbles; they do **not** light the board by themselves. Use the
+    **Outputs** checkboxes to drive `probe_out`; on Arty, bits **0–3**
+    drive the four **green** LEDs (active high). **All outputs on** /
+    **All outputs off** set every `probe_out` bit to all 1s or all 0s in one
+    write each (full width, not only the visible grid).
+    Until **Attach EIO** succeeds, poll controls and the I/O grids stay
+    disabled.
 11. Click the **EJTAG-AXI** tab, type `0x40000000` into the address
     field, click **Read**.
 12. Done.  Disconnect from the Connection panel when you're

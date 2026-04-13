@@ -54,11 +54,17 @@ See [chapter 14](14_transports.md) "TCL injection prevention".
 ### xsdb error: `no bit string in output` / empty stdout
 
 **Cause**: xsdb died mid-command, or the parser saw a frame with
-no hex payload.  Usually means hw_server lost the cable.
+no hex payload.  Often **hw_server lost the cable**, but the same
+symptom appeared when **two threads talked to one xsdb session at
+once** (e.g. EIO **Poll inputs** on a `QTimer` while the ELA capture
+worker runs).  The host stack now serializes XSDB and OpenOCD socket
+I/O with a lock so those paths cannot interleave.
 
 **Fix**: unplug/replug the JTAG USB cable, restart `hw_server`,
 retry.  Recent commits include captured xsdb stderr in the
-parser error message — read it for the real reason.
+parser error message — read it for the real reason.  If you still
+see empty stdout on an older build, turn off EIO polling while
+capturing.
 
 ## Build / RTL
 

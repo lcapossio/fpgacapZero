@@ -28,12 +28,14 @@ from PySide6.QtWidgets import QMainWindow, QWidget
 _Rect = tuple[int, int, int, int]
 
 # Target share of work-area height for the external viewer (top); host gets the rest.
-_VIEWER_HEIGHT_FRACTION = 0.50
+# Slightly above half so the waveform pane reads as even with the GUI once title bars
+# and rounding are accounted for.
+_VIEWER_HEIGHT_FRACTION = 0.52
 # Minimum host strip height (px) so capture / docks stay usable.
-_HOST_MIN_HEIGHT_PX = 300
+_HOST_MIN_HEIGHT_PX = 280
 # Also reserve at least this fraction of work-area height for the host
 # (takes precedence on tall screens).
-_HOST_MIN_HEIGHT_FRACTION = 0.38
+_HOST_MIN_HEIGHT_FRACTION = 0.36
 # Preferred minimum height (px) for the viewer; may be reduced if the work area is small.
 _VIEWER_MIN_HEIGHT_PX = 120
 
@@ -51,9 +53,10 @@ def split_work_area_vertical(
     """
     Split a work-area rectangle into ``(top, bottom)`` as ``(x, y, w, h)``.
 
-    The top region is sized for the waveform viewer (~``viewer_height_fraction`` of
-    ``h``), with at least ``host_min_height_px`` for the bottom strip when the work
-    area is tall enough.
+    The top region is sized for the waveform viewer: at least half the work area
+    (rounded up when ``h`` is odd), at least ``viewer_height_fraction * h``, and
+    never leaving less than ``host_min_height_px`` / the host fraction for the GUI
+    strip when the work area is short.
     """
     if h < 2 or w < 1:
         return None
@@ -66,8 +69,14 @@ def split_work_area_vertical(
     min_host = min(min_host, h - viewer_min_height_px - 1)
     min_host = max(1, min_host)
 
-    top_h = max(viewer_min_height_px, int(h * viewer_height_fraction))
-    top_h = min(top_h, h - min_host)
+    max_top = h - min_host
+    # Prefer an even split (viewer gets the extra logical row when ``h`` is odd), then
+    # nudge toward ``viewer_height_fraction`` if that yields more viewer space without
+    # breaking ``min_host``.
+    half_up = (h + 1) // 2
+    frac_h = int(h * viewer_height_fraction)
+    top_h = max(viewer_min_height_px, max(half_up, frac_h))
+    top_h = min(top_h, max_top)
     bottom_h = h - top_h
     if bottom_h < min_host:
         bottom_h = min(min_host, h - 1)

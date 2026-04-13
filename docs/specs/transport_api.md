@@ -21,8 +21,8 @@ class Transport(ABC):
 - **Do not use `-hex` format** — XSDB applies a non-standard byte/nibble
   transformation that scrambles bit positions.
 - Burst `read_block` via USER2 256-bit DR: `floor(256/SAMPLE_W)` samples per
-  scan.  ~49 KB/s actual sample data for any width; 0.64 ms/scan overhead
-  (measured on Arty A7 onboard FT2232H via XSDB, TCK up to 30 MHz).
+  scan.  How fast samples stream depends on the adapter and how much
+  per-scan overhead the transport adds (batched vs single DR).
 - Falls back to USER1 single-sequence pipelined reads for non-DATA addresses.
 - All operations within a read use a single `jtag sequence` object to prevent
   stale-read bugs from inter-sequence timing gaps.

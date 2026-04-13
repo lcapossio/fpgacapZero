@@ -31,6 +31,11 @@ from ..cli import _parse_probes
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
+# Pre/post + 1 must fit in usable depth; invalid pair → both spin boxes get a red outline.
+# Keep background/text from the active theme so dark/light palettes stay readable.
+_PREPOST_SPIN_INVALID_STYLE = "QSpinBox { border: 2px solid #e57373; border-radius: 3px; }"
+_PREPOST_SPIN_NORMAL_STYLE = ""
+
 _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Hex", 16),
     ("Dec", 10),
@@ -115,6 +120,9 @@ class CapturePanel(QGroupBox):
         self._hw_has_ext_trigger: bool = True
         self._hw_has_storage_qual: bool = True
         self._hw_probe_mux_w: int = 0
+        self._hw_num_segments: int = 1
+        self._ui_busy: bool = False
+        self._did_apply_first_connect_prepost_defaults: bool = False
 
         self._hw_label = QLabel(
             "Connect first (toolbar or Connection panel). "
@@ -138,6 +146,36 @@ class CapturePanel(QGroupBox):
         self._post = QSpinBox()
         self._post.setRange(0, 1_000_000)
         self._post.setValue(16)
+        self._pre.valueChanged.connect(self._on_pre_post_changed)
+        self._post.valueChanged.connect(self._on_pre_post_changed)
+
+        self._btn_pre_max = QPushButton("Max")
+        self._btn_pre_max.setToolTip(
+            "Set pre-trigger as high as allowed for the current post-trigger and usable depth "
+            "(pre + post + 1 ≤ depth per segment).",
+        )
+        self._btn_pre_max.setMaximumWidth(52)
+        self._btn_pre_max.clicked.connect(self._on_pre_max_clicked)
+        self._btn_post_max = QPushButton("Max")
+        self._btn_post_max.setToolTip(
+            "Set post-trigger as high as allowed for the current pre-trigger and usable depth.",
+        )
+        self._btn_post_max.setMaximumWidth(52)
+        self._btn_post_max.clicked.connect(self._on_post_max_clicked)
+
+        row_pre = QWidget()
+        lay_pre = QHBoxLayout(row_pre)
+        lay_pre.setContentsMargins(0, 0, 0, 0)
+        lay_pre.setSpacing(6)
+        lay_pre.addWidget(self._pre, 1)
+        lay_pre.addWidget(self._btn_pre_max, 0)
+
+        row_post = QWidget()
+        lay_post = QHBoxLayout(row_post)
+        lay_post.setContentsMargins(0, 0, 0, 0)
+        lay_post.setSpacing(6)
+        lay_post.addWidget(self._post, 1)
+        lay_post.addWidget(self._btn_post_max, 0)
 
         self._trig_mode = QComboBox()
         for m in ("value_match", "edge_detect", "both"):
@@ -229,9 +267,18 @@ class CapturePanel(QGroupBox):
         self._seq_table.setMinimumHeight(96)
 
         self._btn_cfg = QPushButton("Configure")
+        self._btn_cfg.setToolTip("Write capture and trigger registers from this panel.")
         self._btn_arm = QPushButton("Arm")
-        self._btn_cap = QPushButton("Capture")
-        self._btn_cont = QPushButton("Continuous")
+        self._btn_arm.setToolTip(
+            "Normal capture: use the selected trigger, arm, wait until it fires, then read back. "
+            "Use Auto re-arm on the toolbar (beside Stop) to repeat.",
+        )
+        self._btn_cap = QPushButton("Trigger Immediate")
+        self._btn_cap.setToolTip(
+            "Immediate trigger: force capture as soon as the pre-trigger buffer is ready "
+            "(always-true compare), then read back. "
+            "Use Auto re-arm on the toolbar (beside Stop) to repeat.",
+        )
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.setEnabled(False)
 
@@ -239,7 +286,6 @@ class CapturePanel(QGroupBox):
             self._btn_cfg,
             self._btn_arm,
             self._btn_cap,
-            self._btn_cont,
             self._btn_stop,
         ):
             b.setEnabled(False)
@@ -248,7 +294,6 @@ class CapturePanel(QGroupBox):
         row_btns.addWidget(self._btn_cfg)
         row_btns.addWidget(self._btn_arm)
         row_btns.addWidget(self._btn_cap)
-        row_btns.addWidget(self._btn_cont)
         row_btns.addWidget(self._btn_stop)
         row_btns.addStretch(1)
 
@@ -256,8 +301,8 @@ class CapturePanel(QGroupBox):
         form_main.addRow(self._hw_label)
         form_main.addRow("Probe profile", self._profile_pick)
         form_main.addRow("Trigger preset", self._preset)
-        form_main.addRow("Pre-trigger samples", self._pre)
-        form_main.addRow("Post-trigger samples", self._post)
+        form_main.addRow("Pre-trigger samples", row_pre)
+        form_main.addRow("Post-trigger samples", row_post)
         form_main.addRow("Trigger mode", self._trig_mode)
         form_main.addRow("Trigger value", trig_val_wrap)
         form_main.addRow("Trigger mask", self._trig_mask)
@@ -301,6 +346,7 @@ class CapturePanel(QGroupBox):
 
         self._refresh_seq_ui_state()
         self._apply_hw_feature_availability()
+        self._refresh_pre_post_validity()
 
     def clear_hw(self) -> None:
         self._hw_sample_w = None
@@ -311,18 +357,86 @@ class CapturePanel(QGroupBox):
         self._hw_has_ext_trigger = True
         self._hw_has_storage_qual = True
         self._hw_probe_mux_w = 0
+        self._hw_num_segments = 1
+        self._ui_busy = False
         self._btn_stop.setEnabled(False)
         self._hw_label.setText(
             "Connect first (toolbar or Connection panel). "
             "Then sample width and depth load from hardware and the capture buttons unlock.",
         )
-        for b in (self._btn_cfg, self._btn_arm, self._btn_cap, self._btn_cont):
-            b.setEnabled(False)
         with QSignalBlocker(self._seq_enable):
             self._seq_enable.setChecked(False)
         self._seq_table.setRowCount(0)
         self._refresh_seq_ui_state()
         self._apply_hw_feature_availability()
+        self._refresh_pre_post_validity()
+
+    def _pre_post_depth_limit(self) -> int | None:
+        """Max samples in one run: ``pre + post + 1`` must be ≤ this (per segment if segmented)."""
+        if self._hw_depth is None:
+            return None
+        d = max(1, int(self._hw_depth))
+        nseg = max(1, int(self._hw_num_segments))
+        return max(1, d // nseg)
+
+    def _pre_post_pair_valid(self) -> bool:
+        lim = self._pre_post_depth_limit()
+        if lim is None:
+            return True
+        return self._pre.value() + self._post.value() + 1 <= lim
+
+    def _sync_main_capture_buttons(self) -> None:
+        hw_ok = self._hw_sample_w is not None
+        pair_ok = self._pre_post_pair_valid()
+        en = not self._ui_busy and hw_ok and pair_ok
+        self._btn_cfg.setEnabled(en)
+        self._btn_arm.setEnabled(en)
+        self._btn_cap.setEnabled(en)
+
+    def _refresh_pre_post_validity(self) -> None:
+        lim = self._pre_post_depth_limit()
+        if lim is None:
+            self._pre.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
+            self._post.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
+            self._btn_pre_max.setEnabled(False)
+            self._btn_post_max.setEnabled(False)
+            self._sync_main_capture_buttons()
+            return
+        cap = max(0, lim - 1)
+        with QSignalBlocker(self._pre):
+            self._pre.setMaximum(cap)
+        with QSignalBlocker(self._post):
+            self._post.setMaximum(cap)
+        ok = self._pre_post_pair_valid()
+        st = _PREPOST_SPIN_NORMAL_STYLE if ok else _PREPOST_SPIN_INVALID_STYLE
+        self._pre.setStyleSheet(st)
+        self._post.setStyleSheet(st)
+        self._btn_pre_max.setEnabled(True)
+        self._btn_post_max.setEnabled(True)
+        self._sync_main_capture_buttons()
+
+    def _on_pre_post_changed(self, _v: int) -> None:
+        self._refresh_pre_post_validity()
+
+    def _on_pre_max_clicked(self) -> None:
+        lim = self._pre_post_depth_limit()
+        if lim is None:
+            return
+        post = int(self._post.value())
+        new_pre = max(0, lim - 1 - post)
+        with QSignalBlocker(self._pre):
+            self._pre.setValue(new_pre)
+        self._refresh_pre_post_validity()
+
+    def _on_post_max_clicked(self) -> None:
+        lim = self._pre_post_depth_limit()
+        if lim is None:
+            return
+        pre = int(self._pre.value())
+        new_post = max(0, lim - 1 - pre)
+        with QSignalBlocker(self._post):
+            self._post.setValue(new_post)
+        self._refresh_pre_post_validity()
 
     def _apply_hw_feature_availability(self) -> None:
         """Enable/disable advanced fields from :meth:`fcapz.analyzer.Analyzer.probe` flags."""
@@ -432,8 +546,9 @@ class CapturePanel(QGroupBox):
         try:
             pre = int(entry.get("pretrigger", 0))
             post = int(entry.get("posttrigger", 0))
-            self._pre.setValue(pre)
-            self._post.setValue(post)
+            with QSignalBlocker(self._pre), QSignalBlocker(self._post):
+                self._pre.setValue(pre)
+                self._post.setValue(post)
         except (TypeError, ValueError):
             pass
         mode = str(entry.get("trigger_mode", "value_match"))
@@ -502,6 +617,7 @@ class CapturePanel(QGroupBox):
             self._probes.setText(str(entry["probes"]))
         if "trigger_sequence" in entry:
             self._apply_trigger_sequence_entry(entry["trigger_sequence"])
+        self._refresh_pre_post_validity()
 
     def _apply_trigger_sequence_entry(self, raw: Any) -> None:
         if self._hw_trig_stages <= 0:
@@ -724,7 +840,29 @@ class CapturePanel(QGroupBox):
         raw = self._trig_val_radix.currentData()
         return int(raw) if raw is not None else 16
 
-    def set_hw_probe_info(self, info: Mapping[str, Any]) -> None:
+    def set_hw_probe_info(self, info: Mapping[str, Any] | None) -> None:
+        if info is None:
+            self._hw_sample_w = None
+            self._hw_depth = None
+            self._hw_num_chan = None
+            self._hw_trig_stages = 0
+            self._hw_has_decimation = True
+            self._hw_has_ext_trigger = True
+            self._hw_has_storage_qual = True
+            self._hw_probe_mux_w = 0
+            self._hw_num_segments = 1
+            self._btn_stop.setEnabled(False)
+            self._hw_label.setText(
+                "JTAG connected — no fcapz ELA on USER1. Capture controls stay disabled; "
+                "attach EIO, EJTAG-AXI, or UART on their chains if your design includes them.",
+            )
+            with QSignalBlocker(self._seq_enable):
+                self._seq_enable.setChecked(False)
+            self._seq_table.setRowCount(0)
+            self._refresh_seq_ui_state()
+            self._apply_hw_feature_availability()
+            self._refresh_pre_post_validity()
+            return
         sw = int(info["sample_width"])
         depth = int(info["depth"])
         nch = int(info.get("num_channels", 1))
@@ -736,24 +874,28 @@ class CapturePanel(QGroupBox):
         self._hw_has_ext_trigger = bool(info.get("has_ext_trigger", True))
         self._hw_has_storage_qual = bool(info.get("has_storage_qualification", True))
         self._hw_probe_mux_w = int(info.get("probe_mux_w", 0))
+        self._hw_num_segments = max(1, int(info.get("num_segments", 1)))
         self._channel.setMaximum(self._hw_num_chan - 1)
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
         )
-        for b in (self._btn_cfg, self._btn_arm, self._btn_cap, self._btn_cont):
-            b.setEnabled(True)
+        if not self._did_apply_first_connect_prepost_defaults:
+            usable_depth = max(1, depth // self._hw_num_segments)
+            with QSignalBlocker(self._pre), QSignalBlocker(self._post):
+                self._pre.setValue(min(8, max(0, usable_depth - 1)))
+                self._post.setValue(max(0, usable_depth - 1 - self._pre.value()))
+            self._did_apply_first_connect_prepost_defaults = True
         while self._seq_table.rowCount() > self._hw_trig_stages > 0:
             self._seq_table.removeRow(self._seq_table.rowCount() - 1)
         self._refresh_seq_ui_state()
         self._apply_hw_feature_availability()
+        self._refresh_pre_post_validity()
 
     def set_busy(self, busy: bool, *, continuous: bool = False) -> None:
-        self._btn_cfg.setEnabled(not busy and self._hw_sample_w is not None)
-        self._btn_arm.setEnabled(not busy and self._hw_sample_w is not None)
-        self._btn_cap.setEnabled(not busy and self._hw_sample_w is not None)
-        self._btn_cont.setEnabled(not busy and self._hw_sample_w is not None)
+        self._ui_busy = busy
         self._btn_stop.setEnabled(busy and continuous)
         self._apply_hw_feature_availability()
+        self._sync_main_capture_buttons()
 
     def timeout_seconds(self) -> float:
         return float(self._timeout.text().strip() or "10.0")
@@ -761,6 +903,12 @@ class CapturePanel(QGroupBox):
     def build_capture_config(self) -> CaptureConfig:
         if self._hw_sample_w is None or self._hw_depth is None:
             raise ValueError("Not connected — hardware sample width / depth unknown.")
+        if not self._pre_post_pair_valid():
+            lim = self._pre_post_depth_limit()
+            raise ValueError(
+                f"pre + post + 1 must be ≤ usable capture depth ({lim} samples); "
+                "adjust the spin boxes or use Max.",
+            )
         mode = self._trig_mode.currentText().strip()
         base = self.trigger_value_radix()
         try:
@@ -864,11 +1012,9 @@ class CapturePanel(QGroupBox):
         on_configure: Callable[[], None],
         on_arm: Callable[[], None],
         on_capture: Callable[[], None],
-        on_continuous: Callable[[], None],
         on_stop: Callable[[], None],
     ) -> None:
         self._btn_cfg.clicked.connect(on_configure)
         self._btn_arm.clicked.connect(on_arm)
         self._btn_cap.clicked.connect(on_capture)
-        self._btn_cont.clicked.connect(on_continuous)
         self._btn_stop.clicked.connect(on_stop)

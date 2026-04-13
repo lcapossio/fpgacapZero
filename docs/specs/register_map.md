@@ -1,9 +1,42 @@
 # JTAG Register Map — v0.3.0
 
+<a id="regmap-top"></a>
+
+## Index
+
+- **[Overview](#regmap-overview)** — scope: per-core JTAG register space vs SoC memory map.
+- **ELA** (logic analyzer, USER1 / USER2)
+  - [Address map (USER1 control)](#regmap-ela-user1)
+  - [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg)
+  - [Compare modes](#regmap-compare-modes)
+  - [Bitfields](#regmap-bitfields)
+  - [DATA window readout (USER1)](#regmap-data-user1)
+  - [Burst readout (USER2)](#regmap-burst-user2)
+- **EIO** (USER3)
+  - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
+- **EJTAG-AXI** (USER4)
+  - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
+- **EJTAG-UART** (USER4, mutually exclusive with AXI)
+  - [32-bit DR format](#regmap-ejtag-uart) — [commands](#regmap-ejtag-uart-cmd), [CONFIG byte map](#regmap-ejtag-uart-config), [shift-out status](#regmap-ejtag-uart-status)
+
+---
+
+<a id="regmap-overview"></a>
 ## Overview
 Registers are memory-mapped via a simple JTAG-accessible address space. All registers are 32-bit.
 
-## Address Map
+**Scope:** Each major section below (ELA, EIO, EJTAG-AXI, EJTAG-UART) defines
+its **own** register or shift layout. An **address map** table lists
+**32-bit word offsets** for the JTAG path described in that section (ELA
+USER1 control, EIO USER3, etc.). Those offsets are **not** a single
+chip-wide bus map and are **not** the same thing as AXI addresses — except
+that EJTAG-AXI commands embed an AXI `addr` in the 72-bit DR, documented
+in that bridge’s section.
+
+[↑ Top](#regmap-top)
+
+<a id="regmap-ela-user1"></a>
+## ELA core — address map (USER1 control)
 - `0x0000`: `VERSION` (ro) - Core identity and version. `[15:0]` is the
   ASCII core identifier `"LA"` (`0x4C41`, Logic Analyzer); `[23:16]` is
   the minor version; `[31:24]` is the major version. Hosts must verify
@@ -31,6 +64,7 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
 - `0x0040+N*20+12`: `SEQ_STAGE_N_VALUE_B` (rw) - Comparator B match value
 - `0x0040+N*20+16`: `SEQ_STAGE_N_MASK_B` (rw) - Comparator B mask
 
+<a id="regmap-seq-cfg"></a>
 ### SEQ_STAGE_N_CFG encoding
 - `[3:0]`   comparator A mode
 - `[7:4]`   comparator B mode
@@ -38,6 +72,7 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
 - `[12]`    is_final (1 = this stage fires the trigger)
 - `[31:16]` occurrence count target
 
+<a id="regmap-compare-modes"></a>
 ### Compare modes (4 bits)
 | Value | Mode | Operation |
 |------:|------|-----------|
@@ -52,6 +87,9 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
 | 8 | CHANGED | any masked bit changed from previous sample |
 - `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1)
 
+[↑ Top](#regmap-top)
+
+<a id="regmap-bitfields"></a>
 ## Bitfields
 ### VERSION
 - [31:24] `major` (8-bit)
@@ -77,6 +115,9 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
 - [1] `edge_detect` (1 = detect rising edge)
 - [31:2] reserved
 
+[↑ Top](#regmap-top)
+
+<a id="regmap-data-user1"></a>
 ## DATA Window Readout (USER1, per-word)
 - For SAMPLE_W <= 32: read from `0x0100 + (index * 4)` returns sample `index`, zero-padded.
 - For SAMPLE_W > 32: each sample spans `ceil(SAMPLE_W / 32)` consecutive 32-bit words.
@@ -84,21 +125,28 @@ Registers are memory-mapped via a simple JTAG-accessible address space. All regi
   Chunk 0 = bits[31:0], chunk 1 = bits[63:32], etc.
 - Sample order is oldest to newest within the captured window.
 
+[↑ Top](#regmap-top)
+
+<a id="regmap-burst-user2"></a>
 ## Burst Readout (USER2, 256-bit DR)
 - Write any value to `BURST_PTR` (0x002C) via USER1 to start burst from `start_ptr`.
 - Switch IR to USER2 (0x03) and perform 256-bit DR scans.
 - Each scan returns `256 / SAMPLE_W` packed samples (e.g. 32 for 8-bit probes).
 - Read pointer auto-increments; staging buffer is pre-filled during SHIFT phase.
-- Throughput: ~49 KB/s actual sample data (0.64 ms/scan, limited by XSDB
-  overhead).  Measured on Arty A7 with onboard FT2232H via Xilinx
-  hw_server/XSDB (TCK up to 30 MHz).
+- Effective sample delivery rate depends on the host transport and cable;
+  the burst path returns multiple samples per 256-bit DR scan to amortise
+  round trips.
 
+[↑ Top](#regmap-top)
+
+<a id="regmap-eio"></a>
 ## EIO Core Register Map (USER3, CHAIN=3)
 
 The EIO core uses the same 49-bit DR protocol as the ELA control interface,
 but on a separate JTAG USER chain (CHAIN=3, IR=`0x04`) so it coexists with
 ELA USER1 and USER2.
 
+<a id="regmap-eio-addr"></a>
 ### Address Map
 - `0x0000`: `VERSION` (ro) — `{major[7:0], minor[7:0], core_id[15:0]}`,
   where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as the
@@ -110,19 +158,25 @@ ELA USER1 and USER2.
 
 Number of IN words = ⌈IN_W / 32⌉; number of OUT words = ⌈OUT_W / 32⌉.
 
+<a id="regmap-eio-clk"></a>
 ### Clock domains
 - `probe_in` may be driven from any fabric clock. It passes through a 2-FF synchroniser into jtag_clk before being readable. For a debug/control tool this is acceptable.
 - `probe_out` lives entirely in jtag_clk. If connecting to fast logic in a different clock domain, add a synchroniser stage after the `fcapz_eio` output.
 
+<a id="regmap-eio-rst"></a>
 ### Reset behaviour
 On `jtag_rst`: all OUT registers are cleared to zero. IN registers are not affected (they reflect the synchronised fabric value).
 
+[↑ Top](#regmap-top)
+
+<a id="regmap-ejtag-axi"></a>
 ## EJTAG-AXI Bridge DR Format (USER4, CHAIN=4)
 
 The EJTAG-AXI bridge uses a 72-bit pipelined streaming DR. Each scan shifts
 in a new command and shifts out the result of the **previous** command — zero
 polling required.
 
+<a id="regmap-ejtag-axi-in"></a>
 ### Shift-in (host → FPGA), 72 bits LSB-first
 
 | Bits | Field | Description |
@@ -132,6 +186,7 @@ polling required.
 | `[67:64]` | wstrb | AXI write strobes (byte enables) |
 | `[71:68]` | cmd | Command code (see table below) |
 
+<a id="regmap-ejtag-axi-out"></a>
 ### Shift-out (FPGA → host), 72 bits
 
 | Bits | Field | Description |
@@ -142,6 +197,7 @@ polling required.
 | `[67:66]` | rsvd | Reserved |
 | `[71:68]` | status | Status bits (see below) |
 
+<a id="regmap-ejtag-axi-cmd"></a>
 ### Command table
 
 | Code | Mnemonic | Description |
@@ -159,6 +215,7 @@ polling required.
 | 0xE | CONFIG | Read bridge config register (addr selects register) |
 | 0xF | RESET | Reset bridge state machines |
 
+<a id="regmap-ejtag-axi-status"></a>
 ### Status bits `[71:68]`
 
 | Bit | Meaning |
@@ -173,6 +230,7 @@ arready, rvalid). Inter-beat timing in burst writes is host-paced via
 JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
 delay — the host sends a priming `BURST_RDATA` before reading N words.
 
+<a id="regmap-ejtag-axi-config"></a>
 ### Config registers (CMD_CONFIG)
 
 | Address | Name | Value | Description |
@@ -180,3 +238,75 @@ delay — the host sends a priming `BURST_RDATA` before reading N words.
 | `0x0000` | BRIDGE_ID | `0x454A4158` | ASCII `"EJAX"` — identifies bridge core |
 | `0x0004` | VERSION | `0x00010000` | `{major[15:0], minor[15:0]}` |
 | `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
+
+[↑ Top](#regmap-top)
+
+<a id="regmap-ejtag-uart"></a>
+## EJTAG-UART bridge — 32-bit DR (USER4, CHAIN=4)
+
+Unlike the **ELA** and **EIO** cores, the UART bridge has **no memory-mapped
+32-bit register file** addressed like `0x0004`, `0x0008`, ….  The host talks
+to it through a **single 32-bit data register (DR)** per JTAG scan: a 4-bit
+**command** plus an 8-bit **tx_byte** field on shift-in, and **status + FIFO
+metadata + rx_byte** on shift-out.  That is the whole “register” interface.
+
+Optional **identity / build parameters** are read with **`CMD_CONFIG`**: each
+CONFIG scan selects one **byte address** (low nibble of `tx_byte`; `0x00`–`0x0F`).
+The implementation is **pipelined** (like EJTAG-AXI): the byte returned on a
+CONFIG scan is the result of the **previous** CONFIG address; the host issues
+four CONFIG scans plus a trailing **NOP** to assemble one 32-bit value (see
+`EjtagUartController._config_read_u32` in `host/fcapz/ejtaguart.py`).
+
+See [chapter 08 — EJTAG-UART bridge](../08_ejtag_uart_bridge.md) for wiring,
+FIFO behaviour, and the Python API.
+
+<a id="regmap-ejtag-uart-cmd"></a>
+### Shift-in (host → FPGA), 32 bits LSB-first
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[7:0]` | tx_byte | TX data for `TX_PUSH` / `TXRX`; **byte address** `[3:0]` for `CONFIG` (upper bits ignored) |
+| `[27:8]` | reserved | Must be zero |
+| `[31:28]` | cmd | Command code (table below) |
+
+<a id="regmap-ejtag-uart-status"></a>
+### Shift-out (FPGA → host), 32 bits
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[7:0]` | rx_byte | RX data (valid when `RX_VALID` set) or CONFIG byte (when `CONFIG` pipeline says so) |
+| `[15:8]` | tx_free | Conservative lower bound of TX FIFO free space (bytes) |
+| `[23:16]` | reserved | Zero |
+| `[24]` | RX_READY | RX FIFO non-empty |
+| `[25:27]` | reserved | Zero |
+| `[28]` | RX_VALID | `rx_byte` holds a popped RX byte or a valid CONFIG byte |
+| `[29]` | TX_FULL | TX FIFO full |
+| `[30]` | RX_OVERFLOW | Sticky: RX FIFO overflow (cleared by `RESET`) |
+| `[31]` | FRAME_ERR | Sticky: UART framing / parity error (cleared by `RESET`) |
+
+### Command codes
+
+| Code | Mnemonic | Description |
+|-----:|----------|-------------|
+| `0x0` | NOP | No FIFO action; read status / `tx_free` |
+| `0x1` | TX_PUSH | Queue `tx_byte` into TX FIFO if not full |
+| `0x2` | RX_POP | Pop one byte from RX FIFO; data appears on a **later** scan (pipelined) |
+| `0x3` | TXRX | TX push and RX pop in one update |
+| `0xE` | CONFIG | Select config byte `tx_byte[3:0]` for the **next** scan’s captured result |
+| `0xF` | RESET | Reset bridge + flush FIFOs (host should follow with NOPs to clock reset) |
+
+<a id="regmap-ejtag-uart-config"></a>
+### CONFIG byte map (`CMD_CONFIG`, byte address in `tx_byte[3:0]`)
+
+Byte addresses `0x0`–`0xF` decode a **16-byte** config window (aliases repeat
+if more than 4 bits are set; RTL only uses the low nibble).  Four consecutive
+bytes form one little-endian 32-bit word as read by the host stack:
+
+| Byte addr | Assembled word | Name | Content |
+|----------:|----------------|------|---------|
+| `0x0`–`0x3` | word @ 0 | **UART_ID** | `0x454A5552` — ASCII **`EJUR`** (bridge identity). Hosts must match before trusting the core. |
+| `0x4`–`0x7` | word @ 4 | **VERSION** | `[31:16]` = major, `[15:0]` = minor (RTL default `0x00010000` → v1.0). |
+| `0x8`–`0xB` | word @ 8 | **FEATURES** | Packed build parameters from `fcapz_ejtaguart.v`: `[31:30]` = `PARITY` (0 none, 1 even, 2 odd); `[29:16]` = `TX_FIFO_DEPTH` (14 bits); `[15:2]` = `RX_FIFO_DEPTH` (14 bits); `[1:0]` = reserved (`2'b00`). Depths are the module parameters (power of 2). |
+| `0xC`–`0xF` | word @ 12 | **BAUD_DIV** | Integer **uart_clk cycles per UART bit** (`CLK_HZ / BAUD_RATE` as synthesized). |
+
+[↑ Top](#regmap-top)

@@ -8,6 +8,7 @@ from functools import partial
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -25,6 +27,8 @@ from ..transport import Transport
 from .jtag_chain_scope import subsidiary_jtag_chain
 
 _MAX_BITS_UI = 32
+_POLL_MS_PRESETS = (25, 50, 100, 250, 500, 1000)
+_DEFAULT_POLL_MS = 250
 
 
 class EioPanel(QGroupBox):
@@ -41,14 +45,26 @@ class EioPanel(QGroupBox):
         self._chain_spin.setRange(1, 8)
         self._chain_spin.setValue(3)
         self._attach_btn = QPushButton("Attach EIO")
+        self._attach_btn.setToolTip(
+            "Required before reads/writes. Arty reference bitstream: chain 3 (USER3). "
+            "Then use Outputs to drive the green LEDs.",
+        )
         self._attach_btn.clicked.connect(lambda: self.attach_requested.emit())
 
         self._info = QLabel("Not attached.")
         self._info.setWordWrap(True)
 
         self._poll_enable = QCheckBox("Poll inputs")
+        self._poll_ms_combo = QComboBox()
+        for ms in _POLL_MS_PRESETS:
+            self._poll_ms_combo.addItem(f"{ms} ms", ms)
+        self._poll_ms_combo.setCurrentIndex(_POLL_MS_PRESETS.index(_DEFAULT_POLL_MS))
+        self._poll_ms_combo.setMaximumWidth(88)
+        self._poll_ms_combo.setToolTip("How often to read EIO inputs while polling is on.")
+        self._poll_ms_combo.currentIndexChanged.connect(self._on_poll_interval_changed)
+
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(250)
+        self._poll_timer.setInterval(_DEFAULT_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_tick)
 
         self._in_grid = QWidget()
@@ -59,12 +75,27 @@ class EioPanel(QGroupBox):
         self._out_layout = QGridLayout(self._out_grid)
         self._out_checks: list[QCheckBox] = []
 
-        in_scroll = QScrollArea()
-        in_scroll.setWidgetResizable(True)
-        in_scroll.setWidget(self._in_grid)
+        self._all_outputs_on_btn = QPushButton("All outputs on")
+        self._all_outputs_on_btn.setToolTip(
+            "Write every probe_out bit to 1 at once "
+            f"(full OUT_W, not only the first {_MAX_BITS_UI} UI bits).",
+        )
+        self._all_outputs_on_btn.clicked.connect(self._on_all_outputs_on_clicked)
+
+        self._all_outputs_off_btn = QPushButton("All outputs off")
+        self._all_outputs_off_btn.setToolTip(
+            "Write every probe_out bit to 0 at once "
+            f"(full OUT_W, not only the first {_MAX_BITS_UI} UI bits).",
+        )
+        self._all_outputs_off_btn.clicked.connect(self._on_all_outputs_off_clicked)
+
+        self._in_scroll = QScrollArea()
+        self._in_scroll.setWidgetResizable(True)
+        self._in_scroll.setWidget(self._in_grid)
         out_scroll = QScrollArea()
         out_scroll.setWidgetResizable(True)
         out_scroll.setWidget(self._out_grid)
+        self._out_scroll = out_scroll
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Chain"))
@@ -75,9 +106,28 @@ class EioPanel(QGroupBox):
         form = QFormLayout()
         form.addRow(row)
         form.addRow(self._info)
-        form.addRow(self._poll_enable)
-        form.addRow(QLabel("Inputs (read-only)"), in_scroll)
-        form.addRow(QLabel("Outputs"), out_scroll)
+        poll_row = QHBoxLayout()
+        poll_row.addWidget(self._poll_enable)
+        poll_row.addWidget(self._poll_ms_combo)
+        poll_row.addStretch(1)
+        form.addRow(poll_row)
+        form.addRow(QLabel("Inputs (read-only)"), self._in_scroll)
+        out_lbl = QLabel("Outputs (drive fabric / board LEDs)")
+        out_lbl.setToolTip(
+            "Writes EIO probe_out. On the Arty reference design, bits 0–3 drive the "
+            "four green LEDs (active high). Enable Poll inputs above to refresh the "
+            "Inputs checkboxes only — they are not wired to LEDs.",
+        )
+        out_block = QWidget()
+        out_block_layout = QVBoxLayout(out_block)
+        out_block_layout.setContentsMargins(0, 0, 0, 0)
+        out_master_row = QHBoxLayout()
+        out_master_row.addWidget(self._all_outputs_on_btn)
+        out_master_row.addWidget(self._all_outputs_off_btn)
+        out_master_row.addStretch(1)
+        out_block_layout.addLayout(out_master_row)
+        out_block_layout.addWidget(self._out_scroll)
+        form.addRow(out_lbl, out_block)
 
         outer = QGridLayout(self)
         outer.addLayout(form, 0, 0)
@@ -93,6 +143,7 @@ class EioPanel(QGroupBox):
         self._info.setText("Not attached.")
         self._rebuild_bits(0, 0)
         self._attach_btn.setEnabled(False)
+        self._apply_attach_ui_state(False)
 
     def set_transport(self, transport: Transport | None) -> None:
         if transport is None:
@@ -100,6 +151,7 @@ class EioPanel(QGroupBox):
             return
         self._transport = transport
         self._attach_btn.setEnabled(True)
+        self._apply_attach_ui_state(False)
 
     def bind_eio(self, transport: Transport, eio: EioController) -> None:
         self._transport = transport
@@ -115,17 +167,60 @@ class EioPanel(QGroupBox):
             min(eio.in_w, _MAX_BITS_UI),
             min(eio.out_w, _MAX_BITS_UI),
         )
+        self._apply_attach_ui_state(True)
+        try:
+            with subsidiary_jtag_chain(transport, eio.bscan_chain):
+                outv = eio.read_outputs()
+        except (OSError, RuntimeError):
+            outv = 0
+        self._set_output_widgets_from_value(outv)
         if self._poll_enable.isChecked():
             self._poll_tick()
 
     def chain(self) -> int:
         return int(self._chain_spin.value())
 
+    def _apply_attach_ui_state(self, attached: bool) -> None:
+        """Grey out probe UI until EIO is attached; keep chain + attach usable when connected."""
+        has_transport = self._transport is not None
+        self._chain_spin.setEnabled(has_transport and not attached)
+        self._poll_enable.setEnabled(attached)
+        self._poll_ms_combo.setEnabled(attached)
+        self._in_scroll.setEnabled(attached)
+        self._out_scroll.setEnabled(attached)
+        out_bits = len(self._out_checks)
+        can_out = attached and out_bits > 0
+        self._all_outputs_on_btn.setEnabled(can_out)
+        self._all_outputs_off_btn.setEnabled(can_out)
+        for cb in self._out_checks:
+            cb.setEnabled(attached)
+
+    def _full_output_mask(self) -> int:
+        if self._eio is None:
+            return 0
+        return (1 << self._eio.out_w) - 1
+
+    def _set_output_widgets_from_value(self, outv: int) -> None:
+        for i, cb in enumerate(self._out_checks):
+            v = (outv >> i) & 1
+            cb.blockSignals(True)
+            cb.setCheckState(
+                Qt.CheckState.Checked if v else Qt.CheckState.Unchecked,
+            )
+            cb.blockSignals(False)
+
     def _on_poll_toggled(self, on: bool) -> None:
         if on and self._eio is not None:
             self._poll_timer.start()
         else:
             self._poll_timer.stop()
+
+    def _poll_interval_ms(self) -> int:
+        data = self._poll_ms_combo.currentData()
+        return int(data) if data is not None else _DEFAULT_POLL_MS
+
+    def _on_poll_interval_changed(self, _index: int) -> None:
+        self._poll_timer.setInterval(self._poll_interval_ms())
 
     def _rebuild_bits(self, in_n: int, out_n: int) -> None:
         for c in self._in_checks:
@@ -177,13 +272,26 @@ class EioPanel(QGroupBox):
             cb.setCheckState(
                 Qt.CheckState.Checked if v else Qt.CheckState.Unchecked,
             )
-        for i, cb in enumerate(self._out_checks):
-            v = (outv >> i) & 1
-            cb.blockSignals(True)
-            cb.setCheckState(
-                Qt.CheckState.Checked if v else Qt.CheckState.Unchecked,
-            )
-            cb.blockSignals(False)
+        self._set_output_widgets_from_value(outv)
+
+    def _write_full_probe_out(self, value: int) -> bool:
+        if self._eio is None or self._transport is None:
+            return False
+        try:
+            with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain):
+                self._eio.write_outputs(value)
+                outv = self._eio.read_outputs()
+        except (OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.warning(self, "EIO outputs", str(exc))
+            return False
+        self._set_output_widgets_from_value(outv)
+        return True
+
+    def _on_all_outputs_on_clicked(self) -> None:
+        self._write_full_probe_out(self._full_output_mask())
+
+    def _on_all_outputs_off_clicked(self) -> None:
+        self._write_full_probe_out(0)
 
     def _on_output_toggled(self, bit: int, high: bool) -> None:
         if self._eio is None or self._transport is None:
@@ -191,8 +299,19 @@ class EioPanel(QGroupBox):
         try:
             with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain):
                 self._eio.set_bit(bit, 1 if high else 0)
+                outv = self._eio.read_outputs()
         except (OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, "EIO output", str(exc))
+            if self._eio is not None and self._transport is not None:
+                try:
+                    with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain):
+                        outv = self._eio.read_outputs()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                else:
+                    self._set_output_widgets_from_value(outv)
+            return
+        self._set_output_widgets_from_value(outv)
 
     def _on_out_bit_state(self, bit: int, state: int) -> None:
         on = Qt.CheckState(state) == Qt.CheckState.Checked

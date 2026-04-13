@@ -269,6 +269,31 @@ class TestCapture(unittest.TestCase):
         self.assertEqual(len(result.samples), 151)
         self.assertFalse(result.overflow)
 
+    def test_segment_depth_capture_pre8_post247(self):
+        """Long per-segment window: 8 pre + 247 post = 256 samples total."""
+        result = self._capture(pretrig=8, posttrig=247)
+        self.assertEqual(len(result.samples), 256)
+        self.assertFalse(result.overflow)
+
+        # If timestamp capture is enabled in this bitstream, ensure no repeated
+        # adjacent values so long-window runs catch "flat spots" early.
+        if result.timestamps:
+            self.assertEqual(
+                len(result.timestamps),
+                len(result.samples),
+                "timestamp/sample length mismatch",
+            )
+            repeats = [
+                (i - 1, result.timestamps[i - 1], result.timestamps[i])
+                for i in range(1, len(result.timestamps))
+                if result.timestamps[i] <= result.timestamps[i - 1]
+            ]
+            self.assertEqual(
+                repeats,
+                [],
+                f"Non-increasing timestamps in long capture (first 8): {repeats[:8]}",
+            )
+
     def test_trigger_on_specific_value(self):
         """Trigger on a specific counter value (mask=0xFF).
 

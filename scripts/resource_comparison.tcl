@@ -4,7 +4,12 @@
 # Resource comparison across configurations.
 # Usage: vivado -mode batch -source scripts/resource_comparison.tcl
 
-set root C:/Projects/fpgacapZero
+# Repo root = parent of scripts/ (override with env FPGACAP_ROOT if needed).
+if {[info exists ::env(FPGACAP_ROOT)] && $::env(FPGACAP_ROOT) ne ""} {
+    set root [file normalize $::env(FPGACAP_ROOT)]
+} else {
+    set root [file normalize [file join [file dirname [info script]] ..]]
+}
 set part xc7a100tcsg324-1
 
 # {SAMPLE_W DEPTH TRIG_STAGES STOR_QUAL label}

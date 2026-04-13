@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .branding import GUI_DISPLAY_TITLE
 from .settings import GuiSettings, ProbeProfile, UiSettings, ViewerSettings
 
 
@@ -37,7 +38,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, settings: GuiSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("fcapz-gui settings")
+        self.setWindowTitle(f"{GUI_DISPLAY_TITLE} settings")
         self.resize(520, 420)
         self._base = settings
 

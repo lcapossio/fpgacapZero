@@ -31,12 +31,20 @@ designed to fit on any FPGA with minimal resource usage.
 | Parameter | Default | Description |
 |-----------|--------:|-------------|
 | `SAMPLE_W` | 32 | Probe width in bits (1-256+) |
-| `DEPTH` | 1024 | Sample buffer depth |
+| `DEPTH` | 1024 | Sample buffer depth (power of 2) |
 | `TRIG_STAGES` | 1 | Trigger sequencer stages (1 = simple, 2-4 = sequencer) |
 | `STOR_QUAL` | 0 | Storage qualification (0 = off, 1 = on) |
+| `NUM_CHANNELS` | 1 | Mutually exclusive probe buses (runtime mux when >1) |
+| `INPUT_PIPE` | 0 | Optional pipeline registers on `probe_in` |
+| `DECIM_EN` | 0 | Runtime decimation register |
+| `EXT_TRIG_EN` | 0 | `trigger_in` / `trigger_out` ports |
+| `TIMESTAMP_W` | 0 | Per-sample timestamp RAM (`0` = off, 32 or 48) |
+| `NUM_SEGMENTS` | 1 | Segmented capture (`>1` adds segment RAM/control) |
+| `PROBE_MUX_W` | 0 | Packed probe mux width (`0` = off; else runtime slice select) |
 
-When `TRIG_STAGES=1` and `STOR_QUAL=0`, the sequencer and qualification
-logic optimize away completely.
+When `TRIG_STAGES=1`, `STOR_QUAL=0`, `DECIM_EN=0`, `EXT_TRIG_EN=0`,
+`TIMESTAMP_W=0`, `NUM_SEGMENTS=1`, `NUM_CHANNELS=1`, `INPUT_PIPE=0`, and
+`PROBE_MUX_W=0`, extra logic optimises away in synthesis.
 
 EIO core parameters (separate module, `fcapz_eio.v`):
 
@@ -46,11 +54,21 @@ EIO core parameters (separate module, `fcapz_eio.v`):
 | `OUT_W` | 32 | Output probe width (host → fabric) |
 
 ## Resource Usage (xc7a100t)
-| Config | LUTs | BRAM |
+
+Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2), same
+harness as `scripts/resource_comparison.tcl`. See [README.md](../../README.md#resource-usage)
+for FFs and the full `arty_a7_top` reference row.
+
+| Config | Slice LUTs | BRAM |
 |--------|-----:|-----:|
-| 8b × 1024, baseline (dual comparators) | 1,990 | 0.5 |
-| 8b × 1024, full (4-stage seq + SQ) | ~2,500 | 0.5 |
-| 32b × 1024, baseline | ~2,000 | 1.0 |
+| 8b × 1024, baseline (`TRIG_STAGES=1`, `STOR_QUAL=0`) | 1,595 | 0.5 |
+| 8b × 1024, + `STOR_QUAL=1` | 1,616 | 0.5 |
+| 8b × 1024, + 4-stage seq + SQ | 2,095 | 0.5 |
+| 32b × 1024, baseline | 1,548 | 1.0 |
+
+Enabling timestamp, segmentation, decimation, external trigger, or wide
+probe mux builds adds logic and usually **extra BRAM** (see synthesis
+for your exact mix).
 
 ## Clocking
 - `sample_clk` is the capture clock.
@@ -85,7 +103,7 @@ host can queue the next.
 **Burst timing:** The AXI-side timeout (`TIMEOUT` parameter) applies only
 to AXI handshake waits (wready, bvalid, arready, rvalid). It does NOT
 apply between burst write beats in `ST_BURST_W`, because inter-beat pacing
-is host-controlled via JTAG scans (~0.5 ms per beat) — far longer than
+is host-controlled via JTAG scans — far longer than
 any AXI-side timeout.
 
 **Burst read pipeline:** The FIFO read has a 1-scan pipeline delay: the
@@ -93,13 +111,13 @@ first `BURST_RDATA` scan sets `last_cmd` but does not capture FIFO data
 (because `last_cmd` was still `BURST_RSTART` at CAPTURE time). The host
 sends a priming `BURST_RDATA`, then N data scans for N words.
 
-**Throughput (Arty A7, onboard FT2232H, Xilinx hw_server/XSDB, TCK up to
-30 MHz):** ~0.6 KB/s sequential (single `raw_dr_scan` per word, dominated
-by 0.64 ms XSDB round-trip), ~5-8 KB/s with `raw_dr_scan_batch`.
+**Host pacing:** Single-word paths issue roughly one JTAG round trip per
+`raw_dr_scan`; auto-increment blocks and batched APIs amortise tool
+overhead via `raw_dr_scan_batch` where the transport implements it.
 Hardware-validated on Arty A7-100T: single read/write, auto-increment
 blocks, and AXI4 burst read/write all pass.  Different JTAG adapters or
-a raw TCF transport (bypassing XSDB) would significantly change these
-numbers.
+a raw TCF transport (bypassing XSDB) change how much of the cable's
+bandwidth you actually see.
 
 Parameters: `ADDR_W` (default 32), `DATA_W` (default 32), `FIFO_DEPTH`
 (default 16), `TIMEOUT` (default 4096 axi_clk cycles).

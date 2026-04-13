@@ -18,7 +18,8 @@
 //   wrapper defaults unless overridden in the wrapper parameters.
 //
 // - EIO on USER3 exposes {btn[3:0], counter[3:0]} as probe_in and drives
-//   the four constrained green LEDs from probe_out[3:0].  probe_out[4]
+//   the four constrained green LEDs from probe_out[3:0] (resynced into clk).
+//   probe_out[4]
 //   feeds ELA trigger_in, so a host write can make a manual trigger edge.
 //   probe_out[7:5] remains readable/writable over JTAG but is not bonded
 //   to LEDs here.
@@ -46,6 +47,11 @@ module arty_a7_top (
     wire trigger_out_w;
     wire [7:0] eio_probe_in;
     wire [7:0] eio_probe_out;
+
+    // EIO probe_out updates on jtag_clk; LEDs are static I/O on the fabric clock domain.
+    // Resync into sys_clk so the pins see clean levels (matches CDC note in docs/06_eio_core.md).
+    (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync1;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync2;
 
     assign eio_probe_in = {btn, counter[3:0]};
 
@@ -137,7 +143,16 @@ module arty_a7_top (
     // constrained green LEDs via probe_out.  The upper EIO output bits
     // still read back over JTAG, but are not bonded to LEDs in this XDC.
 
-    assign led = eio_probe_out[3:0];
+    always @(posedge clk) begin
+        if (rst) begin
+            led_sync1 <= 4'b0;
+            led_sync2 <= 4'b0;
+        end else begin
+            led_sync1 <= eio_probe_out[3:0];
+            led_sync2 <= led_sync1;
+        end
+    end
+    assign led = led_sync2;
 
     fcapz_eio_xilinx7 #(
         .IN_W  (8),     // btn[3:0] + counter[3:0]

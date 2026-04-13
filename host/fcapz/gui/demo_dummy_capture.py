@@ -4,8 +4,8 @@
 """Launch fcapz-gui against **mock hardware** (no JTAG).
 
 Patches the connect worker so **Connect** completes like a real ELA session. The
-window opens and immediately starts a mock connect; use **Capture** / **Arm**
-as usual. Each **Capture** fills the buffer with **random** sample words
+window opens and immediately starts a mock connect; use **Trigger Immediate** / **Arm**
+as usual. Each **Trigger Immediate** fills the buffer with **random** sample words
 (sized from your configured sample width and pre/post depth).
 Your normal ``gui.toml`` (viewers, paths) is still loaded.
 At least one viewer (e.g. Surfer or GTKWave) must be on ``PATH`` or configured
@@ -89,6 +89,7 @@ def _install_demo_hw_mocks() -> tuple[ExitStack, MagicMock]:
 
     mock_an.configure.side_effect = _configure
     mock_an.capture.side_effect = _capture
+    mock_an.immediate_variant.side_effect = lambda c: c
 
     # History / live-wave / exports call write_vcd (etc.) on the connected analyzer.
     # A bare MagicMock never touches disk, so "Open in viewer" sees missing files.
@@ -121,10 +122,15 @@ def main(_argv: list[str] | None = None) -> int:
     from .app_window import (
         MainWindow,
         apply_application_ui_font,
+        apply_application_window_icon,
         apply_gui_application_style,
     )
+    from .branding import GUI_DISPLAY_TITLE
+    from .reject_spin_combo_wheel import install_reject_spin_combo_wheel_filter
     from .settings import load_gui_settings
 
+    install_reject_spin_combo_wheel_filter(app)
+    apply_application_window_icon(app)
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
 
@@ -133,7 +139,7 @@ def main(_argv: list[str] | None = None) -> int:
         persist_window_layout=False,
         demo_continuous_cycle_delay_s=0.5,
     )
-    w.setWindowTitle("fcapz-gui (demo — mock hardware)")
+    w.setWindowTitle(f"{GUI_DISPLAY_TITLE} (demo — mock hardware)")
 
     w.show()
     # Defer so ConnectionPanel and threads wire up before connect runs.
