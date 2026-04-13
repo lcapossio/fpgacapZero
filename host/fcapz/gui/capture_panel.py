@@ -276,7 +276,8 @@ class CapturePanel(QGroupBox):
         self._btn_cap = QPushButton("Trigger Immediate")
         self._btn_cap.setToolTip(
             "Immediate trigger: force capture as soon as the pre-trigger buffer is ready "
-            "(always-true compare), then read back. Use Auto re-arm on the toolbar (beside Stop) to repeat.",
+            "(always-true compare), then read back. "
+            "Use Auto re-arm on the toolbar (beside Stop) to repeat.",
         )
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.setEnabled(False)

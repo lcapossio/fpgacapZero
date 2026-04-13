@@ -882,7 +882,10 @@ class MainWindow(QMainWindow):
         st.sync()
 
     def _apply_auto_rearm_pref_from_settings(self) -> None:
-        """Set Auto re-arm from ``fcapz-gui-window.ini``; needed after ``restoreState`` clobbers the toolbar."""
+        """Set Auto re-arm from ``fcapz-gui-window.ini``.
+
+        Needed after ``restoreState`` clobbers the toolbar.
+        """
         chk = self._tb_chk_auto_rearm
         if chk is None:
             return
@@ -1003,7 +1006,10 @@ class MainWindow(QMainWindow):
         assert self._main_toolbar is not None
         act_tb = self._main_toolbar.toggleViewAction()
         act_tb.setText("Main &toolbar")
-        act_tb.setStatusTip("Show or hide the Connect / Capture / Stop toolbar (same as the toolbar’s context menu).")
+        act_tb.setStatusTip(
+            "Show or hide the Connect / Capture / Stop toolbar "
+            "(same as the toolbar’s context menu)."
+        )
         m_window.addAction(act_tb)
         m_window.addSeparator()
         m_layouts = m_window.addMenu("Layout &presets")
