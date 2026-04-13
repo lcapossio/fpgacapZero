@@ -143,31 +143,27 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
 
-    def test_capture_rereads_unstable_timestamp_block(self):
-        """A stale first timestamp block is discarded before export/GUI use."""
+    def test_capture_reads_32_bit_timestamps_via_burst_block(self):
+        """32-bit timestamp capture uses the transport-level timestamp burst path."""
 
-        class TimestampRetryTransport(FakeTransport):
+        class TimestampBurstTransport(FakeTransport):
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
                 self.regs[0x00C4] = 32      # TIMESTAMP_W
                 self.data = [10, 11, 12]
-                self.timestamp_reads = 0
+                self.timestamp_burst_args: tuple[int, int, int] | None = None
 
-            def read_block(self, addr: int, words: int):
-                if addr == 0x0100:
-                    return self.data[:words]
-                if addr == 0x1100:
-                    self.timestamp_reads += 1
-                    reads = [
-                        [0, 101, 102],
-                        [100, 101, 102],
-                        [100, 101, 102],
-                    ]
-                    return reads[min(self.timestamp_reads - 1, len(reads) - 1)][:words]
-                return super().read_block(addr, words)
+            def read_timestamp_block(
+                self,
+                addr: int,
+                words: int,
+                timestamp_width: int,
+            ) -> list[int]:
+                self.timestamp_burst_args = (addr, words, timestamp_width)
+                return [100, 101, 102][:words]
 
-        transport = TimestampRetryTransport()
+        transport = TimestampBurstTransport()
         analyzer = Analyzer(transport)
         analyzer.connect()
         analyzer.configure(self._make_cfg())
@@ -176,7 +172,7 @@ class AnalyzerTests(unittest.TestCase):
         result = analyzer.capture(timeout=0.01)
 
         self.assertEqual(result.timestamps, [100, 101, 102])
-        self.assertEqual(transport.timestamp_reads, 3)
+        self.assertEqual(transport.timestamp_burst_args, (0x1100, 3, 32))
 
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""

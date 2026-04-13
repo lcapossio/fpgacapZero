@@ -343,6 +343,24 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
+    def test_timestamp_burst_uses_prefilled_first_scan(self):
+        """Timestamp USER2 reads consume the first scan; no sample-style prime."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+        first = self._burst_token(list(range(8)), sample_w=32)
+        second = self._burst_token([0xEE] * 8, sample_w=32)
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{first} {second}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8, timestamp=True, element_width=32)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 1)
+
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads leave CDC time before every captured word."""
         t = XilinxHwServerTransport()
