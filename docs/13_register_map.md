@@ -62,9 +62,11 @@ The canonical spec covers all four cores in one document:
     `FIFO_DEPTH-1` AXI4 awlen encoding)
   - Status bits and error response codes
 - **EJTAG-UART bridge** (USER4, mutually exclusive with AXI)
-  - 32-bit DR shift format with all command codes
-  - Config registers (`UART_ID`, `VERSION`, FIFO depths)
-  - RX/TX status bits and sticky error flags
+  - 32-bit DR per scan (commands `NOP` … `RESET`); not a word-addressed
+    map like ELA/EIO
+  - **CONFIG** byte addresses `0x0`–`0xF`: `UART_ID` (`EJUR`), `VERSION`,
+    `FEATURES` (parity + TX/RX FIFO depth parameters), `BAUD_DIV`
+  - Shift-out status / `tx_free` / pipelined RX and CONFIG behaviour
 
 ## Quick reference: where features live
 
@@ -78,7 +80,7 @@ The canonical spec covers all four cores in one document:
 | **EIO VERSION encoding** (`IO` core_id) | "EIO Core Register Map" → row at `0x0000` |
 | **EJTAG-AXI 72-bit DR encoding** | "EJTAG-AXI Bridge DR Format" |
 | **EJTAG-AXI FIFO_DEPTH register encoding** | "EJTAG-AXI Bridge" → "Config registers (CMD_CONFIG)" → `FEATURES` row |
-| **EJTAG-UART 32-bit DR encoding** | "EJTAG-UART Bridge DR Format" |
+| **EJTAG-UART DR + CONFIG map** | "EJTAG-UART bridge — 32-bit DR" in the spec |
 
 ## When you actually need this
 

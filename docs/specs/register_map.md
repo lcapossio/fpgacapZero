@@ -16,6 +16,8 @@
   - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
 - **EJTAG-AXI** (USER4)
   - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
+- **EJTAG-UART** (USER4, mutually exclusive with AXI)
+  - [32-bit DR format](#regmap-ejtag-uart) — [commands](#regmap-ejtag-uart-cmd), [CONFIG byte map](#regmap-ejtag-uart-config), [shift-out status](#regmap-ejtag-uart-status)
 
 ---
 
@@ -236,5 +238,75 @@ delay — the host sends a priming `BURST_RDATA` before reading N words.
 | `0x0000` | BRIDGE_ID | `0x454A4158` | ASCII `"EJAX"` — identifies bridge core |
 | `0x0004` | VERSION | `0x00010000` | `{major[15:0], minor[15:0]}` |
 | `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
+
+[↑ Top](#regmap-top)
+
+<a id="regmap-ejtag-uart"></a>
+## EJTAG-UART bridge — 32-bit DR (USER4, CHAIN=4)
+
+Unlike the **ELA** and **EIO** cores, the UART bridge has **no memory-mapped
+32-bit register file** addressed like `0x0004`, `0x0008`, ….  The host talks
+to it through a **single 32-bit data register (DR)** per JTAG scan: a 4-bit
+**command** plus an 8-bit **tx_byte** field on shift-in, and **status + FIFO
+metadata + rx_byte** on shift-out.  That is the whole “register” interface.
+
+Optional **identity / build parameters** are read with **`CMD_CONFIG`**: each
+CONFIG scan selects one **byte address** (low nibble of `tx_byte`; `0x00`–`0x0F`).
+The implementation is **pipelined** (like EJTAG-AXI): the byte returned on a
+CONFIG scan is the result of the **previous** CONFIG address; the host issues
+four CONFIG scans plus a trailing **NOP** to assemble one 32-bit value (see
+`EjtagUartController._config_read_u32` in `host/fcapz/ejtaguart.py`).
+
+See [chapter 08 — EJTAG-UART bridge](../08_ejtag_uart_bridge.md) for wiring,
+FIFO behaviour, and the Python API.
+
+<a id="regmap-ejtag-uart-cmd"></a>
+### Shift-in (host → FPGA), 32 bits LSB-first
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[7:0]` | tx_byte | TX data for `TX_PUSH` / `TXRX`; **byte address** `[3:0]` for `CONFIG` (upper bits ignored) |
+| `[27:8]` | reserved | Must be zero |
+| `[31:28]` | cmd | Command code (table below) |
+
+<a id="regmap-ejtag-uart-status"></a>
+### Shift-out (FPGA → host), 32 bits
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| `[7:0]` | rx_byte | RX data (valid when `RX_VALID` set) or CONFIG byte (when `CONFIG` pipeline says so) |
+| `[15:8]` | tx_free | Conservative lower bound of TX FIFO free space (bytes) |
+| `[23:16]` | reserved | Zero |
+| `[24]` | RX_READY | RX FIFO non-empty |
+| `[25:27]` | reserved | Zero |
+| `[28]` | RX_VALID | `rx_byte` holds a popped RX byte or a valid CONFIG byte |
+| `[29]` | TX_FULL | TX FIFO full |
+| `[30]` | RX_OVERFLOW | Sticky: RX FIFO overflow (cleared by `RESET`) |
+| `[31]` | FRAME_ERR | Sticky: UART framing / parity error (cleared by `RESET`) |
+
+### Command codes
+
+| Code | Mnemonic | Description |
+|-----:|----------|-------------|
+| `0x0` | NOP | No FIFO action; read status / `tx_free` |
+| `0x1` | TX_PUSH | Queue `tx_byte` into TX FIFO if not full |
+| `0x2` | RX_POP | Pop one byte from RX FIFO; data appears on a **later** scan (pipelined) |
+| `0x3` | TXRX | TX push and RX pop in one update |
+| `0xE` | CONFIG | Select config byte `tx_byte[3:0]` for the **next** scan’s captured result |
+| `0xF` | RESET | Reset bridge + flush FIFOs (host should follow with NOPs to clock reset) |
+
+<a id="regmap-ejtag-uart-config"></a>
+### CONFIG byte map (`CMD_CONFIG`, byte address in `tx_byte[3:0]`)
+
+Byte addresses `0x0`–`0xF` decode a **16-byte** config window (aliases repeat
+if more than 4 bits are set; RTL only uses the low nibble).  Four consecutive
+bytes form one little-endian 32-bit word as read by the host stack:
+
+| Byte addr | Assembled word | Name | Content |
+|----------:|----------------|------|---------|
+| `0x0`–`0x3` | word @ 0 | **UART_ID** | `0x454A5552` — ASCII **`EJUR`** (bridge identity). Hosts must match before trusting the core. |
+| `0x4`–`0x7` | word @ 4 | **VERSION** | `[31:16]` = major, `[15:0]` = minor (RTL default `0x00010000` → v1.0). |
+| `0x8`–`0xB` | word @ 8 | **FEATURES** | Packed build parameters from `fcapz_ejtaguart.v`: `[31:30]` = `PARITY` (0 none, 1 even, 2 odd); `[29:16]` = `TX_FIFO_DEPTH` (14 bits); `[15:2]` = `RX_FIFO_DEPTH` (14 bits); `[1:0]` = reserved (`2'b00`). Depths are the module parameters (power of 2). |
+| `0xC`–`0xF` | word @ 12 | **BAUD_DIV** | Integer **uart_clk cycles per UART bit** (`CLK_HZ / BAUD_RATE` as synthesized). |
 
 [↑ Top](#regmap-top)

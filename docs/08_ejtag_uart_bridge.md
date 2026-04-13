@@ -116,9 +116,12 @@ synchroniser delay), so the host can batch many writes safely
 without ever overflowing the FIFO.
 
 You don't need to memorise this — the host stack speaks the
-protocol for you.  See `host/fcapz/ejtaguart.py` and the spec doc
-[`specs/register_map.md`](specs/register_map.md) for the canonical
-encoding.
+protocol for you.  See `host/fcapz/ejtaguart.py`.  The DR shift
+encoding and **CONFIG byte map** (identity, version, FEATURES,
+BAUD_DIV) are specified in
+[`specs/register_map.md`](specs/register_map.md) under **EJTAG-UART**
+— that bridge has **no** separate word-offset register file like
+ELA/EIO; commands and CONFIG bytes *are* the interface.
 
 ## The host API: `EjtagUartController`
 

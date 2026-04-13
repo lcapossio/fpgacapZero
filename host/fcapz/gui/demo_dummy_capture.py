@@ -122,6 +122,7 @@ def main(_argv: list[str] | None = None) -> int:
     from .app_window import (
         MainWindow,
         apply_application_ui_font,
+        apply_application_window_icon,
         apply_gui_application_style,
     )
     from .branding import GUI_DISPLAY_TITLE
@@ -129,6 +130,7 @@ def main(_argv: list[str] | None = None) -> int:
     from .settings import load_gui_settings
 
     install_reject_spin_combo_wheel_filter(app)
+    apply_application_window_icon(app)
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)
 

@@ -27,7 +27,7 @@ from PySide6.QtCore import (
     QUrl,
     Slot,
 )
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -73,6 +73,41 @@ from .worker import CaptureWorker, ConnectWorker
 
 _log = logging.getLogger("fcapz.gui")
 
+_GUI_ASSETS = Path(__file__).resolve().parent / "assets"
+_LOGO_PATH = _GUI_ASSETS / "fcapz_logo.png"
+
+
+def application_window_icon() -> QIcon | None:
+    """Load packaged ``assets/fcapz_logo.png`` for window / taskbar branding.
+
+    Windows shell (taskbar, Alt+Tab) is picky: a single PNG path often yields only the
+    title-bar icon. Register multiple pixmap sizes and re-apply after the native HWND
+    exists (see :meth:`MainWindow._apply_post_show_layout`).
+    """
+    if not _LOGO_PATH.is_file():
+        return None
+    pm0 = QPixmap(str(_LOGO_PATH))
+    if pm0.isNull():
+        return None
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+        icon.addPixmap(
+            pm0.scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+    return icon
+
+
+def apply_application_window_icon(app: QGuiApplication) -> None:
+    """Set default window icon (favicon-style) for all Qt top-level windows."""
+    icon = application_window_icon()
+    if icon is not None:
+        app.setWindowIcon(icon)
+
 # Preferred first-run size; clamped to the primary screen in _fit_initial_geometry().
 _DEFAULT_WINDOW_SIZE = QSize(1280, 820)
 
@@ -90,6 +125,21 @@ _DOCK_FEATURES = (
 
 # Bump when dock object names / layout schema change so old blobs are not restored.
 _WINDOW_STATE_VERSION = 6
+
+# Shipped ``saveState(_WINDOW_STATE_VERSION)`` blob (docks + main toolbar). Regenerate when
+# the schema bumps or the preferred first-run layout changes (filename must match version).
+_DEFAULT_LAYOUT_STATE_PATH = _GUI_ASSETS / f"default_window_state_v{_WINDOW_STATE_VERSION}.bin"
+
+
+def _builtin_default_window_state() -> QByteArray | None:
+    """Packaged Qt main-window state (docks/toolbar), or ``None`` if missing."""
+    if not _DEFAULT_LAYOUT_STATE_PATH.is_file():
+        return None
+    data = _DEFAULT_LAYOUT_STATE_PATH.read_bytes()
+    if not data:
+        return None
+    return QByteArray(data)
+
 
 # Continuous capture: max rate for history / preview / viewer refresh (coalesces bursts).
 _CONTINUOUS_UI_REFRESH_MS = 333
@@ -127,6 +177,9 @@ class MainWindow(QMainWindow):
         demo_continuous_cycle_delay_s: float = 0.0,
     ) -> None:
         super().__init__()
+        _ico = application_window_icon()
+        if _ico is not None:
+            self.setWindowIcon(_ico)
         self.setWindowTitle(GUI_DISPLAY_TITLE)
         # Narrow laptops: docks use scroll areas; toolbar may use » overflow below ~900px.
         self.setMinimumSize(720, 480)
@@ -335,11 +388,19 @@ class MainWindow(QMainWindow):
         # omits or hides it (otherwise the bar can look empty after restore).
         self._build_toolbar()
         self._ensure_no_central_gutter()
-        self._layout_default_state = self.saveState(_WINDOW_STATE_VERSION)
+        builtin_default = _builtin_default_window_state()
+        self._layout_default_state = (
+            QByteArray(builtin_default)
+            if builtin_default is not None
+            else self.saveState(_WINDOW_STATE_VERSION)
+        )
         if restore_saved_layout:
             self._restore_window_layout_from_settings()
-            # Saved state can leave another workbench tab (e.g. UART) on top; match first-run UX.
-            self._dock_capture.raise_()
+        elif builtin_default is not None:
+            if not self._restore_window_state_blob(builtin_default):
+                _log.warning("Could not restore packaged default window layout.")
+        # Restored or packaged layout can leave another workbench tab on top; match first-run UX.
+        self._dock_capture.raise_()
         # restoreState() resets toolbar widgets; re-apply prefs saved in the INI.
         self._apply_auto_rearm_pref_from_settings()
         self._ensure_no_central_gutter()
@@ -607,14 +668,44 @@ class MainWindow(QMainWindow):
                 self.resizeDocks([self._dock_log], [h_bottom], Qt.Orientation.Vertical)
 
     def _apply_post_show_layout(self) -> None:
+        if sys.platform == "win32":
+            self._reapply_window_icon_for_windows_shell()
         self._ensure_no_central_gutter()
         self._reflow_dock_areas()
+
+    def _reapply_window_icon_for_windows_shell(self) -> None:
+        """Taskbar / switcher often need the icon set again once ``windowHandle()`` exists."""
+        icon = application_window_icon()
+        if icon is None or icon.isNull():
+            return
+        self.setWindowIcon(icon)
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            app_inst.setWindowIcon(icon)
+        wh = self.windowHandle()
+        if wh is not None:
+            wh.setIcon(icon)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         if not self._initial_post_show_layout:
             self._initial_post_show_layout = True
             QTimer.singleShot(0, self._apply_post_show_layout)
+
+    def _restore_window_state_blob(self, blob: QByteArray) -> bool:
+        ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
+        for legacy_ver in (5, 4, 3, 2, 1, 0):
+            if ok:
+                break
+            ok = self.restoreState(blob, legacy_ver)
+        return ok
+
+    def _apply_builtin_default_window_state_if_any(self) -> None:
+        b = _builtin_default_window_state()
+        if b is None:
+            return
+        if not self._restore_window_state_blob(b):
+            _log.warning("Built-in default dock layout could not be restored.")
 
     def _restore_window_layout_from_settings(self) -> None:
         st = self._window_qsettings()
@@ -631,13 +722,12 @@ class MainWindow(QMainWindow):
         elif isinstance(ws, bytes) and len(ws) > 0:
             blob = QByteArray(ws)
         if blob is not None:
-            ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
-            for legacy_ver in (5, 4, 3, 2, 1, 0):
-                if ok:
-                    break
-                ok = self.restoreState(blob, legacy_ver)
+            ok = self._restore_window_state_blob(blob)
             if not ok:
                 _log.warning("Saved dock layout was rejected; using built-in default.")
+                self._apply_builtin_default_window_state_if_any()
+        else:
+            self._apply_builtin_default_window_state_if_any()
 
         if _settings_bool(st.value("mainWindow/maximized")):
             self.showMaximized()
@@ -713,6 +803,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._tb_chk_auto_rearm)
         self.addToolBar(_TOP_TOOLBAR_AREA, tb)
         tb.setVisible(True)
+        tb.visibilityChanged.connect(self._on_tool_dock_geometry_changed)
         self._main_toolbar = tb
 
     def _sync_toolbar_actions(self) -> None:
@@ -862,12 +953,7 @@ class MainWindow(QMainWindow):
         if blob is None:
             QMessageBox.warning(self, "User layout", f"No saved data for {key!r}.")
             return
-        ok = self.restoreState(blob, _WINDOW_STATE_VERSION)
-        if not ok:
-            for legacy in (5, 4, 3, 2, 1, 0):
-                if self.restoreState(blob, legacy):
-                    ok = True
-                    break
+        ok = self._restore_window_state_blob(blob)
         if not ok:
             QMessageBox.warning(self, "User layout", "Saved layout could not be restored.")
             return
@@ -914,10 +1000,11 @@ class MainWindow(QMainWindow):
         act_show_all = QAction("Show &all panels", self)
         act_show_all.triggered.connect(self._show_all_tool_docks)
         m_window.addAction(act_show_all)
-        act_show_tb = QAction("Show main &toolbar", self)
-        act_show_tb.setStatusTip("Bring back the Connect / Capture toolbar if it was closed.")
-        act_show_tb.triggered.connect(self._ensure_main_toolbar_visible)
-        m_window.addAction(act_show_tb)
+        assert self._main_toolbar is not None
+        act_tb = self._main_toolbar.toggleViewAction()
+        act_tb.setText("Main &toolbar")
+        act_tb.setStatusTip("Show or hide the Connect / Capture / Stop toolbar (same as the toolbar’s context menu).")
+        m_window.addAction(act_tb)
         m_window.addSeparator()
         m_layouts = m_window.addMenu("Layout &presets")
         act_def = QAction("&Default", self)
@@ -960,13 +1047,14 @@ class MainWindow(QMainWindow):
         for d in self._tool_docks:
             d.show()
             d.raise_()
+        self._ensure_main_toolbar_visible()
         self._schedule_dock_reflow()
         self._schedule_persist_layout()
 
     def _layout_preset_default(self) -> None:
         for d in self._tool_docks:
             d.show()
-        if not self.restoreState(self._layout_default_state, _WINDOW_STATE_VERSION):
+        if not self._restore_window_state_blob(self._layout_default_state):
             _log.warning("Could not restore default layout bytes.")
         self._ensure_no_central_gutter()
         self._dock_capture.raise_()
@@ -1448,6 +1536,7 @@ def run_app(argv: list[str] | None = None) -> int:
     )
     _windows_set_taskbar_app_identity()
     app = QApplication(args)
+    apply_application_window_icon(app)
     install_reject_spin_combo_wheel_filter(app)
     apply_application_ui_font(app, load_gui_settings().ui.font_size_pt)
     apply_gui_application_style(app)

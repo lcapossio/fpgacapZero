@@ -3,7 +3,12 @@
 
 """Host-side controller for the fcapz_ejtaguart JTAG-to-UART bridge core.
 
-Uses a 32-bit pipelined DR -- each scan shifts in a command + tx_byte and
+The bridge has **no** ELA-style word-indexed register file: one **32-bit DR**
+per scan carries a command and optional data.  Identity and build parameters
+are read with ``CMD_CONFIG`` over byte addresses ``0x0``–``0xF`` (see
+``docs/specs/register_map.md``, section **EJTAG-UART**).
+
+Uses a 32-bit pipelined DR — each scan shifts in a command + tx_byte and
 shifts out status + rx_byte + tx_free.
 
 DR format (32 bits, LSB first):

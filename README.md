@@ -3,6 +3,8 @@
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+<a id="readme-top"></a>
+
 Open-source, vendor-agnostic FPGA debug cores: an **Embedded Logic Analyzer
 (ELA)** for waveform capture, an **Embedded I/O (EIO)** for runtime
 read/write of fabric signals, and a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
@@ -15,9 +17,11 @@ UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**, and
 are fully portable.
 
 📖 **[User manual](docs/README.md)** — full walkthrough of the RTL cores,
-host stack, CLI, RPC server, and desktop GUI, plus canonical
-[register map](docs/specs/register_map.md) and
-[transport API](docs/specs/transport_api.md) specs.
+host stack, CLI, RPC server, and desktop GUI. **JTAG register / shift maps**
+are not duplicated in this README; see the manual (e.g. chapter 13 and
+[`docs/specs/register_map.md`](docs/specs/register_map.md)) and
+[`docs/specs/transport_api.md`](docs/specs/transport_api.md) for canonical
+specs.
 
 ## Contents
 
@@ -31,15 +35,16 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
   - [JSON-RPC server](#json-rpc-server)
 - [Integrating the core into your design](#integrating-the-core-into-your-design)
   - [RTL instantiation](#rtl-instantiation)
-  - [JTAG protocol](#jtag-protocol)
-  - [Register map](#register-map)
-  - [EIO register map](#eio-register-map-user3-same-49-bit-dr-protocol)
+  - [Vendor JTAG chain availability](#vendor-jtag-chain-availability)
+  - [JTAG protocol and register reference](#jtag-protocol-and-register-reference)
 - [Comparison with other embedded logic analyzers](#comparison-with-other-embedded-logic-analyzers)
 - [Resource usage](#resource-usage)
 - [CI](#ci)
 - [Building from source](#building-from-source)
 - [Project structure](#project-structure)
 - [License](#license)
+
+Jump within this page: [↑ Top](#readme-top)
 
 ## Features
 
@@ -84,6 +89,8 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
 - All four features are **parameter-gated** -- the smallest core configuration
   has none enabled, adding zero overhead
 
+[↑ Top](#readme-top)
+
 ## Support status
 
 | Area | Status |
@@ -102,6 +109,8 @@ host stack, CLI, RPC server, and desktop GUI, plus canonical
 | Timestamp counter | Implemented in RTL and host API/CLI |
 | Segmented memory | Hardware-validated on Arty A7 (4 segments, auto-rearm) |
 | Raw TCF transport | Planned |
+
+[↑ Top](#readme-top)
 
 ## Quick start
 
@@ -231,6 +240,8 @@ fcapz --backend hw_server --port 3121 \
 The `--summarize` flag prints a structured JSON summary (edge counts, value
 ranges, burst lengths) that an LLM can consume directly. The `--probes` flag
 splits the 8-bit sample into named sub-signals in VCD output.
+
+[↑ Top](#readme-top)
 
 ## Usage
 
@@ -412,6 +423,8 @@ optional `channel`, `probes`, and `summarize` fields.
  "probes": [{"name": "counter_lo", "width": 4, "lsb": 0}]}
 ```
 
+[↑ Top](#readme-top)
+
 ## Integrating the core into your design
 
 ### RTL instantiation
@@ -492,72 +505,19 @@ the Arty A7 reference design does this). On Intel, each gets a unique
 virtual JTAG instance, so both always coexist.
 
 On Gowin, the single chain means **no burst readback** — sample data is read
-word-by-word through the DATA registers (functional but slower).
+word-by-word through the sample DATA window (functional but slower). Details
+are in the manual (see below).
 
-### JTAG protocol
+### JTAG protocol and register reference
 
-Two JTAG user chains provide separate control and data paths (the exact
-primitive and IR codes depend on the FPGA vendor — see table above):
+Bit-level DR layouts, ELA/EIO **address maps**, EJTAG-AXI / EJTAG-UART bridge
+formats, and identity checks are maintained in one place so they do not drift
+from the RTL.
 
-**Control chain — 49-bit DR:**
+- **[User manual index](docs/README.md)** — start here; [chapter 04 — RTL integration](docs/04_rtl_integration.md) covers chains, IR presets, and how the cores attach to the TAP.
+- **Canonical spec:** [`docs/specs/register_map.md`](docs/specs/register_map.md) — full register / shift encodings for ELA, EIO, EJTAG-AXI, and EJTAG-UART (ground truth; [chapter 13](docs/13_register_map.md) is a short pointer into that file).
 
-| Bits | Field | Description |
-|------|-------|-------------|
-| `[31:0]` | data | Write data (TX) / read data (RX) |
-| `[47:32]` | addr | 16-bit register address |
-| `[48]` | rnw | 1 = write, 0 = read |
-
-**Burst data chain — 256-bit DR** (Xilinx, ECP5, Intel only):
-
-Each scan returns 32 packed 8-bit samples (or 8 packed 32-bit samples for
-wider probe widths). The read pointer auto-increments after each scan.
-Initiated by writing to `BURST_PTR` (0x002C) via the control chain.
-
-### Register map
-
-| Address | Name | Access | Description |
-|---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — (core_id=`"LA"`=`0x4C41`). Hosts must verify the low-16 magic. |
-| `0x0004` | CTRL | W | bit 0 = arm, bit 1 = reset |
-| `0x0008` | STATUS | R | bit 0 = armed, 1 = triggered, 2 = done, 3 = overflow |
-| `0x000C` | SAMPLE_W | R | Sample width in bits |
-| `0x0010` | DEPTH | R | Buffer depth in samples |
-| `0x0014` | PRETRIG_LEN | RW | Pre-trigger sample count |
-| `0x0018` | POSTTRIG_LEN | RW | Post-trigger sample count |
-| `0x001C` | CAPTURE_LEN | R | Total captured samples |
-| `0x0020` | TRIG_MODE | RW | bit 0 = value match, bit 1 = edge detect |
-| `0x0024` | TRIG_VALUE | RW | Trigger compare value |
-| `0x0028` | TRIG_MASK | RW | Trigger compare mask (default `0xFFFFFFFF`) |
-| `0x002C` | BURST_PTR | W | Write to initiate burst read from `start_ptr` |
-| `0x0030` | SQ_MODE | RW | Storage qualification mode (0=off, 1=value, 2=edge, 3=both) |
-| `0x0034` | SQ_VALUE | RW | Storage qualification match value |
-| `0x0038` | SQ_MASK | RW | Storage qualification match mask |
-| `0x003C` | FEATURES | R | `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL, `[5]`=HAS_DECIM, `[6]`=HAS_EXT_TRIG, `[7]`=HAS_TIMESTAMP, `[23:16]`=NUM_SEGMENTS, `[31:24]`=TIMESTAMP_W |
-| `0x0040+` | SEQ_STAGE_N | RW | Per-stage (20 bytes each): CFG/VALUE_A/MASK_A/VALUE_B/MASK_B |
-| `0x00B0` | DECIM | RW | 24-bit decimation ratio (captures every N+1 cycles; requires DECIM_EN=1) |
-| `0x00B4` | TRIG_EXT | RW | `[1:0]` external trigger mode: 0=disabled, 1=OR, 2=AND (requires EXT_TRIG_EN=1) |
-| `0x00B8` | NUM_SEGMENTS | R | Number of memory segments (from NUM_SEGMENTS parameter) |
-| `0x00BC` | SEG_STATUS | R | Segment index + all_done flag |
-| `0x00C0` | SEG_SEL | RW | Segment select for readback |
-| `0x00C4` | TIMESTAMP_W | R | Timestamp counter width in bits (0 if disabled) |
-| `0x00D0` | PROBE_MUX_W | R | Probe mux width parameter (0 if disabled) |
-| `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (16-bit, 0..65535) — shifts the committed trigger sample N cycles after the trigger event |
-| `0x0100+` | DATA | R | Sample data window (per-word, via USER1) |
-| dynamic | TS_DATA | R | Timestamp readback (base = `0x0100 + DEPTH * words_per_sample * 4`, requires TIMESTAMP_W>0) |
-
-### EIO register map (USER3, same 49-bit DR protocol)
-
-This register map matches the implemented EIO cores and Python controller.
-Transport chain selection (USER3, IR=0x22 on 7-series) is supported in both
-OpenOCD and hw_server backends.
-
-| Address | Name | Access | Description |
-|---------|------|--------|-------------|
-| `0x0000` | VERSION | R | `{major[7:0], minor[7:0], core_id[15:0]}` — `core_id` = ASCII `"IO"` (`0x494F`). Hosts must verify the low-16 magic. Same encoding as the ELA core's `VERSION`. |
-| `0x0004` | EIO_IN_W | R | Input probe width in bits |
-| `0x0008` | EIO_OUT_W | R | Output probe width in bits |
-| `0x0010+i×4` | IN[i] | R | probe_in chunk i (bits [i×32+31 : i×32]), synced to jtag_clk |
-| `0x0100+i×4` | OUT[i] | RW | probe_out chunk i (bits [i×32+31 : i×32]) |
+[↑ Top](#readme-top)
 
 ## Comparison with other embedded logic analyzers
 
@@ -590,6 +550,8 @@ OpenOCD and hw_server backends.
 - **Single RTL file per core** — no code generation, no Python build step;
   standard Verilog parameters for all configuration
 - **Apache 2.0 license** — usable in proprietary designs with explicit patent grant
+
+[↑ Top](#readme-top)
 
 ## Resource usage
 
@@ -645,6 +607,8 @@ fcapz_ela_xilinx7 #(.SAMPLE_W(8), .DEPTH(1024), .TRIG_STAGES(4), .STOR_QUAL(1)) 
 );
 ```
 
+[↑ Top](#readme-top)
+
 ## CI
 
 GitHub Actions runs on every push and pull request to `main` or `master`:
@@ -662,6 +626,8 @@ documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in
 Those board-level checks now require every adjacent Arty counter sample to
 increment by +1 when decimation is disabled, so partial burst readback
 corruption is caught instead of hidden by a shorter valid prefix.
+
+[↑ Top](#readme-top)
 
 ## Building from source
 
@@ -701,6 +667,8 @@ FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
 FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
   --override-ini='addopts=-p no:cacheprovider'
 ```
+
+[↑ Top](#readme-top)
 
 ## Project structure
 
@@ -781,10 +749,16 @@ fpgacapZero/
       waveform_schema.md   Export format spec
 ```
 
+[↑ Top](#readme-top)
+
 ## Author
 
 Leonardo Capossio — [bard0 design](https://www.bard0.com) — <hello@bard0.com>
 
+[↑ Top](#readme-top)
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
+
+[↑ Top](#readme-top)
