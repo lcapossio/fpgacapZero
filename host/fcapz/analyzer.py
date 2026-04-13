@@ -375,17 +375,11 @@ class Analyzer:
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
         ts_words_per = (self._hw_timestamp_w + 31) // 32
         ts_word_count = total * ts_words_per
-        # Timestamp RAM is stable once capture is done, but the hardware
-        # USER1 readback path can return one stale word immediately after the
-        # USER2 sample burst.  Read twice and require stability; a third read
-        # resolves the rare case where only the second block is transient.
-        raw_a = self.transport.read_block(ts_base, ts_word_count)
-        raw_b = self.transport.read_block(ts_base, ts_word_count)
-        if raw_a == raw_b:
-            raw = raw_b
+        timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
+        if ts_words_per == 1 and callable(timestamp_burst):
+            raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
-            raw_c = self.transport.read_block(ts_base, ts_word_count)
-            raw = raw_c if raw_b != raw_c else raw_b
+            raw = self.transport.read_block(ts_base, ts_word_count)
         timestamps = []
         mask = (1 << self._hw_timestamp_w) - 1
         if ts_words_per == 1:

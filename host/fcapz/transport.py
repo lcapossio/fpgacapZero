@@ -625,15 +625,28 @@ class XilinxHwServerTransport(Transport):
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)
         return self._cached_sps
 
-    def _read_block_burst(self, words: int) -> List[int]:
+    def _read_block_burst(
+        self,
+        words: int,
+        *,
+        timestamp: bool = False,
+        element_width: int | None = None,
+    ) -> List[int]:
         """Read *words* samples via the USER2 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
         USER1 write to BURST_PTR → idle for staging fill → IR switch
         to USER2 → N consecutive 256-bit DR scans.  One round-trip.
         """
-        sps = self._burst_samples_per_scan
+        if timestamp:
+            if element_width is None:
+                element_width = 32
+            sps = max(1, self.BURST_DR_BITS // element_width)
+        else:
+            sps = self._burst_samples_per_scan
+            element_width = self.BURST_DR_BITS // sps
         n_scans = (words + sps - 1) // sps
+        prime_scans = 0 if timestamp else 1
 
         ir1 = f"{self.USER1_IR:02x}"
         ir2 = f"{self.USER2_IR:02x}"
@@ -641,7 +654,9 @@ class XilinxHwServerTransport(Transport):
         zeros = "0" * dr_bits
 
         burst_frame = self._frame_bits(
-            addr=self.ADDR_BURST_PTR, data=0, write=True
+            addr=self.ADDR_BURST_PTR,
+            data=(0x80000000 if timestamp else 0),
+            write=True,
         )
 
         parts = [
@@ -652,10 +667,10 @@ class XilinxHwServerTransport(Transport):
             # Idle so staging buffer fills (~33 TCK needed, extra margin)
             "$_bq delay 80",
         ]
-        # Prime USER2 once, then perform the scans returned to the caller.
-        # The burst RTL fills its staging buffer from USER2 TCKs during SHIFT,
-        # so the first capture after selecting USER2 may be only partially fresh.
-        for _ in range(n_scans + 1):
+        # Prime USER2 once for sample bursts, then perform the scans returned
+        # to the caller. Timestamp bursts use the prefilled first scan directly;
+        # otherwise short captures can read past the valid timestamp window.
+        for _ in range(n_scans + prime_scans):
             parts.append(
                 f"$_bq irshift -state IRUPDATE -hex 6 {ir2}; "
                 f"$_bq drshift -state DRUPDATE -capture -bits {dr_bits} {zeros}"
@@ -664,7 +679,24 @@ class XilinxHwServerTransport(Transport):
         tcl = "; ".join(parts)
 
         out = self._send(tcl)
-        return self._parse_burst_bits(out, words, skip_scans=1)
+        return self._parse_burst_bits(
+            out,
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+        )
+
+    def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
+        """Read timestamp words through USER2 burst mode when available."""
+        if words <= 0:
+            return []
+        if self._burst_available and timestamp_width > 0:
+            return self._read_block_burst(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
+        return self._read_block_user1(addr, words)
 
     def _parse_burst_bits(
         self,
@@ -672,12 +704,17 @@ class XilinxHwServerTransport(Transport):
         total_words: int,
         *,
         skip_scans: int = 0,
+        element_width: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
         """
-        sps = self._burst_samples_per_scan
-        sw = self.BURST_DR_BITS // sps  # bits per sample
+        if element_width is None:
+            sps = self._burst_samples_per_scan
+            sw = self.BURST_DR_BITS // sps  # bits per sample
+        else:
+            sw = element_width
+            sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         for token in output.replace("{", " ").replace("}", " ").split():
