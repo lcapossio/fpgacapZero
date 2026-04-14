@@ -32,6 +32,7 @@ features they expose.
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
 | Gowin GW1N / GW2A | `_gowin` | ❌ |
+| Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)
