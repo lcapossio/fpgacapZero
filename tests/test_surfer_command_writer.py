@@ -34,9 +34,14 @@ class TestSurferCommandWriter(unittest.TestCase):
         self.assertIn("logic.lo", text)
         self.assertIn("logic.timestamp", text)
         # VCD # times are zero-based per capture when timestamps exist.
-        self.assertIn("marker_set fcapz_trigger 0", text)
+        self.assertIn("cursor_set 0", text)
+        self.assertIn("marker_set fcapz_trigger", text)
         self.assertIn("item_set_color blue", text)
         self.assertIn("goto_marker fcapz_trigger", text)
+        self.assertLess(
+            text.index("cursor_set"),
+            text.index("marker_set"),
+        )
         self.assertLess(
             text.index("marker_set"),
             text.index("item_set_color"),
@@ -57,7 +62,8 @@ class TestSurferCommandWriter(unittest.TestCase):
             write_surfer_command_file_for_capture(r, p)
             text = p.read_text(encoding="utf-8")
         self.assertIn("logic.sample", text)
-        self.assertIn("marker_set fcapz_trigger 0", text)
+        self.assertIn("cursor_set 0", text)
+        self.assertIn("marker_set fcapz_trigger", text)
         self.assertIn("item_set_color blue", text)
         self.assertIn("goto_marker fcapz_trigger", text)
 
@@ -74,7 +80,8 @@ class TestSurferCommandWriter(unittest.TestCase):
             p = Path(td) / "z.surfer.txt"
             write_surfer_command_file_for_capture(r, p)
             text = p.read_text(encoding="utf-8")
-        self.assertIn("marker_set fcapz_trigger 2", text)
+        self.assertIn("cursor_set 2", text)
+        self.assertIn("marker_set fcapz_trigger", text)
         self.assertIn("item_set_color blue", text)
 
     def test_no_marker_when_no_samples(self) -> None:

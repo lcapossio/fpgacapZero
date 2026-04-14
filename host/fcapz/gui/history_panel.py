@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..analyzer import Analyzer, CaptureResult
+from ..analyzer import Analyzer, CaptureResult, vcd_simulation_times
 from .gtkw_writer import write_gtkw_for_capture
 from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
@@ -37,6 +37,8 @@ from .surfer_wcp import SurferWcpBridge
 from .viewer_tile import schedule_vertical_split_with_viewer, win32_set_external_viewer_minimized
 from .viewers import GtkWaveViewer, SurferViewer, WaveformViewer
 from .waveform_preview import WaveformPreviewWidget
+
+_SURFER_TRIGGER_MARKER_NAME = "fcapz_trigger"
 
 
 @dataclass
@@ -62,8 +64,10 @@ class HistoryPanel(QWidget):
         self._analyzer_ref: Analyzer | None = None
         self._viewer_processes: list[QProcess] = []
         self._last_viewer_program: str | None = None
+        self._last_surfer_marker_pretrigger: int | None = None
         self._live_wave_root = live_wave_dir(default_gui_config_path())
         self._surfer_wcp = SurferWcpBridge(self)
+        self._surfer_wcp.status_message.connect(self.status_message.emit)
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Time", "Samples", "Flags"])
@@ -202,6 +206,7 @@ class HistoryPanel(QWidget):
             proc.deleteLater()
         self._viewer_processes.clear()
         self._last_viewer_program = None
+        self._last_surfer_marker_pretrigger = None
         self._surfer_wcp.shutdown()
 
     def add_capture(self, analyzer: Analyzer, result: CaptureResult) -> None:
@@ -299,6 +304,14 @@ class HistoryPanel(QWidget):
         if combo_index < 0 or combo_index >= len(self._viewer_rows):
             return
         label, viewer = self._viewer_rows[combo_index]
+        surfer_marker_time: int | None = None
+        surfer_marker_pretrigger: int | None = None
+        if isinstance(viewer, SurferViewer):
+            n = len(ent.result.samples)
+            pre = int(ent.result.config.pretrigger)
+            if n > 0 and 0 <= pre < n:
+                surfer_marker_pretrigger = pre
+                surfer_marker_time = int(vcd_simulation_times(ent.result)[pre])
         if self._reuse_viewer.isChecked():
             root = self._live_wave_root
             root.mkdir(parents=True, exist_ok=True)
@@ -350,6 +363,8 @@ class HistoryPanel(QWidget):
             argv,
             silent=silent,
             surfer_wcp=isinstance(viewer, SurferViewer) and self._reuse_viewer.isChecked(),
+            surfer_marker_time=surfer_marker_time,
+            surfer_marker_pretrigger=surfer_marker_pretrigger,
         )
 
     def _running_viewer_process(self) -> QProcess | None:
@@ -369,6 +384,8 @@ class HistoryPanel(QWidget):
         *,
         silent: bool,
         surfer_wcp: bool = False,
+        surfer_marker_time: int | None = None,
+        surfer_marker_pretrigger: int | None = None,
     ) -> None:
         if not argv or not argv[0]:
             msg = "Viewer command line is empty."
@@ -379,26 +396,49 @@ class HistoryPanel(QWidget):
         prog_resolved = str(Path(argv[0]).resolve())
         can_skip_respawn = sys.platform != "win32"
         wcp_ready = surfer_wcp and self._surfer_wcp.can_reload()
-        # With WCP, Surfer reload is explicit; do not fall back to "assume file watcher" on Unix.
+        # Surfer on Windows needs an explicit WCP reload after the live-wave file
+        # is overwritten. Marker replacement over WCP is intentionally avoided:
+        # this Surfer build aborts the socket when re-adding fcapz_trigger.
         unix_file_watcher_ok = can_skip_respawn and not surfer_wcp
-        reuse_same = (
+        same_running = (
             self._reuse_viewer.isChecked()
             and self._running_viewer_process() is not None
             and self._last_viewer_program == prog_resolved
-            and (wcp_ready or unix_file_watcher_ok)
         )
-        if reuse_same:
-            if wcp_ready:
-                self._surfer_wcp.send_reload()
+        surfer_marker_changed = (
+            surfer_wcp
+            and surfer_marker_pretrigger is not None
+            and surfer_marker_pretrigger != self._last_surfer_marker_pretrigger
+        )
+        if same_running:
+            if surfer_marker_changed:
                 self.status_message.emit(
-                    f"Updated live wave for {viewer_label} — reloaded in Surfer (WCP).",
+                    f"{viewer_label}: pre-trigger changed; reopening to apply marker.",
                 )
             else:
-                self.status_message.emit(
-                    f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
-                )
-            return
-
+                if surfer_wcp and wcp_ready:
+                    self._surfer_wcp.send_reload()
+                    self.status_message.emit(
+                        f"Updated live wave for {viewer_label} - reloaded in Surfer (WCP).",
+                    )
+                    return
+                if surfer_wcp and not wcp_ready:
+                    self.status_message.emit(
+                        f"{viewer_label}: WCP unavailable; reopening live wave.",
+                    )
+                    # Fall through to replace the viewer so auto re-arm still
+                    # shows the newest capture even without a WCP session.
+                elif unix_file_watcher_ok:
+                    self.status_message.emit(
+                        f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
+                    )
+                    return
+                else:
+                    self.status_message.emit(
+                        f"{viewer_label}: reopening live wave.",
+                    )
+                    # Fall through to replace the viewer on platforms without a
+                    # useful file watcher.
         # Different viewer binary, or not reusing, or no running process: replace.
         self.stop_viewer_processes()
         if surfer_wcp:
@@ -413,6 +453,8 @@ class HistoryPanel(QWidget):
         def _on_started() -> None:
             self._viewer_processes.append(proc)
             self._last_viewer_program = prog_resolved
+            if surfer_wcp:
+                self._last_surfer_marker_pretrigger = surfer_marker_pretrigger
             self.status_message.emit(f"Started {viewer_label} (separate window)")
             schedule_vertical_split_with_viewer(self, proc)
 
