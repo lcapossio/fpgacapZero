@@ -39,11 +39,26 @@ _ADDR_OUT_BASE = 0x0100
 
 
 class EioController:
-    """Read input probes and write output probes via JTAG USER3."""
+    """Read input probes and write output probes via JTAG USER3.
 
-    def __init__(self, transport: Transport, chain: int = 3) -> None:
+    When the EIO core is multiplexed onto another core's USER chain via
+    :mod:`fcapz_regbus_mux` (e.g. ``EIO_EN=1`` on the ELA wrapper so ELA
+    control and EIO share USER1), pass ``base_addr`` equal to the address
+    offset the mux assigns to EIO — typically ``0x8000``.  Every register
+    access gets ``base_addr`` OR'd in before hitting the transport, so
+    the on-chip mux routes to the EIO core while the core still sees its
+    own 0x0000-based address space.
+    """
+
+    def __init__(
+        self,
+        transport: Transport,
+        chain: int = 3,
+        base_addr: int = 0,
+    ) -> None:
         self._t = transport
         self._chain = chain
+        self._base_addr = int(base_addr) & 0xFFFF
         self.in_w: int = 0
         self.out_w: int = 0
         self.version_major: int = 0
@@ -69,7 +84,7 @@ class EioController:
         """
         self._t.connect()
         self._t.select_chain(self._chain)
-        version = int(self._t.read_reg(_ADDR_VERSION))
+        version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
         core_id = version & 0xFFFF
         if core_id != EIO_CORE_ID:
             raise RuntimeError(
@@ -80,8 +95,8 @@ class EioController:
         self.version_major = (version >> 24) & 0xFF
         self.version_minor = (version >> 16) & 0xFF
         self.core_id = core_id
-        self.in_w  = self._t.read_reg(_ADDR_IN_W)
-        self.out_w = self._t.read_reg(_ADDR_OUT_W)
+        self.in_w  = self._t.read_reg(self._abs(_ADDR_IN_W))
+        self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
 
     def attach(self) -> None:
         """Use an already-connected transport (e.g. shared with the ELA analyzer).
@@ -92,7 +107,7 @@ class EioController:
         """
         self._t.select_chain(self._chain)
         try:
-            version = int(self._t.read_reg(_ADDR_VERSION))
+            version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
             core_id = version & 0xFFFF
             if core_id != EIO_CORE_ID:
                 raise RuntimeError(
@@ -103,10 +118,14 @@ class EioController:
             self.version_major = (version >> 24) & 0xFF
             self.version_minor = (version >> 16) & 0xFF
             self.core_id = core_id
-            self.in_w = self._t.read_reg(_ADDR_IN_W)
-            self.out_w = self._t.read_reg(_ADDR_OUT_W)
+            self.in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
+            self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
         finally:
             self._t.select_chain(1)
+
+    def _abs(self, offset: int) -> int:
+        """Prepend ``base_addr`` so the on-chip regbus mux routes to EIO."""
+        return (self._base_addr | offset) & 0xFFFF
 
     def close(self) -> None:
         self._t.close()
@@ -117,7 +136,7 @@ class EioController:
         words = (self.in_w + 31) // 32
         value = 0
         for i in range(words):
-            word = self._t.read_reg(_ADDR_IN_BASE + i * 4)
+            word = self._t.read_reg(self._abs(_ADDR_IN_BASE + i * 4))
             value |= word << (i * 32)
         mask = (1 << self.in_w) - 1
         return value & mask
@@ -129,7 +148,7 @@ class EioController:
         words = (self.out_w + 31) // 32
         for i in range(words):
             word = (value >> (i * 32)) & 0xFFFF_FFFF
-            self._t.write_reg(_ADDR_OUT_BASE + i * 4, word)
+            self._t.write_reg(self._abs(_ADDR_OUT_BASE + i * 4), word)
 
     def read_outputs(self) -> int:
         """Read back the currently programmed probe_out value.
@@ -146,7 +165,7 @@ class EioController:
         words = (self.out_w + 31) // 32
         value = 0
         for i in range(words):
-            word = self._t.read_reg(_ADDR_OUT_BASE + i * 4)
+            word = self._t.read_reg(self._abs(_ADDR_OUT_BASE + i * 4))
             value |= word << (i * 32)
         mask = (1 << self.out_w) - 1
         return value & mask

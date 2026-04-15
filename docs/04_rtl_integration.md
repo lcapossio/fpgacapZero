@@ -230,6 +230,9 @@ module fcapz_ela_xilinx7 #(
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
+| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain (e.g. Zynq UltraScale+ MPSoC, where the host toolchain only reliably reaches USER1).  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
+| `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
+| `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
 The minimum-area config (every feature off) is the default if you
 omit a parameter.  The reference Arty A7 design uses:
@@ -250,6 +253,56 @@ fcapz_ela_xilinx7 #(
 This is the "everything on" config and what the hardware integration
 tests exercise.  See [chapter 05](05_ela_core.md) for what each
 feature actually does at runtime.
+
+### Combining ELA + EIO on a single USER chain (`EIO_EN=1`)
+
+If your host toolchain or device can only reach USER1 reliably — most
+notably **Zynq UltraScale+ MPSoC**, where the default xsdb/hw_server
+chain dispatch routes every `irshift` to USER1 regardless of opcode —
+set `EIO_EN=1` on the ELA wrapper and drop the standalone `fcapz_eio_*`
+instance from your top level.  The wrapper adds a
+[`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) on the USER1 49-bit
+register bus that splits the 16-bit address space:
+
+| Host-side address | Routed to |
+|---|---|
+| `0x0000..0x7FFF` | ELA control (VERSION, CTRL, trigger regs, …) |
+| `0x8000..0xFFFF` | EIO (bit 15 stripped, EIO sees `0x0000..0x7FFF`) |
+
+```verilog
+fcapz_ela_xilinxus #(
+    .SAMPLE_W(32), .DEPTH(2048), .NUM_CHANNELS(2),
+    .TIMESTAMP_W(32),
+    .EIO_EN(1), .EIO_IN_W(1), .EIO_OUT_W(1)
+) u_ela (
+    .sample_clk   (sys_clk),
+    .sample_rst   (~aresetn),
+    .probe_in     (ela_channels),
+    .trigger_in   (1'b0),
+    .trigger_out  (),
+    .eio_probe_in (1'b0),
+    .eio_probe_out(cam_power)     // e.g. camera power-enable GPIO
+);
+```
+
+Host-side, pass `base_addr=0x8000` when constructing the EIO
+controller so every register access gets bit 15 OR'd in:
+
+```python
+from fcapz import EioController
+eio = EioController(transport, chain=1, base_addr=0x8000)
+eio.connect()    # reads VERSION at host address 0x8000 → mux routes to EIO 0x0000
+eio.write_outputs(0x1)
+```
+
+**Limits:**
+- The ELA burst readback still uses USER2 (256-bit DR) — that stays on
+  its own chain; only the 49-bit register path is shared.
+- You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
+  `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
+  USER chain).
+- A future third core on the same chain (EJTAG-AXI/UART) would need a
+  wider address mux or a hierarchical `fcapz_regbus_mux`.
 
 ## EIO wrapper parameter reference
 

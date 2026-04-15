@@ -548,6 +548,55 @@ class EioControllerTests(unittest.TestCase):
         eio = self._make_eio()
         self.assertIn("in_w=8", repr(eio))
 
+    def test_base_addr_offsets_every_register_access(self):
+        """EIO muxed on ELA's chain (base_addr=0x8000) routes reads/writes via bit 15."""
+        t = FakeVioTransport()
+        # Seed VERSION and widths at the EIO's OWN view (0x0000-base) so the
+        # fake transport responds even without the mux; then assert the
+        # transport saw 0x8000-OR'd addresses on the wire.
+        eio = EioController(t, chain=1, base_addr=0x8000)
+        # Trace reads so we can assert every address had bit 15 set.
+        seen_reads: list[int] = []
+        orig_read = t.read_reg
+        def traced_read(addr: int) -> int:
+            seen_reads.append(addr)
+            # Respond as if bit 15 were stripped (the on-chip regbus_mux does this).
+            return orig_read(addr & 0x7FFF)
+        t.read_reg = traced_read  # type: ignore[method-assign]
+
+        seen_writes: list[int] = []
+        orig_write = t.write_reg
+        def traced_write(addr: int, value: int) -> None:
+            seen_writes.append(addr)
+            orig_write(addr & 0x7FFF, value)
+        t.write_reg = traced_write  # type: ignore[method-assign]
+
+        eio.connect()
+        eio.read_inputs()
+        eio.write_outputs(0xAB)
+
+        self.assertTrue(seen_reads, "no reads observed")
+        self.assertTrue(seen_writes, "no writes observed")
+        for addr in seen_reads + seen_writes:
+            self.assertTrue(
+                addr & 0x8000,
+                f"address 0x{addr:04X} is missing base_addr bit 15",
+            )
+
+    def test_base_addr_default_zero_keeps_backward_compat(self):
+        """Without base_addr, addresses remain the core's native 0x0000-based map."""
+        t = FakeVioTransport()
+        eio = EioController(t, chain=3)
+        seen_reads: list[int] = []
+        orig_read = t.read_reg
+        def traced_read(addr: int) -> int:
+            seen_reads.append(addr)
+            return orig_read(addr)
+        t.read_reg = traced_read  # type: ignore[method-assign]
+        eio.connect()
+        for addr in seen_reads:
+            self.assertFalse(addr & 0x8000, f"unexpected bit 15 on 0x{addr:04X}")
+
     def test_attach_restores_default_chain(self):
         """attach() must not leave the transport on the EIO USER chain."""
         t = FakeVioTransport()

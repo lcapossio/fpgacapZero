@@ -179,12 +179,73 @@ swap one for the other without changing the IR table.
 
 ### When to use which
 
-| Family | Preset |
-|---|---|
-| Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) |
-| Xilinx Kintex / Virtex UltraScale | `IR_TABLE_XILINX_ULTRASCALE` (or `IR_TABLE_US`) |
-| Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `IR_TABLE_XILINX_ULTRASCALE` |
-| Lattice ECP5, Intel, Gowin | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. |
+| Family | Preset | Extra constructor args |
+|---|---|---|
+| Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
+| Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
+| Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
+| **Zynq UltraScale+ MPSoC** (e.g. KV260, ZCU104) | build your own — see "Chain-shape parameters" below | `ir_length=16`, `dr_extra_bits=1`, `dr_extra_position="tdo"`, `ir_table={1: 0x824F, 2: 0x825F, 3: 0x826F, 4: 0x827F}` (verify on your board first) |
+| Lattice ECP5, Intel, Gowin | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
+
+### Chain-shape parameters (multi-TAP boundary scan)
+
+The default `XilinxHwServerTransport` shifts a single-device 6-bit IR
+and a 49-bit DR — exactly what 7-series and standalone UltraScale(+)
+parts present.  When the JTAG chain has additional TAPs in series with
+the PL TAP (most notably the ARM DAP on Zynq UltraScale+ MPSoC), every
+IR and DR scan must account for those extra TAPs' IR bits and BYPASS
+bits.  Three constructor arguments handle this without forking the
+transport:
+
+| Arg | Default | Meaning |
+|---|---|---|
+| `ir_length` | `6` | Total IR bits to shift on every `irshift`.  For Zynq US+ MPSoC (PL TAP IR=12 + ARM DAP IR=4): `16`. |
+| `dr_extra_bits` | `0` | Extra bits to add to every DR scan, padded with zeros, for BYPASS registers in the rest of the chain.  For Zynq US+ MPSoC: `1` (one BYPASS bit for the ARM DAP). |
+| `dr_extra_position` | `"tdo"` | Where the extra bits sit in the captured token: `"tdo"` if the bypass TAP is closer to TDO than the fcapz BSCANE2 (BYPASS bits land at the start of the captured string), `"tdi"` if closer to TDI. |
+
+The `ir_table` value for each chain is shifted **as-is** for `ir_length`
+bits, so the caller is responsible for OR-ing in the BYPASS opcodes
+of the other TAPs.  Example for Zynq US+ MPSoC with PL `USER1=0x824`
+and ARM DAP BYPASS=`0xF` in the low 4 bits of a 16-bit IR:
+
+```python
+IR_TABLE_ZYNQ_USP = {
+    1: (0x824 << 4) | 0xF,   # 0x824F
+    2: (0x825 << 4) | 0xF,   # 0x825F
+    3: (0x826 << 4) | 0xF,   # 0x826F
+    4: (0x827 << 4) | 0xF,   # 0x827F
+}
+t = XilinxHwServerTransport(
+    fpga_name="xck26",
+    ir_length=16,
+    dr_extra_bits=1,
+    dr_extra_position="tdo",
+    ir_table=IR_TABLE_ZYNQ_USP,
+)
+```
+
+> **Verify on your board.** The exact PL TAP IR length and USER opcodes
+> on Zynq US+ MPSoC depend on the part and on which JTAG node xsdb
+> selects.  Use an interactive `xsdb` session to confirm:
+> `jtag targets`, `tap_get_property -of [jtag targets …] ir_length`.
+> If xsdb auto-walks the chain (selects the PL TAP node directly), the
+> `ir_length` and BYPASS padding may already be handled — in that case
+> use the standalone `IR_TABLE_XILINX_ULTRASCALE` and leave the
+> chain-shape args at their defaults.
+
+> **Recommended MPSoC workaround: use `EIO_EN=1` on the ELA wrapper.**
+> On Zynq US+ MPSoC the default xsdb/hw_server chain-dispatch path
+> routes every USER opcode to USER1 in practice (widening
+> `bscan-switch-user-mask` is necessary but not sufficient to reach
+> USER2/3/4 through the regular 2-phase read pipeline; see BUG-005 in
+> `no_commit/BUGS.md`).  The reliable path is to multiplex ELA + EIO
+> on USER1 via [`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) by
+> setting `EIO_EN=1` on the ELA wrapper, and pass `base_addr=0x8000`
+> to `EioController` so reads/writes route to EIO inside the on-chip
+> mux.  See [chapter 04 — Combining ELA + EIO on a single USER chain](04_rtl_integration.md#combining-ela--eio-on-a-single-user-chain-eio_en1).
+> The ELA burst readback continues to use USER2 unchanged, which is
+> the one secondary chain that works even on unhelpful MPSoC host
+> stacks.
 
 ### Example: UltraScale board
 
@@ -403,21 +464,29 @@ something new.
 
 ## Latency and batching (illustrative)
 
-Measured on Arty A7-100T, FT2232H onboard JTAG, TCK ~30 MHz.  These are
-**per-call or wall-clock examples**, not a spec — your adapter and host
-load will differ.
+Example wall-clock numbers on Arty A7-100T, FT2232H onboard JTAG,
+TCK ~30 MHz, via `XilinxHwServerTransport`.  These are **per-call
+or wall-clock examples**, not a spec — your adapter and host load
+will differ.
 
-| Operation | hw_server | OpenOCD |
-|---|---|---|
-| `read_reg()` (single 32-bit) | ~1.5 ms / call | ~3-5 ms / call |
-| `read_block()` (16 words via `raw_dr_scan_batch`) | ~3 ms total | ~50 ms (no batch support) |
-| `burst_read()` (16 beats AXI) | uses batched DR where available | one scan at a time (slower) |
-| `Analyzer.capture()` of 1024 samples (USER2 burst) | ~50 ms | ~500 ms |
+| Operation | hw_server |
+|---|---|
+| `read_reg()` (single 32-bit) | ~1.5 ms / call |
+| `read_block()` (16 words via `raw_dr_scan_batch`) | ~3 ms total |
+| `burst_read()` (16 beats AXI) | uses batched DR where available |
+| `Analyzer.capture()` of 1024 samples (USER2 burst) | ~50 ms |
 
-The bottleneck in both cases is JTAG round-trip latency through the
-tooling, not the RTL.  The fastest path today is hw_server with batched
-scans.  A future raw-TCF transport (bypassing xsdb) could cut per-scan
-overhead further on Xilinx boards.  See the TODO roadmap.
+**OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
+hardware-validated on Arty A7 (pending a first run with FT2232; see
+[`specs/transport_api.md`](specs/transport_api.md)).  Expect it to be
+slower than `hw_server` per scan because OpenOCD's TCL listener has
+limited batched-scan support, but the delta is not documented until
+somebody benchmarks it.
+
+The bottleneck on the measured path is JTAG round-trip latency through
+the tooling, not the RTL.  The fastest path today is hw_server with
+batched scans.  A future raw-TCF transport (bypassing xsdb) could cut
+per-scan overhead further on Xilinx boards.  See the TODO roadmap.
 
 ## What's next
 
