@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import time
 import subprocess
 import threading
@@ -176,6 +177,16 @@ class OpenOcdTransport(Transport):
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
         1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
     }
+    # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
+    # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
+    # bits) to the openocd config file rather than to host code, so this
+    # preset is only useful when your openocd.cfg already declares the
+    # xck26 / xczu* chain correctly.  Values parallel
+    # ``XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS`` for symmetry.
+    # **Not yet hardware-validated via OpenOCD** — ship with caution.
+    IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
+        1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
+    }
     # Alias so callers can write IR_TABLE_US for brevity.
     IR_TABLE_US = IR_TABLE_XILINX_ULTRASCALE
 
@@ -307,6 +318,24 @@ class XilinxHwServerTransport(Transport):
     IR_TABLE_XILINX7: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
         1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
+    }
+    # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*).  xsdb at the PL-TAP
+    # target level auto-handles the ARM DAP's **IR** (pads with BYPASS)
+    # but does NOT pad the **DR** — the ARM DAP's 1-bit BYPASS register
+    # still sits in series with the PL's DR.  Chain order on MPSoC is
+    # ``TDI → ARM DAP → PL TAP → TDO``, so the DAP BYPASS bit lands on
+    # the TDI-side end of the 50-bit DR scan.  The host must therefore
+    # pair this table with three constructor args:
+    #   ``ir_length=12``  — PL TAP IR width (no DAP bits; xsdb adds those).
+    #   ``dr_extra_bits=1`` — one DAP BYPASS bit on every DR scan.
+    #   ``dr_extra_position="tdi"`` — BYPASS sits at the TDI end; the
+    #       captured token has the fcapz 49-bit response at offset 0 and
+    #       the BYPASS bit trailing, so the parser skips nothing up front.
+    # The PL BSCANE2 USER1..USER4 instructions share the 7-series opcode
+    # pattern but in the 12-bit IR land at 0x024, 0x025, 0x026, 0x027.
+    # Verified on xck26 / KV260 by TDO trace.
+    IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
+        1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
     }
     # Alias so callers can write IR_TABLE_US for brevity.
     IR_TABLE_US = IR_TABLE_XILINX_ULTRASCALE
@@ -1018,10 +1047,22 @@ class XilinxHwServerTransport(Transport):
     # -- process I/O ---------------------------------------------------------
 
     def _send(self, tcl: str) -> str:
-        """Send *tcl* to the persistent xsdb process and return output."""
+        """Send *tcl* to the persistent xsdb process and return output.
+
+        Set environment variable ``FCAPZ_LOG_XSDB=1`` to log every TCL
+        request and every xsdb response to ``stderr`` — use this for
+        wire-level debugging on unusual chains (e.g. investigating why a
+        read returns wrong data on Zynq US+ MPSoC).  The output is noisy
+        but decodable: one ``tcl>`` line per request, one ``tdo>`` line
+        per response.
+        """
+        log = os.environ.get("FCAPZ_LOG_XSDB") == "1"
         with self._xsdb_io_lock:
             if not self._proc or not self._proc.stdin or not self._proc.stdout:
                 raise RuntimeError("not connected — call connect() first")
+            if log:
+                sys.stderr.write(f"[fcapz xsdb] tcl> {tcl}\n")
+                sys.stderr.flush()
             self._proc.stdin.write(tcl + "\n")
             self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
             self._proc.stdin.flush()
@@ -1038,7 +1079,11 @@ class XilinxHwServerTransport(Transport):
                 if line.strip() == self._SENTINEL:
                     break
                 lines.append(line)
-            return "\n".join(lines)
+            out = "\n".join(lines)
+            if log:
+                sys.stderr.write(f"[fcapz xsdb] tdo> {out!r}\n")
+                sys.stderr.flush()
+            return out
 
     def _drain_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:

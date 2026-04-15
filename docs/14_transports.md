@@ -184,8 +184,22 @@ swap one for the other without changing the IR table.
 | Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
 | Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
 | Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
-| **Zynq UltraScale+ MPSoC** (e.g. KV260, ZCU104) | build your own — see "Chain-shape parameters" below | `ir_length=16`, `dr_extra_bits=1`, `dr_extra_position="tdo"`, `ir_table={1: 0x824F, 2: 0x825F, 3: 0x826F, 4: 0x827F}` (verify on your board first) |
+| **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
 | Lattice ECP5, Intel, Gowin | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
+
+The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
+register sits in series with the PL TAP's DR on the TDO side, so every
+DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
+Without it the host's address field lands one bit position off and
+every non-zero register address reads the wrong register (see BUG-006
+in `no_commit/BUGS.md` for the wire-level decode that pinned this
+down).
+
+CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
+the full MPSoC kwargs (`IR_TABLE_XILINX_ZYNQUS` + `ir_length=12` +
+`dr_extra_bits=1` + `dr_extra_position="tdi"`), and
+`fcapz --tap xcku040 …` auto-selects `IR_TABLE_XILINX_ULTRASCALE`.
+See `host/fcapz/cli.py::_chain_shape_kwargs`.
 
 ### Chain-shape parameters (multi-TAP boundary scan)
 
@@ -199,53 +213,27 @@ transport:
 
 | Arg | Default | Meaning |
 |---|---|---|
-| `ir_length` | `6` | Total IR bits to shift on every `irshift`.  For Zynq US+ MPSoC (PL TAP IR=12 + ARM DAP IR=4): `16`. |
-| `dr_extra_bits` | `0` | Extra bits to add to every DR scan, padded with zeros, for BYPASS registers in the rest of the chain.  For Zynq US+ MPSoC: `1` (one BYPASS bit for the ARM DAP). |
-| `dr_extra_position` | `"tdo"` | Where the extra bits sit in the captured token: `"tdo"` if the bypass TAP is closer to TDO than the fcapz BSCANE2 (BYPASS bits land at the start of the captured string), `"tdi"` if closer to TDI. |
+| `ir_length` | `6` | IR bits the host shifts on every `irshift`.  When xsdb auto-walks part of the chain (e.g. targeting the PL TAP on MPSoC), this is just the PL's IR width; xsdb pads the rest of the chain's IR with BYPASS itself. |
+| `dr_extra_bits` | `0` | Extra zero-padded bits the host adds to every DR scan for BYPASS registers of other TAPs in the chain.  xsdb does **not** pad DR — the host must. |
+| `dr_extra_position` | `"tdo"` | Where the extra bits sit in the captured token: `"tdo"` if the bypass TAP is closer to TDO than the fcapz BSCANE2 (BYPASS bits appear at the start of the captured string), `"tdi"` if closer to TDI.  On Zynq US+ MPSoC the ARM DAP is on the TDI side of the PL TAP, so the right choice is `"tdi"`. |
 
 The `ir_table` value for each chain is shifted **as-is** for `ir_length`
-bits, so the caller is responsible for OR-ing in the BYPASS opcodes
-of the other TAPs.  Example for Zynq US+ MPSoC with PL `USER1=0x824`
-and ARM DAP BYPASS=`0xF` in the low 4 bits of a 16-bit IR:
+bits.  Example for Zynq US+ MPSoC (xck26 / KV260), using xsdb at the
+PL-TAP target level where xsdb handles the DAP's IR portion and we
+handle the DAP's 1-bit DR BYPASS:
 
 ```python
-IR_TABLE_ZYNQ_USP = {
-    1: (0x824 << 4) | 0xF,   # 0x824F
-    2: (0x825 << 4) | 0xF,   # 0x825F
-    3: (0x826 << 4) | 0xF,   # 0x826F
-    4: (0x827 << 4) | 0xF,   # 0x827F
-}
 t = XilinxHwServerTransport(
     fpga_name="xck26",
-    ir_length=16,
+    ir_table=XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
+    ir_length=12,
     dr_extra_bits=1,
-    dr_extra_position="tdo",
-    ir_table=IR_TABLE_ZYNQ_USP,
+    dr_extra_position="tdi",
 )
 ```
 
-> **Verify on your board.** The exact PL TAP IR length and USER opcodes
-> on Zynq US+ MPSoC depend on the part and on which JTAG node xsdb
-> selects.  Use an interactive `xsdb` session to confirm:
-> `jtag targets`, `tap_get_property -of [jtag targets …] ir_length`.
-> If xsdb auto-walks the chain (selects the PL TAP node directly), the
-> `ir_length` and BYPASS padding may already be handled — in that case
-> use the standalone `IR_TABLE_XILINX_ULTRASCALE` and leave the
-> chain-shape args at their defaults.
-
-> **Recommended MPSoC workaround: use `EIO_EN=1` on the ELA wrapper.**
-> On Zynq US+ MPSoC the default xsdb/hw_server chain-dispatch path
-> routes every USER opcode to USER1 in practice (widening
-> `bscan-switch-user-mask` is necessary but not sufficient to reach
-> USER2/3/4 through the regular 2-phase read pipeline; see BUG-005 in
-> `no_commit/BUGS.md`).  The reliable path is to multiplex ELA + EIO
-> on USER1 via [`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) by
-> setting `EIO_EN=1` on the ELA wrapper, and pass `base_addr=0x8000`
-> to `EioController` so reads/writes route to EIO inside the on-chip
-> mux.  See [chapter 04 — Combining ELA + EIO on a single USER chain](04_rtl_integration.md#combining-ela--eio-on-a-single-user-chain-eio_en1).
-> The ELA burst readback continues to use USER2 unchanged, which is
-> the one secondary chain that works even on unhelpful MPSoC host
-> stacks.
+That's also exactly what the CLI auto-selects for `xck*` / `xczu*` part
+names, so `fcapz --tap xck26 …` Just Works.
 
 ### Example: UltraScale board
 

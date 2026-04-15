@@ -230,7 +230,7 @@ module fcapz_ela_xilinx7 #(
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
-| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain (e.g. Zynq UltraScale+ MPSoC, where the host toolchain only reliably reaches USER1).  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
+| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
@@ -256,11 +256,12 @@ feature actually does at runtime.
 
 ### Combining ELA + EIO on a single USER chain (`EIO_EN=1`)
 
-If your host toolchain or device can only reach USER1 reliably — most
-notably **Zynq UltraScale+ MPSoC**, where the default xsdb/hw_server
-chain dispatch routes every `irshift` to USER1 regardless of opcode —
-set `EIO_EN=1` on the ELA wrapper and drop the standalone `fcapz_eio_*`
-instance from your top level.  The wrapper adds a
+When you want ELA control and EIO to share a BSCAN primitive — for
+instance, a resource-constrained part with only one spare USER chain
+budgeted for debug, or a design that prefers a single USER chain for
+simpler bitstream-level classification — set `EIO_EN=1` on the ELA
+wrapper and drop the standalone `fcapz_eio_*` instance from your top
+level.  The wrapper adds a
 [`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) on the USER1 49-bit
 register bus that splits the 16-bit address space:
 

@@ -138,6 +138,57 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
     )
 
 
+def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
+    """Return the transport kwargs appropriate for *fpga_name*'s part family.
+
+    The return value is meant to be ``**``-unpacked into
+    :class:`XilinxHwServerTransport` alongside the usual host/port/bitfile
+    arguments.  An empty dict means "use transport defaults" (7-series
+    single-device 6-bit IR, no bypass padding, no read retries).
+
+    MPSoC-specific fields (Zynq UltraScale+, ``xck*`` / ``xczu*``):
+      - ``ir_length=12`` — PL TAP IR width; xsdb auto-walks the DAP
+        portion of the chain's IR, so only the PL's 12 bits are shifted
+        by the host.
+      - ``dr_extra_bits=1`` + ``dr_extra_position="tdi"`` — the ARM DAP's
+        1-bit BYPASS register sits between TDI and the PL TAP's DR, so
+        every DR scan is 1 bit longer than the fcapz 49-bit frame and
+        the BYPASS bit sits at the TDI-side end of the 50-bit scan.
+        The captured token has the fcapz 49 bits at offset 0 and the
+        BYPASS bit trailing; the parser skips nothing at the front.
+        Verified by TDO trace on xck26 / KV260.
+
+    The detection is purely a CLI-layer convenience and lives here, not
+    in the transport, so the transport stays a dumb data-shifter.
+
+    Note: Versal parts (xcvm/xcvc/xcvp/xcve/xcvh) don't use BSCANE2 and
+    aren't supported by fcapz; they fall through to defaults and fail
+    loudly at identity check rather than silently pretending to work.
+    """
+    name_lc = fpga_name.lower()
+    # Standalone UltraScale / UltraScale+ (Kintex, Virtex, Artix US+):
+    # 6-bit IR, different USER opcodes from 7-series.  Must be checked
+    # before the xck* / xczu* branch below because ``xcku040`` starts
+    # with ``xck``.
+    if name_lc.startswith(("xcku", "xcvu", "xcau")):
+        return {
+            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+            "ir_length": 6,
+        }
+    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*): 12-bit PL IR
+    # + 1 ARM DAP BYPASS bit on every DR.
+    if name_lc.startswith(("xck", "xczu")):
+        return {
+            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
+            "ir_length": 12,
+            "dr_extra_bits": 1,
+            "dr_extra_position": "tdi",
+        }
+    # 7-series (xc7a / xc7k / xc7v / xc7s / xc7z) and anything else:
+    # fall back to the transport's default 7-series table.
+    return {}
+
+
 def _make_transport(args: argparse.Namespace):
     if args.backend == "openocd":
         return OpenOcdTransport(host=args.host, port=args.port, tap=args.tap)
@@ -146,6 +197,7 @@ def _make_transport(args: argparse.Namespace):
     bitfile = getattr(args, "program", None)
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
+        **_chain_shape_kwargs(fpga_name),
     )
 
 
