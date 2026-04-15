@@ -78,7 +78,9 @@ def test_surfer_reopens_when_wcp_unavailable_and_pretrigger_unchanged(
     panel._last_surfer_marker_pretrigger = 123
     panel._surfer_wcp = _FakeWcp(ready=False)
     stopped = []
-    monkeypatch.setattr(panel, "stop_viewer_processes", lambda *args, **kwargs: stopped.append(True))
+    monkeypatch.setattr(
+        panel, "stop_viewer_processes", lambda *args, **kwargs: stopped.append(True),
+    )
     started = []
     monkeypatch.setattr("fcapz.gui.history_panel.QProcess.start", lambda self: started.append(True))
 
@@ -103,7 +105,9 @@ def test_surfer_pretrigger_change_reopens_when_marker_must_move(
     panel._last_surfer_marker_pretrigger = 8
     panel._surfer_wcp = _FakeWcp(ready=True)
     stopped = []
-    monkeypatch.setattr(panel, "stop_viewer_processes", lambda *args, **kwargs: stopped.append(True))
+    monkeypatch.setattr(
+        panel, "stop_viewer_processes", lambda *args, **kwargs: stopped.append(True),
+    )
     started = []
     monkeypatch.setattr("fcapz.gui.history_panel.QProcess.start", lambda self: started.append(True))
 

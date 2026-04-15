@@ -81,11 +81,20 @@ LINT_TARGETS = [
     RTL / "fcapz_eio_xilinxus.v",
     RTL / "fcapz_ejtagaxi_xilinxus.v",
     RTL / "fcapz_ejtaguart_xilinxus.v",
+    # Microchip PolarFire (UJTAG) — requires ujtag_stub.
+    RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+    RTL / "fcapz_ela_polarfire.v",
+    RTL / "fcapz_eio_polarfire.v",
+    # Harness that instantiates fcapz_ela_xilinx7 with EIO_EN=1 so the
+    # g_shared generate branch is elaborated (default EIO_EN=0 lint
+    # would dead-code-eliminate it).
+    SIM / "lint_eio_en_xilinx7.v",
 ]
 
 LINT_STUBS = [
     SIM / "bscane2_stub.v",
     SIM / "xpm_fifo_async_stub.v",
+    SIM / "ujtag_stub.v",
 ]
 
 

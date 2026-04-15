@@ -430,7 +430,8 @@ class HistoryPanel(QWidget):
                     # shows the newest capture even without a WCP session.
                 elif unix_file_watcher_ok:
                     self.status_message.emit(
-                        f"Updated live wave for {viewer_label} — reload if the viewer did not refresh.",
+                        f"Updated live wave for {viewer_label} — "
+                        "reload if the viewer did not refresh.",
                     )
                     return
                 else:
