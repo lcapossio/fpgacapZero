@@ -256,12 +256,21 @@ feature actually does at runtime.
 
 ### Combining ELA + EIO on a single USER chain (`EIO_EN=1`)
 
-When you want ELA control and EIO to share a BSCAN primitive — for
-instance, a resource-constrained part with only one spare USER chain
-budgeted for debug, or a design that prefers a single USER chain for
-simpler bitstream-level classification — set `EIO_EN=1` on the ELA
-wrapper and drop the standalone `fcapz_eio_*` instance from your top
-level.  The wrapper adds a
+Two cases to use this mode:
+
+1. **Resource-constrained parts** with only one spare USER chain (ECP5
+   designs with heavy logic, small Lattice / Gowin parts, etc.).
+2. **Zynq UltraScale+ MPSoC (xck26 / xczu*)** — this is the **required**
+   path on MPSoC, not an optional one.  The PL TAP on these parts
+   exposes only USER1 as a reachable chain through xsdb/hw_server at
+   the device-level target (USER2..USER4 either alias to USER1 or put
+   the TAP in BYPASS — see [chapter 14 "Zynq UltraScale+ MPSoC — known
+   limitation: USER1 only"](14_transports.md#zynq-ultrascale-mpsoc--known-limitation-user1-only)).
+   Set `EIO_EN=1` on the ELA wrapper, drop the standalone
+   `fcapz_eio_xilinxus` instance from your top level, and EIO will
+   ride-along on USER1.
+
+The wrapper adds a
 [`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) on the USER1 49-bit
 register bus that splits the 16-bit address space:
 

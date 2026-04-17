@@ -417,6 +417,43 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         parsed = t._parse_bits_u32(token)
         self.assertEqual(parsed, value)
 
+    def test_register_ir_mode_emits_named_irshift(self):
+        """use_register_ir=True emits '-register user{N}' instead of '-hex'."""
+        t = XilinxHwServerTransport(use_register_ir=True)
+        t._active_chain = 1
+        tcl = t._read_reg_tcl(t._frame_bits(0x10, 0, False))
+        self.assertIn("-register user1", tcl)
+        self.assertNotIn("-hex", tcl)
+        # DR should be standard 49 bits (no extra)
+        self.assertIn("-bits 49", tcl)
+        self.assertNotIn("-bits 50", tcl)
+
+    def test_register_ir_write_uses_drupdate(self):
+        """Writes in register mode use -state DRUPDATE + split sequence."""
+        t = XilinxHwServerTransport(use_register_ir=True)
+        t._active_chain = 1
+        tcl = t._write_reg_tcl(t._frame_bits(0x14, 0xCAFE, True))
+        self.assertIn("-register user1", tcl)
+        self.assertIn("-state DRUPDATE", tcl)
+        self.assertIn("state IDLE", tcl)
+        self.assertIn(f"delay {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+
+    def test_register_ir_forces_dr_extra_bits_zero(self):
+        """use_register_ir overrides dr_extra_bits to 0."""
+        t = XilinxHwServerTransport(
+            use_register_ir=True, dr_extra_bits=1, dr_extra_position="tdi",
+        )
+        self.assertEqual(t.dr_extra_bits, 0)
+        self.assertTrue(t.use_register_ir)
+
+    def test_register_ir_select_chain_accepts_1_to_4(self):
+        t = XilinxHwServerTransport(use_register_ir=True)
+        for ch in (1, 2, 3, 4):
+            t.select_chain(ch)
+            self.assertEqual(t._active_chain, ch)
+        with self.assertRaises(ValueError):
+            t.select_chain(5)
+
     def test_chain_shape_validation(self):
         with self.assertRaises(ValueError):
             XilinxHwServerTransport(ir_length=0)

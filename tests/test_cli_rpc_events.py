@@ -544,24 +544,14 @@ class RpcTests(unittest.TestCase):
 class ChainShapeKwargsTests(unittest.TestCase):
     """CLI auto-detection of XilinxHwServerTransport kwargs from fpga_name."""
 
-    def test_zynq_us_plus_mpsoc_kria_full_chain_shape(self):
-        """Kria K26 needs the full MPSoC chain shape: IR=12 + 1 DAP BYPASS bit on DR."""
+    def test_zynq_us_plus_mpsoc_kria_uses_register_ir(self):
+        """Kria K26 uses -register userN mode — one flag, no opcode table."""
         kwargs = _chain_shape_kwargs("xck26")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
-        )
-        self.assertEqual(kwargs["ir_length"], 12)
-        self.assertEqual(kwargs["dr_extra_bits"], 1)
-        self.assertEqual(kwargs["dr_extra_position"], "tdi")
+        self.assertEqual(kwargs, {"use_register_ir": True})
 
-    def test_zynq_us_plus_zcu_full_chain_shape(self):
+    def test_zynq_us_plus_zcu_uses_register_ir(self):
         kwargs = _chain_shape_kwargs("xczu7ev")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
-        )
-        self.assertEqual(kwargs["ir_length"], 12)
-        self.assertEqual(kwargs["dr_extra_bits"], 1)
-        self.assertEqual(kwargs["dr_extra_position"], "tdi")
+        self.assertEqual(kwargs, {"use_register_ir": True})
 
     def test_standalone_kintex_ultrascale_no_dr_padding(self):
         """Standalone US parts are single-device chains: no DAP bypass bits."""
@@ -596,9 +586,7 @@ class ChainShapeKwargsTests(unittest.TestCase):
 
     def test_case_insensitive(self):
         kwargs = _chain_shape_kwargs("XCK26")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
-        )
+        self.assertEqual(kwargs, {"use_register_ir": True})
 
     def test_unknown_name_returns_empty_dict(self):
         self.assertEqual(_chain_shape_kwargs("some_custom_name"), {})
@@ -606,12 +594,10 @@ class ChainShapeKwargsTests(unittest.TestCase):
     def test_mpsoc_kwargs_are_transport_constructor_compatible(self):
         """The dict must ``**``-unpack into XilinxHwServerTransport cleanly."""
         kwargs = _chain_shape_kwargs("xck26")
-        # Should raise no ValueError; the transport constructor validates
-        # ir_length, dr_extra_bits, dr_extra_position.
         t = XilinxHwServerTransport(fpga_name="xck26", **kwargs)
-        self.assertEqual(t.ir_length, 12)
-        self.assertEqual(t.dr_extra_bits, 1)
-        self.assertEqual(t.dr_extra_position, "tdi")
+        self.assertTrue(t.use_register_ir)
+        # In register mode, dr_extra_bits is forced to 0 (xsdb handles bypass).
+        self.assertEqual(t.dr_extra_bits, 0)
 
 
 if __name__ == "__main__":

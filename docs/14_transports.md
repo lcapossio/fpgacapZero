@@ -188,7 +188,7 @@ swap one for the other without changing the IR table.
 | Lattice ECP5, Intel, Gowin | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 
 The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
-register sits in series with the PL TAP's DR on the TDO side, so every
+register sits in series with the PL TAP's DR on the TDI side, so every
 DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
 Without it the host's address field lands one bit position off and
 every non-zero register address reads the wrong register (see BUG-006
@@ -196,44 +196,136 @@ in `no_commit/BUGS.md` for the wire-level decode that pinned this
 down).
 
 CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
-the full MPSoC kwargs (`IR_TABLE_XILINX_ZYNQUS` + `ir_length=12` +
-`dr_extra_bits=1` + `dr_extra_position="tdi"`), and
-`fcapz --tap xcku040 …` auto-selects `IR_TABLE_XILINX_ULTRASCALE`.
+`use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
+auto-selects `IR_TABLE_XILINX_ULTRASCALE`.
 See `host/fcapz/cli.py::_chain_shape_kwargs`.
 
-### Chain-shape parameters (multi-TAP boundary scan)
+### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
-The default `XilinxHwServerTransport` shifts a single-device 6-bit IR
-and a 49-bit DR — exactly what 7-series and standalone UltraScale(+)
-parts present.  When the JTAG chain has additional TAPs in series with
-the PL TAP (most notably the ARM DAP on Zynq UltraScale+ MPSoC), every
-IR and DR scan must account for those extra TAPs' IR bits and BYPASS
-bits.  Three constructor arguments handle this without forking the
-transport:
+Zynq UltraScale+ MPSoC parts (Kria xck24/xck26, ZCU+ xczu*) have a
+**multi-TAP boundary scan chain**: `TDI -> ARM DAP -> PL TAP -> TDO`.
+The ARM DAP (4-bit IR) handles Arm CoreSight debug; the PL TAP
+(12-bit IR) handles FPGA configuration and BSCANE2 USER instructions.
+When both TAPs are in the chain, every IR shift is 16 bits and every
+DR shift carries an extra 1-bit BYPASS register from the DAP.
+
+#### Why raw hex opcodes don't work on MPSoC
+
+On 7-series and standalone UltraScale(+), fcapz shifts USER opcodes as
+raw hex values (`irshift -hex 6 02` for USER1).  On MPSoC, xsdb
+presents the PL TAP as a "virtual" target at the device level — and
+its internal chain-handling intercepts the `irshift -hex` path in ways
+that prevent USER2/3/4 from being reached:
+
+- `irshift -hex 12 024` (the opcode that empirically hits USER1 at the
+  PL-target level) **does** return ELA data.  But `0x025`, `0x026`,
+  `0x027` (attempted USER2/3/4) all collapse to USER1's DR content.
+- The BSDL-authoritative opcodes (`USER1=0x902`, `USER2=0x903`,
+  `USER3=0x922`, `USER4=0x923` from the xczu5ev BSDL) return all
+  zeros (BYPASS) at the PL-target level — xsdb's virtual-target
+  translation doesn't forward them.
+
+This was confirmed by an exhaustive sweep of candidate opcodes on
+xck26 / KV260 with Vivado 2025.2 / xsdb 2025.2.
+
+#### The fix: `-register userN` named-IR mode
+
+xsdb's `irshift` command accepts a `-register <name>` option (documented
+in UG1725) that selects a JTAG instruction by name instead of by hex
+opcode.  In this mode, xsdb handles the multi-TAP IR routing and DR
+BYPASS padding internally — the host shifts standard 49-bit / 256-bit
+DRs with no extra bits.
+
+Verified on xck26 / KV260:
+
+| `-register` name | DR width | Result |
+|---|---|---|
+| `user1` | 49 | ELA VERSION `0x0003_4C41` ("LA") |
+| `user2` | 256 | Real staging-buffer data (burst engine) |
+| `user3` | 49 | Reachable (EIO can be instantiated here) |
+| `user4` | 49 | Reachable |
+
+All four USER chains work.  Reads, writes, and 256-bit burst scans
+are confirmed end-to-end.
+
+#### Write path difference on MPSoC
+
+Writes on MPSoC in `-register` mode need an explicit `-state DRUPDATE`
+on the `drshift` (the `-state IDLE` shortcut that works on 7-series
+doesn't reliably fire the UPDATE-DR event through the named-register
+path) and a longer settling delay (~100 TCK instead of 20):
+
+```
+# Write (MPSoC, -register mode):
+$seq irshift -state IRUPDATE -register user1
+$seq drshift -state DRUPDATE -bits 49 $write_frame
+# [run; delete]
+$seq2 state IDLE
+$seq2 delay 100
+# [run; delete]
+```
+
+Reads use the standard `-state IDLE` + `delay 20` pattern unchanged.
+The transport handles this automatically when `use_register_ir=True`.
+
+#### Usage
+
+```python
+# Programmatic:
+t = XilinxHwServerTransport(
+    fpga_name="xck26",
+    use_register_ir=True,   # the only MPSoC-specific arg
+)
+
+# CLI (auto-detected for xck* / xczu* part names):
+fcapz --tap xck26 probe
+```
+
+No `ir_table`, `ir_length`, or `dr_extra_bits` needed — xsdb handles
+everything when using the named-register path.
+
+#### Troubleshooting on MPSoC
+
+If reads return wrong values or writes don't land:
+
+1. **Confirm `hw_server` is running with `bscan-switch-user-mask 0xF`:**
+   ```bash
+   hw_server -e "set bscan-switch-user-mask 0xF"
+   ```
+   Verify after connect: `configparams bscan-switch-user-mask` should
+   print `15`.
+
+2. **Confirm `dbg_hub` doesn't collide with your BSCANE2 chains.**
+   If your design has ILA/VIO/MARK_DEBUG, Vivado auto-inserts a
+   `dbg_hub` on `C_USER_SCAN_CHAIN=1` by default.  Move it:
+   ```tcl
+   set_property C_USER_SCAN_CHAIN 3 [get_debug_cores dbg_hub]
+   ```
+
+3. **Use `FCAPZ_LOG_XSDB=1`** to trace every TCL command and xsdb
+   response for wire-level debugging.
+
+4. **Verify BSCANE2 instances exist in the bitstream** for the chains
+   you intend to use:
+   ```tcl
+   get_cells -hier -filter {REF_NAME == BSCANE2}
+   ```
+
+### Chain-shape parameters (advanced / non-xsdb transports)
+
+The `use_register_ir` mode above is the recommended path for MPSoC
+through xsdb.  For cable-root JTAG access, non-xsdb transports, or
+other multi-TAP scenarios where named-register mode isn't available,
+the transport also supports explicit chain-shape parameters:
 
 | Arg | Default | Meaning |
 |---|---|---|
-| `ir_length` | `6` | IR bits the host shifts on every `irshift`.  When xsdb auto-walks part of the chain (e.g. targeting the PL TAP on MPSoC), this is just the PL's IR width; xsdb pads the rest of the chain's IR with BYPASS itself. |
-| `dr_extra_bits` | `0` | Extra zero-padded bits the host adds to every DR scan for BYPASS registers of other TAPs in the chain.  xsdb does **not** pad DR — the host must. |
-| `dr_extra_position` | `"tdo"` | Where the extra bits sit in the captured token: `"tdo"` if the bypass TAP is closer to TDO than the fcapz BSCANE2 (BYPASS bits appear at the start of the captured string), `"tdi"` if closer to TDI.  On Zynq US+ MPSoC the ARM DAP is on the TDI side of the PL TAP, so the right choice is `"tdi"`. |
+| `ir_length` | `6` | Total IR bits to shift on every `irshift`. |
+| `dr_extra_bits` | `0` | Extra zero-padded bits for BYPASS registers of other TAPs. |
+| `dr_extra_position` | `"tdo"` | Which end of the captured token holds the extra bits: `"tdo"` or `"tdi"`. |
 
-The `ir_table` value for each chain is shifted **as-is** for `ir_length`
-bits.  Example for Zynq US+ MPSoC (xck26 / KV260), using xsdb at the
-PL-TAP target level where xsdb handles the DAP's IR portion and we
-handle the DAP's 1-bit DR BYPASS:
-
-```python
-t = XilinxHwServerTransport(
-    fpga_name="xck26",
-    ir_table=XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
-    ir_length=12,
-    dr_extra_bits=1,
-    dr_extra_position="tdi",
-)
-```
-
-That's also exactly what the CLI auto-selects for `xck*` / `xczu*` part
-names, so `fcapz --tap xck26 …` Just Works.
+These are overridden to defaults when `use_register_ir=True` (xsdb
+handles chain-walking internally in that mode).
 
 ### Example: UltraScale board
 

@@ -376,6 +376,7 @@ class XilinxHwServerTransport(Transport):
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
+        use_register_ir: bool = False,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -414,6 +415,13 @@ class XilinxHwServerTransport(Transport):
             raise ValueError(
                 f"dr_extra_position must be 'tdo' or 'tdi', got {dr_extra_position!r}"
             )
+        self.use_register_ir = bool(use_register_ir)
+        if self.use_register_ir:
+            # In -register mode xsdb handles both IR routing and DR BYPASS
+            # padding for multi-TAP chains (e.g. Zynq US+ MPSoC ARM DAP).
+            # Override chain-shape params to avoid double-padding.
+            ir_length = 6
+            dr_extra_bits = 0
         self.ir_length = int(ir_length)
         self.dr_extra_bits = int(dr_extra_bits)
         self.dr_extra_position = dr_extra_position
@@ -599,20 +607,22 @@ class XilinxHwServerTransport(Transport):
 
     def select_chain(self, chain: int) -> None:
         """Select BSCANE2 USER chain for subsequent register accesses."""
-        if chain not in self.ir_table:
+        if self.use_register_ir:
+            if not (1 <= chain <= 4):
+                raise ValueError(f"chain must be 1..4, got {chain}")
+        elif chain not in self.ir_table:
             raise ValueError(f"chain {chain} not in ir_table {self.ir_table}")
         self._active_chain = chain
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via XSDB jtag sequence (irscan + drscan)."""
         ch = chain if chain is not None else self._active_chain
-        ir = self._ir_hex(self.ir_table[ch])
         bit_str = "".join("1" if (bits >> i) & 1 else "0" for i in range(width))
         padded = self._pad_dr(bit_str)
         total = self._user_dr_bits(width)
         tcl = (
             f"set _rd [jtag sequence]; "
-            f"$_rd irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{self._irshift_tcl('_rd', ch)}; "
             f"$_rd drshift -state DRUPDATE -capture -bits {total} {padded}; "
             f"puts [$_rd run -bits]; $_rd delete"
         )
@@ -715,8 +725,6 @@ class XilinxHwServerTransport(Transport):
         n_scans = (words + sps - 1) // sps
         prime_scans = 0 if timestamp else 1
 
-        ir1 = self._ir_hex(self.ir_table.get(1, self.USER1_IR))
-        ir2 = self._ir_hex(self.ir_table.get(2, self.USER2_IR))
         dr_bits = self.BURST_DR_BITS
         burst_total = self._user_dr_bits(dr_bits)
         burst_zeros = self._pad_dr("0" * dr_bits)
@@ -729,26 +737,51 @@ class XilinxHwServerTransport(Transport):
             )
         )
         user_total = self._user_dr_bits(self.DR_BITS)
+        ir1_cmd = self._irshift_tcl("_bq", chain=1)
+        ir2_cmd = self._irshift_tcl("_bq", chain=2)
 
-        parts = [
-            "set _bq [jtag sequence]",
-            # Write BURST_PTR via USER1 (triggers start_ptr load)
-            # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
-            f"$_bq irshift -state IRUPDATE -hex {self.ir_length} {ir1}; "
-            f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-            # Idle so staging buffer fills (~33 TCK needed, extra margin)
-            "$_bq delay 80",
-        ]
-        # Prime USER2 once for sample bursts, then perform the scans returned
-        # to the caller. Timestamp bursts use the prefilled first scan directly;
-        # otherwise short captures can read past the valid timestamp window.
-        for _ in range(n_scans + prime_scans):
-            parts.append(
-                f"$_bq irshift -state IRUPDATE -hex {self.ir_length} {ir2}; "
-                f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
-            )
-        parts.append("puts [$_bq run -bits]; $_bq delete")
-        tcl = "; ".join(parts)
+        if self.use_register_ir:
+            # Register mode: BURST_PTR write needs DRUPDATE + split-
+            # sequence IDLE/delay (same pattern as _write_reg_tcl).
+            # Burst scans go in a separate sequence afterwards.
+            write_idle = self.WRITE_IDLE_CYCLES_REGISTER
+            parts_w = [
+                "set _bq [jtag sequence]",
+                f"{ir1_cmd}; "
+                f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
+                "$_bq run; $_bq delete",
+                "set _bqd [jtag sequence]",
+                "$_bqd state IDLE",
+                f"$_bqd delay {write_idle}",
+                "$_bqd run; $_bqd delete",
+            ]
+            parts_r = ["set _bq [jtag sequence]"]
+            for _ in range(n_scans + prime_scans):
+                parts_r.append(
+                    f"{ir2_cmd}; "
+                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
+                )
+            parts_r.append("puts [$_bq run -bits]; $_bq delete")
+            tcl = "; ".join(parts_w + parts_r)
+        else:
+            parts = [
+                "set _bq [jtag sequence]",
+                # Write BURST_PTR via USER1 (triggers start_ptr load)
+                # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
+                f"{ir1_cmd}; "
+                f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
+                # Idle so staging buffer fills (~33 TCK needed, extra margin)
+                "$_bq delay 80",
+            ]
+            # Prime USER2 once for sample bursts, then perform the scans
+            # returned to the caller.
+            for _ in range(n_scans + prime_scans):
+                parts.append(
+                    f"{ir2_cmd}; "
+                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
+                )
+            parts.append("puts [$_bq run -bits]; $_bq delete")
+            tcl = "; ".join(parts)
 
         out = self._send(tcl)
         return self._parse_burst_bits(
@@ -831,9 +864,9 @@ class XilinxHwServerTransport(Transport):
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
         """
-        ir = self._ir_hex(self.ir_table.get(1, self.USER1_IR))
         n = self._user_dr_bits(self.DR_BITS)
         idle = self.READ_IDLE_CYCLES
+        ir_cmd = self._irshift_tcl("_q", chain=1)
         frames: list[str] = []
         for i in range(count):
             frames.append(
@@ -845,12 +878,12 @@ class XilinxHwServerTransport(Transport):
         parts: list[str] = [
             "set _q [jtag sequence]",
             # Scan 0: set first address, no capture
-            f"$_q irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
             f"$_q delay {idle}",
             # Prime capture: discard this word.  Hardware/XSDB can leave the
             # first captured USER1 word stale after a previous pipelined read.
-            f"$_q irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
             f"$_q delay {idle}",
         ]
@@ -858,13 +891,13 @@ class XilinxHwServerTransport(Transport):
         # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
             parts.append(
-                f"$_q irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+                f"{ir_cmd}; "
                 f"$_q drshift -state IDLE -capture -bits {n} {frames[i]}"
             )
             parts.append(f"$_q delay {idle}")
         # Final scan: capture last result
         parts.append(
-            f"$_q irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
         )
         parts.append("puts [$_q run -bits]; $_q delete")
@@ -879,8 +912,8 @@ class XilinxHwServerTransport(Transport):
         """
         if not addrs:
             return []
-        ir = self._ir_hex(self.ir_table[self._active_chain])
         n = self._user_dr_bits(self.DR_BITS)
+        ir_cmd = self._irshift_tcl("_pq")
         frames = [
             self._pad_dr(self._frame_bits(addr=a, data=0, write=False))
             for a in addrs
@@ -888,16 +921,16 @@ class XilinxHwServerTransport(Transport):
         count = len(frames)
         parts: list[str] = [
             "set _pq [jtag sequence]",
-            f"$_pq irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
         ]
         for i in range(1, count):
             parts.append(
-                f"$_pq irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+                f"{ir_cmd}; "
                 f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
         parts.append(
-            f"$_pq irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
         )
         parts.append("puts [$_pq run -bits]; $_pq delete")
@@ -910,9 +943,28 @@ class XilinxHwServerTransport(Transport):
 
     # -- chain shape helpers -------------------------------------------------
 
+    # Write delay: on MPSoC in -register mode, writes need a longer settling
+    # delay (~100 TCK) and an explicit state-IDLE transition to reliably
+    # commit the UPDATE-DR event.  On 7-series READ_IDLE_CYCLES (20) suffices.
+    WRITE_IDLE_CYCLES_REGISTER = 100
+
     def _ir_hex(self, value: int) -> str:
         """Format an IR opcode as the right-width hex string for ``-hex N``."""
         return f"{value:0{self._ir_hex_digits}x}"
+
+    def _irshift_tcl(self, seq_var: str, chain: int | None = None) -> str:
+        """Return the ``irshift`` TCL fragment for *seq_var* targeting *chain*.
+
+        In ``use_register_ir`` mode, emits ``-register user{chain}`` which
+        lets xsdb handle the multi-TAP IR routing internally (needed on
+        Zynq US+ MPSoC).  Otherwise emits ``-hex {ir_length} {opcode}``
+        using the chain's entry in ``ir_table``.
+        """
+        ch = chain if chain is not None else self._active_chain
+        if self.use_register_ir:
+            return f"${seq_var} irshift -state IRUPDATE -register user{ch}"
+        ir = self._ir_hex(self.ir_table[ch])
+        return f"${seq_var} irshift -state IRUPDATE -hex {self.ir_length} {ir}"
 
     def _user_dr_bits(self, frame_bits: int) -> int:
         """Total bits to shift on a DR scan whose fcapz portion is *frame_bits*."""
@@ -962,28 +1014,45 @@ class XilinxHwServerTransport(Transport):
         requires delay to be in RESET/IDLE/PAUSE — DRUPDATE→delay errors.
         """
         v = f"_s{var_suffix}"
-        ir = self._ir_hex(self.ir_table[self._active_chain])
         n = self._user_dr_bits(self.DR_BITS)
         idle = self.READ_IDLE_CYCLES
         padded = self._pad_dr(frame)
+        ir_cmd = self._irshift_tcl(v)
         return (
             f"set {v} [jtag sequence]; "
-            f"${v} irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"${v} drshift -state IDLE -bits {n} {padded}; "
             f"${v} delay {idle}; "
-            f"${v} irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"${v} drshift -state IDLE -capture -bits {n} {padded}; "
             f"puts [${v} run -bits]; ${v} delete"
         )
 
     def _write_reg_tcl(self, frame: str) -> str:
-        ir = self._ir_hex(self.ir_table[self._active_chain])
         n = self._user_dr_bits(self.DR_BITS)
-        idle = self.READ_IDLE_CYCLES
         padded = self._pad_dr(frame)
+        ir_cmd = self._irshift_tcl("_w")
+        if self.use_register_ir:
+            # On MPSoC in -register mode, writes need explicit DRUPDATE
+            # state (the -state IDLE shortcut doesn't reliably fire the
+            # UPDATE-DR event through the named-register path) and a
+            # longer settling delay (~100 TCK).  The delay runs in a
+            # separate sequence after an explicit state-IDLE transition.
+            idle = self.WRITE_IDLE_CYCLES_REGISTER
+            return (
+                f"set _w [jtag sequence]; "
+                f"{ir_cmd}; "
+                f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
+                f"$_w run; $_w delete; "
+                f"set _wd [jtag sequence]; "
+                f"$_wd state IDLE; "
+                f"$_wd delay {idle}; "
+                f"$_wd run; $_wd delete"
+            )
+        idle = self.READ_IDLE_CYCLES
         return (
             f"set _w [jtag sequence]; "
-            f"$_w irshift -state IRUPDATE -hex {self.ir_length} {ir}; "
+            f"{ir_cmd}; "
             f"$_w drshift -state IDLE -bits {n} {padded}; "
             f"$_w run; $_w delete; "
             f"set _wd [jtag sequence]; "

@@ -175,15 +175,14 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
             "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
             "ir_length": 6,
         }
-    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*): 12-bit PL IR
-    # + 1 ARM DAP BYPASS bit on every DR.
+    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*).  xsdb's
+    # ``-register userN`` named-IR mode handles both the multi-TAP IR
+    # routing (PL TAP + ARM DAP) and the DR BYPASS padding internally,
+    # so no ir_table / ir_length / dr_extra_bits are needed — just the
+    # single flag.  Verified on xck26 / KV260: reads, writes, and USER2
+    # burst all work in this mode.
     if name_lc.startswith(("xck", "xczu")):
-        return {
-            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS,
-            "ir_length": 12,
-            "dr_extra_bits": 1,
-            "dr_extra_position": "tdi",
-        }
+        return {"use_register_ir": True}
     # 7-series (xc7a / xc7k / xc7v / xc7s / xc7z) and anything else:
     # fall back to the transport's default 7-series table.
     return {}
