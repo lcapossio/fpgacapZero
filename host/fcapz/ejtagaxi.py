@@ -113,13 +113,54 @@ class EjtagAxiController:
         raise AXIError(f"{context}: read FIFO empty after "
                        f"{self._MAX_BUSY_RETRIES} polls")
 
+    def _prime_cdc(self) -> None:
+        """Issue CMD_RESET + drain to synchronise the TCK↔AXI CDC handshake.
+
+        **Why this is required:** the bridge's shadow_* registers
+        (shadow_wdata, shadow_addr, shadow_wstrb, shadow_cmd) live in
+        the TCK clock domain.  On every command that triggers an AXI
+        transaction, the host updates them and flips ``req_toggle``;
+        the AXI FSM picks up ``req_edge`` 2 axi_clks later and reads
+        the shadow registers cross-domain.
+
+        On a freshly programmed FPGA, the req/ack toggle pair is at
+        its reset value (both 0) and cdc_idle is trivially true, but
+        the multi-bit data-sampling path through Vivado's inferred
+        routing is not guaranteed to be metastability-safe on the
+        first transition from an initial (all-zero) shadow value to a
+        non-zero one.  Per-bit routing delays can let the AXI domain
+        sample a mix of old and new bits and commit corrupt data to
+        memory.  On Arty A7 / xc7a100t this reproducibly manifests as
+        the **first** WRITE_INC after :meth:`connect` writing a
+        scrambled value (e.g. ``0x00FFFF10`` instead of ``0x1000``),
+        with all subsequent writes landing correctly.
+
+        Firing CMD_RESET forces a full req→ack round-trip through the
+        CDC and clears tck-domain sticky state (error_sticky,
+        prev_valid).  After RESET drains (status.busy = 0), shadow
+        updates from the host are stable by the time the AXI domain
+        reads them on the next real command.
+        """
+        self._scan(CMD_RESET)
+        for _ in range(self._MAX_BUSY_RETRIES):
+            status, _, _, _ = self._scan(CMD_NOP)
+            if not (status & self._BUSY):
+                return
+        raise RuntimeError(
+            "EjtagAxiController._prime_cdc: bridge still busy after "
+            f"RESET + {self._MAX_BUSY_RETRIES} NOP polls"
+        )
+
     def connect(self) -> dict:
         """Open transport, select chain, and probe bridge identity.
 
         Owns the transport lifecycle (matching Analyzer.connect and
         EioController.connect): connect() opens, close() closes.
 
-        4 scans: 3 CONFIG + 1 NOP drain.
+        4 scans (3 CONFIG + 1 NOP drain) to read identity, then
+        :meth:`_prime_cdc` (CMD_RESET + NOP drain) to synchronise the
+        TCK↔AXI CDC handshake so the first user write/read has stable
+        cross-domain shadow registers.
         """
         self._transport.connect()
         self._transport.select_chain(self._chain)
@@ -132,6 +173,7 @@ class EjtagAxiController:
         # FEATURES[23:16] = (FIFO_DEPTH - 1), AXI4 awlen convention.
         # Add 1 back to recover the true depth (max supported burst beats).
         self._fifo_depth = ((features >> 16) & 0xFF) + 1
+        self._prime_cdc()
         return {
             "bridge_id": bridge_id,
             "version_major": version >> 16,
@@ -144,8 +186,10 @@ class EjtagAxiController:
     def attach(self) -> dict:
         """Like :meth:`connect` but assume the transport is already open.
 
-        Restores JTAG chain 1 (ELA) before returning so a shared session can
-        continue using USER1 register access.
+        Restores JTAG chain 1 (ELA) before returning so a shared
+        session can continue using USER1 register access.  Also
+        primes the bridge's TCK↔AXI CDC handshake — see
+        :meth:`_prime_cdc`.
         """
         self._transport.select_chain(self._chain)
         try:
@@ -156,6 +200,7 @@ class EjtagAxiController:
             if bridge_id != _BRIDGE_ID:
                 raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
             self._fifo_depth = ((features >> 16) & 0xFF) + 1
+            self._prime_cdc()
             return {
                 "bridge_id": bridge_id,
                 "version_major": version >> 16,
