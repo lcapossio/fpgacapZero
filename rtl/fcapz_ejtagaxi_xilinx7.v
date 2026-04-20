@@ -20,6 +20,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
     parameter TIMEOUT    = 4096,
+    parameter ASYNC_FIFO_IMPL = 1, // 1=AMD/Xilinx XPM, 0=portable behavioral
     parameter CHAIN      = 4       // USER4 (USER1-3 used by ELA+EIO)
 ) (
     // AXI4 master interface
@@ -56,7 +57,11 @@ module fcapz_ejtagaxi_xilinx7 #(
     input  wire [1:0]            m_axi_rresp,
     input  wire                   m_axi_rvalid,
     input  wire                   m_axi_rlast,
-    output wire                   m_axi_rready
+    output wire                   m_axi_rready,
+    output wire [255:0]           debug_tck,
+    output wire [255:0]           debug_tck_edge,
+    output wire [255:0]           debug_axi,
+    output wire [255:0]           debug_axi_edge
 );
 
     // TAP signals
@@ -74,7 +79,8 @@ module fcapz_ejtagaxi_xilinx7 #(
     fcapz_ejtagaxi #(
         .ADDR_W(ADDR_W), .DATA_W(DATA_W),
         .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
-        .USE_BEHAV_ASYNC_FIFO(0)
+        .USE_BEHAV_ASYNC_FIFO(0),
+        .ASYNC_FIFO_IMPL(ASYNC_FIFO_IMPL)
     ) u_ejtagaxi (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift_en(tap_shift),
@@ -95,7 +101,9 @@ module fcapz_ejtagaxi_xilinx7 #(
         .m_axi_arprot(m_axi_arprot),
         .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp),
         .m_axi_rvalid(m_axi_rvalid), .m_axi_rlast(m_axi_rlast),
-        .m_axi_rready(m_axi_rready)
+        .m_axi_rready(m_axi_rready),
+        .debug_tck(debug_tck), .debug_tck_edge(debug_tck_edge),
+        .debug_axi(debug_axi), .debug_axi_edge(debug_axi_edge)
     );
 
 endmodule

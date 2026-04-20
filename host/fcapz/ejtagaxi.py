@@ -57,7 +57,7 @@ class EjtagAxiController:
         self._fifo_depth: int = 0  # populated by connect() from FEATURES
 
     def _encode(self, cmd: int, addr: int = 0, payload: int = 0,
-                wstrb: int = 0xF) -> int:
+                wstrb: int = 0x0) -> int:
         """Build a 72-bit shift-in value."""
         return (
             (addr & 0xFFFFFFFF)
@@ -76,7 +76,7 @@ class EjtagAxiController:
         return status, resp, rdata, info
 
     def _scan(self, cmd: int, addr: int = 0, payload: int = 0,
-              wstrb: int = 0xF) -> tuple[int, int, int, int]:
+              wstrb: int = 0x0) -> tuple[int, int, int, int]:
         """Single 72-bit DR scan. Returns (status, resp, rdata, info)."""
         bits_out = self._transport.raw_dr_scan(
             self._encode(cmd, addr, payload, wstrb),
@@ -114,32 +114,12 @@ class EjtagAxiController:
                        f"{self._MAX_BUSY_RETRIES} polls")
 
     def _prime_cdc(self) -> None:
-        """Issue CMD_RESET + drain to synchronise the TCK↔AXI CDC handshake.
+        """Issue CMD_RESET + drain so the first real command starts from idle.
 
-        **Why this is required:** the bridge's shadow_* registers
-        (shadow_wdata, shadow_addr, shadow_wstrb, shadow_cmd) live in
-        the TCK clock domain.  On every command that triggers an AXI
-        transaction, the host updates them and flips ``req_toggle``;
-        the AXI FSM picks up ``req_edge`` 2 axi_clks later and reads
-        the shadow registers cross-domain.
-
-        On a freshly programmed FPGA, the req/ack toggle pair is at
-        its reset value (both 0) and cdc_idle is trivially true, but
-        the multi-bit data-sampling path through Vivado's inferred
-        routing is not guaranteed to be metastability-safe on the
-        first transition from an initial (all-zero) shadow value to a
-        non-zero one.  Per-bit routing delays can let the AXI domain
-        sample a mix of old and new bits and commit corrupt data to
-        memory.  On Arty A7 / xc7a100t this reproducibly manifests as
-        the **first** WRITE_INC after :meth:`connect` writing a
-        scrambled value (e.g. ``0x00FFFF10`` instead of ``0x1000``),
-        with all subsequent writes landing correctly.
-
-        Firing CMD_RESET forces a full req→ack round-trip through the
-        CDC and clears tck-domain sticky state (error_sticky,
-        prev_valid).  After RESET drains (status.busy = 0), shadow
-        updates from the host are stable by the time the AXI domain
-        reads them on the next real command.
+        Even with the async FIFO RTL in place, hardware has shown that the
+        first post-connect command can still behave differently from steady
+        state. Priming with RESET forces one known-good round trip through the
+        bridge before user traffic begins.
         """
         self._scan(CMD_RESET)
         for _ in range(self._MAX_BUSY_RETRIES):
@@ -157,10 +137,9 @@ class EjtagAxiController:
         Owns the transport lifecycle (matching Analyzer.connect and
         EioController.connect): connect() opens, close() closes.
 
-        4 scans (3 CONFIG + 1 NOP drain) to read identity, then
-        :meth:`_prime_cdc` (CMD_RESET + NOP drain) to synchronise the
-        TCK↔AXI CDC handshake so the first user write/read has stable
-        cross-domain shadow registers.
+        4 scans (3 CONFIG + 1 NOP drain) to read identity, then prime the
+        bridge with RESET + NOP drain so the first real command starts from a
+        fully-idle state.
         """
         self._transport.connect()
         self._transport.select_chain(self._chain)
@@ -187,9 +166,8 @@ class EjtagAxiController:
         """Like :meth:`connect` but assume the transport is already open.
 
         Restores JTAG chain 1 (ELA) before returning so a shared
-        session can continue using USER1 register access.  Also
-        primes the bridge's TCK↔AXI CDC handshake — see
-        :meth:`_prime_cdc`.
+        session can continue using USER1 register access. Also primes the
+        bridge before any subsequent command traffic.
         """
         self._transport.select_chain(self._chain)
         try:
@@ -229,7 +207,10 @@ class EjtagAxiController:
         """Sequential writes using auto-increment.
 
         Uses raw_dr_scan_batch to combine SET_ADDR + N×WRITE_INC + NOP
-        into a single JTAG sequence for maximum throughput.
+        into a single JTAG sequence for maximum throughput, then drains
+        completion responses.  The RTL command FIFO can queue writes faster
+        than AXI completes them, so one trailing NOP is not enough to prove
+        the whole block committed.
         """
         scans = [
             (self._encode(CMD_SET_ADDR, addr=base_addr), DR_WIDTH),
@@ -243,20 +224,38 @@ class EjtagAxiController:
         results = self._transport.raw_dr_scan_batch(
             scans, chain=self._chain)
 
-        # Check responses: result[i+1] has status for scan[i]'s command.
-        # Skip result[0] (SET_ADDR output) and result[1] (first WRITE_INC
-        # output = SET_ADDR's result).  From result[2] onward, each has
-        # the previous write's status.
+        completed = 0
         for i in range(2, len(results)):
             status, resp, _, _ = self._decode(results[i])
             self._check_error(status, resp,
-                f"Block write failed at word {i-2}")
+                f"Block write failed while draining batch")
+            if status & self._PREV_VALID:
+                completed += 1
+
+        for _ in range(len(data) + self._MAX_BUSY_RETRIES):
+            if completed >= len(data):
+                return
+            status, resp, _, _ = self._scan(CMD_NOP)
+            self._check_error(status, resp,
+                f"Block write failed at word {completed}")
+            if status & self._PREV_VALID:
+                completed += 1
+                continue
+            if not (status & self._BUSY):
+                raise AXIError(
+                    f"Block write stalled after {completed}/{len(data)} "
+                    f"words: status=0x{status:X}"
+                )
+        raise AXIError(
+            f"Block write still busy after {completed}/{len(data)} words"
+        )
 
     def read_block(self, base_addr: int, count: int) -> list[int]:
         """Sequential reads using auto-increment.
 
         Uses raw_dr_scan_batch to combine SET_ADDR + prime READ_INC +
-        (N-1)×READ_INC + NOP drain into a single JTAG sequence.
+        (N-1)×READ_INC + NOP drain into a single JTAG sequence, then
+        drains until all queued read completions have arrived.
         """
         scans = [
             (self._encode(CMD_SET_ADDR, addr=base_addr), DR_WIDTH),
@@ -269,18 +268,33 @@ class EjtagAxiController:
         results = self._transport.raw_dr_scan_batch(
             scans, chain=self._chain)
 
-        # results[0] = SET_ADDR output (useless)
-        # results[1] = prime READ_INC output (useless)
-        # results[2] = first read's data (prev_valid from prime)
-        # ...
-        # results[count+1] = last read's data (drain NOP)
         out = []
         for i in range(2, count + 2):
             status, resp, rdata, _ = self._decode(results[i])
             self._check_error(status, resp,
-                f"Block read failed at word {i-2}")
-            out.append(rdata)
-        return out
+                f"Block read failed while draining batch")
+            if status & self._PREV_VALID:
+                out.append(rdata)
+                if len(out) == count:
+                    return out
+
+        for _ in range(count + self._MAX_BUSY_RETRIES):
+            status, resp, rdata, _ = self._scan(CMD_NOP)
+            self._check_error(status, resp,
+                f"Block read failed at word {len(out)}")
+            if status & self._PREV_VALID:
+                out.append(rdata)
+                if len(out) == count:
+                    return out
+                continue
+            if not (status & self._BUSY):
+                raise AXIError(
+                    f"Block read stalled after {len(out)}/{count} words: "
+                    f"status=0x{status:X}"
+                )
+        raise AXIError(
+            f"Block read still busy after {len(out)}/{count} words"
+        )
 
     def burst_write(self, base_addr: int, data: list[int],
                     wstrb: int = 0xF) -> None:

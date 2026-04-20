@@ -14,6 +14,8 @@
 //   ADDR_W     - AXI address width (default 32)
 //   DATA_W     - AXI data width    (default 32)
 //   FIFO_DEPTH - async read FIFO depth for burst reads (default 16)
+//   CMD_FIFO_DEPTH  - async command FIFO depth (default 2*FIFO_DEPTH)
+//   RESP_FIFO_DEPTH - async response FIFO depth (default 2*FIFO_DEPTH)
 //   TIMEOUT    - AXI ready timeout in axi_clk cycles   (default 4096)
 //
 // 72-bit DR format (LSB first):
@@ -24,8 +26,11 @@ module fcapz_ejtagaxi #(
     parameter ADDR_W     = 32,
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
+    parameter CMD_FIFO_DEPTH  = FIFO_DEPTH * 2,
+    parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
-    parameter USE_BEHAV_ASYNC_FIFO    = 1
+    parameter USE_BEHAV_ASYNC_FIFO    = 1,
+    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1)
 ) (
     // TAP signals (from vendor-specific wrapper)
     input  wire        tck,
@@ -70,7 +75,13 @@ module fcapz_ejtagaxi #(
     input  wire [1:0]            m_axi_rresp,
     input  wire                   m_axi_rvalid,
     input  wire                   m_axi_rlast,
-    output reg                    m_axi_rready
+    output reg                    m_axi_rready,
+
+    // Optional debug buses for on-chip logic analysis
+    output wire [255:0]          debug_tck,
+    output wire [255:0]          debug_tck_edge,
+    output wire [255:0]          debug_axi,
+    output wire [255:0]          debug_axi_edge
 );
 
     // ---- Constants -----------------------------------------------------------
@@ -100,22 +111,86 @@ module fcapz_ejtagaxi #(
                      ST_BURST_W     = 4'd6,
                      ST_BURST_AR    = 4'd7,
                      ST_BURST_R_FILL= 4'd8,
-                     ST_DONE        = 4'd9,
-                     ST_TIMEOUT_ERR = 4'd10;
+                     ST_DONE         = 4'd9,
+                     ST_TIMEOUT_ERR  = 4'd10,
+                     ST_CMD_FETCH    = 4'd11,
+                     ST_CMD_DISPATCH = 4'd12,
+                     ST_BURST_W_FETCH= 4'd13,
+                     ST_BURST_W_LOAD = 4'd14;
 
     // Config register addresses
     localparam CFG_BRIDGE_ID = 16'h0000;
     localparam CFG_VERSION   = 16'h0004;
     localparam CFG_FEATURES  = 16'h002C;
+    localparam CFG_DBG_REC_COUNT      = 16'h0100;
+    localparam CFG_DBG_REC0_SR_ADDR   = 16'h0120;
+    localparam CFG_DBG_REC0_SR_PAYLOAD= 16'h0124;
+    localparam CFG_DBG_REC0_SR_META   = 16'h0128;
+    localparam CFG_DBG_REC0_AUTO_ADDR = 16'h012C;
+    localparam CFG_DBG_REC0_CMD_ADDR  = 16'h0130;
+    localparam CFG_DBG_REC0_CMD_WDATA = 16'h0134;
+    localparam CFG_DBG_REC0_CMD_META  = 16'h0138;
+    localparam CFG_DBG_REC1_SR_ADDR   = 16'h0140;
+    localparam CFG_DBG_REC1_SR_PAYLOAD= 16'h0144;
+    localparam CFG_DBG_REC1_SR_META   = 16'h0148;
+    localparam CFG_DBG_REC1_AUTO_ADDR = 16'h014C;
+    localparam CFG_DBG_REC1_CMD_ADDR  = 16'h0150;
+    localparam CFG_DBG_REC1_CMD_WDATA = 16'h0154;
+    localparam CFG_DBG_REC1_CMD_META  = 16'h0158;
+    localparam CFG_DBG_REC2_SR_ADDR   = 16'h0160;
+    localparam CFG_DBG_REC2_SR_PAYLOAD= 16'h0164;
+    localparam CFG_DBG_REC2_SR_META   = 16'h0168;
+    localparam CFG_DBG_REC2_AUTO_ADDR = 16'h016C;
+    localparam CFG_DBG_REC2_CMD_ADDR  = 16'h0170;
+    localparam CFG_DBG_REC2_CMD_WDATA = 16'h0174;
+    localparam CFG_DBG_REC2_CMD_META  = 16'h0178;
+    localparam CFG_DBG_REC3_SR_ADDR   = 16'h0180;
+    localparam CFG_DBG_REC3_SR_PAYLOAD= 16'h0184;
+    localparam CFG_DBG_REC3_SR_META   = 16'h0188;
+    localparam CFG_DBG_REC3_AUTO_ADDR = 16'h018C;
+    localparam CFG_DBG_REC3_CMD_ADDR  = 16'h0190;
+    localparam CFG_DBG_REC3_CMD_WDATA = 16'h0194;
+    localparam CFG_DBG_REC3_CMD_META  = 16'h0198;
+    localparam CFG_RESP_WR_REC_COUNT  = 16'h01A0;
+    localparam CFG_RESP_WR_REC0_DATA  = 16'h01A4;
+    localparam CFG_RESP_WR_REC0_META  = 16'h01A8;
+    localparam CFG_RESP_WR_REC1_DATA  = 16'h01AC;
+    localparam CFG_RESP_WR_REC1_META  = 16'h01B0;
+    localparam CFG_RESP_WR_REC2_DATA  = 16'h01B4;
+    localparam CFG_RESP_WR_REC2_META  = 16'h01B8;
+    localparam CFG_RESP_WR_REC3_DATA  = 16'h01BC;
+    localparam CFG_RESP_WR_REC3_META  = 16'h01C0;
+    localparam CFG_RESP_CAP_REC_COUNT = 16'h01C4;
+    localparam CFG_RESP_CAP_REC0_DATA = 16'h01C8;
+    localparam CFG_RESP_CAP_REC0_META = 16'h01CC;
+    localparam CFG_RESP_CAP_REC1_DATA = 16'h01D0;
+    localparam CFG_RESP_CAP_REC1_META = 16'h01D4;
+    localparam CFG_RESP_CAP_REC2_DATA = 16'h01D8;
+    localparam CFG_RESP_CAP_REC2_META = 16'h01DC;
+    localparam CFG_RESP_CAP_REC3_DATA = 16'h01E0;
+    localparam CFG_RESP_CAP_REC3_META = 16'h01E4;
+    localparam CFG_AXI_DEQ_REC_COUNT  = 16'h01E8;
+    localparam CFG_AXI_DEQ_REC0_ADDR  = 16'h01EC;
+    localparam CFG_AXI_DEQ_REC0_META  = 16'h01F0;
+    localparam CFG_AXI_DEQ_REC1_ADDR  = 16'h01F4;
+    localparam CFG_AXI_DEQ_REC1_META  = 16'h01F8;
+    localparam CFG_AXI_DEQ_REC2_ADDR  = 16'h01FC;
+    localparam CFG_AXI_DEQ_REC2_META  = 16'h0200;
+    localparam CFG_AXI_DEQ_REC3_ADDR  = 16'h0204;
+    localparam CFG_AXI_DEQ_REC3_META  = 16'h0208;
 
     // Unprivileged, non-secure, data access
     assign m_axi_awprot = 3'b000;
     assign m_axi_arprot = 3'b000;
 
-    // ---- Async FIFO pointer width --------------------------------------------
+    // ---- Async FIFO pointer widths -------------------------------------------
     localparam FIFO_AW = $clog2(FIFO_DEPTH);
+    localparam CMD_FIFO_AW = $clog2(CMD_FIFO_DEPTH);
+    localparam RESP_FIFO_AW = $clog2(RESP_FIFO_DEPTH);
     // Encoded into FEATURES[23:16] as (FIFO_DEPTH-1) so 256 fits in 8 bits.
     localparam [7:0] FIFO_DEPTH_ENC = FIFO_DEPTH - 1;
+    localparam CMDQ_W  = 4 + ADDR_W + DATA_W + (DATA_W/8) + 8 + 3 + 2;
+    localparam RESPQ_W = DATA_W + 2;
 
     // ---- Parameter assertions ------------------------------------------------
     // FIFO_DEPTH bounds: must be >=1, <=256 (AXI4 burst max), and power of 2
@@ -125,12 +200,20 @@ module fcapz_ejtagaxi #(
             FIFO_DEPTH_must_be_between_1_and_256 _fifo_depth_check_FAILED();
         if (FIFO_DEPTH & (FIFO_DEPTH - 1))
             FIFO_DEPTH_must_be_power_of_2 _fifo_depth_pow2_check_FAILED();
+        if (CMD_FIFO_DEPTH < 2 || (CMD_FIFO_DEPTH & (CMD_FIFO_DEPTH - 1)))
+            CMD_FIFO_DEPTH_must_be_power_of_2_and_at_least_2 _cmd_depth_check_FAILED();
+        if (RESP_FIFO_DEPTH < 2 || (RESP_FIFO_DEPTH & (RESP_FIFO_DEPTH - 1)))
+            RESP_FIFO_DEPTH_must_be_power_of_2_and_at_least_2 _resp_depth_check_FAILED();
     endgenerate
     initial begin
         if (FIFO_DEPTH < 1 || FIFO_DEPTH > 256)
             $error("fcapz_ejtagaxi: FIFO_DEPTH must be 1..256 (got %0d)", FIFO_DEPTH);
         if (FIFO_DEPTH & (FIFO_DEPTH - 1))
             $error("fcapz_ejtagaxi: FIFO_DEPTH must be a power of 2 (got %0d)", FIFO_DEPTH);
+        if (CMD_FIFO_DEPTH < 2 || (CMD_FIFO_DEPTH & (CMD_FIFO_DEPTH - 1)))
+            $error("fcapz_ejtagaxi: CMD_FIFO_DEPTH must be a power of 2 >= 2 (got %0d)", CMD_FIFO_DEPTH);
+        if (RESP_FIFO_DEPTH < 2 || (RESP_FIFO_DEPTH & (RESP_FIFO_DEPTH - 1)))
+            $error("fcapz_ejtagaxi: RESP_FIFO_DEPTH must be a power of 2 >= 2 (got %0d)", RESP_FIFO_DEPTH);
     end
 
     // ========================================================================
@@ -155,35 +238,87 @@ module fcapz_ejtagaxi #(
     reg [2:0]        burst_awsize;
     reg [1:0]        burst_awburst;
     reg [ADDR_W-1:0] burst_addr;
-
-    // CDC shadow registers (tck -> axi_clk, stable when req_toggle != ack_toggle)
-    reg [3:0]           shadow_cmd;
-    reg [ADDR_W-1:0]    shadow_addr;
-    reg [DATA_W-1:0]    shadow_wdata;
-    reg [DATA_W/8-1:0]  shadow_wstrb;
-    reg [7:0]           shadow_burst_len;
-    reg [2:0]           shadow_burst_size;
-    reg [1:0]           shadow_burst_type;
-
-    // Toggle handshake (tck side)
-    reg req_toggle;
-
-    // 2-FF sync of ack_toggle into tck domain
-    (* ASYNC_REG = "TRUE" *) reg ack_toggle_sync1, ack_toggle_sync2;
-    wire cdc_idle = (req_toggle == ack_toggle_sync2);
-
-    // 2-FF sync of response data (axi_clk -> tck)
-    (* ASYNC_REG = "TRUE" *) reg [DATA_W-1:0] resp_rdata_sync1, resp_rdata_sync2;
-    (* ASYNC_REG = "TRUE" *) reg [1:0]        resp_code_sync1,  resp_code_sync2;
+    reg              burst_cfg_valid;
+    reg [8:0]        burst_w_beats_left;
 
     // Status bits
     reg prev_valid;
-    reg busy;
     reg error_sticky;
-    reg ack_toggle_prev;
+    reg [CMD_FIFO_AW:0] pending_count;
 
     // Last command tracker (for capture-time data source selection)
     reg [3:0] last_cmd;
+    reg [2:0] dbg_rec_count;
+    reg [31:0] dbg_rec_sr_addr [0:3];
+    reg [31:0] dbg_rec_sr_payload [0:3];
+    reg [31:0] dbg_rec_sr_meta [0:3];
+    reg [31:0] dbg_rec_auto_addr [0:3];
+    reg [31:0] dbg_rec_cmd_addr [0:3];
+    reg [31:0] dbg_rec_cmd_wdata [0:3];
+    reg [31:0] dbg_rec_cmd_meta [0:3];
+    reg [2:0] dbg_resp_wr_rec_count;
+    reg [31:0] dbg_resp_wr_rec_data [0:3];
+    reg [31:0] dbg_resp_wr_rec_meta [0:3];
+    reg [2:0] dbg_resp_cap_rec_count;
+    reg [31:0] dbg_resp_cap_rec_data [0:3];
+    reg [31:0] dbg_resp_cap_rec_meta [0:3];
+    reg        resp_pop_pending;
+    reg [2:0] dbg_axi_deq_rec_count;
+    reg [31:0] dbg_axi_deq_rec_addr [0:3];
+    reg [31:0] dbg_axi_deq_rec_meta [0:3];
+    reg [DR_W-1:0] dbg_tck_update_sr;
+    reg [CMDQ_W-1:0] dbg_tck_update_cmdq;
+    reg [ADDR_W-1:0] dbg_tck_update_auto_inc;
+    reg [3:0] dbg_tck_update_last_cmd;
+    reg dbg_tck_update_fire;
+    reg dbg_tck_update_full;
+    reg [15:0] dbg_tck_update_count;
+    reg [15:0] dbg_tck_enqueue_count;
+    reg        reset_req_toggle;
+    reg        reset_ack_sync1_tck;
+    reg        reset_ack_sync2_tck;
+    wire       reset_busy_tck = (reset_req_toggle != reset_ack_sync2_tck);
+
+    // TCK -> AXI command FIFO.  This replaces the old req_toggle/shadow_*
+    // mailbox so command payload bits cross domains atomically.
+    wire                  cmdq_wr_en;
+    wire [CMDQ_W-1:0]     cmdq_wr_data;
+    wire                  cmdq_full;
+    wire                  cmdq_wr_rst_busy;
+    wire                  cmdq_rd_en;
+    wire [CMDQ_W-1:0]     cmdq_rd_data;
+    wire                  cmdq_empty;
+    wire                  cmdq_rd_rst_busy;
+    wire [CMD_FIFO_AW:0]  cmdq_rd_count;
+    wire [CMD_FIFO_AW:0]  cmdq_wr_count;
+
+    // AXI -> TCK response FIFO.  Completed AXI command responses cross back
+    // as coherent words instead of independent synchronized data bits.
+    wire                  respq_wr_en;
+    wire [RESPQ_W-1:0]    respq_wr_data;
+    wire                  respq_full;
+    wire                  respq_wr_rst_busy;
+    wire                  respq_rd_en;
+    wire [RESPQ_W-1:0]    respq_rd_data;
+    wire                  respq_empty;
+    wire                  respq_rd_rst_busy;
+    wire [RESP_FIFO_AW:0] respq_rd_count;
+    wire [RESP_FIFO_AW:0] respq_wr_count;
+    wire [DATA_W-1:0]     respq_rdata = respq_rd_data[DATA_W-1:0];
+    wire [1:0]            respq_code  = respq_rd_data[DATA_W+1:DATA_W];
+    integer dbg_i;
+    reg                   respq_head_seen;
+    reg                   cmdq_stage_valid;
+    reg [CMDQ_W-1:0]      cmdq_stage_data;
+
+    wire cmdq_wr_ready        = !cmdq_wr_rst_busy;
+    wire cmdq_rd_ready        = !cmdq_rd_rst_busy;
+    wire respq_wr_ready       = !respq_wr_rst_busy;
+    wire respq_rd_ready       = !respq_rd_rst_busy;
+    wire cmdq_stage_ready     = !cmdq_stage_valid;
+
+    assign cmdq_wr_en   = cmdq_stage_valid && cmdq_wr_ready && !cmdq_full;
+    assign cmdq_wr_data = cmdq_stage_data;
 
     // ---- Async FIFO instance (burst read buffer) -----------------------------
     wire                  fifo_wr_en;
@@ -197,22 +332,74 @@ module fcapz_ejtagaxi #(
 
     // FIFO reset: asserted by AXI domain on CMD_RESET
     reg fifo_rst_axi;
+    reg fifo_rst_tck;
+    reg cmdq_rst_axi;
+    reg cmdq_rst_tck;
+    reg respq_rst_axi;
+    reg respq_rst_tck;
+
+    fcapz_async_fifo #(
+        .DATA_W  (CMDQ_W),
+        .DEPTH   (CMD_FIFO_DEPTH),
+        .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
+    ) u_cmd_fifo (
+        .wr_clk   (tck),
+        .wr_rst   (axi_rst | cmdq_rst_tck),
+        .wr_en    (cmdq_wr_en),
+        .wr_data  (cmdq_wr_data),
+        .wr_full  (cmdq_full),
+        .wr_rst_busy (cmdq_wr_rst_busy),
+        .rd_clk   (axi_clk),
+        .rd_rst   (axi_rst | cmdq_rst_axi),
+        .rd_en    (cmdq_rd_en),
+        .rd_data  (cmdq_rd_data),
+        .rd_empty (cmdq_empty),
+        .rd_rst_busy (cmdq_rd_rst_busy),
+        .rd_count (cmdq_rd_count),
+        .wr_count (cmdq_wr_count)
+    );
+
+    fcapz_async_fifo #(
+        .DATA_W  (RESPQ_W),
+        .DEPTH   (RESP_FIFO_DEPTH),
+        .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
+    ) u_resp_fifo (
+        .wr_clk   (axi_clk),
+        .wr_rst   (axi_rst | respq_rst_axi),
+        .wr_en    (respq_wr_en),
+        .wr_data  (respq_wr_data),
+        .wr_full  (respq_full),
+        .wr_rst_busy (respq_wr_rst_busy),
+        .rd_clk   (tck),
+        .rd_rst   (axi_rst | respq_rst_tck),
+        .rd_en    (respq_rd_en),
+        .rd_data  (respq_rd_data),
+        .rd_empty (respq_empty),
+        .rd_rst_busy (respq_rd_rst_busy),
+        .rd_count (respq_rd_count),
+        .wr_count (respq_wr_count)
+    );
 
     fcapz_async_fifo #(
         .DATA_W  (DATA_W),
         .DEPTH   (FIFO_DEPTH),
-        .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO)
+        .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
     ) u_burst_fifo (
         .wr_clk   (axi_clk),
         .wr_rst   (axi_rst | fifo_rst_axi),
         .wr_en    (fifo_wr_en),
         .wr_data  (m_axi_rdata),
         .wr_full  (fifo_full),
+        .wr_rst_busy (),
         .rd_clk   (tck),
-        .rd_rst   (1'b0),
+        .rd_rst   (axi_rst | fifo_rst_tck),
         .rd_en    (fifo_rd_en),
         .rd_data  (fifo_rdata),
         .rd_empty (fifo_empty),
+        .rd_rst_busy (),
         .rd_count (fifo_rd_count),
         .wr_count ()
     );
@@ -225,62 +412,152 @@ module fcapz_ejtagaxi #(
     reg [31:0] config_rdata;
 
     // Capture-time data source mux
-    wire ack_edge = (ack_toggle_sync2 != ack_toggle_prev);
+    wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty;
+    wire capture_resp_data  = !capture_burst_data &&
+                              respq_head_seen &&
+                              respq_rd_ready &&
+                              !respq_empty;
 
     wire [31:0] capture_rdata =
         (last_cmd == CMD_CONFIG)                       ? config_rdata      :
-        (last_cmd == CMD_BURST_RDATA && fifo_notempty) ? fifo_rdata        :
-        ack_edge                                       ? resp_rdata_sync2  :
+        capture_burst_data                             ? fifo_rdata        :
+        capture_resp_data                              ? respq_rdata       :
                                                          {DATA_W{1'b0}};
 
     wire [1:0] capture_resp =
-        ack_edge ? resp_code_sync2 : 2'b00;
+        capture_resp_data ? respq_code : 2'b00;
 
     wire capture_prev_valid =
         (last_cmd == CMD_CONFIG)                       ||
-        (last_cmd == CMD_BURST_RDATA && fifo_notempty) ||
-        ack_edge;
+        capture_burst_data                             ||
+        capture_resp_data;
 
     wire [31:0] info_field   = {8'd0, fifo_count, auto_inc_addr[15:0]};
-    wire [3:0]  status_bits  = {fifo_notempty, error_sticky, busy, prev_valid};
+    wire        busy_status  = reset_busy_tck ||
+                               (pending_count != {(CMD_FIFO_AW+1){1'b0}}) ||
+                               cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready;
+    wire [3:0]  status_bits  = {fifo_notempty, error_sticky, busy_status, prev_valid};
 
-    // ---- TCK: 2-FF synchronizers --------------------------------------------
-    always @(posedge tck) begin
-        // ack_toggle sync (axi_clk -> tck)
-        ack_toggle_sync1 <= ack_toggle;
-        ack_toggle_sync2 <= ack_toggle_sync1;
-        // response data sync (axi_clk -> tck)
-        resp_rdata_sync1 <= resp_rdata;
-        resp_rdata_sync2 <= resp_rdata_sync1;
-        resp_code_sync1  <= resp_code;
-        resp_code_sync2  <= resp_code_sync1;
-    end
+    assign debug_tck = {
+        sr,
+        cmdq_wr_data,
+        auto_inc_addr,
+        last_cmd,
+        sr_cmd,
+        cmdq_wr_en,
+        cmdq_full,
+        respq_rd_en,
+        fifo_rd_en,
+        capture_resp_data,
+        capture_burst_data,
+        capture_prev_valid,
+        pending_count[4:0],
+        cmdq_wr_count[4:0],
+        respq_rd_count[4:0],
+        cmdq_wr_ready,
+        cmdq_wr_rst_busy,
+        respq_rd_ready,
+        respq_rd_rst_busy,
+        status_bits,
+        capture_resp,
+        prev_valid,
+        error_sticky,
+        25'd0
+    };
+
+    assign debug_tck_edge = {
+        47'd0,
+        dbg_tck_enqueue_count,
+        dbg_tck_update_count,
+        cmdq_wr_rst_busy,
+        cmdq_wr_ready,
+        cmdq_full,
+        cmdq_wr_en,
+        cmdq_wr_data,
+        auto_inc_addr,
+        sr_cmd,
+        sr_wstrb,
+        sr_payload,
+        sr_addr
+    };
+
+    assign respq_rd_en = sel && update && resp_pop_pending && respq_rd_ready;
+    assign cmdq_rd_en = cmdq_rd_ready &&
+                        !cmdq_empty &&
+                        ((axi_state == ST_CMD_FETCH) ||
+                         (axi_state == ST_BURST_W_FETCH));
+
+    wire burst_first_ack_push =
+        (axi_state == ST_BURST_AW_W) &&
+        ((!m_axi_awvalid || m_axi_awready) && (!m_axi_wvalid || m_axi_wready)) &&
+        (launch_burst_len != 8'd0) && respq_wr_ready && !respq_full;
+
+    wire burst_mid_ack_push =
+        (axi_state == ST_BURST_W_LOAD) &&
+        (launch_cmd == CMD_BURST_WDATA) &&
+        (beat_count != launch_burst_len) && respq_wr_ready && !respq_full;
+
+    wire done_resp_push =
+        (axi_state == ST_DONE) && respq_wr_ready && !respq_full;
+
+    wire timeout_resp_push =
+        (axi_state == ST_TIMEOUT_ERR) && respq_wr_ready && !respq_full;
+
+    assign respq_wr_en = burst_first_ack_push || burst_mid_ack_push ||
+                         done_resp_push || timeout_resp_push;
+
+    assign respq_wr_data =
+        (burst_first_ack_push || burst_mid_ack_push) ? {2'b00, {DATA_W{1'b0}}} :
+        done_resp_push                               ? {resp_code, resp_rdata} :
+        timeout_resp_push                            ? {2'b10, {DATA_W{1'b0}}} :
+                                                       {RESPQ_W{1'b0}};
 
     // ---- TCK: main CAPTURE / SHIFT / UPDATE logic ---------------------------
     always @(posedge tck) begin
-
+        reset_ack_sync1_tck <= dut_reset_ack_toggle_axi;
+        reset_ack_sync2_tck <= reset_ack_sync1_tck;
+        cmdq_rst_tck  <= 1'b0;
+        respq_rst_tck <= 1'b0;
+        fifo_rst_tck  <= 1'b0;
+        if (cmdq_wr_en) begin
+            cmdq_stage_valid <= 1'b0;
+            dbg_tck_enqueue_count <= dbg_tck_enqueue_count + 1'b1;
+        end
         if (sel) begin
+            respq_head_seen <= respq_rd_ready && !respq_empty;
             if (capture) begin
-                // Consume ack edge only during capture so it stays sticky
-                // until the next scan's capture phase reads it
-                ack_toggle_prev <= ack_toggle_sync2;
-
+                resp_pop_pending <= capture_resp_data;
                 // Assemble shift-out register from computed mux outputs
                 if (capture_prev_valid) begin
                     prev_valid <= 1'b1;
                 end
-                if (ack_edge) begin
-                    busy <= 1'b0;
-                end
                 // Set error_sticky on error response
-                if (ack_edge && resp_code_sync2 != 2'b00) begin
+                if (capture_resp_data && respq_code != 2'b00) begin
                     error_sticky <= 1'b1;
+                end
+                if (capture_resp_data &&
+                    pending_count != {(CMD_FIFO_AW+1){1'b0}}) begin
+                    pending_count <= pending_count - 1'b1;
+                end
+                if (capture_resp_data && dbg_resp_cap_rec_count < 3'd4) begin
+                    dbg_resp_cap_rec_data[dbg_resp_cap_rec_count] <= capture_rdata;
+                    dbg_resp_cap_rec_meta[dbg_resp_cap_rec_count] <= {
+                        9'd0,
+                        respq_rd_count[4:0],
+                        pending_count[4:0],
+                        last_cmd,
+                        capture_resp,
+                        respq_head_seen,
+                        respq_empty,
+                        respq_rd_ready
+                    };
+                    dbg_resp_cap_rec_count <= dbg_resp_cap_rec_count + 1'b1;
                 end
 
                 // Build status with live values that reflect this capture's updates
                 sr <= {{fifo_notempty,
-                        error_sticky | (ack_edge & (resp_code_sync2 != 2'b00)),
-                        busy & ~ack_edge,
+                        error_sticky | (capture_resp_data & (respq_code != 2'b00)),
+                        busy_status & ~capture_resp_data,
                         capture_prev_valid},
                        2'b00, capture_resp, info_field, capture_rdata};
 
@@ -289,6 +566,24 @@ module fcapz_ejtagaxi #(
 
             end else if (update) begin
                 prev_valid <= 1'b0;
+                resp_pop_pending <= 1'b0;
+                if (dbg_rec_count < 3'd4) begin
+                    dbg_rec_sr_addr[dbg_rec_count]    <= sr_addr;
+                    dbg_rec_sr_payload[dbg_rec_count] <= sr_payload;
+                    dbg_rec_sr_meta[dbg_rec_count]    <= {21'd0, cmdq_stage_valid, cmdq_wr_ready, cmdq_full, sr_cmd, sr_wstrb};
+                    dbg_rec_auto_addr[dbg_rec_count]  <= auto_inc_addr;
+                    dbg_rec_cmd_addr[dbg_rec_count]   <= {ADDR_W{1'b0}};
+                    dbg_rec_cmd_wdata[dbg_rec_count]  <= {DATA_W{1'b0}};
+                    dbg_rec_cmd_meta[dbg_rec_count]   <= 32'd0;
+                    dbg_rec_count <= dbg_rec_count + 1'b1;
+                end
+                dbg_tck_update_sr       <= sr;
+                dbg_tck_update_cmdq     <= cmdq_stage_data;
+                dbg_tck_update_auto_inc <= auto_inc_addr;
+                dbg_tck_update_last_cmd <= last_cmd;
+                dbg_tck_update_fire     <= 1'b0;
+                dbg_tck_update_full     <= cmdq_full;
+                dbg_tck_update_count    <= dbg_tck_update_count + 1'b1;
 
                 case (sr_cmd)
                     CMD_NOP: begin
@@ -300,44 +595,126 @@ module fcapz_ejtagaxi #(
                     end
 
                     CMD_WRITE: begin
-                        if (cdc_idle) begin
-                            shadow_cmd   <= CMD_WRITE;
-                            shadow_addr  <= sr_addr;
-                            shadow_wdata <= sr_payload;
-                            shadow_wstrb <= sr_wstrb;
-                            req_toggle   <= ~req_toggle;
-                            busy         <= 1'b1;
+                        if (sr_wstrb == {(DATA_W/8){1'b0}}) begin
+                            // Ignore malformed zero-strobe writes so a
+                            // garbled poll scan cannot mutate memory.
+                        end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_WRITE, sr_addr[ADDR_W-1:0],
+                                                 sr_payload[DATA_W-1:0],
+                                                 sr_wstrb[DATA_W/8-1:0],
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_WRITE,
+                                sr_wstrb[DATA_W/8-1:0],
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_WRITE, sr_addr[ADDR_W-1:0],
+                                                    sr_payload[DATA_W-1:0],
+                                                    sr_wstrb[DATA_W/8-1:0],
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
                     CMD_READ: begin
-                        if (cdc_idle) begin
-                            shadow_cmd  <= CMD_READ;
-                            shadow_addr <= sr_addr;
-                            req_toggle  <= ~req_toggle;
-                            busy        <= 1'b1;
+                        if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_READ, sr_addr[ADDR_W-1:0],
+                                                 {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_READ,
+                                {(DATA_W/8){1'b0}},
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_READ, sr_addr[ADDR_W-1:0],
+                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
                     CMD_WRITE_INC: begin
-                        if (cdc_idle) begin
-                            shadow_cmd    <= CMD_WRITE;
-                            shadow_addr   <= auto_inc_addr;
-                            shadow_wdata  <= sr_payload;
-                            shadow_wstrb  <= sr_wstrb;
-                            req_toggle    <= ~req_toggle;
-                            busy          <= 1'b1;
+                        if (sr_wstrb == {(DATA_W/8){1'b0}}) begin
+                            // Ignore malformed zero-strobe writes so a
+                            // garbled poll scan cannot mutate memory.
+                        end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_WRITE, auto_inc_addr,
+                                                 sr_payload[DATA_W-1:0],
+                                                 sr_wstrb[DATA_W/8-1:0],
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_WRITE,
+                                sr_wstrb[DATA_W/8-1:0],
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_WRITE, auto_inc_addr,
+                                                    sr_payload[DATA_W-1:0],
+                                                    sr_wstrb[DATA_W/8-1:0],
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
                             auto_inc_addr <= auto_inc_addr + 4;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
                     CMD_READ_INC: begin
-                        if (cdc_idle) begin
-                            shadow_cmd    <= CMD_READ;
-                            shadow_addr   <= auto_inc_addr;
-                            req_toggle    <= ~req_toggle;
-                            busy          <= 1'b1;
+                        if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_READ, auto_inc_addr,
+                                                 {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_READ,
+                                {(DATA_W/8){1'b0}},
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_READ, auto_inc_addr,
+                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
                             auto_inc_addr <= auto_inc_addr + 4;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
@@ -346,31 +723,77 @@ module fcapz_ejtagaxi #(
                         burst_awlen   <= sr_payload[7:0];
                         burst_awsize  <= sr_payload[10:8];
                         burst_awburst <= sr_payload[13:12];
+                        burst_cfg_valid <= 1'b1;
+                        burst_w_beats_left <= {1'b0, sr_payload[7:0]} + 9'd1;
                     end
 
                     CMD_BURST_WDATA: begin
-                        if (cdc_idle) begin
-                            shadow_cmd        <= CMD_BURST_WDATA;
-                            shadow_addr       <= burst_addr;
-                            shadow_wdata      <= sr_payload;
-                            shadow_wstrb      <= sr_wstrb;
-                            shadow_burst_len  <= burst_awlen;
-                            shadow_burst_size <= burst_awsize;
-                            shadow_burst_type <= burst_awburst;
-                            req_toggle        <= ~req_toggle;
-                            busy              <= 1'b1;
+                        if (!burst_cfg_valid || burst_w_beats_left == 9'd0) begin
+                            // Ignore stray burst-data commands unless a
+                            // BURST_SETUP armed a real burst transfer.
+                        end else if (sr_wstrb == {(DATA_W/8){1'b0}}) begin
+                            // Ignore malformed zero-strobe burst writes.
+                        end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_BURST_WDATA, burst_addr,
+                                                 sr_payload[DATA_W-1:0],
+                                                 sr_wstrb[DATA_W/8-1:0],
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_BURST_WDATA,
+                                sr_wstrb[DATA_W/8-1:0],
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_BURST_WDATA, burst_addr,
+                                                    sr_payload[DATA_W-1:0],
+                                                    sr_wstrb[DATA_W/8-1:0],
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
+                            if (burst_w_beats_left == 9'd1) begin
+                                burst_cfg_valid <= 1'b0;
+                                burst_w_beats_left <= 9'd0;
+                            end else begin
+                                burst_w_beats_left <= burst_w_beats_left - 9'd1;
+                            end
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
                     CMD_BURST_RSTART: begin
-                        if (cdc_idle) begin
-                            shadow_cmd        <= CMD_BURST_RSTART;
-                            shadow_addr       <= burst_addr;
-                            shadow_burst_len  <= burst_awlen;
-                            shadow_burst_size <= burst_awsize;
-                            shadow_burst_type <= burst_awburst;
-                            req_toggle        <= ~req_toggle;
-                            busy              <= 1'b1;
+                        if (!burst_cfg_valid) begin
+                            // Ignore stray burst-start commands unless a
+                            // BURST_SETUP armed a real burst transfer.
+                        end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_BURST_RSTART, burst_addr,
+                                                 {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                            dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
+                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                10'd0,
+                                CMD_BURST_RSTART,
+                                {(DATA_W/8){1'b0}},
+                                burst_awlen,
+                                burst_awsize,
+                                burst_awburst
+                            };
+                            dbg_tck_update_cmdq <= {CMD_BURST_RSTART, burst_addr,
+                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                    burst_awlen, burst_awsize, burst_awburst};
+                            dbg_tck_update_fire <= 1'b1;
+                        end else begin
+                            error_sticky <= 1'b1;
                         end
                     end
 
@@ -390,6 +813,62 @@ module fcapz_ejtagaxi #(
                                                             FIFO_DEPTH_ENC,
                                                             DATA_W[7:0],
                                                             ADDR_W[7:0]};
+                            CFG_DBG_REC_COUNT: config_rdata <= {29'd0, dbg_rec_count};
+                            CFG_DBG_REC0_SR_ADDR: config_rdata <= dbg_rec_sr_addr[0];
+                            CFG_DBG_REC0_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[0];
+                            CFG_DBG_REC0_SR_META: config_rdata <= dbg_rec_sr_meta[0];
+                            CFG_DBG_REC0_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[0];
+                            CFG_DBG_REC0_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[0];
+                            CFG_DBG_REC0_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[0];
+                            CFG_DBG_REC0_CMD_META: config_rdata <= dbg_rec_cmd_meta[0];
+                            CFG_DBG_REC1_SR_ADDR: config_rdata <= dbg_rec_sr_addr[1];
+                            CFG_DBG_REC1_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[1];
+                            CFG_DBG_REC1_SR_META: config_rdata <= dbg_rec_sr_meta[1];
+                            CFG_DBG_REC1_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[1];
+                            CFG_DBG_REC1_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[1];
+                            CFG_DBG_REC1_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[1];
+                            CFG_DBG_REC1_CMD_META: config_rdata <= dbg_rec_cmd_meta[1];
+                            CFG_DBG_REC2_SR_ADDR: config_rdata <= dbg_rec_sr_addr[2];
+                            CFG_DBG_REC2_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[2];
+                            CFG_DBG_REC2_SR_META: config_rdata <= dbg_rec_sr_meta[2];
+                            CFG_DBG_REC2_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[2];
+                            CFG_DBG_REC2_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[2];
+                            CFG_DBG_REC2_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[2];
+                            CFG_DBG_REC2_CMD_META: config_rdata <= dbg_rec_cmd_meta[2];
+                            CFG_DBG_REC3_SR_ADDR: config_rdata <= dbg_rec_sr_addr[3];
+                            CFG_DBG_REC3_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[3];
+                            CFG_DBG_REC3_SR_META: config_rdata <= dbg_rec_sr_meta[3];
+                            CFG_DBG_REC3_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[3];
+                            CFG_DBG_REC3_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[3];
+                            CFG_DBG_REC3_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[3];
+                            CFG_DBG_REC3_CMD_META: config_rdata <= dbg_rec_cmd_meta[3];
+                            CFG_RESP_WR_REC_COUNT: config_rdata <= {29'd0, dbg_resp_wr_rec_count};
+                            CFG_RESP_WR_REC0_DATA: config_rdata <= dbg_resp_wr_rec_data[0];
+                            CFG_RESP_WR_REC0_META: config_rdata <= dbg_resp_wr_rec_meta[0];
+                            CFG_RESP_WR_REC1_DATA: config_rdata <= dbg_resp_wr_rec_data[1];
+                            CFG_RESP_WR_REC1_META: config_rdata <= dbg_resp_wr_rec_meta[1];
+                            CFG_RESP_WR_REC2_DATA: config_rdata <= dbg_resp_wr_rec_data[2];
+                            CFG_RESP_WR_REC2_META: config_rdata <= dbg_resp_wr_rec_meta[2];
+                            CFG_RESP_WR_REC3_DATA: config_rdata <= dbg_resp_wr_rec_data[3];
+                            CFG_RESP_WR_REC3_META: config_rdata <= dbg_resp_wr_rec_meta[3];
+                            CFG_RESP_CAP_REC_COUNT: config_rdata <= {29'd0, dbg_resp_cap_rec_count};
+                            CFG_RESP_CAP_REC0_DATA: config_rdata <= dbg_resp_cap_rec_data[0];
+                            CFG_RESP_CAP_REC0_META: config_rdata <= dbg_resp_cap_rec_meta[0];
+                            CFG_RESP_CAP_REC1_DATA: config_rdata <= dbg_resp_cap_rec_data[1];
+                            CFG_RESP_CAP_REC1_META: config_rdata <= dbg_resp_cap_rec_meta[1];
+                            CFG_RESP_CAP_REC2_DATA: config_rdata <= dbg_resp_cap_rec_data[2];
+                            CFG_RESP_CAP_REC2_META: config_rdata <= dbg_resp_cap_rec_meta[2];
+                            CFG_RESP_CAP_REC3_DATA: config_rdata <= dbg_resp_cap_rec_data[3];
+                            CFG_RESP_CAP_REC3_META: config_rdata <= dbg_resp_cap_rec_meta[3];
+                            CFG_AXI_DEQ_REC_COUNT: config_rdata <= {29'd0, dbg_axi_deq_rec_count};
+                            CFG_AXI_DEQ_REC0_ADDR: config_rdata <= dbg_axi_deq_rec_addr[0];
+                            CFG_AXI_DEQ_REC0_META: config_rdata <= dbg_axi_deq_rec_meta[0];
+                            CFG_AXI_DEQ_REC1_ADDR: config_rdata <= dbg_axi_deq_rec_addr[1];
+                            CFG_AXI_DEQ_REC1_META: config_rdata <= dbg_axi_deq_rec_meta[1];
+                            CFG_AXI_DEQ_REC2_ADDR: config_rdata <= dbg_axi_deq_rec_addr[2];
+                            CFG_AXI_DEQ_REC2_META: config_rdata <= dbg_axi_deq_rec_meta[2];
+                            CFG_AXI_DEQ_REC3_ADDR: config_rdata <= dbg_axi_deq_rec_addr[3];
+                            CFG_AXI_DEQ_REC3_META: config_rdata <= dbg_axi_deq_rec_meta[3];
                             default:       config_rdata <= 32'h0;
                         endcase
                     end
@@ -398,21 +877,26 @@ module fcapz_ejtagaxi #(
                         // Clear tck-domain state unconditionally.
                         error_sticky <= 1'b0;
                         prev_valid   <= 1'b0;
-                        // Propagate reset to AXI domain via CDC handshake.
-                        // The AXI FSM recognizes CMD_RESET and resets its
-                        // state, FIFO write pointer, and pending transactions.
-                        if (cdc_idle) begin
-                            shadow_cmd <= CMD_RESET;
-                            req_toggle <= ~req_toggle;
-                            busy       <= 1'b1;
-                        end
-                        // If NOT idle: an AXI transaction is in flight.
-                        // We do NOT clear busy — the in-flight op will
-                        // complete and toggle ack, which clears busy on
-                        // the next capture.  The host must poll (NOP) until
-                        // busy=0 then re-issue RESET to propagate to AXI.
-                        // This avoids reporting a clean state while stale
-                        // AXI activity is still running.
+                        respq_head_seen <= 1'b0;
+                        resp_pop_pending <= 1'b0;
+                        pending_count <= {(CMD_FIFO_AW+1){1'b0}};
+                        cmdq_rst_tck  <= 1'b1;
+                        respq_rst_tck <= 1'b1;
+                        fifo_rst_tck  <= 1'b1;
+                        cmdq_stage_valid <= 1'b0;
+                        cmdq_stage_data <= {CMDQ_W{1'b0}};
+                        auto_inc_addr <= {ADDR_W{1'b0}};
+                        burst_awlen   <= 8'd0;
+                        burst_awsize  <= 3'b010;
+                        burst_awburst <= 2'b01;
+                        burst_addr    <= {ADDR_W{1'b0}};
+                        burst_cfg_valid <= 1'b0;
+                        burst_w_beats_left <= 9'd0;
+                        config_rdata  <= 32'h0;
+                        last_cmd      <= CMD_NOP;
+                        dbg_rec_count <= 3'd0;
+                        dbg_resp_cap_rec_count <= 3'd0;
+                        reset_req_toggle <= ~reset_req_toggle;
                     end
 
                     default: begin
@@ -421,22 +905,35 @@ module fcapz_ejtagaxi #(
                 endcase
 
                 // Track last command for capture-time data source selection.
-                // Only update for commands that actually executed — commands
-                // dropped due to busy (cdc_idle=0) must NOT change last_cmd,
-                // otherwise the capture-side mux selects the wrong data source
-                // for a command that never launched.
+                // AXI commands update only when successfully enqueued.
                 case (sr_cmd)
                     CMD_NOP, CMD_SET_ADDR, CMD_CONFIG, CMD_BURST_SETUP,
                     CMD_BURST_RDATA:
                         // These are always handled (no CDC needed), safe to update
                         last_cmd <= sr_cmd;
                     CMD_RESET:
-                        // RESET updates last_cmd only if it launched (cdc_idle)
-                        if (cdc_idle) last_cmd <= sr_cmd;
+                        // RESET clears the capture pipeline rather than
+                        // becoming the new "last command".
+                        last_cmd <= CMD_NOP;
                     default:
-                        // AXI commands (WRITE/READ/INC/BURST_WDATA/RSTART):
-                        // Only update if the command was actually dispatched
-                        if (cdc_idle) last_cmd <= sr_cmd;
+                        // AXI commands update only if queued.
+                        if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            case (sr_cmd)
+                                CMD_WRITE, CMD_WRITE_INC:
+                                    if (sr_wstrb != {(DATA_W/8){1'b0}})
+                                        last_cmd <= sr_cmd;
+                                CMD_BURST_WDATA:
+                                    if (burst_cfg_valid &&
+                                        burst_w_beats_left != 9'd0 &&
+                                        sr_wstrb != {(DATA_W/8){1'b0}})
+                                        last_cmd <= sr_cmd;
+                                CMD_BURST_RSTART:
+                                    if (burst_cfg_valid)
+                                        last_cmd <= sr_cmd;
+                                default:
+                                    last_cmd <= sr_cmd;
+                            endcase
+                        end
                 endcase
             end
         end
@@ -450,52 +947,66 @@ module fcapz_ejtagaxi #(
         burst_awsize      = 3'b010;
         burst_awburst     = 2'b01;
         burst_addr        = {ADDR_W{1'b0}};
-        shadow_cmd        = 4'h0;
-        shadow_addr       = {ADDR_W{1'b0}};
-        shadow_wdata      = {DATA_W{1'b0}};
-        shadow_wstrb      = {(DATA_W/8){1'b0}};
-        shadow_burst_len  = 8'd0;
-        shadow_burst_size = 3'b010;
-        shadow_burst_type = 2'b01;
-        req_toggle        = 1'b0;
-        ack_toggle_sync1  = 1'b0;
-        ack_toggle_sync2  = 1'b0;
-        ack_toggle_prev   = 1'b0;
-        resp_rdata_sync1  = {DATA_W{1'b0}};
-        resp_rdata_sync2  = {DATA_W{1'b0}};
-        resp_code_sync1   = 2'b00;
-        resp_code_sync2   = 2'b00;
+        burst_cfg_valid   = 1'b0;
+        burst_w_beats_left = 9'd0;
         prev_valid        = 1'b0;
-        busy              = 1'b0;
         error_sticky      = 1'b0;
+        pending_count     = {(CMD_FIFO_AW+1){1'b0}};
+        reset_req_toggle  = 1'b0;
+        reset_ack_sync1_tck = 1'b0;
+        reset_ack_sync2_tck = 1'b0;
+        respq_head_seen   = 1'b0;
+        resp_pop_pending  = 1'b0;
+        cmdq_stage_valid  = 1'b0;
+        cmdq_stage_data   = {CMDQ_W{1'b0}};
+        cmdq_rst_tck      = 1'b0;
+        respq_rst_tck     = 1'b0;
+        fifo_rst_tck      = 1'b0;
         config_rdata      = 32'h0;
         last_cmd          = 4'h0;
+        dbg_rec_count     = 3'd0;
+        dbg_resp_wr_rec_count = 3'd0;
+        dbg_resp_cap_rec_count = 3'd0;
+        dbg_axi_deq_rec_count = 3'd0;
+        for (dbg_i = 0; dbg_i < 4; dbg_i = dbg_i + 1) begin
+            dbg_rec_sr_addr[dbg_i] = 32'd0;
+            dbg_rec_sr_payload[dbg_i] = 32'd0;
+            dbg_rec_sr_meta[dbg_i] = 32'd0;
+            dbg_rec_auto_addr[dbg_i] = 32'd0;
+            dbg_rec_cmd_addr[dbg_i] = 32'd0;
+            dbg_rec_cmd_wdata[dbg_i] = 32'd0;
+            dbg_rec_cmd_meta[dbg_i] = 32'd0;
+            dbg_resp_wr_rec_data[dbg_i] = 32'd0;
+            dbg_resp_wr_rec_meta[dbg_i] = 32'd0;
+            dbg_resp_cap_rec_data[dbg_i] = 32'd0;
+            dbg_resp_cap_rec_meta[dbg_i] = 32'd0;
+            dbg_axi_deq_rec_addr[dbg_i] = 32'd0;
+            dbg_axi_deq_rec_meta[dbg_i] = 32'd0;
+        end
+        dbg_tck_update_sr = {DR_W{1'b0}};
+        dbg_tck_update_cmdq = {CMDQ_W{1'b0}};
+        dbg_tck_update_auto_inc = {ADDR_W{1'b0}};
+        dbg_tck_update_last_cmd = 4'h0;
+        dbg_tck_update_fire = 1'b0;
+        dbg_tck_update_full = 1'b0;
+        dbg_tck_update_count = 16'd0;
+        dbg_tck_enqueue_count = 16'd0;
     end
 
     // ========================================================================
     //  AXI_CLK domain
     // ========================================================================
 
-    // -- CDC: req_toggle sync (tck -> axi_clk) --------------------------------
-    (* ASYNC_REG = "TRUE" *) reg req_toggle_sync1, req_toggle_sync2;
-    reg req_toggle_prev_axi;
-    wire req_edge = (req_toggle_sync2 != req_toggle_prev_axi);
-
-    // req_toggle_prev_axi updates every cycle — req_edge is a single-cycle
-    // pulse.  This is correct because ST_IDLE always consumes the edge
-    // immediately, and ST_BURST_W only needs edges from subsequent beats
-    // which arrive well after the previous edge has been consumed.
-    always @(posedge axi_clk or posedge axi_rst) begin
-        if (axi_rst) begin
-            req_toggle_sync1    <= 1'b0;
-            req_toggle_sync2    <= 1'b0;
-            req_toggle_prev_axi <= 1'b0;
-        end else begin
-            req_toggle_sync1    <= req_toggle;
-            req_toggle_sync2    <= req_toggle_sync1;
-            req_toggle_prev_axi <= req_toggle_sync2;
-        end
-    end
+    // -- Command FIFO unpack (axi_clk domain) ---------------------------------
+    wire [1:0]          cmdq_burst_type = cmdq_rd_data[1:0];
+    wire [2:0]          cmdq_burst_size = cmdq_rd_data[4:2];
+    wire [7:0]          cmdq_burst_len  = cmdq_rd_data[12:5];
+    wire [DATA_W/8-1:0] cmdq_wstrb      = cmdq_rd_data[12 + DATA_W/8:13];
+    wire [DATA_W-1:0]   cmdq_wdata      = cmdq_rd_data[12 + DATA_W/8 + DATA_W:
+                                                        13 + DATA_W/8];
+    wire [ADDR_W-1:0]   cmdq_addr       = cmdq_rd_data[12 + DATA_W/8 + DATA_W + ADDR_W:
+                                                        13 + DATA_W/8 + DATA_W];
+    wire [3:0]          cmdq_cmd        = cmdq_rd_data[CMDQ_W-1:CMDQ_W-4];
 
     // -- Launch registers (axi_clk domain) ------------------------------------
     reg [3:0]           launch_cmd;
@@ -510,19 +1021,26 @@ module fcapz_ejtagaxi #(
     reg [DATA_W-1:0] resp_rdata;
     reg [1:0]        resp_code;
 
-    // -- Ack toggle (axi_clk domain) ------------------------------------------
-    reg ack_toggle;
-
     // -- AXI FSM state --------------------------------------------------------
     reg [3:0]  axi_state;
     reg [11:0] timeout_cnt;
     reg [7:0]  beat_count;
+    reg        reset_req_sync1_axi;
+    reg        reset_req_sync2_axi;
+    reg        reset_req_seen_axi;
+    reg        dut_reset_ack_toggle_axi;
+    reg [CMDQ_W-1:0]    dbg_axi_deq_cmdq;
+    reg [3:0]           dbg_axi_deq_cmd;
+    reg [ADDR_W-1:0]    dbg_axi_deq_addr;
+    reg [DATA_W-1:0]    dbg_axi_deq_wdata;
+    reg [DATA_W/8-1:0]  dbg_axi_deq_wstrb;
+    reg [3:0]           dbg_axi_deq_state;
+    reg                 dbg_axi_deq_fire;
+    reg [15:0]          dbg_axi_cycle_count;
+    reg [15:0]          dbg_axi_deq_count;
 
     // -- AXI_CLK initial values -----------------------------------------------
     initial begin
-        req_toggle_sync1    = 1'b0;
-        req_toggle_sync2    = 1'b0;
-        req_toggle_prev_axi = 1'b0;
         launch_cmd          = 4'h0;
         launch_addr         = {ADDR_W{1'b0}};
         launch_wdata        = {DATA_W{1'b0}};
@@ -532,10 +1050,22 @@ module fcapz_ejtagaxi #(
         launch_burst_type   = 2'b01;
         resp_rdata          = {DATA_W{1'b0}};
         resp_code           = 2'b00;
-        ack_toggle          = 1'b0;
         axi_state           = ST_IDLE;
         timeout_cnt         = 12'd0;
         beat_count          = 8'd0;
+        reset_req_sync1_axi = 1'b0;
+        reset_req_sync2_axi = 1'b0;
+        reset_req_seen_axi  = 1'b0;
+        dut_reset_ack_toggle_axi = 1'b0;
+        dbg_axi_deq_cmdq    = {CMDQ_W{1'b0}};
+        dbg_axi_deq_cmd     = 4'h0;
+        dbg_axi_deq_addr    = {ADDR_W{1'b0}};
+        dbg_axi_deq_wdata   = {DATA_W{1'b0}};
+        dbg_axi_deq_wstrb   = {(DATA_W/8){1'b0}};
+        dbg_axi_deq_state   = ST_IDLE;
+        dbg_axi_deq_fire    = 1'b0;
+        dbg_axi_cycle_count = 16'd0;
+        dbg_axi_deq_count   = 16'd0;
         m_axi_awaddr        = {ADDR_W{1'b0}};
         m_axi_awlen         = 8'd0;
         m_axi_awsize        = 3'b010;
@@ -552,7 +1082,9 @@ module fcapz_ejtagaxi #(
         m_axi_arburst       = 2'b01;
         m_axi_arvalid       = 1'b0;
         m_axi_rready        = 1'b0;
+        cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
+        respq_rst_axi       = 1'b0;
     end
 
     // ---- AXI master FSM -----------------------------------------------------
@@ -561,7 +1093,21 @@ module fcapz_ejtagaxi #(
             axi_state         <= ST_IDLE;
             timeout_cnt       <= 12'd0;
             beat_count        <= 8'd0;
-            ack_toggle        <= 1'b0;
+            reset_req_sync1_axi <= 1'b0;
+            reset_req_sync2_axi <= 1'b0;
+            reset_req_seen_axi  <= 1'b0;
+            dut_reset_ack_toggle_axi <= 1'b0;
+            dbg_axi_deq_cmdq  <= {CMDQ_W{1'b0}};
+            dbg_axi_deq_cmd   <= 4'h0;
+            dbg_axi_deq_addr  <= {ADDR_W{1'b0}};
+            dbg_axi_deq_wdata <= {DATA_W{1'b0}};
+            dbg_axi_deq_wstrb <= {(DATA_W/8){1'b0}};
+            dbg_axi_deq_state <= ST_IDLE;
+            dbg_axi_deq_fire  <= 1'b0;
+            dbg_axi_cycle_count <= 16'd0;
+            dbg_axi_deq_count   <= 16'd0;
+            dbg_resp_wr_rec_count <= 3'd0;
+            dbg_axi_deq_rec_count <= 3'd0;
             resp_rdata        <= {DATA_W{1'b0}};
             resp_code         <= 2'b00;
             launch_cmd        <= 4'h0;
@@ -587,12 +1133,79 @@ module fcapz_ejtagaxi #(
             m_axi_arburst     <= 2'b01;
             m_axi_arvalid     <= 1'b0;
             m_axi_rready      <= 1'b0;
+            cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
+            respq_rst_axi     <= 1'b0;
         end else begin
+            reset_req_sync1_axi <= reset_req_toggle;
+            reset_req_sync2_axi <= reset_req_sync1_axi;
+            dbg_axi_deq_fire <= 1'b0;
+            dbg_axi_cycle_count <= dbg_axi_cycle_count + 1'b1;
+            cmdq_rst_axi <= 1'b0;
+            respq_rst_axi <= 1'b0;
+            fifo_rst_axi  <= 1'b0;
+            if (respq_wr_en && dbg_resp_wr_rec_count < 3'd4) begin
+                dbg_resp_wr_rec_data[dbg_resp_wr_rec_count] <= respq_wr_data[DATA_W-1:0];
+                dbg_resp_wr_rec_meta[dbg_resp_wr_rec_count] <= {
+                    11'd0,
+                    respq_wr_count[4:0],
+                    launch_cmd,
+                    respq_wr_data[DATA_W+1:DATA_W],
+                    respq_full,
+                    respq_wr_ready,
+                    axi_state
+                };
+                dbg_resp_wr_rec_count <= dbg_resp_wr_rec_count + 1'b1;
+            end
+            if (cmdq_rd_en) begin
+                dbg_axi_deq_cmdq  <= cmdq_rd_data;
+                dbg_axi_deq_cmd   <= cmdq_cmd;
+                dbg_axi_deq_addr  <= cmdq_addr;
+                dbg_axi_deq_wdata <= cmdq_wdata;
+                dbg_axi_deq_wstrb <= cmdq_wstrb;
+                dbg_axi_deq_state <= axi_state;
+                dbg_axi_deq_fire  <= 1'b1;
+                dbg_axi_deq_count <= dbg_axi_deq_count + 1'b1;
+                if (dbg_axi_deq_rec_count < 3'd4) begin
+                    dbg_axi_deq_rec_addr[dbg_axi_deq_rec_count] <= cmdq_addr;
+                    dbg_axi_deq_rec_meta[dbg_axi_deq_rec_count] <= {
+                        16'd0,
+                        cmdq_burst_len,
+                        cmdq_cmd,
+                        axi_state
+                    };
+                    dbg_axi_deq_rec_count <= dbg_axi_deq_rec_count + 1'b1;
+                end
+            end
+            if (reset_req_sync2_axi != reset_req_seen_axi) begin
+                reset_req_seen_axi     <= reset_req_sync2_axi;
+                dut_reset_ack_toggle_axi <= reset_req_sync2_axi;
+                axi_state              <= ST_IDLE;
+                timeout_cnt            <= 12'd0;
+                beat_count             <= 8'd0;
+                launch_cmd             <= 4'h0;
+                launch_addr            <= {ADDR_W{1'b0}};
+                launch_wdata           <= {DATA_W{1'b0}};
+                launch_wstrb           <= {(DATA_W/8){1'b0}};
+                launch_burst_len       <= 8'd0;
+                launch_burst_size      <= 3'b010;
+                launch_burst_type      <= 2'b01;
+                resp_rdata             <= {DATA_W{1'b0}};
+                resp_code              <= 2'b00;
+                m_axi_awvalid          <= 1'b0;
+                m_axi_wvalid           <= 1'b0;
+                m_axi_wlast            <= 1'b0;
+                m_axi_bready           <= 1'b0;
+                m_axi_arvalid          <= 1'b0;
+                m_axi_rready           <= 1'b0;
+                cmdq_rst_axi           <= 1'b1;
+                respq_rst_axi          <= 1'b1;
+                fifo_rst_axi           <= 1'b1;
+                dbg_resp_wr_rec_count  <= 3'd0;
+                dbg_axi_deq_rec_count  <= 3'd0;
+            end else case (axi_state)
 
-            case (axi_state)
-
-                // ---- Idle: wait for request toggle edge ----
+                // ---- Idle: consume next queued command ----
                 ST_IDLE: begin
                     m_axi_awvalid <= 1'b0;
                     m_axi_wvalid  <= 1'b0;
@@ -603,77 +1216,77 @@ module fcapz_ejtagaxi #(
                     timeout_cnt   <= 12'd0;
                     beat_count    <= 8'd0;
 
-                    if (req_edge) begin
-                        // Latch shadow -> launch
-                        launch_cmd        <= shadow_cmd;
-                        launch_addr       <= shadow_addr;
-                        launch_wdata      <= shadow_wdata;
-                        launch_wstrb      <= shadow_wstrb;
-                        launch_burst_len  <= shadow_burst_len;
-                        launch_burst_size <= shadow_burst_size;
-                        launch_burst_type <= shadow_burst_type;
-
-                        case (shadow_cmd)
-                            CMD_WRITE: begin
-                                m_axi_awaddr  <= shadow_addr;
-                                m_axi_awlen   <= 8'd0;
-                                m_axi_awsize  <= 3'b010;
-                                m_axi_awburst <= 2'b01;
-                                m_axi_awvalid <= 1'b1;
-                                m_axi_wdata   <= shadow_wdata;
-                                m_axi_wstrb   <= shadow_wstrb;
-                                m_axi_wvalid  <= 1'b1;
-                                m_axi_wlast   <= 1'b1;
-                                axi_state     <= ST_AW_W;
-                            end
-
-                            CMD_READ: begin
-                                m_axi_araddr  <= shadow_addr;
-                                m_axi_arlen   <= 8'd0;
-                                m_axi_arsize  <= 3'b010;
-                                m_axi_arburst <= 2'b01;
-                                m_axi_arvalid <= 1'b1;
-                                axi_state     <= ST_AR;
-                            end
-
-                            CMD_BURST_WDATA: begin
-                                m_axi_awaddr  <= shadow_addr;
-                                m_axi_awlen   <= shadow_burst_len;
-                                m_axi_awsize  <= shadow_burst_size;
-                                m_axi_awburst <= shadow_burst_type;
-                                m_axi_awvalid <= 1'b1;
-                                m_axi_wdata   <= shadow_wdata;
-                                m_axi_wstrb   <= shadow_wstrb;
-                                m_axi_wvalid  <= 1'b1;
-                                m_axi_wlast   <= (shadow_burst_len == 8'd0);
-                                beat_count    <= 8'd0;
-                                axi_state     <= ST_BURST_AW_W;
-                            end
-
-                            CMD_BURST_RSTART: begin
-                                m_axi_araddr  <= shadow_addr;
-                                m_axi_arlen   <= shadow_burst_len;
-                                m_axi_arsize  <= shadow_burst_size;
-                                m_axi_arburst <= shadow_burst_type;
-                                m_axi_arvalid <= 1'b1;
-                                axi_state     <= ST_BURST_AR;
-                            end
-
-                            CMD_RESET: begin
-                                // Reset AXI-domain state: pulse FIFO reset
-                                // and go straight to DONE (toggles ack).
-                                fifo_rst_axi   <= 1'b1;
-                                resp_code      <= 2'b00;
-                                resp_rdata     <= {DATA_W{1'b0}};
-                                axi_state      <= ST_DONE;
-                            end
-
-                            default: begin
-                                // Unknown AXI command — ack immediately
-                                axi_state <= ST_DONE;
-                            end
-                        endcase
+                    if (!cmdq_empty) begin
+                        // Give FWFT async FIFO one full rd_clk cycle with
+                        // empty=0 before sampling/popping the head word.
+                        axi_state <= ST_CMD_FETCH;
                     end
+                end
+
+                ST_CMD_FETCH: begin
+                    launch_cmd        <= cmdq_cmd;
+                    launch_addr       <= cmdq_addr;
+                    launch_wdata      <= cmdq_wdata;
+                    launch_wstrb      <= cmdq_wstrb;
+                    launch_burst_len  <= cmdq_burst_len;
+                    launch_burst_size <= cmdq_burst_size;
+                    launch_burst_type <= cmdq_burst_type;
+                    axi_state         <= ST_CMD_DISPATCH;
+                end
+
+                ST_CMD_DISPATCH: begin
+                    case (launch_cmd)
+                        CMD_WRITE: begin
+                            m_axi_awaddr  <= launch_addr;
+                            m_axi_awlen   <= 8'd0;
+                            m_axi_awsize  <= 3'b010;
+                            m_axi_awburst <= 2'b01;
+                            m_axi_awvalid <= 1'b1;
+                            m_axi_wdata   <= launch_wdata;
+                            m_axi_wstrb   <= launch_wstrb;
+                            m_axi_wvalid  <= 1'b1;
+                            m_axi_wlast   <= 1'b1;
+                            axi_state     <= ST_AW_W;
+                        end
+
+                        CMD_READ: begin
+                            m_axi_araddr  <= launch_addr;
+                            m_axi_arlen   <= 8'd0;
+                            m_axi_arsize  <= 3'b010;
+                            m_axi_arburst <= 2'b01;
+                            m_axi_arvalid <= 1'b1;
+                            axi_state     <= ST_AR;
+                        end
+
+                        CMD_BURST_WDATA: begin
+                            m_axi_awaddr  <= launch_addr;
+                            m_axi_awlen   <= launch_burst_len;
+                            m_axi_awsize  <= launch_burst_size;
+                            m_axi_awburst <= launch_burst_type;
+                            m_axi_awvalid <= 1'b1;
+                            m_axi_wdata   <= launch_wdata;
+                            m_axi_wstrb   <= launch_wstrb;
+                            m_axi_wvalid  <= 1'b1;
+                            m_axi_wlast   <= (launch_burst_len == 8'd0);
+                            beat_count    <= 8'd0;
+                            axi_state     <= ST_BURST_AW_W;
+                        end
+
+                        CMD_BURST_RSTART: begin
+                            m_axi_araddr  <= launch_addr;
+                            m_axi_arlen   <= launch_burst_len;
+                            m_axi_arsize  <= launch_burst_size;
+                            m_axi_arburst <= launch_burst_type;
+                            m_axi_arvalid <= 1'b1;
+                            axi_state     <= ST_BURST_AR;
+                        end
+
+                        default: begin
+                            resp_code  <= 2'b00;
+                            resp_rdata <= {DATA_W{1'b0}};
+                            axi_state  <= ST_DONE;
+                        end
+                    endcase
                 end
 
                 // ---- Single write: AW + W phase ----
@@ -762,9 +1375,10 @@ module fcapz_ejtagaxi #(
                             axi_state    <= ST_WAIT_B;
                         end else begin
                             // Multi-beat burst: ack first beat so host can send next
-                            ack_toggle <= ~ack_toggle;
-                            beat_count <= 8'd1;
-                            axi_state  <= ST_BURST_W;
+                            if (respq_wr_ready && !respq_full) begin
+                                beat_count <= 8'd1;
+                                axi_state  <= ST_BURST_W;
+                            end
                         end
                         timeout_cnt <= 12'd0;
                     end else begin
@@ -786,38 +1400,41 @@ module fcapz_ejtagaxi #(
                             timeout_cnt  <= 12'd0;
                         end
                     end
-                    // New data from host via toggle edge
-                    if (req_edge && !m_axi_wvalid) begin
-                        if (shadow_cmd == CMD_BURST_WDATA) begin
-                            // Normal: next burst beat
-                            launch_wdata <= shadow_wdata;
-                            launch_wstrb <= shadow_wstrb;
-                            m_axi_wdata  <= shadow_wdata;
-                            m_axi_wstrb  <= shadow_wstrb;
-                            m_axi_wvalid <= 1'b1;
-                            m_axi_wlast  <= (beat_count == launch_burst_len);
-                            beat_count   <= beat_count + 1;
-                            timeout_cnt  <= 12'd0;
-                            // Ack non-last beats so host can queue next
-                            if (beat_count != launch_burst_len)
-                                ack_toggle <= ~ack_toggle;
-                        end else begin
-                            // Unexpected command while in burst — abort.
-                            // Deassert all AXI signals and go to DONE.
-                            // The slave may see an incomplete burst (no wlast)
-                            // which violates AXI protocol, but this is a
-                            // recovery path — the alternative is hanging.
-                            m_axi_wvalid <= 1'b0;
-                            m_axi_wlast  <= 1'b0;
-                            resp_code    <= 2'b10;  // report SLVERR to host
-                            axi_state    <= ST_DONE;
-                        end
+                    // New data from host via command FIFO
+                    if (cmdq_rd_ready && !cmdq_empty && !m_axi_wvalid &&
+                        ((beat_count == launch_burst_len) || (respq_wr_ready && !respq_full))) begin
+                        axi_state    <= ST_BURST_W_FETCH;
                     end
                     // No timeout in ST_BURST_W: inter-beat timing is
                     // controlled by the host via JTAG scans (~0.5 ms each),
                     // which is far longer than any AXI-side timeout.
                     // Timeout only applies to AXI handshake waits (wready,
                     // bvalid, arready, rvalid), not to host-paced data flow.
+                end
+
+                ST_BURST_W_FETCH: begin
+                    launch_cmd   <= cmdq_cmd;
+                    launch_wdata <= cmdq_wdata;
+                    launch_wstrb <= cmdq_wstrb;
+                    axi_state    <= ST_BURST_W_LOAD;
+                end
+
+                ST_BURST_W_LOAD: begin
+                    if (launch_cmd == CMD_BURST_WDATA) begin
+                        m_axi_wdata  <= launch_wdata;
+                        m_axi_wstrb  <= launch_wstrb;
+                        m_axi_wvalid <= 1'b1;
+                        m_axi_wlast  <= (beat_count == launch_burst_len);
+                        beat_count   <= beat_count + 1;
+                        timeout_cnt  <= 12'd0;
+                        axi_state <= ST_BURST_W;
+                    end else begin
+                        m_axi_wvalid <= 1'b0;
+                        m_axi_wlast  <= 1'b0;
+                        resp_code    <= 2'b10;
+                        resp_rdata   <= {DATA_W{1'b0}};
+                        axi_state    <= ST_DONE;
+                    end
                 end
 
                 // ---- Burst read: AR phase ----
@@ -863,8 +1480,9 @@ module fcapz_ejtagaxi #(
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
                     m_axi_rready  <= 1'b0;
-                    ack_toggle    <= ~ack_toggle;
-                    axi_state     <= ST_IDLE;
+                    if (respq_wr_ready && !respq_full) begin
+                        axi_state     <= ST_IDLE;
+                    end
                 end
 
                 // ---- Timeout error: signal error and ack ----
@@ -877,8 +1495,9 @@ module fcapz_ejtagaxi #(
                     m_axi_rready  <= 1'b0;
                     resp_code     <= 2'b10; // SLVERR
                     resp_rdata    <= {DATA_W{1'b0}};
-                    ack_toggle    <= ~ack_toggle;
-                    axi_state     <= ST_IDLE;
+                    if (respq_wr_ready && !respq_full) begin
+                        axi_state     <= ST_IDLE;
+                    end
                 end
 
                 default: begin
@@ -886,15 +1505,65 @@ module fcapz_ejtagaxi #(
                 end
 
             endcase
-
-            // Clear FIFO reset pulse after one cycle
-            if (fifo_rst_axi)
-                fifo_rst_axi <= 1'b0;
         end
     end
 
     // FIFO write enable: burst read data from AXI R-channel
     assign fifo_wr_en = (axi_state == ST_BURST_R_FILL) &&
                         m_axi_rvalid && !fifo_full;
+
+    assign debug_axi = {
+        cmdq_rd_data,
+        launch_addr,
+        launch_wdata,
+        launch_wstrb,
+        launch_cmd,
+        axi_state,
+        beat_count,
+        launch_burst_len,
+        resp_rdata,
+        resp_code,
+        respq_wr_en,
+        respq_full,
+        cmdq_rd_en,
+        cmdq_empty,
+        cmdq_rd_ready,
+        cmdq_rd_rst_busy,
+        respq_wr_ready,
+        respq_wr_rst_busy,
+        m_axi_bready,
+        m_axi_bvalid,
+        m_axi_wlast,
+        m_axi_wready,
+        m_axi_wvalid,
+        m_axi_awready,
+        m_axi_awvalid,
+        m_axi_rready,
+        m_axi_rvalid,
+        m_axi_arready,
+        m_axi_arvalid,
+        m_axi_bresp,
+        24'd0
+    };
+
+    assign debug_axi_edge = {
+        48'd0,
+        dbg_axi_deq_count,
+        dbg_axi_cycle_count,
+        respq_wr_rst_busy,
+        respq_wr_ready,
+        respq_full,
+        cmdq_rd_rst_busy,
+        cmdq_rd_ready,
+        cmdq_empty,
+        cmdq_rd_en,
+        beat_count,
+        axi_state,
+        launch_cmd,
+        launch_wstrb,
+        launch_wdata,
+        launch_addr,
+        cmdq_rd_data
+    };
 
 endmodule

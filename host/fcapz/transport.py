@@ -346,6 +346,7 @@ class XilinxHwServerTransport(Transport):
     BURST_DR_BITS = 256
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
+    RAW_DR_IDLE_CYCLES = 8
     _SENTINEL = "<<XSDB_DONE>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
@@ -623,25 +624,37 @@ class XilinxHwServerTransport(Transport):
         tcl = (
             f"set _rd [jtag sequence]; "
             f"{self._irshift_tcl('_rd', ch)}; "
-            f"$_rd drshift -state DRUPDATE -capture -bits {total} {padded}; "
+            f"$_rd drshift -state IDLE -capture -bits {total} {padded}; "
+            f"$_rd delay {self.RAW_DR_IDLE_CYCLES}; "
             f"puts [$_rd run -bits]; $_rd delete"
         )
         out = self._send(tcl)
-        offset = self._dr_data_offset()
-        # Parse bit string from output
-        for line in reversed(out.strip().splitlines()):
-            line = line.strip()
-            if line and set(line) <= {"0", "1"} and len(line) >= total:
-                result = 0
-                for i in range(width):
-                    if line[offset + i] == "1":
-                        result |= 1 << i
-                return result
-        raise RuntimeError(
-            "xsdb: no bit string in raw_dr_scan output. "
-            f"stdout={out!r}; "
-            f"recent stderr={self._stderr_lines[-10:]!r}"
-        )
+        return self._parse_scan_bits(out, width, total)
+
+    def raw_dr_scan_batch(
+        self, scans: list[tuple[int, int]], *, chain: int | None = None
+    ) -> list[int]:
+        """Perform multiple raw DR scans in one XSDB jtag sequence."""
+        if not scans:
+            return []
+        ch = chain if chain is not None else self._active_chain
+        parts = ["set _rdb [jtag sequence]"]
+        totals: list[int] = []
+        widths: list[int] = []
+        for bits, width in scans:
+            bit_str = "".join("1" if (bits >> i) & 1 else "0" for i in range(width))
+            padded = self._pad_dr(bit_str)
+            total = self._user_dr_bits(width)
+            parts.append(
+                f"{self._irshift_tcl('_rdb', ch)}; "
+                f"$_rdb drshift -state IDLE -capture -bits {total} {padded}; "
+                f"$_rdb delay {self.RAW_DR_IDLE_CYCLES}"
+            )
+            totals.append(total)
+            widths.append(width)
+        parts.append("puts [$_rdb run -bits]; $_rdb delete")
+        out = self._send("; ".join(parts))
+        return self._parse_scan_bits_list(out, widths, totals)
 
     # -- register access -----------------------------------------------------
 
@@ -1112,6 +1125,40 @@ class XilinxHwServerTransport(Transport):
                 f"recent stderr={self._stderr_lines[-10:]!r}"
             )
         return values[:expected]
+
+    def _parse_scan_bits(self, output: str, width: int, total: int) -> int:
+        """Extract one raw DR scan result of *width* bits from XSDB output."""
+        results = self._parse_scan_bits_list(output, [width], [total])
+        return results[0]
+
+    def _parse_scan_bits_list(
+        self,
+        output: str,
+        widths: List[int],
+        totals: List[int],
+    ) -> List[int]:
+        """Extract raw DR scan results with per-scan widths from XSDB output."""
+        tokens: list[str] = []
+        for token in output.replace("{", " ").replace("}", " ").split():
+            token = token.strip()
+            if token and set(token) <= {"0", "1"}:
+                tokens.append(token)
+        offset = self._dr_data_offset()
+        out: list[int] = []
+        token_idx = 0
+        for width, total in zip(widths, totals):
+            min_len = max(total, offset + width)
+            while token_idx < len(tokens) and len(tokens[token_idx]) < min_len:
+                token_idx += 1
+            if token_idx >= len(tokens):
+                raise RuntimeError(
+                    f"xsdb: expected {len(widths)} raw scan results, got {len(out)}. "
+                    f"stdout={output[:500]!r}; "
+                    f"recent stderr={self._stderr_lines[-10:]!r}"
+                )
+            out.append(self._bits_to_int(tokens[token_idx], offset, width))
+            token_idx += 1
+        return out
 
     # -- process I/O ---------------------------------------------------------
 

@@ -58,6 +58,7 @@ class FakeBridgeTransport(Transport):
         self._active_chain: int = 1
         self._config_regs: dict[int, int] = dict(self._CONFIG_REGS)
         self._last_cmd: int = CMD_NOP  # track last command for FIFO priming
+        self.scan_log: list[int] = []
 
     # --- Transport ABC implementation ---
 
@@ -87,6 +88,7 @@ class FakeBridgeTransport(Transport):
         payload = (bits >> 32) & 0xFFFFFFFF
         wstrb   = (bits >> 64) & 0xF
         cmd     = (bits >> 68) & 0xF
+        self.scan_log.append(cmd)
 
         # All commands are pipelined — build output from *previous* result,
         # then execute current command.
@@ -294,6 +296,15 @@ class EjtagAxiTests(unittest.TestCase):
         self.assertEqual(info["version_minor"], 2)
         self.assertEqual(info["addr_w"], 0x20)
         self.assertEqual(info["data_w"], 0x20)
+
+    def test_connect_primes_bridge_with_reset(self):
+        t = FakeBridgeTransport()
+        ctrl = EjtagAxiController(t, chain=4)
+        ctrl.connect()
+        self.assertGreaterEqual(len(t.scan_log), 6)
+        self.assertEqual(t.scan_log[:4], [CMD_CONFIG, CMD_CONFIG, CMD_CONFIG, CMD_NOP])
+        self.assertEqual(t.scan_log[4], CMD_RESET)
+        self.assertEqual(t.scan_log[5], CMD_NOP)
 
     def test_connect_bad_id_raises(self):
         t = FakeBridgeTransport()
