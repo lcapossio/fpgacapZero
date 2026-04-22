@@ -275,6 +275,32 @@ class FakeBridgeTransport(Transport):
     # (fifo_stall_count is handled inside _exec for BURST_RDATA)
 
 
+class BatchOnlyBridgeTransport(FakeBridgeTransport):
+    """Simulate hardware where isolated USER4 scans return zeros.
+
+    This matches the Arty/hw_server behavior we observed on chain 4:
+    a single raw USER4 DR scan comes back as all zeros, but the same scans
+    work correctly when kept inside one batched raw_dr_scan_batch sequence.
+    """
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        assert width == DR_WIDTH
+        addr = bits & 0xFFFFFFFF
+        payload = (bits >> 32) & 0xFFFFFFFF
+        wstrb = (bits >> 64) & 0xF
+        cmd = (bits >> 68) & 0xF
+        self.scan_log.append(cmd)
+        return 0
+
+    def raw_dr_scan_batch(
+        self, scans: list[tuple[int, int]], *, chain: int | None = None
+    ) -> list[int]:
+        out: list[int] = []
+        for bits, width in scans:
+            out.append(FakeBridgeTransport.raw_dr_scan(self, bits, width, chain=chain))
+        return out
+
+
 class EjtagAxiTests(unittest.TestCase):
 
     def _make_ctrl(
@@ -434,6 +460,13 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl = EjtagAxiController(t, chain=4)
         ctrl.connect()
         self.assertEqual(t._active_chain, 4)
+
+    def test_batch_only_transport_still_connects_and_moves_data(self):
+        ctrl, t = self._make_ctrl(BatchOnlyBridgeTransport())
+        ctrl.axi_write(0x0000, 0xCAFEBABE)
+        self.assertEqual(ctrl.axi_read(0x0000), 0xCAFEBABE)
+        ctrl.write_block(0x0004, [0x11, 0x22, 0x33, 0x44])
+        self.assertEqual(ctrl.read_block(0x0004, 4), [0x11, 0x22, 0x33, 0x44])
 
 
 if __name__ == "__main__":

@@ -27,3 +27,6 @@ Thumbs.db
 
 # Temp test outputs
 tests/_tmp/
+
+# User scratch / local notes
+no_commit/

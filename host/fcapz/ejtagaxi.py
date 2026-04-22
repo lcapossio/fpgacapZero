@@ -84,24 +84,117 @@ class EjtagAxiController:
         )
         return self._decode(bits_out)
 
-    def _check_error(self, status: int, resp: int, context: str) -> None:
-        if status & self._ERROR:
-            raise AXIError(f"{context}: resp={resp}")
+    def _scan_batch(
+        self,
+        scans: list[tuple[int, int, int, int]],
+    ) -> list[tuple[int, int, int, int]]:
+        """Run multiple DR scans in one transport batch."""
+        if not scans:
+            return []
+        raw = self._transport.raw_dr_scan_batch(
+            [
+                (self._encode(cmd, addr, payload, wstrb), DR_WIDTH)
+                for cmd, addr, payload, wstrb in scans
+            ],
+            chain=self._chain,
+        )
+        return [self._decode(bits_out) for bits_out in raw]
 
-    def _wait_valid(self, context: str) -> tuple[int, int, int, int]:
-        """Send NOPs until prev_valid=1 or error."""
-        for _ in range(self._MAX_BUSY_RETRIES):
-            status, resp, rdata, info = self._scan(CMD_NOP)
+    def _wait_for_valid_from_batch(
+        self,
+        initial: list[tuple[int, int, int, int]],
+        *,
+        wait_cmd: int,
+        context: str,
+    ) -> tuple[int, int, int, int]:
+        """Run *initial* followed by wait scans; return the first valid result."""
+        decoded = self._scan_batch(
+            initial + [(wait_cmd, 0, 0, 0)] * self._MAX_BUSY_RETRIES
+        )
+        for status, resp, rdata, info in decoded[1:]:
             self._check_error(status, resp, context)
             if status & self._PREV_VALID:
                 return status, resp, rdata, info
+            if status == 0:
+                continue
+            if status & self._FIFO_NOTEMPTY:
+                continue
             if not (status & self._BUSY):
                 raise AXIError(
                     f"{context}: bridge returned status=0x{status:X} "
                     f"(not valid, not busy, not error)"
                 )
-        raise AXIError(f"{context}: bridge still busy after "
-                       f"{self._MAX_BUSY_RETRIES} polls")
+        raise AXIError(
+            f"{context}: bridge still busy/unresolved after "
+            f"{self._MAX_BUSY_RETRIES} polls"
+        )
+
+    def _collect_valids_from_batch(
+        self,
+        initial: list[tuple[int, int, int, int]],
+        *,
+        wait_cmd: int,
+        needed: int,
+        context: str,
+    ) -> list[tuple[int, int, int, int]]:
+        """Collect *needed* valid responses from a single batched transfer."""
+        if needed <= 0:
+            return []
+        decoded = self._scan_batch(
+            initial + [(wait_cmd, 0, 0, 0)] * (needed + self._MAX_BUSY_RETRIES)
+        )
+        out: list[tuple[int, int, int, int]] = []
+        for status, resp, rdata, info in decoded[1:]:
+            self._check_error(status, resp, context)
+            if status & self._PREV_VALID:
+                out.append((status, resp, rdata, info))
+                if len(out) == needed:
+                    return out
+                continue
+            if status == 0:
+                continue
+            if status & self._FIFO_NOTEMPTY:
+                continue
+            if not (status & self._BUSY):
+                raise AXIError(
+                    f"{context}: stalled after {len(out)}/{needed} "
+                    f"responses: status=0x{status:X}"
+                )
+        raise AXIError(
+            f"{context}: still unresolved after {len(out)}/{needed} responses"
+        )
+
+    def _check_error(self, status: int, resp: int, context: str) -> None:
+        if status & self._ERROR:
+            raise AXIError(f"{context}: resp={resp}")
+
+    def _wait_valid(self, context: str) -> tuple[int, int, int, int]:
+        """Send NOPs until prev_valid=1 or error.
+
+        Hardware traces show that the bridge can occasionally report
+        status=0x0 for one or more scans even though recent read responses are
+        still flowing through the AXI->respq->TCK path. Treat that state as an
+        indeterminate presentation gap and keep polling until either prev_valid
+        arrives, an error appears, or the retry budget is exhausted.
+        """
+        last_status = 0
+        for _ in range(self._MAX_BUSY_RETRIES):
+            status, resp, rdata, info = self._scan(CMD_NOP)
+            last_status = status
+            self._check_error(status, resp, context)
+            if status & self._PREV_VALID:
+                return status, resp, rdata, info
+            # status=0x0 has been observed transiently on hardware even when
+            # surrounding scans show valid bridge activity. Keep polling.
+            if status == 0:
+                continue
+            if not (status & self._BUSY):
+                raise AXIError(
+                    f"{context}: bridge returned status=0x{status:X} "
+                    f"(not valid, not busy, not error)"
+                )
+        raise AXIError(f"{context}: bridge still unresolved after "
+                       f"{self._MAX_BUSY_RETRIES} polls (last_status=0x{last_status:X})")
 
     def _wait_fifo_data(self, context: str) -> tuple[int, int, int, int]:
         """Send BURST_RDATA scans until prev_valid=1 (data captured from FIFO)."""
@@ -121,9 +214,10 @@ class EjtagAxiController:
         state. Priming with RESET forces one known-good round trip through the
         bridge before user traffic begins.
         """
-        self._scan(CMD_RESET)
-        for _ in range(self._MAX_BUSY_RETRIES):
-            status, _, _, _ = self._scan(CMD_NOP)
+        decoded = self._scan_batch(
+            [(CMD_RESET, 0, 0, 0)] + [(CMD_NOP, 0, 0, 0)] * self._MAX_BUSY_RETRIES
+        )
+        for status, _, _, _ in decoded[1:]:
             if not (status & self._BUSY):
                 return
         raise RuntimeError(
@@ -143,10 +237,17 @@ class EjtagAxiController:
         """
         self._transport.connect()
         self._transport.select_chain(self._chain)
-        self._scan(CMD_CONFIG, addr=0x0000)
-        _, _, bridge_id, _ = self._scan(CMD_CONFIG, addr=0x0004)
-        _, _, version, _   = self._scan(CMD_CONFIG, addr=0x002C)
-        _, _, features, _  = self._scan(CMD_NOP)
+        decoded = self._scan_batch(
+            [
+                (CMD_CONFIG, 0x0000, 0, 0),
+                (CMD_CONFIG, 0x0004, 0, 0),
+                (CMD_CONFIG, 0x002C, 0, 0),
+                (CMD_NOP, 0, 0, 0),
+            ]
+        )
+        _, _, bridge_id, _ = decoded[1]
+        _, _, version, _ = decoded[2]
+        _, _, features, _ = decoded[3]
         if bridge_id != _BRIDGE_ID:
             raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
         # FEATURES[23:16] = (FIFO_DEPTH - 1), AXI4 awlen convention.
@@ -171,10 +272,17 @@ class EjtagAxiController:
         """
         self._transport.select_chain(self._chain)
         try:
-            self._scan(CMD_CONFIG, addr=0x0000)
-            _, _, bridge_id, _ = self._scan(CMD_CONFIG, addr=0x0004)
-            _, _, version, _ = self._scan(CMD_CONFIG, addr=0x002C)
-            _, _, features, _ = self._scan(CMD_NOP)
+            decoded = self._scan_batch(
+                [
+                    (CMD_CONFIG, 0x0000, 0, 0),
+                    (CMD_CONFIG, 0x0004, 0, 0),
+                    (CMD_CONFIG, 0x002C, 0, 0),
+                    (CMD_NOP, 0, 0, 0),
+                ]
+            )
+            _, _, bridge_id, _ = decoded[1]
+            _, _, version, _ = decoded[2]
+            _, _, features, _ = decoded[3]
             if bridge_id != _BRIDGE_ID:
                 raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
             self._fifo_depth = ((features >> 16) & 0xFF) + 1
@@ -192,14 +300,20 @@ class EjtagAxiController:
 
     def axi_write(self, addr: int, data: int, wstrb: int = 0xF) -> int:
         """Single AXI write. 2 scans. Returns resp code."""
-        self._scan(CMD_WRITE, addr=addr, payload=data, wstrb=wstrb)
-        status, resp, _, _ = self._wait_valid(f"Write to 0x{addr:08X}")
+        status, resp, _, _ = self._wait_for_valid_from_batch(
+            [(CMD_WRITE, addr, data, wstrb)],
+            wait_cmd=CMD_NOP,
+            context=f"Write to 0x{addr:08X}",
+        )
         return resp
 
     def axi_read(self, addr: int) -> int:
         """Single AXI read. 2 scans. Returns 32-bit data."""
-        self._scan(CMD_READ, addr=addr)
-        _, _, rdata, _ = self._wait_valid(f"Read from 0x{addr:08X}")
+        _, _, rdata, _ = self._wait_for_valid_from_batch(
+            [(CMD_READ, addr, 0, 0)],
+            wait_cmd=CMD_NOP,
+            context=f"Read from 0x{addr:08X}",
+        )
         return rdata
 
     def write_block(self, base_addr: int, data: list[int],
@@ -212,42 +326,14 @@ class EjtagAxiController:
         than AXI completes them, so one trailing NOP is not enough to prove
         the whole block committed.
         """
-        scans = [
-            (self._encode(CMD_SET_ADDR, addr=base_addr), DR_WIDTH),
-        ]
+        scans = [(CMD_SET_ADDR, base_addr, 0, 0)]
         for word in data:
-            scans.append(
-                (self._encode(CMD_WRITE_INC, payload=word, wstrb=wstrb),
-                 DR_WIDTH))
-        scans.append((self._encode(CMD_NOP), DR_WIDTH))  # drain
-
-        results = self._transport.raw_dr_scan_batch(
-            scans, chain=self._chain)
-
-        completed = 0
-        for i in range(2, len(results)):
-            status, resp, _, _ = self._decode(results[i])
-            self._check_error(status, resp,
-                f"Block write failed while draining batch")
-            if status & self._PREV_VALID:
-                completed += 1
-
-        for _ in range(len(data) + self._MAX_BUSY_RETRIES):
-            if completed >= len(data):
-                return
-            status, resp, _, _ = self._scan(CMD_NOP)
-            self._check_error(status, resp,
-                f"Block write failed at word {completed}")
-            if status & self._PREV_VALID:
-                completed += 1
-                continue
-            if not (status & self._BUSY):
-                raise AXIError(
-                    f"Block write stalled after {completed}/{len(data)} "
-                    f"words: status=0x{status:X}"
-                )
-        raise AXIError(
-            f"Block write still busy after {completed}/{len(data)} words"
+            scans.append((CMD_WRITE_INC, 0, word, wstrb))
+        self._collect_valids_from_batch(
+            scans,
+            wait_cmd=CMD_NOP,
+            needed=len(data),
+            context="Block write",
         )
 
     def read_block(self, base_addr: int, count: int) -> list[int]:
@@ -258,43 +344,18 @@ class EjtagAxiController:
         drains until all queued read completions have arrived.
         """
         scans = [
-            (self._encode(CMD_SET_ADDR, addr=base_addr), DR_WIDTH),
-            (self._encode(CMD_READ_INC), DR_WIDTH),  # prime
+            (CMD_SET_ADDR, base_addr, 0, 0),
+            (CMD_READ_INC, 0, 0, 0),
         ]
         for _ in range(count - 1):
-            scans.append((self._encode(CMD_READ_INC), DR_WIDTH))
-        scans.append((self._encode(CMD_NOP), DR_WIDTH))  # drain
-
-        results = self._transport.raw_dr_scan_batch(
-            scans, chain=self._chain)
-
-        out = []
-        for i in range(2, count + 2):
-            status, resp, rdata, _ = self._decode(results[i])
-            self._check_error(status, resp,
-                f"Block read failed while draining batch")
-            if status & self._PREV_VALID:
-                out.append(rdata)
-                if len(out) == count:
-                    return out
-
-        for _ in range(count + self._MAX_BUSY_RETRIES):
-            status, resp, rdata, _ = self._scan(CMD_NOP)
-            self._check_error(status, resp,
-                f"Block read failed at word {len(out)}")
-            if status & self._PREV_VALID:
-                out.append(rdata)
-                if len(out) == count:
-                    return out
-                continue
-            if not (status & self._BUSY):
-                raise AXIError(
-                    f"Block read stalled after {len(out)}/{count} words: "
-                    f"status=0x{status:X}"
-                )
-        raise AXIError(
-            f"Block read still busy after {len(out)}/{count} words"
+            scans.append((CMD_READ_INC, 0, 0, 0))
+        results = self._collect_valids_from_batch(
+            scans,
+            wait_cmd=CMD_NOP,
+            needed=count,
+            context="Block read",
         )
+        return [rdata for _, _, rdata, _ in results]
 
     def burst_write(self, base_addr: int, data: list[int],
                     wstrb: int = 0xF) -> None:
@@ -316,14 +377,31 @@ class EjtagAxiController:
             )
         burst_len = n - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
-        self._scan(CMD_BURST_SETUP, addr=base_addr, payload=config)
-        for i, word in enumerate(data):
-            status, resp, _, _ = self._scan(
-                CMD_BURST_WDATA, payload=word, wstrb=wstrb)
-            if i > 0:
-                self._check_error(status, resp,
-                    f"Burst write failed at beat {i-1}")
-        self._wait_valid("Burst write drain")
+        scans = [(CMD_BURST_SETUP, base_addr, config, 0)]
+        scans.extend((CMD_BURST_WDATA, 0, word, wstrb) for word in data)
+        decoded = self._scan_batch(
+            scans + [(CMD_NOP, 0, 0, 0)] * (len(data) + self._MAX_BUSY_RETRIES)
+        )
+        valid_positions: list[int] = []
+        for idx, (status, resp, _, _) in enumerate(decoded[1:], start=1):
+            self._check_error(status, resp, "Burst write")
+            if status & self._PREV_VALID:
+                valid_positions.append(idx)
+                continue
+            if status == 0 or (status & self._FIFO_NOTEMPTY):
+                continue
+            if valid_positions and not (status & self._BUSY):
+                raise AXIError(
+                    f"Burst write stalled after {len(valid_positions)}/{len(data)} beats: "
+                    f"status=0x{status:X}"
+                )
+        setup_responded = bool(valid_positions and valid_positions[0] == 1)
+        expected = len(data) + (1 if setup_responded else 0)
+        if len(valid_positions) < expected:
+            raise AXIError(
+                f"Burst write still unresolved after "
+                f"{len(valid_positions)}/{expected} responses"
+            )
 
     def burst_read(self, base_addr: int, count: int) -> list[int]:
         """AXI4 burst read. N+3 scans.
@@ -351,16 +429,32 @@ class EjtagAxiController:
             )
         burst_len = count - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
-        self._scan(CMD_BURST_SETUP, addr=base_addr, payload=config)
-        self._scan(CMD_BURST_RSTART)
-        # Prime: sets last_cmd to BURST_RDATA so next scan captures fifo[0]
-        self._scan(CMD_BURST_RDATA)
-        results = []
-        for i in range(count):
-            status, resp, rdata, _ = self._wait_fifo_data(
-                f"Burst read beat {i}")
-            results.append(rdata)
-        return results
+        scans = [
+            (CMD_BURST_SETUP, base_addr, config, 0),
+            (CMD_BURST_RSTART, 0, 0, 0),
+        ]
+        scans.extend((CMD_BURST_RDATA, 0, 0, 0) for _ in range(count + 2 + self._MAX_BUSY_RETRIES))
+        decoded = self._scan_batch(scans)
+        out: list[int] = []
+        for idx, (status, resp, rdata, _) in enumerate(decoded[1:], start=1):
+            self._check_error(status, resp, "Burst read")
+            if status & self._PREV_VALID:
+                if idx <= 2:
+                    continue
+                out.append(rdata)
+                if len(out) == count:
+                    return out
+                continue
+            if status == 0 or (status & self._FIFO_NOTEMPTY):
+                continue
+            if out and not (status & self._BUSY):
+                raise AXIError(
+                    f"Burst read stalled after {len(out)}/{count} beats: "
+                    f"status=0x{status:X}"
+                )
+        raise AXIError(
+            f"Burst read still unresolved after {len(out)}/{count} beats"
+        )
 
     def close(self) -> None:
         """Wait for idle, send CMD_RESET to bridge, then close transport.
@@ -388,3 +482,5 @@ class EjtagAxiController:
                 stacklevel=2,
             )
         self._transport.close()
+
+
