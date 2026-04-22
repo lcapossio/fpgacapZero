@@ -285,9 +285,6 @@ class BatchOnlyBridgeTransport(FakeBridgeTransport):
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         assert width == DR_WIDTH
-        addr = bits & 0xFFFFFFFF
-        payload = (bits >> 32) & 0xFFFFFFFF
-        wstrb = (bits >> 64) & 0xF
         cmd = (bits >> 68) & 0xF
         self.scan_log.append(cmd)
         return 0
