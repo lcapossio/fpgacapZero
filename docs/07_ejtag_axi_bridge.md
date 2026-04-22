@@ -45,7 +45,7 @@ is Python, and you can read every line of the FSM in
   the host scans them out.
 - **AXI4 burst write** — a single AXI4 burst write with up to
   `FIFO_DEPTH` beats.  The host paces the writes one per JTAG scan;
-  the bridge per-beat-acks via the toggle handshake so the host
+  the bridge returns one completion per beat so the host
   knows when to send the next beat.
 
 What it **can't** do (yet):
@@ -75,19 +75,18 @@ What it **can't** do (yet):
 
 The **TCK domain** holds a 72-bit shift register that the host
 loads with a command + address + data + wstrb on every scan.  On
-DR update, the parsed fields move into shadow registers and a
-toggle-handshake CDC carries them across to `axi_clk`.
+DR update, the parsed fields are packed into a registered command
+word and pushed into a **TCK-to-AXI async command FIFO**.
 
 The **`axi_clk` domain** runs a 10-state FSM that drives the AXI
-master interface (`m_axi_*`).  Single transactions use the toggle
-handshake for the response too; burst reads use an **async FIFO**
-(Gray-coded pointers, depth = `FIFO_DEPTH` parameter) so the AXI
-side can fill data while the host scans words out one per shift.
+master interface (`m_axi_*`).  Completed responses cross back to
+TCK through an **AXI-to-TCK async response FIFO**.  Burst reads use
+that response path plus a dedicated read FIFO so the AXI side can
+fill data while the host scans words out one per shift.
 
-Burst writes use a **per-beat toggle handshake**: the AXI FSM acks
-each beat (except the last) so the host can queue the next.  This
-means the inter-beat pacing is host-controlled — the AXI side
-never times out between beats, only on the AXI handshake waits
+Burst writes use one completion per beat through the same response
+path.  This keeps the inter-beat pacing host-controlled; the AXI
+side never times out between beats, only on the AXI handshake waits
 themselves (`wready`, `bvalid`, `arready`, `rvalid`).
 
 ## The 72-bit DR shift format
@@ -187,6 +186,11 @@ value = bridge.axi_read(0x40000000)        # returns int
 Two JTAG scans: one to issue the READ command, one NOP to wait
 until `prev_valid` is set and read the data back.
 
+When running over Xilinx `hw_server` / `xsdb`, the host may batch
+that command and its drain scans into one USER4 raw-scan sequence
+internally.  That is a transport detail; the bridge protocol is the
+same.
+
 ### Single write
 
 ```python
@@ -220,6 +224,20 @@ bridge.write_block(0x40000000, [0xAA00, 0xAA01, 0xAA02, ...])
 ```
 
 Same shape, the other direction.
+
+### Transport note: USER4 batching on Arty / hw_server
+
+On the Arty A7 reference setup with `XilinxHwServerTransport`,
+isolated USER4 `raw_dr_scan()` calls were observed to return
+all-zero TDO even though the EJTAG-AXI bridge was alive and
+answering correctly.  The same USER4 transactions worked when they
+were issued inside one `raw_dr_scan_batch()` / single XSDB
+`jtag sequence`.
+
+Because of that, `EjtagAxiController` prefers batched USER4 scan
+sequences for connect, single transactions, block traffic, and
+bursts when running over `hw_server`.  This is a host transport
+reliability detail, not a different RTL protocol.
 
 ### AXI4 burst read
 

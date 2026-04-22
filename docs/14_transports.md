@@ -24,6 +24,12 @@ operations the controllers care about:
 | `read_reg(addr)` / `write_reg(addr, value)` | 49-bit DR scan against the chain's register interface |
 | `raw_dr_scan(bits, width)` / `raw_dr_scan_batch(...)` | Raw DR shift for the burst engines (32-, 72-, 256-bit) |
 
+For EJTAG-AXI on Arty / `hw_server`, the batched form matters in
+practice: isolated USER4 raw scans were observed to return zeros on
+that setup even though the bridge was alive, while the same USER4
+traffic worked when kept inside one `raw_dr_scan_batch()` / single
+XSDB `jtag sequence`.
+
 There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
