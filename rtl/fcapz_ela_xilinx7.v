@@ -45,6 +45,7 @@ module fcapz_ela_xilinx7 #(
     parameter TIMESTAMP_W = 0,
     parameter NUM_SEGMENTS = 1,
     parameter PROBE_MUX_W = 0,
+    parameter STARTUP_ARM = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
@@ -59,6 +60,7 @@ module fcapz_ela_xilinx7 #(
     // External trigger I/O
     input  wire                          trigger_in,
     output wire                          trigger_out,
+    output wire                          armed_out,
     // EIO ports (active when EIO_EN=1; ignored / tied-off otherwise)
     input  wire [EIO_IN_W-1:0]           eio_probe_in,
     output wire [EIO_OUT_W-1:0]          eio_probe_out
@@ -140,11 +142,11 @@ module fcapz_ela_xilinx7 #(
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W)
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(trigger_in), .trigger_out(trigger_out),
+                .trigger_in(trigger_in), .trigger_out(trigger_out), .armed_out(armed_out),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
@@ -169,11 +171,11 @@ module fcapz_ela_xilinx7 #(
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W)
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(trigger_in), .trigger_out(trigger_out),
+                .trigger_in(trigger_in), .trigger_out(trigger_out), .armed_out(armed_out),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),

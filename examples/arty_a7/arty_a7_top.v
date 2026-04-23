@@ -48,11 +48,20 @@ module arty_a7_top (
     reg [3:0] slow_counter;
     reg [26:0] sec_divider;
     wire trigger_out_w;
+    wire ela_armed_w;
     wire [7:0] eio_probe_in;
     wire [7:0] eio_probe_out;
+    reg [7:0] eio_out_sync1;
+    reg [7:0] eio_out_sync2;
+    reg ela_armed_d;
+    reg [3:0] armed_test_count;
+    reg armed_test_active;
+    reg armed_test_pulse;
+    reg armed_test_gate;
+    wire trigger_in_w;
 
-    // EIO probe_out updates on jtag_clk; LEDs are static I/O on the fabric clock domain.
-    // Resync into sys_clk so the pins see clean levels (matches CDC note in docs/06_eio_core.md).
+    // EIO probe_out updates on jtag_clk; resync into sys_clk before using it
+    // for LEDs or deterministic trigger-test controls.
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync1;
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync2;
 
@@ -87,6 +96,54 @@ module arty_a7_top (
         end
     end
 
+    // ---- EIO output resynchronization ----
+    always @(posedge clk) begin
+        if (rst) begin
+            eio_out_sync1 <= 8'h00;
+            eio_out_sync2 <= 8'h00;
+        end else begin
+            eio_out_sync1 <= eio_probe_out;
+            eio_out_sync2 <= eio_out_sync1;
+        end
+    end
+
+    // ---- Deterministic trigger test hook ----
+    // eio_probe_out[4]: manual external trigger (legacy host-driven)
+    // eio_probe_out[5]: emit one pulse 2 cycles after ELA enters ARMED
+    // eio_probe_out[6]: emit one pulse 8 cycles after ELA enters ARMED
+    always @(posedge clk) begin
+        if (rst) begin
+            ela_armed_d       <= 1'b0;
+            armed_test_count  <= 4'd0;
+            armed_test_active <= 1'b0;
+            armed_test_pulse  <= 1'b0;
+            armed_test_gate   <= 1'b0;
+        end else begin
+            ela_armed_d       <= ela_armed_w;
+            armed_test_pulse  <= 1'b0;
+
+            if (ela_armed_w && !ela_armed_d) begin
+                armed_test_count  <= 4'd0;
+                armed_test_active <= eio_out_sync2[5] | eio_out_sync2[6];
+                armed_test_gate   <= 1'b0;
+            end else if (!ela_armed_w) begin
+                armed_test_count  <= 4'd0;
+                armed_test_active <= 1'b0;
+                armed_test_gate   <= 1'b0;
+            end else if (armed_test_active) begin
+                armed_test_count <= armed_test_count + 1'b1;
+                if (eio_out_sync2[5] && (armed_test_count == 4'd1))
+                    armed_test_pulse <= 1'b1;
+                if (eio_out_sync2[6] && (armed_test_count == 4'd7))
+                    armed_test_gate <= 1'b1;
+                if (armed_test_count == 4'd7)
+                    armed_test_active <= 1'b0;
+            end
+        end
+    end
+
+    assign trigger_in_w = eio_out_sync2[4] | armed_test_pulse | armed_test_gate;
+
     // ---- ELA (all features enabled for HW validation) ----
     fcapz_ela_xilinx7 #(
         .SAMPLE_W     (SAMPLE_W),
@@ -99,8 +156,9 @@ module arty_a7_top (
         .sample_clk (clk),
         .sample_rst (rst),
         .probe_in   (counter),
-        .trigger_in (eio_probe_out[4]), // JTAG-driven manual trigger via EIO
-        .trigger_out(trigger_out_w)
+        .trigger_in (trigger_in_w),
+        .trigger_out(trigger_out_w),
+        .armed_out  (ela_armed_w)
     );
 
     // ---- EJTAGAXI: JTAG-to-AXI4 bridge (USER4) ----
@@ -166,7 +224,7 @@ module arty_a7_top (
             led_sync1 <= 4'b0;
             led_sync2 <= 4'b0;
         end else begin
-            led_sync1 <= eio_probe_out[3:0];
+            led_sync1 <= eio_out_sync2[3:0];
             led_sync2 <= led_sync1;
         end
     end

@@ -978,6 +978,79 @@ module fcapz_ela_tb;
         repeat (4) @(posedge sample_clk);
         jtag_write(16'h00D4, 32'd0);
 
+        // ---- Test 26: STARTUP_ARM auto-arms after reset --------------------
+        $display("\n=== Test 26: STARTUP_ARM auto-arms after reset ===");
+        jtag_write(16'h0014, 32'd0);    // PRETRIG_LEN
+        jtag_write(16'h0018, 32'd2);    // POSTTRIG_LEN
+        jtag_write(16'h0020, 32'h1);    // TRIG_MODE: value_match
+        jtag_write(16'h0024, 32'd6);    // TRIG_VALUE
+        jtag_write(16'h0028, 32'hFF);   // TRIG_MASK
+        jtag_write(16'h00D8, 32'd1);    // STARTUP_ARM enable
+        jtag_write(16'h0004, 32'h2);    // RESET -> should auto-arm
+        repeat (12) @(posedge sample_clk);
+        jtag_read(16'h0008, status);
+        check("STARTUP_ARM: armed after reset", status[0] == 1'b1);
+
+        probe_in = '0;
+        repeat (12) begin
+            @(posedge sample_clk);
+            probe_in <= probe_in + 1'b1;
+        end
+        cycles = 0;
+        while (cycles < 100) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+        jtag_read(16'h0008, status);
+        check("STARTUP_ARM: done after auto-armed capture", status[2] == 1'b1);
+        jtag_write(16'h00D8, 32'd0);    // restore
+
+        // ---- Test 27: TRIG_HOLDOFF blocks early hits, allows later ones ----
+        $display("\n=== Test 27: TRIG_HOLDOFF semantics ===");
+        jtag_write(16'h00DC, 32'd4);
+        jtag_read(16'h00DC, sample_word);
+        check("TRIG_HOLDOFF round-trip = 4", sample_word == 32'd4);
+
+        // First: hit happens only during holdoff -> capture must not trigger.
+        jtag_write(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write(16'h0014, 32'd0);
+        jtag_write(16'h0018, 32'd2);
+        jtag_write(16'h0020, 32'h1);
+        jtag_write(16'h0024, 32'd3);    // occurs during 4-cycle holdoff
+        jtag_write(16'h0028, 32'hFF);
+        jtag_write(16'h0004, 32'h1);    // ARM
+        probe_in = '0;
+        repeat (16) begin
+            @(posedge sample_clk);
+            probe_in <= probe_in + 1'b1;
+        end
+        jtag_read(16'h0008, status);
+        check("TRIG_HOLDOFF: early hit ignored", status[1] == 1'b0 && status[2] == 1'b0);
+
+        // Second: later hit after holdoff should still trigger normally.
+        jtag_write(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write(16'h0014, 32'd0);
+        jtag_write(16'h0018, 32'd2);
+        jtag_write(16'h0020, 32'h1);
+        jtag_write(16'h0024, 32'd6);    // occurs after holdoff expires
+        jtag_write(16'h0028, 32'hFF);
+        jtag_write(16'h0004, 32'h1);    // ARM
+        probe_in = '0;
+        repeat (20) begin
+            @(posedge sample_clk);
+            probe_in <= probe_in + 1'b1;
+        end
+        cycles = 0;
+        while (cycles < 100) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+        jtag_read(16'h0008, status);
+        check("TRIG_HOLDOFF: later hit triggers", status[2] == 1'b1);
+        jtag_write(16'h00DC, 32'd0);    // restore
+
         // ---- Summary -------------------------------------------------------
         $display("\n=== Summary: %0d passed, %0d failed ===",
                  test_pass_count, test_fail_count);

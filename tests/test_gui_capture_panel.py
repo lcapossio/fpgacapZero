@@ -52,6 +52,8 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
                 "stor_qual_mode": 0,
                 "stor_qual_value": 0,
                 "stor_qual_mask": 0,
+                "startup_arm": True,
+                "trigger_holdoff": 7,
                 "trigger_delay": 2,
                 "probes": "a:2:0",
             },
@@ -64,6 +66,8 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
         self.assertEqual(cfg.trigger.mask, 15)
         self.assertEqual(cfg.sample_clock_hz, 80_000_000)
         self.assertEqual(cfg.ext_trigger_mode, 1)
+        self.assertTrue(cfg.startup_arm)
+        self.assertEqual(cfg.trigger_holdoff, 7)
         self.assertEqual(len(cfg.probes), 1)
         self.assertEqual(cfg.probes[0].name, "a")
 
@@ -168,6 +172,8 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
                 "stor_qual_mode": 0,
                 "stor_qual_value": 0,
                 "stor_qual_mask": 0,
+                "startup_arm": False,
+                "trigger_holdoff": 0,
                 "trigger_delay": 0,
                 "probes": "",
                 "trigger_sequence": [

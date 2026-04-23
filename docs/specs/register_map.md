@@ -59,6 +59,8 @@ in that bridge’s section.
 - `0x0030`: `SQ_MODE` (rw) - Storage qualification mode (0=off, 1=value, 2=edge, 3=both; STOR_QUAL=1 only)
 - `0x0034`: `SQ_VALUE` (rw) - Storage qualification match value
 - `0x0038`: `SQ_MASK` (rw) - Storage qualification match mask
+- `0x00D8`: `STARTUP_ARM` (rw) - Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes the power-up default of this register so the bitstream can come up pre-armed immediately after configuration.
+- `0x00DC`: `TRIG_HOLDOFF` (rw) - Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after each segmented auto-rearm. Distinct from `TRIG_DELAY`.
 - `0x00D4`: `TRIG_DELAY` (rw) - Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample is shifted N cycles after the trigger event, compensating for upstream pipeline latency. The pre/post-trigger sample counts and the buffer wrap behavior are unchanged — only the position of the "trigger" anchor moves forward.
 - `0x003C`: `FEATURES` (ro) - Feature flags: `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL
 - `0x0040+N*20+0`:  `SEQ_STAGE_N_CFG` (rw) - See encoding below

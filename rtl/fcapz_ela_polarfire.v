@@ -38,6 +38,7 @@ module fcapz_ela_polarfire #(
     parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
     parameter TIMESTAMP_W  = 0,
+    parameter STARTUP_ARM  = 0,
     parameter BURST_W      = 256,
     // PolarFire UJTAG IR opcodes (override if your BSDL differs).
     parameter [7:0] IR_USER1 = 8'h10,
@@ -125,7 +126,7 @@ module fcapz_ela_polarfire #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -152,7 +153,7 @@ module fcapz_ela_polarfire #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),

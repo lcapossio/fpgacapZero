@@ -233,7 +233,10 @@ running `hw_server`, and a programmed bitstream):
 pytest examples/arty_a7/test_hw_integration.py
 ```
 
-41 tests + 13 subtests, takes about 3 minutes on Arty A7-100T.  See
+Currently this is `54` collected items on the checked-in Arty reference
+suite: `47` passing tests and `7` optional UART tests skipped unless
+their separate UART loopback bitstream is enabled, plus `13` subtests.
+Wall-clock time is about 4-5 minutes on Arty A7-100T.  See
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for environment variables
 that gate the optional UART loopback tests.
 

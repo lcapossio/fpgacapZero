@@ -98,6 +98,29 @@ class RpcServer:
             raise ValueError(f"trigger_delay must be 0..65535, got {delay}")
         return delay
 
+    @staticmethod
+    def _validated_trigger_holdoff(delay: int) -> int:
+        if not (0 <= delay <= 0xFFFF):
+            raise ValueError(f"trigger_holdoff must be 0..65535, got {delay}")
+        return delay
+
+    @staticmethod
+    def _validated_bool(value: Any, *, field: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value in (0, 1):
+                return bool(value)
+            raise ValueError(f"{field} must be a boolean, got {value}")
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("0", "false", "no", "off"):
+                return False
+            if lowered in ("1", "true", "yes", "on"):
+                return True
+            raise ValueError(f"{field} must be a boolean, got {value!r}")
+        raise ValueError(f"{field} must be a boolean, got {value!r}")
+
     @classmethod
     def _build_config(cls, req: Dict[str, Any]) -> CaptureConfig:
         return CaptureConfig(
@@ -118,6 +141,12 @@ class RpcServer:
             stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
             stor_qual_value=int(req.get("stor_qual_value", 0)),
             stor_qual_mask=int(req.get("stor_qual_mask", 0)),
+            startup_arm=cls._validated_bool(
+                req.get("startup_arm", False), field="startup_arm"
+            ),
+            trigger_holdoff=cls._validated_trigger_holdoff(
+                int(req.get("trigger_holdoff", 0))
+            ),
             trigger_delay=cls._validated_trigger_delay(int(req.get("trigger_delay", 0))),
         )
 

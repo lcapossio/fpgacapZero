@@ -143,7 +143,9 @@ Top section — **trigger**:
 | **Trigger mode** dropdown | `trigger.mode` (`value_match` / `edge_detect` / `both`) |
 | **Trigger value** + radix (default **Hex**; also Dec / Oct / Bin) | `trigger.value` (parsed in the selected base) |
 | **Trigger mask** hex input | `trigger.mask` |
-| **Trigger delay** spinner (0..65535) | `trigger_delay` (new in v0.3.0) |
+| **Startup arm** checkbox | `startup_arm` |
+| **Trigger holdoff** spinner (0..65535) | `trigger_holdoff` |
+| **Trigger delay** spinner (0..65535) | `trigger_delay` |
 | **Decimation** spinner | `decimation` |
 | **Ext-trigger mode** dropdown | `ext_trigger_mode` |
 

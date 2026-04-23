@@ -163,7 +163,17 @@ fcapz_ejtagaxi_xilinx7 #(
 
 The checked-in [Arty top](../examples/arty_a7/arty_a7_top.v) enables more
 ELA options (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`, `NUM_SEGMENTS`) and
-ties `trigger_in` to an EIO output for hardware tests.
+ties `trigger_in` to an EIO-controlled fabric signal for hardware tests.
+In that reference top:
+
+- `probe_out[4]` is a manual external-trigger bit
+- `probe_out[5]` requests an early one-shot trigger 2 sample clocks
+  after the ELA enters `ARMED`
+- `probe_out[6]` requests a late trigger source beginning 8 sample
+  clocks after the ELA enters `ARMED`
+
+That deterministic trigger-test plumbing is specific to the Arty
+reference design, not a requirement of the generic wrappers.
 
 Each core uses a different USER chain so they don't collide.  The
 default chain assignments are:
@@ -208,6 +218,7 @@ module fcapz_ela_xilinx7 #(
     parameter TIMESTAMP_W  = 0,      // 0=off, 32 or 48
     parameter NUM_SEGMENTS = 1,      // number of memory segments
     parameter PROBE_MUX_W  = 0,      // total bus width for runtime probe mux (0=off)
+    parameter STARTUP_ARM  = 0,      // 1=come up armed after reset/configuration
     parameter BURST_W      = 256,    // USER2 burst DR width (don't change)
     parameter CTRL_CHAIN   = 1,      // BSCANE2 USER chain for control
     parameter DATA_CHAIN   = 2       // BSCANE2 USER chain for burst data
@@ -227,6 +238,7 @@ module fcapz_ela_xilinx7 #(
 | `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into both `fcapz_ela` and `jtag_burst_read` so the USER2 burst engine knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
+| `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |

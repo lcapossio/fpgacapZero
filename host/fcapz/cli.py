@@ -134,6 +134,8 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
         stor_qual_mode=getattr(args, "stor_qual_mode", 0),
         stor_qual_value=getattr(args, "stor_qual_value", 0),
         stor_qual_mask=getattr(args, "stor_qual_mask", 0),
+        startup_arm=getattr(args, "startup_arm", False),
+        trigger_holdoff=getattr(args, "trigger_holdoff", 0),
         trigger_delay=getattr(args, "trigger_delay", 0),
     )
 
@@ -288,6 +290,25 @@ def build_parser() -> argparse.ArgumentParser:
             type=lambda x: int(x, 0),
             default=0,
             help="Storage qualification mask (hex or decimal)",
+        )
+        parser.add_argument(
+            "--startup-arm",
+            action="store_true",
+            help=(
+                "Leave the ELA armed after reset / configuration recovery. "
+                "Useful with bitstreams that want to begin capturing immediately "
+                "after startup or after an explicit RESET."
+            ),
+        )
+        parser.add_argument(
+            "--trigger-holdoff",
+            type=_uint16,
+            default=0,
+            help=(
+                "Ignore trigger hits for N sample-clock cycles after arm or "
+                "segmented auto-rearm. Distinct from --trigger-delay, which "
+                "moves the committed trigger sample later."
+            ),
         )
         parser.add_argument(
             "--trigger-delay",
