@@ -17,7 +17,7 @@
 //   Baseline trigger sequencer/storage qualification settings stay at
 //   wrapper defaults unless overridden in the wrapper parameters.
 //
-// - EIO on USER3 exposes {btn[3:0], counter[3:0]} as probe_in and drives
+// - EIO on USER3 exposes {btn[3:0], slow_counter[3:0]} as probe_in and drives
 //   the four constrained green LEDs from probe_out[3:0] (resynced into clk).
 //   probe_out[4]
 //   feeds ELA trigger_in, so a host write can make a manual trigger edge.
@@ -39,11 +39,14 @@ module arty_a7_top (
     localparam SAMPLE_W     = 8;
     localparam DEPTH        = 1024;
     localparam NUM_SEGMENTS = 4;
+    localparam integer CLK_HZ = 100_000_000;
 
     reg [3:0] rst_pipe;
     wire rst;
 
     reg [SAMPLE_W-1:0] counter;
+    reg [3:0] slow_counter;
+    reg [26:0] sec_divider;
     wire trigger_out_w;
     wire [7:0] eio_probe_in;
     wire [7:0] eio_probe_out;
@@ -53,7 +56,7 @@ module arty_a7_top (
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync1;
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync2;
 
-    assign eio_probe_in = {btn, counter[3:0]};
+    assign eio_probe_in = {btn, slow_counter};
 
     // ---- Reset ----
     always @(posedge clk) begin
@@ -67,6 +70,21 @@ module arty_a7_top (
             counter <= {SAMPLE_W{1'b0}};
         else
             counter <= counter + 1'b1;
+    end
+
+    // ---- Slow counter for EIO visibility ----
+    // Arty A7 reference clock is 100 MHz, so roll the visible EIO counter once
+    // per second to make manual capture/readback easier to confirm.
+    always @(posedge clk) begin
+        if (rst) begin
+            sec_divider  <= 27'd0;
+            slow_counter <= 4'd0;
+        end else if (sec_divider == CLK_HZ - 1) begin
+            sec_divider  <= 27'd0;
+            slow_counter <= slow_counter + 1'b1;
+        end else begin
+            sec_divider <= sec_divider + 1'b1;
+        end
     end
 
     // ---- ELA (all features enabled for HW validation) ----
@@ -139,7 +157,7 @@ module arty_a7_top (
     );
 
     // ---- EIO: Embedded I/O (USER3) ----
-    // Reads buttons plus the counter as probe_in, and drives the four
+    // Reads buttons plus the slow counter as probe_in, and drives the four
     // constrained green LEDs via probe_out.  The upper EIO output bits
     // still read back over JTAG, but are not bonded to LEDs in this XDC.
 
@@ -155,7 +173,7 @@ module arty_a7_top (
     assign led = led_sync2;
 
     fcapz_eio_xilinx7 #(
-        .IN_W  (8),     // btn[3:0] + counter[3:0]
+        .IN_W  (8),     // btn[3:0] + slow_counter[3:0]
         .OUT_W (8),     // lower 4 bits drive physical LEDs
         .CHAIN (3)
     ) u_eio (

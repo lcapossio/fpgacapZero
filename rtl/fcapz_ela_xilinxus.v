@@ -35,13 +35,20 @@ module fcapz_ela_xilinxus #(
     parameter PROBE_MUX_W = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,
-    parameter DATA_CHAIN  = 2
+    parameter DATA_CHAIN  = 2,
+    // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)
+    parameter EIO_EN      = 0,
+    parameter EIO_IN_W    = 1,
+    parameter EIO_OUT_W   = 1
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
     input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
     input  wire                          trigger_in,
-    output wire                          trigger_out
+    output wire                          trigger_out,
+    // EIO ports (active when EIO_EN=1; ignored / tied-off otherwise)
+    input  wire [EIO_IN_W-1:0]           eio_probe_in,
+    output wire [EIO_OUT_W-1:0]          eio_probe_out
 );
 
     // Direct shim — every parameter and port forwarded.
@@ -52,11 +59,13 @@ module fcapz_ela_xilinxus #(
         .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
         .PROBE_MUX_W(PROBE_MUX_W), .BURST_W(BURST_W),
-        .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN)
+        .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
+        .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)
     ) u_inner (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
-        .trigger_in(trigger_in), .trigger_out(trigger_out)
+        .trigger_in(trigger_in), .trigger_out(trigger_out),
+        .eio_probe_in(eio_probe_in), .eio_probe_out(eio_probe_out)
     );
 
 endmodule

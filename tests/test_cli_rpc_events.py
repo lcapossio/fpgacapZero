@@ -19,6 +19,7 @@ from fcapz.analyzer import (
 )
 from fcapz.cli import (
     _build_config,
+    _chain_shape_kwargs,
     _non_negative_int,
     _parse_trigger_sequence,
     _positive_float,
@@ -27,6 +28,7 @@ from fcapz.cli import (
     _uint16,
     build_parser,
 )
+from fcapz.transport import XilinxHwServerTransport
 from fcapz.events import (
     ProbeDefinition,
     find_bursts,
@@ -537,6 +539,65 @@ class RpcTests(unittest.TestCase):
         )
         self.assertEqual(vcd_resp["format"], "vcd")
         self.assertIn("$enddefinitions $end", vcd_resp["content"])
+
+
+class ChainShapeKwargsTests(unittest.TestCase):
+    """CLI auto-detection of XilinxHwServerTransport kwargs from fpga_name."""
+
+    def test_zynq_us_plus_mpsoc_kria_uses_register_ir(self):
+        """Kria K26 uses -register userN mode — one flag, no opcode table."""
+        kwargs = _chain_shape_kwargs("xck26")
+        self.assertEqual(kwargs, {"use_register_ir": True})
+
+    def test_zynq_us_plus_zcu_uses_register_ir(self):
+        kwargs = _chain_shape_kwargs("xczu7ev")
+        self.assertEqual(kwargs, {"use_register_ir": True})
+
+    def test_standalone_kintex_ultrascale_no_dr_padding(self):
+        """Standalone US parts are single-device chains: no DAP bypass bits."""
+        kwargs = _chain_shape_kwargs("xcku040")
+        self.assertIs(
+            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+        self.assertEqual(kwargs["ir_length"], 6)
+        self.assertNotIn("dr_extra_bits", kwargs)
+
+    def test_standalone_virtex_ultrascale_plus(self):
+        kwargs = _chain_shape_kwargs("xcvu9p")
+        self.assertIs(
+            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+        self.assertEqual(kwargs["ir_length"], 6)
+
+    def test_standalone_artix_ultrascale_plus(self):
+        kwargs = _chain_shape_kwargs("xcau15p")
+        self.assertIs(
+            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+        self.assertEqual(kwargs["ir_length"], 6)
+
+    def test_7_series_artix_returns_empty_dict(self):
+        """Empty dict means 'use all transport defaults'."""
+        self.assertEqual(_chain_shape_kwargs("xc7a100t"), {})
+
+    def test_7_series_zynq_7000_returns_empty_dict(self):
+        """xc7z* is Zynq-7000 (different from xczu* MPSoC)."""
+        self.assertEqual(_chain_shape_kwargs("xc7z020"), {})
+
+    def test_case_insensitive(self):
+        kwargs = _chain_shape_kwargs("XCK26")
+        self.assertEqual(kwargs, {"use_register_ir": True})
+
+    def test_unknown_name_returns_empty_dict(self):
+        self.assertEqual(_chain_shape_kwargs("some_custom_name"), {})
+
+    def test_mpsoc_kwargs_are_transport_constructor_compatible(self):
+        """The dict must ``**``-unpack into XilinxHwServerTransport cleanly."""
+        kwargs = _chain_shape_kwargs("xck26")
+        t = XilinxHwServerTransport(fpga_name="xck26", **kwargs)
+        self.assertTrue(t.use_register_ir)
+        # In register mode, dr_extra_bits is forced to 0 (xsdb handles bypass).
+        self.assertEqual(t.dr_extra_bits, 0)
 
 
 if __name__ == "__main__":

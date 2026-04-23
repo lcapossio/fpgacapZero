@@ -102,6 +102,23 @@ the regenerated `rtl/fcapz_version.vh`.  See
 
 ## EJTAG-AXI bridge
 
+### `Bad BRIDGE_ID: 0x00000000` on Arty / `hw_server` even though USER4 is present
+
+**Cause**: on the Arty A7 reference setup, isolated USER4 raw scans
+through `xsdb` / `hw_server` were observed to return all-zero TDO.
+The bridge itself was fine; the same USER4 traffic worked when the
+host kept it inside one batched raw-scan sequence.
+
+**Fix**:
+- Use a recent host build where `EjtagAxiController` batches USER4
+  scan sequences internally.
+- If you are debugging at the transport layer, prefer
+  `raw_dr_scan_batch()` over standalone `raw_dr_scan()` for USER4
+  traffic on this setup.
+- If you still see this after updating, confirm the bitstream really
+  contains the USER4 bridge and that the chain number matches the RTL
+  wrapper (`CHAIN=4` on the Arty reference top).
+
 ### `ValueError: burst length 32 exceeds FIFO_DEPTH-1=15`
 
 **Cause**: the bridge was synthesized with `FIFO_DEPTH=16`, so the

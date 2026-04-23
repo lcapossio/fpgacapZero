@@ -186,6 +186,17 @@ and **probe mux sel** when the mux is only one slice wide.  Tooltips
 on disabled widgets explain why.  The **ELA identity** dock shows
 the same capability flags in prose.
 
+**First-connect pre/post defaults**: on the very first hardware connection
+in a session, if the pretrigger and posttrigger spinners are still at
+zero (never edited), the GUI automatically sets sensible defaults:
+`pretrigger = min(8, segment_depth - 1)` and
+`posttrigger = segment_depth - 1 - pretrigger`.  This gives a usable
+capture window immediately without the user having to think about
+buffer sizing.  The defaults are applied once per connection using a
+`QSignalBlocker` so the panel does not emit spurious change signals.
+Subsequent connects (after Disconnect and re-Connect) leave the
+user's values intact.
+
 ### Capture history panel
 
 Shows a table of every capture from this session, in reverse

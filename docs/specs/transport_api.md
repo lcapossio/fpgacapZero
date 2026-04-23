@@ -11,7 +11,16 @@ class Transport(ABC):
     def read_reg(addr: int) -> int
     def write_reg(addr: int, value: int) -> None
     def read_block(addr: int, words: int) -> list[int]
+
+    # Optional — implement for timestamp burst readback acceleration:
+    def read_timestamp_block(addr: int, words: int, timestamp_width: int) -> list[int]
 ```
+
+`read_timestamp_block` is an **optional extension method**, not part of the ABC
+contract.  The host checks for it via `getattr(transport, "read_timestamp_block",
+None)` and falls back to `read_block` if absent.  Transports that support the
+USER2 burst path should implement it to avoid the slow per-word USER1 readback
+path for timestamp data.
 
 ## Implementations
 
@@ -23,6 +32,10 @@ class Transport(ABC):
 - Burst `read_block` via USER2 256-bit DR: `floor(256/SAMPLE_W)` samples per
   scan.  How fast samples stream depends on the adapter and how much
   per-scan overhead the transport adds (batched vs single DR).
+- `read_timestamp_block(addr, words, timestamp_width)` — timestamp burst via the
+  same USER2 path.  Sets `BURST_PTR` bit[31]=1 to select the timestamp BRAM.
+  No priming scan required; the first 256-bit capture already holds valid data.
+  Returns `words` integers of width `timestamp_width` bits each.
 - Falls back to USER1 single-sequence pipelined reads for non-DATA addresses.
 - All operations within a read use a single `jtag sequence` object to prevent
   stale-read bugs from inter-sequence timing gaps.

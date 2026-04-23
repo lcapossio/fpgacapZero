@@ -5,8 +5,12 @@
 
 // Asynchronous FIFO with parameterized vendor implementation.
 //
-// USE_BEHAV_ASYNC_FIFO=1 (default): portable behavioral gray-coded pointer FIFO.
-// USE_BEHAV_ASYNC_FIFO=0:           vendor primitive (Xilinx xpm_fifo_async).
+// ASYNC_FIFO_IMPL=0: portable behavioral gray-coded pointer FIFO.
+// ASYNC_FIFO_IMPL=1: AMD/Xilinx xpm_fifo_async.
+//
+// USE_BEHAV_ASYNC_FIFO is kept for compatibility with older wrappers:
+//   1 -> ASYNC_FIFO_IMPL=0
+//   0 -> ASYNC_FIFO_IMPL=1
 //
 // Read mode is first-word fall-through (FWFT): rd_data is valid
 // whenever rd_empty=0, without asserting rd_en first.  Asserting
@@ -19,12 +23,14 @@
 // Parameters:
 //   DATA_W  - data width in bits (default 32)
 //   DEPTH   - FIFO depth in entries, must be power of 2 (default 16)
-//   USE_BEHAV_ASYNC_FIFO - 1=portable behavioral (default), 0=vendor primitive
+//   USE_BEHAV_ASYNC_FIFO - legacy selector, 1=behavioral, 0=XPM
+//   ASYNC_FIFO_IMPL      - 0=behavioral, 1=AMD/Xilinx XPM
 
 module fcapz_async_fifo #(
     parameter DATA_W  = 32,
     parameter DEPTH   = 16,
-    parameter USE_BEHAV_ASYNC_FIFO = 1
+    parameter USE_BEHAV_ASYNC_FIFO = 1,
+    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1)
 ) (
     // Write side (wr_clk domain)
     input  wire                      wr_clk,
@@ -32,6 +38,7 @@ module fcapz_async_fifo #(
     input  wire                      wr_en,
     input  wire [DATA_W-1:0]         wr_data,
     output wire                      wr_full,
+    output wire                      wr_rst_busy,
 
     // Read side (rd_clk domain)
     input  wire                      rd_clk,
@@ -39,6 +46,7 @@ module fcapz_async_fifo #(
     input  wire                      rd_en,
     output wire [DATA_W-1:0]         rd_data,
     output wire                      rd_empty,
+    output wire                      rd_rst_busy,
 
     // Approximate count in rd_clk domain
     output wire [$clog2(DEPTH):0]    rd_count,
@@ -65,7 +73,7 @@ module fcapz_async_fifo #(
     end
 
 generate
-if (!USE_BEHAV_ASYNC_FIFO) begin : gen_xpm
+if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
     // =================================================================
     //  Vendor primitive (Xilinx XPM) implementation
     // =================================================================
@@ -99,8 +107,8 @@ if (!USE_BEHAV_ASYNC_FIFO) begin : gen_xpm
         .rd_data_count  (xpm_rd_count),
 
         .wr_data_count  (xpm_wr_count),
-        .wr_rst_busy    (),
-        .rd_rst_busy    (),
+        .wr_rst_busy    (wr_rst_busy),
+        .rd_rst_busy    (rd_rst_busy),
         .almost_full    (),
         .almost_empty   (),
         .data_valid     (),
@@ -215,6 +223,8 @@ end else begin : gen_behavioral
     // ---- Approximate count (wr_clk domain) -------------------------
     wire [AW:0] rptr_bin_wr = gray2bin(rptr_sync2_w);
     assign wr_count = wptr_bin - rptr_bin_wr;
+    assign wr_rst_busy = 1'b0;
+    assign rd_rst_busy = 1'b0;
 
     // ---- Initial values (for simulation) ---------------------------
     initial begin

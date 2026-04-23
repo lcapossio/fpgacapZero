@@ -368,7 +368,99 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         tcl = t._burst_read_tcl(0x0100, 0, 4)
 
         self.assertEqual(tcl.count(f"delay {t.READ_IDLE_CYCLES}"), 5)
-        self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 5)
+        # xsdb 2025.2 requires `delay` to follow IDLE/PAUSE/RESET, so every
+        # capture-and-delay pair parks the TAP in IDLE. The final scan has no
+        # trailing delay and stays in DRUPDATE.
+        self.assertEqual(tcl.count("drshift -state IDLE -capture"), 4)
+        self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 1)
+
+    def test_default_chain_shape_emits_6bit_ir_and_49bit_dr(self):
+        """Default (7-series single-device) chain stays at -hex 6 / -bits 49."""
+        t = XilinxHwServerTransport()
+        self.assertEqual(t.ir_length, 6)
+        self.assertEqual(t.dr_extra_bits, 0)
+        tcl = t._read_reg_tcl(t._frame_bits(addr=0x10, data=0, write=False))
+        self.assertIn("-hex 6 02", tcl)
+        self.assertIn("-bits 49", tcl)
+        self.assertNotIn("-bits 50", tcl)
+
+    def test_zynq_us_plus_chain_shape_emits_16bit_ir_and_50bit_dr(self):
+        """Zynq US+ MPSoC: 16-bit chain IR + 1 BYPASS bit = -hex 16 / -bits 50."""
+        t = XilinxHwServerTransport(
+            ir_length=16,
+            dr_extra_bits=1,
+            dr_extra_position="tdo",
+            ir_table={1: 0x824F, 2: 0x825F, 3: 0x826F, 4: 0x827F},
+        )
+        tcl = t._read_reg_tcl(t._frame_bits(addr=0x10, data=0, write=False))
+        # IR = 16 bits, opcode formatted as 4 hex digits (0x824F = USER1+BYPASS).
+        self.assertIn("-hex 16 824f", tcl)
+        # DR = fcapz 49 + 1 BYPASS = 50 bits; 50-char payload.
+        self.assertIn("-bits 50", tcl)
+        # The padded frame ("0" + 49-char fcapz) must appear in both drshifts.
+        padded_frame = "0" + t._frame_bits(addr=0x10, data=0, write=False)
+        self.assertEqual(len(padded_frame), 50)
+        self.assertEqual(tcl.count(padded_frame), 2)
+
+    def test_chain_shape_parser_strips_bypass_bit(self):
+        """_parse_bits_u32 reads from offset dr_extra_bits when bypass is TDO-side."""
+        t = XilinxHwServerTransport(
+            ir_length=16, dr_extra_bits=1, dr_extra_position="tdo",
+            ir_table={1: 0x824F},
+        )
+        # Build a 50-bit captured token: 1 BYPASS bit + 32-bit value 0xDEADBEEF
+        # padded to fill the 49-bit fcapz frame width.
+        value = 0xDEADBEEF
+        data_bits = "".join("1" if (value >> i) & 1 else "0" for i in range(32))
+        token = "1" + data_bits + ("0" * 17)  # bypass + data + addr/rnw filler
+        self.assertEqual(len(token), 50)
+        parsed = t._parse_bits_u32(token)
+        self.assertEqual(parsed, value)
+
+    def test_register_ir_mode_emits_named_irshift(self):
+        """use_register_ir=True emits '-register user{N}' instead of '-hex'."""
+        t = XilinxHwServerTransport(use_register_ir=True)
+        t._active_chain = 1
+        tcl = t._read_reg_tcl(t._frame_bits(0x10, 0, False))
+        self.assertIn("-register user1", tcl)
+        self.assertNotIn("-hex", tcl)
+        # DR should be standard 49 bits (no extra)
+        self.assertIn("-bits 49", tcl)
+        self.assertNotIn("-bits 50", tcl)
+
+    def test_register_ir_write_uses_drupdate(self):
+        """Writes in register mode use -state DRUPDATE + split sequence."""
+        t = XilinxHwServerTransport(use_register_ir=True)
+        t._active_chain = 1
+        tcl = t._write_reg_tcl(t._frame_bits(0x14, 0xCAFE, True))
+        self.assertIn("-register user1", tcl)
+        self.assertIn("-state DRUPDATE", tcl)
+        self.assertIn("state IDLE", tcl)
+        self.assertIn(f"delay {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+
+    def test_register_ir_forces_dr_extra_bits_zero(self):
+        """use_register_ir overrides dr_extra_bits to 0."""
+        t = XilinxHwServerTransport(
+            use_register_ir=True, dr_extra_bits=1, dr_extra_position="tdi",
+        )
+        self.assertEqual(t.dr_extra_bits, 0)
+        self.assertTrue(t.use_register_ir)
+
+    def test_register_ir_select_chain_accepts_1_to_4(self):
+        t = XilinxHwServerTransport(use_register_ir=True)
+        for ch in (1, 2, 3, 4):
+            t.select_chain(ch)
+            self.assertEqual(t._active_chain, ch)
+        with self.assertRaises(ValueError):
+            t.select_chain(5)
+
+    def test_chain_shape_validation(self):
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(ir_length=0)
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(dr_extra_bits=-1)
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(dr_extra_position="middle")
 
     def test_frame_bits_write_flag(self):
         """_frame_bits() sets bit 48 (write flag) correctly."""

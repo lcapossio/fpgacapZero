@@ -46,6 +46,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Arty / EJTAG-AXI host path:** `EjtagAxiController` now prefers
+  batched USER4 raw-scan sequences for bridge probe, single
+  transactions, block traffic, and bursts when running over Xilinx
+  `hw_server`.  On the Arty A7 reference setup, isolated USER4 raw
+  scans could return all-zero TDO even though the bridge was alive;
+  batching the same USER4 traffic is hardware-validated and fixes the
+  false `Bad BRIDGE_ID: 0x00000000` failure.
+- **Arty reference EIO:** USER3 `probe_in` now exposes
+  `{btn[3:0], slow_counter[3:0]}` where `slow_counter` increments once
+  per second, and the Arty EIO hardware test now checks that slower
+  observable behavior directly.
 - **GUI / EIO:** Probe UI stays disabled until **Attach EIO**; **All outputs on**
   / **All outputs off** buttons write the full output width to all 1s or all 0s;
   output checkboxes sync from hardware readback
@@ -91,6 +102,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- [docs/07_ejtag_axi_bridge.md](docs/07_ejtag_axi_bridge.md),
+  [docs/14_transports.md](docs/14_transports.md), and
+  [docs/17_troubleshooting.md](docs/17_troubleshooting.md) now note the
+  Arty / `hw_server` USER4 batching behavior for EJTAG-AXI; 
+  [docs/06_eio_core.md](docs/06_eio_core.md) reflects the reference
+  design's 1 Hz EIO counter nibble.
 - README and manual resource tables refreshed against Vivado 2025.2
   synthesis reports (`scripts/resource_comparison.tcl` harness + Apr 2026
   `arty_a7_top` place & route): corrected baseline slice LUTs (~1,595 vs

@@ -223,6 +223,13 @@ The full pipeline: `wait_done()`, read back the captured samples
 `CaptureResult`.  Raises `TimeoutError` if the trigger never fires
 within `timeout` seconds.
 
+When `TIMESTAMP_W > 0`, timestamps are read via
+`transport.read_timestamp_block()` if the transport implements that
+method (writes `BURST_PTR[31]=1` to switch the USER2 burst engine to
+the timestamp BRAM).  If the method is absent, `Analyzer` falls back
+to `read_block()` over USER1, which is correct but slower.
+`XilinxHwServerTransport` always implements the fast path.
+
 ```python
 a.arm()
 result = a.capture(timeout=10.0)

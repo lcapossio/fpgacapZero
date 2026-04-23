@@ -677,16 +677,18 @@ class TestEioReadWrite(unittest.TestCase):
         self.eio.close()
 
     def test_read_counter(self):
-        """probe_in is the free-running 8-bit counter — should be non-zero."""
+        """probe_in low nibble is the 1 Hz EIO counter and should advance."""
         import time
-        time.sleep(0.01)  # let counter run
-        val = self.eio.read_inputs()
-        # Counter is always running; two reads should differ
-        time.sleep(0.001)
-        val2 = self.eio.read_inputs()
-        # At least one should be non-zero (counter wraps quickly at 100MHz)
-        self.assertTrue(val != 0 or val2 != 0,
-                        f"Counter stuck at 0: val={val}, val2={val2}")
+        start = self.eio.read_inputs() & 0x0F
+        deadline = time.time() + 2.5
+        seen = [start]
+        while time.time() < deadline:
+            time.sleep(0.25)
+            cur = self.eio.read_inputs() & 0x0F
+            seen.append(cur)
+            if cur != start:
+                return
+        self.fail(f"1 Hz EIO counter did not advance: samples={seen}")
 
     def test_write_read_outputs(self):
         """Write a value to probe_out and read it back."""

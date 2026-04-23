@@ -3,80 +3,67 @@
 
 `timescale 1ns/1ps
 
-// fpgacapZero ELA wrapper for Xilinx 7-series / UltraScale.
+// fpgacapZero ELA wrapper for Microchip PolarFire (and PolarFire SoC,
+// SmartFusion2, IGLOO2 — all share the same UJTAG primitive).
 //
-// Single-instantiation wrapper: bundles the ELA core, register interface,
-// burst read engine, and two BSCANE2 TAP primitives (USER1 + USER2).
+// PolarFire UJTAG provides 2 user instructions on a single primitive:
+//   USER1 → control (49-bit register interface)
+//   USER2 → burst data readout (256-bit DR)
 //
-// Optional EIO: set EIO_EN=1 to include an Embedded I/O core on the
-// same CTRL_CHAIN register bus via address mux.  EIO registers appear
-// at host offset 0x8000 (the mux strips bit 15 before presenting to
-// the EIO core, which sees its own 0x0000-based address space).  Use
-// this on chains where the host toolchain only reliably reaches
-// USER1 (e.g. Zynq UltraScale+ MPSoC with default xsdb/hw_server
-// chain dispatch), or any design with tight BSCAN-primitive budget.
+// Only ONE UJTAG instance is allowed per device, so this wrapper
+// CANNOT coexist with fcapz_eio_polarfire (standalone) — to use ELA
+// and EIO together, set EIO_EN=1 on this wrapper to mux EIO onto
+// USER1 alongside the ELA control bus (EIO registers appear at
+// offset 0x8000 from the host's perspective).
 //
 // Usage:
-//   // ELA only (default)
-//   fcapz_ela_xilinx7 #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
-//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
-//       .trigger_in(1'b0), .trigger_out()
+//   // ELA only
+//   fcapz_ela_polarfire #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
+//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals)
 //   );
 //
-//   // ELA + EIO combined on USER1
-//   fcapz_ela_xilinx7 #(
-//       .SAMPLE_W(8), .DEPTH(1024),
+//   // ELA + EIO combined
+//   fcapz_ela_polarfire #(.SAMPLE_W(8), .DEPTH(1024),
 //       .EIO_EN(1), .EIO_IN_W(32), .EIO_OUT_W(32)
 //   ) u_ela (
 //       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
-//       .trigger_in(1'b0), .trigger_out(),
 //       .eio_probe_in(observe), .eio_probe_out(drive)
 //   );
 
-module fcapz_ela_xilinx7 #(
-    parameter SAMPLE_W    = 8,
-    parameter DEPTH       = 1024,
-    parameter TRIG_STAGES = 1,
-    parameter STOR_QUAL   = 0,
-    parameter INPUT_PIPE  = 0,
+module fcapz_ela_polarfire #(
+    parameter SAMPLE_W     = 8,
+    parameter DEPTH        = 1024,
+    parameter TRIG_STAGES  = 1,
+    parameter STOR_QUAL    = 0,
+    parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
-    parameter DECIM_EN    = 0,
-    parameter EXT_TRIG_EN = 0,
-    parameter TIMESTAMP_W = 0,
-    parameter NUM_SEGMENTS = 1,
-    parameter PROBE_MUX_W = 0,
-    parameter BURST_W     = 256,
-    parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
-    parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
-    // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)
-    parameter EIO_EN      = 0,
-    parameter EIO_IN_W    = 1,
-    parameter EIO_OUT_W   = 1
+    parameter TIMESTAMP_W  = 0,
+    parameter BURST_W      = 256,
+    // PolarFire UJTAG IR opcodes (override if your BSDL differs).
+    parameter [7:0] IR_USER1 = 8'h10,
+    parameter [7:0] IR_USER2 = 8'h11,
+    // Optional EIO (shares USER1 via address mux)
+    parameter EIO_EN       = 0,
+    parameter EIO_IN_W     = 1,
+    parameter EIO_OUT_W    = 1
 ) (
-    input  wire                          sample_clk,
-    input  wire                          sample_rst,
-    input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
-    // External trigger I/O
-    input  wire                          trigger_in,
-    output wire                          trigger_out,
-    // EIO ports (active when EIO_EN=1; ignored / tied-off otherwise)
-    input  wire [EIO_IN_W-1:0]           eio_probe_in,
-    output wire [EIO_OUT_W-1:0]          eio_probe_out
+    input  wire                              sample_clk,
+    input  wire                              sample_rst,
+    input  wire [SAMPLE_W*NUM_CHANNELS-1:0]  probe_in,
+    // EIO ports (active when EIO_EN=1)
+    input  wire [EIO_IN_W-1:0]               eio_probe_in,
+    output wire [EIO_OUT_W-1:0]              eio_probe_out
 );
 
     localparam PTR_W = $clog2(DEPTH);
-    // Segment depth for burst read ring-wrap (equals DEPTH when unsegmented).
-    localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
 
-    // TAP signals -- control (USER1)
+    // TAP signals — single UJTAG primitive exposing both chains
     wire tap1_tck, tap1_tdi, tap1_tdo;
     wire tap1_capture, tap1_shift, tap1_update, tap1_sel;
-
-    // TAP signals -- burst data (USER2)
     wire tap2_tck, tap2_tdi, tap2_tdo;
     wire tap2_capture, tap2_shift, tap2_update, tap2_sel;
 
-    // Register bus
+    // Register bus (from jtag_reg_iface)
     wire        jtag_clk, jtag_rst;
     wire        jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
@@ -90,20 +77,20 @@ module fcapz_ela_xilinx7 #(
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
 
-    // ---- TAP wrappers ----
-    jtag_tap_xilinx7 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
-        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
-        .capture(tap1_capture), .shift(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel)
+    // ---- TAP wrapper (single UJTAG, dual-chain view) ----
+    jtag_tap_polarfire #(
+        .IR_USER1(IR_USER1),
+        .IR_USER2(IR_USER2)
+    ) u_tap (
+        .ch1_tck(tap1_tck), .ch1_tdi(tap1_tdi), .ch1_tdo(tap1_tdo),
+        .ch1_capture(tap1_capture), .ch1_shift(tap1_shift),
+        .ch1_update(tap1_update), .ch1_sel(tap1_sel),
+        .ch2_tck(tap2_tck), .ch2_tdi(tap2_tdi), .ch2_tdo(tap2_tdo),
+        .ch2_capture(tap2_capture), .ch2_shift(tap2_shift),
+        .ch2_update(tap2_update), .ch2_sel(tap2_sel)
     );
 
-    jtag_tap_xilinx7 #(.CHAIN(DATA_CHAIN)) u_tap_data (
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
-        .capture(tap2_capture), .shift(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel)
-    );
-
-    // ---- Register interface ----
+    // ---- Register interface (USER1) ----
     jtag_reg_iface u_reg (
         .arst(sample_rst),
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
@@ -138,13 +125,11 @@ module fcapz_ela_xilinx7 #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
-                .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W)
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(trigger_in), .trigger_out(trigger_out),
+                .trigger_in(1'b0), .trigger_out(),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
@@ -167,13 +152,11 @@ module fcapz_ela_xilinx7 #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
-                .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W)
+                .TIMESTAMP_W(TIMESTAMP_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(trigger_in), .trigger_out(trigger_out),
+                .trigger_in(1'b0), .trigger_out(),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
@@ -188,10 +171,10 @@ module fcapz_ela_xilinx7 #(
         end
     endgenerate
 
-    // ---- Burst read engine ----
+    // ---- Burst read engine (USER2) ----
     jtag_burst_read #(
         .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
+        .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
         .arst(sample_rst),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),

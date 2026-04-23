@@ -32,6 +32,7 @@ features they expose.
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
 | Gowin GW1N / GW2A | `_gowin` | ❌ |
+| Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)
@@ -223,12 +224,15 @@ module fcapz_ela_xilinx7 #(
 | `NUM_CHANNELS` | int | 1..256 | Channel mux: lets one ELA observe `N` separate buses, one selected at arm time.  Probe input width becomes `SAMPLE_W * NUM_CHANNELS` bits. |
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
-| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM. |
+| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into both `fcapz_ela` and `jtag_burst_read` so the USER2 burst engine knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
+| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
+| `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
+| `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
 The minimum-area config (every feature off) is the default if you
 omit a parameter.  The reference Arty A7 design uses:
@@ -249,6 +253,66 @@ fcapz_ela_xilinx7 #(
 This is the "everything on" config and what the hardware integration
 tests exercise.  See [chapter 05](05_ela_core.md) for what each
 feature actually does at runtime.
+
+### Combining ELA + EIO on a single USER chain (`EIO_EN=1`)
+
+Two cases to use this mode:
+
+1. **Resource-constrained parts** with only one spare USER chain (ECP5
+   designs with heavy logic, small Lattice / Gowin parts, etc.).
+2. **Zynq UltraScale+ MPSoC (xck26 / xczu*)** — this is the **required**
+   path on MPSoC, not an optional one.  The PL TAP on these parts
+   exposes only USER1 as a reachable chain through xsdb/hw_server at
+   the device-level target (USER2..USER4 either alias to USER1 or put
+   the TAP in BYPASS — see [chapter 14 "Zynq UltraScale+ MPSoC — known
+   limitation: USER1 only"](14_transports.md#zynq-ultrascale-mpsoc--known-limitation-user1-only)).
+   Set `EIO_EN=1` on the ELA wrapper, drop the standalone
+   `fcapz_eio_xilinxus` instance from your top level, and EIO will
+   ride-along on USER1.
+
+The wrapper adds a
+[`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) on the USER1 49-bit
+register bus that splits the 16-bit address space:
+
+| Host-side address | Routed to |
+|---|---|
+| `0x0000..0x7FFF` | ELA control (VERSION, CTRL, trigger regs, …) |
+| `0x8000..0xFFFF` | EIO (bit 15 stripped, EIO sees `0x0000..0x7FFF`) |
+
+```verilog
+fcapz_ela_xilinxus #(
+    .SAMPLE_W(32), .DEPTH(2048), .NUM_CHANNELS(2),
+    .TIMESTAMP_W(32),
+    .EIO_EN(1), .EIO_IN_W(1), .EIO_OUT_W(1)
+) u_ela (
+    .sample_clk   (sys_clk),
+    .sample_rst   (~aresetn),
+    .probe_in     (ela_channels),
+    .trigger_in   (1'b0),
+    .trigger_out  (),
+    .eio_probe_in (1'b0),
+    .eio_probe_out(cam_power)     // e.g. camera power-enable GPIO
+);
+```
+
+Host-side, pass `base_addr=0x8000` when constructing the EIO
+controller so every register access gets bit 15 OR'd in:
+
+```python
+from fcapz import EioController
+eio = EioController(transport, chain=1, base_addr=0x8000)
+eio.connect()    # reads VERSION at host address 0x8000 → mux routes to EIO 0x0000
+eio.write_outputs(0x1)
+```
+
+**Limits:**
+- The ELA burst readback still uses USER2 (256-bit DR) — that stays on
+  its own chain; only the 49-bit register path is shared.
+- You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
+  `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
+  USER chain).
+- A future third core on the same chain (EJTAG-AXI/UART) would need a
+  wider address mux or a hierarchical `fcapz_regbus_mux`.
 
 ## EIO wrapper parameter reference
 

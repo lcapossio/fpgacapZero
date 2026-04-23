@@ -20,8 +20,8 @@ signals to this value".  Think of it as the in-system equivalent of
 sticking a multimeter probe on a signal, except for digital values
 and with the ability to drive a signal as well as observe it.
 
-The reference Arty A7 design wires `probe_in` to a counter and a
-button, and wires `probe_out` to the LEDs.  After programming, you
+The reference Arty A7 design wires `probe_in` to the pushbuttons plus
+a 1 Hz low-nibble counter, and wires `probe_out` to the LEDs.  After programming, you
 can:
 
 ```bash
