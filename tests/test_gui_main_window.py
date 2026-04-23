@@ -180,6 +180,7 @@ def test_connect_and_disconnect_mocked(qtbot: Any, tmp_path: Path) -> None:
 
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
         qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+        assert "not programmed on connect" in w._conn._status.text()
 
         qtbot.mouseClick(_button_with_text(w, "Disconnect"), Qt.MouseButton.LeftButton)
         QApplication.processEvents()

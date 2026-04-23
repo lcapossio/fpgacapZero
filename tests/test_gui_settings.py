@@ -166,7 +166,6 @@ class TestTriggerHistory(unittest.TestCase):
             stor_qual_mode=0,
             stor_qual_value=0,
             stor_qual_mask=0,
-            startup_arm=False,
             trigger_holdoff=0,
             trigger_delay=0,
         )
@@ -215,7 +214,6 @@ class TestTriggerHistoryEntry(unittest.TestCase):
             stor_qual_mode=0,
             stor_qual_value=0,
             stor_qual_mask=0,
-            startup_arm=True,
             trigger_holdoff=9,
             trigger_delay=3,
         )
@@ -229,7 +227,7 @@ class TestTriggerHistoryEntry(unittest.TestCase):
         self.assertEqual(d["ext_trigger_mode"], "or")
         self.assertEqual(d["probes"], "lo:4:0")
         self.assertEqual(d["probe_sel"], 2)
-        self.assertTrue(d["startup_arm"])
+        self.assertNotIn("startup_arm", d)
         self.assertEqual(d["trigger_holdoff"], 9)
         self.assertEqual(d["trigger_delay"], 3)
         self.assertEqual(d["trigger_sequence"], [])
@@ -267,7 +265,6 @@ class TestTriggerHistoryEntry(unittest.TestCase):
             stor_qual_mode=0,
             stor_qual_value=0,
             stor_qual_mask=0,
-            startup_arm=False,
             trigger_holdoff=0,
             trigger_delay=0,
         )

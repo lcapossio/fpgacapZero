@@ -228,9 +228,6 @@ class CapturePanel(QGroupBox):
         self._stor_val = QLineEdit("0")
         self._stor_mask = QLineEdit("0")
 
-        self._startup_arm = QCheckBox("Arm after reset")
-        self._startup_arm.setObjectName("fcapz_capture_startup_arm")
-
         self._trig_holdoff = QSpinBox()
         self._trig_holdoff.setObjectName("fcapz_capture_trig_holdoff")
         self._trig_holdoff.setRange(0, 65535)
@@ -326,7 +323,6 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Storage qual mode", self._stor_mode)
         form_adv.addRow("Storage qual value", self._stor_val)
         form_adv.addRow("Storage qual mask", self._stor_mask)
-        form_adv.addRow("Startup arm", self._startup_arm)
         form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
         form_adv.addRow("Probes", self._probes)
@@ -607,8 +603,6 @@ class CapturePanel(QGroupBox):
                     spin.setValue(int(entry[key]))
                 except (TypeError, ValueError):
                     spin.setValue(default)
-        if "startup_arm" in entry:
-            self._startup_arm.setChecked(bool(entry["startup_arm"]))
         ext = entry.get("ext_trigger_mode", "disabled")
         if isinstance(ext, int):
             ext = {0: "disabled", 1: "or", 2: "and"}.get(ext, "disabled")
@@ -989,7 +983,7 @@ class CapturePanel(QGroupBox):
             stor_qual_mode=stor_m,
             stor_qual_value=sqv,
             stor_qual_mask=sqm,
-            startup_arm=bool(self._startup_arm.isChecked()),
+            startup_arm=False,
             trigger_holdoff=int(self._trig_holdoff.value()),
             trigger_delay=int(self._trig_delay.value()),
         )

@@ -58,7 +58,8 @@ class ConnectionPanel(QGroupBox):
         self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)
         self._program_on_connect.setToolTip(
             "When checked, Connect runs XSDB fpga -file on the path below. "
-            "Uncheck to attach over JTAG only (FPGA must already hold the right image)."
+            "Uncheck to attach over JTAG only (FPGA must already hold the right image, "
+            "and captures will reflect whatever image is already loaded)."
         )
         self._program_on_connect.stateChanged.connect(lambda _s: self._refresh_timeout_row_state())
 
