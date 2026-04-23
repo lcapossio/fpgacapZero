@@ -55,6 +55,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 # RTL and design sources that feed the bitstream (must match build_arty.tcl)
 _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "reset_sync.v",
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",

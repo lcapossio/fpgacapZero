@@ -278,6 +278,19 @@ module fcapz_ela #(
     reg                startup_arm_sync1, startup_arm_sync2;
     reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
     reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
+    reg [3:0]          sq_mode_sync1, sq_mode_sync2;
+    reg [SAMPLE_W-1:0] sq_value_sync1, sq_value_sync2;
+    reg [SAMPLE_W-1:0] sq_mask_sync1, sq_mask_sync2;
+    reg [31:0]         seq_cfg_sync1     [0:TRIG_STAGES-1];
+    reg [31:0]         seq_cfg_sync2     [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_sync1 [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_sync2 [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_sync1  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_sync2  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_sync1 [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_sync2 [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_sync1  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_sync2  [0:TRIG_STAGES-1];
 
     // ---- Channel mux (sample_clk domain) -----------------------------------
     reg [7:0] chan_sel;   // active channel, latched on arm
@@ -665,6 +678,21 @@ module fcapz_ela #(
             startup_arm_sync1 <= (STARTUP_ARM != 0); startup_arm_sync2 <= (STARTUP_ARM != 0);
             trig_holdoff_sync1 <= 0; trig_holdoff_sync2 <= 0;
             trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
+            sq_mode_sync1     <= 0; sq_mode_sync2     <= 0;
+            sq_value_sync1    <= 0; sq_value_sync2    <= 0;
+            sq_mask_sync1     <= 0; sq_mask_sync2     <= 0;
+            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
+                seq_cfg_sync1[si]     <= 32'h0;
+                seq_cfg_sync2[si]     <= 32'h0;
+                seq_value_a_sync1[si] <= {SAMPLE_W{1'b0}};
+                seq_value_a_sync2[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_a_sync1[si]  <= {SAMPLE_W{1'b0}};
+                seq_mask_a_sync2[si]  <= {SAMPLE_W{1'b0}};
+                seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
+                seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b0}};
+                seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b0}};
+            end
         end else begin
             pretrig_len_sync1  <= jtag_pretrig_len[PTR_W-1:0];
             pretrig_len_sync2  <= pretrig_len_sync1;
@@ -686,6 +714,24 @@ module fcapz_ela #(
             trig_holdoff_sync2 <= trig_holdoff_sync1;
             trig_delay_sync1  <= jtag_trig_delay;
             trig_delay_sync2  <= trig_delay_sync1;
+            sq_mode_sync1     <= jtag_sq_mode[3:0];
+            sq_mode_sync2     <= sq_mode_sync1;
+            sq_value_sync1    <= jtag_sq_value_w;
+            sq_value_sync2    <= sq_value_sync1;
+            sq_mask_sync1     <= jtag_sq_mask_w;
+            sq_mask_sync2     <= sq_mask_sync1;
+            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
+                seq_cfg_sync1[si]     <= jtag_seq_cfg[si];
+                seq_cfg_sync2[si]     <= seq_cfg_sync1[si];
+                seq_value_a_sync1[si] <= jtag_seq_value_a_w[si];
+                seq_value_a_sync2[si] <= seq_value_a_sync1[si];
+                seq_mask_a_sync1[si]  <= jtag_seq_mask_a_w[si];
+                seq_mask_a_sync2[si]  <= seq_mask_a_sync1[si];
+                seq_value_b_sync1[si] <= jtag_seq_value_b_w[si];
+                seq_value_b_sync2[si] <= seq_value_b_sync1[si];
+                seq_mask_b_sync1[si]  <= jtag_seq_mask_b_w[si];
+                seq_mask_b_sync2[si]  <= seq_mask_b_sync1[si];
+            end
         end
     end
 
@@ -740,17 +786,17 @@ module fcapz_ela #(
             trig_value       <= trig_value_sync2;
             trig_mask        <= trig_mask_sync2;
             // Stage-0 compare modes
-            if (jtag_seq_cfg[0][9:0] != 10'd0) begin
-                trig_cmp_mode_a <= jtag_seq_cfg[0][3:0];
-                trig_cmp_mode_b <= jtag_seq_cfg[0][7:4];
-                trig_combine    <= jtag_seq_cfg[0][9:8];
+            if (seq_cfg_sync2[0][9:0] != 10'd0) begin
+                trig_cmp_mode_a <= seq_cfg_sync2[0][3:0];
+                trig_cmp_mode_b <= seq_cfg_sync2[0][7:4];
+                trig_combine    <= seq_cfg_sync2[0][9:8];
             end else begin
                 trig_cmp_mode_a <= trig_mode_sync2[1] ? 4'd8 : 4'd0;
                 trig_cmp_mode_b <= (trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
                 trig_combine    <= (trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
             end
-            trig_value_b     <= jtag_seq_value_b_w[0];
-            trig_mask_b      <= jtag_seq_mask_b_w[0];
+            trig_value_b     <= seq_value_b_sync2[0];
+            trig_mask_b      <= seq_mask_b_sync2[0];
             // Channel select (clamped to valid range)
             chan_sel         <= (chan_sel_sync2 < NUM_CHANNELS) ? chan_sel_sync2 : 8'h0;
             // Probe mux select (clamped when enabled)
@@ -759,10 +805,10 @@ module fcapz_ela #(
             else
                 probe_sel   <= 8'h0;
             // Storage qualification
-            sq_enable        <= (STOR_QUAL != 0) && (jtag_sq_mode[3:0] != 0);
-            sq_cmp_mode      <= jtag_sq_mode[3:0];
-            sq_value         <= jtag_sq_value_w;
-            sq_mask          <= jtag_sq_mask_w;
+            sq_enable        <= (STOR_QUAL != 0) && (sq_mode_sync2 != 0);
+            sq_cmp_mode      <= sq_mode_sync2;
+            sq_value         <= sq_value_sync2;
+            sq_mask          <= sq_mask_sync2;
             // Phase 1: decimation
             decim_ratio      <= jtag_decim;
             // Phase 2: external trigger
@@ -772,16 +818,16 @@ module fcapz_ela #(
             trig_delay       <= trig_delay_sync2;
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_mode_a[si]       <= jtag_seq_cfg[si][3:0];
-                seq_mode_b[si]       <= jtag_seq_cfg[si][7:4];
-                seq_combine[si]      <= jtag_seq_cfg[si][9:8];
-                seq_next_state[si]   <= jtag_seq_cfg[si][10 +: SEQ_STATE_W];
-                seq_is_final[si]     <= jtag_seq_cfg[si][12];
-                seq_count_target[si] <= jtag_seq_cfg[si][31:16];
-                seq_value_a[si]      <= jtag_seq_value_a_w[si];
-                seq_mask_a[si]       <= jtag_seq_mask_a_w[si];
-                seq_value_b[si]      <= jtag_seq_value_b_w[si];
-                seq_mask_b[si]       <= jtag_seq_mask_b_w[si];
+                seq_mode_a[si]       <= seq_cfg_sync2[si][3:0];
+                seq_mode_b[si]       <= seq_cfg_sync2[si][7:4];
+                seq_combine[si]      <= seq_cfg_sync2[si][9:8];
+                seq_next_state[si]   <= seq_cfg_sync2[si][10 +: SEQ_STATE_W];
+                seq_is_final[si]     <= seq_cfg_sync2[si][12];
+                seq_count_target[si] <= seq_cfg_sync2[si][31:16];
+                seq_value_a[si]      <= seq_value_a_sync2[si];
+                seq_mask_a[si]       <= seq_mask_a_sync2[si];
+                seq_value_b[si]      <= seq_value_b_sync2[si];
+                seq_mask_b[si]       <= seq_mask_b_sync2[si];
             end
         end
     end

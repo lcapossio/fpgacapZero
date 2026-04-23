@@ -26,6 +26,7 @@ TESTBENCHES = {
     "fcapz_ela": (
         TB / "fcapz_ela_tb.sv",
         [
+            RTL / "reset_sync.v",
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
             RTL / "trig_compare.v",
@@ -34,6 +35,7 @@ TESTBENCHES = {
     "fcapz_ela_bug_probe": (
         TB / "fcapz_ela_bug_probe_tb.sv",
         [
+            RTL / "reset_sync.v",
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
             RTL / "trig_compare.v",
@@ -48,6 +50,7 @@ TESTBENCHES = {
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
+            RTL / "reset_sync.v",
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
             RTL / "trig_compare.v",
@@ -64,6 +67,7 @@ DEFAULT_TESTBENCHES = [
 
 LINT_TARGETS = [
     RTL / "dpram.v",
+    RTL / "reset_sync.v",
     RTL / "trig_compare.v",
     RTL / "jtag_reg_iface.v",
     RTL / "jtag_burst_read.v",
