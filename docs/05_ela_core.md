@@ -83,7 +83,7 @@ the ELA core.  Anything more complex needs the **trigger sequencer**.
 
 When you build the ELA with `TRIG_STAGES=2..4`, the core gets a
 multi-stage state machine where each stage has **two comparators
-(A and B)** with one of 9 compare modes each, and a combine rule
+(A and B)** with a selectable compare mode each, and a combine rule
 between A and B.
 
 The sequencer is the most powerful trigger feature in fcapz.  It
@@ -97,16 +97,21 @@ or
 > "Trigger only after seeing `start` go HIGH AND `stall` go LOW,
 > followed by `error` going HIGH within the next 100 cycles"
 
-### The 9 compare modes
+### Compare modes
+
+The default RTL build keeps the timing-critical comparator lightweight:
+EQ, NEQ, RISING, FALLING, and CHANGED are enabled. Relational modes
+LT, GT, LEQ, and GEQ are available when the ELA is instantiated with
+`REL_COMPARE=1`.
 
 | Code | Mode | Operation |
 |---|---|---|
 | 0 | EQ | `(probe & mask) == (value & mask)` |
 | 1 | NEQ | `(probe & mask) != (value & mask)` |
-| 2 | LT | `(probe & mask) <  (value & mask)` (unsigned) |
-| 3 | GT | `(probe & mask) >  (value & mask)` (unsigned) |
-| 4 | LEQ | `(probe & mask) <= (value & mask)` |
-| 5 | GEQ | `(probe & mask) >= (value & mask)` |
+| 2 | LT | `(probe & mask) <  (value & mask)` (unsigned, requires `REL_COMPARE=1`) |
+| 3 | GT | `(probe & mask) >  (value & mask)` (unsigned, requires `REL_COMPARE=1`) |
+| 4 | LEQ | `(probe & mask) <= (value & mask)` (requires `REL_COMPARE=1`) |
+| 5 | GEQ | `(probe & mask) >= (value & mask)` (requires `REL_COMPARE=1`) |
 | 6 | RISING | masked bits transition from all-zero to non-zero |
 | 7 | FALLING | masked bits transition from non-zero to all-zero |
 | 8 | CHANGED | any masked bit changed from the previous sample |
@@ -145,7 +150,7 @@ stage0 = SequencerStage(
 )
 
 stage1 = SequencerStage(
-    cmp_mode_a   = 3,           # GT
+    cmp_mode_a   = 3,           # GT, requires REL_COMPARE=1 in RTL
     cmp_mode_b   = 0,
     combine      = 0,           # A only
     next_state   = 0,
@@ -578,10 +583,13 @@ info = analyzer.probe()
 #   "timestamp_width": 32,
 #   "num_segments": 4,
 #   "probe_mux_w": 0,
+#   "compare_caps": 0x1C3,
+#   "compare_modes": [0, 1, 6, 7, 8],
 # }
 ```
 
-The bitfield layout in `FEATURES` is documented in
+The bitfield layout in `FEATURES` and the `COMPARE_CAPS` mode mask at
+`0x00E0` are documented in
 [`specs/register_map.md`](specs/register_map.md), but you should
 prefer reading them via `Analyzer.probe()` which returns the
 decoded form.

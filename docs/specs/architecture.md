@@ -7,8 +7,9 @@ designed to fit on any FPGA with minimal resource usage.
 ## Core Blocks
 - **Probe Input**: User-defined probe buses flattened into `SAMPLE_W` bits (1-256+).
 - **Trigger Block** (`trig_compare.v` × 2 per stage): Dual comparators (A and B)
-  with 9 compare modes (==, !=, <, >, <=, >=, rising, falling, changed) and
-  boolean combine (A-only, B-only, AND, OR). Optional multi-stage sequencer
+  with lightweight default compare modes (==, !=, rising, falling, changed),
+  optional relational modes (<, >, <=, >=), and boolean combine
+  (A-only, B-only, AND, OR). Optional multi-stage sequencer
   (2-4 states) with occurrence counter and state transitions.
   Controlled by `TRIG_STAGES` parameter (1 = simple, 2-4 = sequencer).
 - **Storage Qualification**: Optional condition that filters which samples

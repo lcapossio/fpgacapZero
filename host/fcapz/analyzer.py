@@ -65,6 +65,10 @@ _ADDR_PROBE_MUX_W = 0x00D0
 _ADDR_TRIG_DELAY = 0x00D4
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
+_ADDR_COMPARE_CAPS = 0x00E0
+
+_COMPARE_CAPS_LEGACY_FULL = 0x1FF
+_COMPARE_CAPS_LIGHTWEIGHT = 0x1C3
 
 # Order matches :meth:`Analyzer.probe` field extraction (hw_server pipelined read).
 _ELA_PROBE_ADDRS: tuple[int, ...] = (
@@ -76,6 +80,7 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
     _ADDR_TIMESTAMP_W,
     _ADDR_NUM_SEGMENTS,
     _ADDR_PROBE_MUX_W,
+    _ADDR_COMPARE_CAPS,
 )
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
@@ -116,6 +121,19 @@ class SequencerStage:
         cfg |= (int(self.is_final) & 0x1) << 12
         cfg |= (self.count_target & 0xFFFF) << 16
         return cfg
+
+
+def _compare_mode_available(caps: int, mode: int) -> bool:
+    """Return True when a 4-bit compare mode is implemented by the bitstream."""
+    return 0 <= mode <= 8 and bool(caps & (1 << mode))
+
+
+def _validate_compare_mode(caps: int, mode: int, context: str) -> None:
+    if not _compare_mode_available(caps, mode):
+        raise ValueError(
+            f"{context} compare mode {mode} is not available in this bitstream "
+            f"(COMPARE_CAPS=0x{caps:03X}); rebuild with REL_COMPARE=1 for modes 2-5"
+        )
 
 
 @dataclass
@@ -278,6 +296,7 @@ class Analyzer:
         # Auto-detect hw capabilities
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = hw_features & 0xF  # bits[3:0]
+        hw_compare_caps = int(_read(_ADDR_COMPARE_CAPS)) or _COMPARE_CAPS_LEGACY_FULL
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
 
@@ -325,6 +344,8 @@ class Analyzer:
                     f"only {hw_trig_stages}"
                 )
             for idx, stage in enumerate(config.sequence):
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
@@ -620,7 +641,7 @@ class Analyzer:
 
     def _read_ela_probe_registers_raw(
         self,
-    ) -> tuple[int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int]:
         """Read USER1 ELA identity / feature registers (may be a non-ELA core)."""
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
@@ -633,6 +654,7 @@ class Analyzer:
             timestamp_w = int(vals[5])
             num_segments = max(1, int(vals[6]))
             probe_mux_w = int(vals[7])
+            compare_caps = int(vals[8])
         else:
             _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
             version = int(_vread(_ADDR_VERSION))
@@ -643,6 +665,9 @@ class Analyzer:
             timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
             num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
+            compare_caps = int(self.transport.read_reg(_ADDR_COMPARE_CAPS))
+        if compare_caps == 0:
+            compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
             version,
             sample_w,
@@ -652,6 +677,7 @@ class Analyzer:
             timestamp_w,
             num_segments,
             probe_mux_w,
+            compare_caps,
         )
 
     @staticmethod
@@ -664,6 +690,7 @@ class Analyzer:
         timestamp_w: int,
         num_segments: int,
         probe_mux_w: int,
+        compare_caps: int,
     ) -> Dict:
         core_id = version & 0xFFFF
         return {
@@ -681,6 +708,8 @@ class Analyzer:
             "timestamp_width": timestamp_w,
             "num_segments": num_segments,
             "probe_mux_w": probe_mux_w,
+            "compare_caps": compare_caps,
+            "compare_modes": [m for m in range(9) if _compare_mode_available(compare_caps, m)],
         }
 
     def probe_optional(self) -> Optional[Dict]:
@@ -690,10 +719,12 @@ class Analyzer:
         (EIO, EJTAG-AXI, UART, …) even if the primary USER1 register window does
         not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+            self._read_ela_probe_registers_raw()
+        )
         if (version & 0xFFFF) != _ELA_CORE_ID:
             return None
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
 
     def probe(self) -> Dict:
         """Read the ELA identity and feature registers.
@@ -715,7 +746,9 @@ class Analyzer:
         trigger sequencer depth, 0 if absent), `has_storage_qualification`
         (FEATURES[4]), and the rest of the feature flags.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw = self._read_ela_probe_registers_raw()
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+            self._read_ela_probe_registers_raw()
+        )
         core_id = version & 0xFFFF
         if core_id != _ELA_CORE_ID:
             raise RuntimeError(
@@ -723,4 +756,4 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw)
+        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)

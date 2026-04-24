@@ -23,6 +23,12 @@ SIM  = ROOT / "sim"
 
 # Each entry: (tb_file, [rtl_sources])
 TESTBENCHES = {
+    "trig_compare": (
+        TB / "trig_compare_tb.sv",
+        [
+            RTL / "trig_compare.v",
+        ],
+    ),
     "fcapz_ela": (
         TB / "fcapz_ela_tb.sv",
         [
@@ -59,6 +65,7 @@ TESTBENCHES = {
 }
 
 DEFAULT_TESTBENCHES = [
+    "trig_compare",
     "fcapz_ela",
     "fcapz_ela_bug_probe",
     "fcapz_eio",

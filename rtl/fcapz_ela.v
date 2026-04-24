@@ -19,6 +19,7 @@
 //   INPUT_PIPE   - number of pipeline register stages on probe_in (0 = none)
 //   TIMESTAMP_W  - timestamp counter width (0 = disabled, 32 or 48 = enabled)
 //   NUM_SEGMENTS - number of capture segments (1 = single capture, >1 = segmented)
+//   REL_COMPARE  - 1 enables relational trigger modes (<, >, <=, >=)
 //
 // When NUM_CHANNELS=1, probe_in width is unchanged (backward compatible).
 // All optional features are gated by parameters. The smallest core uses:
@@ -39,7 +40,8 @@ module fcapz_ela #(
     parameter NUM_SEGMENTS = 1,     // capture segments (1 = normal)
     parameter PROBE_MUX_W = 0,      // 0=disabled, >0=total probe width for runtime mux
     parameter STARTUP_ARM = 0,      // 1 = arm automatically after reset/programming
-    parameter DEFAULT_TRIG_EXT = 0  // reset/default external trigger mode
+    parameter DEFAULT_TRIG_EXT = 0, // reset/default external trigger mode
+    parameter REL_COMPARE = 0       // 0=small/faster trigger, 1=enable < > <= >=
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -117,6 +119,7 @@ module fcapz_ela #(
     localparam ADDR_STARTUP_ARM = 16'h00D8;  // RW: [0] auto-arm after reset
     localparam ADDR_TRIG_HOLDOFF = 16'h00DC; // RW: [15:0] ignore triggers for
                                              // sample-clock cycles after arm/re-arm
+    localparam ADDR_COMPARE_CAPS = 16'h00E0; // RO: compare modes implemented
 
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
@@ -175,6 +178,7 @@ module fcapz_ela #(
                                   (EXT_TRIG_EN != 0) ? 1'b1 : 1'b0,
                                   (DECIM_EN != 0) ? 1'b1 : 1'b0,
                                   STOR_QUAL[0], TRIG_STAGES[3:0]};
+    localparam [31:0] COMPARE_CAPS = (REL_COMPARE != 0) ? 32'h0000_01FF : 32'h0000_01C3;
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -497,12 +501,12 @@ module fcapz_ela #(
 
     // Simple trigger: uses stage-0 comparators (backward compatible)
     wire simple_hit_a, simple_hit_b;
-    trig_compare #(.W(SAMPLE_W)) u_simple_a (
+    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_a (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(trig_value), .mask(trig_mask),
         .mode(trig_cmp_mode_a), .hit(simple_hit_a)
     );
-    trig_compare #(.W(SAMPLE_W)) u_simple_b (
+    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_b (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(trig_value_b), .mask(trig_mask_b),
         .mode(trig_cmp_mode_b), .hit(simple_hit_b)
@@ -519,12 +523,12 @@ module fcapz_ela #(
 
     // Sequencer trigger: current stage comparators A and B
     wire seq_hit_a, seq_hit_b;
-    trig_compare #(.W(SAMPLE_W)) u_seq_a (
+    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_a (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(seq_value_a[seq_state]), .mask(seq_mask_a[seq_state]),
         .mode(seq_mode_a[seq_state]), .hit(seq_hit_a)
     );
-    trig_compare #(.W(SAMPLE_W)) u_seq_b (
+    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
         .mode(seq_mode_b[seq_state]), .hit(seq_hit_b)
@@ -567,7 +571,7 @@ module fcapz_ela #(
     wire sq_hit_w;
     generate
         if (STOR_QUAL != 0) begin : g_sq_cmp
-            trig_compare #(.W(SAMPLE_W)) u_sq_cmp (
+            trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_sq_cmp (
                 .probe(active_probe), .probe_prev(probe_prev),
                 .value(sq_value), .mask(sq_mask),
                 .mode(sq_cmp_mode), .hit(sq_hit_w)
@@ -1365,6 +1369,7 @@ module fcapz_ela #(
             ADDR_TRIG_HOLDOFF: jtag_rdata = {16'h0, jtag_trig_holdoff};
             ADDR_TRIG_DELAY:  jtag_rdata = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata = TIMESTAMP_W;
+            ADDR_COMPARE_CAPS: jtag_rdata = COMPARE_CAPS;
             default: begin
                 if (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]) begin
                     ts_word_idx = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;

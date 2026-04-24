@@ -53,6 +53,7 @@ class FakeTransport(Transport):
                 0x003C: 0x0001_0164,  # FEATURES: TRIG_STAGES=4, HAS_DECIM=1, HAS_EXT=1
                 0x00C4: 0,            # TIMESTAMP_W
                 0x00B8: 1,            # NUM_SEGMENTS
+                0x00E0: 0x1FF,        # COMPARE_CAPS: all compare modes
             },
         }
         self._active_chain: int = 1
@@ -233,6 +234,15 @@ class AnalyzerTests(unittest.TestCase):
         transport.regs[0x003C] = int(transport.regs[0x003C]) & ~(1 << 4)
         self.assertFalse(analyzer.probe()["has_storage_qualification"])
 
+    def test_probe_reports_compare_caps(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        transport.regs[0x00E0] = 0x1C3
+        info = analyzer.probe()
+        self.assertEqual(info["compare_caps"], 0x1C3)
+        self.assertEqual(info["compare_modes"], [0, 1, 6, 7, 8])
+
 
 class SequencerTests(unittest.TestCase):
     """Tests for trigger sequencer register writes via configure()."""
@@ -302,6 +312,32 @@ class SequencerTests(unittest.TestCase):
         self.assertEqual(regs[0x005C], 0x80)       # mask_a
         self.assertEqual(regs[0x0060], 0)          # value_b
         self.assertEqual(regs[0x0064], 0xFFFFFFFF) # mask_b
+
+    def test_relational_sequence_mode_requires_compare_capability(self):
+        transport = FakeTransport()
+        transport.regs[0x00E0] = 0x1C3
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[
+                SequencerStage(
+                    cmp_mode_a=3,
+                    combine=0,
+                    is_final=True,
+                    count_target=1,
+                    value_a=0x80,
+                    mask_a=0xFF,
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "REL_COMPARE=1"):
+            analyzer.configure(cfg)
 
     def test_probe_sel_written(self):
         transport = FakeTransport()

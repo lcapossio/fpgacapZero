@@ -39,7 +39,8 @@ module fcapz_ela_gowin #(
     // Optional EIO (shares single chain via address mux)
     parameter EIO_EN       = 0,
     parameter EIO_IN_W     = 1,
-    parameter EIO_OUT_W    = 1
+    parameter EIO_OUT_W    = 1,
+    parameter REL_COMPARE  = 0
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -121,7 +122,7 @@ module fcapz_ela_gowin #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -149,7 +150,7 @@ module fcapz_ela_gowin #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),

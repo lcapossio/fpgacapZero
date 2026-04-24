@@ -42,6 +42,11 @@ _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Oct", 8),
     ("Bin", 2),
 )
+_COMPARE_CAPS_LEGACY_FULL = 0x1FF
+
+
+def _compare_mode_available(caps: int, mode: int) -> bool:
+    return 0 <= mode <= 8 and bool(caps & (1 << mode))
 
 
 def _parse_trigger_value_text(text: str, base: int) -> int:
@@ -121,6 +126,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual: bool = True
         self._hw_probe_mux_w: int = 0
         self._hw_num_segments: int = 1
+        self._hw_compare_caps: int = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy: bool = False
         self._did_apply_first_connect_prepost_defaults: bool = False
 
@@ -364,6 +370,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = True
         self._hw_probe_mux_w = 0
         self._hw_num_segments = 1
+        self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy = False
         self._btn_stop.setEnabled(False)
         self._hw_label.setText(
@@ -858,6 +865,7 @@ class CapturePanel(QGroupBox):
             self._hw_has_storage_qual = True
             self._hw_probe_mux_w = 0
             self._hw_num_segments = 1
+            self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
             self._btn_stop.setEnabled(False)
             self._hw_label.setText(
                 "JTAG connected — no fcapz ELA on USER1. Capture controls stay disabled; "
@@ -882,6 +890,9 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = bool(info.get("has_storage_qualification", True))
         self._hw_probe_mux_w = int(info.get("probe_mux_w", 0))
         self._hw_num_segments = max(1, int(info.get("num_segments", 1)))
+        self._hw_compare_caps = int(info.get("compare_caps", _COMPARE_CAPS_LEGACY_FULL)) or (
+            _COMPARE_CAPS_LEGACY_FULL
+        )
         self._channel.setMaximum(self._hw_num_chan - 1)
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
@@ -966,7 +977,18 @@ class CapturePanel(QGroupBox):
                 )
             sequence = []
             for r in range(n):
-                sequence.append(self._parse_sequencer_row(r))
+                stage = self._parse_sequencer_row(r)
+                if not _compare_mode_available(self._hw_compare_caps, stage.cmp_mode_a):
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator A mode {stage.cmp_mode_a} is not "
+                        "available in this bitstream; rebuild with REL_COMPARE=1 for modes 2-5."
+                    )
+                if not _compare_mode_available(self._hw_compare_caps, stage.cmp_mode_b):
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator B mode {stage.cmp_mode_b} is not "
+                        "available in this bitstream; rebuild with REL_COMPARE=1 for modes 2-5."
+                    )
+                sequence.append(stage)
         return CaptureConfig(
             pretrigger=int(self._pre.value()),
             posttrigger=int(self._post.value()),

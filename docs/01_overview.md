@@ -39,9 +39,9 @@ configuration uses zero overhead for unused features):
 
 - Sample width 1–256 bits per channel.
 - Buffer depth 16 samples to 16 M samples (limited by available BRAM).
-- **2 comparators per trigger stage** with 9 compare modes (`==`,
-  `!=`, `<`, `>`, `<=`, `>=`, rising, falling, changed) and AND/OR
-  combine.
+- **2 comparators per trigger stage** with lightweight default compare modes
+  (`==`, `!=`, rising, falling, changed), optional relational modes
+  (`<`, `>`, `<=`, `>=`), and AND/OR combine.
 - Optional **multi-stage trigger sequencer** (2-4 states with
   occurrence counters and inter-state transitions).
 - Optional **storage qualification** — only store samples that match

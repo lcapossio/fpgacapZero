@@ -23,7 +23,8 @@ module fcapz_ela_intel #(
     parameter TIMESTAMP_W = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
-    parameter DATA_CHAIN  = 2    // BSCANE2 USER chain for burst data
+    parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
+    parameter REL_COMPARE = 0
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -98,7 +99,7 @@ module fcapz_ela_intel #(
         .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
         .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
         .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-        .TIMESTAMP_W(TIMESTAMP_W)
+        .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE)
     ) u_ela (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),

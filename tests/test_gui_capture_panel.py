@@ -146,6 +146,28 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
         self.assertEqual(len(cfg.sequence), 1)
         self.assertEqual(cfg.sequence[0].value_a, 0x10)
 
+    def test_build_capture_config_rejects_unavailable_relational_mode(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {
+                "sample_width": 8,
+                "depth": 1024,
+                "num_channels": 1,
+                "trig_stages": 2,
+                "compare_caps": 0x1C3,
+            },
+        )
+        enable = p.findChild(QCheckBox, "fcapz_capture_seq_enable")
+        self.assertIsNotNone(enable)
+        enable.setChecked(True)
+        table = p.findChild(QTableWidget, "fcapz_capture_seq_table")
+        self.assertIsNotNone(table)
+        cmp_a = table.cellWidget(0, 0)
+        self.assertIsInstance(cmp_a, QSpinBox)
+        cmp_a.setValue(3)
+        with self.assertRaisesRegex(ValueError, "REL_COMPARE=1"):
+            p.build_capture_config()
+
     def test_apply_trigger_history_restores_sequence(self) -> None:
         p = CapturePanel()
         p.set_hw_probe_info(

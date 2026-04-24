@@ -41,7 +41,8 @@ module fcapz_ela_xilinxus #(
     // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)
     parameter EIO_EN      = 0,
     parameter EIO_IN_W    = 1,
-    parameter EIO_OUT_W   = 1
+    parameter EIO_OUT_W   = 1,
+    parameter REL_COMPARE = 0
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -62,7 +63,8 @@ module fcapz_ela_xilinxus #(
         .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
         .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
-        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .BURST_W(BURST_W),
+        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
+        .BURST_W(BURST_W),
         .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
         .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)
     ) u_inner (

@@ -51,9 +51,10 @@ Jump within this page: [↑ Top](#readme-top)
 - **Tiny, parameterizable RTL core** -- ~1,595 slice LUTs + 0.5 BRAM baseline
   (8b × 1024, dual comparators, Vivado 2025.2 synth on xc7a100t);
   configurable sample width (1-256+ bits) and buffer depth (16-16M samples)
-- **Flexible trigger** -- 2 comparators per stage with 9 compare modes
-  (==, !=, <, >, <=, >=, rising, falling, changed), boolean combine
-  (AND/OR), and optional multi-stage sequencer (2-4 states)
+- **Flexible trigger** -- 2 comparators per stage with lightweight default
+  modes (==, !=, rising, falling, changed), optional relational modes
+  (<, >, <=, >=), boolean combine (AND/OR), and optional multi-stage
+  sequencer (2-4 states)
 - **Configurable trigger delay** (`TRIG_DELAY`, 0-65535 sample clocks) --
   shifts the committed trigger sample N cycles after the trigger event
   to compensate for upstream pipeline latency between a cause signal
@@ -525,7 +526,7 @@ from the RTL.
 |---------|:-----------:|:----------:|:------------:|:--------------:|:---------:|:---------:|
 | **Vendor-portable** | Yes | No | No | No | No | Yes |
 | **Open source** | Apache 2.0 | No | No | No | No | BSD |
-| **Trigger modes** | 9 (==,!=,<,>,<=,>=,R,F,changed) | ==, !=, edge | ==, !=, compare | Value + edge | 6 types | Value match |
+| **Trigger modes** | 5 default, 9 with relational option | ==, !=, edge | ==, !=, compare | Value + edge | 6 types | Value match |
 | **Trigger sequencer** | 2-4 stages | 16-state FSM | State-based | 16 levels | Multi-level | Basic |
 | **Dual comparators** | Yes (AND/OR) | Yes | Yes | Yes (TU+TE) | Yes | No |
 | **Storage qualification** | Yes | Yes | Yes | -- | -- | Subsampling |
@@ -542,9 +543,9 @@ from the RTL.
 
 **Key differentiators:**
 
-- **Only vendor-portable option with advanced triggers** — 9 compare modes, dual
-  comparators with boolean combine, and multi-stage sequencer; LiteScope is also
-  portable but offers only basic triggering
+- **Only vendor-portable option with advanced triggers** — dual comparators,
+  optional relational modes, boolean combine, and multi-stage sequencer;
+  LiteScope is also portable but offers only basic triggering
 - **LLM-native host stack** — JSON-RPC server, structured event extraction
   (edges, bursts, frequency), and capture summaries designed for AI-driven debug
 - **Single RTL file per core** — no code generation, no Python build step;
