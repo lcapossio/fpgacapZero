@@ -46,6 +46,7 @@ module fcapz_ela_xilinx7 #(
     parameter NUM_SEGMENTS = 1,
     parameter PROBE_MUX_W = 0,
     parameter STARTUP_ARM = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
@@ -156,7 +157,8 @@ module fcapz_ela_xilinx7 #(
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM)
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -185,7 +187,8 @@ module fcapz_ela_xilinx7 #(
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM)
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),

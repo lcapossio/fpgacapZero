@@ -137,6 +137,36 @@ class TestProbe(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+@unittest.skipIf(_BACKEND != "hw_server", "requires hw_server programming on connect")
+class TestStartupArmGsr(unittest.TestCase):
+    """Configuration-time startup arm validation for the Arty bitstream."""
+
+    def test_bitstream_powers_up_armed_after_gsr(self):
+        """After FPGA programming, STARTUP_ARM=1 should arm without host reset."""
+        t = _make_transport()
+        try:
+            t.connect()
+            self.assertEqual(t.read_reg(0x00D8) & 0x1, 1)
+            self.assertEqual(t.read_reg(0x00B4) & 0x3, 2)
+
+            status = t.read_reg(0x0008)
+            self.assertTrue(
+                status & 0x1,
+                f"expected armed after configuration/GSR, got 0x{status:08X}",
+            )
+            self.assertFalse(
+                status & 0x2,
+                f"unexpected triggered after configuration/GSR, got 0x{status:08X}",
+            )
+            self.assertFalse(
+                status & 0x4,
+                f"unexpected done after configuration/GSR, got 0x{status:08X}",
+            )
+        finally:
+            t.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestRegisterRoundTrip(unittest.TestCase):
     """Write/read-back on writable registers."""
 
@@ -438,9 +468,18 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
 
         self.assertFalse(self.a.wait_done(timeout=0.2, poll_interval=0.01))
         status = self.t.read_reg(0x0008)
-        self.assertTrue(status & 0x1, f"expected still armed after blocked early pulse, got 0x{status:08X}")
-        self.assertFalse(status & 0x2, f"unexpected triggered after blocked early pulse, got 0x{status:08X}")
-        self.assertFalse(status & 0x4, f"unexpected done after blocked early pulse, got 0x{status:08X}")
+        self.assertTrue(
+            status & 0x1,
+            f"expected still armed after blocked early pulse, got 0x{status:08X}",
+        )
+        self.assertFalse(
+            status & 0x2,
+            f"unexpected triggered after blocked early pulse, got 0x{status:08X}",
+        )
+        self.assertFalse(
+            status & 0x4,
+            f"unexpected done after blocked early pulse, got 0x{status:08X}",
+        )
 
     def test_trigger_holdoff_allows_late_armed_edge_pulse(self):
         """A pulse 8 cycles after ARMED should pass when holdoff=4."""

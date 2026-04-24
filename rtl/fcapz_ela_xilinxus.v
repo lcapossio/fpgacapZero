@@ -34,6 +34,7 @@ module fcapz_ela_xilinxus #(
     parameter NUM_SEGMENTS = 1,
     parameter PROBE_MUX_W = 0,
     parameter STARTUP_ARM = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,
     parameter DATA_CHAIN  = 2,
@@ -60,7 +61,8 @@ module fcapz_ela_xilinxus #(
         .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
         .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-        .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM), .BURST_W(BURST_W),
+        .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .BURST_W(BURST_W),
         .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
         .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)
     ) u_inner (

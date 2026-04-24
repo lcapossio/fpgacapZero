@@ -38,7 +38,8 @@ module fcapz_ela #(
     parameter TIMESTAMP_W = 0,      // timestamp width (0=off, 32 or 48)
     parameter NUM_SEGMENTS = 1,     // capture segments (1 = normal)
     parameter PROBE_MUX_W = 0,      // 0=disabled, >0=total probe width for runtime mux
-    parameter STARTUP_ARM = 0       // 1 = arm automatically after reset/programming
+    parameter STARTUP_ARM = 0,      // 1 = arm automatically after reset/programming
+    parameter DEFAULT_TRIG_EXT = 0  // reset/default external trigger mode
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -118,6 +119,7 @@ module fcapz_ela #(
                                              // sample-clock cycles after arm/re-arm
 
     localparam ADDR_DATA_BASE   = 16'h0100;
+    localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
 
     // ---- Parameter assertions (simulation) ------------------------------------
     initial begin
@@ -131,6 +133,8 @@ module fcapz_ela #(
             $error("fcapz_ela: SAMPLE_W must be >= 1");
         if (SAMPLE_W > 256)
             $error("fcapz_ela: SAMPLE_W must be <= 256 (got %0d)", SAMPLE_W);
+        if (DEFAULT_TRIG_EXT < 0 || DEFAULT_TRIG_EXT > 3)
+            $error("fcapz_ela: DEFAULT_TRIG_EXT must be 0-3 (got %0d)", DEFAULT_TRIG_EXT);
     end
 
     // Synthesis-safe upper-bound trap for SAMPLE_W
@@ -352,6 +356,18 @@ module fcapz_ela #(
     reg [15:0] trig_holdoff_count;
     reg        trig_holdoff_active;
     reg        startup_arm_pending;
+
+    // Xilinx GSR loads flip-flop INIT values at configuration time.  Keep the
+    // startup-arm path explicit so a bitstream can come up armed without first
+    // relying on a user reset pulse.
+    initial begin
+        jtag_startup_arm   = (STARTUP_ARM != 0);
+        jtag_trig_ext      = DEFAULT_TRIG_EXT_MODE;
+        startup_arm_pending = (STARTUP_ARM != 0);
+        armed              = 1'b0;
+        triggered          = 1'b0;
+        done               = 1'b0;
+    end
 
     // Phase 1: decimation state (sample domain)
     // When DECIM_EN=0, decim_tick is tied high and all counter logic optimizes away.
@@ -580,7 +596,7 @@ module fcapz_ela #(
             jtag_sq_mask       <= 32'h0;
             jtag_chan_sel      <= 8'h0;
             jtag_decim         <= 24'h0;
-            jtag_trig_ext      <= 2'h0;
+            jtag_trig_ext      <= DEFAULT_TRIG_EXT_MODE;
             jtag_seg_sel       <= {SEG_IDX_W{1'b0}};
             jtag_probe_sel     <= 8'h0;
             jtag_startup_arm   <= (STARTUP_ARM != 0);
@@ -779,7 +795,7 @@ module fcapz_ela #(
             chan_sel         <= 8'h0;
             probe_sel        <= 8'h0;
             decim_ratio      <= 24'h0;
-            ext_trig_mode    <= 2'h0;
+            ext_trig_mode    <= DEFAULT_TRIG_EXT_MODE;
             trig_delay       <= 16'h0;
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
                 seq_mode_a[si]       <= 4'd0;

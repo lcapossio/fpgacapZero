@@ -461,6 +461,11 @@ This is intentionally different from `trigger_delay`: holdoff suppresses
 
 Hardware validation status on the checked-in Arty A7 reference design:
 
+- Configuration/GSR startup is validated by programming the Arty bitstream
+  built with `STARTUP_ARM=1`, then reading `STATUS` before issuing any host
+  reset/config write.  The reference bitstream uses `DEFAULT_TRIG_EXT=2`
+  so the core remains `armed=1` while waiting for the EIO-driven external
+  trigger input.
 - `startup_arm` is validated deterministically by checking the ELA
   status register after `RESET`: with `startup_arm=True`, the core
   comes back `armed=1`; with `startup_arm=False`, it stays idle.

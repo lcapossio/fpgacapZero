@@ -14,6 +14,8 @@
 //     EXT_TRIG_EN=1    external trigger input from EIO probe_out[4]
 //     TIMESTAMP_W=32   per-sample timestamp RAM/readback
 //     NUM_SEGMENTS=4   segmented capture with auto-rearm
+//     STARTUP_ARM=1    prove Xilinx configuration/GSR startup auto-arm
+//     DEFAULT_TRIG_EXT=2 keeps the default startup arm waiting for EIO trigger_in
 //   Baseline trigger sequencer/storage qualification settings stay at
 //   wrapper defaults unless overridden in the wrapper parameters.
 //
@@ -53,12 +55,14 @@ module arty_a7_top (
     wire [7:0] eio_probe_out;
     reg [7:0] eio_out_sync1;
     reg [7:0] eio_out_sync2;
-    reg ela_armed_d;
+    reg ela_pretrigger_d;
     reg [3:0] armed_test_count;
     reg armed_test_active;
     reg armed_test_pulse;
     reg armed_test_gate;
     wire trigger_in_w;
+    wire ela_pretrigger_phase_w;
+    wire ela_fresh_arm_phase_w;
 
     // EIO probe_out updates on jtag_clk; resync into sys_clk before using it
     // for LEDs or deterministic trigger-test controls.
@@ -107,24 +111,33 @@ module arty_a7_top (
         end
     end
 
+    assign ela_pretrigger_phase_w = u_ela.g_ela_only.u_ela.armed &&
+                                    !u_ela.g_ela_only.u_ela.triggered;
+    assign ela_fresh_arm_phase_w = u_ela.g_ela_only.u_ela.any_arm_pulse ||
+                                   (ela_pretrigger_phase_w && !ela_pretrigger_d);
+
     // ---- Deterministic trigger test hook ----
     // eio_probe_out[4]: manual external trigger (legacy host-driven)
-    // eio_probe_out[5]: emit one pulse 2 cycles after ELA enters ARMED
-    // eio_probe_out[6]: emit one pulse 8 cycles after ELA enters ARMED
+    // eio_probe_out[5]: emit one pulse immediately when ELA enters a fresh
+    //                   armed/not-triggered phase
+    // eio_probe_out[6]: emit one pulse 8 cycles after ELA enters a fresh
+    //                   armed/not-triggered phase
     always @(posedge clk) begin
         if (rst) begin
-            ela_armed_d       <= 1'b0;
+            ela_pretrigger_d  <= 1'b0;
             armed_test_count  <= 4'd0;
             armed_test_active <= 1'b0;
             armed_test_pulse  <= 1'b0;
             armed_test_gate   <= 1'b0;
         end else begin
-            ela_armed_d       <= ela_armed_w;
+            ela_pretrigger_d  <= ela_pretrigger_phase_w;
             armed_test_pulse  <= 1'b0;
 
-            if (ela_armed_w && !ela_armed_d) begin
+            if (ela_fresh_arm_phase_w) begin
                 armed_test_count  <= 4'd0;
-                armed_test_active <= eio_out_sync2[5] | eio_out_sync2[6];
+                armed_test_active <= eio_out_sync2[6];
+                if (eio_out_sync2[5])
+                    armed_test_pulse <= 1'b1;
                 armed_test_gate   <= 1'b0;
             end else if (!ela_armed_w) begin
                 armed_test_count  <= 4'd0;
@@ -132,8 +145,6 @@ module arty_a7_top (
                 armed_test_gate   <= 1'b0;
             end else if (armed_test_active) begin
                 armed_test_count <= armed_test_count + 1'b1;
-                if (eio_out_sync2[5] && (armed_test_count == 4'd1))
-                    armed_test_pulse <= 1'b1;
                 if (eio_out_sync2[6] && (armed_test_count == 4'd7))
                     armed_test_gate <= 1'b1;
                 if (armed_test_count == 4'd7)
@@ -148,10 +159,13 @@ module arty_a7_top (
     fcapz_ela_xilinx7 #(
         .SAMPLE_W     (SAMPLE_W),
         .DEPTH        (DEPTH),
+        .INPUT_PIPE   (1),
         .DECIM_EN     (1),
         .EXT_TRIG_EN  (1),
         .TIMESTAMP_W  (32),
-        .NUM_SEGMENTS (NUM_SEGMENTS)
+        .NUM_SEGMENTS (NUM_SEGMENTS),
+        .STARTUP_ARM  (1),
+        .DEFAULT_TRIG_EXT(2)
     ) u_ela (
         .sample_clk (clk),
         .sample_rst (rst),

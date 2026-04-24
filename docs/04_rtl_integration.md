@@ -219,6 +219,7 @@ module fcapz_ela_xilinx7 #(
     parameter NUM_SEGMENTS = 1,      // number of memory segments
     parameter PROBE_MUX_W  = 0,      // total bus width for runtime probe mux (0=off)
     parameter STARTUP_ARM  = 0,      // 1=come up armed after reset/configuration
+    parameter DEFAULT_TRIG_EXT = 0,  // reset/default external trigger mode
     parameter BURST_W      = 256,    // USER2 burst DR width (don't change)
     parameter CTRL_CHAIN   = 1,      // BSCANE2 USER chain for control
     parameter DATA_CHAIN   = 2       // BSCANE2 USER chain for burst data
@@ -239,6 +240,7 @@ module fcapz_ela_xilinx7 #(
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
+| `DEFAULT_TRIG_EXT` | int | 0..3 | Power-up/reset default for `TRIG_EXT`. Useful with `STARTUP_ARM=1` when you want the bitstream to come up armed but wait for an external trigger condition instead of immediately matching the default internal comparator. |
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
