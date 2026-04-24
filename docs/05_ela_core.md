@@ -37,6 +37,13 @@ dual-port BRAM continuously.  When the trigger fires, it captures
 shows what was happening *before* the trigger fired, the trigger
 sample itself, and the post-trigger window.
 
+On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
+write command is itself registered: write enable, address, sample data,
+and timestamp data are captured together before they drive the inferred
+RAM.  That keeps the trigger/store decision off the same-cycle BRAM
+write path, while preserving the externally visible capture window and
+trigger-sample alignment.
+
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
 25 samples total, and `samples[8]` is the one that caused the

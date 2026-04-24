@@ -376,16 +376,29 @@ module fcapz_ela #(
     reg [PTR_W-1:0] seg_start_ptr [0:NUM_SEGMENTS-1];
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
+    localparam TS_DATA_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    reg                  mem_we_a_q;
+    reg  [PTR_W-1:0]     mem_wr_addr_q;
+    reg  [SAMPLE_W-1:0]  mem_wr_data_q;
+    reg  [TS_DATA_W-1:0] mem_wr_ts_q;
+    reg  [PTR_W-1:0]     mem_addr_a;
+    wire [SAMPLE_W-1:0]  mem_dout_a;
+    wire [SAMPLE_W-1:0]  mem_dout_b;
     wire                 mem_we_a;
-    reg  [PTR_W-1:0]    mem_addr_a;
-    wire [SAMPLE_W-1:0] mem_dout_a;
-    wire [SAMPLE_W-1:0] mem_dout_b;
+    wire                 mem_we_a_ram;
+    wire [SAMPLE_W-1:0]  mem_din_a_ram;
+    wire [TS_DATA_W-1:0] mem_ts_din_a_ram;
+    wire [TS_DATA_W-1:0] ts_counter_cur;
+
+    assign mem_we_a_ram   = (INPUT_PIPE >= 1) ? mem_we_a_q : mem_we_a;
+    assign mem_din_a_ram  = (INPUT_PIPE >= 1) ? mem_wr_data_q : active_probe;
+    assign mem_ts_din_a_ram = (INPUT_PIPE >= 1) ? mem_wr_ts_q : ts_counter_cur;
 
     dpram #(.WIDTH(SAMPLE_W), .DEPTH(DEPTH)) u_samplebuf (
         .clk_a  (sample_clk),
-        .we_a   (mem_we_a),
+        .we_a   (mem_we_a_ram),
         .addr_a (mem_addr_a),
-        .din_a  (active_probe),
+        .din_a  (mem_din_a_ram),
         .dout_a (mem_dout_a),
         .clk_b  (jtag_clk),
         .addr_b (burst_rd_addr),
@@ -396,9 +409,9 @@ module fcapz_ela #(
     generate
         if (TIMESTAMP_W > 0) begin : g_ts
             reg [TIMESTAMP_W-1:0] ts_counter;
-            reg [PTR_W-1:0]      ts_addr_a;
             wire [TIMESTAMP_W-1:0] ts_dout_a;
             wire [TIMESTAMP_W-1:0] ts_dout_b;
+            assign ts_counter_cur = ts_counter;
 
             // Free-running counter in sample_clk
             always @(posedge sample_clk or posedge sample_rst) begin
@@ -410,9 +423,9 @@ module fcapz_ela #(
 
             dpram #(.WIDTH(TIMESTAMP_W), .DEPTH(DEPTH)) u_tsbuf (
                 .clk_a  (sample_clk),
-                .we_a   (mem_we_a),
+                .we_a   (mem_we_a_ram),
                 .addr_a (mem_addr_a),
-                .din_a  (ts_counter),
+                .din_a  (mem_ts_din_a_ram[TIMESTAMP_W-1:0]),
                 .dout_a (ts_dout_a),
                 .clk_b  (jtag_clk),
                 .addr_b (burst_rd_addr),
@@ -420,6 +433,7 @@ module fcapz_ela #(
             );
             assign burst_rd_ts_data = ts_dout_b;
         end else begin : g_no_ts
+            assign ts_counter_cur = {TS_DATA_W{1'b0}};
             assign burst_rd_ts_data = 1'b0;
         end
     endgenerate
@@ -456,7 +470,6 @@ module fcapz_ela #(
     integer word_index, sample_index;
 
     // Phase 3: timestamp readback CDC registers
-    localparam TS_DATA_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     reg [TS_DATA_W-1:0] ts_rd_data_sample, ts_rd_data_sync1, ts_rd_data_sync2;
     reg [TS_DATA_W-1:0] ts_rd_data_jtag;
 
@@ -867,10 +880,31 @@ module fcapz_ela #(
     assign mem_we_a = pre_store_now || post_store_now;
     wire [PTR_W-1:0] post_store_limit = posttrig_len;
     always @(*) begin
-        if (mem_rd_pending)
+        if ((INPUT_PIPE >= 1) && mem_we_a_q)
+            mem_addr_a = mem_wr_addr_q;
+        else if (mem_rd_pending)
             mem_addr_a = idx;
         else
             mem_addr_a = wr_ptr;
+    end
+
+    // Register the RAM write command so address, data, and enable stay
+    // aligned and the trigger/WEA path does not have to reach the BRAM in
+    // the same cycle as trigger evaluation.
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            mem_we_a_q     <= 1'b0;
+            mem_wr_addr_q  <= {PTR_W{1'b0}};
+            mem_wr_data_q  <= {SAMPLE_W{1'b0}};
+            mem_wr_ts_q    <= {TS_DATA_W{1'b0}};
+        end else begin
+            mem_we_a_q <= mem_we_a;
+            if (mem_we_a) begin
+                mem_wr_addr_q <= wr_ptr;
+                mem_wr_data_q <= active_probe;
+                mem_wr_ts_q   <= ts_counter_cur;
+            end
+        end
     end
 
     // Phase 2: trigger_out pulse

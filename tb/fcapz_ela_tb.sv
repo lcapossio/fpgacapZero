@@ -16,6 +16,7 @@
 module fcapz_ela_tb;
     localparam int SAMPLE_W = 8;
     localparam int DEPTH    = 16;
+    localparam int PIPE_DEPTH = 1024;
 
     logic sample_clk = 1'b0;
     logic jtag_clk   = 1'b0;
@@ -170,6 +171,46 @@ module fcapz_ela_tb;
         .burst_start_ptr (burst_start_ptr_pmux)
     );
 
+    // ==== DUT5: INPUT_PIPE=1 regression instance ============================
+    logic [31:0] jtag_rdata_pipe;
+    logic        jtag_wr_en_pipe = 1'b0;
+    logic        jtag_rd_en_pipe = 1'b0;
+    logic [15:0] jtag_addr_pipe  = '0;
+    logic [31:0] jtag_wdata_pipe = '0;
+    logic [SAMPLE_W-1:0] probe_in_pipe = '0;
+    logic trigger_in_pipe = 1'b0;
+    logic [$clog2(PIPE_DEPTH)-1:0] burst_rd_addr_pipe = '0;
+    wire  [SAMPLE_W-1:0]           burst_rd_data_pipe;
+    wire                            burst_start_pipe;
+    wire  [$clog2(PIPE_DEPTH)-1:0]  burst_start_ptr_pipe;
+
+    fcapz_ela #(
+        .SAMPLE_W(SAMPLE_W),
+        .DEPTH(PIPE_DEPTH),
+        .DECIM_EN(1),
+        .EXT_TRIG_EN(1),
+        .TIMESTAMP_W(32),
+        .NUM_SEGMENTS(4),
+        .INPUT_PIPE(1)
+    ) dut_pipe (
+        .sample_clk      (sample_clk),
+        .sample_rst      (sample_rst),
+        .probe_in        (probe_in_pipe),
+        .trigger_in      (trigger_in_pipe),
+        .trigger_out     (),
+        .jtag_clk        (jtag_clk),
+        .jtag_rst        (jtag_rst),
+        .jtag_wr_en      (jtag_wr_en_pipe),
+        .jtag_rd_en      (jtag_rd_en_pipe),
+        .jtag_addr       (jtag_addr_pipe),
+        .jtag_wdata      (jtag_wdata_pipe),
+        .jtag_rdata      (jtag_rdata_pipe),
+        .burst_rd_addr   (burst_rd_addr_pipe),
+        .burst_rd_data   (burst_rd_data_pipe),
+        .burst_start     (burst_start_pipe),
+        .burst_start_ptr (burst_start_ptr_pipe)
+    );
+
     // Clocks
     always #5  sample_clk = ~sample_clk; // 100 MHz
     always #7  jtag_clk   = ~jtag_clk;   // ~71 MHz
@@ -253,6 +294,26 @@ module fcapz_ela_tb;
         jtag_rd_en_seg <= 1'b0;
         repeat (8) @(posedge jtag_clk);
         data = jtag_rdata_seg;
+    endtask
+
+    // Helpers for dut_pipe
+    task automatic jtag_write_pipe(input [15:0] addr, input [31:0] data);
+        @(posedge jtag_clk);
+        jtag_addr_pipe  <= addr;
+        jtag_wdata_pipe <= data;
+        jtag_wr_en_pipe <= 1'b1;
+        @(posedge jtag_clk);
+        jtag_wr_en_pipe <= 1'b0;
+    endtask
+
+    task automatic jtag_read_pipe(input [15:0] addr, output [31:0] data);
+        @(posedge jtag_clk);
+        jtag_addr_pipe  <= addr;
+        jtag_rd_en_pipe <= 1'b1;
+        @(posedge jtag_clk);
+        jtag_rd_en_pipe <= 1'b0;
+        repeat (8) @(posedge jtag_clk);
+        data = jtag_rdata_pipe;
     endtask
 
     // ---- Procedural assertions (iverilog-compatible) ------------------------
@@ -1050,6 +1111,127 @@ module fcapz_ela_tb;
         jtag_read(16'h0008, status);
         check("TRIG_HOLDOFF: later hit triggers", status[2] == 1'b1);
         jtag_write(16'h00DC, 32'd0);    // restore
+
+        // ---- Test 28: INPUT_PIPE=1 minimal capture regression -------------
+        $display("\n=== Test 28: INPUT_PIPE=1 minimal capture ===");
+        jtag_write_pipe(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write_pipe(16'h0014, 32'd0);    // PRETRIG_LEN
+        jtag_write_pipe(16'h0018, 32'd0);    // POSTTRIG_LEN
+        jtag_write_pipe(16'h0020, 32'h1);    // TRIG_MODE: value_match
+        jtag_write_pipe(16'h0024, 32'd0);    // TRIG_VALUE (repeats every 256 cycles)
+        jtag_write_pipe(16'h0028, 32'hFF);   // TRIG_MASK
+        jtag_write_pipe(16'h00B0, 32'd0);    // DECIM=0
+        jtag_write_pipe(16'h0004, 32'h1);    // ARM
+
+        probe_in_pipe = '0;
+        repeat (1200) begin
+            @(posedge sample_clk);
+            probe_in_pipe <= probe_in_pipe + 1'b1;
+        end
+
+        cycles = 0;
+        while (cycles < 160) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+
+        jtag_read_pipe(16'h0008, status);
+        check("INPUT_PIPE=1 minimal: done", status[2] == 1'b1);
+        check("INPUT_PIPE=1 minimal: armed cleared", status[0] == 1'b0);
+        jtag_read_pipe(16'h001C, cap_len);
+        check($sformatf("INPUT_PIPE=1 minimal: CAPTURE_LEN=1 (got %0d)", cap_len),
+              cap_len == 1);
+        jtag_read_pipe(16'h00BC, seg_status);
+        check("INPUT_PIPE=1 minimal: all segments done", seg_status[31] == 1'b1);
+
+        // ---- Test 29: INPUT_PIPE=1 large capture regression ---------------
+        $display("\n=== Test 29: INPUT_PIPE=1 large capture ===");
+        jtag_write_pipe(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write_pipe(16'h0014, 32'd50);   // PRETRIG_LEN
+        jtag_write_pipe(16'h0018, 32'd100);  // POSTTRIG_LEN
+        jtag_write_pipe(16'h0020, 32'h1);    // TRIG_MODE: value_match
+        jtag_write_pipe(16'h0024, 32'd64);   // TRIG_VALUE
+        jtag_write_pipe(16'h0028, 32'hFF);   // TRIG_MASK
+        jtag_write_pipe(16'h00B0, 32'd0);    // DECIM=0
+        jtag_write_pipe(16'h0004, 32'h1);    // ARM
+
+        probe_in_pipe = '0;
+        repeat (1400) begin
+            @(posedge sample_clk);
+            probe_in_pipe <= probe_in_pipe + 1'b1;
+        end
+
+        cycles = 0;
+        while (cycles < 200) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+
+        jtag_read_pipe(16'h0008, status);
+        check("INPUT_PIPE=1 large: done", status[2] == 1'b1);
+        check("INPUT_PIPE=1 large: overflow clear", status[3] == 1'b0);
+        jtag_read_pipe(16'h001C, cap_len);
+        check($sformatf("INPUT_PIPE=1 large: CAPTURE_LEN=151 (got %0d)", cap_len),
+              cap_len == 151);
+        jtag_read_pipe(16'h00BC, seg_status);
+        check("INPUT_PIPE=1 large: all segments done", seg_status[31] == 1'b1);
+
+        // ---- Test 30: INPUT_PIPE=1 holdoff late ext pulse -----------------
+        $display("\n=== Test 30: INPUT_PIPE=1 holdoff late ext pulse ===");
+        jtag_write_pipe(16'h0004, 32'h2);    // RESET
+        repeat (10) @(posedge sample_clk);
+        jtag_write_pipe(16'h0014, 32'd0);
+        jtag_write_pipe(16'h0018, 32'd2);
+        jtag_write_pipe(16'h0020, 32'h1);
+        jtag_write_pipe(16'h0024, 32'd0);    // always true with mask=0
+        jtag_write_pipe(16'h0028, 32'd0);
+        jtag_write_pipe(16'h00B4, 32'd2);    // EXT_TRIG = AND
+        jtag_write_pipe(16'h00DC, 32'd4);    // TRIG_HOLDOFF = 4
+        jtag_write_pipe(16'h0004, 32'h1);    // ARM
+
+        begin
+            logic prev_pretrigger_pipe;
+            integer pulse_countdown;
+
+            probe_in_pipe = '0;
+            trigger_in_pipe = 1'b0;
+            prev_pretrigger_pipe = 1'b0;
+            pulse_countdown = -1;
+            repeat (320) begin
+                @(posedge sample_clk);
+                probe_in_pipe <= probe_in_pipe + 1'b1;
+                trigger_in_pipe = 1'b0;
+
+                if ((dut_pipe.armed && !dut_pipe.triggered) && !prev_pretrigger_pipe) begin
+                    pulse_countdown = 8;
+                end else if (pulse_countdown >= 0) begin
+                    if (pulse_countdown == 0)
+                        trigger_in_pipe = 1'b1;
+                    pulse_countdown = pulse_countdown - 1;
+                end
+
+                prev_pretrigger_pipe = dut_pipe.armed && !dut_pipe.triggered;
+            end
+        end
+
+        cycles = 0;
+        while (cycles < 120) begin
+            @(posedge sample_clk);
+            cycles++;
+        end
+
+        jtag_read_pipe(16'h0008, status);
+        check("INPUT_PIPE=1 holdoff late pulse: done", status[2] == 1'b1);
+        check("INPUT_PIPE=1 holdoff late pulse: triggered", status[1] == 1'b1);
+        jtag_read_pipe(16'h001C, cap_len);
+        check($sformatf("INPUT_PIPE=1 holdoff late pulse: CAPTURE_LEN=3 (got %0d)", cap_len),
+              cap_len == 3);
+        jtag_read_pipe(16'h00BC, seg_status);
+        check("INPUT_PIPE=1 holdoff late pulse: all segments done", seg_status[31] == 1'b1);
+        jtag_write_pipe(16'h00DC, 32'd0);    // restore
+        jtag_write_pipe(16'h00B4, 32'd0);    // restore
 
         // ---- Summary -------------------------------------------------------
         $display("\n=== Summary: %0d passed, %0d failed ===",
