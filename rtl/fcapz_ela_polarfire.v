@@ -38,6 +38,7 @@ module fcapz_ela_polarfire #(
     parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
     parameter TIMESTAMP_W  = 0,
+    parameter STARTUP_ARM  = 0,
     parameter BURST_W      = 256,
     // PolarFire UJTAG IR opcodes (override if your BSDL differs).
     parameter [7:0] IR_USER1 = 8'h10,
@@ -76,6 +77,8 @@ module fcapz_ela_polarfire #(
     wire                burst_start;
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
+    wire                jtag_rst_ctrl;
+    wire                jtag_rst_data;
 
     // ---- TAP wrapper (single UJTAG, dual-chain view) ----
     jtag_tap_polarfire #(
@@ -90,9 +93,21 @@ module fcapz_ela_polarfire #(
         .ch2_update(tap2_update), .ch2_sel(tap2_sel)
     );
 
+    reset_sync u_rst_sync_ctrl (
+        .clk(tap1_tck),
+        .arst(sample_rst),
+        .srst(jtag_rst_ctrl)
+    );
+
+    reset_sync u_rst_sync_data (
+        .clk(tap2_tck),
+        .arst(sample_rst),
+        .srst(jtag_rst_data)
+    );
+
     // ---- Register interface (USER1) ----
     jtag_reg_iface u_reg (
-        .arst(sample_rst),
+        .arst(jtag_rst_ctrl),
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
         .capture(tap1_capture), .shift_en(tap1_shift),
         .update(tap1_update), .sel(tap1_sel),
@@ -125,7 +140,7 @@ module fcapz_ela_polarfire #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -152,7 +167,7 @@ module fcapz_ela_polarfire #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W)
+                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -176,7 +191,7 @@ module fcapz_ela_polarfire #(
         .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
-        .arst(sample_rst),
+        .arst(jtag_rst_data),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),

@@ -53,6 +53,8 @@ module fcapz_ela_intel #(
     wire                burst_start;
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
+    wire                jtag_rst_ctrl;
+    wire                jtag_rst_data;
 
     // ---- TAP wrappers ----
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
@@ -67,9 +69,21 @@ module fcapz_ela_intel #(
         .update(tap2_update), .sel(tap2_sel)
     );
 
+    reset_sync u_rst_sync_ctrl (
+        .clk(tap1_tck),
+        .arst(sample_rst),
+        .srst(jtag_rst_ctrl)
+    );
+
+    reset_sync u_rst_sync_data (
+        .clk(tap2_tck),
+        .arst(sample_rst),
+        .srst(jtag_rst_data)
+    );
+
     // ---- Register interface ----
     jtag_reg_iface u_reg (
-        .arst(sample_rst),
+        .arst(jtag_rst_ctrl),
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
         .capture(tap1_capture), .shift_en(tap1_shift),
         .update(tap1_update), .sel(tap1_sel),
@@ -103,7 +117,7 @@ module fcapz_ela_intel #(
         .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
-        .arst(sample_rst),
+        .arst(jtag_rst_data),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),

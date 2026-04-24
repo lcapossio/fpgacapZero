@@ -55,6 +55,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 # RTL and design sources that feed the bitstream (must match build_arty.tcl)
 _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "reset_sync.v",
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
@@ -133,6 +134,36 @@ class TestProbe(unittest.TestCase):
             self.assertEqual(info["depth"], 1024)
         finally:
             a.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+@unittest.skipIf(_BACKEND != "hw_server", "requires hw_server programming on connect")
+class TestStartupArmGsr(unittest.TestCase):
+    """Configuration-time startup arm validation for the Arty bitstream."""
+
+    def test_bitstream_powers_up_armed_after_gsr(self):
+        """After FPGA programming, STARTUP_ARM=1 should arm without host reset."""
+        t = _make_transport()
+        try:
+            t.connect()
+            self.assertEqual(t.read_reg(0x00D8) & 0x1, 1)
+            self.assertEqual(t.read_reg(0x00B4) & 0x3, 2)
+
+            status = t.read_reg(0x0008)
+            self.assertTrue(
+                status & 0x1,
+                f"expected armed after configuration/GSR, got 0x{status:08X}",
+            )
+            self.assertFalse(
+                status & 0x2,
+                f"unexpected triggered after configuration/GSR, got 0x{status:08X}",
+            )
+            self.assertFalse(
+                status & 0x4,
+                f"unexpected done after configuration/GSR, got 0x{status:08X}",
+            )
+        finally:
+            t.close()
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -336,6 +367,141 @@ class TestCapture(unittest.TestCase):
             if ((samples[i] - samples[i - 1]) & 0xFF) != 1
         ]
         self.assertEqual(errors, [], f"counter step errors in samples={samples}")
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestStartupArmAndHoldoff(unittest.TestCase):
+    """Hardware validation for the new startup-arm / holdoff controls."""
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.eio import EioController
+
+        self.t = _make_transport()
+        self.a = Analyzer(self.t)
+        self.a.connect()
+        self.eio = EioController(self.t, chain=3)
+        self.eio.attach()
+        self._set_eio_outputs(0)
+
+    def tearDown(self):
+        try:
+            self._set_eio_outputs(0)
+        finally:
+            self.a.close()
+
+    def _set_eio_outputs(self, value: int) -> None:
+        self.t.select_chain(3)
+        try:
+            self.eio.write_outputs(value)
+        finally:
+            self.t.select_chain(1)
+
+    def test_register_roundtrip(self):
+        """STARTUP_ARM / TRIG_HOLDOFF read back correctly on silicon."""
+        self.t.write_reg(0x00D8, 1)
+        self.t.write_reg(0x00DC, 23)
+        self.assertEqual(self.t.read_reg(0x00D8) & 0x1, 1)
+        self.assertEqual(self.t.read_reg(0x00DC) & 0xFFFF, 23)
+        self.t.write_reg(0x00D8, 0)
+        self.t.write_reg(0x00DC, 0)
+
+    def test_startup_arm_reset_rearms_deterministically(self):
+        """RESET should leave the core armed when startup_arm is enabled."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+            startup_arm=True,
+            ext_trigger_mode=2,
+        )
+        self.a.configure(cfg)
+        self.a.reset()
+
+        status = self.t.read_reg(0x0008)
+        self.assertTrue(status & 0x1, f"expected armed after RESET, got 0x{status:08X}")
+        self.assertFalse(status & 0x2, f"unexpected triggered after RESET, got 0x{status:08X}")
+        self.assertFalse(status & 0x4, f"unexpected done after RESET, got 0x{status:08X}")
+
+    def test_reset_without_startup_arm_stays_idle(self):
+        """RESET should leave the core idle when startup_arm is disabled."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+            startup_arm=False,
+            ext_trigger_mode=2,
+        )
+        self.a.configure(cfg)
+        self.a.reset()
+
+        status = self.t.read_reg(0x0008)
+        self.assertFalse(status & 0x1, f"expected idle after RESET, got 0x{status:08X}")
+        self.assertFalse(status & 0x2, f"unexpected triggered after RESET, got 0x{status:08X}")
+        self.assertFalse(status & 0x4, f"unexpected done after RESET, got 0x{status:08X}")
+
+    def test_trigger_holdoff_blocks_early_armed_edge_pulse(self):
+        """A pulse 2 cycles after ARMED should be ignored by holdoff=4."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+            startup_arm=False,
+            trigger_holdoff=4,
+            ext_trigger_mode=2,
+        )
+        self.a.configure(cfg)
+        self._set_eio_outputs(1 << 5)
+        self.a.arm()
+
+        self.assertFalse(self.a.wait_done(timeout=0.2, poll_interval=0.01))
+        status = self.t.read_reg(0x0008)
+        self.assertTrue(
+            status & 0x1,
+            f"expected still armed after blocked early pulse, got 0x{status:08X}",
+        )
+        self.assertFalse(
+            status & 0x2,
+            f"unexpected triggered after blocked early pulse, got 0x{status:08X}",
+        )
+        self.assertFalse(
+            status & 0x4,
+            f"unexpected done after blocked early pulse, got 0x{status:08X}",
+        )
+
+    def test_trigger_holdoff_allows_late_armed_edge_pulse(self):
+        """A pulse 8 cycles after ARMED should pass when holdoff=4."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+            startup_arm=False,
+            trigger_holdoff=4,
+            ext_trigger_mode=2,
+        )
+        self.a.configure(cfg)
+        self._set_eio_outputs(1 << 6)
+        self.a.arm()
+
+        result = self.a.capture(timeout=5.0)
+        self.assertEqual(len(result.samples), 3)
+        self.assertFalse(result.overflow)
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

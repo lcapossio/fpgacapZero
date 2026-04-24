@@ -63,6 +63,8 @@ _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
 _ADDR_TRIG_DELAY = 0x00D4
+_ADDR_STARTUP_ARM = 0x00D8
+_ADDR_TRIG_HOLDOFF = 0x00DC
 
 # Order matches :meth:`Analyzer.probe` field extraction (hw_server pipelined read).
 _ELA_PROBE_ADDRS: tuple[int, ...] = (
@@ -149,6 +151,8 @@ class CaptureConfig:
     stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
     stor_qual_value: int = 0   # storage qualification comparison value
     stor_qual_mask: int = 0    # storage qualification mask
+    startup_arm: bool = False  # if True, reset leaves the core armed
+    trigger_holdoff: int = 0   # sample-clock cycles to ignore triggers after arm/re-arm
     trigger_delay: int = 0     # post-trigger delay in sample-clock cycles
                                # (0..65535) — shifts the committed trigger
                                # sample N cycles after the trigger event,
@@ -247,6 +251,10 @@ class Analyzer:
             raise ValueError(
                 f"trigger_delay must be 0..65535, got {config.trigger_delay}"
             )
+        if not (0 <= config.trigger_holdoff <= 0xFFFF):
+            raise ValueError(
+                f"trigger_holdoff must be 0..65535, got {config.trigger_holdoff}"
+            )
 
         self._validate_probes(config.probes, config.sample_width)
 
@@ -298,6 +306,8 @@ class Analyzer:
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
         self.transport.write_reg(_ADDR_PROBE_SEL, config.probe_sel)
+        self.transport.write_reg(_ADDR_STARTUP_ARM, int(bool(config.startup_arm)))
+        self.transport.write_reg(_ADDR_TRIG_HOLDOFF, config.trigger_holdoff)
         self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
         if config.stor_qual_mode:
             self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)

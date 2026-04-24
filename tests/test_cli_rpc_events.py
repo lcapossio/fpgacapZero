@@ -475,6 +475,43 @@ class RpcTriggerDelayValidationTests(unittest.TestCase):
                 RpcServer._validated_trigger_delay(v)
 
 
+class RpcTriggerHoldoffValidationTests(unittest.TestCase):
+    """Tests for trigger_holdoff validation in RPC _build_config."""
+
+    def test_valid_values_accepted(self):
+        for v in (0, 1, 1234, 0xFFFF):
+            self.assertEqual(RpcServer._validated_trigger_holdoff(v), v)
+
+    def test_invalid_values_rejected(self):
+        for v in (-1, 0x10000, 0x7FFFFFFF):
+            with self.assertRaises(ValueError):
+                RpcServer._validated_trigger_holdoff(v)
+
+
+class RpcBooleanValidationTests(unittest.TestCase):
+    """Tests for strict boolean parsing in RPC _build_config."""
+
+    def test_valid_startup_arm_values(self):
+        cases = [
+            (False, False),
+            (True, True),
+            (0, False),
+            (1, True),
+            ("false", False),
+            ("true", True),
+            ("off", False),
+            ("on", True),
+        ]
+        for raw, expected in cases:
+            cfg = RpcServer._build_config({"startup_arm": raw})
+            self.assertEqual(cfg.startup_arm, expected)
+
+    def test_invalid_startup_arm_values_rejected(self):
+        for raw in (2, "maybe", object()):
+            with self.assertRaises(ValueError):
+                RpcServer._build_config({"startup_arm": raw})
+
+
 class CliTests(unittest.TestCase):
     def test_capture_parser_accepts_channel_and_probes(self):
         parser = build_parser()
@@ -492,6 +529,22 @@ class CliTests(unittest.TestCase):
         config = _build_config(args)
         self.assertEqual(config.channel, 1)
         self.assertEqual([probe.name for probe in config.probes], ["lo", "hi"])
+
+    def test_capture_parser_accepts_startup_arm_and_trigger_holdoff(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "capture",
+                "--startup-arm",
+                "--trigger-holdoff",
+                "12",
+                "--out",
+                "capture.json",
+            ]
+        )
+        config = _build_config(args)
+        self.assertTrue(config.startup_arm)
+        self.assertEqual(config.trigger_holdoff, 12)
 
 
 class RpcServerHarness(RpcServer):

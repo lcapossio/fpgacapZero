@@ -21,8 +21,12 @@ sticking a multimeter probe on a signal, except for digital values
 and with the ability to drive a signal as well as observe it.
 
 The reference Arty A7 design wires `probe_in` to the pushbuttons plus
-a 1 Hz low-nibble counter, and wires `probe_out` to the LEDs.  After programming, you
-can:
+a 1 Hz low-nibble counter, and wires `probe_out[3:0]` to the LEDs.
+Higher `probe_out` bits are used as fabric-side debug controls for the
+hardware tests: bit 4 is the manual ELA external trigger, bit 5 asks
+the Arty top to emit an early one-shot trigger 2 cycles after the ELA
+enters `ARMED`, and bit 6 asks it to assert a late trigger starting 8
+cycles after `ARMED`.  After programming, you can:
 
 ```bash
 $ fcapz eio-read
@@ -43,7 +47,9 @@ first (chain **3** for [`arty_a7_top.v`](../examples/arty_a7/arty_a7_top.v)).
 If the LEDs still ignore writes, confirm the FPGA is programmed with
 that reference bitstream and rebuild if you changed the top-level
 (after programming, `fcapz eio-write 0x0F` from the CLI is a quick
-sanity check).
+sanity check).  On this reference top, EIO bits above 3 do **not**
+drive LEDs; they are intentionally reserved for internal trigger-test
+plumbing used by the Arty hardware integration suite.
 
 ## Architecture
 
@@ -368,6 +374,19 @@ exercise EIO end-to-end:
 | `test_set_clear_bit` | `set_bit()` modifies one bit without disturbing others |
 | `test_output_roundtrip_all_bits` | every bit position works |
 | `test_write_zero_outputs` | clears all bits |
+
+The same Arty reference EIO outputs are also used by the ELA hardware
+tests as deterministic control hooks:
+
+- `probe_out[4]`: manual external trigger source for the ELA
+- `probe_out[5]`: request a one-shot external trigger 2 sample clocks
+  after the ELA enters `ARMED`
+- `probe_out[6]`: request an external trigger level beginning 8 sample
+  clocks after the ELA enters `ARMED`
+
+Those bits are not part of the generic EIO core contract; they are
+just how the checked-in Arty top-level chooses to use its spare output
+bits for board-level validation.
 
 The unit tests in [`../tests/test_host_stack.py`](../tests/test_host_stack.py)
 cover the controller against a `FakeVioTransport` (no hardware

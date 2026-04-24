@@ -33,6 +33,8 @@ module fcapz_ela_xilinxus #(
     parameter TIMESTAMP_W = 0,
     parameter NUM_SEGMENTS = 1,
     parameter PROBE_MUX_W = 0,
+    parameter STARTUP_ARM = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,
     parameter DATA_CHAIN  = 2,
@@ -46,6 +48,7 @@ module fcapz_ela_xilinxus #(
     input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
     input  wire                          trigger_in,
     output wire                          trigger_out,
+    output wire                          armed_out,
     // EIO ports (active when EIO_EN=1; ignored / tied-off otherwise)
     input  wire [EIO_IN_W-1:0]           eio_probe_in,
     output wire [EIO_OUT_W-1:0]          eio_probe_out
@@ -58,13 +61,14 @@ module fcapz_ela_xilinxus #(
         .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
         .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
-        .PROBE_MUX_W(PROBE_MUX_W), .BURST_W(BURST_W),
+        .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .BURST_W(BURST_W),
         .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
         .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)
     ) u_inner (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
-        .trigger_in(trigger_in), .trigger_out(trigger_out),
+        .trigger_in(trigger_in), .trigger_out(trigger_out), .armed_out(armed_out),
         .eio_probe_in(eio_probe_in), .eio_probe_out(eio_probe_out)
     );
 

@@ -197,6 +197,8 @@ cfg = CaptureConfig(
     stor_qual_mode  = 0,
     stor_qual_value = 0,
     stor_qual_mask  = 0,
+    startup_arm     = False,       # leave the core armed after RESET
+    trigger_holdoff = 0,           # ignore triggers for N cycles after arm/re-arm
     trigger_delay   = 0,           # new in v0.3.0
 )
 a.configure(cfg)
@@ -280,7 +282,9 @@ get one giant `sample` blob.  See [chapter 15](15_export_formats.md).
 ### `reset() -> None`
 
 Asserts the RESET bit, clearing armed/triggered/done.  Use it to
-abort an in-progress capture or recover from a stuck state.
+abort an in-progress capture or recover from a stuck state.  If
+`CaptureConfig.startup_arm` is enabled, a later RESET leaves the
+core armed again instead of idle.
 
 ## `CaptureConfig` and friends
 
@@ -304,6 +308,8 @@ class CaptureConfig:
     stor_qual_mode:   int = 0       # 0/1/2
     stor_qual_value:  int = 0
     stor_qual_mask:   int = 0
+    startup_arm:      bool = False  # RESET leaves the core armed
+    trigger_holdoff:  int = 0       # 0..65535 cycles after arm/re-arm
     trigger_delay:    int = 0       # 0..65535 sample-clock cycles
 ```
 

@@ -58,6 +58,7 @@ module fcapz_ela_gowin #(
     wire        jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
     wire [31:0] jtag_wdata, jtag_rdata;
+    wire        jtag_rst_ctrl;
     localparam PTR_W = $clog2(DEPTH);
 
     // Gowin exposes only one user chain here, so USER2 burst readout is not
@@ -77,9 +78,15 @@ module fcapz_ela_gowin #(
         .update(tap_update), .sel(tap_sel)
     );
 
+    reset_sync u_rst_sync_ctrl (
+        .clk(tap_tck),
+        .arst(sample_rst),
+        .srst(jtag_rst_ctrl)
+    );
+
     // ---- Register interface ----
     jtag_reg_iface u_reg (
-        .arst(sample_rst),
+        .arst(jtag_rst_ctrl),
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel),

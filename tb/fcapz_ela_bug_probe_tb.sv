@@ -228,8 +228,56 @@ module fcapz_ela_bug_probe_tb;
         data = rdata_w48;
     endtask
 
+    // ---------------------------------------------------------------------
+    // Regression 6/7: segmented auto-rearm plus external trigger timing.
+    localparam int SEGTRIG_W = 8;
+    localparam int SEGTRIG_DEPTH = 1024;
+    logic [SEGTRIG_W-1:0] probe_segtrig = '0;
+    logic ext_trig_segtrig = 1'b0;
+    logic wr_segtrig = 1'b0, rd_segtrig = 1'b0;
+    logic [15:0] addr_segtrig = '0;
+    logic [31:0] wdata_segtrig = '0, rdata_segtrig;
+    logic [$clog2(SEGTRIG_DEPTH)-1:0] burst_addr_segtrig = '0;
+    wire [SEGTRIG_W-1:0] burst_data_segtrig;
+    wire burst_start_segtrig;
+    wire [$clog2(SEGTRIG_DEPTH)-1:0] burst_start_ptr_segtrig;
+    wire armed_out_segtrig;
+
+    fcapz_ela #(
+        .SAMPLE_W(SEGTRIG_W),
+        .DEPTH(SEGTRIG_DEPTH),
+        .EXT_TRIG_EN(1),
+        .TIMESTAMP_W(32),
+        .NUM_SEGMENTS(4),
+        .INPUT_PIPE(1)
+    ) dut_segtrig (
+        .sample_clk(sample_clk), .sample_rst(sample_rst), .probe_in(probe_segtrig),
+        .trigger_in(ext_trig_segtrig), .trigger_out(), .armed_out(armed_out_segtrig),
+        .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
+        .jtag_wr_en(wr_segtrig), .jtag_rd_en(rd_segtrig),
+        .jtag_addr(addr_segtrig), .jtag_wdata(wdata_segtrig), .jtag_rdata(rdata_segtrig),
+        .burst_rd_addr(burst_addr_segtrig), .burst_rd_data(burst_data_segtrig),
+        .burst_start(burst_start_segtrig), .burst_start_ptr(burst_start_ptr_segtrig)
+    );
+
+    task automatic write_segtrig(input [15:0] addr, input [31:0] data);
+        @(posedge jtag_clk);
+        addr_segtrig <= addr; wdata_segtrig <= data; wr_segtrig <= 1'b1;
+        @(posedge jtag_clk);
+        wr_segtrig <= 1'b0;
+    endtask
+
+    task automatic read_segtrig(input [15:0] addr, output [31:0] data);
+        @(posedge jtag_clk);
+        addr_segtrig <= addr; rd_segtrig <= 1'b1;
+        @(posedge jtag_clk);
+        rd_segtrig <= 1'b0;
+        repeat (10) @(posedge jtag_clk);
+        data = rdata_segtrig;
+    endtask
+
     initial begin
-        logic [31:0] word0, word1, word2, status;
+        logic [31:0] word0, word1, word2, status, seg_status;
         int i;
 
         repeat (4) @(posedge sample_clk);
@@ -355,6 +403,84 @@ module fcapz_ela_bug_probe_tb;
         $display("  sample[0] chunk0=0x%08x chunk1=0x%08x", word0, word1);
         check("48-bit data low chunk is 0x22223333", word0 === 32'h2222_3333);
         check("48-bit data high chunk is zero-extended", word1 === 32'h0000_1111);
+
+        $display("\n=== Regression 7: single armed-edge pulse source stalls segmented capture ===");
+        write_segtrig(16'h0014, 32'd0);
+        write_segtrig(16'h0018, 32'd2);
+        write_segtrig(16'h0020, 32'h1);
+        write_segtrig(16'h0024, 32'd0);
+        write_segtrig(16'h0028, 32'd0);
+        write_segtrig(16'h00B4, 32'd2);   // EXT_TRIG = AND
+        write_segtrig(16'h00DC, 32'd4);   // TRIG_HOLDOFF = 4
+        write_segtrig(16'h0004, 32'h1);
+        probe_segtrig = '0;
+        ext_trig_segtrig = 1'b0;
+        begin
+            logic prev_armed_only;
+            integer pulse_countdown;
+
+            prev_armed_only = 1'b0;
+            pulse_countdown = -1;
+            repeat (220) begin
+                @(posedge sample_clk);
+                probe_segtrig <= probe_segtrig + 1'b1;
+                ext_trig_segtrig = 1'b0;
+                if (armed_out_segtrig && !prev_armed_only) begin
+                    pulse_countdown = 8;
+                end else if (pulse_countdown >= 0) begin
+                    if (pulse_countdown == 0)
+                        ext_trig_segtrig = 1'b1;
+                    pulse_countdown = pulse_countdown - 1;
+                end
+                prev_armed_only = armed_out_segtrig;
+            end
+        end
+        wait_sample(40);
+        read_segtrig(16'h0008, status);
+        read_segtrig(16'h00BC, seg_status);
+        $display("  old-hook status=0x%08x seg_status=0x%08x", status, seg_status);
+        check("single armed-edge pulse source does not finish all segments",
+              (status[2] == 1'b0) && (seg_status[31] == 1'b0) && (seg_status[1:0] == 2'd1));
+
+        $display("\n=== Regression 8: per-rearm pulse source completes segmented capture ===");
+        write_segtrig(16'h0004, 32'h2);
+        wait_sample(8);
+        write_segtrig(16'h0014, 32'd0);
+        write_segtrig(16'h0018, 32'd2);
+        write_segtrig(16'h0020, 32'h1);
+        write_segtrig(16'h0024, 32'd0);
+        write_segtrig(16'h0028, 32'd0);
+        write_segtrig(16'h00B4, 32'd2);
+        write_segtrig(16'h00DC, 32'd4);
+        write_segtrig(16'h0004, 32'h1);
+        probe_segtrig = '0;
+        ext_trig_segtrig = 1'b0;
+        begin
+            logic prev_pretrigger_phase;
+            integer pulse_countdown;
+
+            prev_pretrigger_phase = 1'b0;
+            pulse_countdown = -1;
+            repeat (320) begin
+                @(posedge sample_clk);
+                probe_segtrig <= probe_segtrig + 1'b1;
+                ext_trig_segtrig = 1'b0;
+                if ((dut_segtrig.armed && !dut_segtrig.triggered) && !prev_pretrigger_phase) begin
+                    pulse_countdown = 8;
+                end else if (pulse_countdown >= 0) begin
+                    if (pulse_countdown == 0)
+                        ext_trig_segtrig = 1'b1;
+                    pulse_countdown = pulse_countdown - 1;
+                end
+                prev_pretrigger_phase = dut_segtrig.armed && !dut_segtrig.triggered;
+            end
+        end
+        wait_sample(40);
+        read_segtrig(16'h0008, status);
+        read_segtrig(16'h00BC, seg_status);
+        $display("  fixed-hook status=0x%08x seg_status=0x%08x", status, seg_status);
+        check("per-rearm pulse source finishes all segments",
+              (status[2] == 1'b1) && (seg_status[31] == 1'b1) && (seg_status[1:0] == 2'd0));
 
         $display("\n=== Regression summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);

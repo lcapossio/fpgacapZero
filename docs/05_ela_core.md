@@ -3,7 +3,8 @@
 > **Goal**: deep dive on the Embedded Logic Analyzer.  By the end of
 > this chapter you will understand every trigger mode, every storage
 > option, and how the runtime knobs (decimation, segments, probe mux,
-> trigger delay) interact with the basic capture flow.
+> startup arm, trigger holdoff, trigger delay) interact with the basic
+> capture flow.
 >
 > **Pre-reads**: [01_overview](01_overview.md),
 > [03_first_capture](03_first_capture.md),
@@ -35,6 +36,13 @@ dual-port BRAM continuously.  When the trigger fires, it captures
 `pretrigger + 1 + posttrigger` samples — the pre-trigger window
 shows what was happening *before* the trigger fired, the trigger
 sample itself, and the post-trigger window.
+
+On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
+write command is itself registered: write enable, address, sample data,
+and timestamp data are captured together before they drive the inferred
+RAM.  That keeps the trigger/store decision off the same-cycle BRAM
+write path, while preserving the externally visible capture window and
+trigger-sample alignment.
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
@@ -281,9 +289,9 @@ cfg = CaptureConfig(
 )
 ```
 
-The reference Arty A7 design ties `trigger_in` to `btn[1]` so you
-can manually fire the trigger by pressing the button — try it from
-the GUI or the CLI:
+The reference Arty A7 design ties `trigger_in` to an EIO-controlled
+fabric signal, so you can manually fire the trigger from the host
+without rebuilding the bitstream — try it from the GUI or the CLI:
 
 ```bash
 fcapz capture \
@@ -296,7 +304,8 @@ fcapz capture \
 ```
 
 (`0xFF` is unlikely to ever match the counter at the moment you arm,
-so the OR-with-button behavior is the only way the trigger fires.)
+so the OR-with-external-trigger behavior is the only way the trigger
+fires.)
 
 ## Per-sample timestamps (`TIMESTAMP_W=32` or `48`)
 
@@ -413,7 +422,61 @@ cfg = CaptureConfig(
 )
 ```
 
-## Configurable trigger delay (new in v0.3.0)
+## Startup arm and trigger holdoff
+
+Two closely related knobs control **when the core is allowed to start
+listening** for a trigger:
+
+- `startup_arm`: if enabled, RESET leaves the core armed instead of idle.
+  The RTL parameter `STARTUP_ARM=1` makes that behavior the power-up
+  default, so a bitstream can come up ready to capture immediately after
+  configuration.
+- `trigger_holdoff`: ignore trigger hits for N sample-clock cycles after
+  `ARM` and after each segmented auto-rearm.
+
+`trigger_holdoff` is useful when the interesting trigger condition is
+real, but the first few cycles after arming are noisy or guaranteed to
+contain a false positive.
+
+```python
+cfg = CaptureConfig(
+    ...,
+    startup_arm=True,
+    trigger_holdoff=8,
+)
+```
+
+What happens at runtime:
+
+1. The core arms (explicit `ARM`, segmented auto-rearm, or RESET with
+   `startup_arm` enabled).
+2. Samples still flow into the circular buffer normally.
+3. Trigger comparators and sequencer transitions are ignored for
+   `trigger_holdoff` cycles.
+4. After that window expires, normal trigger evaluation resumes.
+
+This is intentionally different from `trigger_delay`: holdoff suppresses
+*early trigger acceptance*, while delay accepts the trigger and moves the
+*committed trigger sample* later.
+
+Hardware validation status on the checked-in Arty A7 reference design:
+
+- Configuration/GSR startup is validated by programming the Arty bitstream
+  built with `STARTUP_ARM=1`, then reading `STATUS` before issuing any host
+  reset/config write.  The reference bitstream uses `DEFAULT_TRIG_EXT=2`
+  so the core remains `armed=1` while waiting for the EIO-driven external
+  trigger input.
+- `startup_arm` is validated deterministically by checking the ELA
+  status register after `RESET`: with `startup_arm=True`, the core
+  comes back `armed=1`; with `startup_arm=False`, it stays idle.
+- `trigger_holdoff` is validated deterministically with an on-chip
+  trigger-test hook that generates a known external-trigger stimulus
+  a fixed number of sample clocks after the ELA enters `ARMED`.
+  The hardware tests confirm that a pulse 2 cycles after arm is
+  blocked by `trigger_holdoff=4`, while a stimulus beginning 8 cycles
+  after arm is accepted normally.
+
+## Configurable trigger delay
 
 Sometimes the cause of a problem and the moment you want to look at
 are **not the same cycle**.  Example: a state machine asserts an

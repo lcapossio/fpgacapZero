@@ -228,6 +228,11 @@ class CapturePanel(QGroupBox):
         self._stor_val = QLineEdit("0")
         self._stor_mask = QLineEdit("0")
 
+        self._trig_holdoff = QSpinBox()
+        self._trig_holdoff.setObjectName("fcapz_capture_trig_holdoff")
+        self._trig_holdoff.setRange(0, 65535)
+        self._trig_holdoff.setValue(0)
+
         self._trig_delay = QSpinBox()
         self._trig_delay.setRange(0, 65535)
         self._trig_delay.setValue(0)
@@ -318,6 +323,7 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Storage qual mode", self._stor_mode)
         form_adv.addRow("Storage qual value", self._stor_val)
         form_adv.addRow("Storage qual mask", self._stor_mask)
+        form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
         form_adv.addRow("Probes", self._probes)
         self._adv_section = CollapsibleSection(
@@ -589,6 +595,7 @@ class CapturePanel(QGroupBox):
             ("decimation", self._decim, 0),
             ("probe_sel", self._probe_sel, 0),
             ("stor_qual_mode", self._stor_mode, 0),
+            ("trigger_holdoff", self._trig_holdoff, 0),
             ("trigger_delay", self._trig_delay, 0),
         ):
             if key in entry:
@@ -976,6 +983,8 @@ class CapturePanel(QGroupBox):
             stor_qual_mode=stor_m,
             stor_qual_value=sqv,
             stor_qual_mask=sqm,
+            startup_arm=False,
+            trigger_holdoff=int(self._trig_holdoff.value()),
             trigger_delay=int(self._trig_delay.value()),
         )
 

@@ -482,6 +482,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         QApplication.restoreOverrideCursor()
         conn = self._conn.connection_settings()
+        hw_attach_only = (
+            conn.backend == "hw_server"
+            and (not bool(conn.program_on_connect) or not bool(conn.program))
+        )
         self._ela_present = info is not None
         if info is not None:
             _log.info(
@@ -506,14 +510,22 @@ class MainWindow(QMainWindow):
         self._eio_panel.set_transport(analyzer.transport)
         self._axi_panel.set_transport_available(True)
         self._uart_panel.set_transport_available(True)
-        if info is not None:
-            self._conn.set_connected(True, "Connected — ELA identity OK.")
-        else:
-            self._conn.set_connected(
-                True,
-                "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available).",
+        if info is not None and hw_attach_only:
+            msg = (
+                "Connected — JTAG only; FPGA was not programmed on connect, so ELA captures "
+                "reflect the image already loaded on the board."
             )
-        self.statusBar().showMessage("Connected")
+        elif info is not None:
+            msg = "Connected — ELA identity OK."
+        elif hw_attach_only:
+            msg = (
+                "Connected — JTAG only; FPGA was not programmed on connect, and no ELA was "
+                "found on USER1 in the currently loaded image."
+            )
+        else:
+            msg = "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available)."
+        self._conn.set_connected(True, msg)
+        self.statusBar().showMessage(msg)
 
         gui = load_gui_settings(self._config_path)
         gui.connection = conn

@@ -161,12 +161,16 @@ class ConnectWorker(QObject):
                 if c.program_on_connect and c.program:
                     _conn_log.info("hw_server: will program bitfile on connect: %s", c.program)
                 elif c.program and not c.program_on_connect:
-                    _conn_log.info(
-                        "hw_server: program on connect is off (bitfile path kept for later): %s",
+                    _conn_log.warning(
+                        "hw_server: connecting without programming; captures reflect the "
+                        "bitstream already loaded on the FPGA, not the saved path: %s",
                         c.program,
                     )
                 else:
-                    _conn_log.info("hw_server: no bitfile path; connect without fpga -file")
+                    _conn_log.warning(
+                        "hw_server: no bitfile path; connecting without programming, "
+                        "so captures reflect the image already loaded on the FPGA",
+                    )
             analyzer.connect()
             t_connect = time.monotonic()
             if self._cancel_requested:

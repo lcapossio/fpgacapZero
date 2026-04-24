@@ -414,6 +414,23 @@ class SequencerTests(unittest.TestCase):
         analyzer.configure(cfg)
         self.assertEqual(transport.regs[0x00D4], 42)
 
+    def test_trigger_holdoff_and_startup_arm_written(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            startup_arm=True,
+            trigger_holdoff=17,
+        )
+        analyzer.configure(cfg)
+        self.assertEqual(transport.regs[0x00D8], 1)
+        self.assertEqual(transport.regs[0x00DC], 17)
+
     def test_trigger_delay_default_zero_written(self):
         transport = FakeTransport()
         analyzer = Analyzer(transport)
@@ -429,6 +446,8 @@ class SequencerTests(unittest.TestCase):
         # Even when not specified, the register is unconditionally written
         # to 0 so a previous run cannot leak in.
         self.assertEqual(transport.regs.get(0x00D4, None), 0)
+        self.assertEqual(transport.regs.get(0x00D8, None), 0)
+        self.assertEqual(transport.regs.get(0x00DC, None), 0)
 
     def test_trigger_delay_out_of_range_rejected(self):
         analyzer = Analyzer(FakeTransport())
@@ -441,6 +460,21 @@ class SequencerTests(unittest.TestCase):
                 sample_width=8,
                 depth=1024,
                 trigger_delay=bad,
+            )
+            with self.assertRaises(ValueError):
+                analyzer.configure(cfg)
+
+    def test_trigger_holdoff_out_of_range_rejected(self):
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        for bad in (-1, 0x10000, 0x7FFFFFFF):
+            cfg = CaptureConfig(
+                pretrigger=1,
+                posttrigger=2,
+                trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                sample_width=8,
+                depth=1024,
+                trigger_holdoff=bad,
             )
             with self.assertRaises(ValueError):
                 analyzer.configure(cfg)

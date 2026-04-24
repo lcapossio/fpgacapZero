@@ -335,6 +335,7 @@ def trigger_history_entry_from_config(
         "stor_qual_mode": int(cfg.stor_qual_mode),
         "stor_qual_value": int(cfg.stor_qual_value),
         "stor_qual_mask": int(cfg.stor_qual_mask),
+        "trigger_holdoff": int(cfg.trigger_holdoff),
         "trigger_delay": int(cfg.trigger_delay),
         "probes": probes,
         "trigger_sequence": [

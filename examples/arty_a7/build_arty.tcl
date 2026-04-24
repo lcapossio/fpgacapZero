@@ -88,6 +88,9 @@ if {[file exists $project_xpr]} {
         set_property is_global_include true \
             [get_files $root/rtl/fcapz_version.vh]
     }
+    if {[llength [get_files -quiet $root/rtl/reset_sync.v]] == 0} {
+        add_files $root/rtl/reset_sync.v
+    }
 } else {
     # No .xpr but partial peripheral dirs may exist from a killed build.
     # Use -force to clear them now that we've removed the stale locks.
@@ -96,6 +99,7 @@ if {[file exists $project_xpr]} {
     # ── Sources (only added on initial creation) ──────────────
     add_files [list \
         $root/rtl/fcapz_version.vh \
+        $root/rtl/reset_sync.v \
         $root/rtl/dpram.v \
         $root/rtl/trig_compare.v \
         $root/rtl/fcapz_ela.v \
