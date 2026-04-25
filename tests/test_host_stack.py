@@ -53,7 +53,7 @@ class FakeTransport(Transport):
                 0x003C: 0x0001_0164,  # FEATURES: TRIG_STAGES=4, HAS_DECIM=1, HAS_EXT=1
                 0x00C4: 0,            # TIMESTAMP_W
                 0x00B8: 1,            # NUM_SEGMENTS
-                0x00E0: 0x1FF,        # COMPARE_CAPS: all compare modes
+                0x00E0: 0x3_01FF,     # COMPARE_CAPS: all modes + dual compare
             },
         }
         self._active_chain: int = 1
@@ -242,6 +242,11 @@ class AnalyzerTests(unittest.TestCase):
         info = analyzer.probe()
         self.assertEqual(info["compare_caps"], 0x1C3)
         self.assertEqual(info["compare_modes"], [0, 1, 6, 7, 8])
+        self.assertTrue(info["has_dual_compare"])  # Legacy caps imply dual compare.
+
+        transport.regs[0x00E0] = 0x2_01C3
+        info = analyzer.probe()
+        self.assertFalse(info["has_dual_compare"])
 
 
 class SequencerTests(unittest.TestCase):
@@ -337,6 +342,35 @@ class SequencerTests(unittest.TestCase):
             ],
         )
         with self.assertRaisesRegex(ValueError, "REL_COMPARE=1"):
+            analyzer.configure(cfg)
+
+    def test_b_combine_requires_dual_compare_capability(self):
+        transport = FakeTransport()
+        transport.regs[0x00E0] = 0x2_01C3
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sequence=[
+                SequencerStage(
+                    cmp_mode_a=0,
+                    cmp_mode_b=1,
+                    combine=2,
+                    is_final=True,
+                    count_target=1,
+                    value_a=0x80,
+                    mask_a=0xFF,
+                    value_b=0x40,
+                    mask_b=0xFF,
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "DUAL_COMPARE=0"):
             analyzer.configure(cfg)
 
     def test_probe_sel_written(self):

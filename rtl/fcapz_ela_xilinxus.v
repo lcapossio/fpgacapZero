@@ -42,7 +42,8 @@ module fcapz_ela_xilinxus #(
     parameter EIO_EN      = 0,
     parameter EIO_IN_W    = 1,
     parameter EIO_OUT_W   = 1,
-    parameter REL_COMPARE = 0
+    parameter REL_COMPARE = 0,
+    parameter DUAL_COMPARE = 1
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -64,6 +65,7 @@ module fcapz_ela_xilinxus #(
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
         .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
         .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
+        .DUAL_COMPARE(DUAL_COMPARE),
         .BURST_W(BURST_W),
         .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
         .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)

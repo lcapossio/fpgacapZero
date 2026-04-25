@@ -69,6 +69,8 @@ _ADDR_COMPARE_CAPS = 0x00E0
 
 _COMPARE_CAPS_LEGACY_FULL = 0x1FF
 _COMPARE_CAPS_LIGHTWEIGHT = 0x1C3
+_COMPARE_CAP_DUAL = 1 << 16
+_COMPARE_CAP_SCHEMA = 1 << 17
 
 # Order matches :meth:`Analyzer.probe` field extraction (hw_server pipelined read).
 _ELA_PROBE_ADDRS: tuple[int, ...] = (
@@ -133,6 +135,19 @@ def _validate_compare_mode(caps: int, mode: int, context: str) -> None:
         raise ValueError(
             f"{context} compare mode {mode} is not available in this bitstream "
             f"(COMPARE_CAPS=0x{caps:03X}); rebuild with REL_COMPARE=1 for modes 2-5"
+        )
+
+
+def _dual_compare_available(caps: int) -> bool:
+    """Legacy bitstreams omitted this flag but always had comparator B."""
+    return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
+
+
+def _validate_dual_compare(caps: int, stage: SequencerStage, context: str) -> None:
+    if stage.combine != 0 and not _dual_compare_available(caps):
+        raise ValueError(
+            f"{context} uses comparator B but this bitstream was built with "
+            f"DUAL_COMPARE=0 (COMPARE_CAPS=0x{caps:05X})"
         )
 
 
@@ -346,6 +361,7 @@ class Analyzer:
             for idx, stage in enumerate(config.sequence):
                 _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
                 _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
+                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
@@ -720,6 +736,7 @@ class Analyzer:
             "probe_mux_w": probe_mux_w,
             "compare_caps": compare_caps,
             "compare_modes": [m for m in range(9) if _compare_mode_available(compare_caps, m)],
+            "has_dual_compare": _dual_compare_available(compare_caps),
         }
 
     def probe_optional(self) -> Optional[Dict]:

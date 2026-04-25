@@ -592,12 +592,13 @@ info = analyzer.probe()
 #   "timestamp_width": 32,
 #   "num_segments": 4,
 #   "probe_mux_w": 0,
-#   "compare_caps": 0x1C3,
+#   "compare_caps": 0x301C3,
 #   "compare_modes": [0, 1, 6, 7, 8],
+#   "has_dual_compare": True,
 # }
 ```
 
-The bitfield layout in `FEATURES` and the `COMPARE_CAPS` mode mask at
+The bitfield layout in `FEATURES` and the `COMPARE_CAPS` capability mask at
 `0x00E0` are documented in
 [`specs/register_map.md`](specs/register_map.md), but you should
 prefer reading them via `Analyzer.probe()` which returns the

@@ -51,8 +51,8 @@ Jump within this page: [↑ Top](#readme-top)
 - **Tiny, parameterizable RTL core** -- ~1,595 slice LUTs + 0.5 BRAM baseline
   (8b × 1024, dual comparators, Vivado 2025.2 synth on xc7a100t);
   configurable sample width (1-256+ bits) and buffer depth (16-16M samples)
-- **Flexible trigger** -- 2 comparators per stage with lightweight default
-  modes (==, !=, rising, falling, changed), optional relational modes
+- **Flexible trigger** -- optional dual comparators per stage with lightweight
+  default modes (==, !=, rising, falling, changed), optional relational modes
   (<, >, <=, >=), boolean combine (AND/OR), and optional multi-stage
   sequencer (2-4 states)
 - **Configurable trigger delay** (`TRIG_DELAY`, 0-65535 sample clocks) --
@@ -546,8 +546,8 @@ from the RTL.
 
 **Key differentiators:**
 
-- **Only vendor-portable option with advanced triggers** — dual comparators,
-  optional relational modes, boolean combine, and multi-stage sequencer;
+- **Only vendor-portable option with advanced triggers** — optional dual
+  comparators, optional relational modes, boolean combine, and multi-stage sequencer;
   LiteScope is also portable but offers only basic triggering
 - **LLM-native host stack** — JSON-RPC server, structured event extraction
   (edges, bursts, frequency), and capture summaries designed for AI-driven debug

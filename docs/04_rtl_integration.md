@@ -223,7 +223,8 @@ module fcapz_ela_xilinx7 #(
     parameter BURST_W      = 256,    // USER2 burst DR width (don't change)
     parameter CTRL_CHAIN   = 1,      // BSCANE2 USER chain for control
     parameter DATA_CHAIN   = 2,      // BSCANE2 USER chain for burst data
-    parameter REL_COMPARE  = 0       // 1=enable <, >, <=, >= trigger modes
+    parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
+    parameter DUAL_COMPARE = 1       // 0=A-only compare, 1=enable comparator B
 ) ( ... );
 ```
 
@@ -231,7 +232,7 @@ module fcapz_ela_xilinx7 #(
 |---|---|---|---|
 | `SAMPLE_W` | int | 1..256 | Width of each probe sample.  Costs FFs proportionally; default 8 is small. |
 | `DEPTH` | int | 16..16M, **power of 2** | Buffer depth.  Stored in dual-port BRAM; ~512 LUTs at depth=1024.  Larger means more BRAM. |
-| `TRIG_STAGES` | int | 1..4 | Number of trigger sequencer stages.  `1` = single-stage simple trigger; `2..4` = multi-stage state machine.  Each extra stage adds two comparators and ~50 LUTs. |
+| `TRIG_STAGES` | int | 1..4 | Number of trigger sequencer stages.  `1` = single-stage simple trigger; `2..4` = multi-stage state machine.  Each extra stage adds sequencer state and comparator configuration. |
 | `STOR_QUAL` | bit | 0/1 | Storage qualification: filter which samples get stored based on a comparator.  +21 LUTs.  Up to ~10× effective depth on sparse signals. |
 | `INPUT_PIPE` | int | 0..N | Pipeline registers between `probe_in` and the comparators.  Use this if your fabric has tight timing on the probe path; each stage adds 1 cycle of latency.  With `INPUT_PIPE>=1`, the ELA also registers the BRAM write command and internally enables a one-cycle `COMPARE_PIPE`, so wide relational compares do not sit on the capture-control critical path. |
 | `NUM_CHANNELS` | int | 1..256 | Channel mux: lets one ELA observe `N` separate buses, one selected at arm time.  Probe input width becomes `SAMPLE_W * NUM_CHANNELS` bits. |
@@ -243,6 +244,7 @@ module fcapz_ela_xilinx7 #(
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
 | `DEFAULT_TRIG_EXT` | int | 0..3 | Power-up/reset default for `TRIG_EXT`. Useful with `STARTUP_ARM=1` when you want the bitstream to come up armed but wait for an external trigger condition instead of immediately matching the default internal comparator. |
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
+| `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for an apples-to-apples, single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
 | `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |

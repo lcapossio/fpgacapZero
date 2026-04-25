@@ -41,7 +41,8 @@ module fcapz_ela #(
     parameter PROBE_MUX_W = 0,      // 0=disabled, >0=total probe width for runtime mux
     parameter STARTUP_ARM = 0,      // 1 = arm automatically after reset/programming
     parameter DEFAULT_TRIG_EXT = 0, // reset/default external trigger mode
-    parameter REL_COMPARE = 0       // 0=small/faster trigger, 1=enable < > <= >=
+    parameter REL_COMPARE = 0,      // 0=small/faster trigger, 1=enable < > <= >=
+    parameter DUAL_COMPARE = 1      // 0=A-only trigger compare, 1=enable comparator B
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -150,6 +151,7 @@ module fcapz_ela #(
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;
     localparam COMPARE_PIPE = (INPUT_PIPE >= 1) ? 1 : 0;
+    localparam HAS_DUAL_COMPARE = (DUAL_COMPARE != 0);
 
     // Phase 4: segment derived params
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
@@ -179,7 +181,11 @@ module fcapz_ela #(
                                   (EXT_TRIG_EN != 0) ? 1'b1 : 1'b0,
                                   (DECIM_EN != 0) ? 1'b1 : 1'b0,
                                   STOR_QUAL[0], TRIG_STAGES[3:0]};
-    localparam [31:0] COMPARE_CAPS = (REL_COMPARE != 0) ? 32'h0000_01FF : 32'h0000_01C3;
+    localparam [31:0] COMPARE_MODE_CAPS =
+        (REL_COMPARE != 0) ? 32'h0000_01FF : 32'h0000_01C3;
+    localparam [31:0] COMPARE_CAPS =
+        COMPARE_MODE_CAPS | 32'h0002_0000 |
+        (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000);
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -511,22 +517,32 @@ module fcapz_ela #(
         .value(trig_value), .mask(trig_mask),
         .mode(trig_cmp_mode_a), .hit(simple_hit_a_raw)
     );
-    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_b (
-        .probe(active_probe), .probe_prev(probe_prev),
-        .value(trig_value_b), .mask(trig_mask_b),
-        .mode(trig_cmp_mode_b), .hit(simple_hit_b_raw)
-    );
+    generate
+        if (HAS_DUAL_COMPARE) begin : g_simple_b_cmp
+            trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_b (
+                .probe(active_probe), .probe_prev(probe_prev),
+                .value(trig_value_b), .mask(trig_mask_b),
+                .mode(trig_cmp_mode_b), .hit(simple_hit_b_raw)
+            );
+        end else begin : g_no_simple_b_cmp
+            assign simple_hit_b_raw = 1'b0;
+        end
+    endgenerate
     reg simple_hit_a_q, simple_hit_b_q;
     wire simple_hit_a = (COMPARE_PIPE != 0) ? simple_hit_a_q : simple_hit_a_raw;
     wire simple_hit_b = (COMPARE_PIPE != 0) ? simple_hit_b_q : simple_hit_b_raw;
     reg simple_trigger_hit;
     always @(*) begin
-        case (trig_combine)
-            2'd0: simple_trigger_hit = simple_hit_a;
-            2'd1: simple_trigger_hit = simple_hit_b;
-            2'd2: simple_trigger_hit = simple_hit_a & simple_hit_b;
-            2'd3: simple_trigger_hit = simple_hit_a | simple_hit_b;
-        endcase
+        if (!HAS_DUAL_COMPARE) begin
+            simple_trigger_hit = simple_hit_a;
+        end else begin
+            case (trig_combine)
+                2'd0: simple_trigger_hit = simple_hit_a;
+                2'd1: simple_trigger_hit = simple_hit_b;
+                2'd2: simple_trigger_hit = simple_hit_a & simple_hit_b;
+                2'd3: simple_trigger_hit = simple_hit_a | simple_hit_b;
+            endcase
+        end
     end
 
     // Sequencer trigger: current stage comparators A and B
@@ -536,23 +552,33 @@ module fcapz_ela #(
         .value(seq_value_a[seq_state]), .mask(seq_mask_a[seq_state]),
         .mode(seq_mode_a[seq_state]), .hit(seq_hit_a_raw)
     );
-    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
-        .probe(active_probe), .probe_prev(probe_prev),
-        .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
-        .mode(seq_mode_b[seq_state]), .hit(seq_hit_b_raw)
-    );
+    generate
+        if (HAS_DUAL_COMPARE) begin : g_seq_b_cmp
+            trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
+                .probe(active_probe), .probe_prev(probe_prev),
+                .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
+                .mode(seq_mode_b[seq_state]), .hit(seq_hit_b_raw)
+            );
+        end else begin : g_no_seq_b_cmp
+            assign seq_hit_b_raw = 1'b0;
+        end
+    endgenerate
     reg seq_hit_a_q, seq_hit_b_q;
     wire seq_hit_a = (COMPARE_PIPE != 0) ? seq_hit_a_q : seq_hit_a_raw;
     wire seq_hit_b = (COMPARE_PIPE != 0) ? seq_hit_b_q : seq_hit_b_raw;
     wire [1:0] seq_combine_cur = seq_combine[seq_state];
     reg seq_stage_hit;
     always @(*) begin
-        case (seq_combine_cur)
-            2'd0: seq_stage_hit = seq_hit_a;
-            2'd1: seq_stage_hit = seq_hit_b;
-            2'd2: seq_stage_hit = seq_hit_a & seq_hit_b;
-            2'd3: seq_stage_hit = seq_hit_a | seq_hit_b;
-        endcase
+        if (!HAS_DUAL_COMPARE) begin
+            seq_stage_hit = seq_hit_a;
+        end else begin
+            case (seq_combine_cur)
+                2'd0: seq_stage_hit = seq_hit_a;
+                2'd1: seq_stage_hit = seq_hit_b;
+                2'd2: seq_stage_hit = seq_hit_a & seq_hit_b;
+                2'd3: seq_stage_hit = seq_hit_a | seq_hit_b;
+            endcase
+        end
     end
 
     wire seq_count_reached = (seq_count_target[seq_state] == 16'h0) ||
@@ -714,11 +740,13 @@ module fcapz_ela #(
                             jtag_addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE) begin
                             s = (jtag_addr - ADDR_SEQ_BASE) / SEQ_STRIDE;
                             case ((jtag_addr - ADDR_SEQ_BASE) % SEQ_STRIDE)
-                                0:  jtag_seq_cfg[s]     <= jtag_wdata;
+                                0:  jtag_seq_cfg[s]     <= HAS_DUAL_COMPARE
+                                                           ? jtag_wdata
+                                                           : (jtag_wdata & ~32'h0000_03F0);
                                 4:  jtag_seq_value_a[s] <= jtag_wdata;
                                 8:  jtag_seq_mask_a[s]  <= jtag_wdata;
-                                12: jtag_seq_value_b[s] <= jtag_wdata;
-                                16: jtag_seq_mask_b[s]  <= jtag_wdata;
+                                12: if (HAS_DUAL_COMPARE) jtag_seq_value_b[s] <= jtag_wdata;
+                                16: if (HAS_DUAL_COMPARE) jtag_seq_mask_b[s]  <= jtag_wdata;
                                 default: ;
                             endcase
                         end
@@ -814,10 +842,17 @@ module fcapz_ela #(
                 seq_value_a_sync2[si] <= seq_value_a_sync1[si];
                 seq_mask_a_sync1[si]  <= jtag_seq_mask_a_w[si];
                 seq_mask_a_sync2[si]  <= seq_mask_a_sync1[si];
-                seq_value_b_sync1[si] <= jtag_seq_value_b_w[si];
-                seq_value_b_sync2[si] <= seq_value_b_sync1[si];
-                seq_mask_b_sync1[si]  <= jtag_seq_mask_b_w[si];
-                seq_mask_b_sync2[si]  <= seq_mask_b_sync1[si];
+                if (HAS_DUAL_COMPARE) begin
+                    seq_value_b_sync1[si] <= jtag_seq_value_b_w[si];
+                    seq_value_b_sync2[si] <= seq_value_b_sync1[si];
+                    seq_mask_b_sync1[si]  <= jtag_seq_mask_b_w[si];
+                    seq_mask_b_sync2[si]  <= seq_mask_b_sync1[si];
+                end else begin
+                    seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
+                    seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
+                    seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b1}};
+                    seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b1}};
+                end
             end
         end
     end
@@ -874,12 +909,12 @@ module fcapz_ela #(
             // Stage-0 compare modes
             if (seq_cfg_sync2[0][9:0] != 10'd0) begin
                 trig_cmp_mode_a <= seq_cfg_sync2[0][3:0];
-                trig_cmp_mode_b <= seq_cfg_sync2[0][7:4];
-                trig_combine    <= seq_cfg_sync2[0][9:8];
+                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][7:4] : 4'd0;
+                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][9:8] : 2'd0;
             end else begin
                 trig_cmp_mode_a <= trig_mode_sync2[1] ? 4'd8 : 4'd0;
-                trig_cmp_mode_b <= (trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
-                trig_combine    <= (trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
+                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
+                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
             end
             trig_value_b     <= seq_value_b_sync2[0];
             trig_mask_b      <= seq_mask_b_sync2[0];
@@ -905,8 +940,8 @@ module fcapz_ela #(
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
                 seq_mode_a[si]       <= seq_cfg_sync2[si][3:0];
-                seq_mode_b[si]       <= seq_cfg_sync2[si][7:4];
-                seq_combine[si]      <= seq_cfg_sync2[si][9:8];
+                seq_mode_b[si]       <= HAS_DUAL_COMPARE ? seq_cfg_sync2[si][7:4] : 4'd0;
+                seq_combine[si]      <= HAS_DUAL_COMPARE ? seq_cfg_sync2[si][9:8] : 2'd0;
                 seq_next_state[si]   <= seq_cfg_sync2[si][10 +: SEQ_STATE_W];
                 seq_is_final[si]     <= seq_cfg_sync2[si][12];
                 seq_count_target[si] <= seq_cfg_sync2[si][31:16];
@@ -1461,8 +1496,8 @@ module fcapz_ela #(
                         0:  jtag_rdata_mux = seq_cfg_r;
                         4:  jtag_rdata_mux = seq_value_a_r;
                         8:  jtag_rdata_mux = seq_mask_a_r;
-                        12: jtag_rdata_mux = seq_value_b_r;
-                        16: jtag_rdata_mux = seq_mask_b_r;
+                        12: jtag_rdata_mux = HAS_DUAL_COMPARE ? seq_value_b_r : 32'h0;
+                        16: jtag_rdata_mux = HAS_DUAL_COMPARE ? seq_mask_b_r : 32'hFFFF_FFFF;
                         default: jtag_rdata_mux = 32'h0;
                     endcase
                 end

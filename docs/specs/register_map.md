@@ -62,7 +62,13 @@ in that bridge’s section.
 - `0x00D8`: `STARTUP_ARM` (rw) - Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes the power-up default of this register so the bitstream can come up pre-armed immediately after configuration.
 - `0x00DC`: `TRIG_HOLDOFF` (rw) - Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after each segmented auto-rearm. Distinct from `TRIG_DELAY`.
 - `0x00D4`: `TRIG_DELAY` (rw) - Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample is shifted N cycles after the trigger event, compensating for upstream pipeline latency. The pre/post-trigger sample counts and the buffer wrap behavior are unchanged — only the position of the "trigger" anchor moves forward.
-- `0x00E0`: `COMPARE_CAPS` (ro) - Compare mode capability bitmask. Bit N set means compare mode N is implemented by this bitstream. Default lightweight builds report `0x1C3` (modes 0, 1, 6, 7, 8); `REL_COMPARE=1` builds report `0x1FF` (modes 0-8).
+- `0x00E0`: `COMPARE_CAPS` (ro) - Compare capability bitmask. Bits 0-8
+  report compare modes implemented by this bitstream. Bit 16 reports
+  comparator B / dual-combine support when bit 17 is set. Bit 17 marks the
+  extended capability schema; older bitstreams omit bit 17 and should be
+  treated as dual-compare capable for compatibility. Default lightweight,
+  dual-comparator builds report `0x301C3`; `REL_COMPARE=1` dual-comparator
+  builds report `0x301FF`; `DUAL_COMPARE=0` clears bit 16.
 - `0x003C`: `FEATURES` (ro) - Feature flags: `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL
 - `0x0040+N*20+0`:  `SEQ_STAGE_N_CFG` (rw) - See encoding below
 - `0x0040+N*20+4`:  `SEQ_STAGE_N_VALUE_A` (rw) - Comparator A match value
@@ -83,6 +89,9 @@ in that bridge’s section.
 Modes 0, 1, 6, 7, and 8 are present in the default lightweight RTL build.
 Modes 2-5 require the ELA `REL_COMPARE=1` parameter; otherwise they never
 match.
+Comparator B and combine modes 1-3 require `DUAL_COMPARE=1`; with
+`DUAL_COMPARE=0`, hardware forces A-only comparison and the host rejects
+B-combine sequencer configurations.
 
 | Value | Mode | Operation |
 |------:|------|-----------|

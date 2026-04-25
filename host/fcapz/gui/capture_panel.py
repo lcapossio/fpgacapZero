@@ -43,10 +43,16 @@ _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Bin", 2),
 )
 _COMPARE_CAPS_LEGACY_FULL = 0x1FF
+_COMPARE_CAP_DUAL = 1 << 16
+_COMPARE_CAP_SCHEMA = 1 << 17
 
 
 def _compare_mode_available(caps: int, mode: int) -> bool:
     return 0 <= mode <= 8 and bool(caps & (1 << mode))
+
+
+def _dual_compare_available(caps: int) -> bool:
+    return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
 
 
 def _parse_trigger_value_text(text: str, base: int) -> int:
@@ -123,6 +129,7 @@ class CapturePanel(QGroupBox):
         self._hw_trig_stages: int = 0
         self._hw_has_decimation: bool = True
         self._hw_has_ext_trigger: bool = True
+        self._hw_has_dual_compare: bool = True
         self._hw_has_storage_qual: bool = True
         self._hw_probe_mux_w: int = 0
         self._hw_num_segments: int = 1
@@ -893,6 +900,9 @@ class CapturePanel(QGroupBox):
         self._hw_compare_caps = int(info.get("compare_caps", _COMPARE_CAPS_LEGACY_FULL)) or (
             _COMPARE_CAPS_LEGACY_FULL
         )
+        self._hw_has_dual_compare = bool(
+            info.get("has_dual_compare", _dual_compare_available(self._hw_compare_caps))
+        )
         self._channel.setMaximum(self._hw_num_chan - 1)
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
@@ -987,6 +997,11 @@ class CapturePanel(QGroupBox):
                     raise ValueError(
                         f"Stage {r + 1}: comparator B mode {stage.cmp_mode_b} is not "
                         "available in this bitstream; rebuild with REL_COMPARE=1 for modes 2-5."
+                    )
+                if stage.combine != 0 and not self._hw_has_dual_compare:
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator B is not available in this "
+                        "ELA build; rebuild with DUAL_COMPARE=1 or use A-only combine."
                     )
                 sequence.append(stage)
         return CaptureConfig(
