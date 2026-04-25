@@ -47,6 +47,15 @@ TESTBENCHES = {
             RTL / "trig_compare.v",
         ],
     ),
+    "fcapz_ela_config_matrix": (
+        TB / "fcapz_ela_config_matrix_tb.sv",
+        [
+            RTL / "reset_sync.v",
+            RTL / "fcapz_ela.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+        ],
+    ),
     "jtag_burst_read": (
         TB / "jtag_burst_read_tb.sv",
         [
@@ -80,6 +89,7 @@ DEFAULT_TESTBENCHES = [
     "trig_compare",
     "fcapz_ela",
     "fcapz_ela_bug_probe",
+    "fcapz_ela_config_matrix",
     "jtag_burst_read",
     "jtag_pipe_iface",
     "fcapz_eio",
