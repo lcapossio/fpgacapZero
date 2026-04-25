@@ -34,11 +34,12 @@ There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
 throughput (the Xilinx hw_server transport does this for the ELA
-burst readback).
+burst readback).  Xilinx `SINGLE_CHAIN_BURST=1` builds keep those
+wide burst scans on USER1 instead of switching to USER2.
 
 An **optional** extension method `read_timestamp_block(addr, words,
-timestamp_width)` accelerates timestamp readback via the USER2 burst
-path.  The host checks for it via `getattr(transport,
+timestamp_width)` accelerates timestamp readback via the burst path.
+The host checks for it via `getattr(transport,
 "read_timestamp_block", None)` and falls back to `read_block` when
 absent.  See "Timestamp burst readback" below.
 
@@ -102,9 +103,13 @@ logger `fcapz.gui.connect`.
 `XilinxHwServerTransport` implements the optional
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
-USER2 256-bit DR burst path used for sample data.
+256-bit DR burst path used for sample data.  Default Xilinx builds use
+USER2; `single_chain_burst=True` transports use USER1.
 
 The key difference from a sample burst:
+
+Note: current hardware uses the same priming-scan behavior for timestamp
+bursts as for sample bursts; the host discards that first 256-bit scan.
 
 - `BURST_PTR` is written with `bit[31]=1` to switch the staging mux
   to the timestamp BRAM instead of the sample BRAM.

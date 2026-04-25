@@ -51,6 +51,7 @@ class RpcServer:
                 port=int(req.get("port", 3121)),
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
+                single_chain_burst=bool(req.get("single_chain_burst", False)),
             )
         raise ValueError(f"unknown backend: {backend}")
 

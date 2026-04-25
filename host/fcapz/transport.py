@@ -378,6 +378,7 @@ class XilinxHwServerTransport(Transport):
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
         use_register_ir: bool = False,
+        single_chain_burst: bool = False,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -417,6 +418,7 @@ class XilinxHwServerTransport(Transport):
                 f"dr_extra_position must be 'tdo' or 'tdi', got {dr_extra_position!r}"
             )
         self.use_register_ir = bool(use_register_ir)
+        self.single_chain_burst = bool(single_chain_burst)
         if self.use_register_ir:
             # In -register mode xsdb handles both IR routing and DR BYPASS
             # padding for multi-TAP chains (e.g. Zynq US+ MPSoC ARM DAP).
@@ -690,17 +692,19 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            return self._read_block_burst(words)
+            try:
+                return self._read_block_burst(words)
+            except (ConnectionError, RuntimeError):
+                self._has_burst = False
         # Non-burst path needs flush to reset USER1 pipeline
         return self._read_block_user1(addr, words)
 
     @property
     def _burst_available(self) -> bool:
-        """True if the bitstream has the USER2 burst interface."""
+        """True if the bitstream has a fast burst interface."""
         if not hasattr(self, "_has_burst"):
-            # Xilinx/Intel/Microchip ELA wrappers instantiate USER2 for burst
-            # readout. Do not probe by writing BURST_PTR here: that register is
-            # a side-effecting start toggle for the USER2 burst engine.
+            # Do not probe by writing BURST_PTR here: that register is a
+            # side-effecting start toggle for the burst engine.
             self._has_burst = True
         return self._has_burst
 
@@ -721,7 +725,7 @@ class XilinxHwServerTransport(Transport):
         timestamp: bool = False,
         element_width: int | None = None,
     ) -> List[int]:
-        """Read *words* samples via the USER2 256-bit burst DR.
+        """Read *words* samples via the 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
         USER1 write to BURST_PTR → idle for staging fill → IR switch
@@ -750,7 +754,8 @@ class XilinxHwServerTransport(Transport):
         )
         user_total = self._user_dr_bits(self.DR_BITS)
         ir1_cmd = self._irshift_tcl("_bq", chain=1)
-        ir2_cmd = self._irshift_tcl("_bq", chain=2)
+        burst_chain = 1 if self.single_chain_burst else 2
+        ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         if self.use_register_ir:
             # Register mode: BURST_PTR write needs DRUPDATE + split-
@@ -770,7 +775,7 @@ class XilinxHwServerTransport(Transport):
             parts_r = ["set _bq [jtag sequence]"]
             for _ in range(n_scans + prime_scans):
                 parts_r.append(
-                    f"{ir2_cmd}; "
+                    f"{ir_burst_cmd}; "
                     f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
                 )
             parts_r.append("puts [$_bq run -bits]; $_bq delete")
@@ -790,11 +795,10 @@ class XilinxHwServerTransport(Transport):
                 "$_bq run; $_bq delete",
             ]
             parts_r = ["set _bq [jtag sequence]"]
-            # USER2's BSCAN clock is only active while USER2 is selected, so
-            # the first USER2 scan primes/fills staging and is discarded.
+            # The first wide scan primes/fills staging and is discarded.
             for _ in range(n_scans + prime_scans):
                 parts_r.append(
-                    f"{ir2_cmd}; "
+                    f"{ir_burst_cmd}; "
                     f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
                 )
             parts_r.append("puts [$_bq run -bits]; $_bq delete")
@@ -813,11 +817,14 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            return self._read_block_burst(
-                words,
-                timestamp=True,
-                element_width=timestamp_width,
-            )
+            try:
+                return self._read_block_burst(
+                    words,
+                    timestamp=True,
+                    element_width=timestamp_width,
+                )
+            except (ConnectionError, RuntimeError):
+                self._has_burst = False
         return self._read_block_user1(addr, words)
 
     def _parse_burst_bits(

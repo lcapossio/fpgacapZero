@@ -14,6 +14,10 @@ designed to fit on any FPGA with minimal resource usage.
   `INPUT_PIPE>=1` also register comparator hits internally, keeping optional
   relational compares off the capture-control critical path.
   Controlled by `TRIG_STAGES` parameter (1 = simple, 2-4 = sequencer).
+- **Feature-gated ELA Core**: disabled feature groups stop accepting writes,
+  cross as constants, and read back fixed values so synthesis can remove their
+  registers and muxes. Small builds use the same `fcapz_ela.v` implementation
+  as full builds.
 - **Storage Qualification**: Optional condition that filters which samples
   are stored, effectively multiplying buffer depth. `STOR_QUAL` parameter
   (0 = off, 1 = on, +21 LUTs).
@@ -22,8 +26,10 @@ designed to fit on any FPGA with minimal resource usage.
 - **Capture Controller**: Arm, trigger detect, post-trigger countdown, done.
 - **JTAG Register Map** (`jtag_reg_iface.v`): 49-bit DR on USER1 for
   control/status + per-word data readback.
-- **Burst Readback** (`jtag_burst_read.v`): 256-bit DR on USER2 for fast
-  block reads (32 8-bit samples per scan).
+- **Single-Chain Pipe** (`jtag_pipe_iface.v`): optional Xilinx path that
+  carries both 49-bit register packets and 256-bit burst packets on USER1.
+- **Burst Readback** (`jtag_burst_read.v`): default 256-bit DR on USER2 for
+  fast block reads (32 8-bit samples per scan).
 - **Embedded I/O** (`fcapz_eio.v`): JTAG-accessible input/output probe registers
   on USER3 (CHAIN=3). `IN_W`-bit input bus synchronised to jtag_clk;
   `OUT_W`-bit output register driven to fabric.  Parameters: `IN_W`, `OUT_W`.

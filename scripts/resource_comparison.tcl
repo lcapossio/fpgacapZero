@@ -63,7 +63,7 @@ foreach cfg $configs {
     puts $fp "endmodule"
     close $fp
 
-    add_files [list $root/rtl/dpram.v $root/rtl/reset_sync.v $root/rtl/trig_compare.v $root/rtl/fcapz_ela.v $root/rtl/jtag_reg_iface.v $root/rtl/jtag_burst_read.v $root/rtl/jtag_tap/jtag_tap_xilinx7.v $root/vivado/top_${label}.v]
+    add_files [list $root/rtl/dpram.v $root/rtl/reset_sync.v $root/rtl/trig_compare.v $root/rtl/fcapz_ela.v $root/rtl/jtag_reg_iface.v $root/rtl/jtag_pipe_iface.v $root/rtl/jtag_burst_read.v $root/rtl/jtag_tap/jtag_tap_xilinx7.v $root/vivado/top_${label}.v]
     add_files -fileset constrs_1 $root/examples/arty_a7/arty_a7.xdc
     set_property top arty_a7_top [current_fileset]
 

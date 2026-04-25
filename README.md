@@ -577,6 +577,8 @@ reference (Apr 2026). Regenerate ELA-only rows with
 | 8b × 1024, seq + SQ | 2,095 | 1,897 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=1` |
 | 8b × 4096 | 1,541 | 1,490 | 1.0 | Deeper buffer (+0.5 BRAM tile vs 1024) |
 | 32b × 1024 | 1,548 | 1,740 | 1.0 | Wider samples (+0.5 BRAM tile vs 8b×1024) |
+| 8b x 1024, single comparator, slow USER1 readout | 596 | 779 | 0.5 | One BSCANE2; advanced features compiled out |
+| 8b x 1024, single comparator, single-chain fast readout | 912 | 1,234 | 0.5 | One BSCANE2; 256-bit USER1 burst via `SINGLE_CHAIN_BURST=1` |
 | **`arty_a7_top` (placed)** | **2,701** | **2,743** | **1.5** | ELA with `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave` (no UART in this bitstream) |
 
 Optional ELA parameters (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`,
@@ -684,6 +686,7 @@ fpgacapZero/
     fcapz_ela.v              ELA core (vendor-agnostic)
     fcapz_eio.v              EIO core (vendor-agnostic)
     jtag_reg_iface.v         JTAG-to-register bridge
+    jtag_pipe_iface.v        Single-chain register + burst pipe
     jtag_burst_read.v        Burst data readout (256-bit DR)
     fcapz_ela_xilinx7.v       ELA wrapper — Xilinx 7-series
     fcapz_ela_xilinxus.v      ELA wrapper — Xilinx UltraScale / UltraScale+

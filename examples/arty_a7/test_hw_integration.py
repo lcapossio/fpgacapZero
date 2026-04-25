@@ -65,6 +65,7 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_ela.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
     _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_pipe_iface.v",
     _ROOT / "rtl" / "jtag_burst_read.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
     _ROOT / "rtl" / "fcapz_async_fifo.v",

@@ -105,6 +105,7 @@ if {[file exists $project_xpr]} {
         $root/rtl/fcapz_ela.v \
         $root/rtl/fcapz_ela_xilinx7.v \
         $root/rtl/jtag_reg_iface.v \
+        $root/rtl/jtag_pipe_iface.v \
         $root/rtl/jtag_burst_read.v \
         $root/rtl/jtag_tap/jtag_tap_xilinx7.v \
         $root/rtl/fcapz_async_fifo.v \

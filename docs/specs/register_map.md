@@ -104,7 +104,9 @@ B-combine sequencer configurations.
 | 6 | RISING | masked bits: all-zero → non-zero |
 | 7 | FALLING | masked bits: non-zero → all-zero |
 | 8 | CHANGED | any masked bit changed from previous sample |
-- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1)
+- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1).
+  Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this
+  slow fallback window and return zero for these addresses.
 
 [↑ Top](#regmap-top)
 
@@ -147,17 +149,18 @@ B-combine sequencer configurations.
 [↑ Top](#regmap-top)
 
 <a id="regmap-burst-user2"></a>
-## Burst Readout (USER2, 256-bit DR)
+## Burst Readout (256-bit DR)
 - Write to `BURST_PTR` (0x002C) via USER1 to start a burst from `start_ptr`.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
-- Switch IR to USER2 (0x03) and perform 256-bit DR scans.
+- Default Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
+  `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on USER1 (0x02).
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
   (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
   read `N` scans to get `N × (256/SAMPLE_W)` samples.
 - **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
-  packed LSB-first.  No priming scan; the first scan already contains valid data.
-  The host uses `read_timestamp_block()` to retrieve timestamps via this path.
+  packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
+  via this path and discards the priming scan.
 - Read pointer auto-increments; staging buffer is pre-filled during the SHIFT phase.
 - Effective delivery rate depends on the host transport and cable;
   the burst path returns multiple words per 256-bit DR scan to amortise round trips.

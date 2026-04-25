@@ -53,6 +53,12 @@ TESTBENCHES = {
             RTL / "jtag_burst_read.v",
         ],
     ),
+    "jtag_pipe_iface": (
+        TB / "jtag_pipe_iface_tb.sv",
+        [
+            RTL / "jtag_pipe_iface.v",
+        ],
+    ),
     "fcapz_eio": (
         TB / "fcapz_eio_tb.sv",
         [
@@ -75,6 +81,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela",
     "fcapz_ela_bug_probe",
     "jtag_burst_read",
+    "jtag_pipe_iface",
     "fcapz_eio",
     "chan_mux",
 ]
@@ -85,6 +92,7 @@ LINT_TARGETS = [
     RTL / "trig_compare.v",
     RTL / "jtag_reg_iface.v",
     RTL / "jtag_burst_read.v",
+    RTL / "jtag_pipe_iface.v",
     RTL / "fcapz_async_fifo.v",
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",

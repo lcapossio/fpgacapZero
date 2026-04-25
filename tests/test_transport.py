@@ -339,6 +339,55 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
+    def test_single_chain_burst_uses_user1_for_wide_scans(self):
+        """Single-chain burst keeps both BURST_PTR and 256-bit scans on USER1."""
+        t = XilinxHwServerTransport(single_chain_burst=True)
+        t._cached_sps = 32
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertIn("-hex 6 02", sent[0])
+        self.assertNotIn("-hex 6 03", sent[0])
+        self.assertIn("-bits 256", sent[0])
+
+    def test_read_block_falls_back_when_user2_burst_missing(self):
+        """Single-chain ELA builds can fall back to the USER1 DATA window."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("USER2 unavailable")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+        self.assertFalse(t._has_burst)
+        t._read_block_user1.assert_called_once_with(0x0100, 3)
+
+    def test_timestamp_block_falls_back_when_user2_burst_missing(self):
+        """Timestamp burst failures also disable USER2 for later reads."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("USER2 unavailable")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[4, 5])  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_timestamp_block(0x2100, 2, 32), [4, 5])
+        self.assertFalse(t._has_burst)
+        t._read_block_user1.assert_called_once_with(0x2100, 2)
+
     def test_timestamp_burst_primes_user2_before_returned_scan(self):
         """Timestamp USER2 reads also discard the first fill scan."""
         t = XilinxHwServerTransport()

@@ -109,10 +109,12 @@ fcapz_ela_xilinx7 #(
 That's it.  No TAP primitive instantiation, no JTAG plumbing, no
 register file declarations.  The wrapper takes care of:
 
-- Instantiating two `BSCANE2` primitives (USER1 for control, USER2
-  for burst data readback)
-- Instantiating `jtag_reg_iface` (the 49-bit DR register protocol)
-- Instantiating `jtag_burst_read` (the 256-bit DR burst engine)
+- Instantiating one or two `BSCANE2` primitives. The default uses USER1
+  for control and USER2 for burst data readback; `SINGLE_CHAIN_BURST=1`
+  keeps fast burst readback on USER1 only.
+- Instantiating `jtag_reg_iface` (the 49-bit DR register protocol) or
+  `jtag_pipe_iface` (mixed 49-bit register / 256-bit burst packets)
+- Instantiating `jtag_burst_read` (the two-chain 256-bit DR burst engine)
 - Instantiating `fcapz_ela` (the actual capture core)
 - Wiring everything together
 
@@ -221,10 +223,13 @@ module fcapz_ela_xilinx7 #(
     parameter STARTUP_ARM  = 0,      // 1=come up armed after reset/configuration
     parameter DEFAULT_TRIG_EXT = 0,  // reset/default external trigger mode
     parameter BURST_W      = 256,    // USER2 burst DR width (don't change)
+    parameter BURST_EN     = 1,      // 0=omit USER2 burst path
+    parameter SINGLE_CHAIN_BURST = 0, // 1=fast burst readout on CTRL_CHAIN
     parameter CTRL_CHAIN   = 1,      // BSCANE2 USER chain for control
     parameter DATA_CHAIN   = 2,      // BSCANE2 USER chain for burst data
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
-    parameter DUAL_COMPARE = 1       // 0=A-only compare, 1=enable comparator B
+    parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
+    parameter USER1_DATA_EN = 1      // 0=disable slow USER1 DATA window readback
 ) ( ... );
 ```
 
@@ -238,14 +243,17 @@ module fcapz_ela_xilinx7 #(
 | `NUM_CHANNELS` | int | 1..256 | Channel mux: lets one ELA observe `N` separate buses, one selected at arm time.  Probe input width becomes `SAMPLE_W * NUM_CHANNELS` bits. |
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
-| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into both `fcapz_ela` and `jtag_burst_read` so the USER2 burst engine knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
+| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into the burst read engine so it knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
 | `DEFAULT_TRIG_EXT` | int | 0..3 | Power-up/reset default for `TRIG_EXT`. Useful with `STARTUP_ARM=1` when you want the bitstream to come up armed but wait for an external trigger condition instead of immediately matching the default internal comparator. |
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
 | `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for an apples-to-apples, single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
-| `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
+| `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal Xilinx builds that rely on either USER2 burst readout or `SINGLE_CHAIN_BURST=1` to remove the sample-clock USER1 data CDC and part of the readback mux. |
+| `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
+| `BURST_EN` | bit | 0/1 | Xilinx wrapper option to instantiate the USER2 burst read engine. Default `1` preserves the legacy two-chain fast path. Set `0` for a single-BSCAN, smallest-wrapper build; keep `USER1_DATA_EN=1` so samples remain readable through the slow USER1 data window unless `SINGLE_CHAIN_BURST=1` is enabled. |
+| `SINGLE_CHAIN_BURST` | bit | 0/1 | Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. This is closer to the Xilinx ILA/debug_hub transport shape: one USER chain carries both 49-bit register packets and 256-bit data packets. Host transports must opt in with `single_chain_burst=True`. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |

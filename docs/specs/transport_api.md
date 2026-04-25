@@ -57,11 +57,15 @@ A write requires one DR scan followed by idle cycles:
 1. Scan: shifts in write frame (`rnw=1`, `addr`, `data`).
 2. Idle 20 TCK cycles for the write to propagate.
 
-#### Burst data readout (USER2)
-256-bit DR via BSCANE2 USER2 (IR = `0x03`).  Each scan returns
+#### Burst data readout
+Default Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
+`SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on USER1
+(IR = `0x02`) after the `BURST_PTR` write.  Each scan returns
 `256 / SAMPLE_W` packed samples with auto-incrementing read pointer.
 
 Flow (single `jtag sequence`):
+For `SINGLE_CHAIN_BURST=1`, the burst-chain steps below remain on USER1
+instead of switching to USER2.
 1. IR shift to USER1, DR shift to write `BURST_PTR` (0x002C) — triggers
    staging buffer fill from `start_ptr`.
 2. Idle 40 TCK cycles (staging buffer needs ~33 cycles to load).
