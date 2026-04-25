@@ -407,7 +407,8 @@ class Analyzer:
         ts_words_per = (self._hw_timestamp_w + 31) // 32
         ts_word_count = total * ts_words_per
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        if ts_words_per == 1 and callable(timestamp_burst):
+        used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
+        if used_timestamp_burst:
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
@@ -421,6 +422,15 @@ class Analyzer:
                 for j in range(min(ts_words_per, len(raw) - i)):
                     val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
                 timestamps.append(val & mask)
+        if used_timestamp_burst and any(
+            timestamps[i] <= timestamps[i - 1] for i in range(1, len(timestamps))
+        ):
+            # Some Xilinx hw_server runs occasionally return one stale USER2
+            # timestamp scan after the sample burst. USER1 timestamp reads are
+            # slower but deterministic, so fall back rather than reporting bad
+            # timing metadata with otherwise-good samples.
+            raw = self.transport.read_block(ts_base, ts_word_count)
+            timestamps = [v & mask for v in raw]
         return timestamps
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:

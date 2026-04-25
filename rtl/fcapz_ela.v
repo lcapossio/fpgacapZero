@@ -149,6 +149,7 @@ module fcapz_ela #(
     localparam PTR_W = $clog2(DEPTH);
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;
+    localparam COMPARE_PIPE = (INPUT_PIPE >= 1) ? 1 : 0;
 
     // Phase 4: segment derived params
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
@@ -392,8 +393,12 @@ module fcapz_ela #(
     reg [SEG_IDX_W-1:0] cur_segment;
     reg [SEG_IDX_W-1:0] seg_count;            // number of completed segments
     reg                  all_seg_done;
+    reg                  segment_wrapped;
+    wire                 segment_auto_rearm_now;
     // Per-segment start_ptr storage
     reg [PTR_W-1:0] seg_start_ptr [0:NUM_SEGMENTS-1];
+    reg [PTR_W-1:0] seg_start_ptr_jtag_sync1 [0:NUM_SEGMENTS-1];
+    reg [PTR_W-1:0] seg_start_ptr_jtag_sync2 [0:NUM_SEGMENTS-1];
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
     localparam TS_DATA_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
@@ -500,17 +505,20 @@ module fcapz_ela #(
     wire reset_pulse = reset_toggle_sync1 ^ reset_toggle_sync2;
 
     // Simple trigger: uses stage-0 comparators (backward compatible)
-    wire simple_hit_a, simple_hit_b;
+    wire simple_hit_a_raw, simple_hit_b_raw;
     trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_a (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(trig_value), .mask(trig_mask),
-        .mode(trig_cmp_mode_a), .hit(simple_hit_a)
+        .mode(trig_cmp_mode_a), .hit(simple_hit_a_raw)
     );
     trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_b (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(trig_value_b), .mask(trig_mask_b),
-        .mode(trig_cmp_mode_b), .hit(simple_hit_b)
+        .mode(trig_cmp_mode_b), .hit(simple_hit_b_raw)
     );
+    reg simple_hit_a_q, simple_hit_b_q;
+    wire simple_hit_a = (COMPARE_PIPE != 0) ? simple_hit_a_q : simple_hit_a_raw;
+    wire simple_hit_b = (COMPARE_PIPE != 0) ? simple_hit_b_q : simple_hit_b_raw;
     reg simple_trigger_hit;
     always @(*) begin
         case (trig_combine)
@@ -522,17 +530,20 @@ module fcapz_ela #(
     end
 
     // Sequencer trigger: current stage comparators A and B
-    wire seq_hit_a, seq_hit_b;
+    wire seq_hit_a_raw, seq_hit_b_raw;
     trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_a (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(seq_value_a[seq_state]), .mask(seq_mask_a[seq_state]),
-        .mode(seq_mode_a[seq_state]), .hit(seq_hit_a)
+        .mode(seq_mode_a[seq_state]), .hit(seq_hit_a_raw)
     );
     trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
-        .mode(seq_mode_b[seq_state]), .hit(seq_hit_b)
+        .mode(seq_mode_b[seq_state]), .hit(seq_hit_b_raw)
     );
+    reg seq_hit_a_q, seq_hit_b_q;
+    wire seq_hit_a = (COMPARE_PIPE != 0) ? seq_hit_a_q : seq_hit_a_raw;
+    wire seq_hit_b = (COMPARE_PIPE != 0) ? seq_hit_b_q : seq_hit_b_raw;
     wire [1:0] seq_combine_cur = seq_combine[seq_state];
     reg seq_stage_hit;
     always @(*) begin
@@ -568,25 +579,60 @@ module fcapz_ela #(
     end
 
     // Storage qualification comparator (only instantiated when STOR_QUAL=1)
-    wire sq_hit_w;
+    wire sq_hit_raw;
     generate
         if (STOR_QUAL != 0) begin : g_sq_cmp
             trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_sq_cmp (
                 .probe(active_probe), .probe_prev(probe_prev),
                 .value(sq_value), .mask(sq_mask),
-                .mode(sq_cmp_mode), .hit(sq_hit_w)
+                .mode(sq_cmp_mode), .hit(sq_hit_raw)
             );
         end else begin : g_no_sq_cmp
-            assign sq_hit_w = 1'b1;  // STOR_QUAL=0: always store
+            assign sq_hit_raw = 1'b1;  // STOR_QUAL=0: always store
         end
     endgenerate
+    reg sq_hit_q;
+    wire sq_hit_w = (COMPARE_PIPE != 0) ? sq_hit_q : sq_hit_raw;
     wire store_sample = (STOR_QUAL == 0) || !sq_enable || sq_hit_w;
+
+    // Register compare hits when the input path is already pipelined.  This
+    // keeps wide relational comparators off the capture-control critical path.
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            simple_hit_a_q <= 1'b0;
+            simple_hit_b_q <= 1'b0;
+            seq_hit_a_q    <= 1'b0;
+            seq_hit_b_q    <= 1'b0;
+            sq_hit_q       <= 1'b0;
+        end else if (reset_pulse || any_arm_pulse || segment_auto_rearm_now) begin
+            simple_hit_a_q <= 1'b0;
+            simple_hit_b_q <= 1'b0;
+            seq_hit_a_q    <= 1'b0;
+            seq_hit_b_q    <= 1'b0;
+            sq_hit_q       <= 1'b0;
+        end else begin
+            simple_hit_a_q <= simple_hit_a_raw;
+            simple_hit_b_q <= simple_hit_b_raw;
+            seq_hit_a_q    <= seq_hit_a_raw;
+            seq_hit_b_q    <= seq_hit_b_raw;
+            sq_hit_q       <= sq_hit_raw;
+        end
+    end
 
     // Phase 1: combined store enable (storage qualification AND decimation)
     wire store_enable = store_sample & decim_tick;
 
     // ---- JTAG-domain register writes ---------------------------------------
+    wire jtag_rd_data_window =
+        (jtag_addr >= ADDR_DATA_BASE) ||
+        (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]);
+    wire rd_addr_data_window =
+        (rd_addr_jtag >= ADDR_DATA_BASE) ||
+        (TIMESTAMP_W > 0 && rd_addr_jtag >= ADDR_TS_DATA_BASE[15:0]);
+
     integer s;
+    reg [31:0] jtag_rdata_mux;
+
     always @(posedge jtag_clk or posedge jtag_rst) begin
         if (jtag_rst) begin
             jtag_ctrl          <= 32'h0;
@@ -613,6 +659,10 @@ module fcapz_ela #(
             burst_start        <= 1'b0;
             burst_timestamp    <= 1'b0;
             burst_start_ptr    <= {PTR_W{1'b0}};
+            for (s = 0; s < NUM_SEGMENTS; s = s + 1) begin
+                seg_start_ptr_jtag_sync1[s] <= {PTR_W{1'b0}};
+                seg_start_ptr_jtag_sync2[s] <= {PTR_W{1'b0}};
+            end
             for (s = 0; s < TRIG_STAGES; s = s + 1) begin
                 jtag_seq_cfg[s]     <= (s == 0) ? 32'h0000_1000 : 32'h0;
                 jtag_seq_value_a[s] <= 32'h0;
@@ -621,7 +671,10 @@ module fcapz_ela #(
                 jtag_seq_mask_b[s]  <= 32'hFFFF_FFFF;
             end
         end else begin
-            burst_start <= 1'b0;
+            for (s = 0; s < NUM_SEGMENTS; s = s + 1) begin
+                seg_start_ptr_jtag_sync1[s] <= seg_start_ptr[s];
+                seg_start_ptr_jtag_sync2[s] <= seg_start_ptr_jtag_sync1[s];
+            end
 
             if (jtag_wr_en) begin
                 case (jtag_addr)
@@ -647,13 +700,13 @@ module fcapz_ela #(
                     ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
                     ADDR_SEG_SEL:    jtag_seg_sel      <= jtag_wdata[SEG_IDX_W-1:0];
                     ADDR_BURST_PTR: begin
-                        // Direct read of seg_start_ptr (stable after
-                        // all_seg_done, same CDC safety as STATUS reads)
+                        // Use the JTAG-domain copy; seg_start_ptr is written
+                        // in sample_clk and must not feed USER2 directly.
                         burst_start_ptr <= (NUM_SEGMENTS > 1)
-                            ? seg_start_ptr[jtag_seg_sel]
+                            ? seg_start_ptr_jtag_sync2[jtag_seg_sel]
                             : start_ptr;
                         burst_timestamp <= jtag_wdata[31];
-                        burst_start     <= 1'b1;
+                        burst_start     <= ~burst_start;
                     end
                     default: begin
                         // Sequencer stage registers (5 regs x 4 bytes per stage)
@@ -699,6 +752,7 @@ module fcapz_ela #(
     end
 
     // ---- CDC: config registers ---------------------------------------------
+    integer si;
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             pretrig_len_sync1  <= 0; pretrig_len_sync2  <= 0;
@@ -780,7 +834,6 @@ module fcapz_ela #(
     end
 
     // ---- Latch config on arm -----------------------------------------------
-    integer si;
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             pretrig_len      <= 0;
@@ -889,6 +942,11 @@ module fcapz_ela #(
 
     // ---- Capture state machine ---------------------------------------------
     reg mem_rd_pending;
+    wire [PTR_W-1:0] post_store_limit = posttrig_len;
+    assign segment_auto_rearm_now = (NUM_SEGMENTS > 1) && armed && !done && triggered &&
+        (cur_segment != NUM_SEGMENTS - 1) &&
+        ((post_count >= post_store_limit) ||
+         (store_enable && (post_count + 1'b1 >= post_store_limit)));
     wire trigger_commit_now = armed && !done && !triggered && pretrigger_ready &&
         trigger_holdoff_done &&
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
@@ -898,7 +956,6 @@ module fcapz_ela #(
     wire pre_store_now = armed && !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
-    wire [PTR_W-1:0] post_store_limit = posttrig_len;
     always @(*) begin
         if ((INPUT_PIPE >= 1) && mem_we_a_q)
             mem_addr_a = mem_wr_addr_q;
@@ -938,7 +995,12 @@ module fcapz_ela #(
 
     // Phase 4: segment base address
     wire [PTR_W-1:0] seg_base = (NUM_SEGMENTS > 1) ? (cur_segment * SEG_DEPTH[PTR_W-1:0]) : {PTR_W{1'b0}};
-    wire [PTR_W-1:0] seg_limit = seg_base + SEG_DEPTH[PTR_W-1:0];
+    wire [PTR_W-1:0] wr_seg_off = wr_ptr - seg_base;
+    wire [PTR_W-1:0] trig_seg_off = trig_ptr - seg_base;
+    wire [PTR_W-1:0] capture_start_ptr =
+        (NUM_SEGMENTS > 1 && !segment_wrapped && trig_seg_off < pretrig_len)
+            ? seg_base
+            : seg_base + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
 
     integer seg_i;
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -963,6 +1025,7 @@ module fcapz_ela #(
             cur_segment <= {SEG_IDX_W{1'b0}};
             seg_count   <= {SEG_IDX_W{1'b0}};
             all_seg_done <= 1'b0;
+            segment_wrapped <= 1'b0;
             for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
                 seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
         end else begin
@@ -982,6 +1045,7 @@ module fcapz_ela #(
                 cur_segment <= {SEG_IDX_W{1'b0}};
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
+                segment_wrapped <= 1'b0;
                 for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
                     seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
             end
@@ -1003,6 +1067,7 @@ module fcapz_ela #(
                 cur_segment <= {SEG_IDX_W{1'b0}};
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
+                segment_wrapped <= 1'b0;
                 // Overflow check: use SEG_DEPTH for segmented mode
                 if (NUM_SEGMENTS > 1)
                     overflow <= (pretrig_len_sync2 + posttrig_len_sync2 + 1 > SEG_DEPTH);
@@ -1025,10 +1090,12 @@ module fcapz_ela #(
                     wr_ptr <= wr_ptr + 1'b1;
                     // Phase 4: segment-aware wrap
                     if (NUM_SEGMENTS > 1) begin
-                        if (wr_ptr + 1'b1 >= seg_limit)
+                        if (wr_seg_off + 1'b1 >= SEG_DEPTH[PTR_W-1:0]) begin
                             wr_ptr <= seg_base;
-                        else
+                            segment_wrapped <= 1'b1;
+                        end else begin
                             wr_ptr <= wr_ptr + 1'b1;
+                        end
                     end
                 end
                 if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready)
@@ -1080,10 +1147,10 @@ module fcapz_ela #(
                     if (post_count >= post_store_limit) begin
                         // Segment complete
                         if (NUM_SEGMENTS > 1) begin
-                            // Ring start within this segment (not raw subtract; avoids host/burst
-                            // linear read crossing into the next segment's RAM).
-                            seg_start_ptr[cur_segment] <= seg_base
-                                + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
+                            // Ring start within this segment. Before the
+                            // segment has wrapped, don't point pretrigger
+                            // history into unwritten tail addresses.
+                            seg_start_ptr[cur_segment] <= capture_start_ptr;
                             if (cur_segment == NUM_SEGMENTS - 1) begin
                                 // All segments done
                                 done      <= 1'b1;
@@ -1107,21 +1174,21 @@ module fcapz_ela #(
                                 trig_delay_count   <= 16'h0;
                                 // Set wr_ptr to next segment base
                                 wr_ptr      <= (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
+                                segment_wrapped <= 1'b0;
                             end
                         end else begin
                             done      <= 1'b1;
                             armed     <= 1'b0;
-                            start_ptr <= seg_base
-                                + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
+                            start_ptr <= capture_start_ptr;
                         end
                     end else if (store_enable) begin
                         if (post_count + 1'b1 >= post_store_limit) begin
                             // Segment complete
                             if (NUM_SEGMENTS > 1) begin
-                                // Ring start within this segment (not raw subtract; avoids host/burst
-                                // linear read crossing into the next segment's RAM).
-                                seg_start_ptr[cur_segment] <= seg_base
-                                    + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
+                                // Ring start within this segment. Before the
+                                // segment has wrapped, don't point pretrigger
+                                // history into unwritten tail addresses.
+                                seg_start_ptr[cur_segment] <= capture_start_ptr;
                                 if (cur_segment == NUM_SEGMENTS - 1) begin
                                     // All segments done
                                     done      <= 1'b1;
@@ -1145,12 +1212,12 @@ module fcapz_ela #(
                                     trig_delay_count   <= 16'h0;
                                     // Set wr_ptr to next segment base
                                     wr_ptr      <= (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
+                                    segment_wrapped <= 1'b0;
                                 end
                             end else begin
                                 done      <= 1'b1;
                                 armed     <= 1'b0;
-                                start_ptr <= seg_base
-                                    + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
+                                start_ptr <= capture_start_ptr;
                             end
                         end else begin
                             post_count <= post_count + 1'b1;
@@ -1278,6 +1345,7 @@ module fcapz_ela #(
             ts_rd_data_sync1 <= 32'h0;
             ts_rd_data_sync2 <= 32'h0;
             ts_rd_data_jtag  <= 32'h0;
+            jtag_rdata       <= 32'h0;
         end else begin
             rd_ack_sync1  <= rd_ack_toggle_sample;
             rd_ack_sync2  <= rd_ack_sync1;
@@ -1285,20 +1353,35 @@ module fcapz_ela #(
             rd_data_sync2 <= rd_data_sync1;
             ts_rd_data_sync1 <= ts_rd_data_sample;
             ts_rd_data_sync2 <= ts_rd_data_sync1;
+            if (jtag_rd_en && !jtag_rd_data_window)
+                jtag_rdata <= jtag_rdata_mux;
             if (rd_ack_sync1 ^ rd_ack_sync2) begin
                 rd_data_jtag <= rd_data_sync1;
                 ts_rd_data_jtag <= ts_rd_data_sync1;
+                if (rd_addr_data_window) begin
+                    if (TIMESTAMP_W > 0 && rd_addr_jtag >= ADDR_TS_DATA_BASE[15:0]) begin
+                        jtag_rdata <= ts_rd_data_sync1 >> (
+                            ((rd_addr_jtag - ADDR_TS_DATA_BASE[15:0]) >> 2) % TS_WORDS
+                        ) * 32;
+                    end else if (WORDS_PER_SAMPLE == 1) begin
+                        jtag_rdata <= {{(32-SAMPLE_W){1'b0}}, rd_data_sync1};
+                    end else begin
+                        jtag_rdata <= sample_chunk_word(
+                            rd_data_sync1,
+                            ((rd_addr_jtag - ADDR_DATA_BASE) >> 2) % WORDS_PER_SAMPLE
+                        );
+                    end
+                end
             end
         end
     end
 
     // ---- Register read mux -------------------------------------------------
-    integer data_word_idx, data_chunk, seq_rd_stage, seq_rd_off;
-    integer ts_word_idx, ts_chunk;
+    integer seq_rd_stage, seq_rd_off;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
         (jtag_seg_sel < NUM_SEGMENTS) ? jtag_seg_sel : {SEG_IDX_W{1'b0}};
-    wire [PTR_W-1:0] jtag_seg_start_ptr = seg_start_ptr[jtag_seg_sel_clamped];
+    wire [PTR_W-1:0] jtag_seg_start_ptr = seg_start_ptr_jtag_sync2[jtag_seg_sel_clamped];
 
     wire seq_addr_hit = (jtag_addr >= ADDR_SEQ_BASE) &&
                         (jtag_addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE);
@@ -1327,7 +1410,7 @@ module fcapz_ela #(
     endfunction
 
     always @(*) begin
-        jtag_rdata = 32'h0;
+        jtag_rdata_mux = 32'h0;
         case (jtag_addr)
             // VERSION layout (defined in rtl/fcapz_version.vh, generated
             // from the repo-root VERSION file by tools/sync_version.py):
@@ -1336,63 +1419,51 @@ module fcapz_ela #(
             //   [15:0]  = `FCAPZ_ELA_CORE_ID  = ASCII "LA" = 0x4C41
             // Hosts must verify VERSION[15:0] equals the LA magic before
             // trusting any other ELA register on this chain.
-            ADDR_VERSION:     jtag_rdata = `FCAPZ_ELA_VERSION_REG;
-            ADDR_CTRL:        jtag_rdata = jtag_ctrl;
-            ADDR_STATUS:      jtag_rdata = {28'h0, overflow, done, triggered, armed};
-            ADDR_SAMPLE_W:    jtag_rdata = SAMPLE_W;
-            ADDR_DEPTH:       jtag_rdata = DEPTH;
-            ADDR_PRETRIG:     jtag_rdata = jtag_pretrig_len;
-            ADDR_POSTTRIG:    jtag_rdata = jtag_posttrig_len;
-            ADDR_CAPTURE_LEN: jtag_rdata = capture_len;
-            ADDR_TRIG_MODE:   jtag_rdata = jtag_trig_mode;
-            ADDR_TRIG_VALUE:  jtag_rdata = jtag_trig_value;
-            ADDR_TRIG_MASK:   jtag_rdata = jtag_trig_mask;
-            ADDR_SQ_MODE:     jtag_rdata = jtag_sq_mode;
-            ADDR_SQ_VALUE:    jtag_rdata = jtag_sq_value;
-            ADDR_SQ_MASK:     jtag_rdata = jtag_sq_mask;
-            ADDR_FEATURES:    jtag_rdata = FEATURES;
-            ADDR_CHAN_SEL:    jtag_rdata = {24'h0, jtag_chan_sel};
-            ADDR_NUM_CHAN:    jtag_rdata = NUM_CHANNELS;
-            ADDR_DECIM:       jtag_rdata = {8'h0, jtag_decim};
-            ADDR_TRIG_EXT:    jtag_rdata = {30'h0, jtag_trig_ext};
-            ADDR_NUM_SEGMENTS: jtag_rdata = NUM_SEGMENTS;
-            ADDR_SEG_STATUS:  jtag_rdata = {all_seg_done, {(31-SEG_IDX_W){1'b0}}, seg_count};
-            ADDR_SEG_SEL:     jtag_rdata = {{(32-SEG_IDX_W){1'b0}}, jtag_seg_sel};
+            ADDR_VERSION:     jtag_rdata_mux = `FCAPZ_ELA_VERSION_REG;
+            ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
+            ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, done, triggered, armed};
+            ADDR_SAMPLE_W:    jtag_rdata_mux = SAMPLE_W;
+            ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
+            ADDR_PRETRIG:     jtag_rdata_mux = jtag_pretrig_len;
+            ADDR_POSTTRIG:    jtag_rdata_mux = jtag_posttrig_len;
+            ADDR_CAPTURE_LEN: jtag_rdata_mux = capture_len;
+            ADDR_TRIG_MODE:   jtag_rdata_mux = jtag_trig_mode;
+            ADDR_TRIG_VALUE:  jtag_rdata_mux = jtag_trig_value;
+            ADDR_TRIG_MASK:   jtag_rdata_mux = jtag_trig_mask;
+            ADDR_SQ_MODE:     jtag_rdata_mux = jtag_sq_mode;
+            ADDR_SQ_VALUE:    jtag_rdata_mux = jtag_sq_value;
+            ADDR_SQ_MASK:     jtag_rdata_mux = jtag_sq_mask;
+            ADDR_FEATURES:    jtag_rdata_mux = FEATURES;
+            ADDR_CHAN_SEL:    jtag_rdata_mux = {24'h0, jtag_chan_sel};
+            ADDR_NUM_CHAN:    jtag_rdata_mux = NUM_CHANNELS;
+            ADDR_DECIM:       jtag_rdata_mux = {8'h0, jtag_decim};
+            ADDR_TRIG_EXT:    jtag_rdata_mux = {30'h0, jtag_trig_ext};
+            ADDR_NUM_SEGMENTS: jtag_rdata_mux = NUM_SEGMENTS;
+            ADDR_SEG_STATUS:  jtag_rdata_mux = {all_seg_done, {(31-SEG_IDX_W){1'b0}}, seg_count};
+            ADDR_SEG_SEL:     jtag_rdata_mux = {{(32-SEG_IDX_W){1'b0}}, jtag_seg_sel};
             // seg_start_ptr is stable after all_seg_done (same CDC pattern
             // as all_seg_done/seg_count on ADDR_SEG_STATUS above)
-            ADDR_SEG_START:   jtag_rdata = (NUM_SEGMENTS > 1)
+            ADDR_SEG_START:   jtag_rdata_mux = (NUM_SEGMENTS > 1)
                                 ? {{(32-PTR_W){1'b0}}, jtag_seg_start_ptr}
                                 : {{(32-PTR_W){1'b0}}, start_ptr};
-            ADDR_PROBE_SEL:   jtag_rdata = {24'h0, jtag_probe_sel};
-            ADDR_PROBE_MUX_W: jtag_rdata = PROBE_MUX_W;
-            ADDR_STARTUP_ARM: jtag_rdata = {31'h0, jtag_startup_arm};
-            ADDR_TRIG_HOLDOFF: jtag_rdata = {16'h0, jtag_trig_holdoff};
-            ADDR_TRIG_DELAY:  jtag_rdata = {16'h0, jtag_trig_delay};
-            ADDR_TIMESTAMP_W: jtag_rdata = TIMESTAMP_W;
-            ADDR_COMPARE_CAPS: jtag_rdata = COMPARE_CAPS;
+            ADDR_PROBE_SEL:   jtag_rdata_mux = {24'h0, jtag_probe_sel};
+            ADDR_PROBE_MUX_W: jtag_rdata_mux = PROBE_MUX_W;
+            ADDR_STARTUP_ARM: jtag_rdata_mux = {31'h0, jtag_startup_arm};
+            ADDR_TRIG_HOLDOFF: jtag_rdata_mux = {16'h0, jtag_trig_holdoff};
+            ADDR_TRIG_DELAY:  jtag_rdata_mux = {16'h0, jtag_trig_delay};
+            ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
+            ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
             default: begin
-                if (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]) begin
-                    ts_word_idx = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;
-                    ts_chunk = ts_word_idx % TS_WORDS;
-                    jtag_rdata = ts_rd_data_jtag >> (ts_chunk * 32);
-                end else if (jtag_addr >= ADDR_DATA_BASE) begin
-                    if (WORDS_PER_SAMPLE == 1) begin
-                        jtag_rdata = {{(32-SAMPLE_W){1'b0}}, rd_data_jtag};
-                    end else begin
-                        data_word_idx = (jtag_addr - ADDR_DATA_BASE) >> 2;
-                        data_chunk = data_word_idx % WORDS_PER_SAMPLE;
-                        jtag_rdata = sample_chunk_word(rd_data_jtag, data_chunk);
-                    end
-                end else if (seq_addr_hit) begin
+                if (seq_addr_hit) begin
                     seq_rd_stage = seq_rd_stage_w;
                     seq_rd_off   = seq_rd_off_w;
                     case (seq_rd_off)
-                        0:  jtag_rdata = seq_cfg_r;
-                        4:  jtag_rdata = seq_value_a_r;
-                        8:  jtag_rdata = seq_mask_a_r;
-                        12: jtag_rdata = seq_value_b_r;
-                        16: jtag_rdata = seq_mask_b_r;
-                        default: jtag_rdata = 32'h0;
+                        0:  jtag_rdata_mux = seq_cfg_r;
+                        4:  jtag_rdata_mux = seq_value_a_r;
+                        8:  jtag_rdata_mux = seq_mask_a_r;
+                        12: jtag_rdata_mux = seq_value_b_r;
+                        16: jtag_rdata_mux = seq_mask_b_r;
+                        default: jtag_rdata_mux = 32'h0;
                     endcase
                 end
             end

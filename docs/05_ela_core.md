@@ -40,14 +40,16 @@ sample itself, and the post-trigger window.
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
 and timestamp data are captured together before they drive the inferred
-RAM.  That keeps the trigger/store decision off the same-cycle BRAM
-write path, while preserving the externally visible capture window and
-trigger-sample alignment.
+RAM.  When `INPUT_PIPE>=1`, the core also enables an internal
+`COMPARE_PIPE` stage that registers comparator hits.  This keeps wide
+`REL_COMPARE=1` magnitude compares off the capture-control critical
+path; the tradeoff is one extra sample-clock of trigger decision
+latency.
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
 25 samples total, and `samples[8]` is the one that caused the
-trigger to fire.
+trigger decision to fire.
 
 ## Simple trigger: value match, edge detect, both
 
@@ -103,6 +105,13 @@ The default RTL build keeps the timing-critical comparator lightweight:
 EQ, NEQ, RISING, FALLING, and CHANGED are enabled. Relational modes
 LT, GT, LEQ, and GEQ are available when the ELA is instantiated with
 `REL_COMPARE=1`.
+
+For higher-frequency builds with relational modes enabled, set
+`INPUT_PIPE>=1`.  The ELA derives an internal `COMPARE_PIPE=1` from
+that setting, registering the compare result before it feeds the
+capture FSM.  This is usually the right trade for `REL_COMPARE=1`: one
+sample-clock of decision latency in exchange for a much shorter
+control path.
 
 | Code | Mode | Operation |
 |---|---|---|

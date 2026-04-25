@@ -68,79 +68,98 @@ module jtag_burst_read #(
 
     reg [BURST_W-1:0] sr;
     reg [BURST_W-1:0] staging;
-    reg [PTR_W-1:0]   rd_ptr;
+    reg [SEG_PTR_W-1:0] rd_off;
+    reg [SEG_PTR_W-1:0] next_off;
     reg [PTR_W-1:0]   burst_seg_base;
     reg [LOAD_CTR_W-1:0] load_cnt;
     reg burst_timestamp_r;
+    reg burst_start_seen;
     reg loading;
     wire [LOAD_CTR_W-1:0] words_per_scan =
         burst_timestamp_r ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
-    wire [BURST_W-1:0] load_word = burst_timestamp_r
-        ? {{(BURST_W-TS_W_SAFE){1'b0}}, timestamp_data}
-        : {{(BURST_W-SAMPLE_W){1'b0}}, sample_data};
-    wire [LOAD_CTR_W-1:0] store_slot = load_cnt - 1'b1;
+    wire [LOAD_CTR_W-1:0] start_words_per_scan =
+        burst_timestamp ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
 
     // Segment base address derived from burst_ptr_in (generate avoids zero-width slice)
     wire [PTR_W-1:0] seg_base_of_ptr;
+    wire [SEG_PTR_W-1:0] burst_ptr_off;
     generate
         if (SEG_DEPTH >= DEPTH) begin : g_seg_base_flat
             assign seg_base_of_ptr = {PTR_W{1'b0}};
+            assign burst_ptr_off = burst_ptr_in;
         end else begin : g_seg_base_split
             assign seg_base_of_ptr = {burst_ptr_in[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+            assign burst_ptr_off = burst_ptr_in[SEG_PTR_W-1:0];
         end
     endgenerate
 
     assign tdo      = sr[0];
-    assign mem_addr  = rd_ptr;
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat
+            assign mem_addr = rd_off;
+        end else begin : g_mem_addr_split
+            assign mem_addr = {burst_seg_base[PTR_W-1:SEG_PTR_W], rd_off};
+        end
+    endgenerate
 
     always @(posedge tck or posedge arst) begin
         if (arst) begin
             sr       <= {BURST_W{1'b0}};
             staging  <= {BURST_W{1'b0}};
-            rd_ptr   <= {PTR_W{1'b0}};
+            rd_off   <= {SEG_PTR_W{1'b0}};
+            next_off <= {SEG_PTR_W{1'b0}};
             burst_seg_base <= {PTR_W{1'b0}};
             load_cnt <= {LOAD_CTR_W{1'b0}};
             burst_timestamp_r <= 1'b0;
+            burst_start_seen <= 1'b0;
             loading  <= 1'b0;
         end else begin
 
-            // Burst start: set read pointer and begin first staging fill
-            if (burst_start) begin
-                rd_ptr   <= burst_ptr_in;
+            // Burst start crosses from the USER1 register chain into the
+            // USER2 burst chain as a toggle. USER2's BSCAN clock is gated
+            // separately, so a one-cycle USER1 pulse is not reliable here.
+            if (sel && capture && (burst_start ^ burst_start_seen)) begin
+                burst_start_seen <= burst_start;
                 burst_seg_base <= seg_base_of_ptr;
+                rd_off <= burst_ptr_off + start_words_per_scan - 1'b1;
+                next_off <= burst_ptr_off + start_words_per_scan;
                 load_cnt <= {LOAD_CTR_W{1'b0}};
                 burst_timestamp_r <= burst_timestamp;
                 loading  <= 1'b1;
-            end
-
-            if (sel) begin
-                if (capture) begin
-                    // Load shift register from staging buffer
-                    sr <= staging;
-                    // Start filling staging for next scan
-                    load_cnt <= {LOAD_CTR_W{1'b0}};
-                    loading  <= 1'b1;
-                end else if (shift_en) begin
-                    sr <= {tdi, sr[BURST_W-1:1]};
+            end else begin
+                if (sel) begin
+                    if (capture) begin
+                        // Load shift register from staging buffer
+                        sr <= staging;
+                        // Start filling staging for next scan
+                        rd_off <= next_off + words_per_scan - 1'b1;
+                        next_off <= next_off + words_per_scan;
+                        load_cnt <= {LOAD_CTR_W{1'b0}};
+                        loading  <= 1'b1;
+                    end else if (shift_en) begin
+                        sr <= {tdi, sr[BURST_W-1:1]};
+                    end
                 end
-            end
 
-            // Staging buffer fill: read one word per cycle from memory.
-            // memory data is available 1 cycle after rd_ptr is set
-            if (loading) begin
-                if (load_cnt > 0) begin
-                    if (burst_timestamp_r)
-                        staging[store_slot * TS_W_SAFE +: TS_W_SAFE] <= load_word[TS_W_SAFE-1:0];
-                    else
-                        staging[store_slot * SAMPLE_W +: SAMPLE_W] <= load_word[SAMPLE_W-1:0];
-                end
-                if (load_cnt == words_per_scan) begin
-                    loading <= 1'b0;
-                end else begin
-                    // Wrap within segment (bitmask; SEG_DEPTH is power-of-two).
-                    rd_ptr <= burst_seg_base
-                        + ((rd_ptr - burst_seg_base + 1'b1) & (SEG_DEPTH - 1));
-                    load_cnt <= load_cnt + 1'b1;
+                // Staging buffer fill: read one word per cycle from memory.
+                // Memory data is available 1 cycle after rd_off is set.  The
+                // reader walks backward and shifts each word into the low end
+                // so the final staging layout is still sample0 at bits [0+:W].
+                if (loading && !(sel && capture)) begin
+                    if (load_cnt > 0) begin
+                        if (burst_timestamp_r)
+                            staging <= (staging << TS_W_SAFE)
+                                | {{(BURST_W-TS_W_SAFE){1'b0}}, timestamp_data};
+                        else
+                            staging <= (staging << SAMPLE_W)
+                                | {{(BURST_W-SAMPLE_W){1'b0}}, sample_data};
+                    end
+                    if (load_cnt == words_per_scan) begin
+                        loading <= 1'b0;
+                    end else begin
+                        rd_off <= rd_off - 1'b1;
+                        load_cnt <= load_cnt + 1'b1;
+                    end
                 end
             end
         end

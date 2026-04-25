@@ -698,11 +698,10 @@ class XilinxHwServerTransport(Transport):
     def _burst_available(self) -> bool:
         """True if the bitstream has the USER2 burst interface."""
         if not hasattr(self, "_has_burst"):
-            try:
-                self.write_reg(self.ADDR_BURST_PTR, 0)
-                self._has_burst = True
-            except Exception:
-                self._has_burst = False
+            # Xilinx/Intel/Microchip ELA wrappers instantiate USER2 for burst
+            # readout. Do not probe by writing BURST_PTR here: that register is
+            # a side-effecting start toggle for the USER2 burst engine.
+            self._has_burst = True
         return self._has_burst
 
     @property
@@ -736,7 +735,7 @@ class XilinxHwServerTransport(Transport):
             sps = self._burst_samples_per_scan
             element_width = self.BURST_DR_BITS // sps
         n_scans = (words + sps - 1) // sps
-        prime_scans = 0 if timestamp else 1
+        prime_scans = 1
 
         dr_bits = self.BURST_DR_BITS
         burst_total = self._user_dr_bits(dr_bits)
@@ -757,7 +756,7 @@ class XilinxHwServerTransport(Transport):
             # Register mode: BURST_PTR write needs DRUPDATE + split-
             # sequence IDLE/delay (same pattern as _write_reg_tcl).
             # Burst scans go in a separate sequence afterwards.
-            write_idle = self.WRITE_IDLE_CYCLES_REGISTER
+            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
             parts_w = [
                 "set _bq [jtag sequence]",
                 f"{ir1_cmd}; "
@@ -777,24 +776,29 @@ class XilinxHwServerTransport(Transport):
             parts_r.append("puts [$_bq run -bits]; $_bq delete")
             tcl = "; ".join(parts_w + parts_r)
         else:
-            parts = [
+            parts_w = [
                 "set _bq [jtag sequence]",
                 # Write BURST_PTR via USER1 (triggers start_ptr load)
                 # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so staging buffer fills (~33 TCK needed, extra margin)
-                "$_bq delay 80",
+                # Idle so the USER1 BURST_PTR update crosses into the burst
+                # reader and the first 256-bit staging word fills before
+                # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
+                # more margin than the raw ~33 TCK memory-fill latency.
+                f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
+                "$_bq run; $_bq delete",
             ]
-            # Prime USER2 once for sample bursts, then perform the scans
-            # returned to the caller.
+            parts_r = ["set _bq [jtag sequence]"]
+            # USER2's BSCAN clock is only active while USER2 is selected, so
+            # the first USER2 scan primes/fills staging and is discarded.
             for _ in range(n_scans + prime_scans):
-                parts.append(
+                parts_r.append(
                     f"{ir2_cmd}; "
                     f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
                 )
-            parts.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts)
+            parts_r.append("puts [$_bq run -bits]; $_bq delete")
+            tcl = "; ".join(parts_w + parts_r)
 
         out = self._send(tcl)
         return self._parse_burst_bits(
@@ -960,6 +964,7 @@ class XilinxHwServerTransport(Transport):
     # delay (~100 TCK) and an explicit state-IDLE transition to reliably
     # commit the UPDATE-DR event.  On 7-series READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
+    BURST_PREFILL_IDLE_CYCLES = 160
 
     def _ir_hex(self, value: int) -> str:
         """Format an IR opcode as the right-width hex string for ``-hex N``."""

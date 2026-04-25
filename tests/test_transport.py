@@ -320,11 +320,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(13)))
 
     def test_read_block_burst_primes_user2_before_returned_scans(self):
-        """Burst reads issue one extra USER2 scan and discard its data.
-
-        The USER2 burst RTL fills staging during SHIFT, so the first capture
-        after selecting USER2 is a pipeline prime, not returned sample data.
-        """
+        """Burst reads discard the first USER2 scan while staging fills."""
         t = XilinxHwServerTransport()
         t._cached_sps = 32
         sent: list[str] = []
@@ -343,23 +339,23 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
-    def test_timestamp_burst_uses_prefilled_first_scan(self):
-        """Timestamp USER2 reads consume the first scan; no sample-style prime."""
+    def test_timestamp_burst_primes_user2_before_returned_scan(self):
+        """Timestamp USER2 reads also discard the first fill scan."""
         t = XilinxHwServerTransport()
         sent: list[str] = []
+        stale = self._burst_token([0xEE] * 8, sample_w=32)
         first = self._burst_token(list(range(8)), sample_w=32)
-        second = self._burst_token([0xEE] * 8, sample_w=32)
 
         def fake_send(tcl: str) -> str:
             sent.append(tcl)
-            return f"{first} {second}"
+            return f"{stale} {first}"
 
         t._send = fake_send  # type: ignore[method-assign]
 
         vals = t._read_block_burst(8, timestamp=True, element_width=32)
 
         self.assertEqual(vals, list(range(8)))
-        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 1)
+        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
 
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads leave CDC time before every captured word."""

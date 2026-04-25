@@ -10,7 +10,9 @@ designed to fit on any FPGA with minimal resource usage.
   with lightweight default compare modes (==, !=, rising, falling, changed),
   optional relational modes (<, >, <=, >=), and boolean combine
   (A-only, B-only, AND, OR). Optional multi-stage sequencer
-  (2-4 states) with occurrence counter and state transitions.
+  (2-4 states) with occurrence counter and state transitions. Builds with
+  `INPUT_PIPE>=1` also register comparator hits internally, keeping optional
+  relational compares off the capture-control critical path.
   Controlled by `TRIG_STAGES` parameter (1 = simple, 2-4 = sequencer).
 - **Storage Qualification**: Optional condition that filters which samples
   are stored, effectively multiplying buffer depth. `STOR_QUAL` parameter
@@ -36,7 +38,7 @@ designed to fit on any FPGA with minimal resource usage.
 | `TRIG_STAGES` | 1 | Trigger sequencer stages (1 = simple, 2-4 = sequencer) |
 | `STOR_QUAL` | 0 | Storage qualification (0 = off, 1 = on) |
 | `NUM_CHANNELS` | 1 | Mutually exclusive probe buses (runtime mux when >1) |
-| `INPUT_PIPE` | 0 | Optional pipeline registers on `probe_in` |
+| `INPUT_PIPE` | 0 | Optional pipeline registers on `probe_in`; also enables registered compare hits |
 | `DECIM_EN` | 0 | Runtime decimation register |
 | `EXT_TRIG_EN` | 0 | `trigger_in` / `trigger_out` ports |
 | `TIMESTAMP_W` | 0 | Per-sample timestamp RAM (`0` = off, 32 or 48) |

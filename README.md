@@ -79,6 +79,9 @@ Jump within this page: [↑ Top](#readme-top)
 - **Three export formats** -- JSON (LLM-friendly), CSV, VCD
 - **Multi-signal probes** -- named sub-signals in VCD export and capture
   summaries
+- **Timing-friendly trigger pipeline** -- `INPUT_PIPE>=1` also registers
+  comparator hits, so optional relational trigger modes can be used in faster
+  sample-clock builds with one extra cycle of trigger decision latency
 - **Sample decimation** (DECIM_EN=1) -- /N divider captures every N+1 cycles,
   extending effective capture window without increasing buffer depth
 - **External trigger I/O** (EXT_TRIG_EN=1) -- trigger_in / trigger_out ports

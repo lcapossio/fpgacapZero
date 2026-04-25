@@ -47,6 +47,12 @@ TESTBENCHES = {
             RTL / "trig_compare.v",
         ],
     ),
+    "jtag_burst_read": (
+        TB / "jtag_burst_read_tb.sv",
+        [
+            RTL / "jtag_burst_read.v",
+        ],
+    ),
     "fcapz_eio": (
         TB / "fcapz_eio_tb.sv",
         [
@@ -68,6 +74,7 @@ DEFAULT_TESTBENCHES = [
     "trig_compare",
     "fcapz_ela",
     "fcapz_ela_bug_probe",
+    "jtag_burst_read",
     "fcapz_eio",
     "chan_mux",
 ]
