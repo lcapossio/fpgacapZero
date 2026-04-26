@@ -35,6 +35,7 @@ specs.
   - [JSON-RPC server](#json-rpc-server)
 - [Integrating the core into your design](#integrating-the-core-into-your-design)
   - [RTL instantiation](#rtl-instantiation)
+  - [LiteX integration](#litex-integration)
   - [Vendor JTAG chain availability](#vendor-jtag-chain-availability)
   - [JTAG protocol and register reference](#jtag-protocol-and-register-reference)
 - [Design Goals](#design-goals)
@@ -67,6 +68,9 @@ Jump within this page: [↑ Top](#readme-top)
 - **Two JTAG backends** -- OpenOCD (cross-platform) and Xilinx hw_server/XSDB
 - **Python host stack** -- ELA CLI, optional **PySide6 desktop GUI** (`fcapz-gui`),
   programmatic API, JSON-RPC server, and LLM event extraction helpers
+- **LiteX helper** -- optional `fcapz.litex.FcapzELA` module that adds the
+  ELA RTL sources, packs named LiteX/Migen probe signals, and keeps capture
+  control on the existing JTAG transport
 - **Embedded I/O (EIO)** -- RTL cores and Python controller for runtime
   read/write of fabric signals via JTAG USER3
 - **JTAG-to-AXI4 Bridge (EJTAG-AXI)** -- 72-bit pipelined DR for single
@@ -489,6 +493,36 @@ fcapz_ela_ecp5 #(
 ```
 
 VHDL wrappers are also provided in `rtl/vhdl/`.
+
+### LiteX integration
+
+LiteX designs can use the optional `fcapz.litex.FcapzELA` helper to add the
+ELA RTL sources and instantiate the JTAG-accessible wrapper from Python:
+
+```python
+from migen import ClockSignal, ResetSignal
+from fcapz.litex import FcapzELA
+
+soc.submodules.ela = FcapzELA(
+    platform,
+    vendor="xilinx7",
+    sample_clk=ClockSignal("sys"),
+    sample_rst=ResetSignal("sys"),
+    probes={
+        "wb_cyc": bus.cyc,
+        "wb_stb": bus.stb,
+        "wb_adr": bus.adr,
+        "wb_dat_w": bus.dat_w,
+    },
+    depth=1024,
+)
+```
+
+The helper packs named LiteX/Migen signals into `probe_in`, records bit
+offsets in `probe_fields`, and keeps control/readback on the existing JTAG
+transport.  It does not consume LiteX CSR or Wishbone address space.  See
+[`docs/04_rtl_integration.md`](docs/04_rtl_integration.md#litex-integration)
+for details.
 
 ### Vendor JTAG chain availability
 

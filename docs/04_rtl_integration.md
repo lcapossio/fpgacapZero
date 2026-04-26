@@ -140,6 +140,44 @@ synthesis) for the baseline config (8b × 1024, dual comparators).  See
 storage qualification, width/depth scaling, and the full `arty_a7_top`
 reference.
 
+## LiteX integration
+
+LiteX designs can instantiate the same JTAG-accessible ELA wrapper through
+the optional Python helper in `fcapz.litex`.  Install LiteX in your SoC
+environment, then add the module to your design:
+
+```python
+from migen import ClockSignal, ResetSignal
+from fcapz.litex import FcapzELA
+
+soc.submodules.ela = FcapzELA(
+    platform,
+    vendor="xilinx7",
+    sample_clk=ClockSignal("sys"),
+    sample_rst=ResetSignal("sys"),
+    probes={
+        "bus_we": bus.we,
+        "bus_adr": bus.adr,
+        "bus_dat_w": bus.dat_w,
+        "fsm_state": fsm_state,
+    },
+    depth=1024,
+)
+```
+
+`probes` are packed with normal Migen `Cat` ordering: the first named signal
+occupies the low bits of `probe_in`, and `FcapzELA.probe_fields` records each
+field's name, width, and bit offset for capture metadata.  The helper also
+adds the required RTL files to the LiteX platform, including the generated
+`fcapz_version.vh` header and the selected vendor TAP wrapper.
+
+This first integration path keeps capture control on the existing JTAG
+transport.  It does not consume LiteX CSRs or Wishbone address space.  Use
+the normal `fcapz` CLI, GUI, or Python API against the programmed bitstream.
+The high-level `FcapzELA` wrapper currently targets the Xilinx 7-series and
+UltraScale-style ELA wrappers; lower-level source manifests for the other RTL
+wrappers are available through `ela_rtl_sources()` for custom integration.
+
 ## Adding more cores in the same design
 
 The reference Arty A7 design uses three cores in one bitstream:
