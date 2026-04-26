@@ -34,8 +34,8 @@ There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
 throughput (the Xilinx hw_server transport does this for the ELA
-burst readback).  Xilinx `SINGLE_CHAIN_BURST=1` builds keep those
-wide burst scans on USER1 instead of switching to USER2.
+burst readback). Default Xilinx builds keep those wide burst scans on
+USER1; pass `single_chain_burst=False` only for legacy two-chain builds.
 
 An **optional** extension method `read_timestamp_block(addr, words,
 timestamp_width)` accelerates timestamp readback via the burst path.
@@ -103,8 +103,8 @@ logger `fcapz.gui.connect`.
 `XilinxHwServerTransport` implements the optional
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
-256-bit DR burst path used for sample data.  Default Xilinx builds use
-USER2; `single_chain_burst=True` transports use USER1.
+256-bit DR burst path used for sample data. Default Xilinx transports
+use USER1; `single_chain_burst=False` selects legacy DATA_CHAIN readout.
 
 The key difference from a sample burst:
 
@@ -202,9 +202,7 @@ The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
 register sits in series with the PL TAP's DR on the TDI side, so every
 DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
 Without it the host's address field lands one bit position off and
-every non-zero register address reads the wrong register (see BUG-006
-in `no_commit/BUGS.md` for the wire-level decode that pinned this
-down).
+every non-zero register address reads the wrong register.
 
 CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
 `use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
@@ -306,9 +304,10 @@ If reads return wrong values or writes don't land:
    Verify after connect: `configparams bscan-switch-user-mask` should
    print `15`.
 
-2. **Confirm `dbg_hub` doesn't collide with your BSCANE2 chains.**
-   If your design has ILA/VIO/MARK_DEBUG, Vivado auto-inserts a
-   `dbg_hub` on `C_USER_SCAN_CHAIN=1` by default.  Move it:
+2. **Confirm no other debug logic collides with your BSCANE2 chains.**
+   Some design flows can insert extra JTAG-facing debug logic on a USER
+   scan chain. If another block is using the same chain as fpgacapZero,
+   move it to an unused chain:
    ```tcl
    set_property C_USER_SCAN_CHAIN 3 [get_debug_cores dbg_hub]
    ```
@@ -565,7 +564,7 @@ will differ.
 | `read_reg()` (single 32-bit) | ~1.5 ms / call |
 | `read_block()` (16 words via `raw_dr_scan_batch`) | ~3 ms total |
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
-| `Analyzer.capture()` of 1024 samples (USER2 burst) | ~50 ms |
+| `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
 **OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
 hardware-validated on Arty A7 (pending a first run with FT2232; see

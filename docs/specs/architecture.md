@@ -26,10 +26,10 @@ designed to fit on any FPGA with minimal resource usage.
 - **Capture Controller**: Arm, trigger detect, post-trigger countdown, done.
 - **JTAG Register Map** (`jtag_reg_iface.v`): 49-bit DR on USER1 for
   control/status + per-word data readback.
-- **Single-Chain Pipe** (`jtag_pipe_iface.v`): optional Xilinx path that
+- **Single-Chain Pipe** (`jtag_pipe_iface.v`): default Xilinx path that
   carries both 49-bit register packets and 256-bit burst packets on USER1.
-- **Burst Readback** (`jtag_burst_read.v`): default 256-bit DR on USER2 for
-  fast block reads (32 8-bit samples per scan).
+- **Burst Readback** (`jtag_burst_read.v`): legacy separate-chain 256-bit DR
+  for fast block reads (32 8-bit samples per scan).
 - **Embedded I/O** (`fcapz_eio.v`): JTAG-accessible input/output probe registers
   on USER3 (CHAIN=3). `IN_W`-bit input bus synchronised to jtag_clk;
   `OUT_W`-bit output register driven to fabric.  Parameters: `IN_W`, `OUT_W`.
@@ -88,7 +88,7 @@ for your exact mix).
 ## Data Model
 - Samples stored as packed `SAMPLE_W` vectors in BRAM.
 - Wide samples (> 32 bits) read as multiple 32-bit chunks via USER1,
-  or natively via the 256-bit USER2 burst DR.
+  or natively via the 256-bit burst DR.
 - Timestamps are implicit by sample index.
 
 ## JTAG-to-AXI4 Bridge (`fcapz_ejtagaxi.v`)
@@ -140,5 +140,5 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 |-------|---------|----------|
 | Unit (Python) | `pytest tests/test_host_stack.py` | Transport, Analyzer, EioController |
 | RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
-| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA, ELA regression probe, EIO, and channel-mux testbenches |
-| Hardware | `pytest tests/test_hw_integration.py` | 15 tests, Arty A7-100T |
+| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel-mux testbenches |
+| Hardware | `pytest examples/arty_a7/test_hw_integration.py` | Arty A7-100T hardware regression for the reference bitstream |

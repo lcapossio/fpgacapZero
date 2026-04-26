@@ -29,8 +29,8 @@ will have:
 
 ```
 examples/arty_a7/arty_a7_top.bit         (the bitstream)
-no_commit/vivado_build.log               (the full Vivado log)
-no_commit/vivado_build.jou               (the journal)
+vivado/logs/vivado_build.log             (the full Vivado log)
+vivado/logs/vivado_build.jou             (the journal)
 ```
 
 > If the build fails with `Project 1-161: Failed to remove the
@@ -153,7 +153,7 @@ What just happened:
 4. The free-running counter rolled around to 0x42, the trigger fired,
    the ELA captured 16 more samples, and asserted DONE.
 5. `Analyzer.capture()` polled DONE, read back the 25 captured
-   samples (8 + 1 + 16) over the USER2 burst DR (256-bit, fast), and
+   samples (8 + 1 + 16) over the 256-bit burst path, and
    returned a `CaptureResult`.
 6. `analyzer.write_json(result, "my_capture.json")` serialised the
    result.

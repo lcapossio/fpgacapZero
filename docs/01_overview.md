@@ -5,17 +5,15 @@
 
 ## What fpgacapZero is
 
-fpgacapZero is an **open-source, vendor-agnostic FPGA debug suite** —
+fpgacapZero is an **open-source, vendor-agnostic FPGA debug suite**:
 a small set of RTL cores you drop into your own design plus a Python
-host stack that talks to them over JTAG.  Apache-2.0 licensed, no
+host stack that talks to them over JTAG. Apache-2.0 licensed, no
 strings attached.
 
-It is the open alternative to commercial in-chip debug tools like
-Xilinx ChipScope (now Vivado ILA/VIO), Intel SignalTap, and Lattice
-Reveal.  Those tools work well, but they lock you to one vendor, one
-toolchain, and one workflow.  fpgacapZero gives you the same
-capability — observe and drive signals on a running FPGA from a host
-PC over JTAG — freely and without the lock-in.
+The project is built around a simple goal: make signal capture, signal
+drive, and debug bus access available from normal RTL and normal host
+software, without tying the workflow to one FPGA family, one GUI, or
+one closed project database.
 
 ## The four cores
 
@@ -25,8 +23,6 @@ PC through the FPGA's JTAG TAP via the BSCANE2 (or vendor-equivalent)
 primitive.
 
 ### 1. ELA — Embedded Logic Analyzer
-
-> **What it replaces**: Vivado ILA, SignalTap, Reveal.
 
 The ELA core is a **circular sample buffer** with a configurable
 trigger.  You connect it to a bus of fabric signals; it captures
@@ -65,9 +61,6 @@ configuration uses zero overhead for unused features):
 The ELA's full feature deep-dive is in [chapter 05](05_ela_core.md).
 
 ### 2. EIO — Embedded I/O
-
-> **What it replaces**: Vivado VIO, SignalTap's "in-system source &
-> probe", Reveal's `IO_PROBE`.
 
 The EIO core gives the host **runtime read/write access to fabric
 signals**.  You define an input bus (fabric → host) and an output
@@ -133,7 +126,7 @@ can talk to all of them in one xsdb / OpenOCD session.
 | Core | Default chain | Default IR (7-series) | Default IR (UltraScale) |
 |------|---------------|-----------------------|-------------------------|
 | ELA control | USER1 | `0x02` | `0x24` |
-| ELA burst data | USER2 | `0x03` | `0x25` |
+| ELA burst data | USER1 by default; optional USER2 | `0x02` / `0x03` | `0x24` / `0x25` |
 | EIO | USER3 | `0x22` | `0x26` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` | `0x27` |
 

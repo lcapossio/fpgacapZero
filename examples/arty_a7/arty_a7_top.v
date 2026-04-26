@@ -8,7 +8,7 @@
 // The design is intentionally small and self-stimulating so the Python
 // hardware tests can run without external fabric logic:
 //
-// - ELA on USER1/USER2 captures a free-running 8-bit counter.
+// - ELA on USER1 captures a free-running 8-bit counter.
 //   Enabled ELA options:
 //     DECIM_EN=1       runtime sample decimation register
 //     EXT_TRIG_EN=1    external trigger input from EIO probe_out[4]

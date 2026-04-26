@@ -37,7 +37,7 @@ module fcapz_ela_xilinxus #(
     parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
     parameter BURST_EN    = 1,
-    parameter SINGLE_CHAIN_BURST = 0,
+    parameter SINGLE_CHAIN_BURST = 1,
     parameter CTRL_CHAIN  = 1,
     parameter DATA_CHAIN  = 2,
     // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)

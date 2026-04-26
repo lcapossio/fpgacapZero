@@ -380,10 +380,9 @@ synchroniser handles correctly.
 
 ### Status
 
-Tracked in [`../no_commit/BUGS.md`](../no_commit/BUGS.md) as
-**BUG-002** (Open, Low priority).  The fix is RTL: harden the RX
-synchroniser path or change the loopback testbench to insert a
-small wire delay.  Not blocking any release.
+This is a known low-priority issue. The fix is RTL: harden the RX
+synchroniser path or change the loopback testbench to insert a small
+wire delay. Not blocking any release.
 
 ## Resource usage
 

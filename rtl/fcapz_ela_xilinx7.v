@@ -48,8 +48,8 @@ module fcapz_ela_xilinx7 #(
     parameter STARTUP_ARM = 0,
     parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
-    parameter BURST_EN    = 1,   // 0=omit USER2 burst path, use USER1 DATA window
-    parameter SINGLE_CHAIN_BURST = 0, // 1=fast burst readout on CTRL_CHAIN
+    parameter BURST_EN    = 1,   // 0=omit separate USER2 burst path
+    parameter SINGLE_CHAIN_BURST = 1, // 1=fast burst readout on CTRL_CHAIN
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
     // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)

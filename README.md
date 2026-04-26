@@ -37,7 +37,7 @@ specs.
   - [RTL instantiation](#rtl-instantiation)
   - [Vendor JTAG chain availability](#vendor-jtag-chain-availability)
   - [JTAG protocol and register reference](#jtag-protocol-and-register-reference)
-- [Comparison with other embedded logic analyzers](#comparison-with-other-embedded-logic-analyzers)
+- [Design Goals](#design-goals)
 - [Resource usage](#resource-usage)
 - [CI](#ci)
 - [Building from source](#building-from-source)
@@ -494,7 +494,7 @@ VHDL wrappers are also provided in `rtl/vhdl/`.
 
 | Vendor | Primitive | User chains | ELA (needs 2) | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
 |--------|-----------|:-----------:|:---:|:---:|:---:|:---:|
-| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1+USER2 | USER3 | USER4 | USER4 (shared) |
+| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 by default; optional USER2 | USER3 | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0+1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1+ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
 | **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
@@ -523,37 +523,26 @@ from the RTL.
 
 [↑ Top](#readme-top)
 
-## Comparison with other embedded logic analyzers
+## Design Goals
 
-| Feature | **fpgacapZero** | Vivado ILA | SignalTap II | Lattice Reveal | Gowin GAO | LiteScope |
-|---------|:-----------:|:----------:|:------------:|:--------------:|:---------:|:---------:|
-| **Vendor-portable** | Yes | No | No | No | No | Yes |
-| **Open source** | Apache 2.0 | No | No | No | No | BSD |
-| **Trigger modes** | 5 default, 9 with relational option | ==, !=, edge | ==, !=, compare | Value + edge | 6 types | Value match |
-| **Trigger sequencer** | 2-4 stages | 16-state FSM | State-based | 16 levels | Multi-level | Basic |
-| **Dual comparators** | Yes (AND/OR) | Yes | Yes | Yes (TU+TE) | Yes | No |
-| **Storage qualification** | Yes | Yes | Yes | -- | -- | Subsampling |
-| **Buffer type** | BRAM (any vendor) | BRAM/URAM | BRAM | EBR | BSRAM | BRAM |
-| **Channel mux** | Yes (runtime) | Multiple cores | Runtime mux | Multiple cores | Up to 16 AO | Groups |
-| **Readback** | JTAG burst  | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
+fpgacapZero is designed as an independent, vendor-agnostic debug stack.
+The same ELA, EIO, EJTAG-AXI, and EJTAG-UART concepts are exposed through
+small RTL modules, a stable register map, and a scriptable host stack.
 
-\* 
-| **Host interface** | Python API + CLI + JSON-RPC | GUI + Tcl + ChipScoPy | GUI + Tcl | GUI | GUI | Python + CLI |
-| **Export formats** | JSON, CSV, VCD | CSV, VCD | CSV, VCD, TBL | Proprietary | CSV, VCD, PRN | VCD, CSV, SR |
-| **Virtual I/O** | EIO core | VIO | In-System Sources | -- | GVIO | LiteScopeIO |
-| **LLM-friendly** | Yes (JSON-RPC, summaries) | Moderate (Tcl) | Moderate (Tcl) | Limited | Limited | Good (Python) |
-| **Baseline LUTs** | ~1,600 | ~1,000+ | Varies | Varies | Varies | Small |
+| Area | Project direction |
+|------|-------------------|
+| **Portability** | Shared core RTL with thin vendor TAP wrappers |
+| **Configurability** | Compile-time parameters remove unused trigger, storage, timestamp, segment, readout, and mux features |
+| **Triggering** | Lightweight default compare modes, optional relational compares, optional B comparator, and optional multi-stage sequencer |
+| **Readback** | Simple 32-bit register reads plus optional 256-bit burst paths where a wrapper can support them |
+| **Host access** | Python API, CLI, JSON-RPC, GUI, and export helpers |
+| **Data formats** | JSON, CSV, VCD, and structured capture summaries |
+| **Licensing** | Apache 2.0, usable in proprietary designs with explicit patent grant |
 
-**Key differentiators:**
+The result is intentionally parameter-driven: small designs can compile
+out unused features, while larger debug builds can enable richer trigger
+and readback behavior without switching cores.
 
-- **Only vendor-portable option with advanced triggers** — optional dual
-  comparators, optional relational modes, boolean combine, and multi-stage sequencer;
-  LiteScope is also portable but offers only basic triggering
-- **LLM-native host stack** — JSON-RPC server, structured event extraction
-  (edges, bursts, frequency), and capture summaries designed for AI-driven debug
-- **Single RTL file per core** — no code generation, no Python build step;
-  standard Verilog parameters for all configuration
-- **Apache 2.0 license** — usable in proprietary designs with explicit patent grant
 
 [↑ Top](#readme-top)
 
@@ -623,8 +612,8 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression step for USER1/USER2 priming and timestamp stabilization |
-| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, Xilinx 7-series / UltraScale wrappers, and simulation stubs |
-| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then ELA, ELA regression probe, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
+| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
@@ -653,8 +642,11 @@ python sim/run_sim.py --lint-only
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
-the testbenches.  CI uses the same runner so local regressions and GitHub
-Actions exercise the same RTL lint target list.
+the testbenches. The ELA configuration matrix covers small/scalable build
+shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
+registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
+so local regressions and GitHub Actions exercise the same RTL lint target
+list.
 
 ### Tests
 
@@ -717,6 +709,8 @@ fpgacapZero/
       fcapz_eio_*.vhd       VHDL EIO wrappers (one per vendor)
   tb/
     fcapz_ela_tb.sv          ELA core testbench
+    fcapz_ela_config_matrix_tb.sv
+                              ELA parameter/configuration matrix testbench
     fcapz_ela_bug_probe_tb.sv ELA regression probe for capture-window edge cases
     fcapz_eio_tb.sv          EIO core testbench (7 scenarios, 18 checks)
     chan_mux_tb.sv           Channel mux (NUM_CHANNELS) testbench

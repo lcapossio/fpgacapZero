@@ -19,7 +19,7 @@ class Transport(ABC):
 `read_timestamp_block` is an **optional extension method**, not part of the ABC
 contract.  The host checks for it via `getattr(transport, "read_timestamp_block",
 None)` and falls back to `read_block` if absent.  Transports that support the
-USER2 burst path should implement it to avoid the slow per-word USER1 readback
+256-bit burst path should implement it to avoid the slow per-word USER1 readback
 path for timestamp data.
 
 ## Implementations
@@ -59,7 +59,7 @@ A write requires one DR scan followed by idle cycles:
 
 #### Burst data readout
 Default Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
-`SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on USER1
+Default `SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on USER1
 (IR = `0x02`) after the `BURST_PTR` write.  Each scan returns
 `256 / SAMPLE_W` packed samples with auto-incrementing read pointer.
 

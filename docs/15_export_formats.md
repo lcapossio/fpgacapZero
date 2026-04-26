@@ -249,8 +249,7 @@ GTKWave then opens with the layout pre-loaded:
 gtkwave cap.vcd --save cap.gtkw
 ```
 
-A future commit could generate Surfer's state file the same way
-— see the GUI plan in `no_commit/plans/qt_gui_plan.md`.
+A future commit could generate Surfer's state file the same way.
 
 ## Waveform viewer integration
 
@@ -318,16 +317,11 @@ today is the `pyqtgraph` quick-preview pane (see
 separate top-level windows; the user arranges them side-by-side
 with fcapz-gui (snap left + snap right is the typical pattern).
 
-This isn't a workaround — it's the same pattern every FPGA dev
-already uses: Vivado + GTKWave side by side, ChipScope + an
-external editor side by side, etc.  The `pyqtgraph` preview
-covers the "instant feedback inside the same window" case for
-80% of debug sessions; external viewers handle the 20% where you
-need search, decode, save layouts, scripted analysis, etc.
-
-The full reasoning is in `no_commit/plans/qt_gui_plan.md` if you
-want the deep dive on why GTKWave can't be `XEmbed`-ed and why
-the Surfer-web embedding is technically possible but nontrivial.
+This isn't a workaround: it keeps heavyweight viewers in their own
+processes while the `pyqtgraph` preview covers the "instant feedback
+inside the same window" case for most debug sessions. External viewers
+handle the cases where you need search, decode, save layouts, scripted
+analysis, or a viewer-specific workflow.
 
 ## Worked example: capture → JSON → LLM summary
 

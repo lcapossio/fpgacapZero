@@ -240,7 +240,5 @@ pip install -e .
 You're at the end of the manual.  From here:
 
 - [`../CHANGELOG.md`](../CHANGELOG.md) — release history
-- [`../no_commit/BUGS.md`](../no_commit/BUGS.md) — known bugs
-  with reproduction recipes
 - [`specs/register_map.md`](specs/register_map.md) — bit-level
   reference for every core

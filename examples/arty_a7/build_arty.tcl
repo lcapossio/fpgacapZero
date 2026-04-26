@@ -91,6 +91,9 @@ if {[file exists $project_xpr]} {
     if {[llength [get_files -quiet $root/rtl/reset_sync.v]] == 0} {
         add_files $root/rtl/reset_sync.v
     }
+    if {[llength [get_files -quiet $root/rtl/jtag_pipe_iface.v]] == 0} {
+        add_files $root/rtl/jtag_pipe_iface.v
+    }
 } else {
     # No .xpr but partial peripheral dirs may exist from a killed build.
     # Use -force to clear them now that we've removed the stale locks.

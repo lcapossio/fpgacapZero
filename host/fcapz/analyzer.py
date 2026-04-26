@@ -406,8 +406,9 @@ class Analyzer:
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
         deadline = time.monotonic() + timeout
+        read_status = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         while time.monotonic() < deadline:
-            status = self.transport.read_reg(_ADDR_STATUS)
+            status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
@@ -455,9 +456,10 @@ class Analyzer:
         if not self.wait_done(timeout):
             raise TimeoutError("capture did not complete within timeout")
 
-        status = self.transport.read_reg(_ADDR_STATUS)
+        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-        reported_total = int(self.transport.read_reg(_ADDR_CAPTURE_LEN))
+        reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
         if 0 < reported_total <= self._config.depth:
             total = reported_total
         else:
@@ -501,9 +503,10 @@ class Analyzer:
         # directly by the burst engine (stable after all_seg_done).
         self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
 
-        status = self.transport.read_reg(_ADDR_STATUS)
+        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-        reported_total = int(self.transport.read_reg(_ADDR_CAPTURE_LEN))
+        reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
         if 0 < reported_total <= self._config.depth:
             total = reported_total
         else:

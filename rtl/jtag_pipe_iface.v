@@ -7,8 +7,8 @@
 //
 // This keeps the existing 49-bit register protocol for normal CSR accesses,
 // then reuses the same USER chain for 256-bit packed capture reads after the
-// host writes BURST_PTR.  It is intentionally Xilinx-debug-hub shaped: one
-// BSCAN chain carries both control packets and high-throughput data packets.
+// host writes BURST_PTR.  One BSCAN chain carries both control packets and
+// high-throughput data packets.
 
 module jtag_pipe_iface #(
     parameter SAMPLE_W = 8,

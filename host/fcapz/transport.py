@@ -378,7 +378,7 @@ class XilinxHwServerTransport(Transport):
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
         use_register_ir: bool = False,
-        single_chain_burst: bool = False,
+        single_chain_burst: bool = True,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -804,16 +804,31 @@ class XilinxHwServerTransport(Transport):
             parts_r.append("puts [$_bq run -bits]; $_bq delete")
             tcl = "; ".join(parts_w + parts_r)
 
-        out = self._send(tcl)
-        return self._parse_burst_bits(
-            out,
-            words,
-            skip_scans=prime_scans,
-            element_width=element_width,
-        )
+        def run_once() -> List[int]:
+            out = self._send(tcl)
+            return self._parse_burst_bits(
+                out,
+                words,
+                skip_scans=prime_scans,
+                element_width=element_width,
+            )
+
+        first = run_once()
+        if not self.single_chain_burst:
+            return first
+
+        # Single-chain burst shares USER1 with the 49-bit register protocol.
+        # On real hw_server sessions a rapid re-arm can leave the first burst
+        # transaction partially stale.  Repeat until two consecutive reads
+        # agree; this is content-agnostic and keeps the separate DATA_CHAIN path
+        # at its original single-transaction cost.
+        second = run_once()
+        if second == first:
+            return second
+        return run_once()
 
     def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
-        """Read timestamp words through USER2 burst mode when available."""
+        """Read timestamp words through the configured burst mode when available."""
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:

@@ -154,7 +154,7 @@ B-combine sequencer configurations.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
 - Default Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
-  `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on USER1 (0x02).
+  Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on USER1 (0x02).
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
   (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
   read `N` scans to get `N × (256/SAMPLE_W)` samples.

@@ -300,7 +300,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
     @staticmethod
     def _burst_token(values: list[int], sample_w: int = 8) -> str:
-        """Pack values into one LSB-first USER2 burst token."""
+        """Pack values into one LSB-first 256-bit burst token."""
         bits = ["0"] * XilinxHwServerTransport.BURST_DR_BITS
         for sample_idx, value in enumerate(values):
             base = sample_idx * sample_w
@@ -309,7 +309,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         return "".join(bits)
 
     def test_parse_burst_bits_can_skip_priming_scan(self):
-        """USER2 burst parsing discards the priming scan when requested."""
+        """Burst parsing discards the priming scan when requested."""
         t = XilinxHwServerTransport()
         t._cached_sps = 32
         stale = self._burst_token([0xEE] * 32)
@@ -321,7 +321,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
     def test_read_block_burst_primes_user2_before_returned_scans(self):
         """Burst reads discard the first USER2 scan while staging fills."""
-        t = XilinxHwServerTransport()
+        t = XilinxHwServerTransport(single_chain_burst=False)
         t._cached_sps = 32
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
@@ -341,7 +341,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
     def test_single_chain_burst_uses_user1_for_wide_scans(self):
         """Single-chain burst keeps both BURST_PTR and 256-bit scans on USER1."""
-        t = XilinxHwServerTransport(single_chain_burst=True)
+        t = XilinxHwServerTransport()
         t._cached_sps = 32
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
@@ -360,6 +360,26 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-hex 6 03", sent[0])
         self.assertIn("-bits 256", sent[0])
 
+    def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
+        """Legacy two-chain burst keeps 256-bit scans on USER2."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t._cached_sps = 32
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertIn("-hex 6 03", sent[0])
+        self.assertIn("-bits 256", sent[0])
+
     def test_read_block_falls_back_when_user2_burst_missing(self):
         """Single-chain ELA builds can fall back to the USER1 DATA window."""
         t = XilinxHwServerTransport()
@@ -374,12 +394,12 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
 
-    def test_timestamp_block_falls_back_when_user2_burst_missing(self):
-        """Timestamp burst failures also disable USER2 for later reads."""
+    def test_timestamp_block_falls_back_when_burst_missing(self):
+        """Timestamp burst failures also disable fast burst reads."""
         t = XilinxHwServerTransport()
 
         def fail_burst(*args, **kwargs):
-            raise RuntimeError("USER2 unavailable")
+            raise RuntimeError("burst unavailable")
 
         t._read_block_burst = fail_burst  # type: ignore[method-assign]
         t._read_block_user1 = MagicMock(return_value=[4, 5])  # type: ignore[method-assign]
@@ -388,8 +408,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x2100, 2)
 
-    def test_timestamp_burst_primes_user2_before_returned_scan(self):
-        """Timestamp USER2 reads also discard the first fill scan."""
+    def test_timestamp_burst_primes_before_returned_scan(self):
+        """Timestamp burst reads also discard the first fill scan."""
         t = XilinxHwServerTransport()
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 8, sample_w=32)

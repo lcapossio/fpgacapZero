@@ -198,7 +198,7 @@ def _make_transport(args: argparse.Namespace):
     bitfile = getattr(args, "program", None)
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
-        single_chain_burst=getattr(args, "single_chain_burst", False),
+        single_chain_burst=not getattr(args, "two_chain_burst", False),
         **_chain_shape_kwargs(fpga_name),
     )
 
@@ -217,9 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
     p.add_argument(
-        "--single-chain-burst",
+        "--two-chain-burst",
         action="store_true",
-        help="hw_server only: use ELA SINGLE_CHAIN_BURST bitstreams (burst reads on USER1)",
+        help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
     )
     p.add_argument(
         "--program",

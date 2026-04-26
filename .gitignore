@@ -28,6 +28,3 @@ Thumbs.db
 # Temp test outputs
 tests/_tmp/
 .codex_pytest_tmp*/
-
-# User scratch / local notes
-no_commit/
