@@ -817,15 +817,21 @@ class XilinxHwServerTransport(Transport):
         if not self.single_chain_burst:
             return first
 
-        # Single-chain burst shares USER1 with the 49-bit register protocol.
-        # On real hw_server sessions a rapid re-arm can leave the first burst
-        # transaction partially stale.  Repeat until two consecutive reads
-        # agree; this is content-agnostic and keeps the separate DATA_CHAIN path
-        # at its original single-transaction cost.
-        second = run_once()
-        if second == first:
-            return second
-        return run_once()
+        # Single-chain burst shares one USER chain between 49-bit register
+        # frames and 256-bit burst frames.  Once STATUS.done is observed, the
+        # capture RAM is read-only until the next ARM/RESET, so repeating the
+        # same BURST_PTR transaction must return identical data.  Real
+        # hw_server/BSCANE2 sessions can return one stale first transaction
+        # immediately after rapid re-arm; require a stable pair and fail loudly
+        # if the stream does not converge instead of silently accepting a
+        # one-off retry result.
+        previous = first
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("single-chain burst readback did not stabilize")
 
     def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
         """Read timestamp words through the configured burst mode when available."""

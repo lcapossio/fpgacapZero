@@ -360,6 +360,45 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-hex 6 03", sent[0])
         self.assertIn("-bits 256", sent[0])
 
+    def test_single_chain_burst_requires_stable_repeated_readback(self):
+        """Single-chain retry rejects streams that never produce a stable pair."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        prime = self._burst_token([0xAA] * 32)
+        responses = [
+            f"{prime} {self._burst_token([0x10] * 32)}",
+            f"{prime} {self._burst_token([0x20] * 32)}",
+            f"{prime} {self._burst_token([0x30] * 32)}",
+            f"{prime} {self._burst_token([0x40] * 32)}",
+        ]
+
+        def fake_send(_tcl: str) -> str:
+            return responses.pop(0)
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
+            t._read_block_burst(8)
+
+    def test_single_chain_burst_accepts_first_stale_then_stable_pair(self):
+        """A one-transaction stale read is tolerated only after stability."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        prime = self._burst_token([0xAA] * 32)
+        stale = f"{prime} {self._burst_token([0xEE] * 32)}"
+        fresh = f"{prime} {self._burst_token(list(range(32)))}"
+        responses = [stale, fresh, fresh]
+
+        def fake_send(_tcl: str) -> str:
+            return responses.pop(0)
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertEqual(responses, [])
+
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)

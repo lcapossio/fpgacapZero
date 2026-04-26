@@ -37,6 +37,15 @@ throughput (the Xilinx hw_server transport does this for the ELA
 burst readback). Default Xilinx builds keep those wide burst scans on
 USER1; pass `single_chain_burst=False` only for legacy two-chain builds.
 
+For single-chain burst readback, the host verifies stability instead of
+trusting the first transaction.  The invariant is simple: after the ELA
+reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,
+so repeating the same `BURST_PTR` read transaction must return identical data.
+Some real `hw_server` sessions can produce one stale first transaction after
+rapid re-arm; `XilinxHwServerTransport` requires two consecutive matching
+single-chain burst reads and raises `RuntimeError` if the result does not
+stabilize.  The legacy two-chain DATA_CHAIN path remains a single transaction.
+
 An **optional** extension method `read_timestamp_block(addr, words,
 timestamp_width)` accelerates timestamp readback via the burst path.
 The host checks for it via `getattr(transport,
