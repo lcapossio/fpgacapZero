@@ -344,6 +344,63 @@ class SequencerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "REL_COMPARE=1"):
             analyzer.configure(cfg)
 
+    def test_all_relational_sequence_modes_require_compare_capability(self):
+        for mode in (2, 3, 4, 5):
+            with self.subTest(mode=mode):
+                transport = FakeTransport()
+                transport.regs[0x00E0] = 0x1C3
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                cfg = CaptureConfig(
+                    pretrigger=1,
+                    posttrigger=2,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=[
+                        SequencerStage(
+                            cmp_mode_a=mode,
+                            combine=0,
+                            is_final=True,
+                            count_target=1,
+                            value_a=0x80,
+                            mask_a=0xFF,
+                        ),
+                    ],
+                )
+
+                with self.assertRaisesRegex(ValueError, "REL_COMPARE=1"):
+                    analyzer.configure(cfg)
+                self.assertNotIn(0x0040, transport.regs)
+
+    def test_relational_sequence_modes_allowed_when_compare_capability_present(self):
+        for mode in (2, 3, 4, 5):
+            with self.subTest(mode=mode):
+                transport = FakeTransport()
+                transport.regs[0x00E0] = 0x3_01FF
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                cfg = CaptureConfig(
+                    pretrigger=1,
+                    posttrigger=2,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=[
+                        SequencerStage(
+                            cmp_mode_a=mode,
+                            combine=0,
+                            is_final=True,
+                            count_target=1,
+                            value_a=0x80,
+                            mask_a=0xFF,
+                        ),
+                    ],
+                )
+
+                analyzer.configure(cfg)
+                self.assertEqual(transport.regs[0x0040] & 0xF, mode)
+
     def test_b_combine_requires_dual_compare_capability(self):
         transport = FakeTransport()
         transport.regs[0x00E0] = 0x2_01C3
