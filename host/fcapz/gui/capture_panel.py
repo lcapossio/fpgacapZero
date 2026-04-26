@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from ..analyzer import CaptureConfig, SequencerStage, TriggerConfig
 from ..cli import _parse_probes
+from ..probes import load_probe_file, probes_to_arg
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
@@ -252,6 +255,11 @@ class CapturePanel(QGroupBox):
 
         self._probes = QLineEdit()
         self._probes.setPlaceholderText("name:width:lsb,... (optional)")
+        self._btn_load_probes = QPushButton("Load .prob")
+        self._btn_load_probes.clicked.connect(self._on_load_probe_file)
+        row_probes = QHBoxLayout()
+        row_probes.addWidget(self._probes, 1)
+        row_probes.addWidget(self._btn_load_probes)
 
         self._timeout = QLineEdit("10.0")
 
@@ -338,7 +346,7 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Storage qual mask", self._stor_mask)
         form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
-        form_adv.addRow("Probes", self._probes)
+        form_adv.addRow("Probes", row_probes)
         self._adv_section = CollapsibleSection(
             "Advanced (decimation, mux, ext trig, storage qual, probes, …)",
             adv_body,
@@ -366,6 +374,24 @@ class CapturePanel(QGroupBox):
         self._refresh_seq_ui_state()
         self._apply_hw_feature_availability()
         self._refresh_pre_post_validity()
+
+    def _on_load_probe_file(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load probe sidecar",
+            "",
+            "Probe sidecar (*.prob);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            probe_file = load_probe_file(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Load .prob", str(exc))
+            return
+        self._probes.setText(probes_to_arg(probe_file.probes))
+        if probe_file.sample_clock_hz is not None:
+            self._clock_hz.setValue(int(probe_file.sample_clock_hz))
 
     def clear_hw(self) -> None:
         self._hw_sample_w = None

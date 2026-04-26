@@ -249,6 +249,14 @@ The `--summarize` flag prints a structured JSON summary (edge counts, value
 ranges, burst lengths) that an LLM can consume directly. The `--probes` flag
 splits the 8-bit sample into named sub-signals in VCD output.
 
+For wider designs, keep probe names in a `.prob` sidecar instead of typing the
+lane map on every capture:
+
+```bash
+fcapz --backend hw_server --port 3121 \
+  capture --probe-file design.prob --format vcd --out capture.vcd
+```
+
 [↑ Top](#readme-top)
 
 ## Usage
@@ -516,11 +524,14 @@ soc.submodules.ela = FcapzELA(
     },
     depth=1024,
 )
+
+soc.ela.write_probe_file("build/ela.prob", sample_clock_hz=int(sys_clk_freq))
 ```
 
 The helper packs named LiteX/Migen signals into `probe_in`, records bit
-offsets in `probe_fields`, and keeps control/readback on the existing JTAG
-transport.  It does not consume LiteX CSR or Wishbone address space.  See
+offsets in `probe_fields`, can emit a `.prob` sidecar for the host, and keeps
+control/readback on the existing JTAG transport.  It does not consume LiteX
+CSR or Wishbone address space.  See
 [`docs/04_rtl_integration.md`](docs/04_rtl_integration.md#litex-integration)
 for details.
 

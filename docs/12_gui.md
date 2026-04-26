@@ -161,6 +161,10 @@ sub-signals.  Each row is a `name` / `width` / `lsb` triple that
 becomes a `ProbeSpec` in the `CaptureConfig`.  The probe panel
 validates as you type — overlapping bit ranges turn red.
 
+The **Load .prob** button fills the same field from a probe sidecar, so
+generated LiteX maps or hand-authored non-LiteX maps can be reused without
+typing the lane list each time.
+
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 

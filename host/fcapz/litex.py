@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .analyzer import ProbeSpec
+from .probes import probe_file_dict, write_probe_file
+
 
 _ROOT = Path(__file__).resolve().parents[2]
 _RTL_DIR = _ROOT / "rtl"
@@ -253,6 +256,38 @@ class FcapzELA:
             o_trigger_out=trigger_out_sig,
             o_armed_out=armed_out_sig,
             i_eio_probe_in=0,
+        )
+
+    def probe_specs(self) -> list[ProbeSpec]:
+        """Return probe fields as host-side ``ProbeSpec`` objects."""
+
+        return [
+            ProbeSpec(name=field.name, width=field.width, lsb=field.offset)
+            for field in self.probe_fields
+        ]
+
+    def probe_file_dict(self, *, sample_clock_hz: int | None = None) -> dict[str, Any]:
+        """Return a JSON-serializable ``.prob`` document for this LiteX ELA."""
+
+        return probe_file_dict(
+            self.probe_specs(),
+            sample_width=self.sample_width,
+            sample_clock_hz=sample_clock_hz,
+        )
+
+    def write_probe_file(
+        self,
+        path: str | Path,
+        *,
+        sample_clock_hz: int | None = None,
+    ) -> None:
+        """Write a ``.prob`` sidecar for this LiteX ELA instance."""
+
+        write_probe_file(
+            path,
+            self.probe_specs(),
+            sample_width=self.sample_width,
+            sample_clock_hz=sample_clock_hz,
         )
 
 

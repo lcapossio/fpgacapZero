@@ -22,6 +22,14 @@ from .events import (
     frequency_estimate,
     summarize,
 )
+from .probes import (
+    PROBE_FILE_FORMAT,
+    ProbeFile,
+    load_probe_file,
+    probe_file_dict,
+    probes_to_arg,
+    write_probe_file,
+)
 from .transport import (
     OpenOcdTransport,
     Transport,
@@ -55,4 +63,10 @@ __all__ = [
     "EjtagAxiController",
     "AXIError",
     "EjtagUartController",
+    "PROBE_FILE_FORMAT",
+    "ProbeFile",
+    "load_probe_file",
+    "probe_file_dict",
+    "probes_to_arg",
+    "write_probe_file",
 ]

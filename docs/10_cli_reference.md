@@ -127,6 +127,7 @@ setup.  Both take the same options.
 | `--channel N` | `0` | Probe channel mux selector |
 | `--probe-sel N` | `0` | Runtime probe mux slice index |
 | `--probes SPEC` | none | Probe definitions: `name:width:lsb,name:width:lsb,...` |
+| `--probe-file FILE.prob` | none | Load probe definitions, sample width, and optional sample clock from a `.prob` sidecar |
 | `--decimation N` | `0` | Capture every N+1 cycles (requires `DECIM_EN=1`) |
 | `--ext-trigger-mode MODE` | `disabled` | `disabled`, `or`, `and` (requires `EXT_TRIG_EN=1`) |
 | `--stor-qual-mode N` | `0` | 0=disabled, 1=store-when-match, 2=store-when-no-match |
@@ -160,6 +161,14 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --pretrigger 4 --posttrigger 4 \
         --trigger-value 0x10 \
         --probes lo:4:0,hi:4:4 \
+        --format vcd --out capture.vcd
+
+# Same idea, but load lanes from a .prob sidecar
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+      capture \
+        --pretrigger 4 --posttrigger 4 \
+        --trigger-value 0x10 \
+        --probe-file design.prob \
         --format vcd --out capture.vcd
 
 # Trigger delay (commit trigger 4 cycles after the cause)
@@ -240,6 +249,42 @@ Constraints (validated by the host):
 
 Without `--probes` you get one giant `sample` signal in the VCD —
 useful for quick checks but ugly for waveform viewing.
+
+### The `.prob` sidecar format
+
+`.prob` files are JSON probe maps.  They are the preferred way to keep signal
+names next to a bitstream, especially when the ELA probe bus is wider than a
+few hand-written fields:
+
+```json
+{
+  "format": "fpgacapzero.probes.v1",
+  "core": "ela",
+  "sample_width": 41,
+  "sample_clock_hz": 100000000,
+  "probes": [
+    {"name": "axi_valid", "width": 1, "lsb": 0},
+    {"name": "axi_ready", "width": 1, "lsb": 1},
+    {"name": "axi_addr", "width": 32, "lsb": 2},
+    {"name": "state", "width": 7, "lsb": 34}
+  ]
+}
+```
+
+That file describes this packed RTL bus:
+
+```verilog
+assign ela_probe = {
+    state,       // bits 40:34
+    axi_addr,    // bits 33:2
+    axi_ready,   // bit 1
+    axi_valid    // bit 0
+};
+```
+
+`--probe-file` and `--probes` are mutually exclusive.  If the file includes
+`sample_width` or `sample_clock_hz`, those become the capture defaults; explicit
+CLI `--sample-width` or `--sample-clock-hz` values still override them.
 
 ### The `--trigger-sequence` JSON schema
 

@@ -346,6 +346,21 @@ probes = [
 These names show up in the VCD export and the LLM-friendly summary.
 Overlapping bit ranges raise `ValueError` in `Analyzer.configure()`.
 
+For reusable probe maps, store the same fields in a `.prob` sidecar:
+
+```python
+from fcapz import load_probe_file, write_probe_file
+
+write_probe_file(
+    "design.prob",
+    [ProbeSpec("valid", 1, 0), ProbeSpec("state", 7, 1)],
+    sample_width=8,
+)
+
+probe_file = load_probe_file("design.prob")
+cfg = CaptureConfig(..., sample_width=probe_file.sample_width, probes=probe_file.probes)
+```
+
 ### `SequencerStage`
 
 ```python

@@ -163,6 +163,8 @@ soc.submodules.ela = FcapzELA(
     },
     depth=1024,
 )
+
+soc.ela.write_probe_file("build/ela.prob", sample_clock_hz=int(sys_clk_freq))
 ```
 
 `probes` are packed with normal Migen `Cat` ordering: the first named signal
@@ -170,6 +172,12 @@ occupies the low bits of `probe_in`, and `FcapzELA.probe_fields` records each
 field's name, width, and bit offset for capture metadata.  The helper also
 adds the required RTL files to the LiteX platform, including the generated
 `fcapz_version.vh` header and the selected vendor TAP wrapper.
+
+The generated `.prob` sidecar can be passed directly to the host:
+
+```bash
+fcapz capture --probe-file build/ela.prob --format vcd --out capture.vcd
+```
 
 This first integration path keeps capture control on the existing JTAG
 transport.  It does not consume LiteX CSRs or Wishbone address space.  Use
