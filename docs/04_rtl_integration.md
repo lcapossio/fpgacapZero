@@ -322,6 +322,13 @@ module fcapz_ela_xilinx7 #(
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
+**Migration note:** older Xilinx bitstreams may have been built with
+`SINGLE_CHAIN_BURST=0`, where 256-bit burst scans live on `DATA_CHAIN`.
+The current host default expects single-chain burst on `CTRL_CHAIN`. If a
+legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
+warning, use the CLI `--two-chain-burst` option or construct
+`XilinxHwServerTransport(single_chain_burst=False)`.
+
 The default config is intentionally small and single-chain, while still
 keeping compatibility features such as comparator B and USER1 fallback
 readout enabled. The reference Arty A7 design uses:
