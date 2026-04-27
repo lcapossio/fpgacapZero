@@ -68,6 +68,23 @@ TESTBENCHES = {
             RTL / "jtag_pipe_iface.v",
         ],
     ),
+    "fcapz_ela_xilinx7_single_chain": (
+        TB / "fcapz_ela_xilinx7_single_chain_tb.sv",
+        [
+            SIM / "bscane2_stub.v",
+            RTL / "reset_sync.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+            RTL / "fcapz_ela.v",
+            RTL / "jtag_pipe_iface.v",
+            RTL / "jtag_reg_iface.v",
+            RTL / "jtag_burst_read.v",
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "fcapz_eio.v",
+            RTL / "fcapz_regbus_mux.v",
+            RTL / "fcapz_ela_xilinx7.v",
+        ],
+    ),
     "fcapz_eio": (
         TB / "fcapz_eio_tb.sv",
         [
@@ -92,6 +109,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_config_matrix",
     "jtag_burst_read",
     "jtag_pipe_iface",
+    "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "chan_mux",
 ]
