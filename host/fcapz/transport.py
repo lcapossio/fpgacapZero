@@ -694,7 +694,15 @@ class XilinxHwServerTransport(Transport):
         if addr == 0x0100 and self._burst_available:
             try:
                 return self._read_block_burst(words)
-            except (ConnectionError, RuntimeError):
+            except (ConnectionError, RuntimeError) as exc:
+                if self.single_chain_burst:
+                    _hw_log.warning(
+                        "single-chain ELA burst readback failed (%s); falling back to "
+                        "slow USER1 DATA reads. If this bitstream was built with "
+                        "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
+                        "XilinxHwServerTransport(single_chain_burst=False).",
+                        exc,
+                    )
                 self._has_burst = False
         # Non-burst path needs flush to reset USER1 pipeline
         return self._read_block_user1(addr, words)
@@ -844,7 +852,15 @@ class XilinxHwServerTransport(Transport):
                     timestamp=True,
                     element_width=timestamp_width,
                 )
-            except (ConnectionError, RuntimeError):
+            except (ConnectionError, RuntimeError) as exc:
+                if self.single_chain_burst:
+                    _hw_log.warning(
+                        "single-chain ELA timestamp burst readback failed (%s); "
+                        "falling back to slow USER1 timestamp reads. If this bitstream "
+                        "was built with SINGLE_CHAIN_BURST=0, pass --two-chain-burst or "
+                        "construct XilinxHwServerTransport(single_chain_burst=False).",
+                        exc,
+                    )
                 self._has_burst = False
         return self._read_block_user1(addr, words)
 

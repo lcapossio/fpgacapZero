@@ -433,6 +433,23 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
 
+    def test_single_chain_burst_fallback_logs_migration_hint(self):
+        """Default single-chain failure should point legacy users at two-chain mode."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("single-chain burst readback did not stabilize")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.hw_server", level="WARNING") as logs:
+            self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+
+        text = "\n".join(logs.output)
+        self.assertIn("SINGLE_CHAIN_BURST=0", text)
+        self.assertIn("--two-chain-burst", text)
+
     def test_timestamp_block_falls_back_when_burst_missing(self):
         """Timestamp burst failures also disable fast burst reads."""
         t = XilinxHwServerTransport()
