@@ -46,6 +46,13 @@ RAM.  When `INPUT_PIPE>=1`, the core also enables an internal
 path; the tradeoff is one extra sample-clock of trigger decision
 latency.
 
+`INPUT_PIPE` delays probe data before trigger/storage logic sees it. If
+timestamps are enabled, the timestamp counter is not delayed by the same
+number of stages; each timestamp marks the cycle when the pipelined sample
+is written, not the original external `probe_in` cycle. In practice the
+reported timestamp is later than the external probe event by `INPUT_PIPE`
+sample-clock cycles.
+
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
 25 samples total, and `samples[8]` is the one that caused the
@@ -272,6 +279,11 @@ sample, and the post-trigger window starts after that sample.
 The captured timestamps (if `TIMESTAMP_W > 0`) reflect the real cycle
 counter, so a downstream tool can reconstruct the gaps between
 samples accurately.
+
+With `INPUT_PIPE>=1`, timestamps are aligned to the stored, pipelined sample
+stream. Relative spacing between stored samples is still accurate, but the
+absolute timestamp for an external `probe_in` event is offset by the input
+pipeline depth.
 
 ## External trigger I/O (`EXT_TRIG_EN=1`)
 

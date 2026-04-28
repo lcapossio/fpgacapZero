@@ -330,6 +330,12 @@ legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
 warning, use the CLI `--two-chain-burst` option or construct
 `XilinxHwServerTransport(single_chain_burst=False)`.
 
+**Startup defaults:** `STARTUP_ARM` and `DEFAULT_TRIG_EXT` rely on the FPGA
+and synthesis flow preserving register initial values at configuration time
+(for example, Xilinx GSR/INIT behavior). If a target family or flow does not
+guarantee those initial values, configure the registers from the host after
+programming instead of relying on power-up auto-arm behavior.
+
 The default config is intentionally small and single-chain, while still
 keeping compatibility features such as comparator B and USER1 fallback
 readout enabled. The reference Arty A7 design uses:

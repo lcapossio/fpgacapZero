@@ -151,6 +151,9 @@ module fcapz_ela #(
     localparam PTR_W = $clog2(DEPTH);
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;
+    // INPUT_PIPE also registers compare hits so REL_COMPARE comparators stay
+    // off the capture-control critical path. This adds one trigger-decision
+    // cycle whenever probe input pipelining is enabled.
     localparam COMPARE_PIPE = (INPUT_PIPE >= 1) ? 1 : 0;
     localparam HAS_DUAL_COMPARE = (DUAL_COMPARE != 0);
     localparam HAS_USER1_DATA = (USER1_DATA_EN != 0);
