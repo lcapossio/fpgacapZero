@@ -11,7 +11,7 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..analyzer import Analyzer, CaptureConfig
-from ..transport import connect_timing_logs_enabled
+from ..transport import connect_timing_logs_enabled, list_xilinx_hw_server_targets
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
 from .transport_from_settings import transport_from_connection
@@ -211,3 +211,35 @@ class ConnectWorker(QObject):
                     pass
             return
         self.finished.emit(analyzer, info)
+
+
+class TargetScanWorker(QObject):
+    """Background XSDB target scan so the connection panel stays responsive."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        timeout_sec: float,
+    ) -> None:
+        super().__init__()
+        self._host = host
+        self._port = int(port)
+        self._timeout_sec = float(timeout_sec)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            targets = list_xilinx_hw_server_targets(
+                host=self._host,
+                port=self._port,
+                timeout_sec=self._timeout_sec,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced via GUI
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(targets)

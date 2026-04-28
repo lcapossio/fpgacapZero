@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .settings import ConnectionSettings
+from .worker import TargetScanWorker
 
 
 class ConnectionPanel(QGroupBox):
@@ -35,6 +36,8 @@ class ConnectionPanel(QGroupBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Connection", parent)
         self._connected = False
+        self._scan_thread: QThread | None = None
+        self._scan_worker: TargetScanWorker | None = None
 
         self._backend = QComboBox()
         self._backend.addItem("Xilinx hw_server", "hw_server")
@@ -47,8 +50,19 @@ class ConnectionPanel(QGroupBox):
         self._port.setRange(1, 65535)
         self._port.setValue(6666)
 
-        self._tap = QLineEdit()
-        self._tap.setPlaceholderText("xc7a100t.tap or FPGA target name")
+        self._tap = QComboBox()
+        self._tap.setEditable(True)
+        self._tap.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._tap.lineEdit().setPlaceholderText("xc7a100t.tap or FPGA target name")
+        self._scan_targets_btn = QPushButton("Scan")
+        self._scan_targets_btn.setToolTip("List JTAG targets from hw_server / XSDB.")
+        self._scan_targets_btn.clicked.connect(self._scan_targets)
+
+        tap_row = QWidget()
+        tl = QHBoxLayout(tap_row)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(self._tap, stretch=1)
+        tl.addWidget(self._scan_targets_btn)
 
         self._ir = QComboBox()
         self._ir.addItem("Xilinx 7-series", "xilinx7")
@@ -137,7 +151,7 @@ class ConnectionPanel(QGroupBox):
         form.addRow("Backend", self._backend)
         form.addRow("Host", self._host)
         form.addRow("Port", self._port)
-        form.addRow("TAP / target", self._tap)
+        form.addRow("TAP / target", tap_row)
         form.addRow("IR table", self._ir)
         form.addRow("", self._program_on_connect)
         form.addRow("Bitfile path", prog_row)
@@ -158,7 +172,98 @@ class ConnectionPanel(QGroupBox):
         is_hw = self._backend.currentData() == "hw_server"
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
+        self._scan_targets_btn.setEnabled(is_hw and not self._connected)
         self._refresh_timeout_row_state()
+
+    def _scan_targets(self) -> None:
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            return
+        if self._backend.currentData() != "hw_server":
+            QMessageBox.information(
+                self,
+                "Scan targets",
+                "JTAG target scanning is currently available for hw_server only.",
+            )
+            return
+        host = self._host.text().strip() or "127.0.0.1"
+        port = int(self._port.value())
+        if port == 6666:
+            port = 3121
+        self._status.setText(f"Scanning JTAG targets on {host}:{port}...")
+        self._scan_targets_btn.setEnabled(False)
+        thread = QThread()
+        worker = TargetScanWorker(
+            host=host,
+            port=port,
+            timeout_sec=float(self._tcp_timeout.value()),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_scan_targets_finished)
+        worker.failed.connect(self._on_scan_targets_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._on_scan_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._scan_thread = thread
+        self._scan_worker = worker
+        thread.start()
+
+    def _tap_text(self) -> str:
+        return self._tap.currentText().strip()
+
+    def _set_tap_text(self, text: str) -> None:
+        idx = self._tap.findText(text)
+        if idx >= 0:
+            self._tap.setCurrentIndex(idx)
+        else:
+            self._tap.setEditText(text)
+
+    def _replace_scanned_targets(self, targets: list[str]) -> None:
+        current = self._tap_text()
+        self._tap.blockSignals(True)
+        self._tap.clear()
+        seen: set[str] = set()
+        if current:
+            self._tap.addItem(current)
+            seen.add(current)
+        for target in targets:
+            target = target.strip()
+            if target and target not in seen:
+                self._tap.addItem(target)
+                seen.add(target)
+        if current:
+            self._set_tap_text(current)
+        elif targets:
+            self._tap.setCurrentIndex(0)
+        self._tap.blockSignals(False)
+
+    def _on_scan_targets_finished(self, targets: object) -> None:
+        target_list = [str(t) for t in targets] if isinstance(targets, list) else []
+        if not target_list:
+            self._status.setText("Scan complete: no JTAG targets reported.")
+            QMessageBox.information(
+                self,
+                "Scan targets",
+                "hw_server responded, but XSDB did not report any JTAG targets.",
+            )
+            return
+        self._replace_scanned_targets(target_list)
+        self._tap.showPopup()
+        self._status.setText(f"Scan complete: {len(target_list)} target(s) found.")
+
+    def _on_scan_targets_failed(self, message: str) -> None:
+        self._status.setText(f"Scan failed: {message}")
+        QMessageBox.warning(self, "Scan targets failed", message)
+
+    def _on_scan_thread_finished(self) -> None:
+        self._scan_worker = None
+        self._scan_thread = None
+        self._scan_targets_btn.setEnabled(
+            self._backend.currentData() == "hw_server" and not self._connected
+        )
 
     def _will_program_bitfile(self) -> bool:
         return (
@@ -217,7 +322,7 @@ class ConnectionPanel(QGroupBox):
         host = self._host.text().strip()
         if not host:
             return "Host must not be empty."
-        tap = self._tap.text().strip()
+        tap = self._tap_text()
         if not tap:
             return "TAP / target must not be empty."
         if self._backend.currentData() == "hw_server":
@@ -235,7 +340,7 @@ class ConnectionPanel(QGroupBox):
             backend=str(self._backend.currentData()),
             host=self._host.text().strip(),
             port=int(self._port.value()),
-            tap=self._tap.text().strip(),
+            tap=self._tap_text(),
             program=program_raw if program_raw else None,
             program_on_connect=self._program_on_connect.isChecked(),
             ir_table=str(self._ir.currentData()),
@@ -251,7 +356,7 @@ class ConnectionPanel(QGroupBox):
             self._backend.setCurrentIndex(idx)
         self._host.setText(conn.host)
         self._port.setValue(conn.port)
-        self._tap.setText(conn.tap)
+        self._set_tap_text(conn.tap)
         ir_idx = self._ir.findData(conn.ir_table)
         if ir_idx >= 0:
             self._ir.setCurrentIndex(ir_idx)
@@ -278,6 +383,7 @@ class ConnectionPanel(QGroupBox):
         self._tap.setEnabled(editable)
         self._ir.setEnabled(editable)
         is_hw = self._backend.currentData() == "hw_server"
+        self._scan_targets_btn.setEnabled(editable and is_hw)
         self._program_on_connect.setEnabled(editable and is_hw)
         self._program.setEnabled(editable and is_hw)
         self._tcp_timeout.setEnabled(editable)

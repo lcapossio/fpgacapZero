@@ -12,7 +12,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from fcapz.transport import (
+    list_xilinx_hw_server_targets,
+    OpenOcdTransport,
+    Transport,
+    XilinxHwServerTransport,
+    parse_xsdb_jtag_targets,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,76 @@ class ConcreteTransport(Transport):
     def read_block(self, addr: int, words: int):
         return [0] * words
 
+
+class XsdbTargetParserTests(unittest.TestCase):
+    def test_parse_jtag_targets_output(self) -> None:
+        raw = """
+          1  jsn-JTAG-HS3-210299
+             2  arm_dap
+          *  3  xck26
+             4  xc7a100t
+        """
+        self.assertEqual(
+            parse_xsdb_jtag_targets(raw),
+            ["jsn-JTAG-HS3-210299", "arm_dap", "xck26", "xc7a100t"],
+        )
+
+    def test_parse_jtag_targets_prefers_fpga_device_names(self) -> None:
+        raw = """
+          1  Digilent Arty A7-100T 210319B26DC2A
+             2  xc7a100t (idcode 13631093 irlen 6 fpga)
+          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+             4  xck26 (idcode 04724093 irlen 12 fpga)
+             5  arm_dap (idcode 5ba00477 irlen 4)
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xc7a100t", "xck26"])
+
+    def test_parse_jtag_targets_deduplicates_names(self) -> None:
+        raw = """
+          1  xck26
+        * 2  xck26
+          note: not a target line
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xck26"])
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.run")
+    def test_list_jtag_targets_uses_minimal_scan_script(
+        self,
+        run_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "  1  jsn-JTAG-HS3-210299\n* 2  xck26\n"
+        proc.stderr = ""
+        run_mock.return_value = proc
+
+        self.assertEqual(
+            list_xilinx_hw_server_targets(host="localhost", port=3121),
+            ["jsn-JTAG-HS3-210299", "xck26"],
+        )
+
+        script = run_mock.call_args.kwargs["input"]
+        self.assertIn("connect -url tcp:localhost:3121", script)
+        self.assertIn("puts [jtag targets]", script)
+        self.assertNotIn("configparams", script)
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.run")
+    def test_list_jtag_targets_rejects_autolaunch_without_target_output(
+        self,
+        run_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
+        proc.stderr = ""
+        run_mock.return_value = proc
+
+        with self.assertRaisesRegex(RuntimeError, "launched hw_server"):
+            list_xilinx_hw_server_targets(host="localhost", port=3121)
 
 # ---------------------------------------------------------------------------
 # Transport ABC contract

@@ -51,6 +51,20 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertIsInstance(t, XilinxHwServerTransport)
         self.assertEqual(t.fpga_name, "myfpga")
 
+    def test_hw_server_xck26_uses_register_ir(self) -> None:
+        c = ConnectionSettings(backend="hw_server", tap="xck26")
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, XilinxHwServerTransport)
+        self.assertTrue(t.use_register_ir)
+        self.assertEqual(t.dr_extra_bits, 0)
+
+    def test_hw_server_ultrascale_uses_ultrascale_ir_table(self) -> None:
+        c = ConnectionSettings(backend="hw_server", tap="xcku040")
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, XilinxHwServerTransport)
+        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE)
+        self.assertEqual(t.ir_length, 6)
+
     def test_hw_server_ready_timeout_when_program_set(self) -> None:
         c = ConnectionSettings(
             backend="hw_server",

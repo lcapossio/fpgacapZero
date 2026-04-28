@@ -30,6 +30,7 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
 
 
 def connect_timing_logs_enabled() -> bool:
@@ -43,6 +44,75 @@ def connect_timing_logs_enabled() -> bool:
         "true",
         "yes",
     )
+
+
+def parse_xsdb_jtag_targets(output: str) -> list[str]:
+    """Parse target names from XSDB ``jtag targets`` / ``targets`` output."""
+    names: list[str] = []
+    fpga_names: list[str] = []
+    seen: set[str] = set()
+    seen_fpga: set[str] = set()
+    for line in output.splitlines():
+        m = _XSDB_TARGET_RE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        if " (idcode " in name:
+            bare = name.split(" (", 1)[0].strip()
+            if " fpga)" in name and bare and bare not in seen_fpga:
+                seen_fpga.add(bare)
+                fpga_names.append(bare)
+            name = bare
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    if fpga_names:
+        return fpga_names
+    return names
+
+
+def list_xilinx_hw_server_targets(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 3121,
+    xsdb_path: str | None = None,
+    timeout_sec: float = 10.0,
+) -> list[str]:
+    """Return JTAG target names reported by ``hw_server`` via XSDB."""
+    xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
+    if not xsdb:
+        raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
+    script = (
+        f"connect -url tcp:{host}:{int(port)}\n"
+        "puts [jtag targets]\n"
+        "exit\n"
+    )
+    env = os.environ.copy()
+    for key in ("TEMP", "TMP"):
+        raw = env.get(key, "")
+        if not raw or not os.path.isdir(raw) or not os.access(raw, os.W_OK):
+            env[key] = os.getcwd()
+    proc = subprocess.run(
+        [xsdb],
+        input=script,
+        text=True,
+        capture_output=True,
+        timeout=float(timeout_sec),
+        check=False,
+        env=env,
+    )
+    output = f"{proc.stdout}\n{proc.stderr}"
+    if proc.returncode != 0:
+        raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
+    targets = parse_xsdb_jtag_targets(output)
+    if not targets and "To connect to this hw_server instance use url" in output:
+        raise RuntimeError(
+            "XSDB launched hw_server but did not return JTAG targets. "
+            "Start hw_server first, then scan again. "
+            f"Raw XSDB output:\n{output.strip()}"
+        )
+    return targets
 
 
 class Transport(ABC):

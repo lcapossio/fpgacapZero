@@ -9,6 +9,19 @@ from ..transport import OpenOcdTransport, Transport, XilinxHwServerTransport
 from .settings import ConnectionSettings, ir_table_preset
 
 
+def _hw_server_chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
+    """Mirror CLI auto-selection for common hw_server target families."""
+    name_lc = fpga_name.lower()
+    if name_lc.startswith(("xcku", "xcvu", "xcau")):
+        return {
+            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+            "ir_length": 6,
+        }
+    if name_lc.startswith(("xck", "xczu")):
+        return {"use_register_ir": True}
+    return {}
+
+
 def transport_from_connection(conn: ConnectionSettings) -> Transport:
     """Mirror CLI transport selection, including hw_server default port remap."""
     ir = ir_table_preset(conn.ir_table)
@@ -31,6 +44,8 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             conn.program if (conn.program_on_connect and conn.program) else None
         )
         ready_to = conn.hw_ready_timeout_sec if bitfile else 2.0
+        chain_kwargs = _hw_server_chain_shape_kwargs(fpga)
+        ir = chain_kwargs.pop("ir_table", ir)
         return XilinxHwServerTransport(
             host=conn.host,
             port=port,
@@ -40,5 +55,6 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             ready_probe_timeout=ready_to,
             post_program_delay_ms=conn.hw_post_program_delay_ms,
             ready_poll_interval_sec=conn.hw_ready_poll_interval_ms / 1000.0,
+            **chain_kwargs,
         )
     raise ValueError(f"unknown backend {conn.backend!r}")
