@@ -22,7 +22,7 @@ back to individual chapters as you need them.
 |---|---------|--------------|
 | 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
 | 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD or Vivado hw_server). |
-| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, program the FPGA, capture a waveform, view it in GTKWave. |
+| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the GUI, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
 | 06 | [EIO core](06_eio_core.md) | The Embedded I/O core: read fabric signals, drive fabric signals, clock domains, host API. |

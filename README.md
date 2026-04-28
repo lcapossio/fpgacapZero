@@ -268,7 +268,7 @@ fcapz [global options] <command> [command options]
 | `--backend` | `hw_server` | `openocd` or `hw_server` |
 | `--host` | `127.0.0.1` | Server address |
 | `--port` | backend default | `6666` for OpenOCD, `3121` for hw_server |
-| `--tap` | `xc7a100t.tap` | JTAG TAP name |
+| `--tap` | `xc7a100t.tap` | OpenOCD TAP name or hw_server FPGA target |
 | `--program` | *(none)* | Program FPGA with bitfile before command (hw_server) |
 
 **Commands:**
@@ -279,6 +279,14 @@ fcapz [global options] <command> [command options]
 | `arm` | Arm the trigger without configuring |
 | `configure` | Write capture configuration to hardware |
 | `capture` | Configure, arm, wait for trigger, read samples, export |
+| `eio-probe` | Read EIO core identity and probe widths |
+| `eio-read` | Read EIO input probes |
+| `eio-write` | Write EIO output probes |
+| `axi-read` | Single AXI read via JTAG-to-AXI bridge |
+| `axi-write` | Single AXI write via JTAG-to-AXI bridge |
+| `axi-dump` | Read a block of AXI words |
+| `axi-fill` | Fill AXI memory with a pattern |
+| `axi-load` | Load a binary file into AXI memory |
 | `uart-send` | Send data to UART TX via JTAG-to-UART bridge |
 | `uart-recv` | Receive data from UART RX via JTAG-to-UART bridge |
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |

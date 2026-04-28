@@ -1,14 +1,16 @@
 # 03 — First capture in 10 minutes
 
 > **Goal**: by the end of this chapter you will have built the
-> reference Arty A7 bitstream, programmed the FPGA, captured a
-> waveform that triggers on a specific value, exported it to
-> VCD, and viewed it in GTKWave.  All from the command line.
+> reference Arty A7 bitstream, opened the desktop GUI, programmed
+> the FPGA, captured a waveform that triggers on a specific value,
+> and exported the same capture from the CLI for automation.
 >
 > **What you need**: an Arty A7-100T (or any Xilinx 7-series board
 > if you adapt the build script), a USB cable to your PC, Vivado
-> 2025.2 (or 2022.2+) with `hw_server` and `xsdb` on PATH, GTKWave
-> on PATH, and a working `fcapz` install per [chapter 02](02_install.md).
+> 2025.2 (or 2022.2+) with `hw_server` and `xsdb` on PATH, a working
+> `fcapz` install with the GUI extra per [chapter 02](02_install.md),
+> and optionally GTKWave / Surfer / WaveTrace on PATH for external
+> waveform viewing.
 
 
 ## Step 1: build the reference bitstream
@@ -63,7 +65,40 @@ You only need to do this once per session — `hw_server -d`
 backgrounds itself and stays alive until you reboot or
 `pkill hw_server`.
 
-## Step 3: program the FPGA and probe the cores
+## Step 3: open the GUI, program the FPGA, and probe the core
+
+Start the desktop GUI:
+
+```bash
+fcapz-gui
+```
+
+In the **Connection** panel:
+
+- Set **Backend** to `hw_server`.
+- Set **Host** to `127.0.0.1` and **Port** to `3121`.
+- Set **FPGA target** to `xc7a100t`.
+- Set **Bitfile** to `examples/arty_a7/arty_a7_top.bit`.
+- Leave **Program on connect** enabled for this first run.
+- Click **Connect**.
+
+The screenshot below shows where those connection fields live; your exact
+bitfile path and checkbox state should match the steps above.
+
+<p align="center">
+  <img src="assets/fcapz-gui-connection.png" alt="fcapz-gui Connection panel with backend, host, port, target, bitfile, and timeout fields" width="760">
+</p>
+
+The GUI connects to `hw_server`, programs the FPGA, waits for the ELA
+registers to become readable, and probes the core.  You should see the ELA
+tab populate with the reference bitstream's hardware parameters:
+`sample_width=8`, `depth=1024`, timestamps enabled, and 4 capture segments.
+
+If the GUI reports that the FPGA did not become ready, the same readiness
+wait would fail from the CLI too.  Check the board cable, `hw_server`, the
+selected FPGA target, and the bitfile path.
+
+The command-line equivalent is:
 
 ```bash
 fcapz --backend hw_server --port 3121 \
@@ -71,6 +106,10 @@ fcapz --backend hw_server --port 3121 \
       --program examples/arty_a7/arty_a7_top.bit \
       probe
 ```
+
+For `hw_server`, `--tap` is the FPGA target name (`xc7a100t`).  OpenOCD
+usually uses the TAP name with its `.tap` suffix (`xc7a100t.tap`), which is
+why the CLI default looks slightly different from the commands in this chapter.
 
 The `--program` flag tells fcapz to:
 
@@ -117,13 +156,45 @@ The interesting numbers:
   has decimation, ext-trigger, timestamps, and 4-segment memory all
   enabled.
 
-## Step 4: capture a waveform that triggers on counter == 0x42
+## Step 4: capture a waveform in the GUI
 
 The reference design's probe is a free-running 8-bit counter
 (`probe_in[7:0]`) so we know it eventually hits any value 0–255.
-We will trigger on the counter reaching `0x42`, capture 8 samples
-before and 16 samples after the trigger, and write the result to a
-JSON file.
+We will trigger on the counter reaching `0x42`, capture 8 samples before
+and 16 samples after the trigger, and inspect the result in the embedded
+waveform preview.
+
+In the **ELA** tab:
+
+- Set **Pretrigger** to `8`.
+- Set **Posttrigger** to `16`.
+- Set **Trigger mode** to `value_match`.
+- Set **Trigger value** to `0x42`.
+- Set **Trigger mask** to `0xFF`.
+- Set **Probes** to `counter:8:0`.
+- Click **Capture**.
+
+The ELA capture panel groups the trigger, pre/post-trigger window, probe
+profile, and sample-clock controls in one place:
+
+<p align="center">
+  <img src="assets/fcapz-gui-capture.png" alt="fcapz-gui ELA capture panel with trigger and pre/post-trigger controls" width="900">
+</p>
+
+You should see 25 samples: 8 before the trigger, the trigger sample, and
+16 after it.  The value at index `8` should be `0x42`, and the surrounding
+samples should be the counter incrementing.  That pre-trigger context is
+the killer feature of an in-chip logic analyzer: you get to see what
+happened before the event, not only after it.
+
+From the GUI you can also save the capture as JSON / CSV / VCD, or open the
+VCD in an external viewer if GTKWave, Surfer, or WaveTrace is installed.
+
+## Step 5: repeat the same capture from the CLI
+
+The GUI is the friendliest way to confirm the hardware path is alive.  The
+CLI gives you the same capture flow in a form you can paste into scripts,
+CI jobs, or lab notebooks.
 
 ```bash
 fcapz --backend hw_server --port 3121 \
@@ -138,8 +209,8 @@ fcapz --backend hw_server --port 3121 \
         --out my_capture.json
 ```
 
-Note we did **not** pass `--program` this time — the bitstream is
-already loaded from step 3.  Reprogramming on every command is wasteful;
+Note we do **not** pass `--program` this time — the bitstream is
+already loaded from the GUI step.  Reprogramming on every command is wasteful;
 once is enough.
 
 What just happened:
@@ -213,7 +284,7 @@ are the counter incrementing.  The pre-trigger window shows what was
 happening *before* the trigger fired — the killer feature of any
 in-chip logic analyzer.
 
-## Step 5: export to VCD and view in GTKWave
+## Step 6: export to VCD and view in GTKWave
 
 The same capture, but as a VCD file for waveform viewing:
 
@@ -246,7 +317,7 @@ the same 8-bit bus into two 4-bit named lanes in the VCD.  This is
 how you give your captured signals meaningful names instead of
 seeing one giant `sample` blob.
 
-## Step 6: try a few more tricks
+## Step 7: try a few more tricks
 
 Now that the basic flow works, here are five one-liners that
 showcase the features.  Each one is a deeper dive in a later chapter.
@@ -335,7 +406,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 
 You should see `0xDEADBEEF` come back.
 
-## Step 7: clean up
+## Step 8: clean up
 
 Nothing to clean — the bitstream stays in the FPGA until you power
 the board down or reprogram it.  `hw_server` keeps running in the
@@ -346,6 +417,7 @@ or kill it from Task Manager (Windows).
 
 | Concept | Chapter |
 |---|---|
+| The desktop GUI (`fcapz-gui`) | [12 — Desktop GUI](12_gui.md) |
 | `fcapz` CLI options and subcommands | [10 — CLI reference](10_cli_reference.md) |
 | `Analyzer.configure / arm / capture` Python API | [09 — Python API](09_python_api.md) |
 | `--probes name:width:lsb` syntax | [04 — RTL integration](04_rtl_integration.md), [09 — Python API](09_python_api.md) |
@@ -356,20 +428,18 @@ or kill it from Task Manager (Windows).
 | AXI read/write/burst | [07 — EJTAG-AXI bridge](07_ejtag_axi_bridge.md) |
 | The readiness wait, hw_server connection details | [14 — Transports](14_transports.md) |
 | What VERSION/core_id mean and why they matter | [16 — Versioning and release](16_versioning_and_release.md) |
-| The desktop GUI (`fcapz-gui`) | [12 — Desktop GUI](12_gui.md) |
 
 ## Recap
 
 In about 10 minutes you have:
 
 - Built a real bitstream with three fpgacapZero cores
-- Programmed it onto an Arty A7
-- Captured a waveform with pre/post-trigger context
+- Programmed it onto an Arty A7 from the GUI
+- Captured a waveform with pre/post-trigger context in the GUI
 - Verified the trigger landed on the right sample
 - Exported to JSON and VCD
 - Opened the VCD in GTKWave
 
-Everything you just did is also doable from the Python API
-([chapter 09](09_python_api.md)), the JSON-RPC server
-([chapter 11](11_rpc_server.md)), or the desktop GUI
-([chapter 12](12_gui.md)) — pick the workflow that fits your project.
+Everything you just did is also doable from the CLI, the Python API
+([chapter 09](09_python_api.md)), or the JSON-RPC server
+([chapter 11](11_rpc_server.md)) — pick the workflow that fits your project.
