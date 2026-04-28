@@ -115,6 +115,8 @@ def load_probe_file(path: str | Path) -> ProbeFile:
     if fmt != PROBE_FILE_FORMAT:
         raise ValueError(f"{p}: unsupported probe file format {fmt!r}")
 
+    if "sample_width" in data and data["sample_width"] is None:
+        raise ValueError(f"{p}: sample_width must be omitted or a positive integer, not null")
     sample_width = data.get("sample_width")
     sample_width_i = int(sample_width) if sample_width is not None else None
     if sample_width_i is not None and sample_width_i <= 0:

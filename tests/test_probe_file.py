@@ -63,6 +63,23 @@ def test_probe_file_rejects_overlap(tmp_path):
         load_probe_file(path)
 
 
+def test_probe_file_rejects_explicit_null_sample_width(tmp_path):
+    path = tmp_path / "null_width.prob"
+    path.write_text(
+        json.dumps(
+            {
+                "format": PROBE_FILE_FORMAT,
+                "sample_width": None,
+                "probes": [{"name": "state", "width": 4, "lsb": 0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sample_width.*not null"):
+        load_probe_file(path)
+
+
 def test_cli_build_config_loads_probe_file(tmp_path):
     path = tmp_path / "soc.prob"
     write_probe_file(

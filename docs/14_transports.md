@@ -46,6 +46,14 @@ rapid re-arm; `XilinxHwServerTransport` requires two consecutive matching
 single-chain burst reads and raises `RuntimeError` if the result does not
 stabilize.  The legacy two-chain DATA_CHAIN path remains a single transaction.
 
+This is a stability check, not a cryptographic or protocol-level data oracle:
+two identical but stale/corrupt scans would still pass.  The reference Arty
+hardware tests add a higher-level plausibility check by capturing the known
+free-running counter and requiring adjacent samples to increment by +1 when
+decimation is disabled.  Designs with critical readback requirements should
+use a similar application-level invariant, or add a future versioned burst
+framing/CRC to the RTL and host protocol.
+
 An **optional** extension method `read_timestamp_block(addr, words,
 timestamp_width)` accelerates timestamp readback via the burst path.
 The host checks for it via `getattr(transport,
