@@ -607,23 +607,24 @@ decoded form.
 
 ## Resource usage
 
-Vivado **synthesis**, **xc7a100t**, 2025.2 — **Slice LUTs** (same
-measurement as `scripts/resource_comparison.tcl`). BRAM is Block RAM
-tiles (18K granularity counts as 0.5 where applicable).
+Vivado **synthesis**, **xc7a100t**, 2025.2 -- **Slice LUTs**. BRAM is
+Block RAM tiles (18K granularity counts as 0.5 where applicable).
+Rows that mention readout include the wrapper/TAP/register plumbing.
 
 | Configuration | Slice LUTs | FFs | BRAM | Notes |
 |---|---:|---:|---:|---|
-| `SAMPLE_W=8`, `DEPTH=1024`, baseline | 1,595 | 1,478 | 0.5 | `TRIG_STAGES=1`, `STOR_QUAL=0` |
-| Above + `STOR_QUAL=1` | 1,616 | 1,497 | 0.5 | +21 LUT |
-| Above + `TRIG_STAGES=4` (no SQ) | 2,098 | 1,878 | 0.5 | 4-stage sequencer |
-| Above + `TRIG_STAGES=4` + `STOR_QUAL=1` | 2,095 | 1,897 | 0.5 | seq + storage qualification |
-| `SAMPLE_W=8`, `DEPTH=4096`, baseline | 1,541 | 1,490 | 1.0 | deeper buffer |
-| `SAMPLE_W=32`, `DEPTH=1024`, baseline | 1,548 | 1,740 | 1.0 | wider samples |
+| `SAMPLE_W=8`, `DEPTH=1024`, A-only, slow USER1 readout | 596 | 779 | 0.5 | `DUAL_COMPARE=0`, optional features off |
+| `SAMPLE_W=8`, `DEPTH=1024`, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | `SINGLE_CHAIN_BURST=1` |
+| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | EQ/NEQ/edges/changed |
+| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | relational modes, registered compare hit |
+| Above + `STOR_QUAL=1` | 2,521 | 1,749 | 0.5 | storage qualification |
+| Above + `TRIG_STAGES=4` | 2,954 | 2,788 | 0.5 | 4-stage sequencer |
+| `SAMPLE_W=32`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | wider samples |
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
-with EIO and EJTAG-AXI — **post-place** that top-level uses about **2.7k
-slice LUTs** and **1.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
+with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
+slice LUTs** and **3.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
 Your tool and family will vary.
 
 ## What's next

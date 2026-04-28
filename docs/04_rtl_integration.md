@@ -133,8 +133,9 @@ register file declarations.  The wrapper takes care of:
 - Instantiating `fcapz_ela` (the actual capture core)
 - Wiring everything together
 
-Resource usage: ~1,595 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
-synthesis) for the baseline config (8b × 1024, dual comparators).  See
+Resource usage: ~912 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
+synthesis) for an 8b x 1024 single-comparator, single-chain fast-readout
+configuration.  Simple USER1 register-readout builds are ~596 LUTs.  See
 [`specs/architecture.md`](specs/architecture.md) and the
 [README resource table](../README.md#resource-usage) for sequencer,
 storage qualification, width/depth scaling, and the full `arty_a7_top`

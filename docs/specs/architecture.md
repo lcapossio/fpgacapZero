@@ -64,16 +64,17 @@ EIO core parameters (separate module, `fcapz_eio.v`):
 
 ## Resource Usage (xc7a100t)
 
-Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2), same
-harness as `scripts/resource_comparison.tcl`. See [README.md](../../README.md#resource-usage)
+Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2). See [README.md](../../README.md#resource-usage)
 for FFs and the full `arty_a7_top` reference row.
 
 | Config | Slice LUTs | BRAM |
 |--------|-----:|-----:|
-| 8b × 1024, baseline (`TRIG_STAGES=1`, `STOR_QUAL=0`) | 1,595 | 0.5 |
-| 8b × 1024, + `STOR_QUAL=1` | 1,616 | 0.5 |
-| 8b × 1024, + 4-stage seq + SQ | 2,095 | 0.5 |
-| 32b × 1024, baseline | 1,548 | 1.0 |
+| 8b x 1024, A-only, slow USER1 readout | 596 | 0.5 |
+| 8b x 1024, A-only, single-chain fast readout | 912 | 0.5 |
+| 8b x 1024, dual compare, `REL_COMPARE=0` | 2,021 | 0.5 |
+| 8b x 1024, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 0.5 |
+| 8b x 1024, 4-stage sequencer | 2,954 | 0.5 |
+| 32b x 1024, dual compare, `REL_COMPARE=0` | 2,472 | 1.0 |
 
 Enabling timestamp, segmentation, decimation, external trigger, or wide
 probe mux builds adds logic and usually **extra BRAM** (see synthesis
