@@ -194,6 +194,55 @@ module fcapz_ela_config_matrix_tb;
         .burst_start_ptr(rel_burst_start_ptr)
     );
 
+    // ---- Mixed feature build: REL + INPUT_PIPE + dual comparator + SQ + segments ----
+    reg [SAMPLE_W-1:0] probe_combo = 8'h00;
+    reg combo_wr = 1'b0;
+    reg combo_rd = 1'b0;
+    reg [15:0] combo_addr = 16'h0;
+    reg [31:0] combo_wdata = 32'h0;
+    wire [31:0] combo_rdata;
+    reg [$clog2(DEPTH)-1:0] combo_burst_addr = '0;
+    wire [SAMPLE_W-1:0] combo_burst_data;
+    wire combo_burst_start;
+    wire [$clog2(DEPTH)-1:0] combo_burst_start_ptr;
+
+    fcapz_ela #(
+        .SAMPLE_W(SAMPLE_W),
+        .DEPTH(DEPTH),
+        .TRIG_STAGES(2),
+        .STOR_QUAL(1),
+        .NUM_CHANNELS(1),
+        .INPUT_PIPE(1),
+        .DECIM_EN(0),
+        .EXT_TRIG_EN(0),
+        .TIMESTAMP_W(0),
+        .NUM_SEGMENTS(4),
+        .PROBE_MUX_W(0),
+        .REL_COMPARE(1),
+        .DUAL_COMPARE(1),
+        .USER1_DATA_EN(1)
+    ) dut_combo (
+        .sample_clk(sample_clk),
+        .sample_rst(sample_rst),
+        .probe_in(probe_combo),
+        .trigger_in(1'b0),
+        .trigger_out(),
+        .armed_out(),
+        .jtag_clk(jtag_clk),
+        .jtag_rst(jtag_rst),
+        .jtag_wr_en(combo_wr),
+        .jtag_rd_en(combo_rd),
+        .jtag_addr(combo_addr),
+        .jtag_wdata(combo_wdata),
+        .jtag_rdata(combo_rdata),
+        .burst_rd_addr(combo_burst_addr),
+        .burst_rd_data(combo_burst_data),
+        .burst_rd_ts_data(),
+        .burst_start(combo_burst_start),
+        .burst_timestamp(),
+        .burst_start_ptr(combo_burst_start_ptr)
+    );
+
     task automatic write_min(input [15:0] addr, input [31:0] data);
         begin
             @(posedge jtag_clk);
@@ -263,6 +312,29 @@ module fcapz_ela_config_matrix_tb;
         end
     endtask
 
+    task automatic write_combo(input [15:0] addr, input [31:0] data);
+        begin
+            @(posedge jtag_clk);
+            combo_addr <= addr;
+            combo_wdata <= data;
+            combo_wr <= 1'b1;
+            @(posedge jtag_clk);
+            combo_wr <= 1'b0;
+        end
+    endtask
+
+    task automatic read_combo(input [15:0] addr, output [31:0] data);
+        begin
+            @(posedge jtag_clk);
+            combo_addr <= addr;
+            combo_rd <= 1'b1;
+            @(posedge jtag_clk);
+            combo_rd <= 1'b0;
+            repeat (8) @(posedge jtag_clk);
+            data = combo_rdata;
+        end
+    endtask
+
     task automatic drive_min_counter(input integer cycles);
         integer i;
         begin
@@ -272,6 +344,7 @@ module fcapz_ela_config_matrix_tb;
                 probe_nouser1 <= probe_nouser1 + 8'h1;
                 if (probe_rel > 8'h00)
                     probe_rel <= probe_rel - 8'h1;
+                probe_combo <= probe_combo + 8'h1;
             end
         end
     endtask
@@ -305,6 +378,17 @@ module fcapz_ela_config_matrix_tb;
             for (i = 0; i < 80 && status[2] == 1'b0; i = i + 1) begin
                 drive_min_counter(2);
                 read_rel(ADDR_STATUS, status);
+            end
+        end
+    endtask
+
+    task automatic wait_done_combo(output [31:0] status);
+        integer i;
+        begin
+            status = 32'h0;
+            for (i = 0; i < 80 && status[2] == 1'b0; i = i + 1) begin
+                drive_min_counter(2);
+                read_combo(ADDR_STATUS, status);
             end
         end
     endtask
@@ -413,6 +497,35 @@ module fcapz_ela_config_matrix_tb;
         read_rel(ADDR_CAPTURE_LEN, cap_len);
         check("REL_COMPARE=1 LT sequencer capture reaches done", status[2] == 1'b1);
         check("REL_COMPARE=1 LT sequencer capture has expected length", cap_len == 32'd3);
+
+        $display("\n=== Config 4: REL + INPUT_PIPE + dual comparator + SQ + segments ===");
+        read_combo(ADDR_FEATURES, rdata);
+        check("combo features advertise SQ and 4 segments",
+              ((rdata & 32'h10) != 0) && (((rdata >> 16) & 8'hFF) == 8'd4));
+        read_combo(ADDR_COMPARE_CAPS, rdata);
+        check("combo compare caps include relational and dual comparator",
+              rdata == 32'h0003_01FF);
+
+        probe_combo = 8'h00;
+        write_combo(ADDR_CTRL, 32'h2);
+        write_combo(ADDR_PRETRIG, 32'd0);
+        write_combo(ADDR_POSTTRIG, 32'd2);
+        write_combo(ADDR_SQ_MODE, 32'd1);
+        write_combo(ADDR_SQ_VALUE, 32'd0);
+        write_combo(ADDR_SQ_MASK, 32'd1);
+        write_combo(ADDR_SEQ_BASE + 16'd0, 32'h0000_1306); // final changed A OR B
+        write_combo(ADDR_SEQ_BASE + 16'd4, 32'd0);
+        write_combo(ADDR_SEQ_BASE + 16'd8, 32'hFF);
+        write_combo(ADDR_SEQ_BASE + 16'd12, 32'd0);
+        write_combo(ADDR_SEQ_BASE + 16'd16, 32'hFF);
+        write_combo(ADDR_CTRL, 32'h1);
+        wait_done_combo(status);
+        read_combo(ADDR_CAPTURE_LEN, cap_len);
+        check("combo capture remains active until all segments complete", status[2] == 1'b0);
+        check("combo capture fits one 4-sample segment", cap_len == 32'd3);
+        read_combo(ADDR_SEG_STATUS, rdata);
+        check("combo segmented status reports at least one completed segment",
+              (rdata & 32'h1) != 0);
 
         $display("\n=== fcapz_ela_config_matrix summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);
