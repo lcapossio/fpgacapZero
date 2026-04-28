@@ -9,6 +9,11 @@
 // then reuses the same USER chain for 256-bit packed capture reads after the
 // host writes BURST_PTR.  One BSCAN chain carries both control packets and
 // high-throughput data packets.
+//
+// When SEG_DEPTH is smaller than DEPTH, burst_ptr_in is interpreted as a
+// segment base pointer.  The low segment-offset bits must be zero; simulation
+// fails loudly on a misaligned pointer so bad host/wrapper plumbing cannot
+// silently read the wrong segment window.
 
 module jtag_pipe_iface #(
     parameter SAMPLE_W = 8,
@@ -97,6 +102,25 @@ module jtag_pipe_iface #(
             assign burst_ptr_off = burst_ptr_in[SEG_PTR_W-1:0];
         end
     endgenerate
+
+`ifndef SYNTHESIS
+    generate
+        if (SEG_DEPTH < DEPTH) begin : g_seg_ptr_align_assert
+            always @(posedge tck) begin
+                if (!arst && sel && capture && (burst_start ^ burst_start_seen)) begin
+                    if (burst_ptr_in[SEG_PTR_W-1:0] != {SEG_PTR_W{1'b0}}) begin
+                        $fatal(
+                            1,
+                            "jtag_pipe_iface: burst_ptr_in 0x%0h is not aligned to SEG_DEPTH=%0d",
+                            burst_ptr_in,
+                            SEG_DEPTH
+                        );
+                    end
+                end
+            end
+        end
+    endgenerate
+`endif
 
     assign tdo = sr[0];
     assign reg_clk = tck;

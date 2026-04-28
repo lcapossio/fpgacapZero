@@ -184,9 +184,52 @@ module jtag_pipe_iface_tb;
     reg [BURST_W-1:0] first_scan;
     reg [BURST_W-1:0] second_scan;
 
+    // Segmented builds require BURST_PTR to be aligned to the segment base.
+    // The DUT below exercises the legal case in the normal regression. Run
+    // this same testbench with +MISALIGN_SEG_PTR to verify the RTL assertion
+    // fires on an unaligned start pointer.
+    localparam SEG_DEPTH = 256;
+    reg seg_arst = 1'b1;
+    reg seg_sel = 1'b0;
+    reg seg_capture = 1'b0;
+    reg seg_burst_start = 1'b0;
+    reg [$clog2(DEPTH)-1:0] seg_burst_ptr = 10'd256;
+    wire [$clog2(DEPTH)-1:0] seg_mem_addr;
+
+    jtag_pipe_iface #(
+        .SAMPLE_W(SAMPLE_W),
+        .TIMESTAMP_W(0),
+        .DEPTH(DEPTH),
+        .BURST_W(BURST_W),
+        .SEG_DEPTH(SEG_DEPTH)
+    ) dut_segmented (
+        .arst(seg_arst),
+        .tck(tck),
+        .tdi(1'b0),
+        .tdo(),
+        .capture(seg_capture),
+        .shift_en(1'b0),
+        .update(1'b0),
+        .sel(seg_sel),
+        .reg_clk(),
+        .reg_rst(),
+        .reg_wr_en(),
+        .reg_rd_en(),
+        .reg_addr(),
+        .reg_wdata(),
+        .reg_rdata(32'h0),
+        .mem_addr(seg_mem_addr),
+        .sample_data({SAMPLE_W{1'b0}}),
+        .timestamp_data(1'b0),
+        .burst_start(seg_burst_start),
+        .burst_timestamp(1'b0),
+        .burst_ptr_in(seg_burst_ptr)
+    );
+
     initial begin
         repeat (4) tick();
         arst = 1'b0;
+        seg_arst = 1'b0;
         repeat (4) tick();
 
         $display("\n=== 49-bit register protocol on pipe ===");
@@ -207,6 +250,21 @@ module jtag_pipe_iface_tb;
         scan_burst(second_scan);
         expect_samples("first returned burst starts at 42", first_scan, 42);
         expect_samples("next returned burst starts at 74", second_scan, 74);
+
+        $display("\n=== segmented BURST_PTR alignment contract ===");
+        if ($test$plusargs("MISALIGN_SEG_PTR")) begin
+            seg_burst_ptr = 10'd257;
+        end else begin
+            seg_burst_ptr = 10'd256;
+        end
+        seg_sel = 1'b1;
+        seg_capture = 1'b1;
+        seg_burst_start = ~seg_burst_start;
+        tick();
+        seg_capture = 1'b0;
+        seg_sel = 1'b0;
+        idle_cycles(4);
+        check("segmented aligned pointer is accepted", seg_mem_addr[9:8] == 2'b01);
 
         $display("\n=== jtag_pipe_iface summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);
