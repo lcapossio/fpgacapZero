@@ -22,7 +22,7 @@ back to individual chapters as you need them.
 |---|---------|--------------|
 | 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
 | 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD or Vivado hw_server). |
-| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, program the FPGA, capture a waveform, view it in GTKWave. |
+| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the GUI, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
 | 06 | [EIO core](06_eio_core.md) | The Embedded I/O core: read fabric signals, drive fabric signals, clock domains, host API. |
@@ -63,22 +63,19 @@ and should be corrected.
 - File paths in the running text use `code formatting`. When a file
   path appears as a clickable link it always points at the file in
   this repository (relative path).
-- "**HIGH / MEDIUM / LOW**" priority labels reflect the project's
-  internal `no_commit/TODO.md` roadmap and may evolve between
-  releases.
+- "**HIGH / MEDIUM / LOW**" priority labels reflect maintainer triage
+  and may evolve between releases.
 - "**BREAKING**" is used to flag a change that requires user action
   on upgrade. Every BREAKING change has a migration recipe in
   [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ## What's not in this manual
 
-- Anything in [`../no_commit/`](../no_commit/) — that directory is
-  the maintainer's working scratchpad, gitignored, and intentionally
-  not part of the user-facing tree.
 - Hardware bring-up for vendor wrappers other than Xilinx 7-series.
-  ECP5, Intel, Gowin, and the UltraScale wrappers exist in the RTL
-  tree but have not been hardware-validated yet — see chapter 04 for
-  the support matrix.
+  The shared core RTL is covered by simulation, and the vendor wrappers
+  are lint-elaborated, but ECP5, Intel, Gowin, PolarFire, and UltraScale
+  board-level smoke tests are still future work. See chapter 04 for the
+  support matrix and validation levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.

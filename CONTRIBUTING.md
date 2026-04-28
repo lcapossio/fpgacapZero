@@ -473,8 +473,7 @@ Before pushing to a remote or opening a PR, confirm all of the following:
 
 ## Reporting bugs
 
-Known issues and the active bug list live in `no_commit/BUGS.md` (not tracked
-by git). For public bug reports, open a GitHub issue with:
+For public bug reports, open a GitHub issue with:
 
 - A minimal reproduction (board / adapter / command / output)
 - OpenOCD or Vivado version, Python version

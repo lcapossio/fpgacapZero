@@ -30,6 +30,7 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
 
 
 def connect_timing_logs_enabled() -> bool:
@@ -43,6 +44,75 @@ def connect_timing_logs_enabled() -> bool:
         "true",
         "yes",
     )
+
+
+def parse_xsdb_jtag_targets(output: str) -> list[str]:
+    """Parse target names from XSDB ``jtag targets`` / ``targets`` output."""
+    names: list[str] = []
+    fpga_names: list[str] = []
+    seen: set[str] = set()
+    seen_fpga: set[str] = set()
+    for line in output.splitlines():
+        m = _XSDB_TARGET_RE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        if " (idcode " in name:
+            bare = name.split(" (", 1)[0].strip()
+            if " fpga)" in name and bare and bare not in seen_fpga:
+                seen_fpga.add(bare)
+                fpga_names.append(bare)
+            name = bare
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    if fpga_names:
+        return fpga_names
+    return names
+
+
+def list_xilinx_hw_server_targets(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 3121,
+    xsdb_path: str | None = None,
+    timeout_sec: float = 10.0,
+) -> list[str]:
+    """Return JTAG target names reported by ``hw_server`` via XSDB."""
+    xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
+    if not xsdb:
+        raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
+    script = (
+        f"connect -url tcp:{host}:{int(port)}\n"
+        "puts [jtag targets]\n"
+        "exit\n"
+    )
+    env = os.environ.copy()
+    for key in ("TEMP", "TMP"):
+        raw = env.get(key, "")
+        if not raw or not os.path.isdir(raw) or not os.access(raw, os.W_OK):
+            env[key] = os.getcwd()
+    proc = subprocess.run(
+        [xsdb],
+        input=script,
+        text=True,
+        capture_output=True,
+        timeout=float(timeout_sec),
+        check=False,
+        env=env,
+    )
+    output = f"{proc.stdout}\n{proc.stderr}"
+    if proc.returncode != 0:
+        raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
+    targets = parse_xsdb_jtag_targets(output)
+    if not targets and "To connect to this hw_server instance use url" in output:
+        raise RuntimeError(
+            "XSDB launched hw_server but did not return JTAG targets. "
+            "Start hw_server first, then scan again. "
+            f"Raw XSDB output:\n{output.strip()}"
+        )
+    return targets
 
 
 class Transport(ABC):
@@ -378,6 +448,7 @@ class XilinxHwServerTransport(Transport):
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
         use_register_ir: bool = False,
+        single_chain_burst: bool = True,
     ):
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
@@ -417,6 +488,7 @@ class XilinxHwServerTransport(Transport):
                 f"dr_extra_position must be 'tdo' or 'tdi', got {dr_extra_position!r}"
             )
         self.use_register_ir = bool(use_register_ir)
+        self.single_chain_burst = bool(single_chain_burst)
         if self.use_register_ir:
             # In -register mode xsdb handles both IR routing and DR BYPASS
             # padding for multi-TAP chains (e.g. Zynq US+ MPSoC ARM DAP).
@@ -690,19 +762,28 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            return self._read_block_burst(words)
+            try:
+                return self._read_block_burst(words)
+            except (ConnectionError, RuntimeError) as exc:
+                if self.single_chain_burst:
+                    _hw_log.warning(
+                        "single-chain ELA burst readback failed (%s); falling back to "
+                        "slow USER1 DATA reads. If this bitstream was built with "
+                        "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
+                        "XilinxHwServerTransport(single_chain_burst=False).",
+                        exc,
+                    )
+                self._has_burst = False
         # Non-burst path needs flush to reset USER1 pipeline
         return self._read_block_user1(addr, words)
 
     @property
     def _burst_available(self) -> bool:
-        """True if the bitstream has the USER2 burst interface."""
+        """True if the bitstream has a fast burst interface."""
         if not hasattr(self, "_has_burst"):
-            try:
-                self.write_reg(self.ADDR_BURST_PTR, 0)
-                self._has_burst = True
-            except Exception:
-                self._has_burst = False
+            # Do not probe by writing BURST_PTR here: that register is a
+            # side-effecting start toggle for the burst engine.
+            self._has_burst = True
         return self._has_burst
 
     @property
@@ -722,7 +803,7 @@ class XilinxHwServerTransport(Transport):
         timestamp: bool = False,
         element_width: int | None = None,
     ) -> List[int]:
-        """Read *words* samples via the USER2 256-bit burst DR.
+        """Read *words* samples via the 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
         USER1 write to BURST_PTR → idle for staging fill → IR switch
@@ -736,7 +817,7 @@ class XilinxHwServerTransport(Transport):
             sps = self._burst_samples_per_scan
             element_width = self.BURST_DR_BITS // sps
         n_scans = (words + sps - 1) // sps
-        prime_scans = 0 if timestamp else 1
+        prime_scans = 1
 
         dr_bits = self.BURST_DR_BITS
         burst_total = self._user_dr_bits(dr_bits)
@@ -751,13 +832,14 @@ class XilinxHwServerTransport(Transport):
         )
         user_total = self._user_dr_bits(self.DR_BITS)
         ir1_cmd = self._irshift_tcl("_bq", chain=1)
-        ir2_cmd = self._irshift_tcl("_bq", chain=2)
+        burst_chain = 1 if self.single_chain_burst else 2
+        ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         if self.use_register_ir:
             # Register mode: BURST_PTR write needs DRUPDATE + split-
             # sequence IDLE/delay (same pattern as _write_reg_tcl).
             # Burst scans go in a separate sequence afterwards.
-            write_idle = self.WRITE_IDLE_CYCLES_REGISTER
+            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
             parts_w = [
                 "set _bq [jtag sequence]",
                 f"{ir1_cmd}; "
@@ -771,49 +853,85 @@ class XilinxHwServerTransport(Transport):
             parts_r = ["set _bq [jtag sequence]"]
             for _ in range(n_scans + prime_scans):
                 parts_r.append(
-                    f"{ir2_cmd}; "
+                    f"{ir_burst_cmd}; "
                     f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
                 )
             parts_r.append("puts [$_bq run -bits]; $_bq delete")
             tcl = "; ".join(parts_w + parts_r)
         else:
-            parts = [
+            parts_w = [
                 "set _bq [jtag sequence]",
                 # Write BURST_PTR via USER1 (triggers start_ptr load)
                 # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so staging buffer fills (~33 TCK needed, extra margin)
-                "$_bq delay 80",
+                # Idle so the USER1 BURST_PTR update crosses into the burst
+                # reader and the first 256-bit staging word fills before
+                # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
+                # more margin than the raw ~33 TCK memory-fill latency.
+                f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
+                "$_bq run; $_bq delete",
             ]
-            # Prime USER2 once for sample bursts, then perform the scans
-            # returned to the caller.
+            parts_r = ["set _bq [jtag sequence]"]
+            # The first wide scan primes/fills staging and is discarded.
             for _ in range(n_scans + prime_scans):
-                parts.append(
-                    f"{ir2_cmd}; "
+                parts_r.append(
+                    f"{ir_burst_cmd}; "
                     f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
                 )
-            parts.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts)
+            parts_r.append("puts [$_bq run -bits]; $_bq delete")
+            tcl = "; ".join(parts_w + parts_r)
 
-        out = self._send(tcl)
-        return self._parse_burst_bits(
-            out,
-            words,
-            skip_scans=prime_scans,
-            element_width=element_width,
-        )
+        def run_once() -> List[int]:
+            out = self._send(tcl)
+            return self._parse_burst_bits(
+                out,
+                words,
+                skip_scans=prime_scans,
+                element_width=element_width,
+            )
+
+        first = run_once()
+        if not self.single_chain_burst:
+            return first
+
+        # Single-chain burst shares one USER chain between 49-bit register
+        # frames and 256-bit burst frames.  Once STATUS.done is observed, the
+        # capture RAM is read-only until the next ARM/RESET, so repeating the
+        # same BURST_PTR transaction must return identical data.  Real
+        # hw_server/BSCANE2 sessions can return one stale first transaction
+        # immediately after rapid re-arm; require a stable pair and fail loudly
+        # if the stream does not converge instead of silently accepting a
+        # one-off retry result.
+        previous = first
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("single-chain burst readback did not stabilize")
 
     def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
-        """Read timestamp words through USER2 burst mode when available."""
+        """Read timestamp words through the configured burst mode when available."""
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            return self._read_block_burst(
-                words,
-                timestamp=True,
-                element_width=timestamp_width,
-            )
+            try:
+                return self._read_block_burst(
+                    words,
+                    timestamp=True,
+                    element_width=timestamp_width,
+                )
+            except (ConnectionError, RuntimeError) as exc:
+                if self.single_chain_burst:
+                    _hw_log.warning(
+                        "single-chain ELA timestamp burst readback failed (%s); "
+                        "falling back to slow USER1 timestamp reads. If this bitstream "
+                        "was built with SINGLE_CHAIN_BURST=0, pass --two-chain-burst or "
+                        "construct XilinxHwServerTransport(single_chain_burst=False).",
+                        exc,
+                    )
+                self._has_burst = False
         return self._read_block_user1(addr, words)
 
     def _parse_burst_bits(
@@ -960,6 +1078,7 @@ class XilinxHwServerTransport(Transport):
     # delay (~100 TCK) and an explicit state-IDLE transition to reliably
     # commit the UPDATE-DR event.  On 7-series READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
+    BURST_PREFILL_IDLE_CYCLES = 160
 
     def _ir_hex(self, value: int) -> str:
         """Format an IR opcode as the right-width hex string for ``-hex N``."""

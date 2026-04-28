@@ -40,14 +40,23 @@ sample itself, and the post-trigger window.
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
 and timestamp data are captured together before they drive the inferred
-RAM.  That keeps the trigger/store decision off the same-cycle BRAM
-write path, while preserving the externally visible capture window and
-trigger-sample alignment.
+RAM.  When `INPUT_PIPE>=1`, the core also enables an internal
+`COMPARE_PIPE` stage that registers comparator hits.  This keeps wide
+`REL_COMPARE=1` magnitude compares off the capture-control critical
+path; the tradeoff is one extra sample-clock of trigger decision
+latency.
+
+`INPUT_PIPE` delays probe data before trigger/storage logic sees it. If
+timestamps are enabled, the timestamp counter is not delayed by the same
+number of stages; each timestamp marks the cycle when the pipelined sample
+is written, not the original external `probe_in` cycle. In practice the
+reported timestamp is later than the external probe event by `INPUT_PIPE`
+sample-clock cycles.
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
 25 samples total, and `samples[8]` is the one that caused the
-trigger to fire.
+trigger decision to fire.
 
 ## Simple trigger: value match, edge detect, both
 
@@ -83,7 +92,7 @@ the ELA core.  Anything more complex needs the **trigger sequencer**.
 
 When you build the ELA with `TRIG_STAGES=2..4`, the core gets a
 multi-stage state machine where each stage has **two comparators
-(A and B)** with one of 9 compare modes each, and a combine rule
+(A and B)** with a selectable compare mode each, and a combine rule
 between A and B.
 
 The sequencer is the most powerful trigger feature in fcapz.  It
@@ -97,16 +106,28 @@ or
 > "Trigger only after seeing `start` go HIGH AND `stall` go LOW,
 > followed by `error` going HIGH within the next 100 cycles"
 
-### The 9 compare modes
+### Compare modes
+
+The default RTL build keeps the timing-critical comparator lightweight:
+EQ, NEQ, RISING, FALLING, and CHANGED are enabled. Relational modes
+LT, GT, LEQ, and GEQ are available when the ELA is instantiated with
+`REL_COMPARE=1`.
+
+For higher-frequency builds with relational modes enabled, set
+`INPUT_PIPE>=1`.  The ELA derives an internal `COMPARE_PIPE=1` from
+that setting, registering the compare result before it feeds the
+capture FSM.  This is usually the right trade for `REL_COMPARE=1`: one
+sample-clock of decision latency in exchange for a much shorter
+control path.
 
 | Code | Mode | Operation |
 |---|---|---|
 | 0 | EQ | `(probe & mask) == (value & mask)` |
 | 1 | NEQ | `(probe & mask) != (value & mask)` |
-| 2 | LT | `(probe & mask) <  (value & mask)` (unsigned) |
-| 3 | GT | `(probe & mask) >  (value & mask)` (unsigned) |
-| 4 | LEQ | `(probe & mask) <= (value & mask)` |
-| 5 | GEQ | `(probe & mask) >= (value & mask)` |
+| 2 | LT | `(probe & mask) <  (value & mask)` (unsigned, requires `REL_COMPARE=1`) |
+| 3 | GT | `(probe & mask) >  (value & mask)` (unsigned, requires `REL_COMPARE=1`) |
+| 4 | LEQ | `(probe & mask) <= (value & mask)` (requires `REL_COMPARE=1`) |
+| 5 | GEQ | `(probe & mask) >= (value & mask)` (requires `REL_COMPARE=1`) |
 | 6 | RISING | masked bits transition from all-zero to non-zero |
 | 7 | FALLING | masked bits transition from non-zero to all-zero |
 | 8 | CHANGED | any masked bit changed from the previous sample |
@@ -145,7 +166,7 @@ stage0 = SequencerStage(
 )
 
 stage1 = SequencerStage(
-    cmp_mode_a   = 3,           # GT
+    cmp_mode_a   = 3,           # GT, requires REL_COMPARE=1 in RTL
     cmp_mode_b   = 0,
     combine      = 0,           # A only
     next_state   = 0,
@@ -259,6 +280,11 @@ The captured timestamps (if `TIMESTAMP_W > 0`) reflect the real cycle
 counter, so a downstream tool can reconstruct the gaps between
 samples accurately.
 
+With `INPUT_PIPE>=1`, timestamps are aligned to the stored, pipelined sample
+stream. Relative spacing between stored samples is still accurate, but the
+absolute timestamp for an external `probe_in` event is offset by the input
+pipeline depth.
+
 ## External trigger I/O (`EXT_TRIG_EN=1`)
 
 The ELA exposes `trigger_in` and `trigger_out` ports when built with
@@ -334,11 +360,12 @@ two 32-bit words, with the upper word zero-extended in bits `[31:16]`.
 The same zero-extension rule applies to wide sample readback when the
 last 32-bit chunk is only partially used.
 
-**Timestamp readback uses the USER2 burst path**, not the slow per-word
-USER1 register reads.  Writing `BURST_PTR` (0x002C) with `bit[31]=1`
-switches the `jtag_burst_read` staging mux from the sample BRAM to the
-timestamp BRAM; subsequent 256-bit USER2 DR scans return
-`256 / TIMESTAMP_W` packed timestamps per scan.  The host calls
+**Timestamp readback uses the 256-bit burst path**, not the slow per-word
+USER1 register reads.  Default single-chain builds keep those burst scans
+on USER1; legacy two-chain builds use DATA_CHAIN. Writing `BURST_PTR`
+(0x002C) with `bit[31]=1` switches the burst staging mux from the sample
+BRAM to the timestamp BRAM; subsequent 256-bit DR scans return
+`256 / TIMESTAMP_W` packed timestamps per scan. The host calls
 `transport.read_timestamp_block()` which handles the BRAM-select bit
 and the no-priming-scan protocol automatically.  If the transport does
 not implement that method the host falls back to the USER1 path, which
@@ -578,33 +605,38 @@ info = analyzer.probe()
 #   "timestamp_width": 32,
 #   "num_segments": 4,
 #   "probe_mux_w": 0,
+#   "compare_caps": 0x301C3,
+#   "compare_modes": [0, 1, 6, 7, 8],
+#   "has_dual_compare": True,
 # }
 ```
 
-The bitfield layout in `FEATURES` is documented in
+The bitfield layout in `FEATURES` and the `COMPARE_CAPS` capability mask at
+`0x00E0` are documented in
 [`specs/register_map.md`](specs/register_map.md), but you should
 prefer reading them via `Analyzer.probe()` which returns the
 decoded form.
 
 ## Resource usage
 
-Vivado **synthesis**, **xc7a100t**, 2025.2 — **Slice LUTs** (same
-measurement as `scripts/resource_comparison.tcl`). BRAM is Block RAM
-tiles (18K granularity counts as 0.5 where applicable).
+Vivado **synthesis**, **xc7a100t**, 2025.2 -- **Slice LUTs**. BRAM is
+Block RAM tiles (18K granularity counts as 0.5 where applicable).
+Rows that mention readout include the wrapper/TAP/register plumbing.
 
 | Configuration | Slice LUTs | FFs | BRAM | Notes |
 |---|---:|---:|---:|---|
-| `SAMPLE_W=8`, `DEPTH=1024`, baseline | 1,595 | 1,478 | 0.5 | `TRIG_STAGES=1`, `STOR_QUAL=0` |
-| Above + `STOR_QUAL=1` | 1,616 | 1,497 | 0.5 | +21 LUT |
-| Above + `TRIG_STAGES=4` (no SQ) | 2,098 | 1,878 | 0.5 | 4-stage sequencer |
-| Above + `TRIG_STAGES=4` + `STOR_QUAL=1` | 2,095 | 1,897 | 0.5 | seq + storage qualification |
-| `SAMPLE_W=8`, `DEPTH=4096`, baseline | 1,541 | 1,490 | 1.0 | deeper buffer |
-| `SAMPLE_W=32`, `DEPTH=1024`, baseline | 1,548 | 1,740 | 1.0 | wider samples |
+| `SAMPLE_W=8`, `DEPTH=1024`, A-only, slow USER1 readout | 596 | 779 | 0.5 | `DUAL_COMPARE=0`, optional features off |
+| `SAMPLE_W=8`, `DEPTH=1024`, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | `SINGLE_CHAIN_BURST=1` |
+| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | EQ/NEQ/edges/changed |
+| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | relational modes, registered compare hit |
+| Above + `STOR_QUAL=1` | 2,521 | 1,749 | 0.5 | storage qualification |
+| Above + `TRIG_STAGES=4` | 2,954 | 2,788 | 0.5 | 4-stage sequencer |
+| `SAMPLE_W=32`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | wider samples |
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
-with EIO and EJTAG-AXI — **post-place** that top-level uses about **2.7k
-slice LUTs** and **1.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
+with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
+slice LUTs** and **3.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
 Your tool and family will vary.
 
 ## What's next

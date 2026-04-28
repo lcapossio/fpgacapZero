@@ -221,14 +221,14 @@ calls it for you.
 ### `capture(timeout=10.0) -> CaptureResult`
 
 The full pipeline: `wait_done()`, read back the captured samples
-(via the USER2 burst DR), read back timestamps if enabled, return a
+(via the configured burst path when available), read back timestamps if enabled, return a
 `CaptureResult`.  Raises `TimeoutError` if the trigger never fires
 within `timeout` seconds.
 
 When `TIMESTAMP_W > 0`, timestamps are read via
 `transport.read_timestamp_block()` if the transport implements that
-method (writes `BURST_PTR[31]=1` to switch the USER2 burst engine to
-the timestamp BRAM).  If the method is absent, `Analyzer` falls back
+method (writes `BURST_PTR[31]=1` to switch burst readout to the timestamp
+BRAM).  If the method is absent, `Analyzer` falls back
 to `read_block()` over USER1, which is correct but slower.
 `XilinxHwServerTransport` always implements the fast path.
 
@@ -345,6 +345,21 @@ probes = [
 
 These names show up in the VCD export and the LLM-friendly summary.
 Overlapping bit ranges raise `ValueError` in `Analyzer.configure()`.
+
+For reusable probe maps, store the same fields in a `.prob` sidecar:
+
+```python
+from fcapz import load_probe_file, write_probe_file
+
+write_probe_file(
+    "design.prob",
+    [ProbeSpec("valid", 1, 0), ProbeSpec("state", 7, 1)],
+    sample_width=8,
+)
+
+probe_file = load_probe_file("design.prob")
+cfg = CaptureConfig(..., sample_width=probe_file.sample_width, probes=probe_file.probes)
+```
 
 ### `SequencerStage`
 

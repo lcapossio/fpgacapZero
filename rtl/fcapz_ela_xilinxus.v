@@ -36,12 +36,17 @@ module fcapz_ela_xilinxus #(
     parameter STARTUP_ARM = 0,
     parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
+    parameter BURST_EN    = 1,
+    parameter SINGLE_CHAIN_BURST = 1,
     parameter CTRL_CHAIN  = 1,
     parameter DATA_CHAIN  = 2,
     // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)
     parameter EIO_EN      = 0,
     parameter EIO_IN_W    = 1,
-    parameter EIO_OUT_W   = 1
+    parameter EIO_OUT_W   = 1,
+    parameter REL_COMPARE = 0,
+    parameter DUAL_COMPARE = 1,
+    parameter USER1_DATA_EN = 1
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -62,7 +67,11 @@ module fcapz_ela_xilinxus #(
         .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
         .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
-        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .BURST_W(BURST_W),
+        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
+        .DUAL_COMPARE(DUAL_COMPARE),
+        .USER1_DATA_EN(USER1_DATA_EN),
+        .BURST_W(BURST_W), .BURST_EN(BURST_EN),
+        .SINGLE_CHAIN_BURST(SINGLE_CHAIN_BURST),
         .CTRL_CHAIN(CTRL_CHAIN), .DATA_CHAIN(DATA_CHAIN),
         .EIO_EN(EIO_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W)
     ) u_inner (

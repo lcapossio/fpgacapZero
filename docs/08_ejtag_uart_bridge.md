@@ -5,7 +5,7 @@
 > to send and receive bytes from the host, and what the known
 > internal-loopback caveat (BUG-002) means in practice.
 
-## What it is and what it replaces
+## What it is
 
 The EJTAG-UART bridge gives the host PC a **bidirectional UART**
 to your design over JTAG, with TX and RX async FIFOs, **without
@@ -13,14 +13,6 @@ burning a physical UART pin** on your FPGA package and **without
 wiring up a USB-serial adapter**.  The bridge lives on JTAG USER4
 (CHAIN=4), the same chain as the EJTAG-AXI bridge — they're
 mutually exclusive in any one bitstream.
-
-What it replaces:
-
-| Tool | Comparison |
-|---|---|
-| Xilinx STDIO over JTAG (XSDB `mrd`/`mwr` games) | Same outcome; dedicated bidirectional FIFO instead of polled mailbox |
-| Vivado AXI UART Lite + JTAG-to-AXI | Two cores instead of one; you'd need both the AXI bridge AND a soft UART; more LUTs and more host complexity |
-| Real USB-serial adapter on a physical pin | Better latency and throughput, but uses a pin you may not have, and requires the user to know which COM port to open |
 
 Use cases that just work:
 
@@ -380,10 +372,9 @@ synchroniser handles correctly.
 
 ### Status
 
-Tracked in [`../no_commit/BUGS.md`](../no_commit/BUGS.md) as
-**BUG-002** (Open, Low priority).  The fix is RTL: harden the RX
-synchroniser path or change the loopback testbench to insert a
-small wire delay.  Not blocking any release.
+This is a known low-priority issue. The fix is RTL: harden the RX
+synchroniser path or change the loopback testbench to insert a small
+wire delay. Not blocking any release.
 
 ## Resource usage
 

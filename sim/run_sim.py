@@ -23,6 +23,12 @@ SIM  = ROOT / "sim"
 
 # Each entry: (tb_file, [rtl_sources])
 TESTBENCHES = {
+    "trig_compare": (
+        TB / "trig_compare_tb.sv",
+        [
+            RTL / "trig_compare.v",
+        ],
+    ),
     "fcapz_ela": (
         TB / "fcapz_ela_tb.sv",
         [
@@ -39,6 +45,44 @@ TESTBENCHES = {
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
             RTL / "trig_compare.v",
+        ],
+    ),
+    "fcapz_ela_config_matrix": (
+        TB / "fcapz_ela_config_matrix_tb.sv",
+        [
+            RTL / "reset_sync.v",
+            RTL / "fcapz_ela.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+        ],
+    ),
+    "jtag_burst_read": (
+        TB / "jtag_burst_read_tb.sv",
+        [
+            RTL / "jtag_burst_read.v",
+        ],
+    ),
+    "jtag_pipe_iface": (
+        TB / "jtag_pipe_iface_tb.sv",
+        [
+            RTL / "jtag_pipe_iface.v",
+        ],
+    ),
+    "fcapz_ela_xilinx7_single_chain": (
+        TB / "fcapz_ela_xilinx7_single_chain_tb.sv",
+        [
+            SIM / "bscane2_stub.v",
+            RTL / "reset_sync.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+            RTL / "fcapz_ela.v",
+            RTL / "jtag_pipe_iface.v",
+            RTL / "jtag_reg_iface.v",
+            RTL / "jtag_burst_read.v",
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "fcapz_eio.v",
+            RTL / "fcapz_regbus_mux.v",
+            RTL / "fcapz_ela_xilinx7.v",
         ],
     ),
     "fcapz_eio": (
@@ -59,8 +103,13 @@ TESTBENCHES = {
 }
 
 DEFAULT_TESTBENCHES = [
+    "trig_compare",
     "fcapz_ela",
     "fcapz_ela_bug_probe",
+    "fcapz_ela_config_matrix",
+    "jtag_burst_read",
+    "jtag_pipe_iface",
+    "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "chan_mux",
 ]
@@ -71,6 +120,7 @@ LINT_TARGETS = [
     RTL / "trig_compare.v",
     RTL / "jtag_reg_iface.v",
     RTL / "jtag_burst_read.v",
+    RTL / "jtag_pipe_iface.v",
     RTL / "fcapz_async_fifo.v",
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",

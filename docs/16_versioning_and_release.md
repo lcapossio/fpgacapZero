@@ -321,7 +321,7 @@ python tools/sync_version.py
 ```bash
 python -m ruff check .
 python -m pytest tests/                     # 218 unit tests
-python sim/run_sim.py                       # RTL lint + simulation regression
+python sim/run_sim.py                       # RTL lint + simulation matrix
 python tools/sync_version.py --check        # should print OK
 ```
 

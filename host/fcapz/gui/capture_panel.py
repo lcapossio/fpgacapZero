@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from ..analyzer import CaptureConfig, SequencerStage, TriggerConfig
 from ..cli import _parse_probes
+from ..probes import load_probe_file, probes_to_arg
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
@@ -42,6 +45,17 @@ _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Oct", 8),
     ("Bin", 2),
 )
+_COMPARE_CAPS_LEGACY_FULL = 0x1FF
+_COMPARE_CAP_DUAL = 1 << 16
+_COMPARE_CAP_SCHEMA = 1 << 17
+
+
+def _compare_mode_available(caps: int, mode: int) -> bool:
+    return 0 <= mode <= 8 and bool(caps & (1 << mode))
+
+
+def _dual_compare_available(caps: int) -> bool:
+    return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
 
 
 def _parse_trigger_value_text(text: str, base: int) -> int:
@@ -118,9 +132,11 @@ class CapturePanel(QGroupBox):
         self._hw_trig_stages: int = 0
         self._hw_has_decimation: bool = True
         self._hw_has_ext_trigger: bool = True
+        self._hw_has_dual_compare: bool = True
         self._hw_has_storage_qual: bool = True
         self._hw_probe_mux_w: int = 0
         self._hw_num_segments: int = 1
+        self._hw_compare_caps: int = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy: bool = False
         self._did_apply_first_connect_prepost_defaults: bool = False
 
@@ -239,6 +255,11 @@ class CapturePanel(QGroupBox):
 
         self._probes = QLineEdit()
         self._probes.setPlaceholderText("name:width:lsb,... (optional)")
+        self._btn_load_probes = QPushButton("Load .prob")
+        self._btn_load_probes.clicked.connect(self._on_load_probe_file)
+        row_probes = QHBoxLayout()
+        row_probes.addWidget(self._probes, 1)
+        row_probes.addWidget(self._btn_load_probes)
 
         self._timeout = QLineEdit("10.0")
 
@@ -325,7 +346,7 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Storage qual mask", self._stor_mask)
         form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
-        form_adv.addRow("Probes", self._probes)
+        form_adv.addRow("Probes", row_probes)
         self._adv_section = CollapsibleSection(
             "Advanced (decimation, mux, ext trig, storage qual, probes, …)",
             adv_body,
@@ -354,6 +375,24 @@ class CapturePanel(QGroupBox):
         self._apply_hw_feature_availability()
         self._refresh_pre_post_validity()
 
+    def _on_load_probe_file(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load probe sidecar",
+            "",
+            "Probe sidecar (*.prob);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            probe_file = load_probe_file(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Load .prob", str(exc))
+            return
+        self._probes.setText(probes_to_arg(probe_file.probes))
+        if probe_file.sample_clock_hz is not None:
+            self._clock_hz.setValue(int(probe_file.sample_clock_hz))
+
     def clear_hw(self) -> None:
         self._hw_sample_w = None
         self._hw_depth = None
@@ -364,6 +403,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = True
         self._hw_probe_mux_w = 0
         self._hw_num_segments = 1
+        self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy = False
         self._btn_stop.setEnabled(False)
         self._hw_label.setText(
@@ -858,6 +898,7 @@ class CapturePanel(QGroupBox):
             self._hw_has_storage_qual = True
             self._hw_probe_mux_w = 0
             self._hw_num_segments = 1
+            self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
             self._btn_stop.setEnabled(False)
             self._hw_label.setText(
                 "JTAG connected — no fcapz ELA on USER1. Capture controls stay disabled; "
@@ -882,6 +923,12 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = bool(info.get("has_storage_qualification", True))
         self._hw_probe_mux_w = int(info.get("probe_mux_w", 0))
         self._hw_num_segments = max(1, int(info.get("num_segments", 1)))
+        self._hw_compare_caps = int(info.get("compare_caps", _COMPARE_CAPS_LEGACY_FULL)) or (
+            _COMPARE_CAPS_LEGACY_FULL
+        )
+        self._hw_has_dual_compare = bool(
+            info.get("has_dual_compare", _dual_compare_available(self._hw_compare_caps))
+        )
         self._channel.setMaximum(self._hw_num_chan - 1)
         self._hw_label.setText(
             f"Hardware: sample width = {sw} bits, depth = {depth}, channels = {self._hw_num_chan}."
@@ -966,7 +1013,23 @@ class CapturePanel(QGroupBox):
                 )
             sequence = []
             for r in range(n):
-                sequence.append(self._parse_sequencer_row(r))
+                stage = self._parse_sequencer_row(r)
+                if not _compare_mode_available(self._hw_compare_caps, stage.cmp_mode_a):
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator A mode {stage.cmp_mode_a} is not "
+                        "available in this bitstream; rebuild with REL_COMPARE=1 for modes 2-5."
+                    )
+                if not _compare_mode_available(self._hw_compare_caps, stage.cmp_mode_b):
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator B mode {stage.cmp_mode_b} is not "
+                        "available in this bitstream; rebuild with REL_COMPARE=1 for modes 2-5."
+                    )
+                if stage.combine != 0 and not self._hw_has_dual_compare:
+                    raise ValueError(
+                        f"Stage {r + 1}: comparator B is not available in this "
+                        "ELA build; rebuild with DUAL_COMPARE=1 or use A-only combine."
+                    )
+                sequence.append(stage)
         return CaptureConfig(
             pretrigger=int(self._pre.value()),
             posttrigger=int(self._post.value()),

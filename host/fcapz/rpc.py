@@ -13,6 +13,7 @@ from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
+from .probes import load_probe_file
 from .transport import OpenOcdTransport, Transport, XilinxHwServerTransport
 
 _SCHEMA_VERSION = "1.1"
@@ -51,6 +52,7 @@ class RpcServer:
                 port=int(req.get("port", 3121)),
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
+                single_chain_burst=bool(req.get("single_chain_burst", True)),
             )
         raise ValueError(f"unknown backend: {backend}")
 
@@ -123,6 +125,25 @@ class RpcServer:
 
     @classmethod
     def _build_config(cls, req: Dict[str, Any]) -> CaptureConfig:
+        probe_file = load_probe_file(req["probe_file"]) if req.get("probe_file") else None
+        if probe_file is not None and req.get("probes") is not None:
+            raise ValueError("probes and probe_file are mutually exclusive")
+        probes = (
+            probe_file.probes
+            if probe_file is not None
+            else cls._parse_probes(req.get("probes"))
+        )
+        file_sample_width = (
+            probe_file.sample_width
+            if probe_file is not None and probe_file.sample_width is not None
+            else 8
+        )
+        file_sample_clock_hz = (
+            probe_file.sample_clock_hz
+            if probe_file is not None and probe_file.sample_clock_hz is not None
+            else 100_000_000
+        )
+
         return CaptureConfig(
             pretrigger=int(req.get("pretrigger", 8)),
             posttrigger=int(req.get("posttrigger", 16)),
@@ -131,10 +152,10 @@ class RpcServer:
                 value=int(req.get("trigger_value", 0)),
                 mask=int(req.get("trigger_mask", 0xFF)),
             ),
-            sample_width=int(req.get("sample_width", 8)),
+            sample_width=int(req.get("sample_width", file_sample_width)),
             depth=int(req.get("depth", 1024)),
-            sample_clock_hz=int(req.get("sample_clock_hz", 100_000_000)),
-            probes=cls._parse_probes(req.get("probes")),
+            sample_clock_hz=int(req.get("sample_clock_hz", file_sample_clock_hz)),
+            probes=probes,
             channel=int(req.get("channel", 0)),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),

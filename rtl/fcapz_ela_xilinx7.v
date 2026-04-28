@@ -6,7 +6,7 @@
 // fpgacapZero ELA wrapper for Xilinx 7-series / UltraScale.
 //
 // Single-instantiation wrapper: bundles the ELA core, register interface,
-// burst read engine, and two BSCANE2 TAP primitives (USER1 + USER2).
+// burst read engine, and BSCANE2 TAP primitives.
 //
 // Optional EIO: set EIO_EN=1 to include an Embedded I/O core on the
 // same CTRL_CHAIN register bus via address mux.  EIO registers appear
@@ -48,12 +48,17 @@ module fcapz_ela_xilinx7 #(
     parameter STARTUP_ARM = 0,
     parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
+    parameter BURST_EN    = 1,   // 0=omit separate USER2 burst path
+    parameter SINGLE_CHAIN_BURST = 1, // 1=fast burst readout on CTRL_CHAIN
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
     // Optional EIO (shares CTRL_CHAIN via address mux; host talks to EIO at 0x8000+)
     parameter EIO_EN      = 0,
     parameter EIO_IN_W    = 1,
-    parameter EIO_OUT_W   = 1
+    parameter EIO_OUT_W   = 1,
+    parameter REL_COMPARE = 0,
+    parameter DUAL_COMPARE = 1,
+    parameter USER1_DATA_EN = 1
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -102,35 +107,46 @@ module fcapz_ela_xilinx7 #(
         .update(tap1_update), .sel(tap1_sel)
     );
 
-    jtag_tap_xilinx7 #(.CHAIN(DATA_CHAIN)) u_tap_data (
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
-        .capture(tap2_capture), .shift(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel)
-    );
-
     reset_sync u_rst_sync_ctrl (
         .clk(tap1_tck),
         .arst(sample_rst),
         .srst(jtag_rst_ctrl)
     );
 
-    reset_sync u_rst_sync_data (
-        .clk(tap2_tck),
-        .arst(sample_rst),
-        .srst(jtag_rst_data)
-    );
-
-    // ---- Register interface ----
-    jtag_reg_iface u_reg (
-        .arst(jtag_rst_ctrl),
-        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
-        .capture(tap1_capture), .shift_en(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel),
-        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
-        .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
-        .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
-        .reg_rdata(jtag_rdata)
-    );
+    // ---- Register / single-chain pipe interface ----
+    generate
+        if (SINGLE_CHAIN_BURST != 0) begin : g_pipe_iface
+            jtag_pipe_iface #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH),
+                .BURST_PTR_ADDR(16'h002C)
+            ) u_pipe (
+                .arst(jtag_rst_ctrl),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .capture(tap1_capture), .shift_en(tap1_shift),
+                .update(tap1_update), .sel(tap1_sel),
+                .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+                .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
+                .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
+                .reg_rdata(jtag_rdata),
+                .mem_addr(burst_rd_addr),
+                .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_ptr_in(burst_start_ptr)
+            );
+        end else begin : g_reg_iface
+            jtag_reg_iface u_reg (
+                .arst(jtag_rst_ctrl),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .capture(tap1_capture), .shift_en(tap1_shift),
+                .update(tap1_update), .sel(tap1_sel),
+                .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+                .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
+                .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
+                .reg_rdata(jtag_rdata)
+            );
+        end
+    endgenerate
 
     // ---- ELA + optional EIO via address mux ----
     generate
@@ -158,7 +174,9 @@ module fcapz_ela_xilinx7 #(
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
                 .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
-                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT)
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
+                .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
+                .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -188,7 +206,9 @@ module fcapz_ela_xilinx7 #(
                 .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
                 .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
                 .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
-                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT)
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
+                .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
+                .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -207,19 +227,39 @@ module fcapz_ela_xilinx7 #(
         end
     endgenerate
 
-    // ---- Burst read engine ----
-    jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
-    ) u_burst (
-        .arst(jtag_rst_data),
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
-        .capture(tap2_capture), .shift_en(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel),
-        .mem_addr(burst_rd_addr),
-        .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
-        .burst_start(burst_start), .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_start_ptr)
-    );
+    // ---- Optional USER2 burst read engine ----
+    generate
+        if (BURST_EN != 0 && SINGLE_CHAIN_BURST == 0) begin : g_burst
+            jtag_tap_xilinx7 #(.CHAIN(DATA_CHAIN)) u_tap_data (
+                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+                .capture(tap2_capture), .shift(tap2_shift),
+                .update(tap2_update), .sel(tap2_sel)
+            );
+
+            reset_sync u_rst_sync_data (
+                .clk(tap2_tck),
+                .arst(sample_rst),
+                .srst(jtag_rst_data)
+            );
+
+            jtag_burst_read #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
+            ) u_burst (
+                .arst(jtag_rst_data),
+                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+                .capture(tap2_capture), .shift_en(tap2_shift),
+                .update(tap2_update), .sel(tap2_sel),
+                .mem_addr(burst_rd_addr),
+                .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_ptr_in(burst_start_ptr)
+            );
+        end else if (SINGLE_CHAIN_BURST == 0) begin : g_no_burst
+            assign burst_rd_addr = {PTR_W{1'b0}};
+        end else begin : g_single_chain_burst
+            // The single-chain pipe owns the burst memory read address.
+        end
+    endgenerate
 
 endmodule

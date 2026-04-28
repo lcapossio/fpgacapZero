@@ -38,6 +38,21 @@ features they expose.
 If your vendor isn't on the list, see [chapter 14](14_transports.md)
 "Adding a new transport / vendor wrapper" for the porting guide.
 
+### Validation Levels
+
+The ELA core is shared across vendors, so the behavioral simulation suite
+exercises the same feature gates used by every wrapper. `python sim/run_sim.py`
+includes the ELA configuration matrix for small/scalable builds:
+`DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature registers, and
+`REL_COMPARE=1` with `INPUT_PIPE=1`.
+
+Wrapper coverage is currently lighter than core coverage. The lint target
+elaborates the vendor wrappers and catches parameter/port drift, while the
+Arty A7 hardware test validates the Xilinx 7-series reference bitstream.
+ECP5, Intel, Gowin, PolarFire, and UltraScale wrappers should be treated as
+RTL-implemented and lint-clean until a board-level smoke test is added for
+that family.
+
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
 > primitive is byte-identical between 7-series, UltraScale, and
 > UltraScale+.  The `_xilinxus` files are 33-88 LOC each and
@@ -109,26 +124,75 @@ fcapz_ela_xilinx7 #(
 That's it.  No TAP primitive instantiation, no JTAG plumbing, no
 register file declarations.  The wrapper takes care of:
 
-- Instantiating two `BSCANE2` primitives (USER1 for control, USER2
-  for burst data readback)
-- Instantiating `jtag_reg_iface` (the 49-bit DR register protocol)
-- Instantiating `jtag_burst_read` (the 256-bit DR burst engine)
+- Instantiating one or two `BSCANE2` primitives. The default uses USER1
+  for both control and fast burst readback; `SINGLE_CHAIN_BURST=0`
+  enables the legacy separate DATA_CHAIN burst path.
+- Instantiating `jtag_reg_iface` (the 49-bit DR register protocol) or
+  `jtag_pipe_iface` (mixed 49-bit register / 256-bit burst packets)
+- Instantiating `jtag_burst_read` for legacy two-chain burst builds
 - Instantiating `fcapz_ela` (the actual capture core)
 - Wiring everything together
 
-Resource usage: ~1,595 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
-synthesis) for the baseline config (8b × 1024, dual comparators).  See
+Resource usage: ~912 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
+synthesis) for an 8b x 1024 single-comparator, single-chain fast-readout
+configuration.  Simple USER1 register-readout builds are ~596 LUTs.  See
 [`specs/architecture.md`](specs/architecture.md) and the
 [README resource table](../README.md#resource-usage) for sequencer,
 storage qualification, width/depth scaling, and the full `arty_a7_top`
 reference.
+
+## LiteX integration
+
+LiteX designs can instantiate the same JTAG-accessible ELA wrapper through
+the optional Python helper in `fcapz.litex`.  Install LiteX in your SoC
+environment, then add the module to your design:
+
+```python
+from migen import ClockSignal, ResetSignal
+from fcapz.litex import FcapzELA
+
+soc.submodules.ela = FcapzELA(
+    platform,
+    vendor="xilinx7",
+    sample_clk=ClockSignal("sys"),
+    sample_rst=ResetSignal("sys"),
+    probes={
+        "bus_we": bus.we,
+        "bus_adr": bus.adr,
+        "bus_dat_w": bus.dat_w,
+        "fsm_state": fsm_state,
+    },
+    depth=1024,
+)
+
+soc.ela.write_probe_file("build/ela.prob", sample_clock_hz=int(sys_clk_freq))
+```
+
+`probes` are packed with normal Migen `Cat` ordering: the first named signal
+occupies the low bits of `probe_in`, and `FcapzELA.probe_fields` records each
+field's name, width, and bit offset for capture metadata.  The helper also
+adds the required RTL files to the LiteX platform, including the generated
+`fcapz_version.vh` header and the selected vendor TAP wrapper.
+
+The generated `.prob` sidecar can be passed directly to the host:
+
+```bash
+fcapz capture --probe-file build/ela.prob --format vcd --out capture.vcd
+```
+
+This first integration path keeps capture control on the existing JTAG
+transport.  It does not consume LiteX CSRs or Wishbone address space.  Use
+the normal `fcapz` CLI, GUI, or Python API against the programmed bitstream.
+The high-level `FcapzELA` wrapper currently targets the Xilinx 7-series and
+UltraScale-style ELA wrappers; lower-level source manifests for the other RTL
+wrappers are available through `ela_rtl_sources()` for custom integration.
 
 ## Adding more cores in the same design
 
 The reference Arty A7 design uses three cores in one bitstream:
 
 ```verilog
-// 1. ELA on USER1 (control) + USER2 (burst data)
+// 1. ELA on USER1 (control + burst data by default)
 fcapz_ela_xilinx7 #(
     .SAMPLE_W (8),
     .DEPTH    (1024)
@@ -180,8 +244,8 @@ default chain assignments are:
 
 | Core | Default chain | Default IR (7-series) |
 |---|---|---|
-| ELA control | USER1 | `0x02` |
-| ELA burst data | USER2 | `0x03` |
+| ELA control + default burst data | USER1 | `0x02` |
+| ELA legacy burst data (`SINGLE_CHAIN_BURST=0`) | USER2 | `0x03` |
 | EIO | USER3 | `0x22` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` |
 
@@ -194,7 +258,8 @@ fcapz_ela_xilinx7 #(
     .SAMPLE_W   (8),
     .DEPTH      (1024),
     .CTRL_CHAIN (3),     // move ELA control to USER3
-    .DATA_CHAIN (4)      // move ELA burst data to USER4
+    .SINGLE_CHAIN_BURST(0), // use a separate burst-data chain
+    .DATA_CHAIN (4)         // move ELA legacy burst data to USER4
 ) u_ela (
     ...
 );
@@ -220,9 +285,14 @@ module fcapz_ela_xilinx7 #(
     parameter PROBE_MUX_W  = 0,      // total bus width for runtime probe mux (0=off)
     parameter STARTUP_ARM  = 0,      // 1=come up armed after reset/configuration
     parameter DEFAULT_TRIG_EXT = 0,  // reset/default external trigger mode
-    parameter BURST_W      = 256,    // USER2 burst DR width (don't change)
+    parameter BURST_W      = 256,    // burst DR width (don't change)
+    parameter BURST_EN     = 1,      // 0=omit legacy DATA_CHAIN burst path
+    parameter SINGLE_CHAIN_BURST = 1, // 1=fast burst readout on CTRL_CHAIN
     parameter CTRL_CHAIN   = 1,      // BSCANE2 USER chain for control
-    parameter DATA_CHAIN   = 2       // BSCANE2 USER chain for burst data
+    parameter DATA_CHAIN   = 2,      // BSCANE2 USER chain for burst data
+    parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
+    parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
+    parameter USER1_DATA_EN = 1      // 0=disable slow USER1 DATA window readback
 ) ( ... );
 ```
 
@@ -230,26 +300,45 @@ module fcapz_ela_xilinx7 #(
 |---|---|---|---|
 | `SAMPLE_W` | int | 1..256 | Width of each probe sample.  Costs FFs proportionally; default 8 is small. |
 | `DEPTH` | int | 16..16M, **power of 2** | Buffer depth.  Stored in dual-port BRAM; ~512 LUTs at depth=1024.  Larger means more BRAM. |
-| `TRIG_STAGES` | int | 1..4 | Number of trigger sequencer stages.  `1` = single-stage simple trigger; `2..4` = multi-stage state machine.  Each extra stage adds two comparators and ~50 LUTs. |
+| `TRIG_STAGES` | int | 1..4 | Number of trigger sequencer stages.  `1` = single-stage simple trigger; `2..4` = multi-stage state machine.  Each extra stage adds sequencer state and comparator configuration. |
 | `STOR_QUAL` | bit | 0/1 | Storage qualification: filter which samples get stored based on a comparator.  +21 LUTs.  Up to ~10× effective depth on sparse signals. |
-| `INPUT_PIPE` | int | 0..N | Pipeline registers between `probe_in` and the comparators.  Use this if your fabric has tight timing on the probe path; each stage adds 1 cycle of latency.  With `INPUT_PIPE>=1`, the ELA also registers the BRAM write command so write enable, address, data, and optional timestamp reach the inferred RAM together. |
+| `INPUT_PIPE` | int | 0..N | Pipeline registers between `probe_in` and the comparators.  Use this if your fabric has tight timing on the probe path; each stage adds 1 cycle of latency.  With `INPUT_PIPE>=1`, the ELA also registers the BRAM write command and internally enables a one-cycle `COMPARE_PIPE`, so wide relational compares do not sit on the capture-control critical path. |
 | `NUM_CHANNELS` | int | 1..256 | Channel mux: lets one ELA observe `N` separate buses, one selected at arm time.  Probe input width becomes `SAMPLE_W * NUM_CHANNELS` bits. |
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
-| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into both `fcapz_ela` and `jtag_burst_read` so the USER2 burst engine knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
+| `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into the burst read engine so it knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
 | `DEFAULT_TRIG_EXT` | int | 0..3 | Power-up/reset default for `TRIG_EXT`. Useful with `STARTUP_ARM=1` when you want the bitstream to come up armed but wait for an external trigger condition instead of immediately matching the default internal comparator. |
-| `BURST_W` | int | 256 | USER2 burst DR width.  Don't change unless you know exactly what you're doing. |
+| `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
+| `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for a smaller single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
+| `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
+| `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
+| `BURST_EN` | bit | 0/1 | Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
+| `SINGLE_CHAIN_BURST` | bit | 0/1 | Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
-The minimum-area config (every feature off) is the default if you
-omit a parameter.  The reference Arty A7 design uses:
+**Migration note:** older Xilinx bitstreams may have been built with
+`SINGLE_CHAIN_BURST=0`, where 256-bit burst scans live on `DATA_CHAIN`.
+The current host default expects single-chain burst on `CTRL_CHAIN`. If a
+legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
+warning, use the CLI `--two-chain-burst` option or construct
+`XilinxHwServerTransport(single_chain_burst=False)`.
+
+**Startup defaults:** `STARTUP_ARM` and `DEFAULT_TRIG_EXT` rely on the FPGA
+and synthesis flow preserving register initial values at configuration time
+(for example, Xilinx GSR/INIT behavior). If a target family or flow does not
+guarantee those initial values, configure the registers from the host after
+programming instead of relying on power-up auto-arm behavior.
+
+The default config is intentionally small and single-chain, while still
+keeping compatibility features such as comparator B and USER1 fallback
+readout enabled. The reference Arty A7 design uses:
 
 ```verilog
 fcapz_ela_xilinx7 #(

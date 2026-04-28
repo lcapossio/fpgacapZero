@@ -483,7 +483,7 @@ upgrading the host.
   multi-vendor board support
 - `docs/specs/register_map.md` updated for SQ, FIFO_DEPTH encoding,
   ext trigger, timestamps, segmented memory, probe mux
-- `README.md` linked to `no_commit/specs/` documents
+- README documentation linked to draft-only specification documents
 
 **Build / lint**
 - `ruff` added to dev deps and `E501` (line length, max 100) enforced

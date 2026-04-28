@@ -1,21 +1,16 @@
 # 01 — Overview
 
-> **Audience**: junior FPGA developer who has never used fpgacapZero
-> before.  Takes about 10 minutes to read.
-
 ## What fpgacapZero is
 
-fpgacapZero is an **open-source, vendor-agnostic FPGA debug suite** —
+fpgacapZero is an **open-source, vendor-agnostic FPGA debug suite**:
 a small set of RTL cores you drop into your own design plus a Python
-host stack that talks to them over JTAG.  Apache-2.0 licensed, no
+host stack that talks to them over JTAG. Apache-2.0 licensed, no
 strings attached.
 
-It is the open alternative to commercial in-chip debug tools like
-Xilinx ChipScope (now Vivado ILA/VIO), Intel SignalTap, and Lattice
-Reveal.  Those tools work well, but they lock you to one vendor, one
-toolchain, and one workflow.  fpgacapZero gives you the same
-capability — observe and drive signals on a running FPGA from a host
-PC over JTAG — freely and without the lock-in.
+The project is built around a simple goal: make signal capture, signal
+drive, and debug bus access available from normal RTL and normal host
+software, without tying the workflow to one FPGA family, one GUI, or
+one closed project database.
 
 ## The four cores
 
@@ -25,8 +20,6 @@ PC through the FPGA's JTAG TAP via the BSCANE2 (or vendor-equivalent)
 primitive.
 
 ### 1. ELA — Embedded Logic Analyzer
-
-> **What it replaces**: Vivado ILA, SignalTap, Reveal.
 
 The ELA core is a **circular sample buffer** with a configurable
 trigger.  You connect it to a bus of fabric signals; it captures
@@ -39,9 +32,10 @@ configuration uses zero overhead for unused features):
 
 - Sample width 1–256 bits per channel.
 - Buffer depth 16 samples to 16 M samples (limited by available BRAM).
-- **2 comparators per trigger stage** with 9 compare modes (`==`,
-  `!=`, `<`, `>`, `<=`, `>=`, rising, falling, changed) and AND/OR
-  combine.
+- **One or two comparators per trigger stage** with lightweight default
+  compare modes (`==`, `!=`, rising, falling, changed), optional relational
+  modes (`<`, `>`, `<=`, `>=`), and AND/OR combine when comparator B is
+  enabled.
 - Optional **multi-stage trigger sequencer** (2-4 states with
   occurrence counters and inter-state transitions).
 - Optional **storage qualification** — only store samples that match
@@ -66,9 +60,6 @@ The ELA's full feature deep-dive is in [chapter 05](05_ela_core.md).
 
 ### 2. EIO — Embedded I/O
 
-> **What it replaces**: Vivado VIO, SignalTap's "in-system source &
-> probe", Reveal's `IO_PROBE`.
-
 The EIO core gives the host **runtime read/write access to fabric
 signals**.  You define an input bus (fabric → host) and an output
 bus (host → fabric); the host can poll the inputs and drive the
@@ -82,17 +73,13 @@ and quick "is this signal stuck high?" checks.  See
 
 ### 3. EJTAG-AXI — JTAG-to-AXI4 Master Bridge
 
-> **What it replaces**: Vivado JTAG-to-AXI Master, ChipScope AXI bus
-> master, Intel "system console" master.
-
 This bridge gives the host PC **memory-mapped AXI4 master access** to
 your design, over JTAG.  Single read/write transactions, sequential
 auto-increment blocks, and full AXI4 burst transfers (read and write,
 up to 256 beats).  You can poke registers in your CSRs, dump and
 load DDR memory, read back BRAM contents, drive AXI peripherals
-without booting a CPU — anywhere you would normally use Vivado's
-JTAG-to-AXI Master, this works the same way and ships with full
-source.
+without booting a CPU, and keep the debug path under your own source
+control.
 
 A single 72-bit pipelined DR scan is one AXI transaction; the host
 side caches the bridge's `FIFO_DEPTH` from the FEATURES register and
@@ -133,7 +120,7 @@ can talk to all of them in one xsdb / OpenOCD session.
 | Core | Default chain | Default IR (7-series) | Default IR (UltraScale) |
 |------|---------------|-----------------------|-------------------------|
 | ELA control | USER1 | `0x02` | `0x24` |
-| ELA burst data | USER2 | `0x03` | `0x25` |
+| ELA burst data | USER1 by default; USER2 for legacy dual-chain burst | `0x02` / `0x03` | `0x24` / `0x25` |
 | EIO | USER3 | `0x22` | `0x26` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` | `0x27` |
 
@@ -172,9 +159,8 @@ Everything talks to a Python package called `fcapz`.  After
   Surfer / WaveTrace" for the captured `.vcd`.  Documented in
   [chapter 12](12_gui.md).
 
-The host stack is the **only** way to talk to the cores — there is no
-"design your own register access" path.  This is by design: every
-controller validates input, decodes the new core_id magic
+The host stack is the **supported** way to talk to the cores.  This is
+by design: every controller validates input, decodes the core_id magic
 automatically, applies the readiness wait after programming the FPGA,
 and surfaces protocol errors with actionable messages.  Bypassing it
 loses all of that.
@@ -204,8 +190,8 @@ needed.  See [chapter 14](14_transports.md) and
 
 | Vendor | TAP primitive | RTL wrapper | Hardware-validated |
 |--------|--------------|-------------|---------------------|
-| Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ Arty A7-100T |
-| Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ❌ Implemented, lint-clean, not yet hardware-validated |
+| Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
+| Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ❌ |
 | Gowin GW1N / GW2A | Gowin `JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |

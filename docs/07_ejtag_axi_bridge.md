@@ -7,21 +7,12 @@
 > auto-increment / burst transfers, and the AXI4 subset that is
 > actually supported.
 
-## What it is and what it replaces
+## What it is
 
 The EJTAG-AXI bridge is a **JTAG-to-AXI4 master**.  It lives on
 JTAG USER4 (CHAIN=4) and exposes a 32-bit memory-mapped AXI bus on
 the FPGA side.  The host PC can issue AXI4 read and write
 transactions over JTAG, the same way it would from a CPU debugger.
-
-Equivalents in other ecosystems:
-
-| Tool | What it does |
-|---|---|
-| Vivado **JTAG-to-AXI Master** IP | Same role, closed source, Xilinx-only |
-| ChipScope **AXI bus master** | Same role, deprecated by JTAG-to-AXI Master |
-| Intel **System Console** master | Same role, Intel-only, Tcl interface |
-| OpenOCD `aice` / `axi` commands | Bridge-specific, fragile, board-specific |
 
 The fcapz bridge is **vendor-agnostic** (the protocol is standard
 JTAG plus a custom 72-bit DR), the source is yours, the host stack

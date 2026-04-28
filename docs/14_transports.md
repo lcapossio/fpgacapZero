@@ -34,11 +34,29 @@ There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
 throughput (the Xilinx hw_server transport does this for the ELA
-burst readback).
+burst readback). Default Xilinx builds keep those wide burst scans on
+USER1; pass `single_chain_burst=False` only for legacy two-chain builds.
+
+For single-chain burst readback, the host verifies stability instead of
+trusting the first transaction.  The invariant is simple: after the ELA
+reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,
+so repeating the same `BURST_PTR` read transaction must return identical data.
+Some real `hw_server` sessions can produce one stale first transaction after
+rapid re-arm; `XilinxHwServerTransport` requires two consecutive matching
+single-chain burst reads and raises `RuntimeError` if the result does not
+stabilize.  The legacy two-chain DATA_CHAIN path remains a single transaction.
+
+This is a stability check, not a cryptographic or protocol-level data oracle:
+two identical but stale/corrupt scans would still pass.  The reference Arty
+hardware tests add a higher-level plausibility check by capturing the known
+free-running counter and requiring adjacent samples to increment by +1 when
+decimation is disabled.  Designs with critical readback requirements should
+use a similar application-level invariant, or add a future versioned burst
+framing/CRC to the RTL and host protocol.
 
 An **optional** extension method `read_timestamp_block(addr, words,
-timestamp_width)` accelerates timestamp readback via the USER2 burst
-path.  The host checks for it via `getattr(transport,
+timestamp_width)` accelerates timestamp readback via the burst path.
+The host checks for it via `getattr(transport,
 "read_timestamp_block", None)` and falls back to `read_block` when
 absent.  See "Timestamp burst readback" below.
 
@@ -102,9 +120,13 @@ logger `fcapz.gui.connect`.
 `XilinxHwServerTransport` implements the optional
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
-USER2 256-bit DR burst path used for sample data.
+256-bit DR burst path used for sample data. Default Xilinx transports
+use USER1; `single_chain_burst=False` selects legacy DATA_CHAIN readout.
 
 The key difference from a sample burst:
+
+Note: current hardware uses the same priming-scan behavior for timestamp
+bursts as for sample bursts; the host discards that first 256-bit scan.
 
 - `BURST_PTR` is written with `bit[31]=1` to switch the staging mux
   to the timestamp BRAM instead of the sample BRAM.
@@ -197,9 +219,7 @@ The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
 register sits in series with the PL TAP's DR on the TDI side, so every
 DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
 Without it the host's address field lands one bit position off and
-every non-zero register address reads the wrong register (see BUG-006
-in `no_commit/BUGS.md` for the wire-level decode that pinned this
-down).
+every non-zero register address reads the wrong register.
 
 CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
 `use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
@@ -301,9 +321,10 @@ If reads return wrong values or writes don't land:
    Verify after connect: `configparams bscan-switch-user-mask` should
    print `15`.
 
-2. **Confirm `dbg_hub` doesn't collide with your BSCANE2 chains.**
-   If your design has ILA/VIO/MARK_DEBUG, Vivado auto-inserts a
-   `dbg_hub` on `C_USER_SCAN_CHAIN=1` by default.  Move it:
+2. **Confirm no other debug logic collides with your BSCANE2 chains.**
+   Some design flows can insert extra JTAG-facing debug logic on a USER
+   scan chain. If another block is using the same chain as fpgacapZero,
+   move it to an unused chain:
    ```tcl
    set_property C_USER_SCAN_CHAIN 3 [get_debug_cores dbg_hub]
    ```
@@ -560,7 +581,7 @@ will differ.
 | `read_reg()` (single 32-bit) | ~1.5 ms / call |
 | `read_block()` (16 words via `raw_dr_scan_batch`) | ~3 ms total |
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
-| `Analyzer.capture()` of 1024 samples (USER2 burst) | ~50 ms |
+| `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
 **OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
 hardware-validated on Arty A7 (pending a first run with FT2232; see

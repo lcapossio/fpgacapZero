@@ -42,7 +42,7 @@ after each major section for quick return to the title.
 
 The canonical spec covers all four cores in one document:
 
-- **ELA core** (USER1 control + USER2 burst data)
+- **ELA core** (USER1 control + default burst data; optional DATA_CHAIN burst data)
   - Identity / version registers (`VERSION` at `0x0000` with the
     `LA` core_id magic)
   - Control / status / trigger / pre-post-trigger registers

@@ -161,6 +161,10 @@ sub-signals.  Each row is a `name` / `width` / `lsb` triple that
 becomes a `ProbeSpec` in the `CaptureConfig`.  The probe panel
 validates as you type — overlapping bit ranges turn red.
 
+The **Load .prob** button fills the same field from a probe sidecar, so
+generated LiteX maps or hand-authored non-LiteX maps can be reused without
+typing the lane list each time.
+
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 
@@ -168,7 +172,7 @@ ELA dock — bottom **action buttons**:
 
 | Control | What it does |
 |---|---|
-| **Arm** | Same as the toolbar: normal ILA-style capture — `configure` from the panel, `arm`, then `capture(timeout)` on a worker thread; wait for the selected trigger, read back, show in History. |
+| **Arm** | Same as the toolbar: normal ELA capture — `configure` from the panel, `arm`, then `capture(timeout)` on a worker thread; wait for the selected trigger, read back, show in History. |
 | **Trigger Immediate** | Same as the toolbar: immediate capture — always-true compare (`mask=0` value-match, plus a one-stage sequencer when the bitstream has `TRIG_STAGES>1`) so the core triggers as soon as the pre-trigger history is ready; external-trigger gating is cleared for that run. |
 | **Stop** | Ends an auto re-arm loop (cancels the worker between captures). |
 | **Configure** | Writes registers from the panel only (`analyzer.configure(cfg)`), without arming. |

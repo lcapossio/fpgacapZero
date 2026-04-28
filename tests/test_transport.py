@@ -12,7 +12,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fcapz.transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from fcapz.transport import (
+    list_xilinx_hw_server_targets,
+    OpenOcdTransport,
+    Transport,
+    XilinxHwServerTransport,
+    parse_xsdb_jtag_targets,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,76 @@ class ConcreteTransport(Transport):
     def read_block(self, addr: int, words: int):
         return [0] * words
 
+
+class XsdbTargetParserTests(unittest.TestCase):
+    def test_parse_jtag_targets_output(self) -> None:
+        raw = """
+          1  jsn-JTAG-HS3-210299
+             2  arm_dap
+          *  3  xck26
+             4  xc7a100t
+        """
+        self.assertEqual(
+            parse_xsdb_jtag_targets(raw),
+            ["jsn-JTAG-HS3-210299", "arm_dap", "xck26", "xc7a100t"],
+        )
+
+    def test_parse_jtag_targets_prefers_fpga_device_names(self) -> None:
+        raw = """
+          1  Digilent Arty A7-100T 210319B26DC2A
+             2  xc7a100t (idcode 13631093 irlen 6 fpga)
+          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+             4  xck26 (idcode 04724093 irlen 12 fpga)
+             5  arm_dap (idcode 5ba00477 irlen 4)
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xc7a100t", "xck26"])
+
+    def test_parse_jtag_targets_deduplicates_names(self) -> None:
+        raw = """
+          1  xck26
+        * 2  xck26
+          note: not a target line
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xck26"])
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.run")
+    def test_list_jtag_targets_uses_minimal_scan_script(
+        self,
+        run_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "  1  jsn-JTAG-HS3-210299\n* 2  xck26\n"
+        proc.stderr = ""
+        run_mock.return_value = proc
+
+        self.assertEqual(
+            list_xilinx_hw_server_targets(host="localhost", port=3121),
+            ["jsn-JTAG-HS3-210299", "xck26"],
+        )
+
+        script = run_mock.call_args.kwargs["input"]
+        self.assertIn("connect -url tcp:localhost:3121", script)
+        self.assertIn("puts [jtag targets]", script)
+        self.assertNotIn("configparams", script)
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.run")
+    def test_list_jtag_targets_rejects_autolaunch_without_target_output(
+        self,
+        run_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
+        proc.stderr = ""
+        run_mock.return_value = proc
+
+        with self.assertRaisesRegex(RuntimeError, "launched hw_server"):
+            list_xilinx_hw_server_targets(host="localhost", port=3121)
 
 # ---------------------------------------------------------------------------
 # Transport ABC contract
@@ -300,7 +376,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
     @staticmethod
     def _burst_token(values: list[int], sample_w: int = 8) -> str:
-        """Pack values into one LSB-first USER2 burst token."""
+        """Pack values into one LSB-first 256-bit burst token."""
         bits = ["0"] * XilinxHwServerTransport.BURST_DR_BITS
         for sample_idx, value in enumerate(values):
             base = sample_idx * sample_w
@@ -309,7 +385,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         return "".join(bits)
 
     def test_parse_burst_bits_can_skip_priming_scan(self):
-        """USER2 burst parsing discards the priming scan when requested."""
+        """Burst parsing discards the priming scan when requested."""
         t = XilinxHwServerTransport()
         t._cached_sps = 32
         stale = self._burst_token([0xEE] * 32)
@@ -320,12 +396,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(13)))
 
     def test_read_block_burst_primes_user2_before_returned_scans(self):
-        """Burst reads issue one extra USER2 scan and discard its data.
-
-        The USER2 burst RTL fills staging during SHIFT, so the first capture
-        after selecting USER2 is a pipeline prime, not returned sample data.
-        """
-        t = XilinxHwServerTransport()
+        """Burst reads discard the first USER2 scan while staging fills."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
         t._cached_sps = 32
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
@@ -343,23 +415,148 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
-    def test_timestamp_burst_uses_prefilled_first_scan(self):
-        """Timestamp USER2 reads consume the first scan; no sample-style prime."""
+    def test_single_chain_burst_uses_user1_for_wide_scans(self):
+        """Single-chain burst keeps both BURST_PTR and 256-bit scans on USER1."""
         t = XilinxHwServerTransport()
+        t._cached_sps = 32
         sent: list[str] = []
-        first = self._burst_token(list(range(8)), sample_w=32)
-        second = self._burst_token([0xEE] * 8, sample_w=32)
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
 
         def fake_send(tcl: str) -> str:
             sent.append(tcl)
-            return f"{first} {second}"
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertIn("-hex 6 02", sent[0])
+        self.assertNotIn("-hex 6 03", sent[0])
+        self.assertIn("-bits 256", sent[0])
+
+    def test_single_chain_burst_requires_stable_repeated_readback(self):
+        """Single-chain retry rejects streams that never produce a stable pair."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        prime = self._burst_token([0xAA] * 32)
+        responses = [
+            f"{prime} {self._burst_token([0x10] * 32)}",
+            f"{prime} {self._burst_token([0x20] * 32)}",
+            f"{prime} {self._burst_token([0x30] * 32)}",
+            f"{prime} {self._burst_token([0x40] * 32)}",
+        ]
+
+        def fake_send(_tcl: str) -> str:
+            return responses.pop(0)
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
+            t._read_block_burst(8)
+
+    def test_single_chain_burst_accepts_first_stale_then_stable_pair(self):
+        """A one-transaction stale read is tolerated only after stability."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        prime = self._burst_token([0xAA] * 32)
+        stale = f"{prime} {self._burst_token([0xEE] * 32)}"
+        fresh = f"{prime} {self._burst_token(list(range(32)))}"
+        responses = [stale, fresh, fresh]
+
+        def fake_send(_tcl: str) -> str:
+            return responses.pop(0)
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertEqual(responses, [])
+
+    def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
+        """Legacy two-chain burst keeps 256-bit scans on USER2."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t._cached_sps = 32
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        vals = t._read_block_burst(8)
+
+        self.assertEqual(vals, list(range(8)))
+        self.assertIn("-hex 6 03", sent[0])
+        self.assertIn("-bits 256", sent[0])
+
+    def test_read_block_falls_back_when_user2_burst_missing(self):
+        """Single-chain ELA builds can fall back to the USER1 DATA window."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("USER2 unavailable")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+        self.assertFalse(t._has_burst)
+        t._read_block_user1.assert_called_once_with(0x0100, 3)
+
+    def test_single_chain_burst_fallback_logs_migration_hint(self):
+        """Default single-chain failure should point legacy users at two-chain mode."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("single-chain burst readback did not stabilize")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.hw_server", level="WARNING") as logs:
+            self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+
+        text = "\n".join(logs.output)
+        self.assertIn("SINGLE_CHAIN_BURST=0", text)
+        self.assertIn("--two-chain-burst", text)
+
+    def test_timestamp_block_falls_back_when_burst_missing(self):
+        """Timestamp burst failures also disable fast burst reads."""
+        t = XilinxHwServerTransport()
+
+        def fail_burst(*args, **kwargs):
+            raise RuntimeError("burst unavailable")
+
+        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[4, 5])  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_timestamp_block(0x2100, 2, 32), [4, 5])
+        self.assertFalse(t._has_burst)
+        t._read_block_user1.assert_called_once_with(0x2100, 2)
+
+    def test_timestamp_burst_primes_before_returned_scan(self):
+        """Timestamp burst reads also discard the first fill scan."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 8, sample_w=32)
+        first = self._burst_token(list(range(8)), sample_w=32)
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return f"{stale} {first}"
 
         t._send = fake_send  # type: ignore[method-assign]
 
         vals = t._read_block_burst(8, timestamp=True, element_width=32)
 
         self.assertEqual(vals, list(range(8)))
-        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 1)
+        self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
 
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads leave CDC time before every captured word."""

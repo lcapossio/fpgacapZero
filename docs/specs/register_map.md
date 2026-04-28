@@ -62,6 +62,13 @@ in that bridge’s section.
 - `0x00D8`: `STARTUP_ARM` (rw) - Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes the power-up default of this register so the bitstream can come up pre-armed immediately after configuration.
 - `0x00DC`: `TRIG_HOLDOFF` (rw) - Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after each segmented auto-rearm. Distinct from `TRIG_DELAY`.
 - `0x00D4`: `TRIG_DELAY` (rw) - Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample is shifted N cycles after the trigger event, compensating for upstream pipeline latency. The pre/post-trigger sample counts and the buffer wrap behavior are unchanged — only the position of the "trigger" anchor moves forward.
+- `0x00E0`: `COMPARE_CAPS` (ro) - Compare capability bitmask. Bits 0-8
+  report compare modes implemented by this bitstream. Bit 16 reports
+  comparator B / dual-combine support when bit 17 is set. Bit 17 marks the
+  extended capability schema; older bitstreams omit bit 17 and should be
+  treated as dual-compare capable for compatibility. Default lightweight,
+  dual-comparator builds report `0x301C3`; `REL_COMPARE=1` dual-comparator
+  builds report `0x301FF`; `DUAL_COMPARE=0` clears bit 16.
 - `0x003C`: `FEATURES` (ro) - Feature flags: `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL
 - `0x0040+N*20+0`:  `SEQ_STAGE_N_CFG` (rw) - See encoding below
 - `0x0040+N*20+4`:  `SEQ_STAGE_N_VALUE_A` (rw) - Comparator A match value
@@ -79,18 +86,27 @@ in that bridge’s section.
 
 <a id="regmap-compare-modes"></a>
 ### Compare modes (4 bits)
+Modes 0, 1, 6, 7, and 8 are present in the default lightweight RTL build.
+Modes 2-5 require the ELA `REL_COMPARE=1` parameter; otherwise they never
+match.
+Comparator B and combine modes 1-3 require `DUAL_COMPARE=1`; with
+`DUAL_COMPARE=0`, hardware forces A-only comparison and the host rejects
+B-combine sequencer configurations.
+
 | Value | Mode | Operation |
 |------:|------|-----------|
 | 0 | EQ | `(probe & mask) == (value & mask)` |
 | 1 | NEQ | `(probe & mask) != (value & mask)` |
-| 2 | LT | `(probe & mask) <  (value & mask)` unsigned |
-| 3 | GT | `(probe & mask) >  (value & mask)` unsigned |
-| 4 | LEQ | `(probe & mask) <= (value & mask)` unsigned |
-| 5 | GEQ | `(probe & mask) >= (value & mask)` unsigned |
+| 2 | LT | `(probe & mask) <  (value & mask)` unsigned, requires `REL_COMPARE=1` |
+| 3 | GT | `(probe & mask) >  (value & mask)` unsigned, requires `REL_COMPARE=1` |
+| 4 | LEQ | `(probe & mask) <= (value & mask)` unsigned, requires `REL_COMPARE=1` |
+| 5 | GEQ | `(probe & mask) >= (value & mask)` unsigned, requires `REL_COMPARE=1` |
 | 6 | RISING | masked bits: all-zero → non-zero |
 | 7 | FALLING | masked bits: non-zero → all-zero |
 | 8 | CHANGED | any masked bit changed from previous sample |
-- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1)
+- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1).
+  Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this
+  slow fallback window and return zero for these addresses.
 
 [↑ Top](#regmap-top)
 
@@ -133,17 +149,18 @@ in that bridge’s section.
 [↑ Top](#regmap-top)
 
 <a id="regmap-burst-user2"></a>
-## Burst Readout (USER2, 256-bit DR)
+## Burst Readout (256-bit DR)
 - Write to `BURST_PTR` (0x002C) via USER1 to start a burst from `start_ptr`.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
-- Switch IR to USER2 (0x03) and perform 256-bit DR scans.
+- Default Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
+  Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on USER1 (0x02).
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
   (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
   read `N` scans to get `N × (256/SAMPLE_W)` samples.
 - **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
-  packed LSB-first.  No priming scan; the first scan already contains valid data.
-  The host uses `read_timestamp_block()` to retrieve timestamps via this path.
+  packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
+  via this path and discards the priming scan.
 - Read pointer auto-increments; staging buffer is pre-filled during the SHIFT phase.
 - Effective delivery rate depends on the host transport and cable;
   the burst path returns multiple words per 256-bit DR scan to amortise round trips.

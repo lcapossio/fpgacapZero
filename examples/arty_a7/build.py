@@ -13,7 +13,7 @@ Usage
 -----
     python examples/arty_a7/build.py              # default, ~10-15 min
     python examples/arty_a7/build.py --vivado PATH/TO/vivado
-    python examples/arty_a7/build.py --log-dir no_commit
+    python examples/arty_a7/build.py --log-dir vivado/logs
 
 Exit code 0 on success, non-zero otherwise.  The full Vivado log is written
 to ``<log_dir>/vivado_build.log`` and the journal to
@@ -166,7 +166,7 @@ def main() -> int:
     parser.add_argument("--vivado", default=None, help="Path to vivado executable")
     parser.add_argument(
         "--log-dir",
-        default=str(ROOT / "no_commit"),
+        default=str(ROOT / "vivado" / "logs"),
         help="Directory for vivado_build.log and vivado_build.jou",
     )
     args = parser.parse_args()

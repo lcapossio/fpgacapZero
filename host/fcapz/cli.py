@@ -13,6 +13,7 @@ from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
+from .probes import load_probe_file
 from .transport import OpenOcdTransport, XilinxHwServerTransport
 
 
@@ -103,9 +104,16 @@ def _parse_trigger_sequence(raw: str) -> list[SequencerStage]:
 
 
 def _build_config(args: argparse.Namespace) -> CaptureConfig:
-    probes = []
+    probe_file = None
+    probe_file_path = getattr(args, "probe_file", None)
+    if probe_file_path:
+        probe_file = load_probe_file(probe_file_path)
+
+    probes = list(probe_file.probes) if probe_file is not None else []
     probe_str = getattr(args, "probes", None)
     if probe_str:
+        if probe_file is not None:
+            raise argparse.ArgumentTypeError("--probes and --probe-file are mutually exclusive")
         probes = _parse_probes(probe_str)
     # Parse trigger sequence if provided
     sequence = None
@@ -121,9 +129,25 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
             value=args.trigger_value,
             mask=args.trigger_mask,
         ),
-        sample_width=args.sample_width,
+        sample_width=(
+            args.sample_width
+            if args.sample_width is not None
+            else (
+                probe_file.sample_width
+                if probe_file is not None and probe_file.sample_width is not None
+                else 8
+            )
+        ),
         depth=args.depth,
-        sample_clock_hz=args.sample_clock_hz,
+        sample_clock_hz=(
+            args.sample_clock_hz
+            if args.sample_clock_hz is not None
+            else (
+                probe_file.sample_clock_hz
+                if probe_file is not None and probe_file.sample_clock_hz is not None
+                else 100_000_000
+            )
+        ),
         probes=probes,
         channel=args.channel,
         decimation=getattr(args, "decimation", 0),
@@ -198,6 +222,7 @@ def _make_transport(args: argparse.Namespace):
     bitfile = getattr(args, "program", None)
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
+        single_chain_burst=not getattr(args, "two_chain_burst", False),
         **_chain_shape_kwargs(fpga_name),
     )
 
@@ -215,6 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
+    p.add_argument(
+        "--two-chain-burst",
+        action="store_true",
+        help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
+    )
     p.add_argument(
         "--program",
         metavar="BITFILE",
@@ -243,9 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument("--trigger-value", type=int, default=0)
         parser.add_argument("--trigger-mask", type=lambda x: int(x, 0), default=0xFF)
-        parser.add_argument("--sample-width", type=int, default=8)
+        parser.add_argument("--sample-width", type=int, default=None)
         parser.add_argument("--depth", type=int, default=1024)
-        parser.add_argument("--sample-clock-hz", type=int, default=100_000_000)
+        parser.add_argument("--sample-clock-hz", type=int, default=None)
         parser.add_argument("--channel", type=int, default=0, help="Probe mux channel index")
         parser.add_argument(
             "--decimation", type=int, default=0,
@@ -260,6 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
             "--probes",
             default=None,
             help="Signal definitions: name:width:lsb,... (e.g. bus0:4:0,bus1:4:4)",
+        )
+        parser.add_argument(
+            "--probe-file",
+            default=None,
+            help="Path to a .prob probe sidecar file",
         )
         parser.add_argument(
             "--trigger-sequence",

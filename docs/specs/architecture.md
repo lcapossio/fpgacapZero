@@ -7,10 +7,17 @@ designed to fit on any FPGA with minimal resource usage.
 ## Core Blocks
 - **Probe Input**: User-defined probe buses flattened into `SAMPLE_W` bits (1-256+).
 - **Trigger Block** (`trig_compare.v` × 2 per stage): Dual comparators (A and B)
-  with 9 compare modes (==, !=, <, >, <=, >=, rising, falling, changed) and
-  boolean combine (A-only, B-only, AND, OR). Optional multi-stage sequencer
-  (2-4 states) with occurrence counter and state transitions.
+  with lightweight default compare modes (==, !=, rising, falling, changed),
+  optional relational modes (<, >, <=, >=), and boolean combine
+  (A-only, B-only, AND, OR). Optional multi-stage sequencer
+  (2-4 states) with occurrence counter and state transitions. Builds with
+  `INPUT_PIPE>=1` also register comparator hits internally, keeping optional
+  relational compares off the capture-control critical path.
   Controlled by `TRIG_STAGES` parameter (1 = simple, 2-4 = sequencer).
+- **Feature-gated ELA Core**: disabled feature groups stop accepting writes,
+  cross as constants, and read back fixed values so synthesis can remove their
+  registers and muxes. Small builds use the same `fcapz_ela.v` implementation
+  as full builds.
 - **Storage Qualification**: Optional condition that filters which samples
   are stored, effectively multiplying buffer depth. `STOR_QUAL` parameter
   (0 = off, 1 = on, +21 LUTs).
@@ -19,8 +26,10 @@ designed to fit on any FPGA with minimal resource usage.
 - **Capture Controller**: Arm, trigger detect, post-trigger countdown, done.
 - **JTAG Register Map** (`jtag_reg_iface.v`): 49-bit DR on USER1 for
   control/status + per-word data readback.
-- **Burst Readback** (`jtag_burst_read.v`): 256-bit DR on USER2 for fast
-  block reads (32 8-bit samples per scan).
+- **Single-Chain Pipe** (`jtag_pipe_iface.v`): default Xilinx path that
+  carries both 49-bit register packets and 256-bit burst packets on USER1.
+- **Burst Readback** (`jtag_burst_read.v`): legacy separate-chain 256-bit DR
+  for fast block reads (32 8-bit samples per scan).
 - **Embedded I/O** (`fcapz_eio.v`): JTAG-accessible input/output probe registers
   on USER3 (CHAIN=3). `IN_W`-bit input bus synchronised to jtag_clk;
   `OUT_W`-bit output register driven to fabric.  Parameters: `IN_W`, `OUT_W`.
@@ -35,7 +44,7 @@ designed to fit on any FPGA with minimal resource usage.
 | `TRIG_STAGES` | 1 | Trigger sequencer stages (1 = simple, 2-4 = sequencer) |
 | `STOR_QUAL` | 0 | Storage qualification (0 = off, 1 = on) |
 | `NUM_CHANNELS` | 1 | Mutually exclusive probe buses (runtime mux when >1) |
-| `INPUT_PIPE` | 0 | Optional pipeline registers on `probe_in` |
+| `INPUT_PIPE` | 0 | Optional pipeline registers on `probe_in`; also enables registered compare hits |
 | `DECIM_EN` | 0 | Runtime decimation register |
 | `EXT_TRIG_EN` | 0 | `trigger_in` / `trigger_out` ports |
 | `TIMESTAMP_W` | 0 | Per-sample timestamp RAM (`0` = off, 32 or 48) |
@@ -55,16 +64,17 @@ EIO core parameters (separate module, `fcapz_eio.v`):
 
 ## Resource Usage (xc7a100t)
 
-Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2), same
-harness as `scripts/resource_comparison.tcl`. See [README.md](../../README.md#resource-usage)
+Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2). See [README.md](../../README.md#resource-usage)
 for FFs and the full `arty_a7_top` reference row.
 
 | Config | Slice LUTs | BRAM |
 |--------|-----:|-----:|
-| 8b × 1024, baseline (`TRIG_STAGES=1`, `STOR_QUAL=0`) | 1,595 | 0.5 |
-| 8b × 1024, + `STOR_QUAL=1` | 1,616 | 0.5 |
-| 8b × 1024, + 4-stage seq + SQ | 2,095 | 0.5 |
-| 32b × 1024, baseline | 1,548 | 1.0 |
+| 8b x 1024, A-only, slow USER1 readout | 596 | 0.5 |
+| 8b x 1024, A-only, single-chain fast readout | 912 | 0.5 |
+| 8b x 1024, dual compare, `REL_COMPARE=0` | 2,021 | 0.5 |
+| 8b x 1024, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 0.5 |
+| 8b x 1024, 4-stage sequencer | 2,954 | 0.5 |
+| 32b x 1024, dual compare, `REL_COMPARE=0` | 2,472 | 1.0 |
 
 Enabling timestamp, segmentation, decimation, external trigger, or wide
 probe mux builds adds logic and usually **extra BRAM** (see synthesis
@@ -79,7 +89,7 @@ for your exact mix).
 ## Data Model
 - Samples stored as packed `SAMPLE_W` vectors in BRAM.
 - Wide samples (> 32 bits) read as multiple 32-bit chunks via USER1,
-  or natively via the 256-bit USER2 burst DR.
+  or natively via the 256-bit burst DR.
 - Timestamps are implicit by sample index.
 
 ## JTAG-to-AXI4 Bridge (`fcapz_ejtagaxi.v`)
@@ -131,5 +141,5 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 |-------|---------|----------|
 | Unit (Python) | `pytest tests/test_host_stack.py` | Transport, Analyzer, EioController |
 | RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
-| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA, ELA regression probe, EIO, and channel-mux testbenches |
-| Hardware | `pytest tests/test_hw_integration.py` | 15 tests, Arty A7-100T |
+| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel-mux testbenches |
+| Hardware | `pytest examples/arty_a7/test_hw_integration.py` | Arty A7-100T hardware regression for the reference bitstream |

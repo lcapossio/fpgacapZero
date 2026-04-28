@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/fcapz-logo.png" alt="fpgacapZero logo" width="180">
+</p>
+
 # fpgacapZero
 
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
@@ -7,14 +11,16 @@
 
 Open-source, vendor-agnostic FPGA debug cores: an **Embedded Logic Analyzer
 (ELA)** for waveform capture, an **Embedded I/O (EIO)** for runtime
-read/write of fabric signals, and a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
-memory-mapped bus access — all over JTAG. Drop them into any FPGA design and
-export captures to JSON, CSV, or VCD.
+read/write of fabric signals, a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
+memory-mapped bus access, and a **JTAG-to-UART Bridge (EJTAG-UART)** for
+console-style debug — all over JTAG. Drop them into any FPGA design and export
+captures to JSON, CSV, or VCD.
 
-Includes single-instantiation wrappers for **Xilinx 7-series**, **Xilinx
-UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**, and
-**Gowin** in both Verilog and VHDL. The core RTL and Python host stack
-are fully portable.
+Includes single-instantiation Verilog wrappers for **Xilinx 7-series**,
+**Xilinx UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**,
+**Gowin**, and **Microchip PolarFire / SmartFusion2 / IGLOO2**. ELA and EIO
+also provide VHDL wrappers for Xilinx 7-series, Lattice ECP5, Intel / Altera,
+and Gowin. The core RTL and Python host stack are fully portable.
 
 📖 **[User manual](docs/README.md)** — full walkthrough of the RTL cores,
 host stack, CLI, RPC server, and desktop GUI. **JTAG register / shift maps**
@@ -25,8 +31,8 @@ specs.
 
 ## Contents
 
+- [Description](#description)
 - [Features](#features)
-- [Support status](#support-status)
 - [Quick start](#quick-start)
   - [Desktop GUI (fcapz-gui)](#desktop-gui-fcapz-gui)
 - [Usage](#usage)
@@ -35,80 +41,72 @@ specs.
   - [JSON-RPC server](#json-rpc-server)
 - [Integrating the core into your design](#integrating-the-core-into-your-design)
   - [RTL instantiation](#rtl-instantiation)
+  - [LiteX integration](#litex-integration)
   - [Vendor JTAG chain availability](#vendor-jtag-chain-availability)
   - [JTAG protocol and register reference](#jtag-protocol-and-register-reference)
-- [Comparison with other embedded logic analyzers](#comparison-with-other-embedded-logic-analyzers)
+- [Support status](#support-status)
 - [Resource usage](#resource-usage)
 - [CI](#ci)
 - [Building from source](#building-from-source)
 - [Project structure](#project-structure)
+- [Author](#author)
 - [License](#license)
 
 Jump within this page: [↑ Top](#readme-top)
 
-## Features
+## Description
 
-- **Tiny, parameterizable RTL core** -- ~1,595 slice LUTs + 0.5 BRAM baseline
-  (8b × 1024, dual comparators, Vivado 2025.2 synth on xc7a100t);
-  configurable sample width (1-256+ bits) and buffer depth (16-16M samples)
-- **Flexible trigger** -- 2 comparators per stage with 9 compare modes
-  (==, !=, <, >, <=, >=, rising, falling, changed), boolean combine
-  (AND/OR), and optional multi-stage sequencer (2-4 states)
-- **Configurable trigger delay** (`TRIG_DELAY`, 0-65535 sample clocks) --
-  shifts the committed trigger sample N cycles after the trigger event
-  to compensate for upstream pipeline latency between a cause signal
-  and its visible effect on the probe bus
-- **Circular buffer** with pre/post-trigger lengths and optional storage
-  qualification (10x effective depth for sparse signals, +21 LUTs)
-- **Burst readback** -- 256-bit USER2 DR packs multiple samples per scan so
-  readback amortises host round-trips; observed rate depends on the adapter,
-  tool chain, and whether the transport batches DR scans
-- **Two JTAG backends** -- OpenOCD (cross-platform) and Xilinx hw_server/XSDB
-- **Python host stack** -- ELA CLI, optional **PySide6 desktop GUI** (`fcapz-gui`),
-  programmatic API, JSON-RPC server, and LLM event extraction helpers
-- **Embedded I/O (EIO)** -- RTL cores and Python controller for runtime
-  read/write of fabric signals via JTAG USER3
-- **JTAG-to-AXI4 Bridge (EJTAG-AXI)** -- 72-bit pipelined DR for single
-  and burst AXI4 transactions over JTAG; block and burst paths use
-  `raw_dr_scan_batch` where the transport supports it to amortise scan overhead
-- **JTAG-to-UART Bridge (EJTAG-UART)** -- 32-bit pipelined DR for
-  bidirectional UART over JTAG; TX/RX async FIFOs (effective rate is
-  dominated by JTAG round-trip latency). Use cases: debug console,
-  firmware upload, printf-over-JTAG without a physical UART pin
-- **Three export formats** -- JSON (LLM-friendly), CSV, VCD
-- **Multi-signal probes** -- named sub-signals in VCD export and capture
-  summaries
-- **Sample decimation** (DECIM_EN=1) -- /N divider captures every N+1 cycles,
-  extending effective capture window without increasing buffer depth
-- **External trigger I/O** (EXT_TRIG_EN=1) -- trigger_in / trigger_out ports
-  with OR and AND combine modes for multi-core or cross-chip synchronisation
-- **Timestamp counter** (TIMESTAMP_W=32 or 48) -- per-sample cycle-accurate
-  timestamps; exported to VCD for precise timing even with decimation
-- **Segmented memory** (NUM_SEGMENTS>1) -- auto-rearm after each segment fills,
-  capturing multiple trigger events in a single run
-- All four features are **parameter-gated** -- the smallest core configuration
-  has none enabled, adding zero overhead
+fpgacapZero is designed as an independent, vendor-agnostic debug stack.
+The same ELA, EIO, EJTAG-AXI, and EJTAG-UART concepts are exposed through
+small RTL modules, a stable register map, and a scriptable host stack.
+
+| Area | Project direction |
+|------|-------------------|
+| **Portability** | Shared core RTL with thin vendor TAP wrappers |
+| **Configurability** | Compile-time parameters remove unused trigger, storage, timestamp, segment, readout, and mux features |
+| **Triggering** | Lightweight default compare modes, optional relational compares, optional dual comparator, and optional multi-stage sequencer |
+| **Readback** | Default 256-bit burst readout where supported, with simple 32-bit register reads for fallback or chain-limited builds |
+| **Host access** | Python API, CLI, JSON-RPC, GUI, and export helpers |
+| **Data formats** | JSON, CSV, VCD, and structured capture summaries |
+| **Licensing** | Apache 2.0, usable in proprietary designs with explicit patent grant |
+
+The result is intentionally parameter-driven: small designs can compile
+out unused features, while larger debug builds can enable richer trigger
+and readback behavior without switching cores.
 
 [↑ Top](#readme-top)
 
-## Support status
+## Features
 
-| Area | Status |
-|------|--------|
-| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
-| OpenOCD backend | Implemented, needs more hardware validation |
-| Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
-| Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
-| Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
-| Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
-| EIO over real transports | Implemented — transport chain selection supports USER3 |
-| EJTAG-AXI bridge | Hardware-validated on Arty A7 (single, auto-inc, and burst modes) |
-| EJTAG-UART bridge | Hardware-validated on Arty A7 (loopback: send, recv, recv_line, status) |
-| Sample decimation | Implemented in RTL and host API/CLI |
-| External trigger I/O | Implemented in RTL and host API/CLI |
-| Timestamp counter | Implemented in RTL and host API/CLI |
-| Segmented memory | Hardware-validated on Arty A7 (4 segments, auto-rearm) |
-| Raw TCF transport | Planned |
+- **Drop-in FPGA visibility over JTAG** -- capture internal signals, drive
+  debug I/O, access AXI registers, and open a UART console without adding
+  board pins or a soft CPU.
+- **Small when you need it small** -- a practical 8-bit, 1024-sample ELA
+  can be built around **596 LUTs + 0.5 BRAM** with simple readout, or about
+  **912 LUTs + 0.5 BRAM** with the default single-chain fast readout on
+  xc7a100t.
+- **Scales up by parameter, not by rewrite** -- widen probes, deepen buffers,
+  add trigger stages, timestamps, decimation, segmented captures, storage
+  qualification, and external trigger I/O only when the design needs them.
+- **Useful triggers without bloat** -- value match, edge, changed, optional
+  relational compares, optional dual comparator, AND/OR combine, and a 2-4 stage
+  sequencer for protocol-like captures.
+- **Pre/post-trigger waveform capture** -- circular buffer, configurable
+  trigger delay, named sub-signals, and export to **VCD**, **CSV**, or
+  structured **JSON**.
+- **Fast readout paths where available** -- optional burst readback packs
+  multiple samples per JTAG scan to reduce host round trips, while simpler
+  single-register readout remains available for small or limited TAP designs.
+- **Engineer-friendly host tools** -- Python API, command-line capture,
+  optional **PySide6 desktop GUI** (`fcapz-gui`), JSON-RPC server, and
+  capture summaries that are easy to feed into automation.
+- **Portable integration** -- shared RTL core with thin vendor TAP wrappers
+  for Xilinx 7-series, Xilinx UltraScale / UltraScale+, Lattice ECP5,
+  Intel / Altera, Gowin, and Microchip PolarFire-family devices; optional
+  LiteX helper for packing named probes.
+- **Extra debug channels** -- Embedded I/O (EIO), JTAG-to-AXI4
+  (EJTAG-AXI), and JTAG-to-UART (EJTAG-UART) can live beside the ELA when
+  the target device has enough user JTAG chains.
 
 [↑ Top](#readme-top)
 
@@ -164,6 +162,10 @@ transport (TCP/JTAG may take a moment to unwind if the server hung). The
 Connection panel sets **Connect timeout** (OpenOCD TCP, seconds) and **HW ready
 timeout** (after programming a `.bit`, seconds); both are stored in `gui.toml`
 under `[connection]` as `connect_timeout_sec` and `hw_ready_timeout_sec`.
+
+<p align="center">
+  <img src="docs/assets/fcapz-gui-demo.png" alt="fcapz-gui desktop application showing connection, ELA capture controls, and log output" width="900">
+</p>
 
 **Surfer:** the GUI opens the native **Surfer** binary in its **own window** (same as
 GTKWave). Upstream does not expose a supported way to dock the native Surfer UI inside
@@ -241,6 +243,14 @@ The `--summarize` flag prints a structured JSON summary (edge counts, value
 ranges, burst lengths) that an LLM can consume directly. The `--probes` flag
 splits the 8-bit sample into named sub-signals in VCD output.
 
+For wider designs, keep probe names in a `.prob` sidecar instead of typing the
+lane map on every capture:
+
+```bash
+fcapz --backend hw_server --port 3121 \
+  capture --probe-file design.prob --format vcd --out capture.vcd
+```
+
 [↑ Top](#readme-top)
 
 ## Usage
@@ -257,8 +267,8 @@ fcapz [global options] <command> [command options]
 |------|---------|-------------|
 | `--backend` | `hw_server` | `openocd` or `hw_server` |
 | `--host` | `127.0.0.1` | Server address |
-| `--port` | `6666` | `6666` for OpenOCD, `3121` for hw_server |
-| `--tap` | `xc7a100t.tap` | JTAG TAP name |
+| `--port` | backend default | `6666` for OpenOCD, `3121` for hw_server |
+| `--tap` | `xc7a100t.tap` | OpenOCD TAP name or hw_server FPGA target |
 | `--program` | *(none)* | Program FPGA with bitfile before command (hw_server) |
 
 **Commands:**
@@ -269,6 +279,14 @@ fcapz [global options] <command> [command options]
 | `arm` | Arm the trigger without configuring |
 | `configure` | Write capture configuration to hardware |
 | `capture` | Configure, arm, wait for trigger, read samples, export |
+| `eio-probe` | Read EIO core identity and probe widths |
+| `eio-read` | Read EIO input probes |
+| `eio-write` | Write EIO output probes |
+| `axi-read` | Single AXI read via JTAG-to-AXI bridge |
+| `axi-write` | Single AXI write via JTAG-to-AXI bridge |
+| `axi-dump` | Read a block of AXI words |
+| `axi-fill` | Fill AXI memory with a pattern |
+| `axi-load` | Load a binary file into AXI memory |
 | `uart-send` | Send data to UART TX via JTAG-to-UART bridge |
 | `uart-recv` | Receive data from UART RX via JTAG-to-UART bridge |
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |
@@ -288,6 +306,7 @@ fcapz [global options] <command> [command options]
 | `--sample-clock-hz` | `100000000` | For VCD timescale |
 | `--channel` | `0` | Probe mux channel index |
 | `--probes` | *(none)* | Signal definitions: `name:width:lsb,...` |
+| `--probe-file` | *(none)* | `.prob` sidecar with named signal definitions |
 | `--timeout` | `10.0` | Seconds to wait for trigger (capture only) |
 | `--out` | *(required)* | Output file path (capture only) |
 | `--format` | `json` | `json`, `csv`, or `vcd` (capture only) |
@@ -443,12 +462,14 @@ Pick the wrapper for your FPGA vendor — one instantiation each for ELA and EIO
 //   fcapz_ela_ecp5     / fcapz_eio_ecp5      — Lattice ECP5
 //   fcapz_ela_intel    / fcapz_eio_intel     — Intel / Altera
 //   fcapz_ela_gowin    / fcapz_eio_gowin     — Gowin GW1N / GW2A
+//   fcapz_ela_polarfire / fcapz_eio_polarfire — Microchip PolarFire-family
 
 wire [127:0] my_signals;  // up to 256+ bits
 
 // ELA — embedded logic analyzer (one instantiation, all JTAG internals bundled)
 fcapz_ela_xilinx7 #(
     .SAMPLE_W(128), .DEPTH(4096),
+    .SINGLE_CHAIN_BURST(1), // default: control + fast burst readout on USER1
     .TRIG_STAGES(4), .STOR_QUAL(1),
     .DECIM_EN(0),        // 1 = enable sample decimation (/N divider)
     .EXT_TRIG_EN(0),     // 1 = enable external trigger I/O ports
@@ -486,14 +507,48 @@ fcapz_ela_ecp5 #(
 
 VHDL wrappers are also provided in `rtl/vhdl/`.
 
+### LiteX integration
+
+LiteX designs can use the optional `fcapz.litex.FcapzELA` helper to add the
+ELA RTL sources and instantiate the JTAG-accessible wrapper from Python:
+
+```python
+from migen import ClockSignal, ResetSignal
+from fcapz.litex import FcapzELA
+
+soc.submodules.ela = FcapzELA(
+    platform,
+    vendor="xilinx7",
+    sample_clk=ClockSignal("sys"),
+    sample_rst=ResetSignal("sys"),
+    probes={
+        "wb_cyc": bus.cyc,
+        "wb_stb": bus.stb,
+        "wb_adr": bus.adr,
+        "wb_dat_w": bus.dat_w,
+    },
+    depth=1024,
+)
+
+soc.ela.write_probe_file("build/ela.prob", sample_clock_hz=int(sys_clk_freq))
+```
+
+The helper packs named LiteX/Migen signals into `probe_in`, records bit
+offsets in `probe_fields`, can emit a `.prob` sidecar for the host, and keeps
+control/readback on the existing JTAG transport.  It does not consume LiteX
+CSR or Wishbone address space.  See
+[`docs/04_rtl_integration.md`](docs/04_rtl_integration.md#litex-integration)
+for details.
+
 ### Vendor JTAG chain availability
 
-| Vendor | Primitive | User chains | ELA (needs 2) | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
+| Vendor | Primitive | User chains | ELA | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
 |--------|-----------|:-----------:|:---:|:---:|:---:|:---:|
-| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1+USER2 | USER3 | USER4 | USER4 (shared) |
-| **Intel** | sld_virtual_jtag | Unlimited | inst 0+1 | inst 2 | inst 3 | inst 5 |
-| **ECP5** | JTAGG | 2 (ER1+ER2) | ER1+ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
+| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
+| **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
+| **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
 | **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
+| **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
 
 **Verified Xilinx 7-series IR codes** (xc7a100t, Arty A7):
 USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
@@ -504,9 +559,17 @@ bitstream, assign UART to a free chain (e.g. USER3 if EIO is not used —
 the Arty A7 reference design does this). On Intel, each gets a unique
 virtual JTAG instance, so both always coexist.
 
+Xilinx ELA wrappers default to `SINGLE_CHAIN_BURST=1`: USER1 carries both
+control and 256-bit burst readout. Set `SINGLE_CHAIN_BURST=0` only for the
+legacy USER2 dual-chain burst path.
+
 On Gowin, the single chain means **no burst readback** — sample data is read
 word-by-word through the sample DATA window (functional but slower). Details
 are in the manual (see below).
+
+On PolarFire-family devices, UJTAG exposes two user instructions from one
+primitive. To use ELA and EIO together, enable `EIO_EN=1` on the ELA wrapper;
+EIO shares USER1 through the wrapper's register-bus mux.
 
 ### JTAG protocol and register reference
 
@@ -519,37 +582,25 @@ from the RTL.
 
 [↑ Top](#readme-top)
 
-## Comparison with other embedded logic analyzers
+## Support status
 
-| Feature | **fpgacapZero** | Vivado ILA | SignalTap II | Lattice Reveal | Gowin GAO | LiteScope |
-|---------|:-----------:|:----------:|:------------:|:--------------:|:---------:|:---------:|
-| **Vendor-portable** | Yes | No | No | No | No | Yes |
-| **Open source** | Apache 2.0 | No | No | No | No | BSD |
-| **Trigger modes** | 9 (==,!=,<,>,<=,>=,R,F,changed) | ==, !=, edge | ==, !=, compare | Value + edge | 6 types | Value match |
-| **Trigger sequencer** | 2-4 stages | 16-state FSM | State-based | 16 levels | Multi-level | Basic |
-| **Dual comparators** | Yes (AND/OR) | Yes | Yes | Yes (TU+TE) | Yes | No |
-| **Storage qualification** | Yes | Yes | Yes | -- | -- | Subsampling |
-| **Buffer type** | BRAM (any vendor) | BRAM/URAM | BRAM | EBR | BSRAM | BRAM |
-| **Channel mux** | Yes (runtime) | Multiple cores | Runtime mux | Multiple cores | Up to 16 AO | Groups |
-| **Readback** | JTAG burst  | JTAG | JTAG | JTAG | JTAG | Wishbone (UART/ETH/PCIe) |
-
-\* 
-| **Host interface** | Python API + CLI + JSON-RPC | GUI + Tcl + ChipScoPy | GUI + Tcl | GUI | GUI | Python + CLI |
-| **Export formats** | JSON, CSV, VCD | CSV, VCD | CSV, VCD, TBL | Proprietary | CSV, VCD, PRN | VCD, CSV, SR |
-| **Virtual I/O** | EIO core | VIO | In-System Sources | -- | GVIO | LiteScopeIO |
-| **LLM-friendly** | Yes (JSON-RPC, summaries) | Moderate (Tcl) | Moderate (Tcl) | Limited | Limited | Good (Python) |
-| **Baseline LUTs** | ~1,600 | ~1,000+ | Varies | Varies | Varies | Small |
-
-**Key differentiators:**
-
-- **Only vendor-portable option with advanced triggers** — 9 compare modes, dual
-  comparators with boolean combine, and multi-stage sequencer; LiteScope is also
-  portable but offers only basic triggering
-- **LLM-native host stack** — JSON-RPC server, structured event extraction
-  (edges, bursts, frequency), and capture summaries designed for AI-driven debug
-- **Single RTL file per core** — no code generation, no Python build step;
-  standard Verilog parameters for all configuration
-- **Apache 2.0 license** — usable in proprietary designs with explicit patent grant
+| Area | Status |
+|------|--------|
+| Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
+| OpenOCD backend | Implemented, needs more hardware validation |
+| Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
+| Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
+| Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
+| Microchip PolarFire-family TAP wrappers | Implemented in RTL, host validation still limited |
+| Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
+| EIO over real transports | Implemented — USER3 on Xilinx; wrapper-shared chain on ECP5, Gowin, and PolarFire-family devices |
+| EJTAG-AXI bridge | Hardware-validated on Arty A7 (single, auto-inc, and burst modes) |
+| EJTAG-UART bridge | Hardware-validated on Arty A7 (loopback: send, recv, recv_line, status) |
+| Sample decimation | Implemented in RTL and host API/CLI |
+| External trigger I/O | Implemented in RTL and host API/CLI |
+| Timestamp counter | Implemented in RTL and host API/CLI |
+| Segmented memory | Hardware-validated on Arty A7 (4 segments, auto-rearm) |
+| Raw TCF transport | Planned |
 
 [↑ Top](#readme-top)
 
@@ -561,19 +612,19 @@ uses dual-port BRAM, so scaling wider or deeper adds BRAM, not LUTs.
 Numbers below are **Slice LUTs** and **FFs** from Vivado **synthesis**
 reports on **xc7a100t** (2025.2), except the last row, which uses the
 same **post–place & route** totals as the shipped `arty_a7_top`
-reference (Apr 2026). Regenerate ELA-only rows with
-`vivado -mode batch -source scripts/resource_comparison.tcl` (set
-`FPGACAP_ROOT` if the repo is not next to `scripts/`).
+reference (Apr 2026). The small rows are wrapper-inclusive: they include
+the JTAG TAP/register/readout plumbing, not only `fcapz_ela.v`.
 
 | Config | Slice LUTs | FFs | BRAM | Notes |
 |--------|-----:|----:|-----:|-------|
-| 8b × 1024, baseline | 1,595 | 1,478 | 0.5 | Dual comparators, 9 modes; `TRIG_STAGES=1`, `STOR_QUAL=0` |
-| 8b × 1024, +storage qual | 1,616 | 1,497 | 0.5 | +21 LUT |
-| 8b × 1024, +4-stage seq | 2,098 | 1,878 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=0` |
-| 8b × 1024, seq + SQ | 2,095 | 1,897 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=1` |
-| 8b × 4096 | 1,541 | 1,490 | 1.0 | Deeper buffer (+0.5 BRAM tile vs 1024) |
-| 32b × 1024 | 1,548 | 1,740 | 1.0 | Wider samples (+0.5 BRAM tile vs 8b×1024) |
-| **`arty_a7_top` (placed)** | **2,701** | **2,743** | **1.5** | ELA with `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave` (no UART in this bitstream) |
+| 8b x 1024, A-only, slow USER1 readout | 596 | 779 | 0.5 | Smallest practical 1024-sample ELA; `DUAL_COMPARE=0`, optional features off |
+| 8b x 1024, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | One BSCANE2; 256-bit USER1 burst via `SINGLE_CHAIN_BURST=1` |
+| 8b x 1024, dual comparator, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | Compatibility trigger shape; EQ/NEQ/edges/changed |
+| 8b x 1024, dual comparator, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | Adds `<`, `>`, `<=`, `>=`; compare hit is registered for timing |
+| 8b x 1024, +storage qualification | 2,521 | 1,749 | 0.5 | Same compatibility harness with `STOR_QUAL=1` |
+| 8b x 1024, 4-stage sequencer | 2,954 | 2,788 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=0` |
+| 32b x 1024, dual comparator, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | Wider samples mainly add BRAM/FFs |
+| **`arty_a7_top` (placed)** | **3,244** | **4,562** | **3.5** | Hardware-validation reference: ELA with `INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave` |
 
 Optional ELA parameters (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`,
 `NUM_SEGMENTS`, channel mux, etc.) add registers, comparators, and
@@ -582,7 +633,7 @@ authoritative “full validation” footprint for that combination.
 Per-core deltas are not additive in synthesis because Vivado optimises
 across hierarchy.
 
-**Fmax (reference build):** `sys_clk` @ 100 MHz with WNS ≈ 1.13 ns after
+**Fmax (reference build):** `sys_clk` @ 100 MHz with WNS positive after
 route on `arty_a7_top` (xc7a100t, same build). JTAG `tck_bscan` is
 constrained at 10 MHz (adapter-dependent in practice, often higher).
 
@@ -596,7 +647,7 @@ Synthesis / P&R from Vivado 2025.2, xc7a100t (Arty A7). Fits on even
 the smallest Artix-7.
 
 ```verilog
-// Minimal core (Xilinx — swap suffix for other vendors)
+// Default small core (Xilinx — swap suffix for other vendors)
 fcapz_ela_xilinx7 #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
     .sample_clk(clk), .sample_rst(rst), .probe_in(signals)
 );
@@ -616,9 +667,9 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | Job | What it checks |
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
-| `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression step for USER1/USER2 priming and timestamp stabilization |
-| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, Xilinx 7-series / UltraScale wrappers, and simulation stubs |
-| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then ELA, ELA regression probe, EIO, and channel-mux testbenches (Icarus Verilog + `vvp`) |
+| `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
+| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
@@ -647,8 +698,11 @@ python sim/run_sim.py --lint-only
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
-the testbenches.  CI uses the same runner so local regressions and GitHub
-Actions exercise the same RTL lint target list.
+the testbenches. The ELA configuration matrix covers small/scalable build
+shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
+registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
+so local regressions and GitHub Actions exercise the same RTL lint target
+list.
 
 ### Tests
 
@@ -675,78 +729,66 @@ FPGACAP_GUI_HW=1 python -m pytest tests/test_gui_hw_capture.py -v --tb=short \
 ```
 fpgacapZero/
   rtl/
-    dpram.v                  Dual-port RAM (infers BRAM automatically)
-    trig_compare.v           Comparator unit (9 modes)
-    fcapz_ela.v              ELA core (vendor-agnostic)
-    fcapz_eio.v              EIO core (vendor-agnostic)
-    jtag_reg_iface.v         JTAG-to-register bridge
-    jtag_burst_read.v        Burst data readout (256-bit DR)
-    fcapz_ela_xilinx7.v       ELA wrapper — Xilinx 7-series
-    fcapz_ela_xilinxus.v      ELA wrapper — Xilinx UltraScale / UltraScale+
-    fcapz_ela_ecp5.v          ELA wrapper — Lattice ECP5
-    fcapz_ela_intel.v         ELA wrapper — Intel / Altera
-    fcapz_ela_gowin.v         ELA wrapper — Gowin
-    fcapz_eio_xilinx7.v       EIO wrapper — Xilinx 7-series
-    fcapz_eio_xilinxus.v      EIO wrapper — Xilinx UltraScale / UltraScale+
-    fcapz_eio_ecp5.v          EIO wrapper — Lattice ECP5
-    fcapz_eio_intel.v         EIO wrapper — Intel / Altera
-    fcapz_eio_gowin.v         EIO wrapper — Gowin
-    fcapz_ejtagaxi.v          EJTAG-AXI bridge core (vendor-agnostic)
-    fcapz_ejtagaxi_xilinx7.v  EJTAG-AXI wrapper — Xilinx 7-series
-    fcapz_ejtagaxi_xilinxus.v EJTAG-AXI wrapper — Xilinx UltraScale / UltraScale+
-    fcapz_ejtagaxi_intel.v    EJTAG-AXI wrapper — Intel / Altera
-    fcapz_ejtaguart.v         EJTAG-UART bridge core (vendor-agnostic)
-    fcapz_ejtaguart_xilinx7.v EJTAG-UART wrapper — Xilinx 7-series
-    fcapz_ejtaguart_xilinxus.v EJTAG-UART wrapper — Xilinx UltraScale / UltraScale+
-    fcapz_ejtaguart_intel.v   EJTAG-UART wrapper — Intel / Altera
+    fcapz_ela.v              ELA core
+    fcapz_eio.v              EIO core
+    fcapz_ejtagaxi.v         EJTAG-AXI core
+    fcapz_ejtaguart.v        EJTAG-UART core
+    fcapz_async_fifo.v       Portable async FIFO used by bridge cores
+    fcapz_regbus_mux.v       Register-bus mux for shared-chain wrappers
+    fcapz_version.vh         Version/core-id header
+    dpram.v                  Dual-port sample/timestamp RAM
+    reset_sync.v             Reset synchronizer
+    trig_compare.v           Trigger comparator unit
+    jtag_reg_iface.v         49-bit register protocol
+    jtag_pipe_iface.v        Single-chain register + burst pipe
+    jtag_burst_read.v        Legacy separate-chain burst readout
+    fcapz_ela_*.v            ELA vendor wrappers
+    fcapz_eio_*.v            EIO vendor wrappers
+    fcapz_ejtagaxi_*.v       EJTAG-AXI vendor wrappers
+    fcapz_ejtaguart_*.v      EJTAG-UART vendor wrappers
     jtag_tap/
-      jtag_tap_xilinx7.v    TAP primitive — Xilinx 7-series (BSCANE2)
-      jtag_tap_xilinxus.v   TAP primitive — Xilinx UltraScale / UltraScale+ (BSCANE2)
-      jtag_tap_ecp5.v       TAP primitive — Lattice (JTAGG)
-      jtag_tap_intel.v      TAP primitive — Intel (sld_virtual_jtag)
-      jtag_tap_gowin.v      TAP primitive — Gowin (JTAG)
+      jtag_tap_*.v           Vendor TAP primitive adapters
     vhdl/
-      fcapz_ela_*.vhd       VHDL ELA wrappers (one per vendor)
-      fcapz_eio_*.vhd       VHDL EIO wrappers (one per vendor)
+      fcapz_ela_*.vhd        VHDL ELA wrappers
+      fcapz_eio_*.vhd        VHDL EIO wrappers
   tb/
-    fcapz_ela_tb.sv          ELA core testbench
-    fcapz_ela_bug_probe_tb.sv ELA regression probe for capture-window edge cases
-    fcapz_eio_tb.sv          EIO core testbench (7 scenarios, 18 checks)
-    chan_mux_tb.sv           Channel mux (NUM_CHANNELS) testbench
-    fcapz_ejtagaxi_tb.sv    EJTAG-AXI bridge testbench
-    fcapz_ejtaguart_tb.sv   EJTAG-UART bridge testbench
+    *_tb.sv, *_tb.v          RTL simulations and focused regressions
+    fcapz_ela_config_matrix_tb.sv
+                             ELA parameter/configuration matrix
+    fcapz_ela_xilinx7_single_chain_tb.sv
+                             Wrapper-level single-chain readback regression
+    jtag_pipe_iface_tb.sv    Single-chain pipe protocol regression
+    jtag_burst_read_tb.sv    Legacy burst readout regression
+    fcapz_async_fifo_equiv_tb.v
+                             Behavioral vs primitive FIFO equivalence
   host/fcapz/
-    __init__.py            Public API
-    analyzer.py            Analyzer, CaptureConfig, CaptureResult, ProbeSpec
-    transport.py           OpenOCD and hw_server transports (burst + pipelined)
-    events.py              LLM event extraction (edges, bursts, frequency, summarize)
-    cli.py                 Command-line interface
-    rpc.py                 JSON-RPC server
-    eio.py                 EioController: read/write fabric probes via JTAG USER3
-    ejtagaxi.py            EjtagAxiController: AXI4 read/write over JTAG USER4
-    ejtaguart.py           EjtagUartController: UART send/recv over JTAG USER4
+    analyzer.py              ELA API
+    transport.py             OpenOCD and hw_server transports
+    cli.py, rpc.py           CLI and JSON-RPC entry points
+    eio.py                   EIO controller
+    ejtagaxi.py              AXI bridge controller
+    ejtaguart.py             UART bridge controller
+    events.py                Capture summary/event helpers
+    probes.py                .prob sidecar parser/writer
+    litex.py                 LiteX ELA integration helper
+    gui/                     PySide6 desktop GUI modules and assets
   examples/arty_a7/
-    arty_a7_top.v          Reference design top-level
-    arty_a7.xdc            Pin constraints
-    build_arty.tcl         Vivado batch build
-    arty_a7.cfg            OpenOCD config (onboard FT2232)
-    arty_a7_hs3.cfg        OpenOCD config (Digilent HS3)
-    test_hw_integration.py Hardware integration tests
+    arty_a7_top.v            Reference design top-level
+    arty_a7.xdc              Pin constraints
+    build_arty.tcl           Vivado batch build
+    arty_a7*.cfg             OpenOCD configs
+    test_hw_integration.py   Hardware integration tests
   tests/
-    test_host_stack.py     Python unit tests
-    test_cli_rpc_events.py CLI, RPC, and event helper tests
-    test_ejtaguart.py      EJTAG-UART controller unit tests
+    test_*.py                Host, CLI/RPC, transport, LiteX, probe-file,
+                             bridge, GUI, and viewer tests
   docs/
-    README.md              User-manual index (chapters 01_*–17_*)
-    01_overview.md         What fpgacapZero is, the four cores, vendor matrix
-    02_install.md          Python install, optional GUI extras, prereqs
-    03_first_capture.md    10-minute walkthrough on Arty A7
-    ...                    (see docs/README.md for the full chapter list)
-    specs/                 Canonical reference docs
-      architecture.md      Core block diagram
-      register_map.md      Register map specification (ground truth)
-      transport_api.md     Transport interface spec
-      waveform_schema.md   Export format spec
+    README.md                User-manual index
+    01_overview.md ...       User-manual chapters
+    specs/                   Canonical reference docs
+      architecture.md        Core block diagram
+      register_map.md        Register map specification (ground truth)
+      transport_api.md       Transport interface spec
+      waveform_schema.md     Export format spec
 ```
 
 [↑ Top](#readme-top)

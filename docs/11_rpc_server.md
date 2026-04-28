@@ -224,6 +224,8 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 ```
 
 `probes` can also be a string in the CLI `name:width:lsb,...` form.
+Use `probe_file` with a `.prob` sidecar path to load the same information
+from disk; `probes` and `probe_file` are mutually exclusive.
 
 #### `arm`
 
@@ -242,7 +244,7 @@ Configure + arm + capture in one call, returning the result.
   "posttrigger": 16,
   "trigger_value": 66,
   "trigger_mask": 255,
-  "probes": [{"name": "counter", "width": 8, "lsb": 0}],
+  "probe_file": "design.prob",
   "format": "json",         // or "csv" or "vcd"
   "summarize": true,        // optional, returns LLM-friendly summary
   "timeout": 10.0
