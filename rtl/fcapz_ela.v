@@ -149,6 +149,9 @@ module fcapz_ela #(
     endgenerate
 
     localparam PTR_W = $clog2(DEPTH);
+    // Used by the single-segment pre-arm rolling buffer. Keep this explicit
+    // instead of slicing DEPTH, because power-of-two DEPTH would truncate to 0.
+    localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;
     // INPUT_PIPE also registers compare hits so REL_COMPARE comparators stay
@@ -1033,7 +1036,7 @@ module fcapz_ela #(
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
                           (post_count < post_store_limit);
-    wire pre_store_now = armed && !done && !triggered &&
+    wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
     always @(*) begin
@@ -1135,9 +1138,11 @@ module fcapz_ela #(
                 armed       <= 1'b1;
                 triggered   <= 1'b0;
                 done        <= 1'b0;
-                wr_ptr      <= {PTR_W{1'b0}};
+                if (HAS_SEGMENTS)
+                    wr_ptr  <= {PTR_W{1'b0}};
                 post_count  <= {PTR_W{1'b0}};
-                pre_count   <= {PTR_W+1{1'b0}};
+                if (HAS_SEGMENTS)
+                    pre_count <= {PTR_W+1{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
                 trig_holdoff_active <= (trig_holdoff_sync2 != 16'h0);
@@ -1154,6 +1159,19 @@ module fcapz_ela #(
                     overflow <= (pretrig_len_sync2 + posttrig_len_sync2 + 1 > SEG_DEPTH);
                 else
                     overflow <= (pretrig_len_sync2 + posttrig_len_sync2 + 1 > DEPTH);
+            end
+
+            // Issue #10: in single-segment mode, keep BRAM populated before
+            // arm so a fast trigger can use real pre-arm history instead of
+            // waiting for a post-arm prefill window.
+            if (!armed && !done) begin
+                if (mem_we_a) begin
+                    wr_ptr <= wr_ptr + 1'b1;
+                    if (wr_ptr >= DEPTH_LAST)
+                        wr_ptr <= {PTR_W{1'b0}};
+                end
+                if (store_enable && !pretrigger_ready)
+                    pre_count <= pre_count + 1'b1;
             end
 
             if (armed && !done) begin
