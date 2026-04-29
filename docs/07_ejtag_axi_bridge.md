@@ -323,6 +323,18 @@ register dumps and small block transfers, small enough that the
 LUT/FF cost is negligible (~150 LUTs for the FIFO).  Bumping to
 256 costs ~1200 LUTs but lets you do full AXI4 max bursts.
 
+`DEBUG_EN` defaults to `0` on the core and vendor wrappers. Leave it
+off for production builds so synthesis can prune the 256-bit debug
+buses, capture-record storage, and debug-only counters; enable it only
+when wiring those buses into an on-chip analyzer.
+
+Those debug buses are internal development telemetry, not a stable host
+or register-map API. They expose snapshots of the TCK-side command
+pipeline, AXI-side launch/response state, and a few short capture
+records used while wiring an ILA. The exact bit layout may change with
+the bridge implementation; production designs should use the documented
+JTAG command protocol and CONFIG registers instead.
+
 ## Throughput
 
 Sustained data rate depends on the JTAG adapter, cable, and whether the

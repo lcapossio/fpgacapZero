@@ -13,7 +13,9 @@
 //
 // The slave memory is not reset by CMD_RESET, only the bridge state is.
 
-module fcapz_ejtagaxi_reset_regression_tb;
+module fcapz_ejtagaxi_reset_regression_tb #(
+    parameter DEBUG_EN = 0
+);
 
     logic tck     = 1'b0;
     logic axi_clk = 1'b0;
@@ -56,6 +58,10 @@ module fcapz_ejtagaxi_reset_regression_tb;
     wire        m_axi_rvalid;
     wire        m_axi_rlast;
     wire        m_axi_rready;
+    wire [255:0] debug_tck;
+    wire [255:0] debug_tck_edge;
+    wire [255:0] debug_axi;
+    wire [255:0] debug_axi_edge;
 
     integer pass_count = 0;
     integer fail_count = 0;
@@ -71,7 +77,8 @@ module fcapz_ejtagaxi_reset_regression_tb;
         .ADDR_W     (32),
         .DATA_W     (32),
         .FIFO_DEPTH (16),
-        .TIMEOUT    (4096)
+        .TIMEOUT    (4096),
+        .DEBUG_EN   (DEBUG_EN)
     ) dut (
         .tck           (tck),
         .tdi           (tdi),
@@ -108,7 +115,11 @@ module fcapz_ejtagaxi_reset_regression_tb;
         .m_axi_rresp   (m_axi_rresp),
         .m_axi_rvalid  (m_axi_rvalid),
         .m_axi_rlast   (m_axi_rlast),
-        .m_axi_rready  (m_axi_rready)
+        .m_axi_rready  (m_axi_rready),
+        .debug_tck     (debug_tck),
+        .debug_tck_edge(debug_tck_edge),
+        .debug_axi     (debug_axi),
+        .debug_axi_edge(debug_axi_edge)
     );
 
     axi4_test_slave #(
@@ -372,6 +383,16 @@ module fcapz_ejtagaxi_reset_regression_tb;
         resp  = get_resp(scan_out);
         check("first post-reset read_inc resp=OKAY", resp == 2'b00);
         check("first post-reset read_inc data correct", rdata == 32'h89AB_CDEF);
+
+        if (DEBUG_EN) begin
+            check("DEBUG_EN=1 exposes debug activity",
+                  (debug_tck != 256'd0) || (debug_tck_edge != 256'd0) ||
+                  (debug_axi != 256'd0) || (debug_axi_edge != 256'd0));
+        end else begin
+            check("DEBUG_EN=0 ties debug buses low",
+                  debug_tck == 256'd0 && debug_tck_edge == 256'd0 &&
+                  debug_axi == 256'd0 && debug_axi_edge == 256'd0);
+        end
 
         if (fail_count == 0) begin
             $display("PASS: reset regression (%0d checks)", pass_count);

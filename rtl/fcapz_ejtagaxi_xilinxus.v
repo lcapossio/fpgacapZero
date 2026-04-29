@@ -22,6 +22,7 @@ module fcapz_ejtagaxi_xilinxus #(
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
     parameter TIMEOUT    = 4096,
+    parameter DEBUG_EN   = 0,
     parameter ASYNC_FIFO_IMPL = 1,
     parameter CHAIN      = 4
 ) (
@@ -69,6 +70,7 @@ module fcapz_ejtagaxi_xilinxus #(
     fcapz_ejtagaxi_xilinx7 #(
         .ADDR_W(ADDR_W), .DATA_W(DATA_W),
         .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
+        .DEBUG_EN(DEBUG_EN),
         .ASYNC_FIFO_IMPL(ASYNC_FIFO_IMPL),
         .CHAIN(CHAIN)
     ) u_inner (
