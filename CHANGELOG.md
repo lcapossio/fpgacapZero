@@ -9,6 +9,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **EJTAG-AXI RTL:** `DEBUG_EN` parameter on the core and vendor wrappers,
+  defaulting off to prune bridge-only debug buses, capture records, and
+  counters from production builds; RTL reset regression now sweeps
+  `DEBUG_EN=0` and `DEBUG_EN=1`.
+
 - **Docs:** JTAG register map spec — in-document index, ↑ Top anchors, and
   clarified per-core “address map” scope ([`docs/specs/register_map.md`](docs/specs/register_map.md));
   chapter 13 stub updated ([`docs/13_register_map.md`](docs/13_register_map.md)).

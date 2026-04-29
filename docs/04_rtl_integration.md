@@ -444,6 +444,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
     parameter TIMEOUT    = 4096,
+    parameter DEBUG_EN   = 0,
     parameter CHAIN      = 4
 ) ( ... );
 ```
@@ -454,6 +455,7 @@ module fcapz_ejtagaxi_xilinx7 #(
 | `DATA_W` | 32 | AXI data width.  Only 32 is supported today. |
 | `FIFO_DEPTH` | 1..256, **power of 2** | Async FIFO depth for burst reads.  Limits the maximum burst length the host can request — the host caches this from `FEATURES[23:16]` and rejects oversized requests at the API boundary.  See [chapter 07](07_ejtag_axi_bridge.md). |
 | `TIMEOUT` | int | AXI handshake timeout in `axi_clk` cycles.  Applies to `wready`/`bvalid`/`arready`/`rvalid` waits, **not** between burst beats. |
+| `DEBUG_EN` | 0, 1 | Enables the 256-bit debug buses and debug CONFIG capture records. Defaults off to let synthesis prune debug-only storage and counters. |
 | `CHAIN` | 1..4 | BSCANE2 USER chain. |
 
 ## EJTAG-UART wrapper parameter reference

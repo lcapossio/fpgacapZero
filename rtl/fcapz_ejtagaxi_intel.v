@@ -20,6 +20,7 @@ module fcapz_ejtagaxi_intel #(
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
     parameter TIMEOUT    = 4096,
+    parameter DEBUG_EN   = 0,
     parameter ASYNC_FIFO_IMPL = 0, // 0=portable behavioral
     parameter CHAIN      = 4       // sld_instance_index (1-3 used by ELA+EIO)
 ) (
@@ -79,6 +80,7 @@ module fcapz_ejtagaxi_intel #(
     fcapz_ejtagaxi #(
         .ADDR_W(ADDR_W), .DATA_W(DATA_W),
         .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
+        .DEBUG_EN(DEBUG_EN),
         .ASYNC_FIFO_IMPL(ASYNC_FIFO_IMPL)
     ) u_ejtagaxi (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),

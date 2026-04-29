@@ -29,6 +29,7 @@ module fcapz_ejtagaxi #(
     parameter CMD_FIFO_DEPTH  = FIFO_DEPTH * 2,
     parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
+    parameter DEBUG_EN   = 0,
     parameter USE_BEHAV_ASYNC_FIFO    = 1,
     parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1)
 ) (
@@ -438,7 +439,7 @@ module fcapz_ejtagaxi #(
                                cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready;
     wire [3:0]  status_bits  = {fifo_notempty, error_sticky, busy_status, prev_valid};
 
-    assign debug_tck = {
+    assign debug_tck = DEBUG_EN ? {
         sr,
         cmdq_wr_data,
         auto_inc_addr,
@@ -463,9 +464,9 @@ module fcapz_ejtagaxi #(
         prev_valid,
         error_sticky,
         25'd0
-    };
+    } : 256'd0;
 
-    assign debug_tck_edge = {
+    assign debug_tck_edge = DEBUG_EN ? {
         47'd0,
         dbg_tck_enqueue_count,
         dbg_tck_update_count,
@@ -479,7 +480,7 @@ module fcapz_ejtagaxi #(
         sr_wstrb,
         sr_payload,
         sr_addr
-    };
+    } : 256'd0;
 
     assign respq_rd_en = sel && update && resp_pop_pending && respq_rd_ready;
     assign cmdq_rd_en = cmdq_rd_ready &&
@@ -519,9 +520,11 @@ module fcapz_ejtagaxi #(
         cmdq_rst_tck  <= 1'b0;
         respq_rst_tck <= 1'b0;
         fifo_rst_tck  <= 1'b0;
-        if (cmdq_wr_en) begin
+        if (DEBUG_EN && cmdq_wr_en) begin
             cmdq_stage_valid <= 1'b0;
             dbg_tck_enqueue_count <= dbg_tck_enqueue_count + 1'b1;
+        end else if (cmdq_wr_en) begin
+            cmdq_stage_valid <= 1'b0;
         end
         if (sel) begin
             respq_head_seen <= respq_rd_ready && !respq_empty;
@@ -539,7 +542,7 @@ module fcapz_ejtagaxi #(
                     pending_count != {(CMD_FIFO_AW+1){1'b0}}) begin
                     pending_count <= pending_count - 1'b1;
                 end
-                if (capture_resp_data && dbg_resp_cap_rec_count < 3'd4) begin
+                if (DEBUG_EN && capture_resp_data && dbg_resp_cap_rec_count < 3'd4) begin
                     dbg_resp_cap_rec_data[dbg_resp_cap_rec_count] <= capture_rdata;
                     dbg_resp_cap_rec_meta[dbg_resp_cap_rec_count] <= {
                         9'd0,
@@ -567,7 +570,7 @@ module fcapz_ejtagaxi #(
             end else if (update) begin
                 prev_valid <= 1'b0;
                 resp_pop_pending <= 1'b0;
-                if (dbg_rec_count < 3'd4) begin
+                if (DEBUG_EN && dbg_rec_count < 3'd4) begin
                     dbg_rec_sr_addr[dbg_rec_count]    <= sr_addr;
                     dbg_rec_sr_payload[dbg_rec_count] <= sr_payload;
                     dbg_rec_sr_meta[dbg_rec_count]    <= {21'd0, cmdq_stage_valid, cmdq_wr_ready, cmdq_full, sr_cmd, sr_wstrb};
@@ -577,13 +580,15 @@ module fcapz_ejtagaxi #(
                     dbg_rec_cmd_meta[dbg_rec_count]   <= 32'd0;
                     dbg_rec_count <= dbg_rec_count + 1'b1;
                 end
-                dbg_tck_update_sr       <= sr;
-                dbg_tck_update_cmdq     <= cmdq_stage_data;
-                dbg_tck_update_auto_inc <= auto_inc_addr;
-                dbg_tck_update_last_cmd <= last_cmd;
-                dbg_tck_update_fire     <= 1'b0;
-                dbg_tck_update_full     <= cmdq_full;
-                dbg_tck_update_count    <= dbg_tck_update_count + 1'b1;
+                if (DEBUG_EN) begin
+                    dbg_tck_update_sr       <= sr;
+                    dbg_tck_update_cmdq     <= cmdq_stage_data;
+                    dbg_tck_update_auto_inc <= auto_inc_addr;
+                    dbg_tck_update_last_cmd <= last_cmd;
+                    dbg_tck_update_fire     <= 1'b0;
+                    dbg_tck_update_full     <= cmdq_full;
+                    dbg_tck_update_count    <= dbg_tck_update_count + 1'b1;
+                end
 
                 case (sr_cmd)
                     CMD_NOP: begin
@@ -607,21 +612,23 @@ module fcapz_ejtagaxi #(
                             pending_count <= pending_count + 1'b1;
                             burst_cfg_valid <= 1'b0;
                             burst_w_beats_left <= 9'd0;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_WRITE,
-                                sr_wstrb[DATA_W/8-1:0],
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_WRITE, sr_addr[ADDR_W-1:0],
-                                                    sr_payload[DATA_W-1:0],
-                                                    sr_wstrb[DATA_W/8-1:0],
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_WRITE,
+                                    sr_wstrb[DATA_W/8-1:0],
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_WRITE, sr_addr[ADDR_W-1:0],
+                                                        sr_payload[DATA_W-1:0],
+                                                        sr_wstrb[DATA_W/8-1:0],
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                         end else begin
                             error_sticky <= 1'b1;
                         end
@@ -636,20 +643,22 @@ module fcapz_ejtagaxi #(
                             pending_count <= pending_count + 1'b1;
                             burst_cfg_valid <= 1'b0;
                             burst_w_beats_left <= 9'd0;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_READ,
-                                {(DATA_W/8){1'b0}},
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_READ, sr_addr[ADDR_W-1:0],
-                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= sr_addr[ADDR_W-1:0];
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_READ,
+                                    {(DATA_W/8){1'b0}},
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_READ, sr_addr[ADDR_W-1:0],
+                                                        {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                         end else begin
                             error_sticky <= 1'b1;
                         end
@@ -666,21 +675,23 @@ module fcapz_ejtagaxi #(
                                                  sr_wstrb[DATA_W/8-1:0],
                                                  burst_awlen, burst_awsize, burst_awburst};
                             pending_count <= pending_count + 1'b1;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_WRITE,
-                                sr_wstrb[DATA_W/8-1:0],
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_WRITE, auto_inc_addr,
-                                                    sr_payload[DATA_W-1:0],
-                                                    sr_wstrb[DATA_W/8-1:0],
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_WRITE,
+                                    sr_wstrb[DATA_W/8-1:0],
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_WRITE, auto_inc_addr,
+                                                        sr_payload[DATA_W-1:0],
+                                                        sr_wstrb[DATA_W/8-1:0],
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                             auto_inc_addr <= auto_inc_addr + 4;
                             burst_cfg_valid <= 1'b0;
                             burst_w_beats_left <= 9'd0;
@@ -696,20 +707,22 @@ module fcapz_ejtagaxi #(
                                                  {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
                                                  burst_awlen, burst_awsize, burst_awburst};
                             pending_count <= pending_count + 1'b1;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_READ,
-                                {(DATA_W/8){1'b0}},
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_READ, auto_inc_addr,
-                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= auto_inc_addr;
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_READ,
+                                    {(DATA_W/8){1'b0}},
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_READ, auto_inc_addr,
+                                                        {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                             auto_inc_addr <= auto_inc_addr + 4;
                             burst_cfg_valid <= 1'b0;
                             burst_w_beats_left <= 9'd0;
@@ -740,21 +753,23 @@ module fcapz_ejtagaxi #(
                                                  sr_wstrb[DATA_W/8-1:0],
                                                  burst_awlen, burst_awsize, burst_awburst};
                             pending_count <= pending_count + 1'b1;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_BURST_WDATA,
-                                sr_wstrb[DATA_W/8-1:0],
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_BURST_WDATA, burst_addr,
-                                                    sr_payload[DATA_W-1:0],
-                                                    sr_wstrb[DATA_W/8-1:0],
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= sr_payload[DATA_W-1:0];
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_BURST_WDATA,
+                                    sr_wstrb[DATA_W/8-1:0],
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_BURST_WDATA, burst_addr,
+                                                        sr_payload[DATA_W-1:0],
+                                                        sr_wstrb[DATA_W/8-1:0],
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                             if (burst_w_beats_left == 9'd1) begin
                                 burst_cfg_valid <= 1'b0;
                                 burst_w_beats_left <= 9'd0;
@@ -778,20 +793,22 @@ module fcapz_ejtagaxi #(
                             pending_count <= pending_count + 1'b1;
                             burst_cfg_valid <= 1'b0;
                             burst_w_beats_left <= 9'd0;
-                            dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
-                            dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
-                            dbg_rec_cmd_meta[dbg_rec_count]  <= {
-                                10'd0,
-                                CMD_BURST_RSTART,
-                                {(DATA_W/8){1'b0}},
-                                burst_awlen,
-                                burst_awsize,
-                                burst_awburst
-                            };
-                            dbg_tck_update_cmdq <= {CMD_BURST_RSTART, burst_addr,
-                                                    {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
-                                                    burst_awlen, burst_awsize, burst_awburst};
-                            dbg_tck_update_fire <= 1'b1;
+                            if (DEBUG_EN) begin
+                                dbg_rec_cmd_addr[dbg_rec_count]  <= burst_addr;
+                                dbg_rec_cmd_wdata[dbg_rec_count] <= {DATA_W{1'b0}};
+                                dbg_rec_cmd_meta[dbg_rec_count]  <= {
+                                    10'd0,
+                                    CMD_BURST_RSTART,
+                                    {(DATA_W/8){1'b0}},
+                                    burst_awlen,
+                                    burst_awsize,
+                                    burst_awburst
+                                };
+                                dbg_tck_update_cmdq <= {CMD_BURST_RSTART, burst_addr,
+                                                        {DATA_W{1'b0}}, {(DATA_W/8){1'b0}},
+                                                        burst_awlen, burst_awsize, burst_awburst};
+                                dbg_tck_update_fire <= 1'b1;
+                            end
                         end else begin
                             error_sticky <= 1'b1;
                         end
@@ -813,62 +830,62 @@ module fcapz_ejtagaxi #(
                                                             FIFO_DEPTH_ENC,
                                                             DATA_W[7:0],
                                                             ADDR_W[7:0]};
-                            CFG_DBG_REC_COUNT: config_rdata <= {29'd0, dbg_rec_count};
-                            CFG_DBG_REC0_SR_ADDR: config_rdata <= dbg_rec_sr_addr[0];
-                            CFG_DBG_REC0_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[0];
-                            CFG_DBG_REC0_SR_META: config_rdata <= dbg_rec_sr_meta[0];
-                            CFG_DBG_REC0_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[0];
-                            CFG_DBG_REC0_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[0];
-                            CFG_DBG_REC0_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[0];
-                            CFG_DBG_REC0_CMD_META: config_rdata <= dbg_rec_cmd_meta[0];
-                            CFG_DBG_REC1_SR_ADDR: config_rdata <= dbg_rec_sr_addr[1];
-                            CFG_DBG_REC1_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[1];
-                            CFG_DBG_REC1_SR_META: config_rdata <= dbg_rec_sr_meta[1];
-                            CFG_DBG_REC1_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[1];
-                            CFG_DBG_REC1_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[1];
-                            CFG_DBG_REC1_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[1];
-                            CFG_DBG_REC1_CMD_META: config_rdata <= dbg_rec_cmd_meta[1];
-                            CFG_DBG_REC2_SR_ADDR: config_rdata <= dbg_rec_sr_addr[2];
-                            CFG_DBG_REC2_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[2];
-                            CFG_DBG_REC2_SR_META: config_rdata <= dbg_rec_sr_meta[2];
-                            CFG_DBG_REC2_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[2];
-                            CFG_DBG_REC2_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[2];
-                            CFG_DBG_REC2_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[2];
-                            CFG_DBG_REC2_CMD_META: config_rdata <= dbg_rec_cmd_meta[2];
-                            CFG_DBG_REC3_SR_ADDR: config_rdata <= dbg_rec_sr_addr[3];
-                            CFG_DBG_REC3_SR_PAYLOAD: config_rdata <= dbg_rec_sr_payload[3];
-                            CFG_DBG_REC3_SR_META: config_rdata <= dbg_rec_sr_meta[3];
-                            CFG_DBG_REC3_AUTO_ADDR: config_rdata <= dbg_rec_auto_addr[3];
-                            CFG_DBG_REC3_CMD_ADDR: config_rdata <= dbg_rec_cmd_addr[3];
-                            CFG_DBG_REC3_CMD_WDATA: config_rdata <= dbg_rec_cmd_wdata[3];
-                            CFG_DBG_REC3_CMD_META: config_rdata <= dbg_rec_cmd_meta[3];
-                            CFG_RESP_WR_REC_COUNT: config_rdata <= {29'd0, dbg_resp_wr_rec_count};
-                            CFG_RESP_WR_REC0_DATA: config_rdata <= dbg_resp_wr_rec_data[0];
-                            CFG_RESP_WR_REC0_META: config_rdata <= dbg_resp_wr_rec_meta[0];
-                            CFG_RESP_WR_REC1_DATA: config_rdata <= dbg_resp_wr_rec_data[1];
-                            CFG_RESP_WR_REC1_META: config_rdata <= dbg_resp_wr_rec_meta[1];
-                            CFG_RESP_WR_REC2_DATA: config_rdata <= dbg_resp_wr_rec_data[2];
-                            CFG_RESP_WR_REC2_META: config_rdata <= dbg_resp_wr_rec_meta[2];
-                            CFG_RESP_WR_REC3_DATA: config_rdata <= dbg_resp_wr_rec_data[3];
-                            CFG_RESP_WR_REC3_META: config_rdata <= dbg_resp_wr_rec_meta[3];
-                            CFG_RESP_CAP_REC_COUNT: config_rdata <= {29'd0, dbg_resp_cap_rec_count};
-                            CFG_RESP_CAP_REC0_DATA: config_rdata <= dbg_resp_cap_rec_data[0];
-                            CFG_RESP_CAP_REC0_META: config_rdata <= dbg_resp_cap_rec_meta[0];
-                            CFG_RESP_CAP_REC1_DATA: config_rdata <= dbg_resp_cap_rec_data[1];
-                            CFG_RESP_CAP_REC1_META: config_rdata <= dbg_resp_cap_rec_meta[1];
-                            CFG_RESP_CAP_REC2_DATA: config_rdata <= dbg_resp_cap_rec_data[2];
-                            CFG_RESP_CAP_REC2_META: config_rdata <= dbg_resp_cap_rec_meta[2];
-                            CFG_RESP_CAP_REC3_DATA: config_rdata <= dbg_resp_cap_rec_data[3];
-                            CFG_RESP_CAP_REC3_META: config_rdata <= dbg_resp_cap_rec_meta[3];
-                            CFG_AXI_DEQ_REC_COUNT: config_rdata <= {29'd0, dbg_axi_deq_rec_count};
-                            CFG_AXI_DEQ_REC0_ADDR: config_rdata <= dbg_axi_deq_rec_addr[0];
-                            CFG_AXI_DEQ_REC0_META: config_rdata <= dbg_axi_deq_rec_meta[0];
-                            CFG_AXI_DEQ_REC1_ADDR: config_rdata <= dbg_axi_deq_rec_addr[1];
-                            CFG_AXI_DEQ_REC1_META: config_rdata <= dbg_axi_deq_rec_meta[1];
-                            CFG_AXI_DEQ_REC2_ADDR: config_rdata <= dbg_axi_deq_rec_addr[2];
-                            CFG_AXI_DEQ_REC2_META: config_rdata <= dbg_axi_deq_rec_meta[2];
-                            CFG_AXI_DEQ_REC3_ADDR: config_rdata <= dbg_axi_deq_rec_addr[3];
-                            CFG_AXI_DEQ_REC3_META: config_rdata <= dbg_axi_deq_rec_meta[3];
+                            CFG_DBG_REC_COUNT: config_rdata <= DEBUG_EN ? {29'd0, dbg_rec_count} : 32'd0;
+                            CFG_DBG_REC0_SR_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_sr_addr[0] : 32'd0;
+                            CFG_DBG_REC0_SR_PAYLOAD: config_rdata <= DEBUG_EN ? dbg_rec_sr_payload[0] : 32'd0;
+                            CFG_DBG_REC0_SR_META: config_rdata <= DEBUG_EN ? dbg_rec_sr_meta[0] : 32'd0;
+                            CFG_DBG_REC0_AUTO_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_auto_addr[0] : 32'd0;
+                            CFG_DBG_REC0_CMD_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_cmd_addr[0] : 32'd0;
+                            CFG_DBG_REC0_CMD_WDATA: config_rdata <= DEBUG_EN ? dbg_rec_cmd_wdata[0] : 32'd0;
+                            CFG_DBG_REC0_CMD_META: config_rdata <= DEBUG_EN ? dbg_rec_cmd_meta[0] : 32'd0;
+                            CFG_DBG_REC1_SR_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_sr_addr[1] : 32'd0;
+                            CFG_DBG_REC1_SR_PAYLOAD: config_rdata <= DEBUG_EN ? dbg_rec_sr_payload[1] : 32'd0;
+                            CFG_DBG_REC1_SR_META: config_rdata <= DEBUG_EN ? dbg_rec_sr_meta[1] : 32'd0;
+                            CFG_DBG_REC1_AUTO_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_auto_addr[1] : 32'd0;
+                            CFG_DBG_REC1_CMD_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_cmd_addr[1] : 32'd0;
+                            CFG_DBG_REC1_CMD_WDATA: config_rdata <= DEBUG_EN ? dbg_rec_cmd_wdata[1] : 32'd0;
+                            CFG_DBG_REC1_CMD_META: config_rdata <= DEBUG_EN ? dbg_rec_cmd_meta[1] : 32'd0;
+                            CFG_DBG_REC2_SR_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_sr_addr[2] : 32'd0;
+                            CFG_DBG_REC2_SR_PAYLOAD: config_rdata <= DEBUG_EN ? dbg_rec_sr_payload[2] : 32'd0;
+                            CFG_DBG_REC2_SR_META: config_rdata <= DEBUG_EN ? dbg_rec_sr_meta[2] : 32'd0;
+                            CFG_DBG_REC2_AUTO_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_auto_addr[2] : 32'd0;
+                            CFG_DBG_REC2_CMD_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_cmd_addr[2] : 32'd0;
+                            CFG_DBG_REC2_CMD_WDATA: config_rdata <= DEBUG_EN ? dbg_rec_cmd_wdata[2] : 32'd0;
+                            CFG_DBG_REC2_CMD_META: config_rdata <= DEBUG_EN ? dbg_rec_cmd_meta[2] : 32'd0;
+                            CFG_DBG_REC3_SR_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_sr_addr[3] : 32'd0;
+                            CFG_DBG_REC3_SR_PAYLOAD: config_rdata <= DEBUG_EN ? dbg_rec_sr_payload[3] : 32'd0;
+                            CFG_DBG_REC3_SR_META: config_rdata <= DEBUG_EN ? dbg_rec_sr_meta[3] : 32'd0;
+                            CFG_DBG_REC3_AUTO_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_auto_addr[3] : 32'd0;
+                            CFG_DBG_REC3_CMD_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_cmd_addr[3] : 32'd0;
+                            CFG_DBG_REC3_CMD_WDATA: config_rdata <= DEBUG_EN ? dbg_rec_cmd_wdata[3] : 32'd0;
+                            CFG_DBG_REC3_CMD_META: config_rdata <= DEBUG_EN ? dbg_rec_cmd_meta[3] : 32'd0;
+                            CFG_RESP_WR_REC_COUNT: config_rdata <= DEBUG_EN ? {29'd0, dbg_resp_wr_rec_count} : 32'd0;
+                            CFG_RESP_WR_REC0_DATA: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_data[0] : 32'd0;
+                            CFG_RESP_WR_REC0_META: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_meta[0] : 32'd0;
+                            CFG_RESP_WR_REC1_DATA: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_data[1] : 32'd0;
+                            CFG_RESP_WR_REC1_META: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_meta[1] : 32'd0;
+                            CFG_RESP_WR_REC2_DATA: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_data[2] : 32'd0;
+                            CFG_RESP_WR_REC2_META: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_meta[2] : 32'd0;
+                            CFG_RESP_WR_REC3_DATA: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_data[3] : 32'd0;
+                            CFG_RESP_WR_REC3_META: config_rdata <= DEBUG_EN ? dbg_resp_wr_rec_meta[3] : 32'd0;
+                            CFG_RESP_CAP_REC_COUNT: config_rdata <= DEBUG_EN ? {29'd0, dbg_resp_cap_rec_count} : 32'd0;
+                            CFG_RESP_CAP_REC0_DATA: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_data[0] : 32'd0;
+                            CFG_RESP_CAP_REC0_META: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_meta[0] : 32'd0;
+                            CFG_RESP_CAP_REC1_DATA: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_data[1] : 32'd0;
+                            CFG_RESP_CAP_REC1_META: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_meta[1] : 32'd0;
+                            CFG_RESP_CAP_REC2_DATA: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_data[2] : 32'd0;
+                            CFG_RESP_CAP_REC2_META: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_meta[2] : 32'd0;
+                            CFG_RESP_CAP_REC3_DATA: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_data[3] : 32'd0;
+                            CFG_RESP_CAP_REC3_META: config_rdata <= DEBUG_EN ? dbg_resp_cap_rec_meta[3] : 32'd0;
+                            CFG_AXI_DEQ_REC_COUNT: config_rdata <= DEBUG_EN ? {29'd0, dbg_axi_deq_rec_count} : 32'd0;
+                            CFG_AXI_DEQ_REC0_ADDR: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_addr[0] : 32'd0;
+                            CFG_AXI_DEQ_REC0_META: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_meta[0] : 32'd0;
+                            CFG_AXI_DEQ_REC1_ADDR: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_addr[1] : 32'd0;
+                            CFG_AXI_DEQ_REC1_META: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_meta[1] : 32'd0;
+                            CFG_AXI_DEQ_REC2_ADDR: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_addr[2] : 32'd0;
+                            CFG_AXI_DEQ_REC2_META: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_meta[2] : 32'd0;
+                            CFG_AXI_DEQ_REC3_ADDR: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_addr[3] : 32'd0;
+                            CFG_AXI_DEQ_REC3_META: config_rdata <= DEBUG_EN ? dbg_axi_deq_rec_meta[3] : 32'd0;
                             default:       config_rdata <= 32'h0;
                         endcase
                     end
@@ -1139,12 +1156,14 @@ module fcapz_ejtagaxi #(
         end else begin
             reset_req_sync1_axi <= reset_req_toggle;
             reset_req_sync2_axi <= reset_req_sync1_axi;
-            dbg_axi_deq_fire <= 1'b0;
-            dbg_axi_cycle_count <= dbg_axi_cycle_count + 1'b1;
+            if (DEBUG_EN) begin
+                dbg_axi_deq_fire <= 1'b0;
+                dbg_axi_cycle_count <= dbg_axi_cycle_count + 1'b1;
+            end
             cmdq_rst_axi <= 1'b0;
             respq_rst_axi <= 1'b0;
             fifo_rst_axi  <= 1'b0;
-            if (respq_wr_en && dbg_resp_wr_rec_count < 3'd4) begin
+            if (DEBUG_EN && respq_wr_en && dbg_resp_wr_rec_count < 3'd4) begin
                 dbg_resp_wr_rec_data[dbg_resp_wr_rec_count] <= respq_wr_data[DATA_W-1:0];
                 dbg_resp_wr_rec_meta[dbg_resp_wr_rec_count] <= {
                     11'd0,
@@ -1157,7 +1176,7 @@ module fcapz_ejtagaxi #(
                 };
                 dbg_resp_wr_rec_count <= dbg_resp_wr_rec_count + 1'b1;
             end
-            if (cmdq_rd_en) begin
+            if (DEBUG_EN && cmdq_rd_en) begin
                 dbg_axi_deq_cmdq  <= cmdq_rd_data;
                 dbg_axi_deq_cmd   <= cmdq_cmd;
                 dbg_axi_deq_addr  <= cmdq_addr;
@@ -1201,8 +1220,10 @@ module fcapz_ejtagaxi #(
                 cmdq_rst_axi           <= 1'b1;
                 respq_rst_axi          <= 1'b1;
                 fifo_rst_axi           <= 1'b1;
-                dbg_resp_wr_rec_count  <= 3'd0;
-                dbg_axi_deq_rec_count  <= 3'd0;
+                if (DEBUG_EN) begin
+                    dbg_resp_wr_rec_count  <= 3'd0;
+                    dbg_axi_deq_rec_count  <= 3'd0;
+                end
             end else case (axi_state)
 
                 // ---- Idle: consume next queued command ----
@@ -1512,7 +1533,7 @@ module fcapz_ejtagaxi #(
     assign fifo_wr_en = (axi_state == ST_BURST_R_FILL) &&
                         m_axi_rvalid && !fifo_full;
 
-    assign debug_axi = {
+    assign debug_axi = DEBUG_EN ? {
         cmdq_rd_data,
         launch_addr,
         launch_wdata,
@@ -1544,9 +1565,9 @@ module fcapz_ejtagaxi #(
         m_axi_arvalid,
         m_axi_bresp,
         24'd0
-    };
+    } : 256'd0;
 
-    assign debug_axi_edge = {
+    assign debug_axi_edge = DEBUG_EN ? {
         48'd0,
         dbg_axi_deq_count,
         dbg_axi_cycle_count,
@@ -1564,6 +1585,6 @@ module fcapz_ejtagaxi #(
         launch_wdata,
         launch_addr,
         cmdq_rd_data
-    };
+    } : 256'd0;
 
 endmodule

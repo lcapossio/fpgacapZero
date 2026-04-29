@@ -187,8 +187,12 @@ module arty_a7_top (
     wire        bridge_wlast, bridge_bvalid, bridge_bready;
     wire        bridge_arvalid, bridge_arready, bridge_rvalid, bridge_rready, bridge_rlast;
 
+    // DEBUG_EN is intentionally off in the shipping reference design:
+    // USER4 validation uses host AXI reads/writes, and no ILA consumes the
+    // bridge's internal 256-bit telemetry buses here.
     fcapz_ejtagaxi_xilinx7 #(
-        .ADDR_W(32), .DATA_W(32), .FIFO_DEPTH(16), .TIMEOUT(4096)
+        .ADDR_W(32), .DATA_W(32), .FIFO_DEPTH(16), .TIMEOUT(4096),
+        .DEBUG_EN(0)
     ) u_ejtagaxi (
         .axi_clk(clk),
         .axi_rst(rst),

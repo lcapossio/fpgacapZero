@@ -20,6 +20,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
     parameter TIMEOUT    = 4096,
+    parameter DEBUG_EN   = 0,
     parameter ASYNC_FIFO_IMPL = 1, // 1=AMD/Xilinx XPM, 0=portable behavioral
     parameter CHAIN      = 4       // USER4 (USER1-3 used by ELA+EIO)
 ) (
@@ -79,6 +80,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     fcapz_ejtagaxi #(
         .ADDR_W(ADDR_W), .DATA_W(DATA_W),
         .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
+        .DEBUG_EN(DEBUG_EN),
         .USE_BEHAV_ASYNC_FIFO(0),
         .ASYNC_FIFO_IMPL(ASYNC_FIFO_IMPL)
     ) u_ejtagaxi (
