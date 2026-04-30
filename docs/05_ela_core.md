@@ -37,6 +37,16 @@ dual-port BRAM continuously.  When the trigger fires, it captures
 shows what was happening *before* the trigger fired, the trigger
 sample itself, and the post-trigger window.
 
+In single-segment builds, pre-trigger history rolls even before `arm()`,
+so a trigger that arrives immediately after arming can still return real
+history. Segmented capture mode has separate per-segment bookkeeping and
+does not use this rolling pre-arm path. That single-segment history is
+not reset by `arm()`: back-to-back captures can include samples from
+before the latest arm, including the previous capture tail, until new
+samples overwrite them. Pulse `sample_rst` between captures if each
+capture must be fully independent. The rolling writes also mean the BRAM
+write port has idle sample-clock activity in single-segment builds.
+
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
 and timestamp data are captured together before they drive the inferred
@@ -213,6 +223,12 @@ fcapz capture --trigger-sequence my_sequence.json ...
 See [chapter 10](10_cli_reference.md) for the full JSON schema.
 
 ## Storage qualification (`STOR_QUAL=1`)
+
+The single-segment rolling pre-trigger buffer respects storage
+qualification and decimation even before `arm()`. If `STOR_QUAL=1`,
+the pre-arm history contains only samples that satisfy the current
+qualification registers; update those registers before relying on the
+rolling window.
 
 Sometimes you don't care about every sample — you only want to
 record the ones where some condition is true.  Storage qualification

@@ -276,6 +276,52 @@ module fcapz_ela_bug_probe_tb;
         data = rdata_segtrig;
     endtask
 
+    // ---------------------------------------------------------------------
+    // Regression 9: pretrigger history is a rolling buffer before arm.
+    localparam int ROLL_W = 8;
+    localparam int ROLL_DEPTH = 16;
+    logic [ROLL_W-1:0] probe_roll = '0;
+    logic ext_trig_roll = 1'b0;
+    logic wr_roll = 1'b0, rd_roll = 1'b0;
+    logic [15:0] addr_roll = '0;
+    logic [31:0] wdata_roll = '0, rdata_roll;
+    logic [$clog2(ROLL_DEPTH)-1:0] burst_addr_roll = '0;
+    wire [ROLL_W-1:0] burst_data_roll;
+    wire burst_start_roll;
+    wire [$clog2(ROLL_DEPTH)-1:0] burst_start_ptr_roll;
+    wire armed_out_roll;
+
+    fcapz_ela #(
+        .SAMPLE_W(ROLL_W),
+        .DEPTH(ROLL_DEPTH),
+        .EXT_TRIG_EN(1),
+        .INPUT_PIPE(1)
+    ) dut_roll (
+        .sample_clk(sample_clk), .sample_rst(sample_rst), .probe_in(probe_roll),
+        .trigger_in(ext_trig_roll), .trigger_out(), .armed_out(armed_out_roll),
+        .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
+        .jtag_wr_en(wr_roll), .jtag_rd_en(rd_roll),
+        .jtag_addr(addr_roll), .jtag_wdata(wdata_roll), .jtag_rdata(rdata_roll),
+        .burst_rd_addr(burst_addr_roll), .burst_rd_data(burst_data_roll),
+        .burst_start(burst_start_roll), .burst_start_ptr(burst_start_ptr_roll)
+    );
+
+    task automatic write_roll(input [15:0] addr, input [31:0] data);
+        @(posedge jtag_clk);
+        addr_roll <= addr; wdata_roll <= data; wr_roll <= 1'b1;
+        @(posedge jtag_clk);
+        wr_roll <= 1'b0;
+    endtask
+
+    task automatic read_roll(input [15:0] addr, output [31:0] data);
+        @(posedge jtag_clk);
+        addr_roll <= addr; rd_roll <= 1'b1;
+        @(posedge jtag_clk);
+        rd_roll <= 1'b0;
+        repeat (10) @(posedge jtag_clk);
+        data = rdata_roll;
+    endtask
+
     initial begin
         logic [31:0] word0, word1, word2, status, seg_status;
         int i;
@@ -481,6 +527,120 @@ module fcapz_ela_bug_probe_tb;
         $display("  fixed-hook status=0x%08x seg_status=0x%08x", status, seg_status);
         check("per-rearm pulse source finishes all segments",
               (status[2] == 1'b1) && (seg_status[31] == 1'b1) && (seg_status[1:0] == 2'd0));
+
+        $display("\n=== Regression 9: fast trigger uses rolling pre-arm history ===");
+        write_roll(16'h0014, 32'd8);    // PRETRIG
+        write_roll(16'h0018, 32'd2);    // POSTTRIG
+        write_roll(16'h0020, 32'h1);    // value-match, made unreachable below
+        write_roll(16'h0024, 32'd255);
+        write_roll(16'h0028, 32'hFF);
+        write_roll(16'h00B4, 32'd1);    // EXT_TRIG = OR
+        probe_roll = 8'd0;
+        ext_trig_roll = 1'b0;
+        repeat (24) begin
+            @(posedge sample_clk);
+            probe_roll <= probe_roll + 1'b1;
+        end
+        write_roll(16'h0004, 32'h1);    // ARM after history is already full
+        begin
+            integer pulse_delay;
+            integer pulse_width;
+            logic pulse_armed;
+            pulse_delay = -1;
+            pulse_width = 0;
+            pulse_armed = 1'b0;
+            repeat (40) begin
+                @(posedge sample_clk);
+                probe_roll <= probe_roll + 1'b1;
+                ext_trig_roll = 1'b0;
+                if (armed_out_roll && !pulse_armed) begin
+                    pulse_delay = 2;
+                    pulse_armed = 1'b1;
+                end else if (pulse_delay >= 0) begin
+                    if (pulse_delay == 0) begin
+                        ext_trig_roll = 1'b1;
+                        pulse_width = 3;
+                        pulse_delay = -1;
+                    end else begin
+                        pulse_delay = pulse_delay - 1;
+                    end
+                end else if (pulse_width > 0) begin
+                    ext_trig_roll = 1'b1;
+                    pulse_width = pulse_width - 1;
+                end
+            end
+        end
+        wait_sample(40);
+        read_roll(16'h0008, status);
+        read_roll(16'h0100, word0);
+        read_roll(16'h0100 + 8*4, word1);
+        read_roll(16'h0100 + 9*4, word2);
+        $display("  status=0x%08x pre_count=%0d pre_ready=%0d wr_ptr=%0d samples[0,8,9]=0x%02x 0x%02x 0x%02x",
+                 status, dut_roll.pre_count, dut_roll.pretrigger_ready, dut_roll.wr_ptr,
+                 word0[7:0], word1[7:0], word2[7:0]);
+        check("fast external trigger completes without post-arm prefill delay",
+              status[2] == 1'b1);
+        check("rolling prehistory start is the expected prior sample",
+              word0[7:0] == 8'd25);
+        check("trigger sample is anchored at pretrigger index",
+              word1[7:0] == 8'd33);
+        check("post-trigger sample follows trigger sample",
+              word2[7:0] == 8'd34);
+
+        $display("\n=== Regression 10: re-arm keeps rolling history coherent ===");
+        probe_roll = 8'd80;
+        ext_trig_roll = 1'b0;
+        repeat (6) begin
+            @(posedge sample_clk);
+            probe_roll <= probe_roll + 1'b1;
+        end
+        // Re-arm directly after the previous DONE. The frozen previous
+        // capture tail is allowed to be part of the next pre-trigger history
+        // until enough new samples overwrite it.
+        write_roll(16'h0004, 32'h1);
+        begin
+            integer pulse_delay2;
+            integer pulse_width2;
+            logic pulse_armed2;
+            pulse_delay2 = -1;
+            pulse_width2 = 0;
+            pulse_armed2 = 1'b0;
+            repeat (40) begin
+                @(posedge sample_clk);
+                probe_roll <= probe_roll + 1'b1;
+                ext_trig_roll = 1'b0;
+                if (armed_out_roll && !pulse_armed2) begin
+                    pulse_delay2 = 2;
+                    pulse_armed2 = 1'b1;
+                end else if (pulse_delay2 >= 0) begin
+                    if (pulse_delay2 == 0) begin
+                        ext_trig_roll = 1'b1;
+                        pulse_width2 = 3;
+                        pulse_delay2 = -1;
+                    end else begin
+                        pulse_delay2 = pulse_delay2 - 1;
+                    end
+                end else if (pulse_width2 > 0) begin
+                    ext_trig_roll = 1'b1;
+                    pulse_width2 = pulse_width2 - 1;
+                end
+            end
+        end
+        wait_sample(40);
+        read_roll(16'h0008, status);
+        read_roll(16'h0100, word0);
+        read_roll(16'h0100 + 8*4, word1);
+        read_roll(16'h0100 + 9*4, word2);
+        $display("  status=0x%08x samples[0,8,9]=0x%02x 0x%02x 0x%02x",
+                 status, word0[7:0], word1[7:0], word2[7:0]);
+        check("second fast external trigger completes",
+              status[2] == 1'b1);
+        check("second rolling prehistory includes previous capture tail",
+              word0[7:0] == 8'd33);
+        check("second trigger sample is anchored at pretrigger index",
+              word1[7:0] == 8'd92);
+        check("second post-trigger sample follows trigger sample",
+              word2[7:0] == 8'd93);
 
         $display("\n=== Regression summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);

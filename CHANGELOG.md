@@ -51,6 +51,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA pre-trigger capture:** sample memory now maintains a rolling
+  pre-arm history in single-segment mode, so a trigger shortly after
+  `arm()` captures the actual early event with valid pre-trigger samples
+  instead of waiting for a post-arm prefill window or exposing stale/zero
+  entries. Segmented capture mode is unchanged and remains tracked
+  separately. The pre-trigger window may include samples from before the
+  latest `arm()` call, including the previous capture tail; pulse
+  `sample_rst` between captures if each capture must be independent.
 - **Arty / EJTAG-AXI host path:** `EjtagAxiController` now prefers
   batched USER4 raw-scan sequences for bridge probe, single
   transactions, block traffic, and bursts when running over Xilinx
