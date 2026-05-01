@@ -613,6 +613,7 @@ class FakeVioTransport(Transport):
     def __init__(self, probe_in: int = 0xAB):
         self._probe_in = probe_in
         self._active_chain: int = 1
+        self.connect_chain: int | None = None
         self.regs = {
             # VERSION computed from canonical fcapz.__version__ so this
             # fake stays in sync when VERSION is bumped.
@@ -623,6 +624,7 @@ class FakeVioTransport(Transport):
         }
 
     def connect(self) -> None:
+        self.connect_chain = self._active_chain
         return None
 
     def close(self) -> None:
@@ -1002,12 +1004,14 @@ class ChainSelectionTests(unittest.TestCase):
         eio = EioController(transport, chain=3)
         eio.connect()
         self.assertEqual(transport._active_chain, 3)
+        self.assertEqual(transport.connect_chain, 3)
 
     def test_eio_custom_chain(self):
         transport = FakeVioTransport()
         eio = EioController(transport, chain=4)
         eio.connect()
         self.assertEqual(transport._active_chain, 4)
+        self.assertEqual(transport.connect_chain, 4)
 
     def test_raw_dr_scan_returns_bits(self):
         t = FakeTransport()

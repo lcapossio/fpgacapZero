@@ -82,6 +82,9 @@ class EioController:
         cached on the instance for the caller; they should match
         ``fcapz.__version__``.
         """
+        # XilinxHwServerTransport may run a 49-bit VERSION ready probe during
+        # connect(), so select EIO's USER chain before opening the session.
+        self._t.select_chain(self._chain)
         self._t.connect()
         self._t.select_chain(self._chain)
         version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))

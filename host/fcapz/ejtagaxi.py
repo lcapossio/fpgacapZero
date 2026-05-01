@@ -13,6 +13,7 @@ DR format (72 bits, LSB first):
 
 from __future__ import annotations
 
+import time
 import warnings
 
 from .transport import Transport
@@ -235,16 +236,36 @@ class EjtagAxiController:
         bridge with RESET + NOP drain so the first real command starts from a
         fully-idle state.
         """
-        self._transport.connect()
         self._transport.select_chain(self._chain)
-        decoded = self._scan_batch(
-            [
-                (CMD_CONFIG, 0x0000, 0, 0),
-                (CMD_CONFIG, 0x0004, 0, 0),
-                (CMD_CONFIG, 0x002C, 0, 0),
-                (CMD_NOP, 0, 0, 0),
-            ]
+        old_ready_probe_addr = getattr(self._transport, "ready_probe_addr", None)
+        if hasattr(self._transport, "ready_probe_addr"):
+            # The generic hw_server ready probe uses the 49-bit ELA/EIO
+            # register protocol. EJTAG-AXI uses a 72-bit streaming DR, so
+            # readiness must be checked with CMD_CONFIG after connect().
+            self._transport.ready_probe_addr = None
+        try:
+            self._transport.connect()
+        finally:
+            if hasattr(self._transport, "ready_probe_addr"):
+                self._transport.ready_probe_addr = old_ready_probe_addr
+        self._transport.select_chain(self._chain)
+        deadline = time.monotonic() + float(
+            getattr(self._transport, "ready_probe_timeout", 2.0)
         )
+        decoded = []
+        while True:
+            decoded = self._scan_batch(
+                [
+                    (CMD_CONFIG, 0x0000, 0, 0),
+                    (CMD_CONFIG, 0x0004, 0, 0),
+                    (CMD_CONFIG, 0x002C, 0, 0),
+                    (CMD_NOP, 0, 0, 0),
+                ]
+            )
+            _, _, bridge_id, _ = decoded[1]
+            if bridge_id == _BRIDGE_ID or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
         _, _, bridge_id, _ = decoded[1]
         _, _, version, _ = decoded[2]
         _, _, features, _ = decoded[3]
@@ -482,5 +503,3 @@ class EjtagAxiController:
                 stacklevel=2,
             )
         self._transport.close()
-
-

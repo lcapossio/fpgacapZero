@@ -43,7 +43,7 @@ class FakeBridgeTransport(Transport):
         0x002C: (0x0F << 16) | 0x2020,
     }
 
-    def __init__(self):
+    def __init__(self, *, stale_config_id_reads: int = 0):
         self.regs: list[int] = [0] * 16
         self.auto_inc_addr: int = 0
         self.prev_valid: bool = False
@@ -56,13 +56,20 @@ class FakeBridgeTransport(Transport):
         self.busy_count: int = 0
         self.fifo_stall_count: int = 0
         self._active_chain: int = 1
+        self.connect_chain: int | None = None
+        self.ready_probe_addr: int | None = 0x0000
+        self.ready_probe_timeout: float = 0.1
+        self.connect_ready_probe_addr: int | None = None
         self._config_regs: dict[int, int] = dict(self._CONFIG_REGS)
+        self.stale_config_id_reads = stale_config_id_reads
         self._last_cmd: int = CMD_NOP  # track last command for FIFO priming
         self.scan_log: list[int] = []
 
     # --- Transport ABC implementation ---
 
     def connect(self) -> None:
+        self.connect_chain = self._active_chain
+        self.connect_ready_probe_addr = self.ready_probe_addr
         pass
 
     def close(self) -> None:
@@ -195,7 +202,11 @@ class FakeBridgeTransport(Transport):
 
         elif cmd == CMD_CONFIG:
             # Return config register value; pipelined so sets prev_rdata
-            self.prev_rdata = self._config_regs.get(addr, 0)
+            if addr == 0x0000 and self.stale_config_id_reads > 0:
+                self.stale_config_id_reads -= 1
+                self.prev_rdata = 0
+            else:
+                self.prev_rdata = self._config_regs.get(addr, 0)
             self.prev_valid = True
             self.prev_resp = RESP_OKAY
 
@@ -457,6 +468,23 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl = EjtagAxiController(t, chain=4)
         ctrl.connect()
         self.assertEqual(t._active_chain, 4)
+        self.assertEqual(t.connect_chain, 4)
+        self.assertIsNone(t.connect_ready_probe_addr)
+        self.assertEqual(t.ready_probe_addr, 0x0000)
+
+    def test_connect_retries_until_bridge_id_is_ready(self):
+        t = FakeBridgeTransport(stale_config_id_reads=2)
+        ctrl = EjtagAxiController(t, chain=4)
+        info = ctrl.connect()
+        self.assertEqual(info["bridge_id"], _BRIDGE_ID)
+        self.assertEqual(t.stale_config_id_reads, 0)
+
+    def test_connect_timeout_with_stale_bridge_id_raises(self):
+        t = FakeBridgeTransport(stale_config_id_reads=100)
+        t.ready_probe_timeout = 0.0
+        ctrl = EjtagAxiController(t, chain=4)
+        with self.assertRaisesRegex(RuntimeError, "Bad BRIDGE_ID: 0x00000000"):
+            ctrl.connect()
 
     def test_batch_only_transport_still_connects_and_moves_data(self):
         ctrl, t = self._make_ctrl(BatchOnlyBridgeTransport())

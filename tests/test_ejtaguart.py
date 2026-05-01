@@ -47,14 +47,20 @@ class FakeUartTransport(Transport):
 
     TX_FIFO_DEPTH = 16
 
-    def __init__(self):
+    def __init__(self, *, stale_id_reads: int = 0):
         self.tx_buf: bytearray = bytearray()  # bytes sent via TX_PUSH
         self.rx_buf: bytearray = bytearray()  # bytes available for RX_POP
         self._active_chain: int = 1
+        self.connect_chain: int | None = None
+        self.ready_probe_addr: int | None = 0x0000
+        self.ready_probe_timeout: float = 0.1
+        self.connect_ready_probe_addr: int | None = None
         self._prev_rx_byte: int = 0
         self._prev_rx_valid: bool = False
         self._prev_config_byte: int = 0
         self._prev_config_valid: bool = False
+        self.stale_id_reads = stale_id_reads
+        self._stale_id_active = False
         self._rx_overflow: bool = False
         self._frame_err: bool = False
 
@@ -78,6 +84,8 @@ class FakeUartTransport(Transport):
     # --- Transport ABC implementation ---
 
     def connect(self) -> None:
+        self.connect_chain = self._active_chain
+        self.connect_ready_probe_addr = self.ready_probe_addr
         self._init_config()
 
     def close(self) -> None:
@@ -155,7 +163,15 @@ class FakeUartTransport(Transport):
         elif cmd == CMD_CONFIG:
             self._init_config()
             addr = tx_byte & 0xFF
-            self._prev_config_byte = self._CONFIG_MAP.get(addr, 0)
+            if addr == 0 and self.stale_id_reads > 0:
+                self.stale_id_reads -= 1
+                self._stale_id_active = True
+            if self._stale_id_active and addr < 4:
+                self._prev_config_byte = 0
+                if addr == 3:
+                    self._stale_id_active = False
+            else:
+                self._prev_config_byte = self._CONFIG_MAP.get(addr, 0)
             self._prev_config_valid = True
 
         elif cmd == CMD_RESET:
@@ -303,6 +319,23 @@ class EjtagUartTests(unittest.TestCase):
         ctrl = EjtagUartController(t, chain=4)
         ctrl.connect()
         self.assertEqual(t._active_chain, 4)
+        self.assertEqual(t.connect_chain, 4)
+        self.assertIsNone(t.connect_ready_probe_addr)
+        self.assertEqual(t.ready_probe_addr, 0x0000)
+
+    def test_connect_retries_until_uart_id_is_ready(self):
+        t = FakeUartTransport(stale_id_reads=2)
+        ctrl = EjtagUartController(t, chain=4)
+        info = ctrl.connect()
+        self.assertEqual(info["id"], _UART_ID)
+        self.assertEqual(t.stale_id_reads, 0)
+
+    def test_connect_timeout_with_stale_uart_id_raises(self):
+        t = FakeUartTransport(stale_id_reads=100)
+        t.ready_probe_timeout = 0.0
+        ctrl = EjtagUartController(t, chain=4)
+        with self.assertRaisesRegex(RuntimeError, "Bad UART ID: 0x00000000"):
+            ctrl.connect()
 
     def test_connect_failure_closes_transport(self):
         """connect() must close the transport if ID check fails."""

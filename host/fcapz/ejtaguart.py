@@ -70,10 +70,28 @@ class EjtagUartController:
                 wrong bitstream, or core not loaded).
             RuntimeError: If the transport cannot connect.
         """
-        self._transport.connect()
+        self._transport.select_chain(self._chain)
+        old_ready_probe_addr = getattr(self._transport, "ready_probe_addr", None)
+        if hasattr(self._transport, "ready_probe_addr"):
+            # The generic hw_server ready probe uses the 49-bit ELA/EIO
+            # register protocol. EJTAG-UART uses a 32-bit streaming DR, so
+            # readiness must be checked with CMD_CONFIG after connect().
+            self._transport.ready_probe_addr = None
+        try:
+            self._transport.connect()
+        finally:
+            if hasattr(self._transport, "ready_probe_addr"):
+                self._transport.ready_probe_addr = old_ready_probe_addr
         self._transport.select_chain(self._chain)
         try:
-            uid = self._config_read_u32(0x00)
+            deadline = time.monotonic() + float(
+                getattr(self._transport, "ready_probe_timeout", 2.0)
+            )
+            while True:
+                uid = self._config_read_u32(0x00)
+                if uid == self.UART_ID or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
             if uid != self.UART_ID:
                 # XSDB can occasionally return one stale DR result right
                 # after a fresh session/chain selection. Flush a couple of
@@ -273,4 +291,3 @@ class EjtagUartController:
         _, _, b2 = self._scan(cmd=self.CMD_CONFIG, tx_byte=base_addr + 3)
         _, _, b3 = self._scan(cmd=self.CMD_NOP)  # drain
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-
