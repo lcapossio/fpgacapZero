@@ -25,12 +25,14 @@
 //   DEPTH   - FIFO depth in entries, must be power of 2 (default 16)
 //   USE_BEHAV_ASYNC_FIFO - legacy selector, 1=behavioral, 0=XPM
 //   ASYNC_FIFO_IMPL      - 0=behavioral, 1=AMD/Xilinx XPM
+//   XPM_FIFO_MEMORY_TYPE - XPM storage selector ("auto", "block", "distributed")
 
 module fcapz_async_fifo #(
     parameter DATA_W  = 32,
     parameter DEPTH   = 16,
     parameter USE_BEHAV_ASYNC_FIFO = 1,
-    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1)
+    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1),
+    parameter XPM_FIFO_MEMORY_TYPE = "auto"
 ) (
     // Write side (wr_clk domain)
     input  wire                      wr_clk,
@@ -78,12 +80,19 @@ if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
     //  Vendor primitive (Xilinx XPM) implementation
     // =================================================================
 
+    if (DEPTH < 16)
+        XPM_FIFO_DEPTH_must_be_at_least_16 _xpm_depth_check_FAILED();
+    initial begin
+        if (DEPTH < 16)
+            $error("fcapz_async_fifo: XPM FIFO depth must be >= 16 (got %0d)", DEPTH);
+    end
+
     wire [AW:0] xpm_rd_count;
     wire [AW:0] xpm_wr_count;
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (2),
-        .FIFO_MEMORY_TYPE    ("auto"),
+        .FIFO_MEMORY_TYPE    (XPM_FIFO_MEMORY_TYPE),
         .FIFO_READ_LATENCY   (0),
         .FIFO_WRITE_DEPTH    (DEPTH),
         .READ_DATA_WIDTH     (DATA_W),

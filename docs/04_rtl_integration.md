@@ -443,8 +443,13 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter ADDR_W     = 32,
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
+    parameter CMD_FIFO_DEPTH  = FIFO_DEPTH * 2,
+    parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
+    parameter CMD_FIFO_MEMORY_TYPE   = "auto",
+    parameter RESP_FIFO_MEMORY_TYPE  = "auto",
+    parameter BURST_FIFO_MEMORY_TYPE = "auto",
     parameter CHAIN      = 4
 ) ( ... );
 ```
@@ -454,8 +459,13 @@ module fcapz_ejtagaxi_xilinx7 #(
 | `ADDR_W` | 32, 64 | AXI address width.  64 is supported but not hardware-validated. |
 | `DATA_W` | 32 | AXI data width.  Only 32 is supported today. |
 | `FIFO_DEPTH` | 1..256, **power of 2** | Async FIFO depth for burst reads.  Limits the maximum burst length the host can request — the host caches this from `FEATURES[23:16]` and rejects oversized requests at the API boundary.  See [chapter 07](07_ejtag_axi_bridge.md). |
+| `CMD_FIFO_DEPTH` | power of 2 | TCK-to-AXI command queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; Xilinx XPM FIFO builds require at least 16. |
+| `RESP_FIFO_DEPTH` | power of 2 | AXI-to-TCK response queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; Xilinx XPM FIFO builds require at least 16. |
 | `TIMEOUT` | int | AXI handshake timeout in `axi_clk` cycles.  Applies to `wready`/`bvalid`/`arready`/`rvalid` waits, **not** between burst beats. |
 | `DEBUG_EN` | 0, 1 | Enables the 256-bit debug buses and debug CONFIG capture records. Defaults off to let synthesis prune debug-only storage and counters. |
+| `CMD_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the command queue. Ignored by the portable behavioral FIFO. |
+| `RESP_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the response queue. Ignored by the portable behavioral FIFO. |
+| `BURST_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the burst read FIFO. Ignored by the portable behavioral FIFO. |
 | `CHAIN` | 1..4 | BSCANE2 USER chain. |
 
 ## EJTAG-UART wrapper parameter reference

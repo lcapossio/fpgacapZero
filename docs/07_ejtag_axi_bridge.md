@@ -320,8 +320,32 @@ fcapz_ejtagaxi_xilinx7 #(
 
 The default 16 is a deliberate compromise: enough for most CSR
 register dumps and small block transfers, small enough that the
-LUT/FF cost is negligible (~150 LUTs for the FIFO).  Bumping to
-256 costs ~1200 LUTs but lets you do full AXI4 max bursts.
+default burst FIFO remains small. On Xilinx XPM builds, bumping to
+256 moves the burst buffer into BRAM rather than exploding LUT use,
+but it does spend another RAMB18 tile to enable full AXI4 max bursts.
+
+`CMD_FIFO_DEPTH` and `RESP_FIFO_DEPTH` size the separate command and
+response queues between TCK and `axi_clk`. Their wrapper defaults track
+the core default (`2*FIFO_DEPTH`) for compatibility with aggressively
+batched host traffic, but they can be set independently when BRAM is
+tighter than queue depth. On Xilinx XPM FIFO builds, the minimum legal
+depth is 16. The Arty A7 reference uses:
+
+```verilog
+.FIFO_DEPTH      (16),
+.CMD_FIFO_DEPTH  (16),
+.RESP_FIFO_DEPTH (16),
+.CMD_FIFO_MEMORY_TYPE("distributed")
+```
+
+This keeps the same 16-beat burst limit while avoiding the extra BRAM
+tiles that Vivado otherwise spends on the default 32-deep response queue
+and the wide command queue. Leave the memory-type selectors at `"auto"`
+unless you have checked the target tool's utilization result; forcing
+large FIFOs into distributed RAM can quickly cost more LUTs than it saves.
+In the Arty reference, the 16-entry response queue already maps out of
+BRAM with `"auto"`, so only the command queue needs an explicit
+`"distributed"` override.
 
 `DEBUG_EN` defaults to `0` on the core and vendor wrappers. Leave it
 off for production builds so synthesis can prune the 256-bit debug
