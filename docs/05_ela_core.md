@@ -652,7 +652,8 @@ Rows that mention readout include the wrapper/TAP/register plumbing.
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
 with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
-slice LUTs** and **3.5 BRAM tiles** (see [README.md](../README.md#resource-usage)).
+slice LUTs** and **1.5 BRAM tiles** after the EJTAG-AXI FIFO trim
+(see [README.md](../README.md#resource-usage)).
 Your tool and family will vary.
 
 ## What's next

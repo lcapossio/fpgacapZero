@@ -14,7 +14,15 @@
 // The slave memory is not reset by CMD_RESET, only the bridge state is.
 
 module fcapz_ejtagaxi_reset_regression_tb #(
-    parameter DEBUG_EN = 0
+    parameter DEBUG_EN = 0,
+    parameter FIFO_DEPTH = 16,
+    parameter CMD_FIFO_DEPTH  = FIFO_DEPTH * 2,
+    parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
+    parameter USE_BEHAV_ASYNC_FIFO = 1,
+    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1),
+    parameter CMD_FIFO_MEMORY_TYPE   = "auto",
+    parameter RESP_FIFO_MEMORY_TYPE  = "auto",
+    parameter BURST_FIFO_MEMORY_TYPE = "auto"
 );
 
     logic tck     = 1'b0;
@@ -76,9 +84,16 @@ module fcapz_ejtagaxi_reset_regression_tb #(
     fcapz_ejtagaxi #(
         .ADDR_W     (32),
         .DATA_W     (32),
-        .FIFO_DEPTH (16),
+        .FIFO_DEPTH (FIFO_DEPTH),
+        .CMD_FIFO_DEPTH  (CMD_FIFO_DEPTH),
+        .RESP_FIFO_DEPTH (RESP_FIFO_DEPTH),
         .TIMEOUT    (4096),
-        .DEBUG_EN   (DEBUG_EN)
+        .DEBUG_EN   (DEBUG_EN),
+        .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL),
+        .CMD_FIFO_MEMORY_TYPE   (CMD_FIFO_MEMORY_TYPE),
+        .RESP_FIFO_MEMORY_TYPE  (RESP_FIFO_MEMORY_TYPE),
+        .BURST_FIFO_MEMORY_TYPE (BURST_FIFO_MEMORY_TYPE)
     ) dut (
         .tck           (tck),
         .tdi           (tdi),

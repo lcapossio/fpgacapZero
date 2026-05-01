@@ -17,6 +17,7 @@
 //   CMD_FIFO_DEPTH  - async command FIFO depth (default 2*FIFO_DEPTH)
 //   RESP_FIFO_DEPTH - async response FIFO depth (default 2*FIFO_DEPTH)
 //   TIMEOUT    - AXI ready timeout in axi_clk cycles   (default 4096)
+//   *_FIFO_MEMORY_TYPE - XPM storage selectors ("auto", "block", "distributed")
 //
 // 72-bit DR format (LSB first):
 //   Shift-in:  [31:0] addr, [63:32] payload, [67:64] wstrb, [71:68] cmd
@@ -31,7 +32,10 @@ module fcapz_ejtagaxi #(
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
     parameter USE_BEHAV_ASYNC_FIFO    = 1,
-    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1)
+    parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1),
+    parameter CMD_FIFO_MEMORY_TYPE   = "auto",
+    parameter RESP_FIFO_MEMORY_TYPE  = "auto",
+    parameter BURST_FIFO_MEMORY_TYPE = "auto"
 ) (
     // TAP signals (from vendor-specific wrapper)
     input  wire        tck,
@@ -343,7 +347,8 @@ module fcapz_ejtagaxi #(
         .DATA_W  (CMDQ_W),
         .DEPTH   (CMD_FIFO_DEPTH),
         .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
-        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL),
+        .XPM_FIFO_MEMORY_TYPE (CMD_FIFO_MEMORY_TYPE)
     ) u_cmd_fifo (
         .wr_clk   (tck),
         .wr_rst   (axi_rst | cmdq_rst_tck),
@@ -365,7 +370,8 @@ module fcapz_ejtagaxi #(
         .DATA_W  (RESPQ_W),
         .DEPTH   (RESP_FIFO_DEPTH),
         .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
-        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL),
+        .XPM_FIFO_MEMORY_TYPE (RESP_FIFO_MEMORY_TYPE)
     ) u_resp_fifo (
         .wr_clk   (axi_clk),
         .wr_rst   (axi_rst | respq_rst_axi),
@@ -387,7 +393,8 @@ module fcapz_ejtagaxi #(
         .DATA_W  (DATA_W),
         .DEPTH   (FIFO_DEPTH),
         .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
-        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
+        .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL),
+        .XPM_FIFO_MEMORY_TYPE (BURST_FIFO_MEMORY_TYPE)
     ) u_burst_fifo (
         .wr_clk   (axi_clk),
         .wr_rst   (axi_rst | fifo_rst_axi),

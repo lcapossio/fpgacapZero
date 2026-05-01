@@ -191,7 +191,12 @@ module arty_a7_top (
     // USER4 validation uses host AXI reads/writes, and no ILA consumes the
     // bridge's internal 256-bit telemetry buses here.
     fcapz_ejtagaxi_xilinx7 #(
-        .ADDR_W(32), .DATA_W(32), .FIFO_DEPTH(16), .TIMEOUT(4096),
+        .ADDR_W(32), .DATA_W(32),
+        .FIFO_DEPTH(16),
+        .CMD_FIFO_DEPTH(16),
+        .RESP_FIFO_DEPTH(16),
+        .CMD_FIFO_MEMORY_TYPE("distributed"),
+        .TIMEOUT(4096),
         .DEBUG_EN(0)
     ) u_ejtagaxi (
         .axi_clk(clk),

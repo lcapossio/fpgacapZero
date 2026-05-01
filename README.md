@@ -594,7 +594,7 @@ from the RTL.
 | Microchip PolarFire-family TAP wrappers | Implemented in RTL, host validation still limited |
 | Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
 | EIO over real transports | Implemented — USER3 on Xilinx; wrapper-shared chain on ECP5, Gowin, and PolarFire-family devices |
-| EJTAG-AXI bridge | Hardware-validated on Arty A7 (single, auto-inc, and burst modes); `DEBUG_EN=0` reference build is synthesis/place/route validated, hardware rerun pending |
+| EJTAG-AXI bridge | Hardware-validated on Arty A7 (single, auto-inc, burst, strobe, and error paths) with the trimmed FIFO / `DEBUG_EN=0` reference build |
 | EJTAG-UART bridge | Hardware-validated on Arty A7 (loopback: send, recv, recv_line, status) |
 | Sample decimation | Implemented in RTL and host API/CLI |
 | External trigger I/O | Implemented in RTL and host API/CLI |
@@ -625,7 +625,8 @@ the JTAG TAP/register/readout plumbing, not only `fcapz_ela.v`.
 | 8b x 1024, 4-stage sequencer | 2,954 | 2,788 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=0` |
 | 32b x 1024, dual comparator, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | Wider samples mainly add BRAM/FFs |
 | `arty_a7_top` (placed, pre-`DEBUG_EN` always-on debug) | 3,244 | 4,562 | 3.5 | Historical baseline for the same validation reference |
-| **`arty_a7_top` (placed, `DEBUG_EN=0`)** | **2,318** | **3,168** | **3.5** | Current reference: ELA with `INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave`; bridge debug telemetry disabled |
+| `arty_a7_top` (placed, `DEBUG_EN=0`) | 2,318 | 3,168 | 3.5 | Bridge debug telemetry disabled; previous reference before the EJTAG-AXI FIFO trim |
+| **`arty_a7_top` (placed, trimmed EJTAG-AXI FIFOs, `DEBUG_EN=0`)** | **2,371** | **3,356** | **1.5** | Current reference: ELA with `INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave`; bridge debug telemetry disabled; EJTAG-AXI command/response queues set to 16 entries |
 
 Optional ELA parameters (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`,
 `NUM_SEGMENTS`, channel mux, etc.) add registers, comparators, and
@@ -634,10 +635,14 @@ authoritative “full validation” footprint for that combination.
 Per-core deltas are not additive in synthesis because Vivado optimises
 across hierarchy.
 
-The EJTAG-AXI `DEBUG_EN=0` row comes from the Arty A7-100T Vivado
-2025.2 post-place report after gating bridge-only debug telemetry:
-`-926` slice LUTs and `-1,394` FFs versus the previous always-on
-debug baseline, with BRAM unchanged.
+The trimmed EJTAG-AXI row comes from the Arty A7-100T Vivado 2025.2
+post-place report after gating bridge-only debug telemetry and reducing
+small bridge queues to their XPM minimum depth. Versus the previous
+always-on debug baseline, the current reference is `-873` slice LUTs,
+`-1,206` FFs, and `-2.0` BRAM tiles. Versus the earlier `DEBUG_EN=0`
+reference, the FIFO trim trades about `+53` LUTs and `+188` FFs for
+`-2.0` BRAM tiles; placed hierarchy reports `u_ejtagaxi` at 883 LUTs,
+1,270 FFs, and 0 BRAM.
 
 **Fmax (reference build):** `sys_clk` @ 100 MHz with WNS positive after
 route on `arty_a7_top` (xc7a100t, same build). JTAG `tck_bscan` is

@@ -21,8 +21,13 @@ module fcapz_ejtagaxi_xilinxus #(
     parameter ADDR_W     = 32,
     parameter DATA_W     = 32,
     parameter FIFO_DEPTH = 16,
+    parameter CMD_FIFO_DEPTH  = FIFO_DEPTH * 2,
+    parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
+    parameter CMD_FIFO_MEMORY_TYPE   = "auto",
+    parameter RESP_FIFO_MEMORY_TYPE  = "auto",
+    parameter BURST_FIFO_MEMORY_TYPE = "auto",
     parameter ASYNC_FIFO_IMPL = 1,
     parameter CHAIN      = 4
 ) (
@@ -69,8 +74,14 @@ module fcapz_ejtagaxi_xilinxus #(
 
     fcapz_ejtagaxi_xilinx7 #(
         .ADDR_W(ADDR_W), .DATA_W(DATA_W),
-        .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
+        .FIFO_DEPTH(FIFO_DEPTH),
+        .CMD_FIFO_DEPTH(CMD_FIFO_DEPTH),
+        .RESP_FIFO_DEPTH(RESP_FIFO_DEPTH),
+        .TIMEOUT(TIMEOUT),
         .DEBUG_EN(DEBUG_EN),
+        .CMD_FIFO_MEMORY_TYPE(CMD_FIFO_MEMORY_TYPE),
+        .RESP_FIFO_MEMORY_TYPE(RESP_FIFO_MEMORY_TYPE),
+        .BURST_FIFO_MEMORY_TYPE(BURST_FIFO_MEMORY_TYPE),
         .ASYNC_FIFO_IMPL(ASYNC_FIFO_IMPL),
         .CHAIN(CHAIN)
     ) u_inner (

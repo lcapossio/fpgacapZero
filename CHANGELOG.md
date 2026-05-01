@@ -9,6 +9,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **EJTAG-AXI RTL:** Vendor wrappers now expose `CMD_FIFO_DEPTH` and
+  `RESP_FIFO_DEPTH` independently from burst `FIFO_DEPTH`; the Arty
+  reference sets both command/response queues to 16 and forces the small
+  command queue to distributed XPM storage to trim BRAM usage while
+  keeping the 16-beat burst FIFO. The placed Arty A7 reference now reports
+  1.5 BRAM tiles total, and the EJTAG-AXI hierarchy itself reports 0 BRAM.
 - **EJTAG-AXI RTL:** `DEBUG_EN` parameter on the core and vendor wrappers,
   defaulting off to prune bridge-only debug buses, capture records, and
   counters from production builds; RTL reset regression now sweeps
