@@ -7,6 +7,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Host / hw_server:** `EjtagAxiController.connect()` and
+  `EjtagUartController.connect()` now skip the generic 49-bit register
+  ready probe during programming and poll their native streaming
+  `CMD_CONFIG` identities instead. `EioController.connect()` selects its
+  USER chain before the transport-level ready probe, so USER3 EIO connects
+  no longer depend on USER1/ELA responding first.
+
 ### Added
 
 - **EJTAG-AXI RTL:** Vendor wrappers now expose `CMD_FIFO_DEPTH` and
