@@ -27,7 +27,8 @@ class EjtagUartRtlTests(unittest.TestCase):
                 str(ROOT / "tb" / "xpm_fifo_async_stub.v"),
             ]
             compile_result = subprocess.run(
-                ["iverilog", "-g2012", "-o", str(vvp)] + sources,
+                ["iverilog", "-g2012", "-I", str(ROOT / "rtl"), "-o", str(vvp)]
+                + sources,
                 capture_output=True,
                 text=True,
             )

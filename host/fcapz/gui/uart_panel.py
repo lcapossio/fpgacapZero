@@ -88,10 +88,12 @@ class UartPanel(QGroupBox):
 
     def bind_uart(self, uart: EjtagUartController, info: dict) -> None:
         self._uart = uart
-        ver = info["version"]
-        maj = (ver >> 16) & 0xFFFF
-        minor = ver & 0xFFFF
-        self._info.setText(f"UART bridge OK — id=0x{info['id']:08X}, v{maj}.{minor}")
+        maj = info["version_major"]
+        minor = info["version_minor"]
+        suffix = " legacy ID" if info.get("legacy_id") else ""
+        self._info.setText(
+            f"UART bridge OK — id=0x{info['id']:04X}, v{maj}.{minor}{suffix}"
+        )
         self._send_btn.setEnabled(True)
 
     def chain(self) -> int:

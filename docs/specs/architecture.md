@@ -1,4 +1,4 @@
-# Architecture — v0.3.0
+# Architecture — v0.4.0
 
 ## Goal
 Vendor-agnostic JTAG logic analyzer core with configurable features,

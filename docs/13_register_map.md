@@ -58,13 +58,13 @@ The canonical spec covers all four cores in one document:
   - Input / output register banks
 - **EJTAG-AXI bridge** (USER4)
   - 72-bit pipelined DR shift format with all command codes
-  - Config registers (`BRIDGE_ID`, `VERSION`, `FEATURES` with the
-    `FIFO_DEPTH-1` AXI4 awlen encoding)
+  - Config registers (`VERSION` with `JX` core_id, `FEATURES` with
+    the `FIFO_DEPTH-1` AXI4 awlen encoding)
   - Status bits and error response codes
 - **EJTAG-UART bridge** (USER4, mutually exclusive with AXI)
   - 32-bit DR per scan (commands `NOP` … `RESET`); not a word-addressed
     map like ELA/EIO
-  - **CONFIG** byte addresses `0x0`–`0xF`: `UART_ID` (`EJUR`), `VERSION`,
+  - **CONFIG** byte addresses `0x0`–`0xF`: `VERSION` (`JU` core_id),
     `FEATURES` (parity + TX/RX FIFO depth parameters), `BAUD_DIV`
   - Shift-out status / `tx_free` / pipelined RX and CONFIG behaviour
 

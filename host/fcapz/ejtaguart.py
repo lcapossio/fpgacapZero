@@ -21,6 +21,7 @@ DR format (32 bits, LSB first):
 from __future__ import annotations
 
 import time
+import warnings
 
 from .transport import Transport
 
@@ -34,7 +35,10 @@ CMD_RESET   = 0xF
 
 DR_WIDTH = 32
 
-_UART_ID = 0x454A5552  # ASCII "EJUR"
+_UART_CORE_ID = 0x4A55  # ASCII "JU"
+_UART_ID = _UART_CORE_ID  # compatibility alias for older tests/imports
+_LEGACY_UART_ID = 0x454A5552  # ASCII "EJUR"
+_legacy_uart_id_warned = False
 
 
 class EjtagUartController:
@@ -52,18 +56,55 @@ class EjtagUartController:
         self._transport = transport
         self._chain = chain
 
+    @staticmethod
+    def _decode_identity(identity_or_version: int, legacy_version: int | None) -> dict:
+        uid = identity_or_version & 0xFFFF
+        if identity_or_version == _LEGACY_UART_ID:
+            global _legacy_uart_id_warned
+            if not _legacy_uart_id_warned:
+                warnings.warn(
+                    "EJTAG-UART bridge reports legacy UART_ID 0x454A5552 "
+                    "('EJUR'); rebuild the bitstream to expose VERSION[15:0] "
+                    "as 0x4A55 ('JU'). Legacy IDs are accepted for now.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                _legacy_uart_id_warned = True
+            version = int(legacy_version or 0)
+            return {
+                "id": _UART_CORE_ID,
+                "core_id": _UART_CORE_ID,
+                "legacy_id": True,
+                "legacy_raw_id": identity_or_version,
+                "version": version,
+                "version_major": version >> 16,
+                "version_minor": version & 0xFFFF,
+            }
+        if uid != _UART_CORE_ID:
+            raise RuntimeError(f"Bad EJTAG-UART VERSION[15:0]: 0x{uid:04X}")
+        version = identity_or_version
+        return {
+            "id": uid,
+            "core_id": uid,
+            "legacy_id": False,
+            "legacy_raw_id": None,
+            "version": version,
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+        }
+
     def connect(self) -> dict:
         """Open transport, select chain, probe identity.
 
-        Probe is 10 scans: 5 for UART_ID + 5 for VERSION.
+        Probe reads the packed VERSION word at config byte address 0.
 
         Returns:
             dict with keys:
 
-            * ``"id"`` (int) — bridge identity word; always ``0x454A5552``
-              (ASCII ``"EJUR"``) for a valid core.
+            * ``"id"`` / ``"core_id"`` (int) — low-16 bridge identity word;
+              always ``0x4A55`` (ASCII ``"JU"``) for a valid core.
             * ``"version"`` (int) — packed version register
-              ``{major[15:0], minor[15:0]}``.
+              ``{major[7:0], minor[7:0], core_id[15:0]}``.
 
         Raises:
             RuntimeError: If the identity word does not match (wrong chain,
@@ -88,21 +129,28 @@ class EjtagUartController:
                 getattr(self._transport, "ready_probe_timeout", 2.0)
             )
             while True:
-                uid = self._config_read_u32(0x00)
-                if uid == self.UART_ID or time.monotonic() >= deadline:
+                identity_or_version = self._config_read_u32(0x00)
+                uid = identity_or_version & 0xFFFF
+                if (
+                    uid == self.UART_ID
+                    or identity_or_version == _LEGACY_UART_ID
+                    or time.monotonic() >= deadline
+                ):
                     break
                 time.sleep(0.02)
-            if uid != self.UART_ID:
+            if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
                 # XSDB can occasionally return one stale DR result right
                 # after a fresh session/chain selection. Flush a couple of
                 # harmless NOP scans and retry the identity probe once.
                 self._scan(cmd=self.CMD_NOP)
                 self._scan(cmd=self.CMD_NOP)
-                uid = self._config_read_u32(0x00)
-            if uid != self.UART_ID:
-                raise RuntimeError(f"Bad UART ID: 0x{uid:08X}")
-            version = self._config_read_u32(0x04)
-            return {"id": uid, "version": version}
+                identity_or_version = self._config_read_u32(0x00)
+            legacy_version = (
+                self._config_read_u32(0x04)
+                if identity_or_version == _LEGACY_UART_ID
+                else None
+            )
+            return self._decode_identity(identity_or_version, legacy_version)
         except Exception:
             self._transport.close()
             raise
@@ -115,15 +163,18 @@ class EjtagUartController:
         """
         self._transport.select_chain(self._chain)
         try:
-            uid = self._config_read_u32(0x00)
-            if uid != self.UART_ID:
+            identity_or_version = self._config_read_u32(0x00)
+            uid = identity_or_version & 0xFFFF
+            if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
                 self._scan(cmd=self.CMD_NOP)
                 self._scan(cmd=self.CMD_NOP)
-                uid = self._config_read_u32(0x00)
-            if uid != self.UART_ID:
-                raise RuntimeError(f"Bad UART ID: 0x{uid:08X}")
-            version = self._config_read_u32(0x04)
-            return {"id": uid, "version": version}
+                identity_or_version = self._config_read_u32(0x00)
+            legacy_version = (
+                self._config_read_u32(0x04)
+                if identity_or_version == _LEGACY_UART_ID
+                else None
+            )
+            return self._decode_identity(identity_or_version, legacy_version)
         finally:
             self._transport.select_chain(1)
 

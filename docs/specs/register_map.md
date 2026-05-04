@@ -1,4 +1,4 @@
-# JTAG Register Map — v0.3.0
+# JTAG Register Map — v0.4.0
 
 <a id="regmap-top"></a>
 
@@ -263,8 +263,8 @@ delay — the host sends a priming `BURST_RDATA` before reading N words.
 
 | Address | Name | Value | Description |
 |---------|------|-------|-------------|
-| `0x0000` | BRIDGE_ID | `0x454A4158` | ASCII `"EJAX"` — identifies bridge core |
-| `0x0004` | VERSION | `0x00010000` | `{major[15:0], minor[15:0]}` |
+| `0x0000` | VERSION | varies | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"JX"` (`0x4A58`). Hosts verify `VERSION[15:0]` before trusting the core. Legacy bitstreams that still return `"EJAX"` (`0x454A4158`) at this address are accepted with a warning. |
+| `0x0004` | VERSION_ALIAS | same as `0x0000` | Mirror of VERSION for explorer-friendly reads at the old VERSION slot. |
 | `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
 
 [↑ Top](#regmap-top)
@@ -332,8 +332,8 @@ bytes form one little-endian 32-bit word as read by the host stack:
 
 | Byte addr | Assembled word | Name | Content |
 |----------:|----------------|------|---------|
-| `0x0`–`0x3` | word @ 0 | **UART_ID** | `0x454A5552` — ASCII **`EJUR`** (bridge identity). Hosts must match before trusting the core. |
-| `0x4`–`0x7` | word @ 4 | **VERSION** | `[31:16]` = major, `[15:0]` = minor (RTL default `0x00010000` → v1.0). |
+| `0x0`–`0x3` | word @ 0 | **VERSION** | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII **`JU`** (`0x4A55`). Hosts verify `VERSION[15:0]` before trusting the core. Legacy bitstreams that still return **`EJUR`** (`0x454A5552`) here are accepted with a warning. |
+| `0x4`–`0x7` | word @ 4 | **VERSION_ALIAS** | Mirror of VERSION for explorer-friendly reads at the old VERSION slot. |
 | `0x8`–`0xB` | word @ 8 | **FEATURES** | Packed build parameters from `fcapz_ejtaguart.v`: `[31:30]` = `PARITY` (0 none, 1 even, 2 odd); `[29:16]` = `TX_FIFO_DEPTH` (14 bits); `[15:2]` = `RX_FIFO_DEPTH` (14 bits); `[1:0]` = reserved (`2'b00`). Depths are the module parameters (power of 2). |
 | `0xC`–`0xF` | word @ 12 | **BAUD_DIV** | Integer **uart_clk cycles per UART bit** (`CLK_HZ / BAUD_RATE` as synthesized). |
 

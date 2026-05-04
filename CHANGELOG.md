@@ -7,6 +7,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Version:** Bumped project/RTL identity version to `0.4.0`.
+- **EJTAG bridges:** EJTAG-AXI and EJTAG-UART now expose ELA/EIO-style
+  packed `VERSION` identities through their native `CMD_CONFIG` paths:
+  `JX` (`0x4A58`) for AXI and `JU` (`0x4A55`) for UART, with major/minor
+  version bytes in `VERSION[31:16]`. Hosts still accept legacy `EJAX` /
+  `EJUR` bridge IDs for old bitstreams and emit `RuntimeWarning`.
+- **Host API:** EJTAG `connect()` / `attach()` now report normalized
+  16-bit core IDs (`bridge_id` / `id` and `core_id`) for both new and
+  legacy bitstreams. Legacy 32-bit identity words are exposed separately
+  as `legacy_raw_id` with `legacy_id=True`; new bitstreams report
+  `legacy_raw_id=None`. EJTAG bridge
+  `version_major` / `version_minor` now decode the 8-bit packed VERSION
+  fields for new bitstreams; legacy bitstreams keep the old 16-bit decode.
+  Upgrade the host before rebuilding v0.4.0 bitstreams: v0.3.x hosts do
+  not understand the new packed EJTAG identity word.
+
 ### Fixed
 
 - **Host / hw_server:** `EjtagAxiController.connect()` and
@@ -80,7 +98,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `hw_server`.  On the Arty A7 reference setup, isolated USER4 raw
   scans could return all-zero TDO even though the bridge was alive;
   batching the same USER4 traffic is hardware-validated and fixes the
-  false `Bad BRIDGE_ID: 0x00000000` failure.
+  false `Bad EJTAG-AXI VERSION[15:0]: 0x0000` failure.
 - **Arty reference EIO:** USER3 `probe_in` now exposes
   `{btn[3:0], slow_counter[3:0]}` where `slow_counter` increments once
   per second, and the Arty EIO hardware test now checks that slower

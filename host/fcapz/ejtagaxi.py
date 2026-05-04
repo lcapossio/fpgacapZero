@@ -34,7 +34,10 @@ CMD_RESET        = 0xF
 
 DR_WIDTH = 72
 
-_BRIDGE_ID = 0x454A4158  # ASCII "EJAX"
+_BRIDGE_CORE_ID = 0x4A58  # ASCII "JX"
+_BRIDGE_ID = _BRIDGE_CORE_ID  # compatibility alias for older tests/imports
+_LEGACY_BRIDGE_ID = 0x454A4158  # ASCII "EJAX"
+_legacy_bridge_id_warned = False
 
 
 class AXIError(Exception):
@@ -226,6 +229,54 @@ class EjtagAxiController:
             f"RESET + {self._MAX_BUSY_RETRIES} NOP polls"
         )
 
+    @staticmethod
+    def _decode_config(
+        identity_or_version: int,
+        legacy_version: int,
+        features: int,
+    ) -> dict:
+        core_id = identity_or_version & 0xFFFF
+        legacy = identity_or_version == _LEGACY_BRIDGE_ID
+        if legacy:
+            global _legacy_bridge_id_warned
+            if not _legacy_bridge_id_warned:
+                warnings.warn(
+                    "EJTAG-AXI bridge reports legacy BRIDGE_ID 0x454A4158 "
+                    "('EJAX'); rebuild the bitstream to expose VERSION[15:0] "
+                    "as 0x4A58 ('JX'). Legacy IDs are accepted for now.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                _legacy_bridge_id_warned = True
+            version = legacy_version
+            return {
+                "bridge_id": _BRIDGE_CORE_ID,
+                "core_id": _BRIDGE_CORE_ID,
+                "legacy_id": True,
+                "legacy_raw_id": identity_or_version,
+                "version": version,
+                "version_major": version >> 16,
+                "version_minor": version & 0xFFFF,
+                "addr_w": features & 0xFF,
+                "data_w": (features >> 8) & 0xFF,
+                "fifo_depth": ((features >> 16) & 0xFF) + 1,
+            }
+        if core_id != _BRIDGE_CORE_ID:
+            raise RuntimeError(f"Bad EJTAG-AXI VERSION[15:0]: 0x{core_id:04X}")
+        version = identity_or_version
+        return {
+            "bridge_id": core_id,
+            "core_id": core_id,
+            "legacy_id": False,
+            "legacy_raw_id": None,
+            "version": version,
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+            "addr_w": features & 0xFF,
+            "data_w": (features >> 8) & 0xFF,
+            "fifo_depth": ((features >> 16) & 0xFF) + 1,
+        }
+
     def connect(self) -> dict:
         """Open transport, select chain, and probe bridge identity.
 
@@ -262,27 +313,24 @@ class EjtagAxiController:
                     (CMD_NOP, 0, 0, 0),
                 ]
             )
-            _, _, bridge_id, _ = decoded[1]
-            if bridge_id == _BRIDGE_ID or time.monotonic() >= deadline:
+            _, _, identity_or_version, _ = decoded[1]
+            core_id = identity_or_version & 0xFFFF
+            if (
+                core_id == _BRIDGE_CORE_ID
+                or identity_or_version == _LEGACY_BRIDGE_ID
+                or time.monotonic() >= deadline
+            ):
                 break
             time.sleep(0.02)
-        _, _, bridge_id, _ = decoded[1]
-        _, _, version, _ = decoded[2]
+        _, _, identity_or_version, _ = decoded[1]
+        _, _, legacy_version, _ = decoded[2]
         _, _, features, _ = decoded[3]
-        if bridge_id != _BRIDGE_ID:
-            raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
+        info = self._decode_config(identity_or_version, legacy_version, features)
         # FEATURES[23:16] = (FIFO_DEPTH - 1), AXI4 awlen convention.
         # Add 1 back to recover the true depth (max supported burst beats).
-        self._fifo_depth = ((features >> 16) & 0xFF) + 1
+        self._fifo_depth = int(info["fifo_depth"])
         self._prime_cdc()
-        return {
-            "bridge_id": bridge_id,
-            "version_major": version >> 16,
-            "version_minor": version & 0xFFFF,
-            "addr_w": features & 0xFF,
-            "data_w": (features >> 8) & 0xFF,
-            "fifo_depth": self._fifo_depth,
-        }
+        return info
 
     def attach(self) -> dict:
         """Like :meth:`connect` but assume the transport is already open.
@@ -301,21 +349,13 @@ class EjtagAxiController:
                     (CMD_NOP, 0, 0, 0),
                 ]
             )
-            _, _, bridge_id, _ = decoded[1]
-            _, _, version, _ = decoded[2]
+            _, _, identity_or_version, _ = decoded[1]
+            _, _, legacy_version, _ = decoded[2]
             _, _, features, _ = decoded[3]
-            if bridge_id != _BRIDGE_ID:
-                raise RuntimeError(f"Bad BRIDGE_ID: 0x{bridge_id:08X}")
-            self._fifo_depth = ((features >> 16) & 0xFF) + 1
+            info = self._decode_config(identity_or_version, legacy_version, features)
+            self._fifo_depth = int(info["fifo_depth"])
             self._prime_cdc()
-            return {
-                "bridge_id": bridge_id,
-                "version_major": version >> 16,
-                "version_minor": version & 0xFFFF,
-                "addr_w": features & 0xFF,
-                "data_w": (features >> 8) & 0xFF,
-                "fifo_depth": self._fifo_depth,
-            }
+            return info
         finally:
             self._transport.select_chain(1)
 

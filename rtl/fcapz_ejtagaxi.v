@@ -3,6 +3,10 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines.  AUTO-generated from
+// the canonical VERSION file at the repo root by tools/sync_version.py.
+`include "fcapz_version.vh"
+
 // JTAG-to-AXI4 bridge core (vendor-agnostic).
 //
 // TAP signals are provided by an external vendor-specific wrapper.
@@ -124,8 +128,8 @@ module fcapz_ejtagaxi #(
                      ST_BURST_W_LOAD = 4'd14;
 
     // Config register addresses
-    localparam CFG_BRIDGE_ID = 16'h0000;
-    localparam CFG_VERSION   = 16'h0004;
+    localparam CFG_VERSION   = 16'h0000;
+    localparam CFG_VERSION_ALIAS = 16'h0004;
     localparam CFG_FEATURES  = 16'h002C;
     localparam CFG_DBG_REC_COUNT      = 16'h0100;
     localparam CFG_DBG_REC0_SR_ADDR   = 16'h0120;
@@ -828,8 +832,8 @@ module fcapz_ejtagaxi #(
                     CMD_CONFIG: begin
                         // Latch config value now (sr_addr is valid at update)
                         case (sr_addr[15:0])
-                            CFG_BRIDGE_ID: config_rdata <= 32'h454A4158;
-                            CFG_VERSION:   config_rdata <= {16'd0, 16'd1};
+                            CFG_VERSION:   config_rdata <= `FCAPZ_EJTAGAXI_VERSION_REG;
+                            CFG_VERSION_ALIAS: config_rdata <= `FCAPZ_EJTAGAXI_VERSION_REG;
                             // FEATURES: [7:0]=ADDR_W, [15:8]=DATA_W,
                             // [23:16]=(FIFO_DEPTH-1)  (AXI4 awlen convention,
                             // so FIFO_DEPTH=256 fits as 0xFF; host adds 1)

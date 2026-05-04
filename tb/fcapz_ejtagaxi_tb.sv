@@ -449,7 +449,7 @@ module fcapz_ejtagaxi_tb;
         // ==================================================================
         $display("\n=== Scenario 9: CONFIG reads ===");
 
-        // BRIDGE_ID
+        // VERSION = {major=0, minor=4, core_id="JX"=16'h4A58}
         scan_in = make_cmd(CMD_CONFIG, 32'h0000_0000, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         cdc_wait();
@@ -458,18 +458,18 @@ module fcapz_ejtagaxi_tb;
         dr_scan_72(scan_in, scan_out);
         rdata  = get_rdata(scan_out);
         status = get_status(scan_out);
-        check("S9: BRIDGE_ID=0x454A4158",  rdata == 32'h454A4158);
-        check("S9: BRIDGE_ID prev_valid=1", status[0] == 1'b1);
+        check("S9: VERSION=0x00044A58",  rdata == 32'h0004_4A58);
+        check("S9: VERSION prev_valid=1", status[0] == 1'b1);
         cdc_wait();
 
-        // VERSION
+        // VERSION is also mirrored at the old VERSION slot for exploration.
         scan_in = make_cmd(CMD_CONFIG, 32'h0000_0004, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         cdc_wait();
         scan_in = make_cmd(CMD_NOP, 32'h0, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         rdata = get_rdata(scan_out);
-        check("S9: VERSION=0x00000001", rdata == 32'h0000_0001);
+        check("S9: VERSION alias=0x00044A58", rdata == 32'h0004_4A58);
         cdc_wait();
 
         // FEATURES: {8'd0, (FIFO_DEPTH-1)[7:0]=15, DATA_W[7:0]=32, ADDR_W[7:0]=32}

@@ -10,14 +10,16 @@
 `define FCAPZ_VERSION_VH
 
 `define FCAPZ_VERSION_MAJOR  8'h00
-`define FCAPZ_VERSION_MINOR  8'h03
+`define FCAPZ_VERSION_MINOR  8'h04
 `define FCAPZ_VERSION_PATCH  8'h00
-`define FCAPZ_VERSION_STRING "0.3.0"
+`define FCAPZ_VERSION_STRING "0.4.0"
 
 // Per-core 16-bit ASCII identifiers, packed into VERSION[15:0] of
 // each core's identity register.  Constant per-core; never zero.
 `define FCAPZ_ELA_CORE_ID 16'h4C41  // "LA" - Logic Analyzer
 `define FCAPZ_EIO_CORE_ID 16'h494F  // "IO" - Embedded I/O
+`define FCAPZ_EJTAGAXI_CORE_ID 16'h4A58  // "JX" - EJTAG-AXI bridge
+`define FCAPZ_EJTAGUART_CORE_ID 16'h4A55  // "JU" - EJTAG-UART bridge
 
 // Packed VERSION registers for each core (read at addr 0x0000 of
 // the core's register space).  Layout:
@@ -29,5 +31,7 @@
 // register on the same chain.
 `define FCAPZ_ELA_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_ELA_CORE_ID}
 `define FCAPZ_EIO_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EIO_CORE_ID}
+`define FCAPZ_EJTAGAXI_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EJTAGAXI_CORE_ID}
+`define FCAPZ_EJTAGUART_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EJTAGUART_CORE_ID}
 
 `endif  // FCAPZ_VERSION_VH

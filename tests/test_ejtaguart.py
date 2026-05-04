@@ -15,25 +15,32 @@ from fcapz.ejtaguart import (
     CMD_TXRX,
     DR_WIDTH,
     EjtagUartController,
+    _LEGACY_UART_ID,
     _UART_ID,
 )
 from fcapz.transport import Transport
 
 
 # Config register byte map (matches RTL)
-_UART_ID_BYTES = [
-    (_UART_ID >>  0) & 0xFF,
-    (_UART_ID >>  8) & 0xFF,
-    (_UART_ID >> 16) & 0xFF,
-    (_UART_ID >> 24) & 0xFF,
-]
-
-_VERSION = 0x0001_0000
+_VERSION = (0x01 << 24) | (0x02 << 16) | _UART_ID
 _VERSION_BYTES = [
     (_VERSION >>  0) & 0xFF,
     (_VERSION >>  8) & 0xFF,
     (_VERSION >> 16) & 0xFF,
     (_VERSION >> 24) & 0xFF,
+]
+_LEGACY_VERSION = 0x0001_0002
+_LEGACY_UART_ID_BYTES = [
+    (_LEGACY_UART_ID >>  0) & 0xFF,
+    (_LEGACY_UART_ID >>  8) & 0xFF,
+    (_LEGACY_UART_ID >> 16) & 0xFF,
+    (_LEGACY_UART_ID >> 24) & 0xFF,
+]
+_LEGACY_VERSION_BYTES = [
+    (_LEGACY_VERSION >>  0) & 0xFF,
+    (_LEGACY_VERSION >>  8) & 0xFF,
+    (_LEGACY_VERSION >> 16) & 0xFF,
+    (_LEGACY_VERSION >> 24) & 0xFF,
 ]
 
 
@@ -71,12 +78,11 @@ class FakeUartTransport(Transport):
     def _init_config(cls):
         if cls._CONFIG_MAP:
             return
-        # UART_ID at 0x00..0x03
+        # VERSION at 0x00..0x03
         for i in range(4):
-            cls._CONFIG_MAP[i] = _UART_ID_BYTES[i]
-        # VERSION at 0x04..0x07
+            cls._CONFIG_MAP[i] = _VERSION_BYTES[i]
         for i in range(4):
-            cls._CONFIG_MAP[4 + i] = _VERSION_BYTES[i]
+            cls._CONFIG_MAP[4 + i] = 0
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -205,7 +211,27 @@ class EjtagUartTests(unittest.TestCase):
         ctrl = EjtagUartController(t, chain=4)
         info = ctrl.connect()
         self.assertEqual(info["id"], _UART_ID)
+        self.assertEqual(info["core_id"], _UART_ID)
+        self.assertFalse(info["legacy_id"])
+        self.assertIsNone(info["legacy_raw_id"])
         self.assertEqual(info["version"], _VERSION)
+
+    def test_probe_accepts_legacy_uart_id_with_warning(self):
+        t = FakeUartTransport()
+        t._CONFIG_MAP = dict(t._CONFIG_MAP)
+        for i in range(4):
+            t._CONFIG_MAP[i] = _LEGACY_UART_ID_BYTES[i]
+            t._CONFIG_MAP[4 + i] = _LEGACY_VERSION_BYTES[i]
+        ctrl = EjtagUartController(t, chain=4)
+        with self.assertWarnsRegex(RuntimeWarning, "legacy UART_ID"):
+            info = ctrl.connect()
+        self.assertEqual(info["id"], _UART_ID)
+        self.assertEqual(info["core_id"], _UART_ID)
+        self.assertTrue(info["legacy_id"])
+        self.assertEqual(info["legacy_raw_id"], _LEGACY_UART_ID)
+        self.assertEqual(info["version"], _LEGACY_VERSION)
+        self.assertEqual(info["version_major"], 1)
+        self.assertEqual(info["version_minor"], 2)
 
     def test_probe_bad_id_raises(self):
         t = FakeUartTransport()
@@ -222,7 +248,7 @@ class EjtagUartTests(unittest.TestCase):
     def test_probe_retries_once_on_stale_uart_id(self):
         t = FakeUartTransport()
         ctrl = EjtagUartController(t, chain=4)
-        vals = iter([0x004A5552, _UART_ID, _VERSION])
+        vals = iter([0x0000_0000, _VERSION])
         ctrl._config_read_u32 = lambda addr: next(vals)
         info = ctrl.connect()
         self.assertEqual(info["id"], _UART_ID)
@@ -334,7 +360,7 @@ class EjtagUartTests(unittest.TestCase):
         t = FakeUartTransport(stale_id_reads=100)
         t.ready_probe_timeout = 0.0
         ctrl = EjtagUartController(t, chain=4)
-        with self.assertRaisesRegex(RuntimeError, "Bad UART ID: 0x00000000"):
+        with self.assertRaisesRegex(RuntimeError, r"Bad EJTAG-UART VERSION\[15:0\]: 0x0000"):
             ctrl.connect()
 
     def test_connect_failure_closes_transport(self):

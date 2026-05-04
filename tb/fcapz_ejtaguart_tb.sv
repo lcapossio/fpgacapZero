@@ -240,11 +240,12 @@ module fcapz_ejtaguart_tb;
         repeat (20) @(posedge tck);
 
         // ==================================================================
-        // Scenario 1: CONFIG read (UART_ID, VERSION)
+        // Scenario 1: CONFIG read (VERSION)
         // ==================================================================
-        $display("\n=== Scenario 1: CONFIG read (UART_ID, VERSION) ===");
+        $display("\n=== Scenario 1: CONFIG read (VERSION) ===");
 
-        // Read UART_ID: 4 CONFIG scans + 1 NOP drain
+        // Read VERSION: 4 CONFIG scans + 1 NOP drain.
+        // VERSION = {major=0, minor=4, core_id="JU"=16'h4A55}.
         scan_in = make_cmd(CMD_CONFIG, 8'h00);
         dr_scan_32(scan_in, scan_out);
         cdc_wait();
@@ -252,35 +253,35 @@ module fcapz_ejtaguart_tb;
         scan_in = make_cmd(CMD_CONFIG, 8'h01);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: UART_ID byte0=0x52", rx_byte == 8'h52);
+        check("S1: VERSION byte0=0x55", rx_byte == 8'h55);
         cdc_wait();
 
         scan_in = make_cmd(CMD_CONFIG, 8'h02);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: UART_ID byte1=0x55", rx_byte == 8'h55);
+        check("S1: VERSION byte1=0x4A", rx_byte == 8'h4A);
         cdc_wait();
 
         scan_in = make_cmd(CMD_CONFIG, 8'h03);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: UART_ID byte2=0x4A", rx_byte == 8'h4A);
+        check("S1: VERSION byte2=0x04", rx_byte == 8'h04);
         cdc_wait();
 
         scan_in = make_cmd(CMD_NOP, 8'h00);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: UART_ID byte3=0x45", rx_byte == 8'h45);
+        check("S1: VERSION byte3=0x00", rx_byte == 8'h00);
         cdc_wait();
 
-        // Read VERSION byte 0
+        // Read mirrored VERSION byte 4
         scan_in = make_cmd(CMD_CONFIG, 8'h04);
         dr_scan_32(scan_in, scan_out);
         cdc_wait();
         scan_in = make_cmd(CMD_NOP, 8'h00);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: VERSION byte0=0x00", rx_byte == 8'h00);
+        check("S1: VERSION alias byte4=0x55", rx_byte == 8'h55);
         cdc_wait();
 
         // ==================================================================
