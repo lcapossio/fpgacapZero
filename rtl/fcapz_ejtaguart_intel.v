@@ -16,7 +16,7 @@
 //   );
 
 module fcapz_ejtaguart_intel #(
-    parameter CHAIN          = 5,    // sld_instance_index (1-4 used by ELA+EIO+EJAX)
+    parameter CHAIN          = 5,    // sld_instance_index (1-4 used by ELA+EIO+AXI)
     parameter CLK_HZ         = 100_000_000,
     parameter BAUD_RATE      = 115200,
     parameter TX_FIFO_DEPTH  = 256,

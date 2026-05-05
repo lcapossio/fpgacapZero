@@ -102,7 +102,7 @@ the regenerated `rtl/fcapz_version.vh`.  See
 
 ## EJTAG-AXI bridge
 
-### `Bad BRIDGE_ID: 0x00000000` on Arty / `hw_server` even though USER4 is present
+### `Bad EJTAG-AXI VERSION[15:0]: 0x0000` on Arty / `hw_server` even though USER4 is present
 
 **Cause**: on the Arty A7 reference setup, isolated USER4 raw scans
 through `xsdb` / `hw_server` were observed to return all-zero TDO.

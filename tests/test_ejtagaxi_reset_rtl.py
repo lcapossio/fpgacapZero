@@ -30,6 +30,8 @@ class EjtagAxiResetRtlTests(unittest.TestCase):
                 [
                     "iverilog",
                     "-g2012",
+                    "-I",
+                    str(ROOT / "rtl"),
                     "-P",
                     f"fcapz_ejtagaxi_reset_regression_tb.DEBUG_EN={debug_en}",
                     "-o",

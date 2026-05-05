@@ -23,6 +23,7 @@ from fcapz.ejtagaxi import (
     DR_WIDTH,
     EjtagAxiController,
     _BRIDGE_ID,
+    _LEGACY_BRIDGE_ID,
 )
 from fcapz.transport import Transport
 
@@ -37,8 +38,7 @@ class FakeBridgeTransport(Transport):
 
     # Config register map (read via CMD_CONFIG)
     _CONFIG_REGS = {
-        0x0000: _BRIDGE_ID,     # BRIDGE_ID
-        0x0004: 0x0001_0002,    # version: major=1, minor=2
+        0x0000: (0x01 << 24) | (0x02 << 16) | _BRIDGE_ID,  # VERSION
         # features: addr_w=32, data_w=32, fifo_depth=16 (encoded as 15 in [23:16])
         0x002C: (0x0F << 16) | 0x2020,
     }
@@ -326,6 +326,9 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl2 = EjtagAxiController(t2, chain=4)
         info = ctrl2.connect()
         self.assertEqual(info["bridge_id"], _BRIDGE_ID)
+        self.assertEqual(info["core_id"], _BRIDGE_ID)
+        self.assertFalse(info["legacy_id"])
+        self.assertIsNone(info["legacy_raw_id"])
         self.assertEqual(info["version_major"], 1)
         self.assertEqual(info["version_minor"], 2)
         self.assertEqual(info["addr_w"], 0x20)
@@ -339,6 +342,20 @@ class EjtagAxiTests(unittest.TestCase):
         self.assertEqual(t.scan_log[:4], [CMD_CONFIG, CMD_CONFIG, CMD_CONFIG, CMD_NOP])
         self.assertEqual(t.scan_log[4], CMD_RESET)
         self.assertEqual(t.scan_log[5], CMD_NOP)
+
+    def test_connect_accepts_legacy_bridge_id_with_warning(self):
+        t = FakeBridgeTransport()
+        t._config_regs[0x0000] = _LEGACY_BRIDGE_ID
+        t._config_regs[0x0004] = 0x0001_0002
+        ctrl = EjtagAxiController(t, chain=4)
+        with self.assertWarnsRegex(RuntimeWarning, "legacy BRIDGE_ID"):
+            info = ctrl.connect()
+        self.assertEqual(info["bridge_id"], _BRIDGE_ID)
+        self.assertEqual(info["core_id"], _BRIDGE_ID)
+        self.assertTrue(info["legacy_id"])
+        self.assertEqual(info["legacy_raw_id"], _LEGACY_BRIDGE_ID)
+        self.assertEqual(info["version_major"], 1)
+        self.assertEqual(info["version_minor"], 2)
 
     def test_connect_bad_id_raises(self):
         t = FakeBridgeTransport()
@@ -483,7 +500,7 @@ class EjtagAxiTests(unittest.TestCase):
         t = FakeBridgeTransport(stale_config_id_reads=100)
         t.ready_probe_timeout = 0.0
         ctrl = EjtagAxiController(t, chain=4)
-        with self.assertRaisesRegex(RuntimeError, "Bad BRIDGE_ID: 0x00000000"):
+        with self.assertRaisesRegex(RuntimeError, r"Bad EJTAG-AXI VERSION\[15:0\]: 0x0000"):
             ctrl.connect()
 
     def test_batch_only_transport_still_connects_and_moves_data(self):

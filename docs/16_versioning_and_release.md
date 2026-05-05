@@ -218,18 +218,26 @@ into three fields:
 [15:0]  = CORE_ID  (16-bit ASCII, constant per-core)
 ```
 
-| Core | `core_id` ASCII | Value | Full v0.3.0 register |
+| Core | `core_id` ASCII | Value | Full v0.4.0 register |
 |---|---|---|---|
-| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0003_4C41` |
-| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0003_494F` |
-| EJTAG-AXI | `"EJAX"` (in a separate `BRIDGE_ID` config register) | `0x454A4158` | n/a — bridge uses a different register layout |
-| EJTAG-UART | `"EJUR"` | `0x454A5552` | n/a — same |
+| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0004_4C41` |
+| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0004_494F` |
+| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0004_4A58` |
+| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0004_4A55` |
 
-The ELA and EIO cores use the unified `{major, minor, core_id}`
-encoding because they share the same 49-bit DR register interface.
-The two bridges use their own config-register encodings (the
-72-bit DR for AXI, the 32-bit DR for UART) because their JTAG
-protocols are completely different.
+All cores use the unified `{major, minor, core_id}` identity word. ELA
+and EIO expose it through their 49-bit register interface; EJTAG-AXI and
+EJTAG-UART expose the same layout through their native CONFIG paths.
+The host stack still accepts the pre-v0.4.0 EJTAG bridge IDs (`"EJAX"` and
+`"EJUR"`) with a `RuntimeWarning` so older bitstreams can be used while
+hardware is rebuilt. In host API return dicts, `bridge_id` / `id` and
+`core_id` are always the normalized 16-bit values; old 32-bit identity
+words are reported as `legacy_raw_id` when `legacy_id=True`; new bitstreams
+report `legacy_raw_id=None`.
+Compatibility is intentionally one-way: v0.4.0 hosts can talk to old and
+new bitstreams, but v0.3.x hosts do not understand v0.4.0 EJTAG bridge
+identity words. Upgrade the host before rebuilding or deploying v0.4.0
+bitstreams.
 
 ### Why the magic exists
 

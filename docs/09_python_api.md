@@ -424,7 +424,18 @@ from fcapz import EjtagAxiController, AXIError
 
 bridge = EjtagAxiController(transport, chain=4)
 info = bridge.connect()
-# {"bridge_id": 0x454A4158, "addr_w": 32, "data_w": 32, "fifo_depth": 16, ...}
+# {
+#   "bridge_id": 0x4A58,
+#   "core_id": 0x4A58,
+#   "legacy_id": False,
+#   "legacy_raw_id": None,
+#   "version": 0x00044A58,
+#   "version_major": 0,
+#   "version_minor": 4,
+#   "addr_w": 32,
+#   "data_w": 32,
+#   "fifo_depth": 16,
+# }
 
 # Single transactions
 val = bridge.axi_read(0x40000000)
@@ -444,6 +455,10 @@ bridge.close()
 `axi_read` / `axi_write` raise `AXIError` on a non-OKAY response.
 `burst_read` / `burst_write` raise `ValueError` if the count
 exceeds `fifo_depth` or AXI4's max burst (256).
+Old EJTAG-AXI bitstreams that still report `"EJAX"` are accepted with a
+`RuntimeWarning`; their `connect()` info includes `legacy_id=True` and
+`legacy_raw_id=0x454A4158`. `bridge_id` and `core_id` stay normalized to
+`0x4A58` (`"JX"`) for both old and new bitstreams.
 
 See [chapter 07](07_ejtag_axi_bridge.md) for full details.
 
@@ -454,7 +469,15 @@ from fcapz import EjtagUartController
 
 uart = EjtagUartController(transport, chain=4)
 info = uart.connect()
-# {"id": 0x454A5552, "version": 0x00010000}
+# {
+#   "id": 0x4A55,
+#   "core_id": 0x4A55,
+#   "legacy_id": False,
+#   "legacy_raw_id": None,
+#   "version": 0x00044A55,
+#   "version_major": 0,
+#   "version_minor": 4,
+# }
 
 uart.send(b"Hello\n")
 data = uart.recv(count=64, timeout=1.0)
@@ -462,6 +485,12 @@ line = uart.recv_line(timeout=1.0)
 status = uart.status()
 uart.close()
 ```
+
+Old EJTAG-UART bitstreams that still report `"EJUR"` are accepted with a
+`RuntimeWarning`; their `connect()` info includes `legacy_id=True` and
+`legacy_raw_id=0x454A5552`. `id` and `core_id` stay normalized to
+`0x4A55` (`"JU"`) for both old and new bitstreams; new bitstreams report
+`legacy_raw_id=None`.
 
 See [chapter 08](08_ejtag_uart_bridge.md) for full details.
 

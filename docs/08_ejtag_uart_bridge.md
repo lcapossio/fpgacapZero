@@ -124,13 +124,27 @@ t = XilinxHwServerTransport(port=3121, fpga_name="xc7a100t")
 uart = EjtagUartController(t, chain=4)
 info = uart.connect()
 print(info)
-# {"id": 0x454A5552, "version": 0x0001_0000}
-#  └─ ASCII "EJUR"  └─ major.minor packed
+# {
+#   "id": 0x4A55,
+#   "core_id": 0x4A55,
+#   "legacy_id": False,
+#   "legacy_raw_id": None,
+#   "version": 0x0004_4A55,
+#   "version_major": 0,
+#   "version_minor": 4,
+# }
+#  └─ ASCII "JU"  └─ major.minor + core_id packed
 ```
 
-`connect()` reads the bridge identity (`UART_ID = 0x454A5552 = "EJUR"`)
-and raises `RuntimeError` on mismatch.  Same defensive pattern as
-the other controllers.
+`connect()` reads the packed `VERSION` word and verifies
+`VERSION[15:0] == 0x4A55` (`"JU"`). Old bitstreams that still report
+`UART_ID = 0x454A5552` (`"EJUR"`) are accepted with a `RuntimeWarning`.
+In both cases `info["id"]` and `info["core_id"]` are the normalized
+16-bit `JU` value; old bitstreams additionally report `legacy_id=True`
+and `legacy_raw_id=0x454A5552`.
+New bitstreams report `legacy_id=False` and `legacy_raw_id=None`.
+Other mismatches raise `RuntimeError`, the same defensive pattern as the
+other controllers.
 
 ### Send bytes
 

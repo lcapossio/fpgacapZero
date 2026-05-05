@@ -903,13 +903,20 @@ class TestEjtagAxiProbe(unittest.TestCase):
     """EJTAG-AXI bridge: probe identity."""
 
     def test_bridge_probe(self):
-        from fcapz.ejtagaxi import EjtagAxiController
+        from fcapz import _version_tuple
+        from fcapz.ejtagaxi import _BRIDGE_CORE_ID, EjtagAxiController
 
         t = _make_transport()
         bridge = EjtagAxiController(t, chain=4)
         try:
             info = bridge.connect()
-            self.assertEqual(info["bridge_id"], 0x454A4158)  # "EJAX"
+            major, minor, _patch = _version_tuple()
+            self.assertEqual(info["bridge_id"], _BRIDGE_CORE_ID)
+            self.assertEqual(info["core_id"], _BRIDGE_CORE_ID)
+            self.assertFalse(info["legacy_id"])
+            self.assertIsNone(info["legacy_raw_id"])
+            self.assertEqual(info["version_major"], major)
+            self.assertEqual(info["version_minor"], minor)
             self.assertGreater(info["addr_w"], 0)
             self.assertGreater(info["data_w"], 0)
         finally:

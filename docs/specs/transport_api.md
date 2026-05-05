@@ -1,4 +1,4 @@
-# Transport API — v0.3.0
+# Transport API — v0.4.0
 
 ## Purpose
 Abstracts access to the JTAG register map across different backends (Xilinx `hw_server`, OpenOCD, other vendors).

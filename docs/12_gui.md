@@ -115,7 +115,7 @@ After connecting **with** an ELA on USER1, this panel shows the live
 `Analyzer.probe()` output:
 
 ```
-Version : 0.3
+Version : 0.4
 Core ID : 0x4C41 ('LA')
 Sample W: 8 bits
 Depth   : 1024 samples

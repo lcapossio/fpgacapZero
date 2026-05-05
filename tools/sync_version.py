@@ -39,7 +39,8 @@ HEADER_FILE = ROOT / "rtl" / "fcapz_version.vh"
 CORE_IDS: dict[str, tuple[str, str]] = {
     "ELA":  ("LA", "Logic Analyzer"),
     "EIO":  ("IO", "Embedded I/O"),
-    # Future: ("AX", "AXI bridge"), ("UR", "UART bridge")
+    "EJTAGAXI":  ("JX", "EJTAG-AXI bridge"),
+    "EJTAGUART": ("JU", "EJTAG-UART bridge"),
 }
 
 

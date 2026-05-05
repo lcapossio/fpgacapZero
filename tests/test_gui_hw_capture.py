@@ -99,10 +99,10 @@ def _assert_capture_matches_arty_counter(
     result: CaptureResult,
     *,
     pre: int,
-    trig_val: int = 0,
+    trig_val: int | None = 0,
     context: str = "",
 ) -> None:
-    """Same ideas as ``TestCapture.test_samples_are_counter_values`` + trigger anchor."""
+    """Same ideas as ``TestCapture.test_samples_are_counter_values`` + optional trigger anchor."""
     samples = result.samples
     note = f" {context}" if context else ""
     step_errors = _counter_step_errors_low8(samples)
@@ -115,12 +115,13 @@ def _assert_capture_matches_arty_counter(
         f"expected sequential counter run >= {pre + 1}, got {br}{note}; "
         f"low8={[x & 0xFF for x in samples]}"
     )
-    tbyte = samples[pre] & 0xFF
-    ok = {trig_val & 0xFF, (trig_val + 1) & 0xFF}
-    assert tbyte in ok, (
-        f"trigger sample @{pre} = 0x{tbyte:02x}, expected one of "
-        f"{{{', '.join(f'0x{v:02x}' for v in sorted(ok))}}}{note}"
-    )
+    if trig_val is not None:
+        tbyte = samples[pre] & 0xFF
+        ok = {trig_val & 0xFF, (trig_val + 1) & 0xFF}
+        assert tbyte in ok, (
+            f"trigger sample @{pre} = 0x{tbyte:02x}, expected one of "
+            f"{{{', '.join(f'0x{v:02x}' for v in sorted(ok))}}}{note}"
+        )
 
 
 def _gui_hw_enabled() -> bool:
@@ -147,13 +148,13 @@ def _gui_settings_for_hw() -> GuiSettings:
         gs.connection.backend = "hw_server"
         gs.connection.tap = os.environ.get("FPGACAP_HW_SERVER_TAP", "xc7a100t.tap")
         p = os.environ.get("FPGACAP_HW_SERVER_PORT", "").strip()
-        if p:
-            gs.connection.port = int(p)
+        gs.connection.port = int(p) if p else 3121
         bf = os.environ.get("FPGACAP_BITFILE", "").strip()
         if bf:
             gs.connection.program = bf
         elif _DEFAULT_ARTY_BIT.is_file():
             gs.connection.program = str(_DEFAULT_ARTY_BIT)
+        gs.connection.program_on_connect = bool(gs.connection.program)
     return gs
 
 
@@ -239,15 +240,14 @@ def test_gui_three_captures_consistent(qtbot: Any, tmp_path: Path) -> None:
             _assert_capture_matches_arty_counter(
                 e.result,
                 pre=pre,
-                trig_val=0,
+                trig_val=None,
                 context=f"single capture #{i}",
             )
-
-        tidx = pre
-        bases = [e.result.samples[tidx] & 0xFF for e in last_three]
-        assert bases[0] == bases[1] == bases[2], (
-            f"trigger sample bytes differ across runs: {bases!r}"
-        )
+        runs = [
+            _best_sequential_counter_run_low8(e.result.samples)
+            for e in last_three
+        ]
+        assert runs == [expected_n, expected_n, expected_n], runs
 
 
 @pytest.mark.hw

@@ -27,7 +27,7 @@ class EjtagAxiRtlTests(unittest.TestCase):
                 str(ROOT / "rtl" / "fcapz_async_fifo.v"),
                 str(ROOT / "tb" / "xpm_fifo_async_stub.v"),
             ]
-            cmd = ["iverilog", "-g2012"]
+            cmd = ["iverilog", "-g2012", "-I", str(ROOT / "rtl")]
             for key, value in (params or {}).items():
                 cmd.extend(["-P", f"fcapz_ejtagaxi_reset_regression_tb.{key}={value}"])
             cmd.extend(["-o", str(vvp)])
@@ -84,6 +84,8 @@ class EjtagAxiRtlTests(unittest.TestCase):
                 [
                     "iverilog",
                     "-g2012",
+                    "-I",
+                    str(ROOT / "rtl"),
                     "-P",
                     "fcapz_ejtagaxi_reset_regression_tb.USE_BEHAV_ASYNC_FIFO=0",
                     "-P",

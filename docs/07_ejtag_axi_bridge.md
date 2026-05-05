@@ -149,9 +149,13 @@ bridge = EjtagAxiController(t, chain=4)
 info = bridge.connect()
 print(info)
 # {
-#   "bridge_id": 0x454A4158,    # ASCII "EJAX"
-#   "version_major": 1,
-#   "version_minor": 0,
+#   "bridge_id": 0x4A58,        # ASCII "JX"
+#   "core_id": 0x4A58,
+#   "legacy_id": False,
+#   "legacy_raw_id": None,
+#   "version": 0x00044A58,
+#   "version_major": 0,
+#   "version_minor": 4,
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,            # <-- cached from FEATURES register
@@ -160,8 +164,13 @@ print(info)
 
 After `connect()`, the controller has:
 
-- Verified the bridge identity (`BRIDGE_ID = 0x454A4158 = "EJAX"`)
-  and raised on mismatch.
+- Verified the bridge identity (`VERSION[15:0] = 0x4A58 = "JX"`).
+  Old bitstreams that still report `BRIDGE_ID = 0x454A4158` (`"EJAX"`)
+  are accepted with a `RuntimeWarning`.
+  In both cases `info["bridge_id"]` and `info["core_id"]` are the
+  normalized 16-bit `JX` value; old bitstreams additionally report
+  `legacy_id=True` and `legacy_raw_id=0x454A4158`; new bitstreams report
+  `legacy_id=False` and `legacy_raw_id=None`.
 - Cached `FIFO_DEPTH` from the `FEATURES` register.  This is the
   maximum burst length the bridge can buffer.  Every subsequent
   `burst_read()` / `burst_write()` checks the requested count

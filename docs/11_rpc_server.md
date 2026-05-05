@@ -323,9 +323,13 @@ Response includes the cached `fifo_depth`:
 {
   "ok": true,
   "schema_version": "1.1",
-  "bridge_id": 1162363736,
-  "version_major": 1,
-  "version_minor": 0,
+  "bridge_id": 19032,
+  "core_id": 19032,
+  "legacy_id": false,
+  "legacy_raw_id": null,
+  "version": 281176,
+  "version_major": 0,
+  "version_minor": 4,
   "addr_w": 32,
   "data_w": 32,
   "fifo_depth": 16

@@ -1,4 +1,4 @@
-# Waveform Schema — v0.3.0
+# Waveform Schema — v0.4.0
 
 ## JSON Export (LLM-Friendly)
 ```json

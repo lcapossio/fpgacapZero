@@ -3,6 +3,10 @@
 
 `timescale 1ns/1ps
 
+// Project-wide version + per-core identity defines.  AUTO-generated from
+// the canonical VERSION file at the repo root by tools/sync_version.py.
+`include "fcapz_version.vh"
+
 // JTAG-to-UART bridge core (vendor-agnostic).
 //
 // TAP signals are provided by an external vendor-specific wrapper.
@@ -101,8 +105,7 @@ module fcapz_ejtaguart #(
     localparam FRAME_BITS = (PARITY != 0) ? 11 : 10;
 
     // Config registers
-    localparam [31:0] UART_ID    = 32'h454A5552;  // "EJUR"
-    localparam [31:0] VERSION    = 32'h0001_0000;  // v1.0
+    localparam [31:0] VERSION    = `FCAPZ_EJTAGUART_VERSION_REG;
     localparam [31:0] FEATURES   = {PARITY[1:0], TX_FIFO_DEPTH[13:0], RX_FIFO_DEPTH[13:0], 2'b00};
     localparam [31:0] BAUD_DIV_R = BAUD_DIV[31:0];
 
@@ -221,10 +224,12 @@ module fcapz_ejtaguart #(
     reg [7:0] config_byte;
     always @(*) begin
         case (sr_tx_byte[3:0])  // byte address (low nibble only)
-            4'h0: config_byte = UART_ID[7:0];
-            4'h1: config_byte = UART_ID[15:8];
-            4'h2: config_byte = UART_ID[23:16];
-            4'h3: config_byte = UART_ID[31:24];
+            4'h0: config_byte = VERSION[7:0];
+            4'h1: config_byte = VERSION[15:8];
+            4'h2: config_byte = VERSION[23:16];
+            4'h3: config_byte = VERSION[31:24];
+            // Mirror VERSION at the old v0.3 VERSION byte window so manual
+            // CONFIG probing at 0x4..0x7 sees an intentional identity word.
             4'h4: config_byte = VERSION[7:0];
             4'h5: config_byte = VERSION[15:8];
             4'h6: config_byte = VERSION[23:16];
@@ -565,4 +570,3 @@ module fcapz_ejtaguart #(
     end
 
 endmodule
-
