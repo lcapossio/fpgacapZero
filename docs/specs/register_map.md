@@ -37,44 +37,35 @@ in that bridge’s section.
 
 <a id="regmap-ela-user1"></a>
 ## ELA core — address map (USER1 control)
-- `0x0000`: `VERSION` (ro) - Core identity and version. `[15:0]` is the
-  ASCII core identifier `"LA"` (`0x4C41`, Logic Analyzer); `[23:16]` is
-  the minor version; `[31:24]` is the major version. Hosts must verify
-  the low-16 magic before trusting any other ELA register on this
-  chain. Current value: `0x0002_4C41` (major=0, minor=2, id="LA").
-- `0x0004`: `CTRL` (rw) - Control (arm, reset)
-- `0x0008`: `STATUS` (ro) - Status (armed, triggered, done)
-- `0x000C`: `SAMPLE_W` (ro) - Sample width in bits
-- `0x0010`: `DEPTH` (ro) - Total capture depth in samples
-- `0x0014`: `PRETRIG_LEN` (rw) - Pre-trigger samples
-- `0x0018`: `POSTTRIG_LEN` (rw) - Post-trigger samples
-- `0x001C`: `CAPTURE_LEN` (ro) - Captured sample count for current/last run
-- `0x0020`: `TRIG_MODE` (rw) - Trigger mode
-- `0x0024`: `TRIG_VALUE` (rw) - Compare value
-- `0x0028`: `TRIG_MASK` (rw) - Mask bits
-- `0x002C`: `BURST_PTR` (wo) - Write to initiate burst read from `start_ptr` via USER2.
-  `bit[31]` selects the source BRAM: `0` = sample data (default), `1` = timestamp data.
-  The host sets `bit[31]=1` when calling `read_timestamp_block()` to burst-read the
-  timestamp BRAM through the same USER2 path.
-- `0x0030`: `SQ_MODE` (rw) - Storage qualification mode (0=off, 1=value, 2=edge, 3=both; STOR_QUAL=1 only)
-- `0x0034`: `SQ_VALUE` (rw) - Storage qualification match value
-- `0x0038`: `SQ_MASK` (rw) - Storage qualification match mask
-- `0x00D8`: `STARTUP_ARM` (rw) - Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes the power-up default of this register so the bitstream can come up pre-armed immediately after configuration.
-- `0x00DC`: `TRIG_HOLDOFF` (rw) - Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after each segmented auto-rearm. Distinct from `TRIG_DELAY`.
-- `0x00D4`: `TRIG_DELAY` (rw) - Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample is shifted N cycles after the trigger event, compensating for upstream pipeline latency. The pre/post-trigger sample counts and the buffer wrap behavior are unchanged — only the position of the "trigger" anchor moves forward.
-- `0x00E0`: `COMPARE_CAPS` (ro) - Compare capability bitmask. Bits 0-8
-  report compare modes implemented by this bitstream. Bit 16 reports
-  comparator B / dual-combine support when bit 17 is set. Bit 17 marks the
-  extended capability schema; older bitstreams omit bit 17 and should be
-  treated as dual-compare capable for compatibility. Default lightweight,
-  dual-comparator builds report `0x301C3`; `REL_COMPARE=1` dual-comparator
-  builds report `0x301FF`; `DUAL_COMPARE=0` clears bit 16.
-- `0x003C`: `FEATURES` (ro) - Feature flags: `[3:0]`=TRIG_STAGES, `[4]`=STOR_QUAL
-- `0x0040+N*20+0`:  `SEQ_STAGE_N_CFG` (rw) - See encoding below
-- `0x0040+N*20+4`:  `SEQ_STAGE_N_VALUE_A` (rw) - Comparator A match value
-- `0x0040+N*20+8`:  `SEQ_STAGE_N_MASK_A` (rw) - Comparator A mask
-- `0x0040+N*20+12`: `SEQ_STAGE_N_VALUE_B` (rw) - Comparator B match value
-- `0x0040+N*20+16`: `SEQ_STAGE_N_MASK_B` (rw) - Comparator B mask
+
+| Address | Name | Access | Description |
+|---------|------|--------|-------------|
+| `0x0000` | VERSION | RO | Core identity and version: `[31:24]` major, `[23:16]` minor, `[15:0]` ASCII core ID `"LA"` (`0x4C41`). Hosts verify `VERSION[15:0]` before trusting any other ELA register. Current v0.4 value: `0x0004_4C41`. |
+| `0x0004` | CTRL | RW | Control register; see [CTRL](#regmap-ctrl). |
+| `0x0008` | STATUS | RO | Capture status; see [STATUS](#regmap-status). |
+| `0x000C` | SAMPLE_W | RO | Sample width in bits. |
+| `0x0010` | DEPTH | RO | Total capture depth in samples. |
+| `0x0014` | PRETRIG_LEN | RW | Pre-trigger sample count. |
+| `0x0018` | POSTTRIG_LEN | RW | Post-trigger sample count. |
+| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. |
+| `0x0020` | TRIG_MODE | RW | Trigger mode; see [TRIG_MODE](#regmap-trig-mode). |
+| `0x0024` | TRIG_VALUE | RW | Trigger comparator value. |
+| `0x0028` | TRIG_MASK | RW | Trigger comparator mask. |
+| `0x002C` | BURST_PTR | WO | Write to initiate burst read from `start_ptr` via USER2. `bit[31]` selects source BRAM: `0` = sample data, `1` = timestamp data. Host timestamp burst readback sets `bit[31]=1`. |
+| `0x0030` | SQ_MODE | RW | Storage qualification mode: 0=off, 1=value, 2=edge, 3=both. Active only when `STOR_QUAL=1`. |
+| `0x0034` | SQ_VALUE | RW | Storage qualification match value. |
+| `0x0038` | SQ_MASK | RW | Storage qualification match mask. |
+| `0x003C` | FEATURES | RO | Feature flags: `[3:0]` = `TRIG_STAGES`, `[4]` = `STOR_QUAL`, other bits report optional build features. |
+| `0x0040 + N*20 + 0` | SEQ_STAGE_N_CFG | RW | Sequencer stage N configuration; see [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg). |
+| `0x0040 + N*20 + 4` | SEQ_STAGE_N_VALUE_A | RW | Sequencer stage N comparator A match value. |
+| `0x0040 + N*20 + 8` | SEQ_STAGE_N_MASK_A | RW | Sequencer stage N comparator A mask. |
+| `0x0040 + N*20 + 12` | SEQ_STAGE_N_VALUE_B | RW | Sequencer stage N comparator B match value. |
+| `0x0040 + N*20 + 16` | SEQ_STAGE_N_MASK_B | RW | Sequencer stage N comparator B mask. |
+| `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
+| `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
+| `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. |
+| `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. |
 
 <a id="regmap-seq-cfg"></a>
 ### SEQ_STAGE_N_CFG encoding
@@ -104,14 +95,12 @@ B-combine sequencer configurations.
 | 6 | RISING | masked bits: all-zero → non-zero |
 | 7 | FALLING | masked bits: non-zero → all-zero |
 | 8 | CHANGED | any masked bit changed from previous sample |
-- `0x0100`: `DATA` window (ro) - Sample data readout (per-word, via USER1).
-  Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this
-  slow fallback window and return zero for these addresses.
 
 [↑ Top](#regmap-top)
 
 <a id="regmap-bitfields"></a>
 ## Bitfields
+<a id="regmap-version"></a>
 ### VERSION
 - [31:24] `major` (8-bit)
 - [23:16] `minor` (8-bit)
@@ -119,11 +108,13 @@ B-combine sequencer configurations.
   fcapz ELA core. Constant per-instance; never zero on a valid
   bitstream. Hosts use this as the core identity check.
 
+<a id="regmap-ctrl"></a>
 ### CTRL
 - [0] `arm` (write 1 to arm)
 - [1] `reset` (write 1 to reset)
 - [31:2] reserved
 
+<a id="regmap-status"></a>
 ### STATUS
 - [0] `armed`
 - [1] `triggered`
@@ -131,6 +122,7 @@ B-combine sequencer configurations.
 - [3] `overflow`
 - [31:4] reserved
 
+<a id="regmap-trig-mode"></a>
 ### TRIG_MODE
 - [0] `value_match` (1 = compare TRIG_VALUE with mask)
 - [1] `edge_detect` (1 = detect rising edge)
@@ -176,15 +168,16 @@ ELA USER1 and USER2.
 
 <a id="regmap-eio-addr"></a>
 ### Address Map
-- `0x0000`: `VERSION` (ro) — `{major[7:0], minor[7:0], core_id[15:0]}`,
-  where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as the
-  ELA core's VERSION at `0x0000`. Hosts must verify the low-16 magic.
-- `0x0004`: `EIO_IN_W` (ro) — Input probe width in bits
-- `0x0008`: `EIO_OUT_W` (ro) — Output probe width in bits
-- `0x0010 + i×4`: `IN[i]` (ro) — probe_in bits [(i+1)×32−1 : i×32], synchronised to jtag_clk via 2-FF
-- `0x0100 + i×4`: `OUT[i]` (rw) — probe_out bits [(i+1)×32−1 : i×32], in jtag_clk domain
 
-Number of IN words = ⌈IN_W / 32⌉; number of OUT words = ⌈OUT_W / 32⌉.
+| Address | Name | Access | Description |
+|---------|------|--------|-------------|
+| `0x0000` | VERSION | RO | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as ELA VERSION. Hosts verify `VERSION[15:0]`. Current v0.4 value: `0x0004_494F`. |
+| `0x0004` | EIO_IN_W | RO | Input probe width in bits. |
+| `0x0008` | EIO_OUT_W | RO | Output probe width in bits. |
+| `0x0010 + i*4` | IN[i] | RO | `probe_in` bits `[(i+1)*32-1 : i*32]`, synchronized to `jtag_clk` through a 2-FF synchronizer. |
+| `0x0100 + i*4` | OUT[i] | RW | `probe_out` bits `[(i+1)*32-1 : i*32]`, stored in the `jtag_clk` domain. |
+
+Number of IN words = `ceil(IN_W / 32)`; number of OUT words = `ceil(OUT_W / 32)`.
 
 <a id="regmap-eio-clk"></a>
 ### Clock domains
