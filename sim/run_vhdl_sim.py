@@ -29,9 +29,18 @@ TESTBENCHES = {
             TB_VHDL / "fcapz_eio_tb.vhd",
         ],
     ),
+    "fcapz_ela": (
+        "fcapz_ela_tb",
+        [
+            RTL_VHDL / "pkg" / "fcapz_pkg.vhd",
+            RTL_VHDL / "pkg" / "fcapz_util_pkg.vhd",
+            RTL_VHDL / "core" / "fcapz_ela.vhd",
+            TB_VHDL / "fcapz_ela_tb.vhd",
+        ],
+    ),
 }
 
-DEFAULT_TESTBENCHES = ["fcapz_eio"]
+DEFAULT_TESTBENCHES = ["fcapz_eio", "fcapz_ela"]
 
 
 def run_cmd(cmd: list[str], label: str) -> bool:
