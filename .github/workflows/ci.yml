@@ -13,17 +13,16 @@ concurrency:
 
 jobs:
   # ── 0. Version sync guard ──────────────────────────────────────────
-  # Catches the "I bumped VERSION but forgot to regenerate
-  # rtl/fcapz_version.vh" foot-gun before any other job wastes minutes.
+  # Catches stale generated HDL constants before any other job wastes minutes.
   version-sync:
-    name: VERSION ↔ rtl/fcapz_version.vh in sync
+    name: VERSION and HDL constants in sync
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Verify fcapz_version.vh is regenerated from VERSION
+      - name: Verify HDL version constants are regenerated from VERSION
         run: python tools/sync_version.py --check
 
   # ── 1. Python lint ────────────────────────────────────────────────
@@ -125,3 +124,19 @@ jobs:
           python-version: "3.11"
       - name: Run all RTL testbenches
         run: python sim/run_sim.py
+
+  # -- 6. VHDL simulation (ghdl) ---------------------------------------------
+  sim-vhdl:
+    name: VHDL simulation (ghdl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GHDL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run all VHDL testbenches
+        run: python sim/run_vhdl_sim.py
