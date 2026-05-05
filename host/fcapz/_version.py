@@ -20,16 +20,27 @@ from pathlib import Path
 def _read_version() -> str:
     """Resolve the package version, in order of preference.
 
-    1. ``importlib.metadata`` — works after ``pip install`` (editable or
+    1. Direct ``VERSION`` file read - works in development without
+       ``pip install -e .``, e.g. when running tests via the repo-root
+       conftest that just inserts ``host/`` into ``sys.path``. This
+       keeps source-tree runs coupled to local RTL headers even when an
+       older wheel/editable install is present in the environment.
+    2. ``importlib.metadata`` - works after ``pip install`` (editable or
        wheel), reads the value setuptools wrote into ``PKG-INFO`` from
        the ``VERSION`` file.
-    2. Direct ``VERSION`` file read — works in development without
-       ``pip install -e .``, e.g. when running tests via the repo-root
-       conftest that just inserts ``host/`` into ``sys.path``.
     3. Fallback ``"0+unknown"`` so importing fcapz never fails on a
-       missing install.  Tests should never see this; CI install-smoke
+       missing install. Tests should never see this; CI install-smoke
        catches it.
     """
+    try:
+        # host/fcapz/_version.py -> host/fcapz -> host -> repo root
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        version_file = repo_root / "VERSION"
+        if version_file.is_file():
+            return version_file.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+
     try:
         from importlib.metadata import PackageNotFoundError, version
 
@@ -38,15 +49,6 @@ def _read_version() -> str:
         except PackageNotFoundError:
             pass
     except ImportError:
-        pass
-
-    try:
-        # host/fcapz/_version.py → host/fcapz → host → repo root
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        version_file = repo_root / "VERSION"
-        if version_file.is_file():
-            return version_file.read_text(encoding="utf-8").strip()
-    except Exception:
         pass
 
     return "0+unknown"
@@ -59,8 +61,8 @@ def _version_tuple() -> tuple[int, int, int]:
     """Return ``(major, minor, patch)`` parsed from ``__version__``.
 
     Used by tests and by ``Analyzer.probe()`` comparisons so nobody
-    hardcodes 0/3/0 in three places.  Tolerates trailing pre-release /
-    build metadata after a ``-`` or ``+``.  Out-of-range or malformed
+    hardcodes 0/3/0 in three places. Tolerates trailing pre-release /
+    build metadata after a ``-`` or ``+``. Out-of-range or malformed
     components fall through to ``(0, 0, 0)``.
     """
     base = __version__.split("-", 1)[0].split("+", 1)[0]

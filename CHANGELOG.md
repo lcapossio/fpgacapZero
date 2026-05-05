@@ -24,6 +24,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   fields for new bitstreams; legacy bitstreams keep the old 16-bit decode.
   Upgrade the host before rebuilding v0.4.0 bitstreams: v0.3.x hosts do
   not understand the new packed EJTAG identity word.
+- **Version resolution:** Source-tree runs now resolve the package version
+  from the repo `VERSION` file before falling back to installed package
+  metadata, so a stale wheel/editable install cannot mask the working-tree
+  version.
 
 ### Fixed
 
