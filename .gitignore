@@ -20,6 +20,8 @@ dfx_runtime.txt
 # Simulation artifacts
 sim/*.vvp
 sim/*.vcd
+sim/ghdl/
+*.cf
 
 # OS
 .DS_Store
