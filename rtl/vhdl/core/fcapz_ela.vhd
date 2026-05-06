@@ -177,13 +177,8 @@ architecture rtl of fcapz_ela is
         bool_to_sl(STOR_QUAL /= 0) &
         std_logic_vector(to_unsigned(TRIG_STAGES, 4));
 
-    type sample_mem_t is array (0 to DEPTH - 1) of std_logic_vector(SAMPLE_W - 1 downto 0);
-    type ts_mem_t is array (0 to DEPTH - 1) of std_logic_vector(TS_WIDTH - 1 downto 0);
     type seg_ptr_t is array (0 to NUM_SEGMENTS - 1) of natural range 0 to DEPTH - 1;
     type reg32_array_t is array (natural range <>) of std_logic_vector(31 downto 0);
-
-    signal sample_mem : sample_mem_t := (others => (others => '0'));
-    signal ts_mem     : ts_mem_t := (others => (others => '0'));
 
     signal jtag_ctrl         : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_pretrig_len  : natural range 0 to DEPTH := 0;
@@ -213,7 +208,7 @@ architecture rtl of fcapz_ela is
     signal arm_sync          : std_logic_vector(2 downto 0) := (others => '0');
     signal reset_sync        : std_logic_vector(2 downto 0) := (others => '0');
 
-    signal armed             : std_logic := '0';
+    signal armed             : std_logic := bool_to_sl(STARTUP_ARM /= 0);
     signal triggered         : std_logic := '0';
     signal done              : std_logic := '0';
     signal overflow          : std_logic := '0';
@@ -237,7 +232,16 @@ architecture rtl of fcapz_ela is
     signal trig_holdoff_count: natural range 0 to 65535 := 0;
     signal trig_holdoff_active : std_logic := '0';
     signal pipe_probe        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal hit_pipe          : std_logic := '0';
+    signal sq_pipe           : std_logic := '1';
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
+    signal mem_we_a          : std_logic := '0';
+    signal mem_addr_a        : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
+    signal mem_addr_b        : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
+    signal sample_mem_din    : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal sample_mem_dout_b : std_logic_vector(SAMPLE_W - 1 downto 0);
+    signal ts_mem_din        : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
+    signal ts_mem_dout_b     : std_logic_vector(TS_WIDTH - 1 downto 0);
 
     function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
         variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
@@ -281,12 +285,16 @@ architecture rtl of fcapz_ela is
     function capture_start_ptr(
         trig       : natural;
         pre_len    : natural;
+        post_len   : natural;
         base       : natural;
         wrapped    : std_logic
     ) return natural is
         variable off : natural;
     begin
         if trig < base or trig >= base + SEG_DEPTH then
+            return base;
+        end if;
+        if pre_len + post_len + 1 >= SEG_DEPTH then
             return base;
         end if;
         off := trig - base;
@@ -300,8 +308,73 @@ begin
     armed_out <= armed;
     jtag_rdata <= jtag_rdata_i;
     burst_start_ptr <= std_logic_vector(to_unsigned(start_ptr, PTR_W));
-    burst_rd_data <= sample_mem(to_integer(unsigned(burst_rd_addr)));
-    burst_rd_ts_data <= ts_mem(to_integer(unsigned(burst_rd_addr)));
+    burst_rd_data <= sample_mem_dout_b;
+    burst_rd_ts_data <= ts_mem_dout_b;
+
+    u_sample_mem : entity work.fcapz_dpram
+        generic map (
+            WIDTH => SAMPLE_W,
+            DEPTH => DEPTH
+        )
+        port map (
+            clk_a  => sample_clk,
+            we_a   => mem_we_a,
+            addr_a => mem_addr_a,
+            din_a  => sample_mem_din,
+            dout_a => open,
+            clk_b  => jtag_clk,
+            addr_b => mem_addr_b,
+            dout_b => sample_mem_dout_b
+        );
+
+    u_ts_mem : entity work.fcapz_dpram
+        generic map (
+            WIDTH => TS_WIDTH,
+            DEPTH => DEPTH
+        )
+        port map (
+            clk_a  => sample_clk,
+            we_a   => mem_we_a,
+            addr_a => mem_addr_a,
+            din_a  => ts_mem_din,
+            dout_a => open,
+            clk_b  => jtag_clk,
+            addr_b => mem_addr_b,
+            dout_b => ts_mem_dout_b
+        );
+
+    p_mem_addr_b : process(all)
+        variable addr : natural;
+        variable word_index : natural;
+        variable sample_index : natural;
+        variable rd_start : natural;
+        variable rd_base : natural;
+        variable mem_idx : natural;
+    begin
+        addr := to_integer(unsigned(jtag_addr));
+        rd_start := start_ptr;
+        if NUM_SEGMENTS > 1 then
+            rd_start := seg_start_ptr(jtag_seg_sel);
+        end if;
+        rd_base := (rd_start / SEG_DEPTH) * SEG_DEPTH;
+        mem_idx := to_integer(unsigned(burst_rd_addr));
+
+        if USER1_DATA_EN /= 0 and addr >= ADDR_DATA_BASE and addr < ADDR_TS_DATA_BASE then
+            word_index := (addr - ADDR_DATA_BASE) / 4;
+            sample_index := word_index / WORDS_PER_SAMPLE;
+            if sample_index < capture_len then
+                mem_idx := rd_base + ((rd_start - rd_base + sample_index) mod SEG_DEPTH);
+            end if;
+        elsif TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
+            word_index := (addr - ADDR_TS_DATA_BASE) / 4;
+            sample_index := word_index / TS_WORDS;
+            if sample_index < capture_len then
+                mem_idx := rd_base + ((rd_start - rd_base + sample_index) mod SEG_DEPTH);
+            end if;
+        end if;
+
+        mem_addr_b <= std_logic_vector(to_unsigned(mem_idx, PTR_W));
+    end process;
 
     p_jtag_regs : process(jtag_clk, jtag_rst)
         variable addr : natural;
@@ -431,7 +504,9 @@ begin
         variable hit_a : std_logic;
         variable hit_b : std_logic;
         variable hit : std_logic;
+        variable hit_eff : std_logic;
         variable sq_ok : boolean;
+        variable sq_eff : boolean;
         variable store_tick : boolean;
         variable store_ok : boolean;
         variable base : natural;
@@ -439,6 +514,7 @@ begin
         variable next_segment : natural;
         variable post_limit : natural;
         variable trigger_commit_now : boolean;
+        variable store_now : boolean;
         variable idx : natural;
     begin
         if sample_rst = '1' then
@@ -468,10 +544,17 @@ begin
             trig_holdoff_count <= 0;
             trig_holdoff_active <= '0';
             pipe_probe <= (others => '0');
+            hit_pipe <= '0';
+            sq_pipe <= '1';
+            mem_we_a <= '0';
+            mem_addr_a <= (others => '0');
+            sample_mem_din <= (others => '0');
+            ts_mem_din <= (others => '0');
         elsif rising_edge(sample_clk) then
             arm_sync <= arm_sync(1 downto 0) & arm_toggle_jtag;
             reset_sync <= reset_sync(1 downto 0) & reset_toggle_jtag;
             trigger_out_i <= '0';
+            mem_we_a <= '0';
 
             if TIMESTAMP_W > 0 then
                 timestamp_counter <= timestamp_counter + 1;
@@ -562,7 +645,17 @@ begin
                     jtag_sq_mode(3 downto 0)
                 ) = '1';
             end if;
-            store_ok := store_tick and sq_ok;
+
+            if INPUT_PIPE > 0 then
+                hit_eff := hit_pipe;
+                sq_eff := sq_pipe = '1';
+            else
+                hit_eff := hit;
+                sq_eff := sq_ok;
+            end if;
+            store_ok := store_tick and sq_eff;
+            hit_pipe <= hit;
+            sq_pipe <= bool_to_sl(sq_ok);
 
             if (reset_sync(1) xor reset_sync(0)) = '1' then
                 armed <= jtag_startup_arm;
@@ -582,6 +675,8 @@ begin
                 trig_delay_pending <= '0';
                 trig_delay_count <= 0;
                 trig_holdoff_active <= '0';
+                hit_pipe <= '0';
+                sq_pipe <= '1';
                 if jtag_startup_arm = '1' and jtag_trig_holdoff > 0 then
                     trig_holdoff_active <= '1';
                     trig_holdoff_count <= jtag_trig_holdoff - 1;
@@ -605,25 +700,13 @@ begin
                 trig_delay_count <= 0;
                 trig_holdoff_active <= '1' when jtag_trig_holdoff > 0 else '0';
                 trig_holdoff_count <= jtag_trig_holdoff - 1 when jtag_trig_holdoff > 0 else 0;
+                hit_pipe <= '0';
+                sq_pipe <= '1';
             elsif armed = '1' and done = '0' then
                 base := seg_base(cur_segment);
                 trigger_commit_now := false;
 
-                if store_ok then
-                    sample_mem(wr_ptr) <= compare_probe;
-                    ts_mem(wr_ptr) <= std_logic_vector(timestamp_counter);
-                end if;
-
                 if triggered = '0' then
-                    if store_ok then
-                        if pre_count < SEG_DEPTH then
-                            pre_count <= pre_count + 1;
-                        end if;
-                        if wr_ptr = base + SEG_DEPTH - 1 then
-                            segment_wrapped <= '1';
-                        end if;
-                    end if;
-
                     if trig_delay_pending = '1' then
                         if trig_delay_count = 0 then
                             trigger_commit_now := true;
@@ -631,12 +714,29 @@ begin
                         else
                             trig_delay_count <= trig_delay_count - 1;
                         end if;
-                    elsif pre_count >= jtag_pretrig_len and trig_holdoff_active = '0' and hit = '1' then
+                    elsif pre_count >= jtag_pretrig_len and trig_holdoff_active = '0' and hit_eff = '1' then
                         if jtag_trig_delay = 0 then
                             trigger_commit_now := true;
                         else
                             trig_delay_pending <= '1';
                             trig_delay_count <= jtag_trig_delay - 1;
+                        end if;
+                    end if;
+
+                    store_now := store_ok or trigger_commit_now;
+                    if store_now then
+                        mem_we_a <= '1';
+                        mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
+                        sample_mem_din <= compare_probe;
+                        ts_mem_din <= std_logic_vector(timestamp_counter);
+                    end if;
+
+                    if store_ok and not trigger_commit_now then
+                        if pre_count < SEG_DEPTH then
+                            pre_count <= pre_count + 1;
+                        end if;
+                        if wr_ptr = base + SEG_DEPTH - 1 then
+                            segment_wrapped <= '1';
                         end if;
                     end if;
 
@@ -647,7 +747,7 @@ begin
                         capture_len <= jtag_pretrig_len + jtag_posttrig_len + 1;
                         post_count <= 0;
                         if jtag_posttrig_len = 0 then
-                            start_calc := capture_start_ptr(wr_ptr, jtag_pretrig_len, base, segment_wrapped);
+                            start_calc := capture_start_ptr(wr_ptr, jtag_pretrig_len, jtag_posttrig_len, base, segment_wrapped);
                             seg_start_ptr(cur_segment) <= start_calc;
                             if cur_segment = NUM_SEGMENTS - 1 then
                                 done <= '1';
@@ -664,14 +764,24 @@ begin
                                 post_count <= 0;
                                 wr_ptr <= seg_base(next_segment);
                                 segment_wrapped <= '0';
+                                hit_pipe <= '0';
+                                sq_pipe <= '1';
                             end if;
                         end if;
+                    end if;
+
+                    if store_now and not (trigger_commit_now and jtag_posttrig_len = 0) then
+                        wr_ptr <= next_ptr(wr_ptr, base);
                     end if;
                 else
                     post_limit := jtag_posttrig_len;
                     if store_ok then
+                        mem_we_a <= '1';
+                        mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
+                        sample_mem_din <= compare_probe;
+                        ts_mem_din <= std_logic_vector(timestamp_counter);
                         if post_count + 1 >= post_limit then
-                            start_calc := capture_start_ptr(trig_ptr, jtag_pretrig_len, base, segment_wrapped);
+                            start_calc := capture_start_ptr(trig_ptr, jtag_pretrig_len, jtag_posttrig_len, base, segment_wrapped);
                             seg_start_ptr(cur_segment) <= start_calc;
                             if cur_segment = NUM_SEGMENTS - 1 then
                                 done <= '1';
@@ -691,15 +801,14 @@ begin
                                 trig_delay_pending <= '0';
                                 trig_holdoff_active <= '1' when jtag_trig_holdoff > 0 else '0';
                                 trig_holdoff_count <= jtag_trig_holdoff - 1 when jtag_trig_holdoff > 0 else 0;
+                                hit_pipe <= '0';
+                                sq_pipe <= '1';
                             end if;
                         else
                             post_count <= post_count + 1;
                         end if;
+                        wr_ptr <= next_ptr(wr_ptr, base);
                     end if;
-                end if;
-
-                if store_ok then
-                    wr_ptr <= next_ptr(wr_ptr, base);
                 end if;
             end if;
 
@@ -713,8 +822,6 @@ begin
         variable word_index : natural;
         variable sample_index : natural;
         variable rd_start : natural;
-        variable rd_base : natural;
-        variable mem_idx : natural;
         variable ts_word : std_logic_vector(31 downto 0);
         variable seq_stage : natural;
         variable seq_off : natural;
@@ -725,7 +832,6 @@ begin
         if NUM_SEGMENTS > 1 then
             rd_start := seg_start_ptr(jtag_seg_sel);
         end if;
-        rd_base := (rd_start / SEG_DEPTH) * SEG_DEPTH;
 
         case addr is
             when ADDR_VERSION => r := FCAPZ_ELA_VERSION_REG;
@@ -770,18 +876,16 @@ begin
                     word_index := (addr - ADDR_DATA_BASE) / 4;
                     sample_index := word_index / WORDS_PER_SAMPLE;
                     if sample_index < capture_len then
-                        mem_idx := rd_base + ((rd_start - rd_base + sample_index) mod SEG_DEPTH);
-                        r := sample_word(addr, sample_mem(mem_idx));
+                        r := sample_word(addr, sample_mem_dout_b);
                     end if;
                 elsif TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
                     word_index := (addr - ADDR_TS_DATA_BASE) / 4;
                     sample_index := word_index / TS_WORDS;
                     if sample_index < capture_len then
-                        mem_idx := rd_base + ((rd_start - rd_base + sample_index) mod SEG_DEPTH);
                         ts_word := (others => '0');
                         for i in 0 to 31 loop
                             if i < TIMESTAMP_W then
-                                ts_word(i) := ts_mem(mem_idx)(i);
+                                ts_word(i) := ts_mem_dout_b(i);
                             end if;
                         end loop;
                         r := ts_word;

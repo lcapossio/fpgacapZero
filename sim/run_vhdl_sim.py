@@ -34,6 +34,7 @@ TESTBENCHES = {
         [
             RTL_VHDL / "pkg" / "fcapz_pkg.vhd",
             RTL_VHDL / "pkg" / "fcapz_util_pkg.vhd",
+            RTL_VHDL / "core" / "fcapz_dpram.vhd",
             RTL_VHDL / "core" / "fcapz_ela.vhd",
             TB_VHDL / "fcapz_ela_tb.vhd",
         ],
