@@ -126,11 +126,14 @@ and readback behavior without switching cores.
 pip install -e ".[dev]"
 pytest tests/ -v
 python sim/run_sim.py
+python sim/run_vhdl_sim.py
 ```
 
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
 first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+`python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
+EIO and ELA cores.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -505,7 +508,23 @@ fcapz_ela_ecp5 #(
 );
 ```
 
-VHDL wrappers are also provided in `rtl/vhdl/`.
+VHDL sources are kept under `rtl/vhdl/`: shared packages in `pkg/`, translated
+cores in `core/`, and vendor wrappers in the wrapper files as they are added.
+The current VHDL regression covers EIO and ELA with GHDL:
+
+```bash
+python sim/run_vhdl_sim.py
+```
+
+The Arty A7 VHDL reference build is mixed-language: the ELA and EIO cores are
+VHDL, while the existing Xilinx TAP wrappers, EJTAG-AXI bridge, AXI test slave,
+and top-level glue remain Verilog. Vivado handles that flow directly:
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+This produces `examples/arty_a7/arty_a7_top_vhdl.bit`.
 
 ### LiteX integration
 
@@ -681,8 +700,12 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
+| `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
+The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
+VHDL reference bitstream, build `examples/arty_a7/arty_a7_top_vhdl.bit` and set
+`FPGACAP_BITFILE` plus `FPGACAP_BITSTREAM_VARIANT=vhdl`.
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 Those board-level checks now require every adjacent Arty counter sample to
@@ -697,9 +720,21 @@ corruption is caught instead of hidden by a shorter valid prefix.
 
 ```bash
 vivado -mode batch -source examples/arty_a7/build_arty.tcl
+# or use the Python wrapper
+python examples/arty_a7/build.py
 ```
 
 Produces `examples/arty_a7/arty_a7_top.bit`.
+
+### Mixed-language VHDL Arty build (Vivado)
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+Produces `examples/arty_a7/arty_a7_top_vhdl.bit`. This build uses the translated
+VHDL ELA and EIO cores together with the existing Verilog wrappers and bridge
+cores.
 
 ### Simulation (Icarus Verilog)
 
@@ -715,6 +750,17 @@ registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
 list.
 
+### Simulation (GHDL VHDL)
+
+```bash
+python sim/run_vhdl_sim.py
+```
+
+Runs the VHDL EIO and ELA testbenches. The VHDL ELA testbench includes capture,
+edge trigger, decimation, external trigger, timestamps, segmented capture, probe
+mux, startup arm, trigger holdoff, `INPUT_PIPE=1`, storage qualification,
+sequencer, relational compare, and dual compare coverage.
+
 ### Tests
 
 ```bash
@@ -723,6 +769,16 @@ python -m pytest tests/ -v
 
 # Hardware integration tests (requires Arty A7 + hw_server + built bitstream)
 python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# Same hardware integration suite against the mixed-language VHDL Arty bitstream
+FPGACAP_BITFILE=examples/arty_a7/arty_a7_top_vhdl.bit \
+FPGACAP_BITSTREAM_VARIANT=vhdl \
+python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# PowerShell equivalent
+$env:FPGACAP_BITFILE='examples/arty_a7/arty_a7_top_vhdl.bit'
+$env:FPGACAP_BITSTREAM_VARIANT='vhdl'
+python -m pytest examples\arty_a7\test_hw_integration.py -v
 
 # Force-skip hardware integration tests (e.g. laptop without board)
 FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -760,10 +816,18 @@ fpgacapZero/
     jtag_tap/
       jtag_tap_*.v           Vendor TAP primitive adapters
     vhdl/
-      fcapz_ela_*.vhd        VHDL ELA wrappers
-      fcapz_eio_*.vhd        VHDL EIO wrappers
+      pkg/                   VHDL packages and shared helpers
+      core/
+        fcapz_dpram.vhd      VHDL block-RAM inference helper
+        fcapz_ela.vhd        VHDL ELA core
+        fcapz_eio.vhd        VHDL EIO core
+      fcapz_ela_*.vhd        VHDL ELA vendor wrappers
+      fcapz_eio_*.vhd        VHDL EIO vendor wrappers
   tb/
     *_tb.sv, *_tb.v          RTL simulations and focused regressions
+    vhdl/
+      fcapz_ela_tb.vhd       VHDL ELA regression
+      fcapz_eio_tb.vhd       VHDL EIO regression
     fcapz_ela_config_matrix_tb.sv
                              ELA parameter/configuration matrix
     fcapz_ela_xilinx7_single_chain_tb.sv
@@ -785,8 +849,12 @@ fpgacapZero/
     gui/                     PySide6 desktop GUI modules and assets
   examples/arty_a7/
     arty_a7_top.v            Reference design top-level
+    arty_a7_top.vhd          Mixed-language VHDL-core reference top-level
     arty_a7.xdc              Pin constraints
     build_arty.tcl           Vivado batch build
+    build_arty_vhdl.tcl      Vivado mixed-language VHDL-core batch build
+    build.py                 Python wrapper for Verilog reference build
+    build_vhdl.py            Python wrapper for VHDL reference build
     arty_a7*.cfg             OpenOCD configs
     test_hw_integration.py   Hardware integration tests
   tests/
