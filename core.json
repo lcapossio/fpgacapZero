@@ -47,6 +47,7 @@
   },
   "files": [
     "rtl/fcapz_ela.v",
+    "rtl/fcapz_ela_manager.v",
     "rtl/fcapz_eio.v",
     "rtl/jtag_burst_read.v",
     "rtl/jtag_reg_iface.v",
