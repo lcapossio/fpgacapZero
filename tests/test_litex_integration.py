@@ -46,6 +46,8 @@ def test_ela_rtl_sources_includes_common_and_vendor_files():
     assert "rtl/fcapz_ela.v" in sources
     assert "rtl/fcapz_ela_manager.v" in sources
     assert "rtl/fcapz_ela_multi_xilinx7.v" in sources
+    assert "rtl/fcapz_core_manager.v" in sources
+    assert "rtl/fcapz_debug_multi_xilinx7.v" in sources
     assert "rtl/jtag_pipe_iface.v" in sources
     assert "rtl/fcapz_ela_xilinx7.v" in sources
     assert "rtl/jtag_tap/jtag_tap_xilinx7.v" in sources
