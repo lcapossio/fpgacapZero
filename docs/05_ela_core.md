@@ -401,16 +401,30 @@ and it lets the existing 256-bit burst pipe read from the same selected ELA
 that was armed.
 
 ```verilog
-// Sketch: one jtag_pipe_iface, one fcapz_ela_manager, N fcapz_ela cores.
-// The manager routes non-0xF000 accesses to the selected ELA slot and muxes
-// that slot's burst data/control back to the shared pipe.
-fcapz_ela_manager #(
+wire [2*32-1:0] probes = {axi_state, cpu_state};
+wire [1:0] trigger_in = 2'b00;
+wire [1:0] trigger_out;
+wire [1:0] armed_out;
+
+fcapz_ela_multi_xilinx7 #(
     .NUM_ELAS(2),
     .SAMPLE_W(32),
     .TIMESTAMP_W(32),
+    .CTRL_CHAIN(1),
     .DEPTH(1024)
-) u_ela_mgr (...);
+) u_elas (
+    .sample_clk(clk),
+    .sample_rst(rst),
+    .probe_in(probes),
+    .trigger_in(trigger_in),
+    .trigger_out(trigger_out),
+    .armed_out(armed_out)
+);
 ```
+
+The lower-level `fcapz_ela_manager` is also available if you already have
+custom TAP plumbing and want to instantiate the manager and `fcapz_ela`
+slots yourself.
 
 Manager registers:
 

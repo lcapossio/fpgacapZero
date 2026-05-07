@@ -36,10 +36,15 @@ _COMMON_ELA_SOURCES = (
 )
 
 _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
-    "xilinx7": ("fcapz_ela_xilinx7.v", "jtag_tap/jtag_tap_xilinx7.v"),
+    "xilinx7": (
+        "fcapz_ela_xilinx7.v",
+        "fcapz_ela_multi_xilinx7.v",
+        "jtag_tap/jtag_tap_xilinx7.v",
+    ),
     "xilinxus": (
         "fcapz_ela_xilinxus.v",
         "fcapz_ela_xilinx7.v",
+        "fcapz_ela_multi_xilinx7.v",
         "jtag_tap/jtag_tap_xilinx7.v",
     ),
     "ecp5": ("fcapz_ela_ecp5.v", "jtag_tap/jtag_tap_ecp5.v"),
