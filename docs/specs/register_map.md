@@ -7,6 +7,7 @@
 - **[Overview](#regmap-overview)** — scope: per-core JTAG register space vs SoC memory map.
 - **ELA** (logic analyzer, USER1 / USER2)
   - [Address map (USER1 control)](#regmap-ela-user1)
+  - [ELA manager (multi-ELA active-slot)](#regmap-ela-manager)
   - [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg)
   - [Compare modes](#regmap-compare-modes)
   - [Bitfields](#regmap-bitfields)
@@ -140,13 +141,38 @@ B-combine sequencer configurations.
 
 [↑ Top](#regmap-top)
 
+<a id="regmap-ela-manager"></a>
+## ELA Manager (multi-ELA active-slot)
+
+When multiple ELA cores share one USER chain, the optional manager owns
+`0xF000..0xF0FF`. All other addresses retain the normal ELA register map
+and are routed to the active slot. Reset selects slot 0, preserving legacy
+host behavior.
+
+| Address | Name | Access | Description |
+|---------|------|--------|-------------|
+| `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` ASCII core ID `"LM"` (`0x4C4D`). |
+| `0xF004` | MGR_COUNT | RO | Number of ELA slots behind this manager. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this ELA. |
+| `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
+| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported. |
+
+Selection sequence:
+
+1. Read `MGR_VERSION`; require core ID `"LM"`.
+2. Read `MGR_COUNT`.
+3. Write slot index to `MGR_ACTIVE`.
+4. Use the standard ELA registers at `0x0000+`.
+
+[↑ Top](#regmap-top)
+
 <a id="regmap-burst-user2"></a>
 ## Burst Readout (256-bit DR)
-- Write to `BURST_PTR` (0x002C) via USER1 to start a burst from `start_ptr`.
+- Write to `BURST_PTR` (0x002C) via the active ELA control chain to start a burst from `start_ptr`.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
-- Default Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
-  Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on USER1 (0x02).
+- Legacy two-chain Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
+  Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
   (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
   read `N` scans to get `N × (256/SAMPLE_W)` samples.

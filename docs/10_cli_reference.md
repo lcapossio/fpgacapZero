@@ -32,6 +32,8 @@ subcommand follows:
 | `--port PORT` | `6666` (openocd) or `3121` (hw_server) | Transport TCP port |
 | `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, or hw_server FPGA target name (`.tap` suffix is stripped for hw_server) |
 | `--program BITFILE` | none | Program the FPGA with this bitfile before running the subcommand (hw_server only) |
+| `--chain N` | `1` | ELA control BSCAN USER chain for `probe`, `arm`, `configure`, and `capture` |
+| `--ela-instance N` | none | ELA manager slot on the selected chain; omit for legacy single-ELA bitstreams or the current active slot |
 
 Examples:
 
@@ -53,6 +55,7 @@ fcapz --backend openocd --tap my_custom_chip.tap probe
 | Subcommand | What it does |
 |---|---|
 | `probe` | Read core identity registers (version, sample width, depth, features) |
+| `ela-list` | Read the ELA manager and probe every ELA slot on the selected chain |
 | `arm` | Arm capture without configuring (advanced) |
 | `configure` | Write capture configuration without arming |
 | `capture` | Configure + arm + capture + export to file |
@@ -74,6 +77,19 @@ Read the core's identity, version, and FEATURES registers:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t probe
+```
+
+If the ELA wrapper was instantiated on another USER chain, pass `--chain`:
+
+```bash
+fcapz --backend hw_server --port 3121 --tap xc7a100t --chain 2 probe
+```
+
+For a multi-ELA manager on one chain, list slots and select one:
+
+```bash
+fcapz --backend hw_server --port 3121 --tap xc7a100t ela-list
+fcapz --backend hw_server --port 3121 --tap xc7a100t --ela-instance 1 probe
 ```
 
 Output (formatted JSON to stdout):

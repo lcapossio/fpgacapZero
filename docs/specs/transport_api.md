@@ -33,17 +33,17 @@ path for timestamp data.
   scan.  How fast samples stream depends on the adapter and how much
   per-scan overhead the transport adds (batched vs single DR).
 - `read_timestamp_block(addr, words, timestamp_width)` — timestamp burst via the
-  same USER2 path.  Sets `BURST_PTR` bit[31]=1 to select the timestamp BRAM.
+  same configured burst path.  Sets `BURST_PTR` bit[31]=1 to select the timestamp BRAM.
   No priming scan required; the first 256-bit capture already holds valid data.
   Returns `words` integers of width `timestamp_width` bits each.
-- Falls back to USER1 single-sequence pipelined reads for non-DATA addresses.
+- Falls back to control-chain single-sequence pipelined reads for non-DATA addresses.
 - All operations within a read use a single `jtag sequence` object to prevent
   stale-read bugs from inter-sequence timing gaps.
 - Automatic FPGA programming via `bitfile=` constructor parameter.
 - Default port: 3121.
 
 #### JTAG protocol
-49-bit DR via BSCANE2 USER1 (IR = `0x02`):
+49-bit DR via the selected ELA control BSCAN USER chain:
 - `bits[31:0]` = data (write data TX / read data RX)
 - `bits[47:32]` = addr (16-bit register address)
 - `bits[48]` = rnw (1 = write, 0 = read)
@@ -58,15 +58,15 @@ A write requires one DR scan followed by idle cycles:
 2. Idle 20 TCK cycles for the write to propagate.
 
 #### Burst data readout
-Default Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
-Default `SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on USER1
-(IR = `0x02`) after the `BURST_PTR` write.  Each scan returns
+Legacy two-chain Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
+Default `SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on the
+selected ELA control chain after the `BURST_PTR` write. Each scan returns
 `256 / SAMPLE_W` packed samples with auto-incrementing read pointer.
 
 Flow (single `jtag sequence`):
-For `SINGLE_CHAIN_BURST=1`, the burst-chain steps below remain on USER1
-instead of switching to USER2.
-1. IR shift to USER1, DR shift to write `BURST_PTR` (0x002C) — triggers
+For `SINGLE_CHAIN_BURST=1`, the burst-chain steps below remain on the
+selected ELA control chain instead of switching to USER2.
+1. IR shift to the ELA control chain, DR shift to write `BURST_PTR` (0x002C) — triggers
    staging buffer fill from `start_ptr`.
 2. Idle 40 TCK cycles (staging buffer needs ~33 cycles to load).
 3. IR shift to USER2, then N × 256-bit DR scans with capture.

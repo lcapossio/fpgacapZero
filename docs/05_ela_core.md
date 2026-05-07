@@ -387,6 +387,70 @@ and the no-priming-scan protocol automatically.  If the transport does
 not implement that method the host falls back to the USER1 path, which
 is correct but significantly slower.
 
+## Multiple ELAs on one USER chain
+
+Multi-ELA designs should put an ELA manager between the shared JTAG register
+interface and the individual ELA cores. The manager keeps the legacy ELA
+register map at `0x0000` and adds a small directory/select block at
+`0xF000`. Slot 0 is active after reset, so an old host still sees the first
+ELA exactly where it expects `VERSION`.
+
+The active-slot model is deliberate: it avoids carving the 16-bit register
+space into fixed windows that would conflict with deep DATA/timestamp windows,
+and it lets the existing 256-bit burst pipe read from the same selected ELA
+that was armed.
+
+```verilog
+// Sketch: one jtag_pipe_iface, one fcapz_ela_manager, N fcapz_ela cores.
+// The manager routes non-0xF000 accesses to the selected ELA slot and muxes
+// that slot's burst data/control back to the shared pipe.
+fcapz_ela_manager #(
+    .NUM_ELAS(2),
+    .SAMPLE_W(32),
+    .TIMESTAMP_W(32),
+    .DEPTH(1024)
+) u_ela_mgr (...);
+```
+
+Manager registers:
+
+| Address | Name | Access | Description |
+|---|---|
+| `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "LM"}`. |
+| `0xF004` | MGR_COUNT | RO | Number of ELA slots. |
+| `0xF008` | MGR_ACTIVE | RW | Active ELA slot. Non-manager register and burst accesses target this slot. |
+| `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported. |
+
+Host-side, select the ELA instance explicitly:
+
+```bash
+fcapz --backend hw_server --tap xc7a100t ela-list
+fcapz --backend hw_server --tap xc7a100t --ela-instance 1 probe
+```
+
+```python
+transport = XilinxHwServerTransport(fpga_name="xc7a100t")
+manager = ElaManager(transport)
+transport.connect()
+print(manager.probe_all())
+
+ela0 = Analyzer(transport, instance=0)
+ela1 = Analyzer(transport, instance=1)
+```
+
+Multiple `Analyzer` objects can share one transport session; each analyzer
+re-selects its configured manager slot before probe, configure, arm, status
+polling, and readback. Do not run captures from two Python threads against
+the same transport at the same time. The transport serializes low-level I/O,
+but capture workflows still share FPGA JTAG bandwidth and should be sequenced
+deliberately.
+
+The first manager implementation assumes homogeneous burst shape across slots
+(`SAMPLE_W`, `TIMESTAMP_W`, and `DEPTH` match). If we need heterogeneous ELAs,
+the manager should grow per-slot metadata and mux to a maximum-width burst
+pipe, or we should group different shapes under separate manager instances.
+
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 
 Segmented memory splits the buffer into N equal-sized segments and
