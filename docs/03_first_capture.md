@@ -16,9 +16,12 @@
 ## Step 1: build the reference bitstream
 
 The reference design is at [`../examples/arty_a7/`](../examples/arty_a7/).
-It instantiates one ELA core, one EIO core, and one EJTAG-AXI bridge,
-all wired into a free-running 8-bit counter and a small AXI test slave
-so you have something to look at.
+It instantiates a USER1 debug manager with two ELA slots and two EIO
+slots, plus one EJTAG-AXI bridge.  ELA0 captures the free-running
+8-bit counter, ELA1 captures `counter ^ 0xA5`, EIO0 drives the board
+LED/control test signals, and EIO1 gives a second managed I/O target
+for slot-selection checks.  The AXI bridge is wired to a small AXI test
+slave so you have something to look at from each host path.
 
 ```bash
 cd /path/to/fpgacapZero
@@ -166,6 +169,9 @@ waveform preview.
 
 In the **ELA** tab:
 
+- Leave **ELA core** set to `core 0` for the plain counter.  On the
+  Arty reference bitstream, `core 1` is a second managed ELA capturing
+  `counter ^ 0xA5`.
 - Set **Pretrigger** to `8`.
 - Set **Posttrigger** to `16`.
 - Set **Trigger mode** to `value_match`.
@@ -384,13 +390,18 @@ values 4 apart, because of `decimation=3` (store every N+1 = 4th).
 
 ### d. EIO read/write (chapter 06)
 
-The reference design wires the EIO core to a small register file you
-can poke at runtime:
+The reference design wires two managed EIO slots behind the USER1 core
+manager.  Slot 2 is EIO0, the board-control EIO used by the GUI; slot 3
+is EIO1, an independent second EIO for selection/readback checks.  Pass
+`--chain 1 --instance N` to select one:
 
 ```bash
-fcapz --backend hw_server --port 3121 --tap xc7a100t eio-read
-fcapz --backend hw_server --port 3121 --tap xc7a100t eio-write 0xA5
-fcapz --backend hw_server --port 3121 --tap xc7a100t eio-read
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+      eio-read --chain 1 --instance 2
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+      eio-write --chain 1 --instance 2 0xA5
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+      eio-read --chain 1 --instance 3
 ```
 
 ### e. AXI single read (chapter 07)

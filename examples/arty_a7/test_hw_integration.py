@@ -192,6 +192,39 @@ class TestMultiElaManager(unittest.TestCase):
         finally:
             t.close()
 
+    def test_second_ela_captures_xored_counter(self):
+        """ELA1 probes counter^0xA5, proving capture works beyond slot 0."""
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+        a = Analyzer(_make_transport(), instance=1)
+        try:
+            a.connect()
+            cfg = CaptureConfig(
+                pretrigger=4,
+                posttrigger=8,
+                trigger=TriggerConfig(
+                    mode="value_match",
+                    value=0xA5,
+                    mask=0xFF,
+                ),
+                sample_width=8,
+                depth=1024,
+            )
+            a.configure(cfg)
+            a.arm()
+            result = a.capture(timeout=5.0)
+            samples = [s & 0xFF for s in result.samples]
+            decoded = [s ^ 0xA5 for s in samples]
+            errors = [
+                (i - 1, decoded[i - 1], decoded[i])
+                for i in range(1, len(decoded))
+                if ((decoded[i] - decoded[i - 1]) & 0xFF) != 1
+            ]
+            self.assertEqual(errors, [], f"ELA1 decoded counter errors in samples={samples}")
+            self.assertIn(0xA5, samples)
+        finally:
+            a.close()
+
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 @unittest.skipIf(_BACKEND != "hw_server", "requires hw_server programming on connect")

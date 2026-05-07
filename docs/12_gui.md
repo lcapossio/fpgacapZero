@@ -100,7 +100,10 @@ When you click **Connect**:
    stays open so you can use **EIO**, **EJTAG-AXI**, and **UART** from
    their docks on the correct BSCAN chains; ELA toolbar actions and
    capture controls stay disabled.
-4. On transport or readiness failure, an error dialog pops up with the
+4. If a USER1 core manager is present, the GUI also builds the JTAG
+   hierarchy view, fills the **ELA core** selector from managed ELA
+   slots, and fills the **EIO Core** selector from managed EIO slots.
+5. On transport or readiness failure, an error dialog pops up with the
    underlying exception — typically a `ConnectionError` from the
    readiness wait.  See [chapter 17](17_troubleshooting.md).
 
@@ -112,7 +115,7 @@ re-type them every launch.
 ### Probe summary panel
 
 After connecting **with** an ELA on USER1, this panel shows the live
-`Analyzer.probe()` output:
+`Analyzer.probe()` output for the selected ELA core:
 
 ```
 Version : 0.4
@@ -124,8 +127,9 @@ Features: decimation, ext-trigger, timestamps (32-bit), 4 segments
 ```
 
 If USER1 does not present the ELA core id, the GUI still connects
-and this panel explains that ELA capture is unavailable; subsidiary
-cores use their own **Attach** flows.  The CLI `fcapz` tool still
+and this panel explains that ELA capture is unavailable.  Managed
+topologies are shown in the JTAG hierarchy dock so you can see each
+detected chain and slot.  The CLI `fcapz` tool still
 uses `Analyzer.probe()`, which **raises** on a missing ELA — same
 magic check as [chapter 05](05_ela_core.md) "Identity check".
 
@@ -133,6 +137,12 @@ magic check as [chapter 05](05_ela_core.md) "Identity check".
 
 The headline panel.  Form-driven: every field is a widget that
 maps directly to a `CaptureConfig` field.
+
+When a core manager exposes multiple ELA slots, the **ELA core** selector
+appears at the top of the dock.  Choosing `core 0`, `core 1`, and so on
+selects that managed ELA immediately; the adjacent identity panel updates
+to the selected slot.  The Arty multi-core reference exposes ELA cores 0
+and 1 on USER1.
 
 Top section — **trigger**:
 
@@ -251,10 +261,15 @@ adjacent identical values render as a flat line, not a sawtooth.
 
 ### EIO panel
 
-**JTAG chain**, optional **Managed slot**, and **Attach EIO** create an
-`EioController` on the current transport and show core identity / bus widths.
-Use **Managed slot** when EIO is behind the USER-chain core manager; the Arty
-multi-core reference uses chain **1**, slots **2** and **3**.
+For managed designs, the **Core** selector lists detected EIO cores as
+`core 2`, `core 3`, and so on, with the selected USER chain and manager
+slot shown beside it.  Choosing a core attaches it immediately and shows
+the EIO identity / bus widths.  The Arty multi-core reference uses chain
+**1**, slots **2** and **3**.
+
+For legacy standalone EIO designs with no detected manager slot, the panel
+falls back to manual **JTAG chain**, optional **Managed slot**, and
+**Attach EIO** controls.
 
 For each input bit, **read-only checkboxes** update from
 `EioController.read_inputs()` while **Poll inputs** is checked.
@@ -449,16 +464,16 @@ the same arrangement.
 9. Click **[Open in viewer ▾] → GTKWave**.  GTKWave opens in a
    separate window with the auto-generated `.gtkw` layout — your
    `counter` signal is already added and labelled.
-10. Click the **EIO** tab, click **Attach EIO** (chain **3** on the
-    Arty reference bitstream). Turn on **Poll inputs** to refresh the
-    **Inputs** checkboxes — they mirror `btn[3:0]` and the counter
-    nibbles; they do **not** light the board by themselves. Use the
-    **Outputs** checkboxes to drive `probe_out`; on Arty, bits **0–3**
-    drive the four **green** LEDs (active high). **All outputs on** /
-    **All outputs off** set every `probe_out` bit to all 1s or all 0s in one
-    write each (full width, not only the visible grid).
-    Until **Attach EIO** succeeds, poll controls and the I/O grids stay
-    disabled.
+10. Click the **EIO** tab and choose a managed EIO from the **Core**
+    selector.  On the Arty reference bitstream, `core 2` and `core 3`
+    are USER1 manager slots 2 and 3; selecting one attaches it
+    immediately.  Turn on **Poll inputs** to refresh the **Inputs**
+    checkboxes.  EIO0 mirrors `btn[3:0]` and the slow counter nibble;
+    EIO1 mirrors `{counter[3:0], btn[3:0]}`.  Use the
+    **Outputs** checkboxes to drive `probe_out`; on Arty, EIO0 bits
+    **0-3** drive the four **green** LEDs (active high). **All outputs on** /
+    **All outputs off** set every `probe_out` bit to all 1s or all 0s
+    in one write each (full width, not only the visible grid).
 11. Click the **EJTAG-AXI** tab, type `0x40000000` into the address
     field, click **Read**.
 12. Done.  Disconnect from the Connection panel when you're
