@@ -44,7 +44,6 @@ def test_ela_rtl_sources_includes_common_and_vendor_files():
     sources = [path.as_posix() for path in ela_rtl_sources("xilinx7", rtl_dir="rtl")]
 
     assert "rtl/fcapz_ela.v" in sources
-    assert "rtl/fcapz_ela_multi_xilinx7.v" in sources
     assert "rtl/fcapz_core_manager.v" in sources
     assert "rtl/fcapz_debug_multi_xilinx7.v" in sources
     assert "rtl/jtag_pipe_iface.v" in sources

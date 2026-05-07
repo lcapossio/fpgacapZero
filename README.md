@@ -550,6 +550,12 @@ for details.
 | **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
 
+Single-core ELA/EIO wrappers are available across the vendor rows above.
+Managed multi-core wrappers are Xilinx 7-series only in this revision
+(`fcapz_debug_multi_xilinx7`); the portable `fcapz_core_manager` is shared,
+but ECP5, Gowin, Intel, PolarFire, and UltraScale wrappers still need their
+own TAP-specific shells.
+
 **Verified Xilinx 7-series IR codes** (xc7a100t, Arty A7):
 USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 
@@ -680,7 +686,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
-| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are

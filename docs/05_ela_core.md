@@ -387,7 +387,7 @@ and the no-priming-scan protocol automatically.  If the transport does
 not implement that method the host falls back to the USER1 path, which
 is correct but significantly slower.
 
-## Multiple ELAs on one USER chain
+## Multiple debug cores on one USER chain
 
 Multi-ELA designs use the same generic core manager as mixed ELA/EIO designs.
 The manager keeps the legacy ELA register map at `0x0000` and adds a small
@@ -400,30 +400,30 @@ and it lets the existing 256-bit burst pipe read from the same selected ELA
 that was armed.
 
 ```verilog
-wire [2*32-1:0] probes = {axi_state, cpu_state};
-wire [1:0] trigger_in = 2'b00;
-wire [1:0] trigger_out;
-wire [1:0] armed_out;
-
-fcapz_ela_multi_xilinx7 #(
+fcapz_debug_multi_xilinx7 #(
     .NUM_ELAS(2),
+    .NUM_EIOS(0),
     .SAMPLE_W(32),
     .TIMESTAMP_W(32),
     .CTRL_CHAIN(1),
     .DEPTH(1024)
-) u_elas (
+) u_debug (
     .sample_clk(clk),
     .sample_rst(rst),
-    .probe_in(probes),
-    .trigger_in(trigger_in),
-    .trigger_out(trigger_out),
-    .armed_out(armed_out)
+    .ela_probe_in({axi_state, cpu_state}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in(1'b0),
+    .eio_probe_out()
 );
 ```
 
 The lower-level `fcapz_core_manager` is also available if you already have
 custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
-yourself.
+yourself.  At this revision the packaged multi-core wrapper is Xilinx
+7-series only; other vendors still use their single-core wrappers until
+equivalent debug-manager wrappers are added.
 
 Manager registers:
 
@@ -467,13 +467,10 @@ The first manager implementation assumes homogeneous burst shape across slots
 the manager should grow per-slot metadata and mux to a maximum-width burst
 pipe, or we should group different shapes under separate manager instances.
 
-## Multiple ELAs plus EIO on one USER chain
-
-Use `fcapz_debug_multi_xilinx7` when one USER chain should host several ELAs
-and one or more EIOs. It uses the generic `"CM"` core manager at `0xF000`;
-slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected
-slot exposes its native register map at `0x0000`, so ELA host code still talks
-to ELA registers and EIO host code still talks to EIO registers.
+Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
+Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected
+slot exposes its native register map at `0x0000`, so ELA host code still
+talks to ELA registers and EIO host code still talks to EIO registers.
 
 ```verilog
 fcapz_debug_multi_xilinx7 #(

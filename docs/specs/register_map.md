@@ -151,8 +151,9 @@ slot 0, preserving legacy host behavior for designs whose first slot is an
 ELA.
 
 The manager identity is `0x434D`, ASCII `"CM"`, from `fcapz_core_manager`.
-`fcapz_ela_multi_xilinx7` and `fcapz_debug_multi_xilinx7` both use this same
-manager; ELA-only and mixed designs differ only in their slot descriptors.
+`fcapz_debug_multi_xilinx7` uses this same manager for ELA-only and mixed
+ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
+`"IO"`.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|

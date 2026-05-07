@@ -13,6 +13,8 @@ vivado/
 dfx_runtime.txt
 
 # Build artifacts
+dist/
+packages/
 *.bit
 *.bin
 !host/fcapz/gui/assets/default_window_state_v6.bin
@@ -29,3 +31,4 @@ Thumbs.db
 # Temp test outputs
 tests/_tmp/
 .codex_pytest_tmp*/
+.claude/

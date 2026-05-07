@@ -91,6 +91,12 @@ TESTBENCHES = {
             RTL / "fcapz_eio.v",
         ],
     ),
+    "fcapz_core_manager": (
+        TB / "fcapz_core_manager_tb.sv",
+        [
+            RTL / "fcapz_core_manager.v",
+        ],
+    ),
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
@@ -111,6 +117,7 @@ DEFAULT_TESTBENCHES = [
     "jtag_pipe_iface",
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
+    "fcapz_core_manager",
     "chan_mux",
 ]
 
@@ -124,6 +131,8 @@ LINT_TARGETS = [
     RTL / "fcapz_async_fifo.v",
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",
+    RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_eio.v",
     RTL / "fcapz_eio_xilinx7.v",
     RTL / "fcapz_ejtagaxi.v",

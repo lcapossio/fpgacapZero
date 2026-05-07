@@ -64,7 +64,6 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
-    _ROOT / "rtl" / "fcapz_ela_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_core_manager.v",
     _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
