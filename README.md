@@ -544,7 +544,7 @@ for details.
 
 | Vendor | Primitive | User chains | ELA | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
 |--------|-----------|:-----------:|:---:|:---:|:---:|:---:|
-| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
+| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 standalone, or managed USER1 slot with `fcapz_debug_multi_xilinx7` | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
 | **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |

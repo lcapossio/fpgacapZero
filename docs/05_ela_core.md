@@ -465,6 +465,48 @@ The first manager implementation assumes homogeneous burst shape across slots
 the manager should grow per-slot metadata and mux to a maximum-width burst
 pipe, or we should group different shapes under separate manager instances.
 
+## Multiple ELAs plus EIO on one USER chain
+
+Use `fcapz_debug_multi_xilinx7` when one USER chain should host several ELAs
+and an EIO. It uses the generic `"CM"` core manager at `0xF000`; slot order is
+ELA `0..NUM_ELAS-1`, then EIO when `EIO_EN=1`. Each selected slot exposes its
+native register map at `0x0000`, so ELA host code still talks to ELA registers
+and EIO host code still talks to EIO registers.
+
+```verilog
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .EIO_EN(1),
+    .SAMPLE_W(32),
+    .TIMESTAMP_W(32),
+    .EIO_IN_W(8),
+    .EIO_OUT_W(8)
+) u_debug (
+    .sample_clk(clk),
+    .sample_rst(rst),
+    .ela_probe_in({probe1, probe0}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in(gpio_status),
+    .eio_probe_out(gpio_control)
+);
+```
+
+Host-side:
+
+```python
+manager = ElaManager(transport)          # accepts "LM" and "CM"
+print(manager.probe())                   # num_slots, active, capabilities
+print(manager.slot_info(2))              # {"core_id": 0x494F, ...}
+
+ela1 = Analyzer(transport, instance=1)
+eio = EioController(transport, chain=1, instance=2)
+```
+
+The Arty A7 reference design uses this pattern: two ELA slots and an EIO slot
+share USER1, while EJTAG-AXI remains on USER4.
+
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 
 Segmented memory splits the buffer into N equal-sized segments and

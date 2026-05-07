@@ -7,13 +7,13 @@
 - **[Overview](#regmap-overview)** — scope: per-core JTAG register space vs SoC memory map.
 - **ELA** (logic analyzer, USER1 / USER2)
   - [Address map (USER1 control)](#regmap-ela-user1)
-  - [ELA manager (multi-ELA active-slot)](#regmap-ela-manager)
+  - [Managers (multi-ELA and mixed active-slot)](#regmap-ela-manager)
   - [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg)
   - [Compare modes](#regmap-compare-modes)
   - [Bitfields](#regmap-bitfields)
   - [DATA window readout (USER1)](#regmap-data-user1)
   - [Burst readout (USER2)](#regmap-burst-user2)
-- **EIO** (USER3)
+- **EIO** (USER3 standalone, or a managed USER1 slot)
   - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
 - **EJTAG-AXI** (USER4)
   - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
@@ -142,27 +142,42 @@ B-combine sequencer configurations.
 [↑ Top](#regmap-top)
 
 <a id="regmap-ela-manager"></a>
-## ELA Manager (multi-ELA active-slot)
+## Managers (multi-ELA and mixed active-slot)
 
-When multiple ELA cores share one USER chain, the optional manager owns
-`0xF000..0xF0FF`. All other addresses retain the normal ELA register map
-and are routed to the active slot. Reset selects slot 0, preserving legacy
-host behavior.
+When multiple debug cores share one USER chain, the manager owns
+`0xF000..0xF0FF`. All other addresses retain the active core's native
+register map at `0x0000` and are routed to the selected slot. Reset selects
+slot 0, preserving legacy host behavior for designs whose first slot is an
+ELA.
+
+There are two manager identities:
+
+| Core ID | ASCII | Use |
+|---:|---|---|
+| `0x4C4D` | `"LM"` | ELA-only manager from `fcapz_ela_manager`. |
+| `0x434D` | `"CM"` | Mixed core manager from `fcapz_core_manager`, used by `fcapz_debug_multi_xilinx7` for ELA + EIO slots. |
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` ASCII core ID `"LM"` (`0x4C4D`). |
-| `0xF004` | MGR_COUNT | RO | Number of ELA slots behind this manager. |
-| `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this ELA. |
+| `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` manager core ID (`"LM"` or `"CM"`). |
+| `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this slot. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
-| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported. |
+| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported (`"CM"`). |
+| `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
+| `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
+| `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in burst readback. EIO reports `0`. |
 
 Selection sequence:
 
-1. Read `MGR_VERSION`; require core ID `"LM"`.
+1. Read `MGR_VERSION`; require manager core ID `"LM"` or `"CM"`.
 2. Read `MGR_COUNT`.
-3. Write slot index to `MGR_ACTIVE`.
-4. Use the standard ELA registers at `0x0000+`.
+3. For `"CM"`, optionally enumerate descriptors with `MGR_DESC_INDEX`.
+4. Write slot index to `MGR_ACTIVE`.
+5. Use the selected core's native registers at `0x0000+`.
+
+Burst readback is valid only for ELA slots. If the active slot is EIO, the
+mixed manager returns idle/zero burst controls.
 
 [↑ Top](#regmap-top)
 
@@ -186,11 +201,12 @@ Selection sequence:
 [↑ Top](#regmap-top)
 
 <a id="regmap-eio"></a>
-## EIO Core Register Map (USER3, CHAIN=3)
+## EIO Core Register Map (USER3 standalone, or managed slot)
 
 The EIO core uses the same 49-bit DR protocol as the ELA control interface,
-but on a separate JTAG USER chain (CHAIN=3, IR=`0x04`) so it coexists with
-ELA USER1 and USER2.
+usually on a separate JTAG USER chain (CHAIN=3, IR=`0x04`) so it coexists
+with ELA USER1 and USER2. In mixed-manager designs, select the EIO slot via
+`MGR_ACTIVE` on USER1 first; the EIO still sees this same native address map.
 
 <a id="regmap-eio-addr"></a>
 ### Address Map

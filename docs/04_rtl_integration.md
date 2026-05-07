@@ -414,8 +414,9 @@ eio.write_outputs(0x1)
 - You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
   `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
   USER chain).
-- A future third core on the same chain (EJTAG-AXI/UART) would need a
-  wider address mux or a hierarchical `fcapz_regbus_mux`.
+- For multiple ELAs plus EIO on one Xilinx 7-series chain, prefer
+  `fcapz_debug_multi_xilinx7`; it uses the descriptor-capable `"CM"`
+  active-slot manager instead of the older fixed `0x8000` EIO address window.
 
 ## EIO wrapper parameter reference
 

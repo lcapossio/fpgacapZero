@@ -357,7 +357,14 @@ wrote 0x55
 `VALUE` accepts decimal or `0x` hex.
 
 All three EIO subcommands take `--chain N` (default 3) to override
-the BSCANE2 USER chain.
+the BSCANE2 USER chain. For mixed-manager designs where EIO shares USER1,
+also pass `--instance N` to select the EIO slot before each register access.
+
+```bash
+fcapz --backend hw_server --tap xc7a100t eio-probe --chain 1 --instance 2
+fcapz --backend hw_server --tap xc7a100t eio-write --chain 1 --instance 2 0x11
+fcapz --backend hw_server --tap xc7a100t eio-read --chain 1 --instance 2
+```
 
 ## AXI subcommands
 
