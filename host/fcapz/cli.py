@@ -8,7 +8,14 @@ import json
 import sys
 from pathlib import Path
 
-from .analyzer import Analyzer, CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
+from .analyzer import (
+    Analyzer,
+    CaptureConfig,
+    ElaManager,
+    ProbeSpec,
+    SequencerStage,
+    TriggerConfig,
+)
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -246,6 +253,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
     )
     p.add_argument(
+        "--chain",
+        type=int,
+        default=1,
+        help="ELA control BSCAN USER chain (default 1)",
+    )
+    p.add_argument(
+        "--ela-instance",
+        type=int,
+        default=None,
+        help="ELA manager slot on the selected chain (default: current/legacy slot)",
+    )
+    p.add_argument(
         "--program",
         metavar="BITFILE",
         default=None,
@@ -258,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("probe", help="Read core identity registers")
+    sub.add_parser("ela-list", help="Read ELA manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
 
     cfg = sub.add_parser("configure", help="Write capture configuration")
@@ -613,10 +633,15 @@ def main() -> int:
                     pass
 
     # -- Analyzer commands -------------------------------------------------
-    analyzer = Analyzer(transport)
+    analyzer = Analyzer(transport, chain=args.chain, instance=args.ela_instance)
 
     try:
         analyzer.connect()
+        if args.cmd == "ela-list":
+            manager = ElaManager(transport, chain=args.chain)
+            print(json.dumps(manager.probe_all(), indent=2))
+            return 0
+
         if args.cmd == "probe":
             print(json.dumps(analyzer.probe(), indent=2))
             return 0

@@ -14,7 +14,9 @@ from fcapz.analyzer import (
     Analyzer,
     CaptureConfig,
     CaptureResult,
+    ELA_MANAGER_CORE_ID,
     ELA_CORE_ID,
+    ElaManager,
     SequencerStage,
     TriggerConfig,
     expected_ela_version_reg,
@@ -57,6 +59,16 @@ class FakeTransport(Transport):
             },
         }
         self._active_chain: int = 1
+        self._active_ela: int = 0
+        self._manager_regs: dict[int, int] = {
+            0xF000: ((_version_tuple()[0] & 0xFF) << 24)
+            | ((_version_tuple()[1] & 0xFF) << 16)
+            | ELA_MANAGER_CORE_ID,
+            0xF004: 1,
+            0xF008: 0,
+            0xF00C: 0,
+            0xF010: 1,
+        }
         self.data = [1, 2, 3, 4]
 
     @property
@@ -81,6 +93,8 @@ class FakeTransport(Transport):
         return bits  # simple echo
 
     def read_reg(self, addr: int) -> int:
+        if addr in self._manager_regs:
+            return self._manager_regs[addr]
         return self.regs.get(addr, 0)
 
     def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
@@ -90,6 +104,13 @@ class FakeTransport(Transport):
         return out
 
     def write_reg(self, addr: int, value: int) -> None:
+        if addr == 0xF008:
+            self._active_ela = int(value)
+            self._manager_regs[addr] = int(value)
+            return
+        if addr in self._manager_regs:
+            self._manager_regs[addr] = value
+            return
         self.regs[addr] = value
 
     def read_block(self, addr: int, words: int):
@@ -143,6 +164,60 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(len(result.samples), 4)
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
+
+    def test_analyzer_selects_configured_chain(self):
+        transport = FakeTransport()
+        transport._chain_regs[2] = dict(transport._chain_regs[1])
+        transport._chain_regs[2][0x000C] = 16
+        analyzer = Analyzer(transport, chain=2)
+
+        analyzer.connect()
+        info = analyzer.probe()
+
+        self.assertEqual(analyzer.bscan_chain, 2)
+        self.assertEqual(transport._active_chain, 2)
+        self.assertEqual(info["sample_width"], 16)
+
+    def test_ela_manager_selects_instances_on_one_chain(self):
+        class ManagedElaTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF004] = 2
+                self._slots = [dict(self.regs), dict(self.regs)]
+                self._slots[0][0x000C] = 8
+                self._slots[1][0x000C] = 16
+
+            def read_reg(self, addr: int) -> int:
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = value
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+                return [self.read_reg(a) for a in addrs]
+
+        transport = ManagedElaTransport()
+        manager = ElaManager(transport, chain=1)
+
+        minfo = manager.probe()
+        all_info = manager.probe_all()
+
+        self.assertEqual(minfo["num_elas"], 2)
+        self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
+        self.assertEqual([info["instance"] for info in all_info], [0, 1])
+
+        analyzer = Analyzer(transport, instance=1)
+        self.assertEqual(analyzer.probe()["sample_width"], 16)
+        self.assertEqual(transport._manager_regs[0xF008], 1)
 
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""

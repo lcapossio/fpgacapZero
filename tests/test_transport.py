@@ -415,9 +415,10 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
-    def test_single_chain_burst_uses_user1_for_wide_scans(self):
-        """Single-chain burst keeps both BURST_PTR and 256-bit scans on USER1."""
+    def test_single_chain_burst_uses_active_chain_for_wide_scans(self):
+        """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()
+        t.select_chain(2)
         t._cached_sps = 32
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
@@ -432,8 +433,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         vals = t._read_block_burst(8)
 
         self.assertEqual(vals, list(range(8)))
-        self.assertIn("-hex 6 02", sent[0])
-        self.assertNotIn("-hex 6 03", sent[0])
+        self.assertIn("-hex 6 03", sent[0])
+        self.assertNotIn("-hex 6 02", sent[0])
         self.assertIn("-bits 256", sent[0])
 
     def test_single_chain_burst_requires_stable_repeated_readback(self):
