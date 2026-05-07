@@ -20,6 +20,8 @@ ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
 ELA_MANAGER_CORE_ID = 0x4C4D  # ASCII "LM" (logic-analyzer manager)
 _ELA_MANAGER_CORE_ID = ELA_MANAGER_CORE_ID
+CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
+_CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
 
 
 def expected_ela_version_reg() -> int:
@@ -71,6 +73,9 @@ _ADDR_MGR_COUNT = 0xF004
 _ADDR_MGR_ACTIVE = 0xF008
 _ADDR_MGR_STRIDE = 0xF00C
 _ADDR_MGR_CAPS = 0xF010
+_ADDR_MGR_DESC_INDEX = 0xF014
+_ADDR_MGR_DESC_CORE = 0xF018
+_ADDR_MGR_DESC_CAPS = 0xF01C
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
@@ -847,8 +852,8 @@ class Analyzer:
         return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
 
 
-class ElaManager:
-    """Host helper for the multi-ELA active-slot manager on one USER chain."""
+class CoreManager:
+    """Host helper for active-slot debug-core managers on one USER chain."""
 
     def __init__(self, transport: Transport, *, chain: int = 1):
         self.transport = transport
@@ -871,21 +876,40 @@ class ElaManager:
         read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         version = int(read(_ADDR_MGR_VERSION))
         core_id = version & 0xFFFF
-        if core_id != _ELA_MANAGER_CORE_ID:
+        if core_id not in (_ELA_MANAGER_CORE_ID, _CORE_MANAGER_CORE_ID):
             raise RuntimeError(
-                f"ELA manager identity check failed at VERSION[15:0]: "
-                f"expected 0x{_ELA_MANAGER_CORE_ID:04X} ('LM'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, old single-ELA bitstream, or manager not loaded?"
+                f"core manager identity check failed at VERSION[15:0]: "
+                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM') or "
+                f"0x{_ELA_MANAGER_CORE_ID:04X} ('LM'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
             )
-        return {
+        caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
+        info = {
             "version_major": (version >> 24) & 0xFF,
             "version_minor": (version >> 16) & 0xFF,
             "core_id": core_id,
-            "num_elas": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
+            "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
             "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
             "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
-            "capabilities": int(self.transport.read_reg(_ADDR_MGR_CAPS)),
+            "capabilities": caps,
         }
+        if core_id == _ELA_MANAGER_CORE_ID:
+            info["num_elas"] = info["num_slots"]
+        return info
+
+    def slot_info(self, instance: int) -> Dict:
+        """Return descriptor info for one slot when the manager supports it."""
+        self._select_chain()
+        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+        return {
+            "instance": int(instance),
+            "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
+            "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+        }
+
+    def select_raw(self, instance: int) -> None:
+        self._select_chain()
+        self.transport.write_reg(_ADDR_MGR_ACTIVE, int(instance))
 
     def select(self, instance: int) -> Analyzer:
         """Select *instance* and return an Analyzer bound to that slot."""
@@ -894,19 +918,31 @@ class ElaManager:
         return analyzer
 
     def analyzers(self) -> list[Analyzer]:
-        """Return one Analyzer per manager slot."""
+        """Return one Analyzer per manager slot.
+
+        For a mixed core manager, this returns all slots; callers can use
+        :meth:`slot_info` or :meth:`probe_all` to filter by core type.
+        """
         info = self.probe()
         return [
             Analyzer(self.transport, chain=self._chain, instance=i)
-            for i in range(max(0, int(info["num_elas"])))
+            for i in range(max(0, int(info["num_slots"])))
         ]
 
     def probe_all(self) -> list[Dict]:
-        """Probe every ELA slot and include the slot index in each dict."""
+        """Probe every LA slot and include the slot index in each dict."""
         out: list[Dict] = []
         for idx, analyzer in enumerate(self.analyzers()):
-            info = analyzer.probe()
-            info["instance"] = idx
-            info["chain"] = self._chain
-            out.append(info)
+            try:
+                info = analyzer.probe()
+            except RuntimeError:
+                continue
+            else:
+                info["instance"] = idx
+                info["chain"] = self._chain
+                out.append(info)
         return out
+
+
+class ElaManager(CoreManager):
+    """Compatibility name for manager helpers used by multi-ELA designs."""

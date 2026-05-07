@@ -55,10 +55,12 @@ class EioController:
         transport: Transport,
         chain: int = 3,
         base_addr: int = 0,
+        instance: int | None = None,
     ) -> None:
         self._t = transport
         self._chain = chain
         self._base_addr = int(base_addr) & 0xFFFF
+        self._instance = None if instance is None else int(instance)
         self.in_w: int = 0
         self.out_w: int = 0
         self.version_major: int = 0
@@ -71,6 +73,18 @@ class EioController:
         return self._chain
 
     # ------------------------------------------------------------------
+    def _select_chain(self) -> None:
+        try:
+            self._t.select_chain(self._chain)
+        except NotImplementedError:
+            if self._chain != 1:
+                raise
+
+    def _select_instance(self) -> None:
+        self._select_chain()
+        if self._instance is not None:
+            self._t.write_reg(0xF008, self._instance)
+
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
 
@@ -84,9 +98,9 @@ class EioController:
         """
         # XilinxHwServerTransport may run a 49-bit VERSION ready probe during
         # connect(), so select EIO's USER chain before opening the session.
-        self._t.select_chain(self._chain)
+        self._select_chain()
         self._t.connect()
-        self._t.select_chain(self._chain)
+        self._select_instance()
         version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
         core_id = version & 0xFFFF
         if core_id != EIO_CORE_ID:
@@ -108,7 +122,7 @@ class EioController:
         chain 1 (ELA / USER1) before returning. Does not call :meth:`Transport.connect`
         or :meth:`Transport.close`.
         """
-        self._t.select_chain(self._chain)
+        self._select_instance()
         try:
             version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
             core_id = version & 0xFFFF
@@ -124,7 +138,10 @@ class EioController:
             self.in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
             self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
         finally:
-            self._t.select_chain(1)
+            try:
+                self._t.select_chain(1)
+            except NotImplementedError:
+                pass
 
     def _abs(self, offset: int) -> int:
         """Prepend ``base_addr`` so the on-chip regbus mux routes to EIO."""
@@ -136,6 +153,7 @@ class EioController:
     # ------------------------------------------------------------------
     def read_inputs(self) -> int:
         """Return current probe_in value as a single integer (LSB = bit 0)."""
+        self._select_instance()
         words = (self.in_w + 31) // 32
         value = 0
         for i in range(words):
@@ -146,6 +164,7 @@ class EioController:
 
     def write_outputs(self, value: int) -> None:
         """Write probe_out as a single integer (LSB = bit 0)."""
+        self._select_instance()
         mask = (1 << self.out_w) - 1
         value = value & mask
         words = (self.out_w + 31) // 32
@@ -165,6 +184,7 @@ class EioController:
             Current output register value as an unsigned integer, zero-padded
             to OUT_W bits (bits above OUT_W are masked off).
         """
+        self._select_instance()
         words = (self.out_w + 31) // 32
         value = 0
         for i in range(words):

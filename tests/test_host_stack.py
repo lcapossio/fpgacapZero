@@ -14,6 +14,7 @@ from fcapz.analyzer import (
     Analyzer,
     CaptureConfig,
     CaptureResult,
+    CORE_MANAGER_CORE_ID,
     ELA_MANAGER_CORE_ID,
     ELA_CORE_ID,
     ElaManager,
@@ -218,6 +219,59 @@ class AnalyzerTests(unittest.TestCase):
         analyzer = Analyzer(transport, instance=1)
         self.assertEqual(analyzer.probe()["sample_width"], 16)
         self.assertEqual(transport._manager_regs[0xF008], 1)
+
+    def test_core_manager_describes_and_skips_non_ela_slots(self):
+        class MixedCoreTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF000] = (
+                    ((_version_tuple()[0] & 0xFF) << 24)
+                    | ((_version_tuple()[1] & 0xFF) << 16)
+                    | CORE_MANAGER_CORE_ID
+                )
+                self._manager_regs[0xF004] = 3
+                self._manager_regs[0xF010] = 0x3
+                self._manager_regs[0xF014] = 0
+                self._slots = [dict(self.regs), dict(self.regs), {
+                    0x0000: _expected_eio_version_reg(),
+                    0x0004: 8,
+                    0x0008: 8,
+                }]
+                self._slots[1][0x000C] = 16
+
+            def read_reg(self, addr: int) -> int:
+                if addr == 0xF018:
+                    return [ELA_CORE_ID, ELA_CORE_ID, EIO_CORE_ID][self._manager_regs[0xF014]]
+                if addr == 0xF01C:
+                    return [1, 1, 0][self._manager_regs[0xF014]]
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = int(value)
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+                return [self.read_reg(a) for a in addrs]
+
+        transport = MixedCoreTransport()
+        manager = ElaManager(transport, chain=1)
+
+        minfo = manager.probe()
+        all_info = manager.probe_all()
+
+        self.assertEqual(minfo["core_id"], CORE_MANAGER_CORE_ID)
+        self.assertEqual(minfo["num_slots"], 3)
+        self.assertEqual(manager.slot_info(2)["core_id"], EIO_CORE_ID)
+        self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
+        self.assertEqual([info["instance"] for info in all_info], [0, 1])
 
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
@@ -844,6 +898,28 @@ class EioControllerTests(unittest.TestCase):
         self.assertEqual(t._active_chain, 1)
         self.assertEqual(eio.in_w, 8)
         self.assertEqual(eio.bscan_chain, 3)
+
+    def test_managed_instance_selected_before_each_access(self):
+        """EIO can live behind the active-slot manager on USER1."""
+        t = FakeVioTransport()
+        writes: list[tuple[int, int]] = []
+        orig_write = t.write_reg
+
+        def traced_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            orig_write(addr, value)
+
+        t.write_reg = traced_write  # type: ignore[method-assign]
+        eio = EioController(t, chain=1, instance=2)
+
+        eio.connect()
+        eio.read_inputs()
+        eio.write_outputs(0x5A)
+        eio.read_outputs()
+
+        self.assertEqual(t.connect_chain, 1)
+        self.assertGreaterEqual(writes.count((0xF008, 2)), 4)
+        self.assertEqual(t.regs[0x0100], 0x5A)
 
 
 class MultiSegmentTests(unittest.TestCase):
