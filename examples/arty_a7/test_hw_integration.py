@@ -63,6 +63,8 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_ela_manager.v",
+    _ROOT / "rtl" / "fcapz_ela_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
     _ROOT / "rtl" / "jtag_reg_iface.v",
     _ROOT / "rtl" / "jtag_pipe_iface.v",
@@ -139,6 +141,50 @@ class TestProbe(unittest.TestCase):
             self.assertEqual(info["depth"], 1024)
         finally:
             a.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestMultiElaManager(unittest.TestCase):
+    """Validate the Arty bitstream exposes two ELA slots on USER1."""
+
+    def test_manager_enumerates_and_isolates_ela_slots(self):
+        from fcapz.analyzer import (
+            Analyzer,
+            ELA_CORE_ID,
+            ELA_MANAGER_CORE_ID,
+            ElaManager,
+        )
+
+        t = _make_transport()
+        try:
+            t.connect()
+            manager = ElaManager(t)
+            minfo = manager.probe()
+            self.assertEqual(minfo["core_id"], ELA_MANAGER_CORE_ID)
+            self.assertEqual(minfo["num_elas"], 2)
+
+            slots = manager.probe_all()
+            self.assertEqual([s["instance"] for s in slots], [0, 1])
+            for slot in slots:
+                self.assertEqual(slot["core_id"], ELA_CORE_ID)
+                self.assertEqual(slot["sample_width"], 8)
+                self.assertEqual(slot["depth"], 1024)
+
+            # Prove manager selection routes the normal ELA register map to
+            # independent per-slot state, not just the same ELA twice.
+            ela0 = Analyzer(t, instance=0)
+            ela1 = Analyzer(t, instance=1)
+            ela0.select_instance(0)
+            t.write_reg(0x0014, 11)  # PRETRIG_LEN
+            ela1.select_instance(1)
+            t.write_reg(0x0014, 22)
+
+            ela0.select_instance(0)
+            self.assertEqual(t.read_reg(0x0014), 11)
+            ela1.select_instance(1)
+            self.assertEqual(t.read_reg(0x0014), 22)
+        finally:
+            t.close()
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

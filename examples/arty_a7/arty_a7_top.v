@@ -49,8 +49,9 @@ module arty_a7_top (
     reg [SAMPLE_W-1:0] counter;
     reg [3:0] slow_counter;
     reg [26:0] sec_divider;
-    wire trigger_out_w;
-    wire ela_armed_w;
+    wire [1:0] trigger_in_w;
+    wire [1:0] trigger_out_w;
+    wire [1:0] ela_armed_w;
     wire [7:0] eio_probe_in;
     wire [7:0] eio_probe_out;
     reg [7:0] eio_out_sync1;
@@ -60,7 +61,6 @@ module arty_a7_top (
     reg armed_test_active;
     reg armed_test_pulse;
     reg armed_test_gate;
-    wire trigger_in_w;
     wire ela_pretrigger_phase_w;
     wire ela_fresh_arm_phase_w;
 
@@ -111,9 +111,9 @@ module arty_a7_top (
         end
     end
 
-    assign ela_pretrigger_phase_w = u_ela.g_ela_only.u_ela.armed &&
-                                    !u_ela.g_ela_only.u_ela.triggered;
-    assign ela_fresh_arm_phase_w = u_ela.g_ela_only.u_ela.any_arm_pulse ||
+    assign ela_pretrigger_phase_w = u_ela.g_elas[0].u_ela.armed &&
+                                    !u_ela.g_elas[0].u_ela.triggered;
+    assign ela_fresh_arm_phase_w = u_ela.g_elas[0].u_ela.any_arm_pulse ||
                                    (ela_pretrigger_phase_w && !ela_pretrigger_d);
 
     // ---- Deterministic trigger test hook ----
@@ -139,7 +139,7 @@ module arty_a7_top (
                 if (eio_out_sync2[5])
                     armed_test_pulse <= 1'b1;
                 armed_test_gate   <= 1'b0;
-            end else if (!ela_armed_w) begin
+            end else if (!ela_armed_w[0]) begin
                 armed_test_count  <= 4'd0;
                 armed_test_active <= 1'b0;
                 armed_test_gate   <= 1'b0;
@@ -153,10 +153,17 @@ module arty_a7_top (
         end
     end
 
-    assign trigger_in_w = eio_out_sync2[4] | armed_test_pulse | armed_test_gate;
+    assign trigger_in_w = {
+        1'b0,
+        eio_out_sync2[4] | armed_test_pulse | armed_test_gate
+    };
 
-    // ---- ELA (all features enabled for HW validation) ----
-    fcapz_ela_xilinx7 #(
+    // ---- ELAs (all features enabled for HW validation) ----
+    // Slot 0 preserves the historical Arty capture target. Slot 1 captures a
+    // different deterministic pattern so the hardware tests can validate the
+    // manager path without needing extra board wiring.
+    fcapz_ela_multi_xilinx7 #(
+        .NUM_ELAS     (2),
         .SAMPLE_W     (SAMPLE_W),
         .DEPTH        (DEPTH),
         .INPUT_PIPE   (1),
@@ -169,7 +176,7 @@ module arty_a7_top (
     ) u_ela (
         .sample_clk (clk),
         .sample_rst (rst),
-        .probe_in   (counter),
+        .probe_in   ({counter ^ 8'hA5, counter}),
         .trigger_in (trigger_in_w),
         .trigger_out(trigger_out_w),
         .armed_out  (ela_armed_w)
