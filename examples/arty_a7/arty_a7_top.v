@@ -19,12 +19,10 @@
 //   Baseline trigger sequencer/storage qualification settings stay at
 //   wrapper defaults unless overridden in the wrapper parameters.
 //
-// - EIO on USER3 exposes {btn[3:0], slow_counter[3:0]} as probe_in and drives
-//   the four constrained green LEDs from probe_out[3:0] (resynced into clk).
-//   probe_out[4]
-//   feeds ELA trigger_in, so a host write can make a manual trigger edge.
-//   probe_out[7:5] remains readable/writable over JTAG but is not bonded
-//   to LEDs here.
+// - EIO shares USER1 through the debug core manager as slot 2.  It exposes
+//   {btn[3:0], slow_counter[3:0]} as probe_in and drives the four constrained
+//   green LEDs from probe_out[3:0] (resynced into clk). probe_out[4] feeds
+//   ELA trigger_in, so a host write can make a manual trigger edge.
 //
 // - EJTAG-AXI on USER4 connects to axi4_test_slave so hardware tests can
 //   verify single AXI accesses, partial strobes, bursts, and error paths.
@@ -111,9 +109,9 @@ module arty_a7_top (
         end
     end
 
-    assign ela_pretrigger_phase_w = u_ela.g_elas[0].u_ela.armed &&
-                                    !u_ela.g_elas[0].u_ela.triggered;
-    assign ela_fresh_arm_phase_w = u_ela.g_elas[0].u_ela.any_arm_pulse ||
+    assign ela_pretrigger_phase_w = u_debug.g_elas[0].u_ela.armed &&
+                                    !u_debug.g_elas[0].u_ela.triggered;
+    assign ela_fresh_arm_phase_w = u_debug.g_elas[0].u_ela.any_arm_pulse ||
                                    (ela_pretrigger_phase_w && !ela_pretrigger_d);
 
     // ---- Deterministic trigger test hook ----
@@ -162,8 +160,9 @@ module arty_a7_top (
     // Slot 0 preserves the historical Arty capture target. Slot 1 captures a
     // different deterministic pattern so the hardware tests can validate the
     // manager path without needing extra board wiring.
-    fcapz_ela_multi_xilinx7 #(
+    fcapz_debug_multi_xilinx7 #(
         .NUM_ELAS     (2),
+        .EIO_EN       (1),
         .SAMPLE_W     (SAMPLE_W),
         .DEPTH        (DEPTH),
         .INPUT_PIPE   (1),
@@ -172,14 +171,18 @@ module arty_a7_top (
         .TIMESTAMP_W  (32),
         .NUM_SEGMENTS (NUM_SEGMENTS),
         .STARTUP_ARM  (1),
-        .DEFAULT_TRIG_EXT(2)
-    ) u_ela (
-        .sample_clk (clk),
-        .sample_rst (rst),
-        .probe_in   ({counter ^ 8'hA5, counter}),
-        .trigger_in (trigger_in_w),
-        .trigger_out(trigger_out_w),
-        .armed_out  (ela_armed_w)
+        .DEFAULT_TRIG_EXT(2),
+        .EIO_IN_W     (8),
+        .EIO_OUT_W    (8)
+    ) u_debug (
+        .sample_clk     (clk),
+        .sample_rst     (rst),
+        .ela_probe_in   ({counter ^ 8'hA5, counter}),
+        .ela_trigger_in (trigger_in_w),
+        .ela_trigger_out(trigger_out_w),
+        .ela_armed_out  (ela_armed_w),
+        .eio_probe_in   (eio_probe_in),
+        .eio_probe_out  (eio_probe_out)
     );
 
     // ---- EJTAGAXI: JTAG-to-AXI4 bridge (USER4) ----
@@ -244,7 +247,7 @@ module arty_a7_top (
         .s_axi_rlast(bridge_rlast)
     );
 
-    // ---- EIO: Embedded I/O (USER3) ----
+    // ---- EIO LED output resync ----
     // Reads buttons plus the slow counter as probe_in, and drives the four
     // constrained green LEDs via probe_out.  The upper EIO output bits
     // still read back over JTAG, but are not bonded to LEDs in this XDC.
@@ -259,14 +262,5 @@ module arty_a7_top (
         end
     end
     assign led = led_sync2;
-
-    fcapz_eio_xilinx7 #(
-        .IN_W  (8),     // btn[3:0] + slow_counter[3:0]
-        .OUT_W (8),     // lower 4 bits drive physical LEDs
-        .CHAIN (3)
-    ) u_eio (
-        .probe_in  (eio_probe_in),
-        .probe_out (eio_probe_out)
-    );
 
 endmodule

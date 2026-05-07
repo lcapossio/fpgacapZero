@@ -65,6 +65,8 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_ela.v",
     _ROOT / "rtl" / "fcapz_ela_manager.v",
     _ROOT / "rtl" / "fcapz_ela_multi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
     _ROOT / "rtl" / "jtag_reg_iface.v",
     _ROOT / "rtl" / "jtag_pipe_iface.v",
@@ -431,7 +433,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
         self.t = _make_transport()
         self.a = Analyzer(self.t)
         self.a.connect()
-        self.eio = EioController(self.t, chain=3)
+        self.eio = EioController(self.t, chain=1, instance=2)
         self.eio.attach()
         self._set_eio_outputs(0)
 
@@ -442,11 +444,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             self.a.close()
 
     def _set_eio_outputs(self, value: int) -> None:
-        self.t.select_chain(3)
-        try:
-            self.eio.write_outputs(value)
-        finally:
-            self.t.select_chain(1)
+        self.eio.write_outputs(value)
 
     def test_register_roundtrip(self):
         """STARTUP_ARM / TRIG_HOLDOFF read back correctly on silicon."""
@@ -863,18 +861,18 @@ class TestExtTrigger(unittest.TestCase):
         self.assertEqual(len(result.samples), 6)
 
 
-# ── EIO tests (USER3) ─────────────────────────────────────────────────
+# ── EIO tests (managed USER1 slot 2) ─────────────────────────────────
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioProbe(unittest.TestCase):
-    """EIO: probe identity and widths on chain 3."""
+    """EIO: probe identity and widths through the USER1 debug manager."""
 
     def test_eio_probe(self):
         from fcapz.eio import EioController
 
         t = _make_transport()
-        eio = EioController(t, chain=3)
+        eio = EioController(t, chain=1, instance=2)
         try:
             eio.connect()
             self.assertEqual(eio.in_w, 8)
@@ -885,12 +883,12 @@ class TestEioProbe(unittest.TestCase):
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioReadWrite(unittest.TestCase):
-    """EIO: read inputs and write outputs via JTAG USER3."""
+    """EIO: read inputs and write outputs through managed USER1 slot 2."""
 
     def setUp(self):
         from fcapz.eio import EioController
 
-        self.eio = EioController(_make_transport(), chain=3)
+        self.eio = EioController(_make_transport(), chain=1, instance=2)
         self.eio.connect()
 
     def tearDown(self):
