@@ -117,8 +117,8 @@ class CaptureWorker(QObject):
 class ConnectWorker(QObject):
     """Background connect: build transport, ``Analyzer.connect()``, ``probe_optional()``."""
 
-    finished = Signal(object, object)
-    """``(analyzer, probe_info)`` on success; ``probe_info`` is ``None`` if USER1 has no ELA."""
+    finished = Signal(object, object, object)
+    """``(analyzer, probe_info, topology)`` on success; ``probe_info`` is ``None`` if USER1 has no ELA."""
 
     failed = Signal(str)
     cancelled = Signal()
@@ -177,11 +177,20 @@ class ConnectWorker(QObject):
                 analyzer.close()
                 self.cancelled.emit()
                 return
+            topology = None
             try:
-                manager_info = ElaManager(transport).probe()
+                manager = ElaManager(transport)
+                manager_info = manager.probe()
             except RuntimeError:
                 manager_info = None
             if manager_info is not None:
+                slots = []
+                for idx in range(max(0, int(manager_info.get("num_slots", 0)))):
+                    try:
+                        slots.append(manager.slot_info(idx))
+                    except RuntimeError:
+                        slots.append({"instance": idx, "core_id": 0, "capabilities": 0})
+                topology = {"chain": 1, "manager": manager_info, "slots": slots}
                 analyzer.select_instance(0)
                 _conn_log.info(
                     "USER1 core manager detected: %d slots; GUI ELA capture uses slot 0",
@@ -220,7 +229,7 @@ class ConnectWorker(QObject):
                 except OSError:
                     pass
             return
-        self.finished.emit(analyzer, info)
+        self.finished.emit(analyzer, info, topology)
 
 
 class TargetScanWorker(QObject):

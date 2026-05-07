@@ -411,6 +411,7 @@ class HistoryPanel(QWidget):
             and surfer_marker_pretrigger != self._last_surfer_marker_pretrigger
         )
         if same_running:
+            running = self._running_viewer_process()
             if surfer_marker_changed:
                 self.status_message.emit(
                     f"{viewer_label}: pre-trigger changed; reopening to apply marker.",
@@ -418,6 +419,8 @@ class HistoryPanel(QWidget):
             else:
                 if surfer_wcp and wcp_ready:
                     self._surfer_wcp.send_reload()
+                    if running is not None:
+                        schedule_vertical_split_with_viewer(self, running)
                     self.status_message.emit(
                         f"Updated live wave for {viewer_label} - reloaded in Surfer (WCP).",
                     )
@@ -429,6 +432,8 @@ class HistoryPanel(QWidget):
                     # Fall through to replace the viewer so auto re-arm still
                     # shows the newest capture even without a WCP session.
                 elif unix_file_watcher_ok:
+                    if running is not None:
+                        schedule_vertical_split_with_viewer(self, running)
                     self.status_message.emit(
                         f"Updated live wave for {viewer_label} — "
                         "reload if the viewer did not refresh.",

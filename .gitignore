@@ -16,6 +16,7 @@ dfx_runtime.txt
 *.bit
 *.bin
 !host/fcapz/gui/assets/default_window_state_v6.bin
+!host/fcapz/gui/assets/default_window_state_v7.bin
 
 # Simulation artifacts
 sim/*.vvp

@@ -49,28 +49,10 @@ module fcapz_debug_multi_xilinx7 #(
     localparam PROBE_W = (PROBE_MUX_W > 0) ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS;
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
     localparam EIO_SLOT_BASE = NUM_ELAS;
-
-    function [NUM_SLOTS*16-1:0] slot_core_ids;
-        input unused;
-        integer j;
-        begin
-            slot_core_ids = {NUM_SLOTS{16'h0000}};
-            for (j = 0; j < NUM_ELAS; j = j + 1)
-                slot_core_ids[j*16 +: 16] = 16'h4C41; // "LA"
-            for (j = 0; j < EIO_COUNT; j = j + 1)
-                slot_core_ids[(EIO_SLOT_BASE+j)*16 +: 16] = 16'h494F; // "IO"
-        end
-    endfunction
-
-    function [NUM_SLOTS-1:0] slot_has_burst;
-        input unused;
-        integer j;
-        begin
-            slot_has_burst = {NUM_SLOTS{1'b0}};
-            for (j = 0; j < NUM_ELAS; j = j + 1)
-                slot_has_burst[j] = 1'b1;
-        end
-    endfunction
+    localparam [NUM_SLOTS*16-1:0] SLOT_CORE_IDS =
+        ({NUM_SLOTS{16'h494F}} << (NUM_ELAS*16)) | {NUM_ELAS{16'h4C41}};
+    localparam [NUM_SLOTS-1:0] SLOT_HAS_BURST =
+        {NUM_SLOTS{1'b1}} >> EIO_COUNT;
 
     wire tap_tck, tap_tdi, tap_tdo;
     wire tap_capture, tap_shift, tap_update, tap_sel;
@@ -140,8 +122,8 @@ module fcapz_debug_multi_xilinx7 #(
         .SAMPLE_W(SAMPLE_W),
         .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH),
-        .SLOT_CORE_IDS(slot_core_ids(1'b0)),
-        .SLOT_HAS_BURST(slot_has_burst(1'b0))
+        .SLOT_CORE_IDS(SLOT_CORE_IDS),
+        .SLOT_HAS_BURST(SLOT_HAS_BURST)
     ) u_manager (
         .jtag_clk(jtag_clk),
         .jtag_rst(jtag_rst),

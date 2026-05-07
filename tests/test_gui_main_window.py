@@ -24,7 +24,7 @@ pytest.importorskip("pytestqt")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QPushButton, QToolBar, QToolButton
+from PySide6.QtWidgets import QApplication, QPushButton, QToolBar, QToolButton, QTreeWidget
 
 from fcapz.analyzer import CaptureResult
 from fcapz.gui.app_window import MainWindow
@@ -265,3 +265,154 @@ def test_eio_attach_passes_managed_instance(qtbot: Any, tmp_path: Path) -> None:
 
         eio_cls.assert_called_with(w._analyzer.transport, chain=1, instance=3)
         eio.attach.assert_called_once()
+
+
+@pytest.mark.gui
+def test_eio_detach_reenables_managed_slot_choice(qtbot: Any, tmp_path: Path) -> None:
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+        eio_cls = ex.enter_context(patch("fcapz.gui.app_window.EioController"))
+        eio = eio_cls.return_value
+        eio.in_w = 8
+        eio.out_w = 8
+        eio.version_major = 0
+        eio.version_minor = 4
+        eio.bscan_chain = 1
+        eio.instance = 2
+        eio.read_outputs.return_value = 0
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        w._eio_panel._chain_spin.setValue(1)
+        w._eio_panel._managed_slot.setChecked(True)
+        w._eio_panel._instance_spin.setValue(2)
+        qtbot.mouseClick(_button_with_text(w._eio_panel, "Attach EIO"), Qt.MouseButton.LeftButton)
+
+        assert not w._eio_panel._instance_spin.isEnabled()
+        qtbot.mouseClick(_button_with_text(w._eio_panel, "Detach EIO"), Qt.MouseButton.LeftButton)
+        assert w._eio is None
+        assert w._eio_panel._instance_spin.isEnabled()
+        w._eio_panel._instance_spin.setValue(3)
+        eio.instance = 3
+        qtbot.mouseClick(_button_with_text(w._eio_panel, "Attach EIO"), Qt.MouseButton.LeftButton)
+
+        assert eio_cls.call_args_list[-1].kwargs["instance"] == 3
+
+
+@pytest.mark.gui
+def test_jtag_hierarchy_shows_managed_slots(qtbot: Any, tmp_path: Path) -> None:
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+
+        class FakeManager:
+            def __init__(self, _transport: object) -> None:
+                pass
+
+            def probe(self) -> dict[str, int]:
+                return {
+                    "version_major": 0,
+                    "version_minor": 4,
+                    "core_id": 0x434D,
+                    "num_slots": 4,
+                    "active": 0,
+                    "window_stride": 0,
+                    "capabilities": 3,
+                }
+
+            def slot_info(self, instance: int) -> dict[str, int]:
+                return {
+                    "instance": instance,
+                    "core_id": [0x4C41, 0x4C41, 0x494F, 0x494F][instance],
+                    "capabilities": [1, 1, 0, 0][instance],
+                }
+
+        ex.enter_context(patch("fcapz.gui.worker.ElaManager", FakeManager))
+        eio_cls = ex.enter_context(patch("fcapz.gui.app_window.EioController"))
+        eio = eio_cls.return_value
+        eio.in_w = 8
+        eio.out_w = 8
+        eio.version_major = 0
+        eio.version_minor = 4
+        eio.bscan_chain = 1
+        eio.instance = 2
+        eio.read_outputs.return_value = 0
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        assert w._dock_capture.windowTitle() == "ELA"
+        assert w._dock_eio.windowTitle() == "EIO"
+        assert w._capture._ela_core.isEnabled()
+        assert w._capture._ela_core.itemText(0) == "core 0"
+        assert w._capture._ela_core.itemText(1) == "core 1"
+        assert w._eio_panel._managed_slot.isChecked()
+        assert w._eio_panel._instance_spin.value() == 2
+        assert w._eio_panel._core_combo.isEnabled()
+        assert w._eio_panel._core_combo.itemText(0) == "core 2"
+        assert w._eio_panel._core_combo.itemText(1) == "core 3"
+        assert not w._eio_panel._attach_btn.isVisible()
+        eio.attach.assert_called_once()
+
+        tree = w.findChild(QTreeWidget)
+        assert tree is not None
+        rows: list[str] = []
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            rows.append(top.text(0))
+            for j in range(top.childCount()):
+                child = top.child(j)
+                rows.append(f"{child.text(0)} {child.text(1)}")
+        assert "USER1" in rows
+        assert any("slot 2" in r and "EIO" in r for r in rows)
+        assert any("slot 0" in r and "GUI ELA capture" in r for r in rows)
+
+
+@pytest.mark.gui
+def test_ela_core_selector_selects_managed_instance(qtbot: Any, tmp_path: Path) -> None:
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        mock_an = _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+
+        class FakeManager:
+            def __init__(self, _transport: object) -> None:
+                pass
+
+            def probe(self) -> dict[str, int]:
+                return {
+                    "version_major": 0,
+                    "version_minor": 4,
+                    "core_id": 0x434D,
+                    "num_slots": 2,
+                    "active": 0,
+                    "window_stride": 0,
+                    "capabilities": 3,
+                }
+
+            def slot_info(self, instance: int) -> dict[str, int]:
+                return {
+                    "instance": instance,
+                    "core_id": 0x4C41,
+                    "capabilities": 1,
+                }
+
+        ex.enter_context(patch("fcapz.gui.worker.ElaManager", FakeManager))
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        w._capture._ela_core.setCurrentIndex(1)
+
+        mock_an.select_instance.assert_any_call(1)
+        assert w._capture.selected_ela_instance() == 1

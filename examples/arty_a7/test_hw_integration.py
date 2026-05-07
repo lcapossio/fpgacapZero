@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -434,11 +435,12 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
         from fcapz.eio import EioController
 
         self.t = _make_transport()
-        self.a = Analyzer(self.t)
+        self.a = Analyzer(self.t, instance=0)
         self.a.connect()
         self.eio = EioController(self.t, chain=1, instance=2)
         self.eio.attach()
         self._set_eio_outputs(0)
+        self.a.select_instance(0)
 
     def tearDown(self):
         try:
@@ -448,6 +450,8 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
 
     def _set_eio_outputs(self, value: int) -> None:
         self.eio.write_outputs(value)
+        self.assertEqual(self.eio.read_outputs(), value & 0xFF)
+        time.sleep(0.001)
 
     def test_register_roundtrip(self):
         """STARTUP_ARM / TRIG_HOLDOFF read back correctly on silicon."""
@@ -515,6 +519,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             ext_trigger_mode=2,
         )
         self.a.configure(cfg)
+        self.a.reset()
         self._set_eio_outputs(1 << 5)
         self.a.arm()
 
@@ -548,6 +553,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             ext_trigger_mode=2,
         )
         self.a.configure(cfg)
+        self.a.reset()
         self._set_eio_outputs(1 << 6)
         self.a.arm()
 
