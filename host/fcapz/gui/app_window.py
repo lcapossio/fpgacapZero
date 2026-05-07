@@ -1185,7 +1185,11 @@ class MainWindow(QMainWindow):
             return
         t = self._analyzer.transport
         try:
-            eio = EioController(t, chain=self._eio_panel.chain())
+            eio = EioController(
+                t,
+                chain=self._eio_panel.chain(),
+                instance=self._eio_panel.instance(),
+            )
             eio.attach()
         except (OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, "EIO attach", str(exc))
@@ -1193,7 +1197,11 @@ class MainWindow(QMainWindow):
         self._eio = eio
         self._eio_panel.bind_eio(t, eio)
         self.statusBar().showMessage("EIO attached")
-        _log.info("EIO attached (chain=%d)", self._eio_panel.chain())
+        _log.info(
+            "EIO attached (chain=%d, instance=%s)",
+            self._eio_panel.chain(),
+            self._eio_panel.instance(),
+        )
 
     def _on_axi_attach(self) -> None:
         if self._analyzer is None:

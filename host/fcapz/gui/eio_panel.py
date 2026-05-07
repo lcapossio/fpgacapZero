@@ -44,10 +44,19 @@ class EioPanel(QGroupBox):
         self._chain_spin = QSpinBox()
         self._chain_spin.setRange(1, 8)
         self._chain_spin.setValue(3)
+        self._managed_slot = QCheckBox("Managed slot")
+        self._managed_slot.setToolTip(
+            "Enable when EIO is behind the USER-chain core manager. "
+            "Arty multi-core reference: chain 1, slots 2 and 3.",
+        )
+        self._instance_spin = QSpinBox()
+        self._instance_spin.setRange(0, 255)
+        self._instance_spin.setValue(2)
+        self._instance_spin.setToolTip("Core-manager slot index for this EIO.")
         self._attach_btn = QPushButton("Attach EIO")
         self._attach_btn.setToolTip(
-            "Required before reads/writes. Arty reference bitstream: chain 3 (USER3). "
-            "Then use Outputs to drive the green LEDs.",
+            "Required before reads/writes. Legacy Arty: chain 3. "
+            "Managed Arty: chain 1, slot 2 or 3.",
         )
         self._attach_btn.clicked.connect(lambda: self.attach_requested.emit())
 
@@ -100,6 +109,9 @@ class EioPanel(QGroupBox):
         row = QHBoxLayout()
         row.addWidget(QLabel("Chain"))
         row.addWidget(self._chain_spin)
+        row.addWidget(self._managed_slot)
+        row.addWidget(QLabel("Slot"))
+        row.addWidget(self._instance_spin)
         row.addWidget(self._attach_btn)
         row.addStretch(1)
 
@@ -133,6 +145,9 @@ class EioPanel(QGroupBox):
         outer.addLayout(form, 0, 0)
 
         self._poll_enable.toggled.connect(self._on_poll_toggled)
+        self._managed_slot.toggled.connect(
+            lambda _on: self._apply_attach_ui_state(self._eio is not None)
+        )
         self.clear()
 
     def clear(self) -> None:
@@ -161,6 +176,8 @@ class EioPanel(QGroupBox):
             extra = f" (showing first {_MAX_BITS_UI} of each bus)"
         self._info.setText(
             f"EIO v{eio.version_major}.{eio.version_minor} — "
+            f"chain={eio.bscan_chain}, "
+            f"slot={eio.instance if eio.instance is not None else 'direct'}, "
             f"in_w={eio.in_w}, out_w={eio.out_w}{extra}",
         )
         self._rebuild_bits(
@@ -180,10 +197,19 @@ class EioPanel(QGroupBox):
     def chain(self) -> int:
         return int(self._chain_spin.value())
 
+    def instance(self) -> int | None:
+        if not self._managed_slot.isChecked():
+            return None
+        return int(self._instance_spin.value())
+
     def _apply_attach_ui_state(self, attached: bool) -> None:
         """Grey out probe UI until EIO is attached; keep chain + attach usable when connected."""
         has_transport = self._transport is not None
         self._chain_spin.setEnabled(has_transport and not attached)
+        self._managed_slot.setEnabled(has_transport and not attached)
+        self._instance_spin.setEnabled(
+            has_transport and not attached and self._managed_slot.isChecked()
+        )
         self._poll_enable.setEnabled(attached)
         self._poll_ms_combo.setEnabled(attached)
         self._in_scroll.setEnabled(attached)

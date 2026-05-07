@@ -10,7 +10,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..analyzer import Analyzer, CaptureConfig
+from ..analyzer import Analyzer, CaptureConfig, ElaManager
 from ..transport import connect_timing_logs_enabled, list_xilinx_hw_server_targets
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
@@ -177,6 +177,16 @@ class ConnectWorker(QObject):
                 analyzer.close()
                 self.cancelled.emit()
                 return
+            try:
+                manager_info = ElaManager(transport).probe()
+            except RuntimeError:
+                manager_info = None
+            if manager_info is not None:
+                analyzer.select_instance(0)
+                _conn_log.info(
+                    "USER1 core manager detected: %d slots; GUI ELA capture uses slot 0",
+                    int(manager_info.get("num_slots", 0)),
+                )
             info = analyzer.probe_optional()
             t_probe = time.monotonic()
             if info is None:

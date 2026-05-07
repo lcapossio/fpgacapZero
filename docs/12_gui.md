@@ -251,8 +251,10 @@ adjacent identical values render as a flat line, not a sawtooth.
 
 ### EIO panel
 
-**JTAG chain** spin box and **Attach EIO** create an `EioController` on the
-current transport and show core identity / bus widths.
+**JTAG chain**, optional **Managed slot**, and **Attach EIO** create an
+`EioController` on the current transport and show core identity / bus widths.
+Use **Managed slot** when EIO is behind the USER-chain core manager; the Arty
+multi-core reference uses chain **1**, slots **2** and **3**.
 
 For each input bit, **read-only checkboxes** update from
 `EioController.read_inputs()` while **Poll inputs** is checked.

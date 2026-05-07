@@ -72,6 +72,11 @@ class EioController:
         """BSCANE2 USER chain index used for this core (default 3 = USER3)."""
         return self._chain
 
+    @property
+    def instance(self) -> int | None:
+        """Managed core slot selected before accesses, or ``None`` for direct EIO."""
+        return self._instance
+
     # ------------------------------------------------------------------
     def _select_chain(self) -> None:
         try:

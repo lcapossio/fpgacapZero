@@ -235,3 +235,33 @@ def test_connect_failure_does_not_leave_analyzer(qtbot: Any, tmp_path: Path) -> 
         qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
         qtbot.waitUntil(lambda: w._connect_thread is None, timeout=5000)
         assert w._analyzer is None
+
+
+@pytest.mark.gui
+def test_eio_attach_passes_managed_instance(qtbot: Any, tmp_path: Path) -> None:
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+        eio_cls = ex.enter_context(patch("fcapz.gui.app_window.EioController"))
+        eio = eio_cls.return_value
+        eio.in_w = 8
+        eio.out_w = 8
+        eio.version_major = 0
+        eio.version_minor = 4
+        eio.bscan_chain = 1
+        eio.instance = 3
+        eio.read_outputs.return_value = 0
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        w._eio_panel._chain_spin.setValue(1)
+        w._eio_panel._managed_slot.setChecked(True)
+        w._eio_panel._instance_spin.setValue(3)
+        qtbot.mouseClick(_button_with_text(w._eio_panel, "Attach EIO"), Qt.MouseButton.LeftButton)
+
+        eio_cls.assert_called_with(w._analyzer.transport, chain=1, instance=3)
+        eio.attach.assert_called_once()
