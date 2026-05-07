@@ -162,7 +162,11 @@ class TestMultiElaManager(unittest.TestCase):
             manager = ElaManager(t)
             minfo = manager.probe()
             self.assertEqual(minfo["core_id"], CORE_MANAGER_CORE_ID)
-            self.assertEqual(minfo["num_slots"], 3)
+            self.assertEqual(minfo["num_slots"], 4)
+            self.assertEqual(
+                [manager.slot_info(i)["core_id"] for i in range(4)],
+                [ELA_CORE_ID, ELA_CORE_ID, 0x494F, 0x494F],
+            )
 
             slots = manager.probe_all()
             self.assertEqual([s["instance"] for s in slots], [0, 1])
@@ -879,6 +883,18 @@ class TestEioProbe(unittest.TestCase):
         finally:
             eio.close()
 
+    def test_second_eio_probe(self):
+        from fcapz.eio import EioController
+
+        t = _make_transport()
+        eio = EioController(t, chain=1, instance=3)
+        try:
+            eio.connect()
+            self.assertEqual(eio.in_w, 8)
+            self.assertEqual(eio.out_w, 8)
+        finally:
+            eio.close()
+
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioReadWrite(unittest.TestCase):
@@ -912,6 +928,18 @@ class TestEioReadWrite(unittest.TestCase):
         self.eio.write_outputs(0xA5)
         readback = self.eio.read_outputs()
         self.assertEqual(readback, 0xA5)
+
+    def test_second_eio_write_read_outputs(self):
+        """Second EIO slot has independent output storage."""
+        from fcapz.eio import EioController
+
+        eio1 = EioController(_make_transport(), chain=1, instance=3)
+        try:
+            eio1.connect()
+            eio1.write_outputs(0x3C)
+            self.assertEqual(eio1.read_outputs(), 0x3C)
+        finally:
+            eio1.close()
 
     def test_write_zero_outputs(self):
         """Write 0 and verify readback."""

@@ -470,15 +470,16 @@ pipe, or we should group different shapes under separate manager instances.
 ## Multiple ELAs plus EIO on one USER chain
 
 Use `fcapz_debug_multi_xilinx7` when one USER chain should host several ELAs
-and an EIO. It uses the generic `"CM"` core manager at `0xF000`; slot order is
-ELA `0..NUM_ELAS-1`, then EIO when `EIO_EN=1`. Each selected slot exposes its
-native register map at `0x0000`, so ELA host code still talks to ELA registers
-and EIO host code still talks to EIO registers.
+and one or more EIOs. It uses the generic `"CM"` core manager at `0xF000`;
+slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected
+slot exposes its native register map at `0x0000`, so ELA host code still talks
+to ELA registers and EIO host code still talks to EIO registers.
 
 ```verilog
 fcapz_debug_multi_xilinx7 #(
     .NUM_ELAS(2),
     .EIO_EN(1),
+    .NUM_EIOS(2),
     .SAMPLE_W(32),
     .TIMESTAMP_W(32),
     .EIO_IN_W(8),
@@ -490,8 +491,8 @@ fcapz_debug_multi_xilinx7 #(
     .ela_trigger_in(2'b00),
     .ela_trigger_out(),
     .ela_armed_out(),
-    .eio_probe_in(gpio_status),
-    .eio_probe_out(gpio_control)
+    .eio_probe_in({gpio_status1, gpio_status0}),
+    .eio_probe_out({gpio_control1, gpio_control0})
 );
 ```
 
@@ -500,14 +501,15 @@ Host-side:
 ```python
 manager = ElaManager(transport)
 print(manager.probe())                   # num_slots, active, capabilities
-print(manager.slot_info(2))              # {"core_id": 0x494F, ...}
+print(manager.slot_info(2))              # EIO0: {"core_id": 0x494F, ...}
+print(manager.slot_info(3))              # EIO1: {"core_id": 0x494F, ...}
 
 ela1 = Analyzer(transport, instance=1)
 eio = EioController(transport, chain=1, instance=2)
 ```
 
-The Arty A7 reference design uses this pattern: two ELA slots and an EIO slot
-share USER1, while EJTAG-AXI remains on USER4.
+The Arty A7 reference design uses this pattern: two ELA slots and two EIO
+slots share USER1, while EJTAG-AXI remains on USER4.
 
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 

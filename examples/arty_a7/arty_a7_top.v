@@ -19,10 +19,12 @@
 //   Baseline trigger sequencer/storage qualification settings stay at
 //   wrapper defaults unless overridden in the wrapper parameters.
 //
-// - EIO shares USER1 through the debug core manager as slot 2.  It exposes
-//   {btn[3:0], slow_counter[3:0]} as probe_in and drives the four constrained
-//   green LEDs from probe_out[3:0] (resynced into clk). probe_out[4] feeds
-//   ELA trigger_in, so a host write can make a manual trigger edge.
+// - Two EIOs share USER1 through the debug core manager as slots 2 and 3.
+//   EIO0 exposes {btn[3:0], slow_counter[3:0]} as probe_in and drives the
+//   four constrained green LEDs from probe_out[3:0] (resynced into clk).
+//   EIO0 probe_out[4] feeds ELA trigger_in, so a host write can make a manual
+//   trigger edge. EIO1 exposes {counter[3:0], btn[3:0]} for slot enumeration
+//   and independent EIO read/write validation.
 //
 // - EJTAG-AXI on USER4 connects to axi4_test_slave so hardware tests can
 //   verify single AXI accesses, partial strobes, bursts, and error paths.
@@ -50,8 +52,10 @@ module arty_a7_top (
     wire [1:0] trigger_in_w;
     wire [1:0] trigger_out_w;
     wire [1:0] ela_armed_w;
-    wire [7:0] eio_probe_in;
-    wire [7:0] eio_probe_out;
+    wire [7:0] eio0_probe_in;
+    wire [7:0] eio0_probe_out;
+    wire [7:0] eio1_probe_in;
+    wire [7:0] eio1_probe_out;
     reg [7:0] eio_out_sync1;
     reg [7:0] eio_out_sync2;
     reg ela_pretrigger_d;
@@ -67,7 +71,8 @@ module arty_a7_top (
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync1;
     (* ASYNC_REG = "TRUE" *) reg [3:0] led_sync2;
 
-    assign eio_probe_in = {btn, slow_counter};
+    assign eio0_probe_in = {btn, slow_counter};
+    assign eio1_probe_in = {counter[3:0], btn};
 
     // ---- Reset ----
     always @(posedge clk) begin
@@ -104,15 +109,13 @@ module arty_a7_top (
             eio_out_sync1 <= 8'h00;
             eio_out_sync2 <= 8'h00;
         end else begin
-            eio_out_sync1 <= eio_probe_out;
+            eio_out_sync1 <= eio0_probe_out;
             eio_out_sync2 <= eio_out_sync1;
         end
     end
 
-    assign ela_pretrigger_phase_w = u_debug.g_elas[0].u_ela.armed &&
-                                    !u_debug.g_elas[0].u_ela.triggered;
-    assign ela_fresh_arm_phase_w = u_debug.g_elas[0].u_ela.any_arm_pulse ||
-                                   (ela_pretrigger_phase_w && !ela_pretrigger_d);
+    assign ela_pretrigger_phase_w = ela_armed_w[0];
+    assign ela_fresh_arm_phase_w = ela_pretrigger_phase_w && !ela_pretrigger_d;
 
     // ---- Deterministic trigger test hook ----
     // eio_probe_out[4]: manual external trigger (legacy host-driven)
@@ -163,6 +166,7 @@ module arty_a7_top (
     fcapz_debug_multi_xilinx7 #(
         .NUM_ELAS     (2),
         .EIO_EN       (1),
+        .NUM_EIOS     (2),
         .SAMPLE_W     (SAMPLE_W),
         .DEPTH        (DEPTH),
         .INPUT_PIPE   (1),
@@ -181,8 +185,8 @@ module arty_a7_top (
         .ela_trigger_in (trigger_in_w),
         .ela_trigger_out(trigger_out_w),
         .ela_armed_out  (ela_armed_w),
-        .eio_probe_in   (eio_probe_in),
-        .eio_probe_out  (eio_probe_out)
+        .eio_probe_in   ({eio1_probe_in, eio0_probe_in}),
+        .eio_probe_out  ({eio1_probe_out, eio0_probe_out})
     );
 
     // ---- EJTAGAXI: JTAG-to-AXI4 bridge (USER4) ----

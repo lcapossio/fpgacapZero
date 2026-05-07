@@ -30,8 +30,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   version.
 - **Debug manager:** Added a generic `"CM"` active-slot manager and Xilinx
   `fcapz_debug_multi_xilinx7` wrapper so multiple ELAs and an EIO can share
-  one USER chain. The Arty reference now routes two ELA slots plus EIO through
-  USER1; EIO CLI/API calls can pass `instance=N` for managed slots.
+  one USER chain. The Arty reference now routes two ELA slots plus two EIO
+  slots through USER1; EIO CLI/API calls can pass `instance=N` for managed
+  slots.
 
 ### Fixed
 

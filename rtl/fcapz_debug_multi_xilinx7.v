@@ -3,12 +3,13 @@
 
 `timescale 1ns/1ps
 
-// Mixed debug wrapper: multiple ELAs plus optional EIO behind one USER chain.
-// Slot order is ELA[0..NUM_ELAS-1], then EIO when EIO_EN=1.
+// Mixed debug wrapper: multiple ELAs plus optional EIOs behind one USER chain.
+// Slot order is ELA[0..NUM_ELAS-1], then EIO[0..NUM_EIOS-1].
 
 module fcapz_debug_multi_xilinx7 #(
     parameter NUM_ELAS = 2,
     parameter EIO_EN = 1,
+    parameter NUM_EIOS = EIO_EN,
     parameter SAMPLE_W = 8,
     parameter DEPTH = 1024,
     parameter TRIG_STAGES = 1,
@@ -36,29 +37,33 @@ module fcapz_debug_multi_xilinx7 #(
     input  wire [NUM_ELAS-1:0] ela_trigger_in,
     output wire [NUM_ELAS-1:0] ela_trigger_out,
     output wire [NUM_ELAS-1:0] ela_armed_out,
-    input  wire [EIO_IN_W-1:0] eio_probe_in,
-    output wire [EIO_OUT_W-1:0] eio_probe_out
+    input  wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_IN_W-1:0] eio_probe_in,
+    output wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_OUT_W-1:0] eio_probe_out
 );
 
-    localparam NUM_SLOTS = NUM_ELAS + ((EIO_EN != 0) ? 1 : 0);
+    localparam EIO_COUNT = (NUM_EIOS > 0) ? NUM_EIOS : 0;
+    localparam EIO_PORT_COUNT = (NUM_EIOS > 0) ? NUM_EIOS : 1;
+    localparam NUM_SLOTS = NUM_ELAS + EIO_COUNT;
     localparam PTR_W = $clog2(DEPTH);
     localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     localparam PROBE_W = (PROBE_MUX_W > 0) ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS;
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
-    localparam EIO_SLOT = NUM_ELAS;
+    localparam EIO_SLOT_BASE = NUM_ELAS;
 
     function [NUM_SLOTS*16-1:0] slot_core_ids;
+        input unused;
         integer j;
         begin
             slot_core_ids = {NUM_SLOTS{16'h0000}};
             for (j = 0; j < NUM_ELAS; j = j + 1)
                 slot_core_ids[j*16 +: 16] = 16'h4C41; // "LA"
-            if (EIO_EN != 0)
-                slot_core_ids[EIO_SLOT*16 +: 16] = 16'h494F; // "IO"
+            for (j = 0; j < EIO_COUNT; j = j + 1)
+                slot_core_ids[(EIO_SLOT_BASE+j)*16 +: 16] = 16'h494F; // "IO"
         end
     endfunction
 
     function [NUM_SLOTS-1:0] slot_has_burst;
+        input unused;
         integer j;
         begin
             slot_has_burst = {NUM_SLOTS{1'b0}};
@@ -135,8 +140,8 @@ module fcapz_debug_multi_xilinx7 #(
         .SAMPLE_W(SAMPLE_W),
         .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH),
-        .SLOT_CORE_IDS(slot_core_ids()),
-        .SLOT_HAS_BURST(slot_has_burst())
+        .SLOT_CORE_IDS(slot_core_ids(1'b0)),
+        .SLOT_HAS_BURST(slot_has_burst(1'b0))
     ) u_manager (
         .jtag_clk(jtag_clk),
         .jtag_rst(jtag_rst),
@@ -207,28 +212,30 @@ module fcapz_debug_multi_xilinx7 #(
             );
         end
 
-        if (EIO_EN != 0) begin : g_eio
+        for (i = 0; i < EIO_COUNT; i = i + 1) begin : g_eios
             fcapz_eio #(
                 .IN_W(EIO_IN_W),
                 .OUT_W(EIO_OUT_W)
             ) u_eio (
-                .probe_in(eio_probe_in),
-                .probe_out(eio_probe_out),
+                .probe_in(eio_probe_in[i*EIO_IN_W +: EIO_IN_W]),
+                .probe_out(eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W]),
                 .jtag_clk(jtag_clk),
                 .jtag_rst(jtag_rst),
-                .jtag_wr_en(slot_wr_en[EIO_SLOT]),
-                .jtag_addr(slot_addr[EIO_SLOT*16 +: 16]),
-                .jtag_wdata(slot_wdata[EIO_SLOT*32 +: 32]),
-                .jtag_rdata(slot_rdata[EIO_SLOT*32 +: 32])
+                .jtag_wr_en(slot_wr_en[EIO_SLOT_BASE+i]),
+                .jtag_addr(slot_addr[(EIO_SLOT_BASE+i)*16 +: 16]),
+                .jtag_wdata(slot_wdata[(EIO_SLOT_BASE+i)*32 +: 32]),
+                .jtag_rdata(slot_rdata[(EIO_SLOT_BASE+i)*32 +: 32])
             );
 
-            assign slot_burst_rd_data[EIO_SLOT*SAMPLE_W +: SAMPLE_W] = {SAMPLE_W{1'b0}};
-            assign slot_burst_rd_ts_data[EIO_SLOT*TS_W_SAFE +: TS_W_SAFE] = {TS_W_SAFE{1'b0}};
-            assign slot_burst_start[EIO_SLOT] = 1'b0;
-            assign slot_burst_timestamp[EIO_SLOT] = 1'b0;
-            assign slot_burst_start_ptr[EIO_SLOT*PTR_W +: PTR_W] = {PTR_W{1'b0}};
-        end else begin : g_no_eio
-            assign eio_probe_out = {EIO_OUT_W{1'b0}};
+            assign slot_burst_rd_data[(EIO_SLOT_BASE+i)*SAMPLE_W +: SAMPLE_W] = {SAMPLE_W{1'b0}};
+            assign slot_burst_rd_ts_data[(EIO_SLOT_BASE+i)*TS_W_SAFE +: TS_W_SAFE] = {TS_W_SAFE{1'b0}};
+            assign slot_burst_start[EIO_SLOT_BASE+i] = 1'b0;
+            assign slot_burst_timestamp[EIO_SLOT_BASE+i] = 1'b0;
+            assign slot_burst_start_ptr[(EIO_SLOT_BASE+i)*PTR_W +: PTR_W] = {PTR_W{1'b0}};
+        end
+
+        if (EIO_COUNT == 0) begin : g_no_eio
+            assign eio_probe_out = {EIO_PORT_COUNT*EIO_OUT_W{1'b0}};
         end
     endgenerate
 
