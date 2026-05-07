@@ -389,11 +389,10 @@ is correct but significantly slower.
 
 ## Multiple ELAs on one USER chain
 
-Multi-ELA designs should put an ELA manager between the shared JTAG register
-interface and the individual ELA cores. The manager keeps the legacy ELA
-register map at `0x0000` and adds a small directory/select block at
-`0xF000`. Slot 0 is active after reset, so an old host still sees the first
-ELA exactly where it expects `VERSION`.
+Multi-ELA designs use the same generic core manager as mixed ELA/EIO designs.
+The manager keeps the legacy ELA register map at `0x0000` and adds a small
+directory/select block at `0xF000`. Slot 0 is active after reset, so an old
+host still sees the first ELA exactly where it expects `VERSION`.
 
 The active-slot model is deliberate: it avoids carving the 16-bit register
 space into fixed windows that would conflict with deep DATA/timestamp windows,
@@ -422,19 +421,22 @@ fcapz_ela_multi_xilinx7 #(
 );
 ```
 
-The lower-level `fcapz_ela_manager` is also available if you already have
-custom TAP plumbing and want to instantiate the manager and `fcapz_ela`
-slots yourself.
+The lower-level `fcapz_core_manager` is also available if you already have
+custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
+yourself.
 
 Manager registers:
 
 | Address | Name | Access | Description |
 |---|---|
-| `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "LM"}`. |
-| `0xF004` | MGR_COUNT | RO | Number of ELA slots. |
+| `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
+| `0xF004` | MGR_COUNT | RO | Number of slots. |
 | `0xF008` | MGR_ACTIVE | RW | Active ELA slot. Non-manager register and burst accesses target this slot. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
+| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
+| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
+| `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
 
 Host-side, select the ELA instance explicitly:
 
@@ -496,7 +498,7 @@ fcapz_debug_multi_xilinx7 #(
 Host-side:
 
 ```python
-manager = ElaManager(transport)          # accepts "LM" and "CM"
+manager = ElaManager(transport)
 print(manager.probe())                   # num_slots, active, capabilities
 print(manager.slot_info(2))              # {"core_id": 0x494F, ...}
 

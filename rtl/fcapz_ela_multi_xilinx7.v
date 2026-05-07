@@ -5,7 +5,7 @@
 
 // Multi-ELA Xilinx wrapper: one BSCAN USER chain, N homogeneous ELA slots.
 //
-// Slot selection lives in fcapz_ela_manager at 0xF000..0xF0FF.  Normal ELA
+// Slot selection lives in fcapz_core_manager at 0xF000..0xF0FF.  Normal ELA
 // registers stay at 0x0000 and target the active slot.  Reset selects slot 0,
 // preserving legacy host behavior.
 
@@ -111,11 +111,13 @@ module fcapz_ela_multi_xilinx7 #(
         .burst_ptr_in(burst_start_ptr)
     );
 
-    fcapz_ela_manager #(
-        .NUM_ELAS(NUM_ELAS),
+    fcapz_core_manager #(
+        .NUM_SLOTS(NUM_ELAS),
         .SAMPLE_W(SAMPLE_W),
         .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH)
+        .DEPTH(DEPTH),
+        .SLOT_CORE_IDS({NUM_ELAS{16'h4C41}}),
+        .SLOT_HAS_BURST({NUM_ELAS{1'b1}})
     ) u_manager (
         .jtag_clk(jtag_clk),
         .jtag_rst(jtag_rst),
@@ -124,18 +126,18 @@ module fcapz_ela_multi_xilinx7 #(
         .jtag_addr(jtag_addr),
         .jtag_wdata(jtag_wdata),
         .jtag_rdata(jtag_rdata),
-        .ela_wr_en(ela_wr_en),
-        .ela_rd_en(ela_rd_en),
-        .ela_addr(ela_addr),
-        .ela_wdata(ela_wdata),
-        .ela_rdata(ela_rdata),
+        .slot_wr_en(ela_wr_en),
+        .slot_rd_en(ela_rd_en),
+        .slot_addr(ela_addr),
+        .slot_wdata(ela_wdata),
+        .slot_rdata(ela_rdata),
         .burst_rd_addr(burst_rd_addr),
-        .ela_burst_rd_addr(ela_burst_rd_addr),
-        .ela_burst_rd_data(ela_burst_rd_data),
-        .ela_burst_rd_ts_data(ela_burst_rd_ts_data),
-        .ela_burst_start(ela_burst_start),
-        .ela_burst_timestamp(ela_burst_timestamp),
-        .ela_burst_start_ptr(ela_burst_start_ptr),
+        .slot_burst_rd_addr(ela_burst_rd_addr),
+        .slot_burst_rd_data(ela_burst_rd_data),
+        .slot_burst_rd_ts_data(ela_burst_rd_ts_data),
+        .slot_burst_start(ela_burst_start),
+        .slot_burst_timestamp(ela_burst_timestamp),
+        .slot_burst_start_ptr(ela_burst_start_ptr),
         .burst_rd_data(burst_rd_data),
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start),

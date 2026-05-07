@@ -18,8 +18,6 @@ _ADDR_VERSION = 0x0000
 # this magic before touching any other ELA register on the same chain.
 ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
-ELA_MANAGER_CORE_ID = 0x4C4D  # ASCII "LM" (logic-analyzer manager)
-_ELA_MANAGER_CORE_ID = ELA_MANAGER_CORE_ID
 CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
 _CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
 
@@ -266,7 +264,7 @@ class Analyzer:
 
     @property
     def instance(self) -> int | None:
-        """ELA manager slot selected before accesses, or ``None`` for legacy direct mode."""
+        """Core-manager slot selected before accesses, or ``None`` for legacy direct mode."""
         return self._instance
 
     def _select_chain(self) -> None:
@@ -282,7 +280,7 @@ class Analyzer:
             self.transport.write_reg(_ADDR_MGR_ACTIVE, self._instance)
 
     def select_instance(self, instance: int | None) -> None:
-        """Select an ELA manager slot for subsequent analyzer operations.
+        """Select a core-manager slot for subsequent analyzer operations.
 
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
         behavior for bitstreams without a manager.
@@ -876,11 +874,10 @@ class CoreManager:
         read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         version = int(read(_ADDR_MGR_VERSION))
         core_id = version & 0xFFFF
-        if core_id not in (_ELA_MANAGER_CORE_ID, _CORE_MANAGER_CORE_ID):
+        if core_id != _CORE_MANAGER_CORE_ID:
             raise RuntimeError(
                 f"core manager identity check failed at VERSION[15:0]: "
-                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM') or "
-                f"0x{_ELA_MANAGER_CORE_ID:04X} ('LM'), got 0x{core_id:04X}. "
+                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
             )
         caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
@@ -893,8 +890,6 @@ class CoreManager:
             "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
             "capabilities": caps,
         }
-        if core_id == _ELA_MANAGER_CORE_ID:
-            info["num_elas"] = info["num_slots"]
         return info
 
     def slot_info(self, instance: int) -> Dict:

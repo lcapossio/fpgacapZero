@@ -262,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ela-instance",
         type=int,
         default=None,
-        help="ELA manager slot on the selected chain (default: current/legacy slot)",
+        help="Core-manager ELA slot on the selected chain (default: current/legacy slot)",
     )
     p.add_argument(
         "--program",
@@ -277,7 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("probe", help="Read core identity registers")
-    sub.add_parser("ela-list", help="Read ELA manager and probe all ELA slots")
+    sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
 
     cfg = sub.add_parser("configure", help="Write capture configuration")

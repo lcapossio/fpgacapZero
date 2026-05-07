@@ -15,7 +15,6 @@ from fcapz.analyzer import (
     CaptureConfig,
     CaptureResult,
     CORE_MANAGER_CORE_ID,
-    ELA_MANAGER_CORE_ID,
     ELA_CORE_ID,
     ElaManager,
     SequencerStage,
@@ -64,7 +63,7 @@ class FakeTransport(Transport):
         self._manager_regs: dict[int, int] = {
             0xF000: ((_version_tuple()[0] & 0xFF) << 24)
             | ((_version_tuple()[1] & 0xFF) << 16)
-            | ELA_MANAGER_CORE_ID,
+            | CORE_MANAGER_CORE_ID,
             0xF004: 1,
             0xF008: 0,
             0xF00C: 0,
@@ -212,7 +211,7 @@ class AnalyzerTests(unittest.TestCase):
         minfo = manager.probe()
         all_info = manager.probe_all()
 
-        self.assertEqual(minfo["num_elas"], 2)
+        self.assertEqual(minfo["num_slots"], 2)
         self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
         self.assertEqual([info["instance"] for info in all_info], [0, 1])
 

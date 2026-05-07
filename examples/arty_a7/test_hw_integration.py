@@ -63,7 +63,6 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
-    _ROOT / "rtl" / "fcapz_ela_manager.v",
     _ROOT / "rtl" / "fcapz_ela_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_core_manager.v",
     _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
@@ -153,7 +152,7 @@ class TestMultiElaManager(unittest.TestCase):
         from fcapz.analyzer import (
             Analyzer,
             ELA_CORE_ID,
-            ELA_MANAGER_CORE_ID,
+            CORE_MANAGER_CORE_ID,
             ElaManager,
         )
 
@@ -162,8 +161,8 @@ class TestMultiElaManager(unittest.TestCase):
             t.connect()
             manager = ElaManager(t)
             minfo = manager.probe()
-            self.assertEqual(minfo["core_id"], ELA_MANAGER_CORE_ID)
-            self.assertEqual(minfo["num_elas"], 2)
+            self.assertEqual(minfo["core_id"], CORE_MANAGER_CORE_ID)
+            self.assertEqual(minfo["num_slots"], 3)
 
             slots = manager.probe_all()
             self.assertEqual([s["instance"] for s in slots], [0, 1])

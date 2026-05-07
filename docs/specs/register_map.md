@@ -150,29 +150,26 @@ register map at `0x0000` and are routed to the selected slot. Reset selects
 slot 0, preserving legacy host behavior for designs whose first slot is an
 ELA.
 
-There are two manager identities:
-
-| Core ID | ASCII | Use |
-|---:|---|---|
-| `0x4C4D` | `"LM"` | ELA-only manager from `fcapz_ela_manager`. |
-| `0x434D` | `"CM"` | Mixed core manager from `fcapz_core_manager`, used by `fcapz_debug_multi_xilinx7` for ELA + EIO slots. |
+The manager identity is `0x434D`, ASCII `"CM"`, from `fcapz_core_manager`.
+`fcapz_ela_multi_xilinx7` and `fcapz_debug_multi_xilinx7` both use this same
+manager; ELA-only and mixed designs differ only in their slot descriptors.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` manager core ID (`"LM"` or `"CM"`). |
+| `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` manager core ID `"CM"` (`0x434D`). |
 | `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
 | `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this slot. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
-| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported (`"CM"`). |
+| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported. |
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in burst readback. EIO reports `0`. |
 
 Selection sequence:
 
-1. Read `MGR_VERSION`; require manager core ID `"LM"` or `"CM"`.
+1. Read `MGR_VERSION`; require manager core ID `"CM"`.
 2. Read `MGR_COUNT`.
-3. For `"CM"`, optionally enumerate descriptors with `MGR_DESC_INDEX`.
+3. Optionally enumerate descriptors with `MGR_DESC_INDEX`.
 4. Write slot index to `MGR_ACTIVE`.
 5. Use the selected core's native registers at `0x0000+`.
 

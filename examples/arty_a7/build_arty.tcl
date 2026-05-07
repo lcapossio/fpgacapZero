@@ -106,7 +106,6 @@ if {[file exists $project_xpr]} {
         $root/rtl/dpram.v \
         $root/rtl/trig_compare.v \
         $root/rtl/fcapz_ela.v \
-        $root/rtl/fcapz_ela_manager.v \
         $root/rtl/fcapz_ela_multi_xilinx7.v \
         $root/rtl/fcapz_core_manager.v \
         $root/rtl/fcapz_debug_multi_xilinx7.v \

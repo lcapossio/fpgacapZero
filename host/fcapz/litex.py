@@ -24,7 +24,6 @@ _RTL_DIR = _ROOT / "rtl"
 _COMMON_ELA_SOURCES = (
     "fcapz_version.vh",
     "fcapz_ela.v",
-    "fcapz_ela_manager.v",
     "fcapz_core_manager.v",
     "fcapz_eio.v",
     "fcapz_regbus_mux.v",
