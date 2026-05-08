@@ -179,8 +179,8 @@ module arty_a7_top (
         .EIO_IN_W     (8),
         .EIO_OUT_W    (8)
     ) u_debug (
-        .sample_clk     (clk),
-        .sample_rst     (rst),
+        .ela_sample_clk ({2{clk}}),
+        .ela_sample_rst ({2{rst}}),
         .ela_probe_in   ({counter ^ 8'hA5, counter}),
         .ela_trigger_in (trigger_in_w),
         .ela_trigger_out(trigger_out_w),

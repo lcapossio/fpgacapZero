@@ -408,8 +408,8 @@ fcapz_debug_multi_xilinx7 #(
     .CTRL_CHAIN(1),
     .DEPTH(1024)
 ) u_debug (
-    .sample_clk(clk),
-    .sample_rst(rst),
+    .ela_sample_clk({clk_axi, clk_cpu}),
+    .ela_sample_rst({rst_axi, rst_cpu}),
     .ela_probe_in({axi_state, cpu_state}),
     .ela_trigger_in(2'b00),
     .ela_trigger_out(),
@@ -424,6 +424,12 @@ custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
 yourself.  At this revision the packaged multi-core wrapper is Xilinx
 7-series only; other vendors still use their single-core wrappers until
 equivalent debug-manager wrappers are added.
+
+Each managed ELA has its own `ela_sample_clk[i]` and `ela_sample_rst[i]`.
+Use `{NUM_ELAS{clk}}` / `{NUM_ELAS{rst}}` when every ELA samples the same
+domain, or pass different clocks and resets to capture unrelated fabric
+domains behind one USER chain.  The wrapper resets the shared JTAG pipe when
+any ELA reset is asserted.
 
 Manager registers:
 
@@ -482,8 +488,8 @@ fcapz_debug_multi_xilinx7 #(
     .EIO_IN_W(8),
     .EIO_OUT_W(8)
 ) u_debug (
-    .sample_clk(clk),
-    .sample_rst(rst),
+    .ela_sample_clk({clk1, clk0}),
+    .ela_sample_rst({rst1, rst0}),
     .ela_probe_in({probe1, probe0}),
     .ela_trigger_in(2'b00),
     .ela_trigger_out(),

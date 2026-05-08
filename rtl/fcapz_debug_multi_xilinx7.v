@@ -31,8 +31,8 @@ module fcapz_debug_multi_xilinx7 #(
     parameter EIO_IN_W = 1,
     parameter EIO_OUT_W = 1
 ) (
-    input  wire sample_clk,
-    input  wire sample_rst,
+    input  wire [NUM_ELAS-1:0] ela_sample_clk,
+    input  wire [NUM_ELAS-1:0] ela_sample_rst,
     input  wire [NUM_ELAS*(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] ela_probe_in,
     input  wire [NUM_ELAS-1:0] ela_trigger_in,
     output wire [NUM_ELAS-1:0] ela_trigger_out,
@@ -53,6 +53,7 @@ module fcapz_debug_multi_xilinx7 #(
         ({NUM_SLOTS{16'h494F}} << (NUM_ELAS*16)) | {NUM_ELAS{16'h4C41}};
     localparam [NUM_SLOTS-1:0] SLOT_HAS_BURST =
         {NUM_SLOTS{1'b1}} >> EIO_COUNT;
+    wire debug_arst = |ela_sample_rst;
 
     wire tap_tck, tap_tdi, tap_tdo;
     wire tap_capture, tap_shift, tap_update, tap_sel;
@@ -89,7 +90,7 @@ module fcapz_debug_multi_xilinx7 #(
 
     reset_sync u_rst_sync_ctrl (
         .clk(tap_tck),
-        .arst(sample_rst),
+        .arst(debug_arst),
         .srst(jtag_rst_ctrl)
     );
 
@@ -172,8 +173,8 @@ module fcapz_debug_multi_xilinx7 #(
                 .DUAL_COMPARE(DUAL_COMPARE),
                 .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
-                .sample_clk(sample_clk),
-                .sample_rst(sample_rst),
+                .sample_clk(ela_sample_clk[i]),
+                .sample_rst(ela_sample_rst[i]),
                 .probe_in(ela_probe_in[i*PROBE_W +: PROBE_W]),
                 .trigger_in(ela_trigger_in[i]),
                 .trigger_out(ela_trigger_out[i]),
