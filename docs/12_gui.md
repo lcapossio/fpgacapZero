@@ -215,23 +215,28 @@ user's values intact.
 
 ### Capture history panel
 
-Shows a table of every capture from this session, in reverse
-chronological order:
+Shows a table of every capture from this session:
 
-| # | Time | Samples | Channel | Trigger | Status |
-|---|---|---|---|---|---|
-| 3 | 14:22:03 | 25 | 0 | `value=0x42 mask=0xFF` | OK |
-| 2 | 14:21:58 | 25 | 0 | `value=0x42 mask=0xFF` | OVERFLOW |
-| 1 | 14:21:54 | 25 | 0 | `value=0x42 mask=0xFF` | OK |
+| # | Time | Core | Samples | Flags |
+|---|---|---|---|---|
+| 1 | 14:21:54 | `ela0` | 25 | OK |
+| 2 | 14:21:58 | `ela1` | 25 | OK |
 
-Click a row to make it the **active** capture.  Right-side controls:
+Click a row to make it the **active** capture.  Ctrl/Shift-click multiple
+rows to compare captures from different ELA cores.  When more than one row is
+selected, **Open selected in viewer** and **Export VCD** write one merged VCD
+with a scope per capture (`fcapz.ela0.*`, `fcapz.ela1.*`, ...).  The merged
+timeline aligns each capture at its committed trigger sample; this makes
+different ELA domains easy to compare in Surfer or GTKWave while keeping the
+per-ELA signals separate.
+
+Right-side controls:
 
 - **[Open in viewer ▾]** — dropdown of detected viewers (GTKWave,
   Surfer, WaveTrace, Custom command).  Click to spawn the viewer
   on the captured `.vcd`.  See "Waveform viewer integration" below.
 - **[Export JSON]** / **[Export CSV]** / **[Export VCD]** — write
-  the active capture to a file via the same `Analyzer.write_*`
-  helpers used by the CLI.
+  the active capture to a file; multi-row VCD export writes the merged VCD.
 - **[Quick preview ▾]** — toggle the embedded `pyqtgraph` preview
   pane (see next section).
 
@@ -469,7 +474,7 @@ the same arrangement.
     are USER1 manager slots 2 and 3; selecting one attaches it
     immediately.  Turn on **Poll inputs** to refresh the **Inputs**
     checkboxes.  EIO0 mirrors `btn[3:0]` and the slow counter nibble;
-    EIO1 mirrors `{counter[3:0], btn[3:0]}`.  Use the
+    EIO1 mirrors `{counter_130[3:0], btn[3:0]}`.  Use the
     **Outputs** checkboxes to drive `probe_out`; on Arty, EIO0 bits
     **0-3** drive the four **green** LEDs (active high). **All outputs on** /
     **All outputs off** set every `probe_out` bit to all 1s or all 0s

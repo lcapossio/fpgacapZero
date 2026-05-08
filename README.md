@@ -693,7 +693,12 @@ Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 Those board-level checks now require every adjacent Arty counter sample to
 increment by +1 when decimation is disabled, so partial burst readback
-corruption is caught instead of hidden by a shorter valid prefix.
+corruption is caught instead of hidden by a shorter valid prefix. The managed
+Arty bitstream exercises two ELAs on the same USER chain with independent
+sample domains: ELA0 captures a 150 MHz counter and ELA1 captures a 130 MHz
+xored counter. In the GUI History panel, select captures from both ELAs and
+open/export them as one merged VCD so Surfer or GTKWave can display the two
+waveforms together.
 
 [↑ Top](#readme-top)
 

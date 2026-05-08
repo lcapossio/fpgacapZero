@@ -17,11 +17,12 @@
 
 The reference design is at [`../examples/arty_a7/`](../examples/arty_a7/).
 It instantiates a USER1 debug manager with two ELA slots and two EIO
-slots, plus one EJTAG-AXI bridge.  ELA0 captures the free-running
-8-bit counter, ELA1 captures `counter ^ 0xA5`, EIO0 drives the board
-LED/control test signals, and EIO1 gives a second managed I/O target
-for slot-selection checks.  The AXI bridge is wired to a small AXI test
-slave so you have something to look at from each host path.
+slots, plus one EJTAG-AXI bridge.  ELA0 captures a free-running 8-bit
+counter in a generated 150 MHz sample domain.  ELA1 captures a separate
+130 MHz counter xored with `0xA5`.  EIO0 drives the board LED/control
+test signals, and EIO1 gives a second managed I/O target for
+slot-selection checks.  The AXI bridge is wired to a small AXI test slave
+so you have something to look at from each host path.
 
 ```bash
 cd /path/to/fpgacapZero
@@ -170,8 +171,8 @@ waveform preview.
 In the **ELA** tab:
 
 - Leave **ELA core** set to `core 0` for the plain counter.  On the
-  Arty reference bitstream, `core 1` is a second managed ELA capturing
-  `counter ^ 0xA5`.
+  Arty reference bitstream, `core 1` is a second managed ELA in a 130 MHz
+  sample domain capturing `counter_130 ^ 0xA5`.
 - Set **Pretrigger** to `8`.
 - Set **Posttrigger** to `16`.
 - Set **Trigger mode** to `value_match`.
@@ -195,6 +196,11 @@ happened before the event, not only after it.
 
 From the GUI you can also save the capture as JSON / CSV / VCD, or open the
 VCD in an external viewer if GTKWave, Surfer, or WaveTrace is installed.
+To compare the two managed ELAs, capture once with **ELA core** `core 0`,
+capture again with `core 1`, Ctrl/Shift-select both rows in History, then
+click **Open selected in viewer**.  The GUI writes one merged VCD with
+`fcapz.ela0.*` and `fcapz.ela1.*` scopes aligned at the trigger sample;
+Surfer and GTKWave can show both ELAs in the same waveform window.
 
 ## Step 5: repeat the same capture from the CLI
 
