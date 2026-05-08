@@ -431,6 +431,36 @@ domain, or pass different clocks and resets to capture unrelated fabric
 domains behind one USER chain.  The wrapper resets the shared JTAG pipe when
 any ELA reset is asserted.
 
+Each ELA can also override the scalar/default wrapper settings with packed
+per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the
+maximum burst-pipe width while making core 0 a 16-bit ELA and core 1 a
+32-bit ELA:
+
+```verilog
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .NUM_EIOS(0),
+    .SAMPLE_W(32),                 // max/default width
+    .DEPTH(1024),                  // max/default depth
+    .ELA_SAMPLE_WS({32'd32, 32'd16}),
+    .ELA_DEPTHS({32'd1024, 32'd512}),
+    .ELA_TIMESTAMP_WS({32'd32, 32'd0}),
+    .ELA_NUM_SEGMENTS({32'd4, 32'd1})
+) u_debug (...);
+```
+
+The scalar parameters remain the defaults for existing designs.  Per-slot
+vectors exist for ELA sample width, depth, trigger stages, storage
+qualification, input pipe, channel count, decimation, external trigger,
+timestamp width, segment count, probe mux width, startup arm, default external
+trigger mode, relational compare, dual comparator, and USER1 DATA readout.
+
+Fast 256-bit burst readout is available only for managed ELA slots whose
+`SAMPLE_W`, `DEPTH`, `TIMESTAMP_W`, and `NUM_SEGMENTS` match the wrapper's
+max/default burst-pipe shape.  Heterogeneous slots still work through the
+normal 49-bit DATA window; the host checks the manager descriptor and falls
+back automatically.
+
 Manager registers:
 
 | Address | Name | Access | Description |
@@ -486,7 +516,9 @@ fcapz_debug_multi_xilinx7 #(
     .SAMPLE_W(32),
     .TIMESTAMP_W(32),
     .EIO_IN_W(8),
-    .EIO_OUT_W(8)
+    .EIO_OUT_W(16),
+    .EIO_IN_WS({32'd12, 32'd8}),
+    .EIO_OUT_WS({32'd16, 32'd4})
 ) u_debug (
     .ela_sample_clk({clk1, clk0}),
     .ela_sample_rst({rst1, rst0}),
@@ -676,10 +708,11 @@ What happens at runtime:
 4. When the countdown reaches zero, `trig_ptr <- wr_ptr` is
    committed and the post-trigger countdown begins normally.
 
-Verified end-to-end on Arty A7 silicon: trigger on counter == 0x10
+Verified end-to-end on Arty A7 silicon: trigger on ELA0 counter == 0x10
 with `trigger_delay=4` → captured trigger sample = 0x14 (= cause + 4
-counter ticks, since the reference design's probe is a free-running
-counter).
+counter ticks, since the reference design's ELA0 probe is a free-running
+150 MHz counter). The same Arty manager bitstream also exposes ELA1 on a
+separate 130 MHz sample clock with its own xored counter probe.
 
 `trigger_delay = 0` (the default) reproduces the legacy zero-delay
 behavior exactly.  Range is `0..65535`.

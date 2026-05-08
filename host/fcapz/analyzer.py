@@ -256,6 +256,7 @@ class Analyzer:
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
+        self._manager_slot_caps: int | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -286,6 +287,7 @@ class Analyzer:
         behavior for bitstreams without a manager.
         """
         self._instance = None if instance is None else int(instance)
+        self._manager_slot_caps = None
         self._select_instance()
 
     def connect(self) -> None:
@@ -483,7 +485,7 @@ class Analyzer:
         ts_word_count = total * ts_words_per
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
         used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
-        if used_timestamp_burst:
+        if used_timestamp_burst and self._selected_slot_has_burst():
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
@@ -508,6 +510,22 @@ class Analyzer:
             timestamps = [v & mask for v in raw]
         return timestamps
 
+    def _selected_slot_has_burst(self) -> bool:
+        """Return whether the active managed slot participates in fast burst readback."""
+        if self._instance is None:
+            return True
+        if self._manager_slot_caps is None:
+            self._select_chain()
+            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
+            self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
+        return bool(self._manager_slot_caps & 0x1)
+
+    def _read_data_words(self, total_words: int) -> list[int]:
+        if self._selected_slot_has_burst():
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
+
     def capture(self, timeout: float = 10.0) -> CaptureResult:
         self._select_instance()
         if self._config is None:
@@ -525,7 +543,7 @@ class Analyzer:
             total = fallback_total
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
-        raw = self.transport.read_block(_ADDR_DATA_BASE, total * words_per_sample)
+        raw = self._read_data_words(total * words_per_sample)
         mask = (1 << sw) - 1
         if words_per_sample == 1:
             samples = [v & mask for v in raw]
@@ -574,7 +592,7 @@ class Analyzer:
 
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
-        raw = self.transport.read_block(_ADDR_DATA_BASE, total * words_per_sample)
+        raw = self._read_data_words(total * words_per_sample)
         mask = (1 << sw) - 1
         if words_per_sample == 1:
             samples = [v & mask for v in raw]

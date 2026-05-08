@@ -272,6 +272,50 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
         self.assertEqual([info["instance"] for info in all_info], [0, 1])
 
+    def test_managed_no_burst_slot_uses_slow_data_window(self):
+        class NoBurstManagedTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF004] = 2
+                self._manager_regs[0xF010] = 0x3
+                self._manager_regs[0xF014] = 0
+                self._slots = [dict(self.regs), dict(self.regs)]
+                self._slots[1][0x001C] = 3
+                self.slow_reads: list[int] = []
+
+            def read_reg(self, addr: int) -> int:
+                if addr == 0xF01C:
+                    return 0  # selected slot has no fast burst support
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                if addr >= 0x0100:
+                    self.slow_reads.append(addr)
+                    return 0x40 + ((addr - 0x0100) // 4)
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = int(value)
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_block(self, addr: int, words: int):
+                raise AssertionError("fast read_block should not be used")
+
+        transport = NoBurstManagedTransport()
+        analyzer = Analyzer(transport, instance=1)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.samples, [0x40, 0x41, 0x42])
+        self.assertEqual(transport.slow_reads, [0x0100, 0x0104, 0x0108])
+
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
 

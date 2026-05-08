@@ -164,7 +164,7 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported. |
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
-| `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in burst readback. EIO reports `0`. |
+| `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
 
 Selection sequence:
 

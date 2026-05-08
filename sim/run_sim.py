@@ -152,6 +152,9 @@ LINT_TARGETS = [
     # g_shared generate branch is elaborated (default EIO_EN=0 lint
     # would dead-code-eliminate it).
     SIM / "lint_eio_en_xilinx7.v",
+    # Heterogeneous managed ELA/EIO wrapper shape: per-slot widths, depths,
+    # timestamps, clocks, and EIO widths.
+    SIM / "lint_debug_multi_hetero_xilinx7.v",
 ]
 
 LINT_STUBS = [
