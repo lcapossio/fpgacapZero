@@ -189,38 +189,37 @@ wrappers are available through `ela_rtl_sources()` for custom integration.
 
 ## Adding more cores in the same design
 
-The reference Arty A7 design uses three cores in one bitstream:
+The reference Arty A7 design uses one USER1 debug manager plus AXI on USER4:
 
 ```verilog
-// 1. ELA on USER1 (control + burst data by default)
-fcapz_ela_xilinx7 #(
-    .SAMPLE_W (8),
-    .DEPTH    (1024)
-) u_ela (
-    .sample_clk  (clk_100mhz),
-    .sample_rst  (rst),
-    .probe_in    (counter[7:0]),
-    .trigger_in  (1'b0),
-    .trigger_out ()
+// 1. Managed USER1 debug chain: ELA0, ELA1, EIO0, EIO1.
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .EIO_EN(1),
+    .NUM_EIOS(2),
+    .SAMPLE_W(8),
+    .DEPTH(1024),
+    .EIO_IN_W(8),
+    .EIO_OUT_W(8)
+) u_debug (
+    .ela_sample_clk({clk_130mhz, clk_150mhz}),
+    .ela_sample_rst({rst_130mhz, rst_150mhz}),
+    .ela_probe_in({counter_130 ^ 8'hA5, counter_150}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in({eio1_in, eio0_in}),
+    .eio_probe_out({eio1_out, eio0_out})
 );
 
-// 2. EIO on USER3
-fcapz_eio_xilinx7 #(
-    .IN_W  (8),
-    .OUT_W (8)
-) u_eio (
-    .probe_in  (gpio_in),
-    .probe_out (gpio_out)
-);
-
-// 3. EJTAG-AXI bridge on USER4
+// 2. EJTAG-AXI bridge on USER4
 fcapz_ejtagaxi_xilinx7 #(
     .ADDR_W     (32),
     .DATA_W     (32),
     .FIFO_DEPTH (16)
 ) u_axi (
-    .axi_clk      (clk_100mhz),
-    .axi_rst      (rst),
+    .axi_clk      (clk_150mhz),
+    .axi_rst      (rst_150mhz),
     // ... 30 AXI signals connected to your AXI slave or interconnect ...
 );
 ```

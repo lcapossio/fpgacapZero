@@ -42,14 +42,14 @@ wrote 0x55
 The board has **no separate “input LEDs”**: the **Inputs** row in the
 EIO dock is a read-only mirror of `probe_in` in the GUI. Turn on
 **Poll inputs** so it updates. The **four green LEDs** are driven only
-from **Outputs** (`probe_out[3:0]`). You must click **Attach EIO**
-first (chain **3** for [`arty_a7_top.v`](../examples/arty_a7/arty_a7_top.v)).
-If the LEDs still ignore writes, confirm the FPGA is programmed with
-that reference bitstream and rebuild if you changed the top-level
-(after programming, `fcapz eio-write 0x0F` from the CLI is a quick
-sanity check).  On this reference top, EIO bits above 3 do **not**
-drive LEDs; they are intentionally reserved for internal trigger-test
-plumbing used by the Arty hardware integration suite.
+from **Outputs** (`probe_out[3:0]`). On the managed Arty bitstream, choose
+EIO core `2` in the GUI to select EIO0; selection attaches the EIO
+immediately. If the LEDs still ignore writes, confirm the FPGA is
+programmed with that reference bitstream and rebuild if you changed the
+top-level (after programming, `fcapz eio-write --chain 1 --instance 2 0x0F`
+from the CLI is a quick sanity check).  On this reference top, EIO bits
+above 3 do **not** drive LEDs; they are intentionally reserved for internal
+trigger-test plumbing used by the Arty hardware integration suite.
 
 ## Architecture
 

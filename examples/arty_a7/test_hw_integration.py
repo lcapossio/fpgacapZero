@@ -54,6 +54,8 @@ FPGA = "xc7a100t"
 # COMPARE_PIPE=1 from that setting, so the visible trigger decision sample is
 # one sample after the comparator match.
 TRIGGER_DECISION_LATENCY = 1
+ELA0_SAMPLE_CLOCK_HZ = 150_000_000
+ELA1_SAMPLE_CLOCK_HZ = 130_000_000
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -191,8 +193,47 @@ class TestMultiElaManager(unittest.TestCase):
         finally:
             t.close()
 
-    def test_second_ela_captures_xored_counter(self):
-        """ELA1 probes counter^0xA5, proving capture works beyond slot 0."""
+    def test_first_ela_captures_150mhz_counter(self):
+        """ELA0 samples the plain counter in the generated 150 MHz domain."""
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+        a = Analyzer(_make_transport(), instance=0)
+        try:
+            a.connect()
+            cfg = CaptureConfig(
+                pretrigger=4,
+                posttrigger=8,
+                trigger=TriggerConfig(
+                    mode="value_match",
+                    value=0x40,
+                    mask=0xFF,
+                ),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
+            )
+            a.configure(cfg)
+            a.arm()
+            result = a.capture(timeout=5.0)
+            samples = [s & 0xFF for s in result.samples]
+            errors = [
+                (i - 1, samples[i - 1], samples[i])
+                for i in range(1, len(samples))
+                if ((samples[i] - samples[i - 1]) & 0xFF) != 1
+            ]
+            self.assertEqual(errors, [], f"ELA0 counter errors in samples={samples}")
+            self.assertIn(0x40, samples)
+            if result.timestamps:
+                gaps = [
+                    result.timestamps[i] - result.timestamps[i - 1]
+                    for i in range(1, len(result.timestamps))
+                ]
+                self.assertTrue(all(g == 1 for g in gaps), result.timestamps)
+        finally:
+            a.close()
+
+    def test_second_ela_captures_130mhz_xored_counter(self):
+        """ELA1 samples a separate xored counter in the 130 MHz domain."""
         from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
 
         a = Analyzer(_make_transport(), instance=1)
@@ -208,6 +249,7 @@ class TestMultiElaManager(unittest.TestCase):
                 ),
                 sample_width=8,
                 depth=1024,
+                sample_clock_hz=ELA1_SAMPLE_CLOCK_HZ,
             )
             a.configure(cfg)
             a.arm()
@@ -221,6 +263,12 @@ class TestMultiElaManager(unittest.TestCase):
             ]
             self.assertEqual(errors, [], f"ELA1 decoded counter errors in samples={samples}")
             self.assertIn(0xA5, samples)
+            if result.timestamps:
+                gaps = [
+                    result.timestamps[i] - result.timestamps[i - 1]
+                    for i in range(1, len(result.timestamps))
+                ]
+                self.assertTrue(all(g == 1 for g in gaps), result.timestamps)
         finally:
             a.close()
 
@@ -680,7 +728,7 @@ class TestDecimation(unittest.TestCase):
     def test_decim_zero_baseline(self):
         """DECIM=0 captures every cycle (same as before)."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=self.TriggerConfig(mode="value_match", value=0x10, mask=0xFF),
             decimation=0,
@@ -700,7 +748,7 @@ class TestDecimation(unittest.TestCase):
         pretrigger = 2
         trigger_value = 0x20
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=pretrigger, posttrigger=5,
             trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
@@ -752,7 +800,7 @@ class TestTimestamps(unittest.TestCase):
     def test_timestamps_monotonic(self):
         """Captured timestamps are strictly increasing."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=5,
             trigger=self.TriggerConfig(mode="value_match", value=0x30, mask=0xFF),
         )
@@ -770,7 +818,7 @@ class TestTimestamps(unittest.TestCase):
         pretrigger = 1
         trigger_value = 0x40
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=pretrigger, posttrigger=4,
             trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
@@ -822,7 +870,7 @@ class TestSegmentedCapture(unittest.TestCase):
         Segment depth = 1024/4 = 256, so pretrig+posttrig+1 <= 256.
         """
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
@@ -844,7 +892,7 @@ class TestSegmentedCapture(unittest.TestCase):
     def test_segment_data_independent(self):
         """Each segment has its own capture data, not shared."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=0, posttrigger=2,
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
@@ -891,7 +939,7 @@ class TestExtTrigger(unittest.TestCase):
         from fcapz.analyzer import CaptureConfig, TriggerConfig
 
         cfg = CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=TriggerConfig(mode="value_match", value=0x50, mask=0xFF),
             ext_trigger_mode=0,
