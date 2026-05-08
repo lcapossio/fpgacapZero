@@ -54,7 +54,10 @@ def test_merged_vcd_uses_one_scope_per_capture_and_aligns_triggers() -> None:
 def test_merged_surfer_command_lists_hierarchical_signals(tmp_path: Path) -> None:
     captures = [
         WaveCapture("ela0", _result(pre=2, hz=150_000_000, probe="counter", samples=[1, 2, 3])),
-        WaveCapture("ela1", _result(pre=1, hz=130_000_000, probe="counter_xor", samples=[9, 10, 11])),
+        WaveCapture(
+            "ela1",
+            _result(pre=1, hz=130_000_000, probe="counter_xor", samples=[9, 10, 11]),
+        ),
     ]
     assert merged_signal_paths(captures) == [
         "fcapz.ela0.counter",

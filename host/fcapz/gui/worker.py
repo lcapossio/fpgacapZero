@@ -118,7 +118,11 @@ class ConnectWorker(QObject):
     """Background connect: build transport, ``Analyzer.connect()``, ``probe_optional()``."""
 
     finished = Signal(object, object, object)
-    """``(analyzer, probe_info, topology)`` on success; ``probe_info`` is ``None`` if USER1 has no ELA."""
+    """
+    ``(analyzer, probe_info, topology)`` on success.
+
+    ``probe_info`` is ``None`` if USER1 has no ELA.
+    """
 
     failed = Signal(str)
     cancelled = Signal()

@@ -404,15 +404,30 @@ def build_parser() -> argparse.ArgumentParser:
     # -- EIO subcommands ---------------------------------------------------
     eio_probe = sub.add_parser("eio-probe", help="Read EIO core identity and widths")
     eio_probe.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
-    eio_probe.add_argument("--instance", type=int, default=None, help="Managed core slot on the selected chain")
+    eio_probe.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
     eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
-    eio_read.add_argument("--instance", type=int, default=None, help="Managed core slot on the selected chain")
+    eio_read.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
     eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
-    eio_write.add_argument("--instance", type=int, default=None, help="Managed core slot on the selected chain")
+    eio_write.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
     eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
 
     # -- AXI subcommands ---------------------------------------------------
