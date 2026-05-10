@@ -194,7 +194,7 @@ needed.  See [chapter 14](14_transports.md) and
 | Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ❌ |
-| Gowin GW1N / GW2A | Gowin `JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |
+| Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 
 The wrappers are all single-instantiation: pick the one for your

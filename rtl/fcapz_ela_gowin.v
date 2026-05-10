@@ -128,7 +128,7 @@ module fcapz_ela_gowin #(
                 .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
-                .probe_in(probe_in),
+                .probe_in(probe_in), .trigger_in(1'b0), .trigger_out(),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
@@ -157,7 +157,7 @@ module fcapz_ela_gowin #(
                 .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
-                .probe_in(probe_in),
+                .probe_in(probe_in), .trigger_in(1'b0), .trigger_out(),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),

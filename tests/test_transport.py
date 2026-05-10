@@ -228,6 +228,11 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         self.assertEqual(t.ir_table[3], 0x26)  # USER3
         self.assertEqual(t.ir_table[4], 0x27)  # USER4
 
+    def test_ir_table_gowin_preset(self):
+        """Gowin GW_JTAG ER1/ER2 have their own IR opcodes."""
+        t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_GOWIN)
+        self.assertEqual(t.ir_table, {1: 0x42, 2: 0x43})
+
     def test_ir_table_alias(self):
         """IR_TABLE_US is the same dict as IR_TABLE_XILINX_ULTRASCALE."""
         self.assertIs(

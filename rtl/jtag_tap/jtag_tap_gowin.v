@@ -6,9 +6,12 @@
 // Gowin JTAG TAP wrapper.
 // Presents the standard fpgacapZero TAP interface.
 //
-// Gowin GW1N/GW2A devices provide a JTAG primitive with up to 4
-// user DR chains (similar to Xilinx BSCANE2).  CHAIN selects which
-// user register (1-4).
+// Gowin devices expose user logic through one GW_JTAG primitive per design.
+// That primitive provides two user DR chains (ER1/ER2, selected by IR
+// 0x42/0x43 on the devices checked so far).  CHAIN selects which ER this
+// wrapper instance routes, but do not instantiate multiple standalone Gowin
+// fcapz wrappers in the same design unless you refactor them to share one
+// GW_JTAG instance.
 
 module jtag_tap_gowin #(
     parameter CHAIN = 1
@@ -22,34 +25,49 @@ module jtag_tap_gowin #(
     output wire sel
 );
 
-    wire jtck, jtdi, jrti, jshift, jupdate, jce;
-    wire jrstn;
+    wire jtck, jtdi;
+    wire jreset;
+    wire jrti1, jrti2;
+    wire jshift_capture, jupdate;
+    wire jpause;
+    wire jce1, jce2;
 
-    JTAG u_jtag (
-        .JTCK    (jtck),
-        .JTDI    (jtdi),
-        .JTDO    (tdo),
-        .JSHIFT  (jshift),
-        .JUPDATE (jupdate),
-        .JRSTN   (jrstn),
-        .JCE     (jce),
-        .JRTI    (jrti)
+    generate
+        if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
+            initial begin
+                $error("jtag_tap_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
+                $finish;
+            end
+        end
+    endgenerate
+
+    GW_JTAG u_jtag (
+        .tck_o                (jtck),
+        .tdi_o                (jtdi),
+        .test_logic_reset_o   (jreset),
+        .run_test_idle_er1_o  (jrti1),
+        .run_test_idle_er2_o  (jrti2),
+        .shift_dr_capture_dr_o(jshift_capture),
+        .pause_dr_o           (jpause),
+        .update_dr_o          (jupdate),
+        .enable_er1_o         (jce1),
+        .enable_er2_o         (jce2),
+        .tdo_er1_i            ((CHAIN == 1) ? tdo : 1'b0),
+        .tdo_er2_i            ((CHAIN == 2) ? tdo : 1'b0)
     );
-
-    // Note: Gowin's JTAG primitive supports a single user DR.
-    // For multi-chain, the user logic must decode the instruction
-    // register (not exposed here for simplicity).  CHAIN > 1 would
-    // require a custom IR decode layer.
 
     assign tck     = jtck;
     assign tdi     = jtdi;
-    assign shift   = jshift;
+    assign shift   = jshift_capture & ~jpause;
     assign update  = jupdate;
-    assign sel     = jce;
+    assign sel     = (CHAIN == 1) ? jce1 : jce2;
 
-    // Derive CAPTURE from CE edge (same approach as ECP5)
+    // GW_JTAG combines CAPTURE-DR and SHIFT-DR into one pulse/level, so
+    // derive the one-cycle capture strobe from the selected chain enable
+    // rising edge.  Gate PAUSE-DR out so a pause/resume sequence cannot
+    // look like a fresh CAPTURE-DR to the register interface.
     reg sel_prev;
     always @(posedge jtck) sel_prev <= sel;
-    assign capture = sel & ~sel_prev & ~jshift;
+    assign capture = sel & ~sel_prev & jshift_capture & ~jpause;
 
 endmodule

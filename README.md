@@ -547,7 +547,7 @@ for details.
 | **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
-| **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
+| **Gowin** | GW_JTAG | One primitive; wrapper selects ER1 or ER2 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
 
 **Verified Xilinx 7-series IR codes** (xc7a100t, Arty A7):
@@ -563,9 +563,13 @@ Xilinx ELA wrappers default to `SINGLE_CHAIN_BURST=1`: USER1 carries both
 control and 256-bit burst readout. Set `SINGLE_CHAIN_BURST=0` only for the
 legacy USER2 dual-chain burst path.
 
-On Gowin, the single chain means **no burst readback** — sample data is read
-word-by-word through the sample DATA window (functional but slower). Details
-are in the manual (see below).
+On Gowin, the wrapper keeps readback on the 49-bit register path rather than
+adding a burst readback chain. Sample data is read word-by-word through the
+sample DATA window (functional but slower). Details are in the manual (see
+below).
+Do not instantiate separate Gowin ELA and EIO wrappers in one design: Gowin
+allows one `GW_JTAG` primitive, so use `EIO_EN=1` to share the ELA wrapper's
+register bus instead.
 
 On PolarFire-family devices, UJTAG exposes two user instructions from one
 primitive. To use ELA and EIO together, enable `EIO_EN=1` on the ELA wrapper;
