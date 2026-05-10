@@ -115,7 +115,7 @@ jobs:
   # ── 5. RTL simulation (iverilog + vvp) ───────────────────────────
   lint-rtl-verilator:
     name: RTL driver lint (Verilator)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install Verilator

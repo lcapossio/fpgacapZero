@@ -13,6 +13,7 @@ one always block.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -87,6 +88,38 @@ COMMON_FLAGS = (
 )
 
 
+def verilator_version() -> tuple[int, int] | None:
+    result = subprocess.run(
+        ["verilator", "--version"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    match = re.search(r"Verilator\s+(\d+)\.(\d+)", result.stdout + result.stderr)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def check_verilator_version() -> bool:
+    version = verilator_version()
+    if version is None:
+        print("could not determine Verilator version", file=sys.stderr)
+        return False
+    if version < (5, 0):
+        major, minor = version
+        print(
+            "Verilator 5.0 or newer is required for this lint flag set "
+            f"(found {major}.{minor})",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def run_cmd(cmd: list[str], label: str, *, expect_ok: bool = True) -> bool:
     print(f"[verilator] {label}: {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
@@ -134,7 +167,11 @@ def run_self_test() -> bool:
     output = result.stdout + result.stderr
     if output:
         print(output, end="" if output.endswith("\n") else "\n")
-    if result.returncode == 0 or "MULTIDRIVEN" not in output:
+    saw_driver_warning = (
+        "MULTIDRIVEN" in output
+        or ("%Warning-" in output and "multiple driving" in output and "'q'" in output)
+    )
+    if result.returncode == 0 or not saw_driver_warning:
         print("[verilator] FAILED: self-test did not trip MULTIDRIVEN")
         return False
     return True
@@ -152,6 +189,8 @@ def main() -> None:
     if shutil.which("verilator") is None:
         print("verilator not found on PATH", file=sys.stderr)
         sys.exit(127)
+    if not check_verilator_version():
+        sys.exit(2)
 
     ok = run_lint()
     if args.self_test:

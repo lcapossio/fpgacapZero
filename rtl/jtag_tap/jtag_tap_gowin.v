@@ -34,6 +34,9 @@ module jtag_tap_gowin #(
 
     generate
         if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
+`ifndef VERILATOR
+            __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ u_invalid_chain();
+`endif
             initial begin
                 $error("jtag_tap_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
                 $finish;
