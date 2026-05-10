@@ -131,9 +131,9 @@ python sim/run_sim.py
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
 first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
-Run `python sim/run_verilator_lint.py --self-test` when changing core RTL; it
-catches stricter driver issues such as one register assigned from two always
-blocks.
+Run `python sim/run_verilator_lint.py --self-test` when changing core ELA or
+Gowin wrapper RTL; it runs targeted Verilator driver lint for issues such as
+one register assigned from two always blocks.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -687,7 +687,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
-| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- Verilator driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
+| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- targeted Verilator driver lint for the ELA/Gowin targets plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
@@ -722,9 +722,10 @@ the testbenches. The ELA configuration matrix covers small/scalable build
 shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
 registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
-list. The Verilator lint command complements that broad elaboration pass with
-stricter procedural-driver checks; its self-test must fail a deliberately bad
-multi-driver fixture before the job is considered valid.
+list. The targeted Verilator lint command complements that broad elaboration
+pass for the ELA/Gowin targets with stricter procedural-driver checks; its
+self-test must fail a deliberately bad multi-driver fixture before the job is
+considered valid.
 
 ### Tests
 

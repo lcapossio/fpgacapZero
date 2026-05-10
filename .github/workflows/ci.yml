@@ -112,7 +112,7 @@ jobs:
       - name: Run shared RTL lint regression
         run: python sim/run_sim.py --lint-only
 
-  # ── 5. RTL simulation (iverilog + vvp) ───────────────────────────
+  # -- 5. Targeted RTL driver lint (Verilator) ----------------------
   lint-rtl-verilator:
     name: RTL driver lint (Verilator)
     runs-on: ubuntu-24.04
@@ -126,6 +126,7 @@ jobs:
       - name: Run Verilator lint and MULTIDRIVEN self-test
         run: python sim/run_verilator_lint.py --self-test
 
+  # -- 6. RTL simulation (iverilog + vvp) ---------------------------
   sim:
     name: RTL simulation (iverilog + vvp)
     runs-on: ubuntu-latest
