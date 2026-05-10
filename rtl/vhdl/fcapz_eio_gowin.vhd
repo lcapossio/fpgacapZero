@@ -19,7 +19,7 @@ entity fcapz_eio_gowin is
     generic (
         IN_W  : positive := 32;
         OUT_W : positive := 32;
-        CHAIN : positive := 3
+        CHAIN : positive := 1
     );
     port (
         probe_in  : in  std_logic_vector(IN_W - 1 downto 0);

@@ -131,6 +131,9 @@ python sim/run_sim.py
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
 first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
+the full Verilog RTL matrix through Verilator driver lint for issues such as
+one register assigned from two always blocks.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -547,7 +550,7 @@ for details.
 | **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
-| **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
+| **Gowin** | GW_JTAG | One primitive; wrapper selects ER1 or ER2 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
 
 **Verified Xilinx 7-series IR codes** (xc7a100t, Arty A7):
@@ -563,9 +566,13 @@ Xilinx ELA wrappers default to `SINGLE_CHAIN_BURST=1`: USER1 carries both
 control and 256-bit burst readout. Set `SINGLE_CHAIN_BURST=0` only for the
 legacy USER2 dual-chain burst path.
 
-On Gowin, the single chain means **no burst readback** — sample data is read
-word-by-word through the sample DATA window (functional but slower). Details
-are in the manual (see below).
+On Gowin, the wrapper keeps readback on the 49-bit register path rather than
+adding a burst readback chain. Sample data is read word-by-word through the
+sample DATA window (functional but slower). Details are in the manual (see
+below).
+Do not instantiate separate Gowin ELA and EIO wrappers in one design: Gowin
+allows one `GW_JTAG` primitive, so use `EIO_EN=1` to share the ELA wrapper's
+register bus instead.
 
 On PolarFire-family devices, UJTAG exposes two user instructions from one
 primitive. To use ELA and EIO together, enable `EIO_EN=1` on the ELA wrapper;
@@ -680,6 +687,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
+| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
@@ -706,6 +714,7 @@ Produces `examples/arty_a7/arty_a7_top.bit`.
 ```bash
 python sim/run_sim.py
 python sim/run_sim.py --lint-only
+python sim/run_verilator_lint.py --self-test
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
@@ -713,7 +722,10 @@ the testbenches. The ELA configuration matrix covers small/scalable build
 shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
 registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
-list.
+list. The Verilator lint command complements that broad elaboration pass with
+a full-project Verilog RTL matrix and stricter procedural-driver checks; its
+self-test must fail a deliberately bad multi-driver fixture before the job is
+considered valid.
 
 ### Tests
 

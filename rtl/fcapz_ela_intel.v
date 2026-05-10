@@ -58,6 +58,8 @@ module fcapz_ela_intel #(
     wire [PTR_W-1:0]    burst_start_ptr;
     wire                jtag_rst_ctrl;
     wire                jtag_rst_data;
+    wire                trigger_out_unused;
+    wire                armed_out_unused;
 
     // ---- TAP wrappers ----
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
@@ -106,6 +108,9 @@ module fcapz_ela_intel #(
     ) u_ela (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
+        .trigger_in(1'b0),
+        .trigger_out(trigger_out_unused),
+        .armed_out(armed_out_unused),
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
         .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
