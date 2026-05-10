@@ -15,6 +15,8 @@ module lint_eio_en_xilinx7 (
     input  wire [3:0]  eio_probe_in,
     output wire [3:0]  eio_probe_out
 );
+    wire armed_out_unused;
+
     fcapz_ela_xilinx7 #(
         .SAMPLE_W   (8),
         .DEPTH      (1024),
@@ -27,6 +29,7 @@ module lint_eio_en_xilinx7 (
         .probe_in      (probe_in),
         .trigger_in    (1'b0),
         .trigger_out   (),
+        .armed_out     (armed_out_unused),
         .eio_probe_in  (eio_probe_in),
         .eio_probe_out (eio_probe_out)
     );
