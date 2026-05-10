@@ -331,7 +331,7 @@ class OpenOcdTransport(Transport):
     def _dr_scan(self, value: int) -> int:
         hex_in = f"0x{value:013x}"
         result = self._cmd(f"drscan {self.tap} 49 {hex_in}")
-        return int(result.split()[0], 16)
+        return self._parse_drscan_result(result, command="drscan", width=49)
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via irscan + drscan on the OpenOCD socket."""
@@ -339,7 +339,17 @@ class OpenOcdTransport(Transport):
         hex_width = (width + 3) // 4
         hex_in = f"0x{bits:0{hex_width}x}"
         result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
-        return int(result.split()[0], 16)
+        return self._parse_drscan_result(result, command="drscan", width=width)
+
+    def _parse_drscan_result(self, result: str, *, command: str, width: int) -> int:
+        token = result.split()[0] if result.split() else ""
+        try:
+            return int(token, 16)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"OpenOCD {command} failed or returned non-hex data "
+                f"for tap {self.tap!r}, width {width}: {result!r}"
+            ) from exc
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)

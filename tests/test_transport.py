@@ -274,6 +274,17 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         self.assertTrue(any("irscan" in c for c in cmds))
         self.assertFalse(any("runtest" in c for c in cmds))
 
+    def test_drscan_non_hex_response_raises_runtime_error(self):
+        """OpenOCD errors should not leak raw int(..., 16) ValueError text."""
+        t = OpenOcdTransport(tap="GW1NR-9C.tap")
+        t._cmd = MagicMock(return_value="Tap 'GW1NR-9C.tap' not found")  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"OpenOCD drscan failed.*GW1NR-9C\.tap.*Tap 'GW1NR-9C\.tap' not found",
+        ):
+            t.raw_dr_scan(0, 49)
+
 
 # ---------------------------------------------------------------------------
 # XilinxHwServerTransport failure modes

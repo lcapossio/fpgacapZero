@@ -974,7 +974,6 @@ module fcapz_ela #(
             decim_ratio      <= HAS_DECIM ? jtag_decim : 24'h0;
             // Phase 2: external trigger
             ext_trig_mode    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
-            trig_holdoff     <= trig_holdoff_sync2;
             // Trigger delay (sample clocks) — latched on arm
             trig_delay       <= trig_delay_sync2;
             // Sequencer stages
@@ -1145,6 +1144,7 @@ module fcapz_ela #(
                     pre_count <= {PTR_W+1{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
+                trig_holdoff <= trig_holdoff_sync2;
                 trig_holdoff_active <= (trig_holdoff_sync2 != 16'h0);
                 trig_holdoff_count  <= (trig_holdoff_sync2 != 16'h0)
                     ? (trig_holdoff_sync2 - 16'h1) : 16'h0;
