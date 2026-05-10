@@ -34,6 +34,8 @@ module jtag_tap_gowin #(
 
     generate
         if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
+            // Synthesis/iverilog trip on the unresolved module; Verilator
+            // evaluates the initial $error path during --lint-only.
 `ifndef VERILATOR
             __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ u_invalid_chain();
 `endif
