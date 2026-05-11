@@ -61,18 +61,29 @@ module jtag_tap_gowin #(
         .tdo_er2_i            ((CHAIN == 2) ? tdo : 1'b0)
     );
 
+    wire chain_sel = (CHAIN == 1) ? jce1 : jce2;
+
     assign tck     = jtck;
     assign tdi     = jtdi;
-    assign shift   = jshift_capture & ~jpause;
     assign update  = jupdate;
-    assign sel     = (CHAIN == 1) ? jce1 : jce2;
+    assign sel     = chain_sel;
 
-    // GW_JTAG combines CAPTURE-DR and SHIFT-DR into one pulse/level, so
-    // derive the one-cycle capture strobe from the selected chain enable
-    // rising edge.  Gate PAUSE-DR out so a pause/resume sequence cannot
-    // look like a fresh CAPTURE-DR to the register interface.
-    reg sel_prev;
-    always @(posedge jtck) sel_prev <= sel;
-    assign capture = sel & ~sel_prev & jshift_capture & ~jpause;
+    // GW_JTAG combines CAPTURE-DR and SHIFT-DR into one signal.  The ER
+    // enable can already be high while the TAP is idle, so capture must be
+    // keyed from the first active DR cycle rather than the ER-enable edge.
+    // Keep the DR transaction active across PAUSE-DR so resume shifts cannot
+    // create a second capture pulse mid-scan.
+    reg dr_active;
+    always @(posedge jtck or posedge jreset) begin
+        if (jreset)
+            dr_active <= 1'b0;
+        else if (jupdate)
+            dr_active <= 1'b0;
+        else if (chain_sel & jshift_capture & ~jpause)
+            dr_active <= 1'b1;
+    end
+
+    assign capture = chain_sel & jshift_capture & ~jpause & ~dr_active;
+    assign shift   = chain_sel & jshift_capture & ~jpause &  dr_active;
 
 endmodule

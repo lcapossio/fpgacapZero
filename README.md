@@ -570,6 +570,9 @@ On Gowin, the wrapper keeps readback on the 49-bit register path rather than
 adding a burst readback chain. Sample data is read word-by-word through the
 sample DATA window (functional but slower). Details are in the manual (see
 below).
+Gowin synthesis builds also need the `GW_JTAG` black-box declaration in
+`rtl/gowin/GW_JTAG_stub.v`, unless the project already includes an equivalent
+GAO-generated stub.
 Do not instantiate separate Gowin ELA and EIO wrappers in one design: Gowin
 allows one `GW_JTAG` primitive, so use `EIO_EN=1` to share the ELA wrapper's
 register bus instead.

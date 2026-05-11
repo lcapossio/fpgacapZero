@@ -407,10 +407,13 @@ can be used to build Cyclone IV/V and MAX 10 designs.
 ### Gowin
 
 Relevant RTL files: `rtl/fcapz_ela_gowin.v`, `rtl/jtag_tap/jtag_tap_gowin.v`,
-`rtl/vhdl/fcapz_ela_gowin.vhd`.
+`rtl/gowin/GW_JTAG_stub.v`, `rtl/vhdl/fcapz_ela_gowin.vhd`.
 
-The Gowin JTAG primitive is `JTAGG` (same name as ECP5 but different interface).
-OpenOCD supports Gowin devices via the `ftdi` driver or the Gowin USB cable.
+The Gowin JTAG primitive is `GW_JTAG`. Gowin EDA can generate its own
+black-box declaration when GAO is used; non-GAO builds should include
+`rtl/gowin/GW_JTAG_stub.v` so synthesis can elaborate the primitive and PnR
+can bind it to the device JTAG resource. OpenOCD supports Gowin devices via the
+`ftdi` driver or the Gowin USB cable.
 
 Boards known to carry Gowin FPGAs: **Tang Nano 9K / 20K**, **Tang Primer 25K**.
 The free **Gowin EDA** toolchain can be used for synthesis and place-and-route.

@@ -68,6 +68,12 @@ TESTBENCHES = {
             RTL / "jtag_pipe_iface.v",
         ],
     ),
+    "jtag_tap_gowin": (
+        TB / "jtag_tap_gowin_tb.sv",
+        [
+            RTL / "jtag_tap" / "jtag_tap_gowin.v",
+        ],
+    ),
     "fcapz_ela_xilinx7_single_chain": (
         TB / "fcapz_ela_xilinx7_single_chain_tb.sv",
         [
@@ -109,6 +115,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_config_matrix",
     "jtag_burst_read",
     "jtag_pipe_iface",
+    "jtag_tap_gowin",
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "chan_mux",
