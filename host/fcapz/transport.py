@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import shutil
 import socket
@@ -28,9 +29,18 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
+_TCL_BRACED_RE = re.compile(r"^[^{}\r\n]*$")
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+_quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
+
+
+def _tcl_braced(value: str) -> str:
+    """Return a Tcl brace-quoted literal for simple tool-discovered names."""
+    if not _TCL_BRACED_RE.match(value):
+        raise ValueError(f"value contains characters unsafe for Tcl braces: {value!r}")
+    return "{" + value + "}"
 
 
 def connect_timing_logs_enabled() -> bool:
@@ -179,10 +189,15 @@ class Transport(ABC):
         raise NotImplementedError
 
     def select_chain(self, chain: int) -> None:
-        """Select the BSCANE2 USER chain for subsequent register accesses.
+        """Select the transport-defined JTAG user chain for later accesses.
+
+        For Xilinx/OpenOCD transports this is the BSCANE2 USER chain number
+        mapped through the backend's IR table.  For virtual-JTAG transports it
+        may be the vendor instance identifier, such as Intel's zero-based
+        ``sld_virtual_jtag`` ``instance_index``.
 
         Subclasses that support multi-chain access must override this.
-        Raises ``ValueError`` if *chain* is not in the transport's IR table.
+        Raises ``ValueError`` if *chain* is invalid for that transport.
         Raises ``NotImplementedError`` on transports that only support a
         single fixed chain.
         """
@@ -192,7 +207,11 @@ class Transport(ABC):
         """Perform a raw DR scan of *width* bits, shifting in *bits*.
 
         Returns the captured TDO value as an unsigned integer.  If *chain*
-        is given it overrides the active chain for this scan only.
+        is given it overrides the active chain for this scan only.  The chain
+        value is transport-specific: Xilinx/OpenOCD transports use the
+        user-chain number that maps through their IR table, while Intel
+        Quartus/USB-Blaster uses the zero-based ``sld_virtual_jtag``
+        ``instance_index``.
 
         Subclasses that expose raw JTAG DR access must override this.
         Raises ``NotImplementedError`` on transports that do not support it.
@@ -367,6 +386,447 @@ class OpenOcdTransport(Transport):
 
     def read_block(self, addr: int, words: int) -> List[int]:
         return [self.read_reg(addr + i * 4) for i in range(words)]
+
+
+class QuartusStpTransport(Transport):
+    """
+    Intel/Altera USB-Blaster transport through Quartus ``quartus_stp``.
+
+    The Intel RTL wrappers use ``sld_virtual_jtag`` instances rather than
+    plain device-level USER opcodes.  Quartus exposes those instances through
+    the ``device_virtual_ir_shift`` and ``device_virtual_dr_shift`` Tcl
+    commands.  This transport keeps a persistent ``quartus_stp`` Tcl process,
+    opens the selected USB-Blaster/device pair, and performs fcapz 49-bit
+    register scans through a selected virtual JTAG instance.
+    """
+
+    DR_BITS = 49
+    # Same idle gap used by the other transports for rtl/jtag_reg_iface.v's
+    # CDC pipeline between the request scan and the response-capture scan.
+    READ_IDLE_CYCLES = 20
+    # fcapz Intel wrappers set sld_ir_width=1 and drive ir_out=0, so the
+    # virtual IR value is currently fixed at zero.
+    VIRTUAL_IR_VALUE = 0
+    _SENTINEL = "<<FCAPZ_QUARTUS_STP_DONE>>"
+
+    def __init__(
+        self,
+        *,
+        hardware_name: str | None = None,
+        device_name: str | None = None,
+        quartus_stp_path: str | None = None,
+        quartus_stp_argv: list[str] | None = None,
+        lock_timeout_ms: int = 10_000,
+        read_timeout_sec: float | None = None,
+        read_idle_cycles: int = READ_IDLE_CYCLES,
+    ):
+        self.hardware_name = hardware_name
+        self.device_name = device_name
+        self._quartus_stp_path = quartus_stp_path
+        self._quartus_stp_argv = list(quartus_stp_argv) if quartus_stp_argv else None
+        self.lock_timeout_ms = int(lock_timeout_ms)
+        self.read_idle_cycles = int(read_idle_cycles)
+        if read_timeout_sec is None:
+            read_timeout_sec = float(os.environ.get("FCAPZ_QUARTUS_TIMEOUT", "60"))
+        self.read_timeout_sec = float(read_timeout_sec)
+        self._active_chain: int = 0
+        self._proc: subprocess.Popen | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_lines: list[str] = []
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stp_io_lock = threading.Lock()
+        self._poisoned = False
+
+    def connect(self) -> None:
+        argv = self._quartus_stp_argv
+        if argv is None:
+            quartus_stp = (
+                self._quartus_stp_path
+                or shutil.which("quartus_stp")
+                or shutil.which("quartus_stp.exe")
+            )
+            if not quartus_stp:
+                raise RuntimeError(
+                    "quartus_stp not found. Add Quartus bin to PATH or pass "
+                    "quartus_stp_path=."
+                )
+            argv = [quartus_stp, "-s"]
+
+        self._proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._poisoned = False
+        self._stdout_lines = queue.Queue()
+        self._stderr_lines = []
+        if self._proc.poll() is not None:
+            self._raise_process_exited()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True
+        )
+        self._stderr_thread.start()
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stdout, daemon=True
+        )
+        self._stdout_thread.start()
+        if self._proc.poll() is not None:
+            self._raise_process_exited()
+        opened_device = self._send(self._open_device_script())
+        _quartus_log.info("Opened Quartus JTAG device %s", opened_device)
+
+    def close(self) -> None:
+        proc = self._proc
+        if proc and proc.stdin:
+            try:
+                self._send("catch {close_device}")
+            except Exception:
+                _quartus_log.debug("quartus_stp close_device failed", exc_info=True)
+            try:
+                proc.stdin.write("exit\n")
+                proc.stdin.flush()
+            except Exception:
+                _quartus_log.debug("quartus_stp exit write failed", exc_info=True)
+        if proc:
+            try:
+                proc.terminate()
+            except Exception:
+                _quartus_log.debug("quartus_stp terminate failed", exc_info=True)
+        self._proc = None
+        self._poisoned = True
+
+    def select_chain(self, chain: int) -> None:
+        if chain < 0:
+            raise ValueError(f"virtual JTAG instance index must be >= 0, got {chain}")
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        if width < 1:
+            raise ValueError(f"DR scan width must be positive, got {width}")
+        instance = self._active_chain if chain is None else chain
+        self._validate_instance(instance)
+        captured = self._send(
+            self._locked_script(
+                body=[
+                    self._virtual_ir_tcl(instance),
+                    self._dr_shift_tcl(instance, bits, width, "__fcapz_capture"),
+                ],
+                result="__fcapz_capture",
+                status="__fcapz_scan_status",
+                error="__fcapz_scan_error",
+            )
+        )
+        return self._shift_string_to_int(captured.strip(), width)
+
+    def raw_dr_scan_batch(
+        self, scans: list[tuple[int, int]], *, chain: int | None = None
+    ) -> list[int]:
+        if not scans:
+            return []
+        instance = self._active_chain if chain is None else chain
+        self._validate_instance(instance)
+        body = ["set __fcapz_captures {}"]
+        body.append(self._virtual_ir_tcl(instance))
+        for idx, (bits, width) in enumerate(scans):
+            if width < 1:
+                raise ValueError(f"DR scan width must be positive, got {width}")
+            var = f"__fcapz_capture_{idx}"
+            body.append(self._dr_shift_tcl(instance, bits, width, var))
+            body.append(f"lappend __fcapz_captures ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_captures",
+                status="__fcapz_batch_status",
+                error="__fcapz_batch_error",
+            )
+        )
+        tokens = captured.split()
+        if len(tokens) != len(scans):
+            raise RuntimeError(
+                f"Quartus batch DR scan returned {len(tokens)} values, "
+                f"expected {len(scans)}: {captured!r}"
+            )
+        return [
+            self._shift_string_to_int(token, width)
+            for token, (_bits, width) in zip(tokens, scans)
+        ]
+
+    def write_reg(self, addr: int, value: int) -> None:
+        frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+        self.raw_dr_scan(frame, self.DR_BITS)
+
+    def read_reg(self, addr: int) -> int:
+        read_frame = (addr & 0xFFFF) << 32
+        instance = self._active_chain
+        shifted_out = self._send(
+            self._locked_script(
+                body=[
+                    self._virtual_ir_tcl(instance),
+                    self._dr_shift_tcl(
+                        instance, read_frame, self.DR_BITS, "__fcapz_discard"
+                    ),
+                    f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
+                    self._dr_shift_tcl(
+                        instance, read_frame, self.DR_BITS, "__fcapz_capture"
+                    ),
+                ],
+                result="__fcapz_capture",
+                status="__fcapz_read_status",
+                error="__fcapz_read_error",
+            )
+        )
+        return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
+
+    def read_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
+        instance = self._active_chain
+        body = ["set __fcapz_reads {}"]
+        body.append(self._virtual_ir_tcl(instance))
+        for i in range(words):
+            read_frame = ((addr + i * 4) & 0xFFFF) << 32
+            body.append(
+                self._dr_shift_tcl(
+                    instance, read_frame, self.DR_BITS, f"__fcapz_discard_{i}"
+                )
+            )
+            body.append(f"device_run_test_idle -num_clocks {self.read_idle_cycles}")
+            body.append(
+                self._dr_shift_tcl(
+                    instance, read_frame, self.DR_BITS, f"__fcapz_capture_{i}"
+                )
+            )
+            body.append(f"lappend __fcapz_reads $__fcapz_capture_{i}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_reads",
+                status="__fcapz_read_block_status",
+                error="__fcapz_read_block_error",
+            )
+        )
+        tokens = captured.split()
+        if len(tokens) != words:
+            raise RuntimeError(
+                f"Quartus read_block returned {len(tokens)} values, expected {words}: "
+            f"{captured!r}"
+        )
+        return [self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF for token in tokens]
+
+    def _validate_instance(self, instance: int) -> None:
+        if instance < 0:
+            raise ValueError(
+                f"virtual JTAG instance index must be >= 0, got {instance}"
+            )
+
+    def _virtual_ir_tcl(self, instance: int) -> str:
+        return (
+            "device_virtual_ir_shift "
+            f"-instance_index {instance} "
+            f"-ir_value {self.VIRTUAL_IR_VALUE} "
+            "-no_captured_ir_value"
+        )
+
+    def _dr_shift_tcl(self, instance: int, bits: int, width: int, result_var: str) -> str:
+        bit_string = self._int_to_shift_string(bits, width)
+        return (
+            f"set {result_var} [device_virtual_dr_shift "
+            f"-instance_index {instance} "
+            f"-length {width} "
+            f"-dr_value {bit_string}]"
+        )
+
+    def _locked_script(
+        self,
+        *,
+        body: list[str],
+        result: str | None = None,
+        status: str,
+        error: str,
+    ) -> str:
+        if not body:
+            raise ValueError("locked Quartus Tcl script body must not be empty")
+        lines = [
+            f"device_lock -timeout {self.lock_timeout_ms}",
+            f"set {status} [catch {{",
+            *body,
+            f"}} {error}]",
+            "device_unlock",
+            f"if {{${status}}} {{",
+            f"    error ${error}",
+            "}",
+        ]
+        if result is not None:
+            lines.append(f"set {result}")
+        return "\n".join(lines)
+
+    def _open_device_script(self) -> str:
+        lines = [
+            "package require ::quartus::jtag",
+        ]
+        if self.hardware_name:
+            lines.append(f"set __fcapz_hardware {_tcl_braced(self.hardware_name)}")
+        else:
+            lines.extend(
+                [
+                    "set __fcapz_hardware_matches [get_hardware_names]",
+                    "if {[llength $__fcapz_hardware_matches] == 0} {",
+                    '    error "no Quartus JTAG hardware found"',
+                    "}",
+                    "if {[llength $__fcapz_hardware_matches] > 1} {",
+                    '    error "multiple Quartus JTAG cables found; pass --hardware"',
+                    "}",
+                    "set __fcapz_hardware [lindex $__fcapz_hardware_matches 0]",
+                ]
+            )
+        if self.device_name:
+            lines.append(f"set __fcapz_device {_tcl_braced(self.device_name)}")
+        else:
+            lines.extend(
+                [
+                    "set __fcapz_device {}",
+                    "foreach __name [get_device_names -hardware_name $__fcapz_hardware] {",
+                    '    if {[string match "@1*" $__name]} {',
+                    "        set __fcapz_device $__name",
+                    "        break",
+                    "    }",
+                    "}",
+                    'if {$__fcapz_device eq ""} {',
+                    '    error "no @1 device found on selected USB-Blaster chain"',
+                    "}",
+                ]
+            )
+        lines.append(
+            "open_device -hardware_name $__fcapz_hardware -device_name $__fcapz_device"
+        )
+        lines.append("set __fcapz_device")
+        return "\n".join(lines)
+
+    def _send(self, script: str) -> str:
+        if self._poisoned:
+            raise RuntimeError("quartus_stp transport is closed or timed out; reconnect")
+        if not self._proc or not self._proc.stdin or not self._proc.stdout:
+            raise RuntimeError("not connected - call connect() first")
+        if self._SENTINEL in script:
+            raise ValueError("quartus_stp Tcl script contains the response sentinel")
+        wrapped = "\n".join(
+            [
+                "set __fcapz_status [catch {",
+                script,
+                "} __fcapz_result]",
+                "if {$__fcapz_status} {",
+                '    puts "ERROR: $__fcapz_result"',
+                "} else {",
+                "    puts $__fcapz_result",
+                "}",
+                f"puts {self._SENTINEL}",
+                "flush stdout",
+            ]
+        )
+        with self._stp_io_lock:
+            if self._proc.poll() is not None:
+                self._raise_process_exited()
+            self._proc.stdin.write(wrapped + "\n")
+            self._proc.stdin.flush()
+            lines: list[str] = []
+            while True:
+                try:
+                    raw = self._stdout_lines.get(timeout=self.read_timeout_sec)
+                except queue.Empty as exc:
+                    self._poison_after_timeout()
+                    raise TimeoutError(
+                        "timed out waiting for quartus_stp response sentinel "
+                        f"after {self.read_timeout_sec:.1f}s; reconnect required"
+                    ) from exc
+                if raw is None:
+                    stderr = "\n".join(self._stderr_lines[-20:])
+                    raise ConnectionError(
+                        f"quartus_stp process exited unexpectedly. stderr:\n{stderr}"
+                    )
+                line = self._strip_quartus_prompt(raw.rstrip("\n\r"))
+                if line.strip() == self._SENTINEL:
+                    break
+                if line:
+                    lines.append(line)
+        out = "\n".join(lines).strip()
+        first_error = next(
+            (idx for idx, line in enumerate(lines) if line.startswith("ERROR: ")),
+            None,
+        )
+        if first_error is not None:
+            raise RuntimeError("\n".join(lines[first_error:]))
+        return out
+
+    @staticmethod
+    def _strip_quartus_prompt(line: str) -> str:
+        stripped = line.strip()
+        while True:
+            if stripped.startswith("tcl>"):
+                stripped = stripped[4:].lstrip()
+                continue
+            if stripped.startswith(">"):
+                stripped = stripped[1:].lstrip()
+                continue
+            return stripped
+
+    def _poison_after_timeout(self) -> None:
+        self._poisoned = True
+        proc = self._proc
+        self._proc = None
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                _quartus_log.debug("quartus_stp kill after timeout failed", exc_info=True)
+
+    def _raise_process_exited(self) -> None:
+        if not self._proc:
+            raise RuntimeError("not connected - call connect() first")
+        code = self._proc.poll()
+        if code is None:
+            return
+        stderr = "\n".join(self._stderr_lines[-20:])
+        raise ConnectionError(
+            f"quartus_stp exited with status {code}. stderr:\n{stderr}"
+        )
+
+    def _drain_stderr(self) -> None:
+        if not self._proc or not self._proc.stderr:
+            raise RuntimeError("quartus_stp process not initialized")
+        for raw in self._proc.stderr:
+            self._stderr_lines.append(raw.rstrip("\n\r"))
+
+    def _drain_stdout(self) -> None:
+        if not self._proc or not self._proc.stdout:
+            raise RuntimeError("quartus_stp process not initialized")
+        for raw in self._proc.stdout:
+            self._stdout_lines.put(raw)
+        self._stdout_lines.put(None)
+
+    @staticmethod
+    def _int_to_shift_string(value: int, width: int) -> str:
+        # Quartus' binary DR operand is a normal fixed-width numeric string.
+        # Its documented example maps "010001" to hex 0x11 and shifts the
+        # rightmost/least-significant bit first.
+        mask = (1 << width) - 1
+        return f"{value & mask:0{width}b}"
+
+    @staticmethod
+    def _shift_string_to_int(value: str, width: int) -> int:
+        bits = re.sub(r"\s+", "", value)
+        if not re.fullmatch(r"[01]+", bits):
+            raise RuntimeError(f"Quartus virtual DR scan returned non-binary data: {value!r}")
+        if len(bits) != width:
+            raise RuntimeError(
+                f"Quartus virtual DR scan returned {len(bits)} bits, expected {width}: "
+                f"{value!r}"
+            )
+        return int(bits, 2)
 
 
 class XilinxHwServerTransport(Transport):

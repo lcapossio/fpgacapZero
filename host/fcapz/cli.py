@@ -14,7 +14,7 @@ from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, XilinxHwServerTransport
+from .transport import OpenOcdTransport, QuartusStpTransport, XilinxHwServerTransport
 
 
 def _positive_int(value: str) -> int:
@@ -225,6 +225,13 @@ def _make_transport(args: argparse.Namespace):
         return OpenOcdTransport(
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )
+    if args.backend == "usb_blaster":
+        device_name = None if args.tap in ("", "auto", "xc7a100t.tap") else args.tap
+        return QuartusStpTransport(
+            hardware_name=getattr(args, "hardware", None),
+            device_name=device_name,
+            quartus_stp_path=getattr(args, "quartus_stp", None),
+        )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
     bitfile = getattr(args, "program", None)
@@ -244,10 +251,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to gui.toml (default: per-user fpgacapzero config directory)",
     )
-    p.add_argument("--backend", choices=["openocd", "hw_server"], default="hw_server")
+    p.add_argument(
+        "--backend",
+        choices=["openocd", "hw_server", "usb_blaster"],
+        default="hw_server",
+    )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
+    p.add_argument(
+        "--hardware",
+        default=None,
+        help="usb_blaster only: Quartus hardware name; default selects first USB-Blaster",
+    )
+    p.add_argument(
+        "--quartus-stp",
+        default=None,
+        help="usb_blaster only: path to quartus_stp executable",
+    )
     p.add_argument(
         "--two-chain-burst",
         action="store_true",

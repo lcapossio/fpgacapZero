@@ -14,7 +14,12 @@ from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from .transport import (
+    OpenOcdTransport,
+    QuartusStpTransport,
+    Transport,
+    XilinxHwServerTransport,
+)
 
 _SCHEMA_VERSION = "1.1"
 
@@ -53,6 +58,13 @@ class RpcServer:
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
+            )
+        if backend == "usb_blaster":
+            tap = str(req.get("tap", "auto"))
+            return QuartusStpTransport(
+                hardware_name=req.get("hardware"),
+                device_name=None if tap in ("", "auto", "xc7a100t.tap") else tap,
+                quartus_stp_path=req.get("quartus_stp"),
             )
         raise ValueError(f"unknown backend: {backend}")
 

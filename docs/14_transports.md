@@ -533,6 +533,9 @@ for the full implementations of:
 
 - `OpenOcdTransport` — TCP socket to OpenOCD's TCL listener;
   ~150 LOC; the simplest reference impl
+- `QuartusStpTransport` â€” subprocess + `quartus_stp` Tcl framing
+  for Intel/Altera USB-Blaster access to `sld_virtual_jtag`
+  instances via `device_virtual_ir_shift` / `device_virtual_dr_shift`
 - `XilinxHwServerTransport` — subprocess + xsdb stdin/stdout
   framing with a `<<XSDB_DONE>>` sentinel; ~400 LOC; richer
   because it handles programming, readiness, error parsing

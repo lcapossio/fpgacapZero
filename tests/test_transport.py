@@ -9,16 +9,21 @@ hardware or network connection required.
 
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
+    QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
     parse_xsdb_jtag_targets,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +289,248 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             r"OpenOCD drscan failed.*GW1NR-9C\.tap.*Tap 'GW1NR-9C\.tap' not found",
         ):
             t.raw_dr_scan(0, 49)
+
+
+class QuartusStpTransportTests(unittest.TestCase):
+    """Intel/Altera USB-Blaster transport helpers."""
+
+    def test_shift_string_is_fixed_width_binary_value(self):
+        self.assertEqual(QuartusStpTransport._int_to_shift_string(0b0101, 4), "0101")
+        self.assertEqual(QuartusStpTransport._shift_string_to_int("0101", 4), 0b0101)
+
+    def test_shift_string_rejects_non_binary_output(self):
+        with self.assertRaisesRegex(RuntimeError, "non-binary"):
+            QuartusStpTransport._shift_string_to_int("0x5", 4)
+
+    def test_select_chain_accepts_zero_based_instance_indices(self):
+        t = QuartusStpTransport()
+        self.assertEqual(t._active_chain, 0)
+        t.select_chain(0)
+        self.assertEqual(t._active_chain, 0)
+        with self.assertRaises(ValueError):
+            t.select_chain(-1)
+
+    def test_raw_dr_scan_emits_unlock_outside_inner_catch(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
+
+        t = FakeQuartus()
+        t.raw_dr_scan(0, 49)
+        script = scripts[0]
+        self.assertIn("set __fcapz_scan_status [catch {", script)
+        self.assertLess(script.index("device_virtual_ir_shift"), script.index("device_unlock"))
+        self.assertLess(script.index("} __fcapz_scan_error]"), script.index("device_unlock"))
+        self.assertIn("if {$__fcapz_scan_status}", script)
+
+    def test_send_times_out_waiting_for_sentinel(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        proc.kill = MagicMock()
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        with self.assertRaises(TimeoutError):
+            t._send("puts hello")
+        proc.kill.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "reconnect|not connected"):
+            t._send("puts again")
+
+    def test_send_raises_runtime_error_on_tcl_error(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("ERROR: virtual dr failed\n")
+        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "virtual dr failed"):
+            t._send("device_virtual_dr_shift")
+
+    def test_send_strips_quartus_prompt_prefixes(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("tcl> tcl> 0001\n")
+        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
+
+    def test_send_strips_quartus_continuation_prompts_and_raises_error(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("> > > 1\n")
+        t._stdout_lines.put("> > ERROR: virtual JTAG instance cannot be found\n")
+        t._stdout_lines.put("> >     while executing device_virtual_dr_shift\n")
+        t._stdout_lines.put(f"> {QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "while executing"):
+            t._send("device_virtual_dr_shift")
+
+    def test_send_rejects_sentinel_collision(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport()
+        t._proc = proc
+        with self.assertRaises(ValueError):
+            t._send(f"puts {QuartusStpTransport._SENTINEL}")
+
+    def test_write_reg_uses_virtual_dr_scan(self):
+        calls: list[tuple[int, int, int | None]] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def raw_dr_scan(self, bits, width, *, chain=None):
+                calls.append((bits, width, chain))
+                return 0
+
+        t = FakeQuartus()
+        t.write_reg(0x1234, 0xDEADBEEF)
+        expected = (1 << 48) | (0x1234 << 32) | 0xDEADBEEF
+        self.assertEqual(calls, [(expected, 49, None)])
+
+    def test_open_device_auto_script_errors_on_multiple_quartus_cables(self):
+        script = QuartusStpTransport()._open_device_script()
+        self.assertIn("get_hardware_names", script)
+        self.assertIn("multiple Quartus JTAG cables found; pass --hardware", script)
+        self.assertIn('string match "@1*"', script)
+
+    def test_read_reg_choreography(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x12345678:049b}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_reg(0x20), 0x12345678)
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 2)
+        self.assertIn("device_run_test_idle", scripts[0])
+
+    def test_raw_dr_scan_batch_uses_one_lock_window(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0001 0010"
+
+        t = FakeQuartus()
+        self.assertEqual(t.raw_dr_scan_batch([(1, 4), (2, 4)]), [1, 2])
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 2)
+
+    def test_raw_dr_scan_batch_empty_is_noop(self):
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                raise AssertionError("empty raw_dr_scan_batch should not send Tcl")
+
+        self.assertEqual(FakeQuartus().raw_dr_scan_batch([]), [])
+
+    def test_raw_scan_chain_override_does_not_mutate_active_chain(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
+
+        t = FakeQuartus()
+        t.select_chain(0)
+        t.raw_dr_scan(0, 49, chain=5)
+        self.assertIn("-instance_index 5", scripts[-1])
+        self.assertEqual(t._active_chain, 0)
+
+    def test_raw_scan_batch_chain_override_does_not_mutate_active_chain(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0000"
+
+        t = FakeQuartus()
+        t.select_chain(0)
+        t.raw_dr_scan_batch([(0, 4)], chain=3)
+        self.assertIn("-instance_index 3", scripts[-1])
+        self.assertEqual(t._active_chain, 0)
+
+    def test_read_reg_uses_configurable_lock_timeout_and_idle_cycles(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x12345678:049b}"
+
+        t = FakeQuartus(lock_timeout_ms=5000, read_idle_cycles=42)
+        t.read_reg(0x20)
+        self.assertIn("device_lock -timeout 5000", scripts[0])
+        self.assertIn("device_run_test_idle -num_clocks 42", scripts[0])
+
+    def test_read_block_uses_one_lock_window(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x11111111:049b} {0x22222222:049b}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_block(0x20, 2), [0x11111111, 0x22222222])
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 4)
+
+    def test_read_block_zero_words_is_noop(self):
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                raise AssertionError("zero-word read_block should not send Tcl")
+
+        self.assertEqual(FakeQuartus().read_block(0x20, 0), [])
+
+    def test_locked_script_rejects_empty_body(self):
+        with self.assertRaises(ValueError):
+            QuartusStpTransport()._locked_script(
+                body=[],
+                status="__status",
+                error="__error",
+            )
+
+    def test_connect_send_close_with_fake_quartus_stp(self):
+        fake_stp = ROOT / "tests" / "fixtures" / "fake_quartus_stp.py"
+        t = QuartusStpTransport(
+            quartus_stp_argv=[sys.executable, str(fake_stp), "-s"],
+            read_timeout_sec=2.0,
+        )
+        t.connect()
+        try:
+            wide_frame = (1 << 48) | (1 << 47) | 1
+            self.assertEqual(t.raw_dr_scan(wide_frame, 49), wide_frame)
+            self.assertEqual(t.read_reg(0x20), 0x12345678)
+            self.assertEqual(t.read_block(0x20, 2), [1, 2])
+            self.assertEqual(t.raw_dr_scan_batch([(0x11, 49), (0x22, 49)]), [0x11, 0x22])
+        finally:
+            t.close()
 
 
 # ---------------------------------------------------------------------------

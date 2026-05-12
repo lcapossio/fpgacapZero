@@ -77,6 +77,20 @@ instead of switching to USER2.
 - Uses `irscan`/`drscan`/`runtest` commands.
 - Not yet hardware-validated (pending test with FT2232).
 
+### `QuartusStpTransport`
+- Connects to a persistent `quartus_stp -s` subprocess for Intel/Altera
+  USB-Blaster access.
+- Uses Quartus virtual JTAG Tcl commands against `sld_virtual_jtag`:
+  `device_virtual_ir_shift`, `device_virtual_dr_shift`, and
+  `device_run_test_idle`.
+- `select_chain()` / `raw_dr_scan(..., chain=...)` use the zero-based
+  `sld_virtual_jtag` `instance_index`, not the 1-based USER-chain convention
+  used by Xilinx/OpenOCD transports.
+- USB cable discovery and device open were exercised on a DE25-Nano with
+  Quartus Prime Lite 25.1std. Full fcapz register access still needs hardware
+  validation with a bitstream that instantiates the Intel `sld_virtual_jtag`
+  wrapper.
+
 ### `VendorStubTransport`
 - Placeholder for future non-Xilinx backends.
 - Raises `NotImplementedError` on all operations.

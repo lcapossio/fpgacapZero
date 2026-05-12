@@ -268,11 +268,17 @@ fcapz [global options] <command> [command options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--backend` | `hw_server` | `openocd` or `hw_server` |
+| `--backend` | `hw_server` | `openocd`, `hw_server`, or `usb_blaster` |
 | `--host` | `127.0.0.1` | Server address |
-| `--port` | backend default | `6666` for OpenOCD, `3121` for hw_server |
-| `--tap` | `xc7a100t.tap` | OpenOCD TAP name or hw_server FPGA target |
+| `--port` | backend default | `6666` for OpenOCD, `3121` for hw_server; ignored by `usb_blaster` |
+| `--tap` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name for `usb_blaster`; default value auto-selects the first `@1` device |
+| `--hardware` | auto | Quartus hardware name for `usb_blaster`; required if more than one Quartus JTAG cable is connected |
+| `--quartus-stp` | PATH lookup | Path to `quartus_stp` for `usb_blaster` |
 | `--program` | *(none)* | Program FPGA with bitfile before command (hw_server) |
+
+For `usb_blaster`, auto device selection uses the first Quartus device named
+`@1...`; pass the exact Quartus device name with `--tap` for other chain
+positions.
 
 **Commands:**
 

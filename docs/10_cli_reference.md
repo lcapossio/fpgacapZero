@@ -27,10 +27,12 @@ subcommand follows:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--backend {openocd,hw_server}` | `openocd` | JTAG transport to use |
+| `--backend {openocd,hw_server,usb_blaster}` | `openocd` | JTAG transport to use |
 | `--host HOST` | `127.0.0.1` | Transport host |
-| `--port PORT` | `6666` (openocd) or `3121` (hw_server) | Transport TCP port |
-| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, or hw_server FPGA target name (`.tap` suffix is stripped for hw_server) |
+| `--port PORT` | `6666` (openocd) or `3121` (hw_server) | Transport TCP port; ignored by `usb_blaster` |
+| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target name, or Quartus device name (`auto`, empty, or the default Xilinx value auto-selects the first `@1` device for `usb_blaster`) |
+| `--hardware HARDWARE` | auto | Quartus hardware name for `usb_blaster`; required if more than one Quartus JTAG cable is connected |
+| `--quartus-stp PATH` | PATH lookup | Path to `quartus_stp` for `usb_blaster` |
 | `--program BITFILE` | none | Program the FPGA with this bitfile before running the subcommand (hw_server only) |
 
 Examples:
@@ -46,7 +48,14 @@ fcapz --backend openocd probe
 
 # Override TAP name for a custom board
 fcapz --backend openocd --tap my_custom_chip.tap probe
+
+# Intel/Altera virtual JTAG through Quartus and USB-Blaster
+fcapz --backend usb_blaster --tap auto probe
 ```
+
+For `usb_blaster`, auto device selection chooses the first Quartus device whose
+name starts with `@1`. If the FPGA is elsewhere in the JTAG chain, pass the
+exact Quartus device name with `--tap`.
 
 ## Subcommands at a glance
 
