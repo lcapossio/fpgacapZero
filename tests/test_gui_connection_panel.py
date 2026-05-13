@@ -147,7 +147,7 @@ class TestConnectionPanel(unittest.TestCase):
             bin_dir = quartus_root / "bin"
             bin_dir.mkdir(parents=True)
             (bin_dir / "quartus_stp").write_text("", encoding="utf-8")
-            with patch.dict("os.environ", {"QUARTUS_ROOTDIR": str(quartus_root)}):
+            with patch.dict("os.environ", {"QUARTUS_ROOTDIR": str(quartus_root)}, clear=True):
                 self.assertEqual(p._quartus_stp_dialog_dir(), str(bin_dir))
 
     def test_quartus_stp_dialog_prefers_rootdir_override(self) -> None:
@@ -163,6 +163,7 @@ class TestConnectionPanel(unittest.TestCase):
             override_bin.mkdir(parents=True)
             (root_bin / "quartus_stp.exe").write_text("", encoding="utf-8")
             (override_bin / "quartus_stp.exe").write_text("", encoding="utf-8")
+            # Env-var precedence is decided before per-root version sorting.
             with patch.dict(
                 "os.environ",
                 {

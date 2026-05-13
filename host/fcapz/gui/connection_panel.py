@@ -361,7 +361,7 @@ class ConnectionPanel(QGroupBox):
         for env_name in ("QUARTUS_ROOTDIR_OVERRIDE", "QUARTUS_ROOTDIR"):
             root = os.environ.get(env_name)
             if root:
-                found = self._find_quartus_stp_dir(Path(root))
+                found = ConnectionPanel._find_quartus_stp_dir(Path(root))
                 if found:
                     return found
         for root in (
@@ -372,7 +372,7 @@ class ConnectionPanel(QGroupBox):
             Path("/opt/intelFPGA_lite"),
             Path("/opt/altera"),
         ):
-            found = self._find_quartus_stp_dir(root)
+            found = ConnectionPanel._find_quartus_stp_dir(root)
             if found:
                 return found
         return ""
@@ -398,8 +398,8 @@ class ConnectionPanel(QGroupBox):
 
     @staticmethod
     def _quartus_path_version_key(path: Path) -> tuple[int, ...]:
-        # Heuristic for preferring newer installs and bin64 over bin; this is
-        # not a strict Quartus version parser.
+        # Heuristic for preferring newer installs and bin64 over bin, not a
+        # strict Quartus version parser; unrelated digits in paths also count.
         nums = [int(n) for n in re.findall(r"\d+", str(path))]
         return tuple(nums) if nums else (0,)
 
