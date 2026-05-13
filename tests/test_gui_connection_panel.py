@@ -21,7 +21,7 @@ except ImportError:
 if _HAVE_PYSIDE:
     from PySide6.QtWidgets import QApplication
 
-    from fcapz.gui.connection_panel import ConnectionPanel
+    from fcapz.gui.connection_panel import ConnectionPanel, _find_quartus_stp_dir
     from fcapz.gui.settings import ConnectionSettings
 
 
@@ -147,7 +147,13 @@ class TestConnectionPanel(unittest.TestCase):
             bin_dir = quartus_root / "bin"
             bin_dir.mkdir(parents=True)
             (bin_dir / "quartus_stp").write_text("", encoding="utf-8")
-            with patch.dict("os.environ", {"QUARTUS_ROOTDIR": str(quartus_root)}, clear=True):
+            with patch.dict(
+                "os.environ",
+                {
+                    "QUARTUS_ROOTDIR": str(quartus_root),
+                    "QUARTUS_ROOTDIR_OVERRIDE": "",
+                },
+            ):
                 self.assertEqual(p._quartus_stp_dialog_dir(), str(bin_dir))
 
     def test_quartus_stp_dialog_prefers_rootdir_override(self) -> None:
@@ -187,13 +193,13 @@ class TestConnectionPanel(unittest.TestCase):
             (new_bin64 / "quartus_stp.exe").write_text("", encoding="utf-8")
 
             self.assertEqual(
-                ConnectionPanel._find_quartus_stp_dir(base),
+                _find_quartus_stp_dir(base),
                 str(new_bin64),
             )
 
     def test_find_quartus_stp_dir_returns_root_when_no_match(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            self.assertEqual(ConnectionPanel._find_quartus_stp_dir(Path(td)), td)
+            self.assertEqual(_find_quartus_stp_dir(Path(td)), td)
 
     @patch("fcapz.gui.connection_panel.QMessageBox.information")
     def test_scan_finish_reports_empty_targets(self, info_box) -> None:
