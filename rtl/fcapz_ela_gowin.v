@@ -44,17 +44,22 @@ module fcapz_ela_gowin #(
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
 ) (
-    input  wire                              sample_clk,
-    input  wire                              sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0]  probe_in,
+    input  wire                             sample_clk,
+    input  wire                             sample_rst,
+    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
     // EIO ports (active when EIO_EN=1)
-    input  wire [EIO_IN_W-1:0]               eio_probe_in,
-    output wire [EIO_OUT_W-1:0]              eio_probe_out
+    input  wire [EIO_IN_W-1:0]              eio_probe_in,
+    output wire [EIO_OUT_W-1:0]             eio_probe_out,
+
+    input  wire                             tms_pad_i,
+    input  wire                             tck_pad_i,
+    input  wire                             tdi_pad_i,
+    output wire                             tdo_pad_o
 );
 
     // TAP signals
-    wire tap_tck, tap_tdi, tap_tdo;
-    wire tap_capture, tap_shift, tap_update, tap_sel;
+    wire tap_tck, tap_tdi;
+    wire [1:0] tap_tdo, tap_capture, tap_shift, tap_update, tap_sel;
 
     // Register bus
     wire        jtag_clk, jtag_rst;
@@ -75,28 +80,46 @@ module fcapz_ela_gowin #(
     wire [PTR_W-1:0] burst_start_ptr_unused;
 
     // ---- TAP wrapper ----
-    jtag_tap_gowin #(.CHAIN(CHAIN)) u_tap_ctrl (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
-        .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+    jtag_tap_gowin u_tap_ctrl (
+        .tck            (tap_tck),
+        .tdi            (tap_tdi),
+        .tdo            (tap_tdo),
+        .capture        (tap_capture),
+        .shift          (tap_shift),
+        .update         (tap_update),
+        .sel            (tap_sel),
+
+        .tms_pad_i      (tms_pad_i),
+        .tck_pad_i      (tck_pad_i),
+        .tdi_pad_i      (tdi_pad_i),
+        .tdo_pad_o      (tdo_pad_o)
     );
 
     reset_sync u_rst_sync_ctrl (
-        .clk(tap_tck),
-        .arst(sample_rst),
-        .srst(jtag_rst_ctrl)
+        .clk    (tap_tck),
+        .arst   (sample_rst),
+        .srst   (jtag_rst_ctrl)
     );
 
     // ---- Register interface ----
     jtag_reg_iface u_reg (
-        .arst(jtag_rst_ctrl),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
-        .capture(tap_capture), .shift_en(tap_shift),
-        .update(tap_update), .sel(tap_sel),
-        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
-        .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
-        .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
-        .reg_rdata(jtag_rdata)
+        .arst       (jtag_rst_ctrl),
+
+        .tck        (tap_tck),
+        .tdi        (tap_tdi),
+        .tdo        (tap_tdo[0]),
+        .capture    (tap_capture[0]),
+        .shift_en   (tap_shift[0]),
+        .update     (tap_update[0]),
+        .sel        (tap_sel[0]),
+
+        .reg_clk    (jtag_clk),
+        .reg_rst    (jtag_rst),
+        .reg_wr_en  (jtag_wr_en),
+        .reg_rd_en  (jtag_rd_en),
+        .reg_addr   (jtag_addr),
+        .reg_wdata  (jtag_wdata),
+        .reg_rdata  (jtag_rdata)
     );
 
     // ---- ELA + optional EIO via address mux ----
