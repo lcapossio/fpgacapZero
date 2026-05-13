@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -149,11 +150,9 @@ class TestConnectionPanel(unittest.TestCase):
             (bin_dir / "quartus_stp").write_text("", encoding="utf-8")
             with patch.dict(
                 "os.environ",
-                {
-                    "QUARTUS_ROOTDIR": str(quartus_root),
-                    "QUARTUS_ROOTDIR_OVERRIDE": "",
-                },
+                {"QUARTUS_ROOTDIR": str(quartus_root)},
             ):
+                os.environ.pop("QUARTUS_ROOTDIR_OVERRIDE", None)
                 self.assertEqual(p._quartus_stp_dialog_dir(), str(bin_dir))
 
     def test_quartus_stp_dialog_prefers_rootdir_override(self) -> None:
