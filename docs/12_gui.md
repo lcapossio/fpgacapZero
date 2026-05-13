@@ -80,7 +80,7 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 |---|---|
 | **Backend** | Dropdown: `hw_server` (default), `openocd`, or `usb_blaster` |
 | **Host** | TCP host of the transport, default `127.0.0.1` |
-| **Port** | TCP port, default `3121` for hw_server / `6666` for openocd |
+| **Port** | TCP port, default `3121` for hw_server / `6666` for openocd; ignored by USB-Blaster |
 | **FPGA target** | hw_server target name (e.g. `xc7a100t`), openocd TAP name, or Quartus device name / `auto` for USB-Blaster |
 | **Quartus hardware** | Optional Quartus hardware name for USB-Blaster, e.g. `DE25-Nano [USB-1]`; leave empty to auto-select when exactly one cable is present |
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
@@ -92,9 +92,9 @@ When you click **Connect**:
 
 1. The GUI builds a `XilinxHwServerTransport`, `OpenOcdTransport`, or
    `QuartusStpTransport` with the field values.
-2. Calls `transport.connect()`, which spawns `xsdb` (or talks to
-   OpenOCD), programs the FPGA if a bitfile is set, runs the
-   readiness probe.
+2. Calls `transport.connect()`, which spawns `xsdb`, talks to
+   OpenOCD, or starts `quartus_stp`.  The GUI programs the FPGA only
+   for the Xilinx `hw_server` backend when a bitfile is set.
 3. Reads the USER1 register window with `Analyzer.probe_optional()`.
    If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
    and the probe summary are enabled.  If not (EIO-only / AXI-only
@@ -361,8 +361,9 @@ generation logic.
 
 **File → Settings...** opens a dialog with three tabs:
 
-1. **Connection** — last-used backend, host, port, FPGA target,
-   bitfile path, IR-table preset.  Persists across sessions.
+1. **Connection** — last-used backend, host, port, FPGA target /
+   Quartus device, Quartus hardware / `quartus_stp` path, bitfile
+   path, IR-table preset.  Persists across sessions.
 2. **Viewers** — detected viewer paths and their per-viewer
    override paths (in case you have a non-standard install of
    GTKWave).  Default viewer dropdown: which one is selected by
@@ -423,7 +424,7 @@ the same arrangement.
   for why and what the embedding constraints are for each viewer.
 - **One transport at a time**.  The GUI manages one shared
   transport across all panels; you cannot have two simultaneous
-  hw_server sessions to two different boards from one GUI
+  JTAG sessions to two different boards from one GUI
   instance.  Workaround: launch two `fcapz-gui` processes side
   by side.
 
@@ -433,6 +434,9 @@ the same arrangement.
 2. In the **Connection** panel, set backend = `hw_server`, port =
    `3121`, target = `xc7a100t`, bitfile =
    `examples/arty_a7/arty_a7_top.bit`, click **Connect**.
+   For Intel/Altera, set backend = `usb_blaster`, target = `auto`,
+   set **Quartus hardware** if more than one cable is connected, and
+   set **quartus_stp** if Quartus is not on PATH.
 3. Wait ~3-5 seconds (FPGA programming + readiness probe).  The
    probe summary panel populates.
 4. Click the **ELA capture** tab.

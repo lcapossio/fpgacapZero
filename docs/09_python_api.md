@@ -111,6 +111,23 @@ program separately (e.g. `openocd -c "init; pld load 0 my.bit; exit"`)
 or via your own startup script.  Once OpenOCD is running and
 listening on TCL port 6666, the transport just talks to it.
 
+### `QuartusStpTransport` (Intel / Altera USB-Blaster)
+
+```python
+from fcapz.transport import QuartusStpTransport
+
+transport = QuartusStpTransport(
+    hardware_name="DE25-Nano [USB-1]",   # optional when one cable is present
+    device_name=None,                    # None / auto selects first @1 device
+    quartus_stp_path=None,               # or full path to quartus_stp.exe
+)
+```
+
+Quartus USB-Blaster access uses a persistent `quartus_stp -s`
+subprocess.  Chain values are Intel `sld_virtual_jtag` instance
+indices configured by the RTL wrapper's `CHAIN` parameter; the fcapz
+Intel control path defaults to instance 1.
+
 ### Sharing one transport between controllers
 
 ```python

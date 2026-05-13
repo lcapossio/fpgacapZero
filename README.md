@@ -117,8 +117,9 @@ and readback behavior without switching cores.
 - Python 3.10+
 - Any FPGA board with JTAG access (tested on Arty A7-100T)
 - One of:
-  - [OpenOCD](https://openocd.org/) with FTDI support (any vendor), **or**
-  - Vivado/XSDB (2022.2+) for the Xilinx hw_server backend
+  - [OpenOCD](https://openocd.org/) with FTDI support,
+  - Vivado/XSDB (2022.2+) for the Xilinx hw_server backend, **or**
+  - Quartus Prime with `quartus_stp` for the Intel/Altera USB-Blaster backend
 
 ### Developer quick start
 
@@ -163,9 +164,10 @@ Clear / Copy all from the **File** menu.
 
 Connect runs in the background; **Cancel** stops the attempt by closing the
 transport (TCP/JTAG may take a moment to unwind if the server hung). The
-Connection panel sets **Connect timeout** (OpenOCD TCP, seconds) and **HW ready
-timeout** (after programming a `.bit`, seconds); both are stored in `gui.toml`
-under `[connection]` as `connect_timeout_sec` and `hw_ready_timeout_sec`.
+Connection panel sets **Connect timeout** (OpenOCD TCP / Quartus response
+timeout, seconds), **HW ready timeout** (after programming a `.bit` via
+hw_server, seconds), and USB-Blaster-specific **Quartus hardware** /
+**quartus_stp** fields; these are stored in `gui.toml` under `[connection]`.
 
 <p align="center">
   <img src="docs/assets/fcapz-gui-demo.png" alt="fcapz-gui desktop application showing connection, ELA capture controls, and log output" width="900">
@@ -198,6 +200,9 @@ fcapz --backend hw_server --port 3121 \
 # OpenOCD backend (program separately, then probe)
 openocd -f examples/arty_a7/arty_a7.cfg &
 fcapz --backend openocd --port 6666 probe
+
+# Quartus USB-Blaster backend (program separately, then probe)
+fcapz --backend usb_blaster --tap auto probe
 ```
 
 Sample output:
@@ -278,8 +283,9 @@ fcapz [global options] <command> [command options]
 | `--program` | *(none)* | Program FPGA with bitfile before command (hw_server) |
 
 For `usb_blaster`, auto device selection uses the first Quartus device named
-`@1...`; pass the exact Quartus device name with `--tap` for other chain
-positions.
+`@1...`; the default Xilinx TAP values (`xc7a100t` and `xc7a100t.tap`) are
+also treated as auto for USB-Blaster. Pass the exact Quartus device name with
+`--tap` for other chain positions.
 
 **Commands:**
 
@@ -555,7 +561,7 @@ for details.
 | Vendor | Primitive | User chains | ELA | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
 |--------|-----------|:-----------:|:---:|:---:|:---:|:---:|
 | **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
-| **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
+| **Intel** | sld_virtual_jtag | Unlimited | inst 1 control + inst 2 burst | inst 3 | inst 4 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
 | **Gowin** | GW_JTAG | One primitive; wrapper selects ER1 or ER2 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
@@ -602,6 +608,7 @@ from the RTL.
 |------|--------|
 | Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
 | OpenOCD backend | Implemented, needs more hardware validation |
+| Quartus USB-Blaster backend | Implemented and hardware-validated on DE25-Nano (Quartus Pro 26.1) |
 | Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
 | Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
@@ -793,7 +800,7 @@ fpgacapZero/
                              Behavioral vs primitive FIFO equivalence
   host/fcapz/
     analyzer.py              ELA API
-    transport.py             OpenOCD and hw_server transports
+    transport.py             OpenOCD, hw_server, and Quartus USB-Blaster transports
     cli.py, rpc.py           CLI and JSON-RPC entry points
     eio.py                   EIO controller
     ejtagaxi.py              AXI bridge controller

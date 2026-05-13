@@ -2,8 +2,8 @@
 
 > **Goal**: by the end of this chapter you will have the `fcapz`
 > command-line tool on your `PATH`, the Python package importable as
-> `import fcapz`, and a working JTAG transport (Vivado hw_server or
-> OpenOCD) ready to talk to a real board.
+> `import fcapz`, and a working JTAG transport (Vivado hw_server,
+> OpenOCD, or Quartus USB-Blaster) ready to talk to a real board.
 
 ## Prerequisites
 
@@ -20,6 +20,9 @@
   - **OpenOCD with FTDI support** — cross-platform, vendor-neutral.
     Install from your distro package manager (Linux), Homebrew
     (macOS), or [openocd.org](https://openocd.org/) (Windows).
+  - **Quartus Prime with `quartus_stp`** — required for Intel/Altera
+    USB-Blaster access through `sld_virtual_jtag`.  Quartus Prime Pro
+    26.1 has been hardware-validated on DE25-Nano.
 - **Optional**: `iverilog` if you want to run the RTL simulation
   testbenches locally.  Install from your distro or
   [iverilog.icarus.com](http://iverilog.icarus.com/).
@@ -95,10 +98,11 @@ walkthrough.
 
 ## Step 3: install a JTAG transport
 
-You need exactly one of the two transports below.  If you have a
+You need exactly one of the transports below.  If you have a
 Xilinx board and Vivado already installed, the hw_server path is the
 fast lane.  If you are on any other vendor or you do not want to
-install Vivado, use OpenOCD.
+install Vivado, use OpenOCD or Quartus USB-Blaster depending on the
+board and RTL wrapper.
 
 ### Option A: Xilinx hw_server (recommended for Xilinx boards)
 
@@ -166,9 +170,47 @@ fpgacapZero connects to that listener and issues raw `irscan` /
    ```
 
 OpenOCD is slower than hw_server (no batched scan support) and has
-not been as thoroughly hardware-validated, but it is the only option
-on non-Xilinx boards.  See [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+not been as thoroughly hardware-validated, but it is still useful on
+non-Xilinx boards with an OpenOCD-supported cable.  See
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md)
 for the OpenOCD validation gaps if you want to help close them.
+
+### Option C: Quartus USB-Blaster (Intel / Altera)
+
+Quartus Prime ships `quartus_stp`, which fpgacapZero uses to access
+Intel `sld_virtual_jtag` instances through a USB-Blaster cable.
+
+1. **Make sure `quartus_stp` is on your PATH**, or remember the full
+   path for `--quartus-stp` / the GUI field.  On Windows with Quartus
+   Pro 26.1 this is typically:
+   ```text
+   C:\altera_pro\26.1\quartus\bin64\quartus_stp.exe
+   ```
+
+2. **Confirm Quartus sees the board**:
+   ```bash
+   jtagconfig
+   ```
+   A DE25-Nano should look similar to:
+   ```text
+   1) DE25-Nano [USB-1]
+     4362C0DD   A5E(A013BB23B|B013BB23BCS)/..
+   ```
+
+3. **Smoke test an already-programmed fpgacapZero Intel bitstream**:
+   ```bash
+   fcapz --backend usb_blaster --tap auto probe
+   ```
+   If `quartus_stp` is not on PATH, pass it explicitly:
+   ```bash
+   fcapz --backend usb_blaster --tap auto \
+         --quartus-stp C:/altera_pro/26.1/quartus/bin64/quartus_stp.exe \
+         probe
+   ```
+
+`--tap auto` opens the first Quartus device whose name starts with
+`@1`.  If your FPGA is elsewhere in the JTAG chain, pass the exact
+Quartus device name with `--tap`.
 
 ## Step 4: get a fpgacapZero bitstream onto an FPGA
 

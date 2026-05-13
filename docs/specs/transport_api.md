@@ -1,7 +1,8 @@
 # Transport API — v0.4.0
 
 ## Purpose
-Abstracts access to the JTAG register map across different backends (Xilinx `hw_server`, OpenOCD, other vendors).
+Abstracts access to the JTAG register map across different backends (Xilinx
+`hw_server`, OpenOCD, Quartus USB-Blaster, other vendors).
 
 ## Interface (Python)
 ```python
@@ -86,10 +87,10 @@ instead of switching to USER2.
 - `select_chain()` / `raw_dr_scan(..., chain=...)` use the
   `sld_virtual_jtag` `instance_index` configured by the Intel RTL wrapper's
   `CHAIN` parameter. The default fcapz Intel control path is instance 1.
-- USB cable discovery, device open, and `fcapz probe` were exercised on a
-  DE25-Nano with Quartus Prime Lite 25.1std and an Intel `sld_virtual_jtag`
-  fcapz bitstream.
+- USB cable discovery, device open, `fcapz probe`, EIO access, and ELA capture
+  were exercised on a DE25-Nano with Quartus Prime Pro 26.1 and an Intel
+  `sld_virtual_jtag` fcapz bitstream.
 
 ### `VendorStubTransport`
-- Placeholder for future non-Xilinx backends.
+- Placeholder for future vendor backends.
 - Raises `NotImplementedError` on all operations.

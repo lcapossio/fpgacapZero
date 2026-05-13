@@ -14,7 +14,9 @@
 loaded, or the JTAG chain selected the wrong device.
 
 **Fix**:
-1. Confirm `hw_server` sees the board: `xsdb -eval "connect; targets"`.
+1. Confirm the transport sees the board: `xsdb -eval "connect; targets"`
+   for `hw_server`, or `jtagconfig` / `fcapz --backend usb_blaster --tap auto
+   probe` for Quartus USB-Blaster.
 2. Pass `bitfile=` to the transport so `connect()` programs it for you.
 3. Check `fpga_name` matches the actual part (`xc7a100t` vs `xc7a35t`).
 4. If you have multiple devices on the chain, use a more specific
@@ -22,6 +24,21 @@ loaded, or the JTAG chain selected the wrong device.
 
 See [chapter 16](16_versioning_and_release.md) for why this magic
 check exists.
+
+### Quartus USB-Blaster: `ERROR: The specified device is not found`
+
+**Cause**: Quartus found the cable but the device name passed to
+`open_device` did not match any device on that cable.  This often
+happens if a saved GUI/CLI config still contains a Xilinx target name
+such as `xc7a100t`.
+
+**Fix**:
+- Use `--tap auto` / GUI target `auto` for the common single-FPGA chain.
+- Run `jtagconfig` to see the Quartus hardware and device names.
+- If your FPGA is not the first `@1` device, pass the exact Quartus
+  device name with `--tap`.
+- If Quartus is not on PATH, set the GUI **quartus_stp** field or pass
+  `--quartus-stp C:/altera_pro/26.1/quartus/bin64/quartus_stp.exe`.
 
 ### `RuntimeError: EIO core identity check failed ... expected 0x494F ('IO')`
 

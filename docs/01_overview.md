@@ -165,9 +165,9 @@ automatically, applies the readiness wait after programming the FPGA,
 and surfaces protocol errors with actionable messages.  Bypassing it
 loses all of that.
 
-## Two JTAG transports
+## Three JTAG transports
 
-The host stack supports two JTAG transports out of the box:
+The host stack supports three JTAG transports out of the box:
 
 - **Xilinx hw_server / XSDB** — the default for Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
@@ -178,12 +178,16 @@ The host stack supports two JTAG transports out of the box:
   on any board.  Slower than hw_server but vendor-neutral.  Talks to
   OpenOCD's TCL listener (default `localhost:6666`) and uses raw
   `irscan` / `drscan` commands.
+- **Quartus USB-Blaster / `quartus_stp`** - Intel/Altera virtual
+  JTAG access through Quartus Prime.  Uses `sld_virtual_jtag`
+  instance indices from the Intel RTL wrapper `CHAIN` parameters.
+  Hardware-validated on DE25-Nano with Quartus Prime Pro 26.1.
 
-Both transports implement the same `Transport` abstract base class,
+All transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To
-add a third (e.g. raw TCF for lower per-scan overhead, or USB-Blaster
-direct), implement the ABC and you are done — no other code changes
-needed.  See [chapter 14](14_transports.md) and
+add another backend (e.g. raw TCF for lower per-scan overhead or a
+direct USB stack), implement the ABC and you are done — no other code
+changes needed.  See [chapter 14](14_transports.md) and
 [`specs/transport_api.md`](specs/transport_api.md).
 
 ## Vendor support matrix
@@ -193,7 +197,7 @@ needed.  See [chapter 14](14_transports.md) and
 | Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
 | Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
-| Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ❌ |
+| Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | DE25-Nano / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 

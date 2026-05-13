@@ -1,11 +1,10 @@
 # 14 — Transports
 
-> **Goal**: understand the `Transport` abstract base class, the two
-> built-in backends (Xilinx hw_server and OpenOCD), the named
-> `IR_TABLE_*` presets that handle the per-family IR opcode
-> differences, the readiness wait that catches "FPGA isn't
-> programmed yet", the TCL injection prevention, and how to add a
-> new transport for a vendor we don't ship today.
+> **Goal**: understand the `Transport` abstract base class, the built-in
+> backends (Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
+> `IR_TABLE_*` presets that handle the Xilinx per-family IR opcode
+> differences, the readiness wait that catches "FPGA isn't programmed yet",
+> the TCL injection prevention, and how to add a new transport.
 >
 > **Audience**: anyone whose default transport doesn't work for
 > their board, or anyone porting fcapz to a new JTAG cable / TCF /
@@ -64,7 +63,7 @@ The full ABC contract is documented in
 [`specs/transport_api.md`](specs/transport_api.md) — it's the
 spec you implement against if you're adding a new backend.
 
-## The two built-in transports
+## The built-in transports
 
 ### `XilinxHwServerTransport`
 
@@ -180,6 +179,50 @@ OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
 
+### `QuartusStpTransport`
+
+Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus
+virtual JTAG commands to reach Intel/Altera `sld_virtual_jtag` instances.
+This is the built-in path for USB-Blaster / USB-Blaster II cables.
+
+```python
+from fcapz.transport import QuartusStpTransport
+
+t = QuartusStpTransport(
+    hardware_name="DE25-Nano [USB-1]",     # optional when one cable is present
+    device_name=None,                      # None / auto selects first @1 device
+    quartus_stp_path=None,                 # or full path to quartus_stp.exe
+)
+t.connect()
+```
+
+The Intel RTL wrapper sets:
+
+```verilog
+.sld_auto_instance_index ("NO"),
+.sld_instance_index      (CHAIN),
+.sld_ir_width            (1)
+```
+
+That means host-side `select_chain()` uses the RTL `CHAIN` parameter,
+not a zero-based Python index.  The default fcapz Intel control path
+is instance 1; EIO and other subsidiary cores use their own wrapper
+parameters.
+
+`QuartusStpTransport` keeps a persistent `quartus_stp` process, frames
+each Tcl request with sentinels, and uses `device_lock` around composite
+operations so a read transaction is not interleaved with SignalTap,
+Programmer, or another Quartus Tcl session.  `read_reg()`,
+`read_block()`, and `raw_dr_scan_batch()` are emitted as single locked
+Tcl blocks where atomicity matters.
+
+Auto device selection opens the first Quartus device whose name starts
+with `@1`.  If the FPGA is at another JTAG position, pass the exact
+Quartus device name as `device_name` / CLI `--tap`.  The CLI and GUI
+treat `auto`, an empty tap, `xc7a100t`, and `xc7a100t.tap` as auto for
+USB-Blaster so older Xilinx defaults do not get passed to Quartus as
+literal device names.
+
 ## IR table presets
 
 Different Xilinx families use different IR opcodes for the BSCANE2
@@ -188,7 +231,7 @@ mapping `chain_index` (1..4) → `ir_opcode` (e.g. `0x02`).  The
 controllers call `transport.select_chain(N)` and the transport
 looks up the opcode in the table.
 
-To save users from looking up the codes, both transports expose
+To save users from looking up the codes, both Xilinx-style transports expose
 named class-level presets:
 
 ```python
@@ -202,7 +245,7 @@ XilinxHwServerTransport.IR_TABLE_US        # alias for IR_TABLE_XILINX_ULTRASCAL
 ```
 
 `OpenOcdTransport` exposes the same three constants under the same
-names — both transports use identical preset shapes so you can
+names — both Xilinx-style transports use identical preset shapes so you can
 swap one for the other without changing the IR table.
 
 ### When to use which
@@ -594,10 +637,17 @@ slower than `hw_server` per scan because OpenOCD's TCL listener has
 limited batched-scan support, but the delta is not documented until
 somebody benchmarks it.
 
+**Quartus USB-Blaster:** hardware probe/capture is validated on
+DE25-Nano with Quartus Prime Pro 26.1.  Latency depends heavily on
+Quartus Tcl startup and USB-Blaster speed; `QuartusStpTransport` keeps
+one `quartus_stp` process alive and batches composite reads under one
+`device_lock` to avoid avoidable round trips.
+
 The bottleneck on the measured path is JTAG round-trip latency through
-the tooling, not the RTL.  The fastest path today is hw_server with
-batched scans.  A future raw-TCF transport (bypassing xsdb) could cut
-per-scan overhead further on Xilinx boards.  See the TODO roadmap.
+the tooling, not the RTL.  The fastest measured Xilinx path today is
+hw_server with batched scans.  A future raw-TCF transport (bypassing
+xsdb) could cut per-scan overhead further on Xilinx boards.  See the
+TODO roadmap.
 
 ## What's next
 

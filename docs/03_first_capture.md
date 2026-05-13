@@ -12,6 +12,12 @@
 > and optionally GTKWave / Surfer / WaveTrace on PATH for external
 > waveform viewing.
 
+This walkthrough uses the Arty A7 / Xilinx `hw_server` reference
+design.  For Intel/Altera boards, use the same GUI capture panels
+after choosing the `usb_blaster` backend and loading a bitstream that
+instantiates the Intel wrappers; see [chapter 02](02_install.md) and
+[chapter 14](14_transports.md).
+
 
 ## Step 1: build the reference bitstream
 

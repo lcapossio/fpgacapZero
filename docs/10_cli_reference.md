@@ -51,11 +51,18 @@ fcapz --backend openocd --tap my_custom_chip.tap probe
 
 # Intel/Altera virtual JTAG through Quartus and USB-Blaster
 fcapz --backend usb_blaster --tap auto probe
+
+# Same, when quartus_stp is not on PATH
+fcapz --backend usb_blaster --tap auto \
+      --quartus-stp C:/altera_pro/26.1/quartus/bin64/quartus_stp.exe \
+      probe
 ```
 
 For `usb_blaster`, auto device selection chooses the first Quartus device whose
-name starts with `@1`. If the FPGA is elsewhere in the JTAG chain, pass the
-exact Quartus device name with `--tap`.
+name starts with `@1`. The default Xilinx TAP values (`xc7a100t` and
+`xc7a100t.tap`) are also treated as auto for USB-Blaster so old saved GUI/CLI
+settings do not get passed to Quartus as literal device names. If the FPGA is
+elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 
 ## Subcommands at a glance
 
