@@ -100,6 +100,13 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertFalse(p._ir.isEnabled())
         self.assertTrue(p._hardware.isEnabled())
 
+    def test_usb_blaster_rewrites_legacy_xilinx_tap_to_auto(self) -> None:
+        p = ConnectionPanel()
+
+        p.load_from_settings(ConnectionSettings(backend="usb_blaster", tap="xc7a100t"))
+
+        self.assertEqual(p.connection_settings().tap, "auto")
+
     @patch("fcapz.gui.connection_panel.QMessageBox.information")
     def test_scan_finish_reports_empty_targets(self, info_box) -> None:
         p = ConnectionPanel()

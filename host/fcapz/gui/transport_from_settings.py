@@ -13,6 +13,8 @@ from ..transport import (
 )
 from .settings import ConnectionSettings, ir_table_preset
 
+_USB_BLASTER_AUTO_TAPS = {"", "auto", "xc7a100t", "xc7a100t.tap"}
+
 
 def _hw_server_chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     """Mirror CLI auto-selection for common hw_server target families."""
@@ -64,7 +66,7 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
         )
     if conn.backend == "usb_blaster":
         tap = conn.tap.strip()
-        device_name = None if tap in ("", "auto", "xc7a100t.tap") else tap
+        device_name = None if tap in _USB_BLASTER_AUTO_TAPS else tap
         return QuartusStpTransport(
             hardware_name=conn.hardware,
             device_name=device_name,

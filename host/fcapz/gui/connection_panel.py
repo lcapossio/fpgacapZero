@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 from .settings import ConnectionSettings
 from .worker import TargetScanWorker
 
+_USB_BLASTER_AUTO_TAPS = {"xc7a100t", "xc7a100t.tap"}
+
 
 class ConnectionPanel(QGroupBox):
     """Transport parameters, connect/disconnect, and optional bitfile for hw_server."""
@@ -206,7 +208,7 @@ class ConnectionPanel(QGroupBox):
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
         self._scan_targets_btn.setEnabled(is_hw and not self._connected)
-        if is_usb and self._tap_text() == "xc7a100t.tap":
+        if is_usb and self._tap_text() in _USB_BLASTER_AUTO_TAPS:
             self._set_tap_text("auto")
         self._refresh_timeout_row_state()
 

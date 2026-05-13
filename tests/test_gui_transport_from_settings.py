@@ -118,6 +118,14 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t._quartus_stp_path, r"C:\altera_lite\quartus\bin64\quartus_stp.exe")
         self.assertEqual(t.read_timeout_sec, 42.0)
 
+    def test_usb_blaster_legacy_xilinx_tap_defaults_to_auto_device(self) -> None:
+        for tap in ("xc7a100t", "xc7a100t.tap"):
+            with self.subTest(tap=tap):
+                c = ConnectionSettings(backend="usb_blaster", tap=tap)
+                t = transport_from_connection(c)
+                self.assertIsInstance(t, QuartusStpTransport)
+                self.assertIsNone(t.device_name)
+
     def test_usb_blaster_explicit_tap_is_device_name(self) -> None:
         c = ConnectionSettings(
             backend="usb_blaster",
