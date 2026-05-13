@@ -302,13 +302,15 @@ class QuartusStpTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-binary"):
             QuartusStpTransport._shift_string_to_int("0x5", 4)
 
-    def test_select_chain_accepts_zero_based_instance_indices(self):
+    def test_select_chain_accepts_rtl_chain_instance_indices(self):
         t = QuartusStpTransport()
-        self.assertEqual(t._active_chain, 0)
-        t.select_chain(0)
-        self.assertEqual(t._active_chain, 0)
+        self.assertEqual(t._active_chain, 1)
+        t.select_chain(1)
+        self.assertEqual(t._active_chain, 1)
+        t.select_chain(3)
+        self.assertEqual(t._active_chain, 3)
         with self.assertRaises(ValueError):
-            t.select_chain(-1)
+            t.select_chain(0)
 
     def test_raw_dr_scan_emits_unlock_outside_inner_catch(self):
         scripts: list[str] = []
@@ -454,10 +456,10 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return "0" * 49
 
         t = FakeQuartus()
-        t.select_chain(0)
+        t.select_chain(1)
         t.raw_dr_scan(0, 49, chain=5)
         self.assertIn("-instance_index 5", scripts[-1])
-        self.assertEqual(t._active_chain, 0)
+        self.assertEqual(t._active_chain, 1)
 
     def test_raw_scan_batch_chain_override_does_not_mutate_active_chain(self):
         scripts: list[str] = []
@@ -468,10 +470,10 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return "0000"
 
         t = FakeQuartus()
-        t.select_chain(0)
+        t.select_chain(1)
         t.raw_dr_scan_batch([(0, 4)], chain=3)
         self.assertIn("-instance_index 3", scripts[-1])
-        self.assertEqual(t._active_chain, 0)
+        self.assertEqual(t._active_chain, 1)
 
     def test_read_reg_uses_configurable_lock_timeout_and_idle_cycles(self):
         scripts: list[str] = []
@@ -485,6 +487,23 @@ class QuartusStpTransportTests(unittest.TestCase):
         t.read_reg(0x20)
         self.assertIn("device_lock -timeout 5000", scripts[0])
         self.assertIn("device_run_test_idle -num_clocks 42", scripts[0])
+
+    def test_virtual_ir_result_is_discarded(self):
+        script = QuartusStpTransport()._virtual_ir_tcl(1)
+        self.assertIn("set __fcapz_ir_discard [device_virtual_ir_shift", script)
+        self.assertIn("-no_captured_ir_value]", script)
+
+    def test_send_returns_final_non_error_result_line(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("tcl> 0\n")
+        t._stdout_lines.put("tcl> 0001\n")
+        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
 
     def test_read_block_uses_one_lock_window(self):
         scripts: list[str] = []

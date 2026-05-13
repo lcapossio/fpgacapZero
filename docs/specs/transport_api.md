@@ -83,13 +83,12 @@ instead of switching to USER2.
 - Uses Quartus virtual JTAG Tcl commands against `sld_virtual_jtag`:
   `device_virtual_ir_shift`, `device_virtual_dr_shift`, and
   `device_run_test_idle`.
-- `select_chain()` / `raw_dr_scan(..., chain=...)` use the zero-based
-  `sld_virtual_jtag` `instance_index`, not the 1-based USER-chain convention
-  used by Xilinx/OpenOCD transports.
-- USB cable discovery and device open were exercised on a DE25-Nano with
-  Quartus Prime Lite 25.1std. Full fcapz register access still needs hardware
-  validation with a bitstream that instantiates the Intel `sld_virtual_jtag`
-  wrapper.
+- `select_chain()` / `raw_dr_scan(..., chain=...)` use the
+  `sld_virtual_jtag` `instance_index` configured by the Intel RTL wrapper's
+  `CHAIN` parameter. The default fcapz Intel control path is instance 1.
+- USB cable discovery, device open, and `fcapz probe` were exercised on a
+  DE25-Nano with Quartus Prime Lite 25.1std and an Intel `sld_virtual_jtag`
+  fcapz bitstream.
 
 ### `VendorStubTransport`
 - Placeholder for future non-Xilinx backends.

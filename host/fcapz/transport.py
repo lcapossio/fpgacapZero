@@ -193,7 +193,7 @@ class Transport(ABC):
 
         For Xilinx/OpenOCD transports this is the BSCANE2 USER chain number
         mapped through the backend's IR table.  For virtual-JTAG transports it
-        may be the vendor instance identifier, such as Intel's zero-based
+        may be the vendor instance identifier, such as Intel's
         ``sld_virtual_jtag`` ``instance_index``.
 
         Subclasses that support multi-chain access must override this.
@@ -210,8 +210,8 @@ class Transport(ABC):
         is given it overrides the active chain for this scan only.  The chain
         value is transport-specific: Xilinx/OpenOCD transports use the
         user-chain number that maps through their IR table, while Intel
-        Quartus/USB-Blaster uses the zero-based ``sld_virtual_jtag``
-        ``instance_index``.
+        Quartus/USB-Blaster uses the ``sld_virtual_jtag`` ``instance_index``
+        configured by the Intel RTL wrapper's ``CHAIN`` parameter.
 
         Subclasses that expose raw JTAG DR access must override this.
         Raises ``NotImplementedError`` on transports that do not support it.
@@ -429,7 +429,7 @@ class QuartusStpTransport(Transport):
         if read_timeout_sec is None:
             read_timeout_sec = float(os.environ.get("FCAPZ_QUARTUS_TIMEOUT", "60"))
         self.read_timeout_sec = float(read_timeout_sec)
-        self._active_chain: int = 0
+        self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stdout_thread: threading.Thread | None = None
@@ -500,8 +500,8 @@ class QuartusStpTransport(Transport):
         self._poisoned = True
 
     def select_chain(self, chain: int) -> None:
-        if chain < 0:
-            raise ValueError(f"virtual JTAG instance index must be >= 0, got {chain}")
+        if chain < 1:
+            raise ValueError(f"virtual JTAG instance index must be >= 1, got {chain}")
         self._active_chain = chain
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
@@ -619,17 +619,17 @@ class QuartusStpTransport(Transport):
         return [self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF for token in tokens]
 
     def _validate_instance(self, instance: int) -> None:
-        if instance < 0:
+        if instance < 1:
             raise ValueError(
-                f"virtual JTAG instance index must be >= 0, got {instance}"
+                f"virtual JTAG instance index must be >= 1, got {instance}"
             )
 
     def _virtual_ir_tcl(self, instance: int) -> str:
         return (
-            "device_virtual_ir_shift "
+            "set __fcapz_ir_discard [device_virtual_ir_shift "
             f"-instance_index {instance} "
             f"-ir_value {self.VIRTUAL_IR_VALUE} "
-            "-no_captured_ir_value"
+            "-no_captured_ir_value]"
         )
 
     def _dr_shift_tcl(self, instance: int, bits: int, width: int, result_var: str) -> str:
@@ -753,14 +753,13 @@ class QuartusStpTransport(Transport):
                     break
                 if line:
                     lines.append(line)
-        out = "\n".join(lines).strip()
         first_error = next(
             (idx for idx, line in enumerate(lines) if line.startswith("ERROR: ")),
             None,
         )
         if first_error is not None:
             raise RuntimeError("\n".join(lines[first_error:]))
-        return out
+        return lines[-1].strip() if lines else ""
 
     @staticmethod
     def _strip_quartus_prompt(line: str) -> str:
