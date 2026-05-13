@@ -8,71 +8,107 @@
 //
 // Gowin devices expose user logic through one GW_JTAG primitive per design.
 // That primitive provides two user DR chains (ER1/ER2, selected by IR
-// 0x42/0x43 on the devices checked so far).  CHAIN selects which ER this
-// wrapper instance routes, but do not instantiate multiple standalone Gowin
-// fcapz wrappers in the same design unless you refactor them to share one
-// GW_JTAG instance.
+// 0x42/0x43 on the devices checked so far).
 
 module jtag_tap_gowin #(
-    parameter CHAIN = 1
 ) (
-    output wire tck,
-    output wire tdi,
-    input  wire tdo,
-    output wire capture,
-    output wire shift,
-    output wire update,
-    output wire sel
+    output reg          tck,
+    output reg          tdi,
+    input  reg  [1:0]   tdo,
+    output reg  [1:0]   capture,
+    output reg  [1:0]   shift,
+    output reg  [1:0]   update,
+    output reg  [1:0]   sel,
+
+    input  wire         tms_pad_i,
+    input  wire         tck_pad_i,
+    input  wire         tdi_pad_i,
+    output wire         tdo_pad_o
 );
 
-    wire jtck, jtdi;
-    wire jreset;
-    wire jrti1, jrti2;
-    wire jshift_capture, jupdate;
-    wire jpause;
-    wire jce1, jce2;
+    wire jtck;
+    wire jtdi;
+    wire jshift_capture;
+    wire jupdate;
+    wire jce1;
+    wire jce2;
 
-    generate
-        if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
-            // Synthesis/iverilog trip on the unresolved module; Verilator
-            // evaluates the initial $error path during --lint-only.
-`ifndef VERILATOR
-            __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ u_invalid_chain();
-`endif
-            initial begin
-                $error("jtag_tap_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
-                $finish;
-            end
-        end
-    endgenerate
+    reg jupdate_d1;
+    reg jtdi_l;
+    reg sreg;
+    reg jhold;
 
     GW_JTAG u_jtag (
-        .tck_o                (jtck),
-        .tdi_o                (jtdi),
-        .test_logic_reset_o   (jreset),
-        .run_test_idle_er1_o  (jrti1),
-        .run_test_idle_er2_o  (jrti2),
-        .shift_dr_capture_dr_o(jshift_capture),
-        .pause_dr_o           (jpause),
-        .update_dr_o          (jupdate),
-        .enable_er1_o         (jce1),
-        .enable_er2_o         (jce2),
-        .tdo_er1_i            ((CHAIN == 1) ? tdo : 1'b0),
-        .tdo_er2_i            ((CHAIN == 2) ? tdo : 1'b0)
+        .tck_pad_i              (tck_pad_i),
+        .tms_pad_i              (tms_pad_i),
+        .tdi_pad_i              (tdi_pad_i),
+        .tdo_pad_o              (tdo_pad_o),
+        .tck_o                  (jtck),
+        .tdi_o                  (jtdi),
+        .test_logic_reset_o     (),
+        .run_test_idle_er1_o    (),
+        .run_test_idle_er2_o    (),
+        .shift_dr_capture_dr_o  (jshift_capture),
+        .pause_dr_o             (),
+        .update_dr_o            (jupdate),
+        .enable_er1_o           (jce1),
+        .enable_er2_o           (jce2),
+        .tdo_er1_i              (tdo[0]),
+        .tdo_er2_i              (tdo[1])
     );
 
-    assign tck     = jtck;
-    assign tdi     = jtdi;
-    assign shift   = jshift_capture & ~jpause;
-    assign update  = jupdate;
-    assign sel     = (CHAIN == 1) ? jce1 : jce2;
+    always_comb begin
+        tck = jtck;
 
-    // GW_JTAG combines CAPTURE-DR and SHIFT-DR into one pulse/level, so
-    // derive the one-cycle capture strobe from the selected chain enable
-    // rising edge.  Gate PAUSE-DR out so a pause/resume sequence cannot
-    // look like a fresh CAPTURE-DR to the register interface.
-    reg sel_prev;
-    always @(posedge jtck) sel_prev <= sel;
-    assign capture = sel & ~sel_prev & jshift_capture & ~jpause;
+        if (jshift_capture == 1'b1) begin
+            tdi = jtdi;
+        end else begin
+            tdi = jtdi_l;
+        end
+    end
+
+    always @(posedge jtck) begin
+        if (jshift_capture == 1'b1) begin
+            jtdi_l <= jtdi;
+        end
+    end
+
+    always @(posedge jtck) begin
+        // defaults
+        jupdate_d1 <= jupdate;
+
+        if (jshift_capture == 1'b1) begin
+            jhold <= 1'b1;
+        end else if ((jupdate == 1'b0) && (jupdate_d1 == 1'b1)) begin
+            jhold <= 1'b0;
+        end
+    end
+
+    always_comb begin
+        capture[0]  = jce1 & (~jshift_capture) & (~jhold);
+        capture[1]  = jce2 & (~jshift_capture) & (~jhold);
+
+        shift[0]    = jce1 & jshift_capture;
+        shift[1]    = jce2 & jshift_capture;
+    end
+
+    always @(posedge jtck) begin
+        if (jshift_capture == 1'b1) begin
+            if (jce1 == 1'b1) begin
+                sreg <= 1'b0;
+            end
+            if (jce2 == 1'b1) begin
+                sreg <= 1'b1;
+            end
+        end
+    end
+
+    always_comb begin
+        update[0]   = jupdate & ~sreg;
+        update[1]   = jupdate & sreg;
+
+        sel[0]      = jce1;
+        sel[1]      = jce2;
+    end
 
 endmodule
