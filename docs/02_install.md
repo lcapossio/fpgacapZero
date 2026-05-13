@@ -21,9 +21,9 @@
     Install from your distro package manager (Linux), Homebrew
     (macOS), or [openocd.org](https://openocd.org/) (Windows).
   - **Quartus Prime with `quartus_stp`** — required for Intel/Altera
-    USB-Blaster access through `sld_virtual_jtag`.  Quartus Prime Pro
-    26.1 has been hardware-validated on DE25-Nano; Lite is expected to
-    work but has not been re-validated on this branch.
+    USB-Blaster access through `sld_virtual_jtag`.  See
+    [`specs/transport_api.md`](specs/transport_api.md) for the
+    hardware-validated Quartus edition.
 - **Optional**: `iverilog` if you want to run the RTL simulation
   testbenches locally.  Install from your distro or
   [iverilog.icarus.com](http://iverilog.icarus.com/).

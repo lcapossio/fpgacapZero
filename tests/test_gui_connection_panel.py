@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -99,6 +101,7 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertFalse(p._port.isEnabled())
         self.assertFalse(p._ir.isEnabled())
         self.assertFalse(p._tcp_timeout.isEnabled())
+        self.assertTrue(p._tcp_timeout.isHidden())
         self.assertTrue(p._hardware.isEnabled())
         self.assertFalse(p._hardware.isHidden())
         self.assertFalse(p._quartus_row.isHidden())
@@ -124,6 +127,28 @@ class TestConnectionPanel(unittest.TestCase):
 
         self.assertTrue(p._hardware.isHidden())
         self.assertTrue(p._quartus_row.isHidden())
+        self.assertFalse(p._tcp_timeout.isHidden())
+
+    def test_quartus_stp_dialog_uses_current_path_parent(self) -> None:
+        p = ConnectionPanel()
+
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / "quartus_stp.exe"
+            exe.write_text("", encoding="utf-8")
+            p._quartus_stp.setText(str(exe))
+
+            self.assertEqual(p._quartus_stp_dialog_dir(), str(Path(td)))
+
+    def test_quartus_stp_dialog_uses_quartus_rootdir(self) -> None:
+        p = ConnectionPanel()
+
+        with tempfile.TemporaryDirectory() as td:
+            quartus_root = Path(td) / "26.1" / "quartus"
+            bin_dir = quartus_root / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "quartus_stp").write_text("", encoding="utf-8")
+            with patch.dict("os.environ", {"QUARTUS_ROOTDIR": str(quartus_root)}):
+                self.assertEqual(p._quartus_stp_dialog_dir(), str(bin_dir))
 
     @patch("fcapz.gui.connection_panel.QMessageBox.information")
     def test_scan_finish_reports_empty_targets(self, info_box) -> None:

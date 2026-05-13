@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..transport import QuartusStpTransport
+from ..transport import QUARTUS_AUTO_DEVICE_TAPS
 from .settings import ConnectionSettings
 from .worker import TargetScanWorker
 
@@ -71,9 +73,9 @@ class ConnectionPanel(QGroupBox):
         self._ir.addItem("UltraScale+", "ultrascale")
 
         self._hardware = QLineEdit()
-        self._hardware.setPlaceholderText("auto or DE25-Nano [USB-1]")
+        self._hardware.setPlaceholderText("auto or <board name> [USB-N]")
         self._hardware.setToolTip(
-            "Quartus hardware name, typically like 'DE25-Nano [USB-1]'. "
+            "Quartus hardware name, typically like '<board name> [USB-N]'. "
             "Leave empty to auto-select when exactly one Quartus JTAG cable is present.",
         )
 
@@ -179,11 +181,12 @@ class ConnectionPanel(QGroupBox):
         form.addRow("IR table", self._ir)
         self._hardware_label = QLabel("Quartus hardware")
         self._quartus_stp_label = QLabel("quartus_stp")
+        self._tcp_timeout_label = QLabel("Connect timeout")
         form.addRow(self._hardware_label, self._hardware)
         form.addRow(self._quartus_stp_label, quartus_row)
         form.addRow("", self._program_on_connect)
         form.addRow("Bitfile path", prog_row)
-        form.addRow("Connect timeout", self._tcp_timeout)
+        form.addRow(self._tcp_timeout_label, self._tcp_timeout)
         form.addRow("HW ready timeout", self._hw_ready)
         form.addRow("Post-program delay", self._post_program_ms)
         form.addRow("Ready poll interval", self._ready_poll_ms)
@@ -201,6 +204,7 @@ class ConnectionPanel(QGroupBox):
         is_hw = backend == "hw_server"
         is_usb = backend == "usb_blaster"
         self._set_quartus_rows_visible(is_usb)
+        self._set_tcp_timeout_row_visible(not is_usb)
         self._host.setEnabled(not is_usb)
         self._port.setEnabled(not is_usb)
         self._ir.setEnabled(not is_usb)
@@ -211,7 +215,7 @@ class ConnectionPanel(QGroupBox):
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
         self._scan_targets_btn.setEnabled(is_hw and not self._connected)
-        if is_usb and self._tap_text() in QuartusStpTransport.AUTO_DEVICE_TAPS:
+        if is_usb and self._tap_text() in QUARTUS_AUTO_DEVICE_TAPS:
             self._set_tap_text("auto")
         self._refresh_timeout_row_state()
 
@@ -220,6 +224,10 @@ class ConnectionPanel(QGroupBox):
         self._hardware.setVisible(visible)
         self._quartus_stp_label.setVisible(visible)
         self._quartus_row.setVisible(visible)
+
+    def _set_tcp_timeout_row_visible(self, visible: bool) -> None:
+        self._tcp_timeout_label.setVisible(visible)
+        self._tcp_timeout.setVisible(visible)
 
     def _scan_targets(self) -> None:
         if self._scan_thread is not None and self._scan_thread.isRunning():
@@ -350,6 +358,12 @@ class ConnectionPanel(QGroupBox):
             parent = Path(current).expanduser().parent
             if parent.is_dir():
                 return str(parent)
+        for env_name in ("QUARTUS_ROOTDIR", "QUARTUS_ROOTDIR_OVERRIDE"):
+            root = os.environ.get(env_name)
+            if root:
+                found = self._find_quartus_stp_dir(Path(root))
+                if found:
+                    return found
         for root in (
             Path("C:/altera_pro"),
             Path("C:/intelFPGA_pro"),
@@ -358,12 +372,33 @@ class ConnectionPanel(QGroupBox):
             Path("/opt/intelFPGA_lite"),
             Path("/opt/altera"),
         ):
-            if root.is_dir():
-                matches = sorted(root.glob("*/quartus/bin64/quartus_stp*"), reverse=True)
-                if matches:
-                    return str(matches[0].parent)
-                return str(root)
+            found = self._find_quartus_stp_dir(root)
+            if found:
+                return found
         return ""
+
+    def _find_quartus_stp_dir(self, root: Path) -> str | None:
+        root = root.expanduser()
+        if not root.is_dir():
+            return None
+        matches: list[Path] = []
+        for pattern in (
+            "bin64/quartus_stp*",
+            "bin/quartus_stp*",
+            "quartus/bin64/quartus_stp*",
+            "quartus/bin/quartus_stp*",
+            "*/quartus/bin64/quartus_stp*",
+            "*/quartus/bin/quartus_stp*",
+        ):
+            matches.extend(p for p in root.glob(pattern) if p.is_file())
+        if matches:
+            return str(max(matches, key=self._quartus_path_version_key).parent)
+        return str(root)
+
+    @staticmethod
+    def _quartus_path_version_key(path: Path) -> tuple[int, ...]:
+        nums = [int(n) for n in re.findall(r"\d+", str(path))]
+        return tuple(nums) if nums else (0,)
 
     def _on_connect_clicked(self) -> None:
         err = self._validate()
@@ -458,7 +493,8 @@ class ConnectionPanel(QGroupBox):
         self._ready_poll_ms.setValue(
             int(max(5, min(500, round(conn.hw_ready_poll_interval_ms))))
         )
-        # Re-run after fields are populated so legacy TAP migration sees the loaded value.
+        # Changing the backend can fire _on_backend_changed before the saved TAP
+        # is loaded; run it again now so legacy TAP migration sees final fields.
         self._on_backend_changed()
 
     def set_connected(self, connected: bool, message: str | None = None) -> None:
@@ -475,6 +511,7 @@ class ConnectionPanel(QGroupBox):
         is_hw = backend == "hw_server"
         is_usb = backend == "usb_blaster"
         self._set_quartus_rows_visible(is_usb)
+        self._set_tcp_timeout_row_visible(not is_usb)
         self._host.setEnabled(editable and not is_usb)
         self._port.setEnabled(editable and not is_usb)
         self._ir.setEnabled(editable and not is_usb)

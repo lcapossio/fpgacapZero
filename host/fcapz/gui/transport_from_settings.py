@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from ..transport import (
+    QUARTUS_AUTO_DEVICE_TAPS,
     OpenOcdTransport,
     QuartusStpTransport,
     Transport,
@@ -64,7 +65,7 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
         )
     if conn.backend == "usb_blaster":
         tap = conn.tap.strip()
-        device_name = None if tap in QuartusStpTransport.AUTO_DEVICE_TAPS else tap
+        device_name = None if tap in QUARTUS_AUTO_DEVICE_TAPS else tap
         return QuartusStpTransport(
             hardware_name=conn.hardware,
             device_name=device_name,

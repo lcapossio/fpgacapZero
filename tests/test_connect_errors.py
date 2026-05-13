@@ -57,6 +57,15 @@ class TestFormatConnectError(unittest.TestCase):
         self.assertIn("first available Quartus cable", msg)
         self.assertIn("first @1 device", msg)
 
+    def test_usb_blaster_timeout_mentions_quartus_not_tcp(self) -> None:
+        conn = ConnectionSettings(backend="usb_blaster", tap="auto")
+
+        msg = format_connect_error(TimeoutError(), conn)
+
+        self.assertIn("Quartus", msg)
+        self.assertIn("FCAPZ_QUARTUS_TIMEOUT", msg)
+        self.assertNotIn("TCP/socket", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

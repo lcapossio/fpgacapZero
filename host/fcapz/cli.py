@@ -14,7 +14,12 @@ from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, QuartusStpTransport, XilinxHwServerTransport
+from .transport import (
+    QUARTUS_AUTO_DEVICE_TAPS,
+    OpenOcdTransport,
+    QuartusStpTransport,
+    XilinxHwServerTransport,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -226,7 +231,7 @@ def _make_transport(args: argparse.Namespace):
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )
     if args.backend == "usb_blaster":
-        device_name = None if args.tap in QuartusStpTransport.AUTO_DEVICE_TAPS else args.tap
+        device_name = None if args.tap in QUARTUS_AUTO_DEVICE_TAPS else args.tap
         return QuartusStpTransport(
             hardware_name=getattr(args, "hardware", None),
             device_name=device_name,

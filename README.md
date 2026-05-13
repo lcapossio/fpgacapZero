@@ -608,7 +608,7 @@ from the RTL.
 |------|--------|
 | Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
 | OpenOCD backend | Implemented, needs more hardware validation |
-| Quartus USB-Blaster backend | Implemented and hardware-validated on DE25-Nano (Quartus Pro 26.1; Lite expected but not re-validated) |
+| Quartus USB-Blaster backend | Implemented and hardware-validated on DE25-Nano; see [`docs/specs/transport_api.md`](docs/specs/transport_api.md) for validated Quartus editions |
 | Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
 | Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |

@@ -638,12 +638,11 @@ limited batched-scan support, but the delta is not documented until
 somebody benchmarks it.
 
 **Quartus USB-Blaster:** hardware probe/capture is validated on
-DE25-Nano with Quartus Prime Pro 26.1.  Quartus Lite is expected to use
-the same `quartus_stp` virtual-JTAG commands, but this branch was not
-re-validated on Lite.  Latency depends heavily on Quartus Tcl startup
-and USB-Blaster speed; `QuartusStpTransport` keeps one `quartus_stp`
-process alive and batches composite reads under one `device_lock` to
-avoid avoidable round trips.
+DE25-Nano; see [`specs/transport_api.md`](specs/transport_api.md) for
+the tested Quartus edition.  Latency depends heavily on Quartus Tcl
+startup and USB-Blaster speed; `QuartusStpTransport` keeps one
+`quartus_stp` process alive and batches composite reads under one
+`device_lock` to avoid avoidable round trips.
 
 The bottleneck on the measured path is JTAG round-trip latency through
 the tooling, not the RTL.  The fastest measured Xilinx path today is
