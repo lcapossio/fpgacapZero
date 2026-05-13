@@ -89,7 +89,8 @@ instead of switching to USER2.
   `CHAIN` parameter. The default fcapz Intel control path is instance 1.
 - USB cable discovery, device open, `fcapz probe`, EIO access, and ELA capture
   were exercised on a DE25-Nano with Quartus Prime Pro 26.1 and an Intel
-  `sld_virtual_jtag` fcapz bitstream.
+  `sld_virtual_jtag` fcapz bitstream.  Quartus Lite is expected to work with
+  the same Tcl commands, but this branch was not re-validated on Lite.
 
 ### `VendorStubTransport`
 - Placeholder for future vendor backends.

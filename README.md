@@ -164,10 +164,10 @@ Clear / Copy all from the **File** menu.
 
 Connect runs in the background; **Cancel** stops the attempt by closing the
 transport (TCP/JTAG may take a moment to unwind if the server hung). The
-Connection panel sets **Connect timeout** (OpenOCD TCP / Quartus response
-timeout, seconds), **HW ready timeout** (after programming a `.bit` via
-hw_server, seconds), and USB-Blaster-specific **Quartus hardware** /
-**quartus_stp** fields; these are stored in `gui.toml` under `[connection]`.
+Connection panel sets **Connect timeout** (OpenOCD TCP, seconds), **HW ready
+timeout** (after programming a `.bit` via hw_server, seconds), and
+USB-Blaster-specific **Quartus hardware** / **quartus_stp** fields; these are
+stored in `gui.toml` under `[connection]`.
 
 <p align="center">
   <img src="docs/assets/fcapz-gui-demo.png" alt="fcapz-gui desktop application showing connection, ELA capture controls, and log output" width="900">
@@ -608,7 +608,7 @@ from the RTL.
 |------|--------|
 | Xilinx `hw_server` backend | Implemented and hardware-validated on Arty A7 (7-series) |
 | OpenOCD backend | Implemented, needs more hardware validation |
-| Quartus USB-Blaster backend | Implemented and hardware-validated on DE25-Nano (Quartus Pro 26.1) |
+| Quartus USB-Blaster backend | Implemented and hardware-validated on DE25-Nano (Quartus Pro 26.1; Lite expected but not re-validated) |
 | Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
 | Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |

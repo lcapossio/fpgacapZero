@@ -407,6 +407,7 @@ class QuartusStpTransport(Transport):
     # fcapz Intel wrappers set sld_ir_width=1 and drive ir_out=0, so the
     # virtual IR value is currently fixed at zero.
     VIRTUAL_IR_VALUE = 0
+    AUTO_DEVICE_TAPS = frozenset(("", "auto", "xc7a100t", "xc7a100t.tap"))
     _SENTINEL = "<<FCAPZ_QUARTUS_STP_DONE>>"
 
     def __init__(

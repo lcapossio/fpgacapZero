@@ -98,7 +98,10 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertFalse(p._host.isEnabled())
         self.assertFalse(p._port.isEnabled())
         self.assertFalse(p._ir.isEnabled())
+        self.assertFalse(p._tcp_timeout.isEnabled())
         self.assertTrue(p._hardware.isEnabled())
+        self.assertFalse(p._hardware.isHidden())
+        self.assertFalse(p._quartus_row.isHidden())
 
     def test_usb_blaster_rewrites_legacy_xilinx_tap_to_auto(self) -> None:
         p = ConnectionPanel()
@@ -106,6 +109,21 @@ class TestConnectionPanel(unittest.TestCase):
         p.load_from_settings(ConnectionSettings(backend="usb_blaster", tap="xc7a100t"))
 
         self.assertEqual(p.connection_settings().tap, "auto")
+
+    def test_usb_blaster_rewrites_empty_tap_to_auto(self) -> None:
+        p = ConnectionPanel()
+
+        p.load_from_settings(ConnectionSettings(backend="usb_blaster", tap=""))
+
+        self.assertEqual(p.connection_settings().tap, "auto")
+
+    def test_quartus_rows_hidden_for_non_usb_backends(self) -> None:
+        p = ConnectionPanel()
+
+        p.load_from_settings(ConnectionSettings(backend="hw_server"))
+
+        self.assertTrue(p._hardware.isHidden())
+        self.assertTrue(p._quartus_row.isHidden())
 
     @patch("fcapz.gui.connection_panel.QMessageBox.information")
     def test_scan_finish_reports_empty_targets(self, info_box) -> None:

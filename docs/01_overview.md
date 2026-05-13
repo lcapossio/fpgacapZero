@@ -181,7 +181,8 @@ The host stack supports three JTAG transports out of the box:
 - **Quartus USB-Blaster / `quartus_stp`** - Intel/Altera virtual
   JTAG access through Quartus Prime.  Uses `sld_virtual_jtag`
   instance indices from the Intel RTL wrapper `CHAIN` parameters.
-  Hardware-validated on DE25-Nano with Quartus Prime Pro 26.1.
+  Hardware-validated on DE25-Nano with Quartus Prime Pro 26.1; Lite
+  is expected to work but was not re-validated on this branch.
 
 All transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To

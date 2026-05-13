@@ -226,7 +226,7 @@ def _make_transport(args: argparse.Namespace):
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )
     if args.backend == "usb_blaster":
-        device_name = None if args.tap in ("", "auto", "xc7a100t.tap") else args.tap
+        device_name = None if args.tap in QuartusStpTransport.AUTO_DEVICE_TAPS else args.tap
         return QuartusStpTransport(
             hardware_name=getattr(args, "hardware", None),
             device_name=device_name,

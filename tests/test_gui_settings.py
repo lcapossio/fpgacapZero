@@ -195,6 +195,21 @@ class TestFromMapping(unittest.TestCase):
         back = gui_settings_from_mapping(data)
         self.assertEqual(back.probe_profiles["a"].probes, "z:1:0")
 
+    def test_old_connection_without_quartus_fields_loads(self) -> None:
+        back = gui_settings_from_mapping(
+            {
+                "connection": {
+                    "backend": "hw_server",
+                    "host": "127.0.0.1",
+                    "port": 3121,
+                    "tap": "xc7a100t",
+                },
+            },
+        )
+
+        self.assertIsNone(back.connection.hardware)
+        self.assertIsNone(back.connection.quartus_stp)
+
 
 class TestDefaultPath(unittest.TestCase):
     def test_returns_path(self) -> None:

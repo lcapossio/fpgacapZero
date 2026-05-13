@@ -22,10 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..transport import QuartusStpTransport
 from .settings import ConnectionSettings
 from .worker import TargetScanWorker
-
-_USB_BLASTER_AUTO_TAPS = {"xc7a100t", "xc7a100t.tap"}
 
 
 class ConnectionPanel(QGroupBox):
@@ -44,7 +43,7 @@ class ConnectionPanel(QGroupBox):
         self._backend = QComboBox()
         self._backend.addItem("Xilinx hw_server", "hw_server")
         self._backend.addItem("OpenOCD", "openocd")
-        self._backend.addItem("Intel/Altera USB-Blaster", "usb_blaster")
+        self._backend.addItem("Intel Quartus JTAG", "usb_blaster")
 
         self._host = QLineEdit()
         self._host.setPlaceholderText("127.0.0.1")
@@ -74,8 +73,8 @@ class ConnectionPanel(QGroupBox):
         self._hardware = QLineEdit()
         self._hardware.setPlaceholderText("auto or DE25-Nano [USB-1]")
         self._hardware.setToolTip(
-            "Quartus hardware name for USB-Blaster. Leave empty to auto-select "
-            "when exactly one Quartus JTAG cable is present.",
+            "Quartus hardware name, typically like 'DE25-Nano [USB-1]'. "
+            "Leave empty to auto-select when exactly one Quartus JTAG cable is present.",
         )
 
         self._quartus_stp = QLineEdit()
@@ -83,14 +82,14 @@ class ConnectionPanel(QGroupBox):
         self._quartus_stp.setToolTip(
             "Optional path to quartus_stp.exe when Quartus is not on PATH.",
         )
-        browse_quartus = QPushButton("Browse...")
-        browse_quartus.clicked.connect(self._browse_quartus_stp)
+        self._browse_quartus = QPushButton("Browse...")
+        self._browse_quartus.clicked.connect(self._browse_quartus_stp)
 
         quartus_row = QWidget()
         ql = QHBoxLayout(quartus_row)
         ql.setContentsMargins(0, 0, 0, 0)
         ql.addWidget(self._quartus_stp, stretch=1)
-        ql.addWidget(browse_quartus)
+        ql.addWidget(self._browse_quartus)
         self._quartus_row = quartus_row
 
         self._program_on_connect = QCheckBox("Program on connect")
@@ -178,8 +177,10 @@ class ConnectionPanel(QGroupBox):
         form.addRow("Port", self._port)
         form.addRow("TAP / target", tap_row)
         form.addRow("IR table", self._ir)
-        form.addRow("Quartus hardware", self._hardware)
-        form.addRow("quartus_stp", quartus_row)
+        self._hardware_label = QLabel("Quartus hardware")
+        self._quartus_stp_label = QLabel("quartus_stp")
+        form.addRow(self._hardware_label, self._hardware)
+        form.addRow(self._quartus_stp_label, quartus_row)
         form.addRow("", self._program_on_connect)
         form.addRow("Bitfile path", prog_row)
         form.addRow("Connect timeout", self._tcp_timeout)
@@ -199,18 +200,26 @@ class ConnectionPanel(QGroupBox):
         backend = self._backend.currentData()
         is_hw = backend == "hw_server"
         is_usb = backend == "usb_blaster"
+        self._set_quartus_rows_visible(is_usb)
         self._host.setEnabled(not is_usb)
         self._port.setEnabled(not is_usb)
         self._ir.setEnabled(not is_usb)
         self._hardware.setEnabled(is_usb)
         self._quartus_stp.setEnabled(is_usb)
         self._quartus_row.setEnabled(is_usb)
+        self._tcp_timeout.setEnabled(not is_usb)
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
         self._scan_targets_btn.setEnabled(is_hw and not self._connected)
-        if is_usb and self._tap_text() in _USB_BLASTER_AUTO_TAPS:
+        if is_usb and self._tap_text() in QuartusStpTransport.AUTO_DEVICE_TAPS:
             self._set_tap_text("auto")
         self._refresh_timeout_row_state()
+
+    def _set_quartus_rows_visible(self, visible: bool) -> None:
+        self._hardware_label.setVisible(visible)
+        self._hardware.setVisible(visible)
+        self._quartus_stp_label.setVisible(visible)
+        self._quartus_row.setVisible(visible)
 
     def _scan_targets(self) -> None:
         if self._scan_thread is not None and self._scan_thread.isRunning():
@@ -329,11 +338,32 @@ class ConnectionPanel(QGroupBox):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select quartus_stp",
-            "",
-            "Quartus STP (quartus_stp.exe quartus_stp);;All files (*.*)",
+            self._quartus_stp_dialog_dir(),
+            "Executables (quartus_stp*);;All files (*.*)",
         )
         if path:
             self._quartus_stp.setText(path)
+
+    def _quartus_stp_dialog_dir(self) -> str:
+        current = self._quartus_stp.text().strip()
+        if current:
+            parent = Path(current).expanduser().parent
+            if parent.is_dir():
+                return str(parent)
+        for root in (
+            Path("C:/altera_pro"),
+            Path("C:/intelFPGA_pro"),
+            Path("C:/intelFPGA_lite"),
+            Path("/opt/intelFPGA_pro"),
+            Path("/opt/intelFPGA_lite"),
+            Path("/opt/altera"),
+        ):
+            if root.is_dir():
+                matches = sorted(root.glob("*/quartus/bin64/quartus_stp*"), reverse=True)
+                if matches:
+                    return str(matches[0].parent)
+                return str(root)
+        return ""
 
     def _on_connect_clicked(self) -> None:
         err = self._validate()
@@ -349,7 +379,7 @@ class ConnectionPanel(QGroupBox):
     def set_connect_in_progress(self, busy: bool) -> None:
         """While connecting: show Cancel; freeze Connect/Disconnect and timeout edits."""
         self._cancel_btn.setVisible(busy)
-        self._tcp_timeout.setEnabled(not busy)
+        self._tcp_timeout.setEnabled(not busy and self._backend.currentData() != "usb_blaster")
         en = not busy and self._refresh_hw_ready_enabled()
         self._hw_ready.setEnabled(en)
         self._post_program_ms.setEnabled(en)
@@ -428,6 +458,7 @@ class ConnectionPanel(QGroupBox):
         self._ready_poll_ms.setValue(
             int(max(5, min(500, round(conn.hw_ready_poll_interval_ms))))
         )
+        # Re-run after fields are populated so legacy TAP migration sees the loaded value.
         self._on_backend_changed()
 
     def set_connected(self, connected: bool, message: str | None = None) -> None:
@@ -443,6 +474,7 @@ class ConnectionPanel(QGroupBox):
         backend = self._backend.currentData()
         is_hw = backend == "hw_server"
         is_usb = backend == "usb_blaster"
+        self._set_quartus_rows_visible(is_usb)
         self._host.setEnabled(editable and not is_usb)
         self._port.setEnabled(editable and not is_usb)
         self._ir.setEnabled(editable and not is_usb)
@@ -452,7 +484,7 @@ class ConnectionPanel(QGroupBox):
         self._scan_targets_btn.setEnabled(editable and is_hw)
         self._program_on_connect.setEnabled(editable and is_hw)
         self._program.setEnabled(editable and is_hw)
-        self._tcp_timeout.setEnabled(editable)
+        self._tcp_timeout.setEnabled(editable and not is_usb)
         hw_prog = editable and self._will_program_bitfile()
         self._hw_ready.setEnabled(hw_prog)
         self._post_program_ms.setEnabled(hw_prog)

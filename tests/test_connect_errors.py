@@ -48,6 +48,15 @@ class TestFormatConnectError(unittest.TestCase):
         msg = format_connect_error(e, self._conn)
         self.assertIn("unreachable", msg.lower())
 
+    def test_usb_blaster_endpoint_label_uses_friendly_auto_names(self) -> None:
+        conn = ConnectionSettings(backend="usb_blaster", tap="auto")
+
+        msg = format_connect_error(Exception("boom"), conn)
+
+        self.assertIn("boom", msg)
+        self.assertIn("first available Quartus cable", msg)
+        self.assertIn("first @1 device", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,10 +116,10 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.hardware_name, "DE25-Nano [USB-1]")
         self.assertIsNone(t.device_name)
         self.assertEqual(t._quartus_stp_path, r"C:\altera_lite\quartus\bin64\quartus_stp.exe")
-        self.assertEqual(t.read_timeout_sec, 42.0)
+        self.assertEqual(t.read_timeout_sec, 60.0)
 
     def test_usb_blaster_legacy_xilinx_tap_defaults_to_auto_device(self) -> None:
-        for tap in ("xc7a100t", "xc7a100t.tap"):
+        for tap in ("", "auto", "xc7a100t", "xc7a100t.tap"):
             with self.subTest(tap=tap):
                 c = ConnectionSettings(backend="usb_blaster", tap=tap)
                 t = transport_from_connection(c)

@@ -65,9 +65,9 @@ def _endpoint_label(conn: ConnectionSettings) -> str:
     if conn.backend == "openocd":
         return f"{conn.host}:{conn.port} (OpenOCD)"
     if conn.backend == "usb_blaster":
-        hardware = conn.hardware or "auto hardware"
-        tap = conn.tap or "auto"
-        return f"{hardware}, device {tap} (Quartus USB-Blaster)"
+        hardware = conn.hardware or "first available Quartus cable"
+        tap = conn.tap if conn.tap not in ("", "auto") else "first @1 device"
+        return f"{hardware}, {tap} (Quartus JTAG)"
     port = conn.port
     if port == 6666:
         port = 3121
