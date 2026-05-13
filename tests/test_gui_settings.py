@@ -42,6 +42,8 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
     def test_save_load_roundtrip(self) -> None:
         s = GuiSettings()
         s.connection.port = 4444
+        s.connection.hardware = "DE25-Nano [USB-1]"
+        s.connection.quartus_stp = r"C:\altera_lite\quartus\bin64\quartus_stp.exe"
         s.connection.program = None
         s.viewers.default_viewer = "surfer"
         s.viewers.open_viewer_after_capture = True
@@ -55,6 +57,11 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             save_gui_settings(s, path)
             loaded = load_gui_settings(path)
             self.assertEqual(loaded.connection.port, 4444)
+            self.assertEqual(loaded.connection.hardware, "DE25-Nano [USB-1]")
+            self.assertEqual(
+                loaded.connection.quartus_stp,
+                r"C:\altera_lite\quartus\bin64\quartus_stp.exe",
+            )
             self.assertIsNone(loaded.connection.program)
             self.assertEqual(loaded.viewers.default_viewer, "surfer")
             self.assertTrue(loaded.viewers.open_viewer_after_capture)

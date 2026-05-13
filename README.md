@@ -150,9 +150,10 @@ pip install -e ".[gui]"
 fcapz-gui
 ```
 
-Connect over **hw_server** or **OpenOCD**, capture from the **ELA** tab, inspect
-waveforms in the embedded preview, or open captures in **GTKWave** (`.gtkw`
-sidecar) or **Surfer** (`--command-file` sidecar, `*.surfer.txt`). Settings and
+Connect over **hw_server**, **OpenOCD**, or **Quartus USB-Blaster**, capture from
+the **ELA** tab, inspect waveforms in the embedded preview, or open captures in
+**GTKWave** (`.gtkw` sidecar) or **Surfer** (`--command-file` sidecar,
+`*.surfer.txt`). Settings and
 probe profiles live in `%APPDATA%\\fpgacapzero\\gui.toml` (Windows) or
 `~/.config/fpgacapzero/gui.toml` (Unix). Next to that file, `fcapz-gui-window.ini`
 stores main-window geometry, dock/tab layout, expandable section state, and any

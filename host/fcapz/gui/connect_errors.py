@@ -64,6 +64,10 @@ def format_connect_error(exc: BaseException, conn: ConnectionSettings) -> str:
 def _endpoint_label(conn: ConnectionSettings) -> str:
     if conn.backend == "openocd":
         return f"{conn.host}:{conn.port} (OpenOCD)"
+    if conn.backend == "usb_blaster":
+        hardware = conn.hardware or "auto hardware"
+        tap = conn.tap or "auto"
+        return f"{hardware}, device {tap} (Quartus USB-Blaster)"
     port = conn.port
     if port == 6666:
         port = 3121

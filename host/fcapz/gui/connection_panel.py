@@ -42,6 +42,7 @@ class ConnectionPanel(QGroupBox):
         self._backend = QComboBox()
         self._backend.addItem("Xilinx hw_server", "hw_server")
         self._backend.addItem("OpenOCD", "openocd")
+        self._backend.addItem("Intel/Altera USB-Blaster", "usb_blaster")
 
         self._host = QLineEdit()
         self._host.setPlaceholderText("127.0.0.1")
@@ -67,6 +68,28 @@ class ConnectionPanel(QGroupBox):
         self._ir = QComboBox()
         self._ir.addItem("Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
+
+        self._hardware = QLineEdit()
+        self._hardware.setPlaceholderText("auto or DE25-Nano [USB-1]")
+        self._hardware.setToolTip(
+            "Quartus hardware name for USB-Blaster. Leave empty to auto-select "
+            "when exactly one Quartus JTAG cable is present.",
+        )
+
+        self._quartus_stp = QLineEdit()
+        self._quartus_stp.setPlaceholderText("quartus_stp from PATH")
+        self._quartus_stp.setToolTip(
+            "Optional path to quartus_stp.exe when Quartus is not on PATH.",
+        )
+        browse_quartus = QPushButton("Browse...")
+        browse_quartus.clicked.connect(self._browse_quartus_stp)
+
+        quartus_row = QWidget()
+        ql = QHBoxLayout(quartus_row)
+        ql.setContentsMargins(0, 0, 0, 0)
+        ql.addWidget(self._quartus_stp, stretch=1)
+        ql.addWidget(browse_quartus)
+        self._quartus_row = quartus_row
 
         self._program_on_connect = QCheckBox("Program on connect")
         self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)
@@ -153,6 +176,8 @@ class ConnectionPanel(QGroupBox):
         form.addRow("Port", self._port)
         form.addRow("TAP / target", tap_row)
         form.addRow("IR table", self._ir)
+        form.addRow("Quartus hardware", self._hardware)
+        form.addRow("quartus_stp", quartus_row)
         form.addRow("", self._program_on_connect)
         form.addRow("Bitfile path", prog_row)
         form.addRow("Connect timeout", self._tcp_timeout)
@@ -169,10 +194,20 @@ class ConnectionPanel(QGroupBox):
         self._on_backend_changed()
 
     def _on_backend_changed(self) -> None:
-        is_hw = self._backend.currentData() == "hw_server"
+        backend = self._backend.currentData()
+        is_hw = backend == "hw_server"
+        is_usb = backend == "usb_blaster"
+        self._host.setEnabled(not is_usb)
+        self._port.setEnabled(not is_usb)
+        self._ir.setEnabled(not is_usb)
+        self._hardware.setEnabled(is_usb)
+        self._quartus_stp.setEnabled(is_usb)
+        self._quartus_row.setEnabled(is_usb)
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
         self._scan_targets_btn.setEnabled(is_hw and not self._connected)
+        if is_usb and self._tap_text() == "xc7a100t.tap":
+            self._set_tap_text("auto")
         self._refresh_timeout_row_state()
 
     def _scan_targets(self) -> None:
@@ -288,6 +323,16 @@ class ConnectionPanel(QGroupBox):
         if path:
             self._program.setText(path)
 
+    def _browse_quartus_stp(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select quartus_stp",
+            "",
+            "Quartus STP (quartus_stp.exe quartus_stp);;All files (*.*)",
+        )
+        if path:
+            self._quartus_stp.setText(path)
+
     def _on_connect_clicked(self) -> None:
         err = self._validate()
         if err:
@@ -319,13 +364,18 @@ class ConnectionPanel(QGroupBox):
         return self._will_program_bitfile()
 
     def _validate(self) -> str | None:
+        backend = self._backend.currentData()
         host = self._host.text().strip()
-        if not host:
+        if backend != "usb_blaster" and not host:
             return "Host must not be empty."
         tap = self._tap_text()
         if not tap:
             return "TAP / target must not be empty."
-        if self._backend.currentData() == "hw_server":
+        if backend == "usb_blaster":
+            quartus = self._quartus_stp.text().strip()
+            if quartus and not Path(quartus).is_file():
+                return f"quartus_stp not found: {quartus}"
+        if backend == "hw_server":
             if self._program_on_connect.isChecked():
                 raw = self._program.text().strip()
                 if not raw:
@@ -336,11 +386,15 @@ class ConnectionPanel(QGroupBox):
 
     def connection_settings(self) -> ConnectionSettings:
         program_raw = self._program.text().strip()
+        hardware_raw = self._hardware.text().strip()
+        quartus_raw = self._quartus_stp.text().strip()
         return ConnectionSettings(
             backend=str(self._backend.currentData()),
             host=self._host.text().strip(),
             port=int(self._port.value()),
             tap=self._tap_text(),
+            hardware=hardware_raw if hardware_raw else None,
+            quartus_stp=quartus_raw if quartus_raw else None,
             program=program_raw if program_raw else None,
             program_on_connect=self._program_on_connect.isChecked(),
             ir_table=str(self._ir.currentData()),
@@ -357,6 +411,8 @@ class ConnectionPanel(QGroupBox):
         self._host.setText(conn.host)
         self._port.setValue(conn.port)
         self._set_tap_text(conn.tap)
+        self._hardware.setText(conn.hardware or "")
+        self._quartus_stp.setText(conn.quartus_stp or "")
         ir_idx = self._ir.findData(conn.ir_table)
         if ir_idx >= 0:
             self._ir.setCurrentIndex(ir_idx)
@@ -382,7 +438,15 @@ class ConnectionPanel(QGroupBox):
         self._port.setEnabled(editable)
         self._tap.setEnabled(editable)
         self._ir.setEnabled(editable)
-        is_hw = self._backend.currentData() == "hw_server"
+        backend = self._backend.currentData()
+        is_hw = backend == "hw_server"
+        is_usb = backend == "usb_blaster"
+        self._host.setEnabled(editable and not is_usb)
+        self._port.setEnabled(editable and not is_usb)
+        self._ir.setEnabled(editable and not is_usb)
+        self._hardware.setEnabled(editable and is_usb)
+        self._quartus_stp.setEnabled(editable and is_usb)
+        self._quartus_row.setEnabled(editable and is_usb)
         self._scan_targets_btn.setEnabled(editable and is_hw)
         self._program_on_connect.setEnabled(editable and is_hw)
         self._program.setEnabled(editable and is_hw)

@@ -78,18 +78,20 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 
 | Field | What it does |
 |---|---|
-| **Backend** | Dropdown: `hw_server` (default) or `openocd` |
+| **Backend** | Dropdown: `hw_server` (default), `openocd`, or `usb_blaster` |
 | **Host** | TCP host of the transport, default `127.0.0.1` |
 | **Port** | TCP port, default `3121` for hw_server / `6666` for openocd |
-| **FPGA target** | hw_server target name (e.g. `xc7a100t`) or openocd TAP name |
+| **FPGA target** | hw_server target name (e.g. `xc7a100t`), openocd TAP name, or Quartus device name / `auto` for USB-Blaster |
+| **Quartus hardware** | Optional Quartus hardware name for USB-Blaster, e.g. `DE25-Nano [USB-1]`; leave empty to auto-select when exactly one cable is present |
+| **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **Bitfile** | Optional path to a `.bit` file; if set, the GUI runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected" |
 | **IR table** | Dropdown: `Xilinx 7-series` (default) or `Xilinx UltraScale / UltraScale+`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
 
 When you click **Connect**:
 
-1. The GUI builds a `XilinxHwServerTransport` (or `OpenOcdTransport`)
-   with the field values.
+1. The GUI builds a `XilinxHwServerTransport`, `OpenOcdTransport`, or
+   `QuartusStpTransport` with the field values.
 2. Calls `transport.connect()`, which spawns `xsdb` (or talks to
    OpenOCD), programs the FPGA if a bitfile is set, runs the
    readiness probe.

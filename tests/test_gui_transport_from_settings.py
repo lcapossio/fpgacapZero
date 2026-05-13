@@ -8,7 +8,7 @@ import unittest
 import pytest
 from fcapz.gui.settings import ConnectionSettings
 from fcapz.gui.transport_from_settings import transport_from_connection
-from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
+from fcapz.transport import OpenOcdTransport, QuartusStpTransport, XilinxHwServerTransport
 
 pytestmark = pytest.mark.gui
 
@@ -102,6 +102,30 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertIsInstance(t, XilinxHwServerTransport)
         self.assertEqual(t.post_program_delay_ms, 350)
         self.assertAlmostEqual(t.ready_poll_interval_sec, 0.04)
+
+    def test_usb_blaster_transport_from_settings(self) -> None:
+        c = ConnectionSettings(
+            backend="usb_blaster",
+            tap="auto",
+            hardware="DE25-Nano [USB-1]",
+            quartus_stp=r"C:\altera_lite\quartus\bin64\quartus_stp.exe",
+            connect_timeout_sec=42.0,
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, QuartusStpTransport)
+        self.assertEqual(t.hardware_name, "DE25-Nano [USB-1]")
+        self.assertIsNone(t.device_name)
+        self.assertEqual(t._quartus_stp_path, r"C:\altera_lite\quartus\bin64\quartus_stp.exe")
+        self.assertEqual(t.read_timeout_sec, 42.0)
+
+    def test_usb_blaster_explicit_tap_is_device_name(self) -> None:
+        c = ConnectionSettings(
+            backend="usb_blaster",
+            tap="@1: A5E(A013BB23B|B013BB23BCS)/.. (0x4362C0DD)",
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, QuartusStpTransport)
+        self.assertEqual(t.device_name, "@1: A5E(A013BB23B|B013BB23BCS)/.. (0x4362C0DD)")
 
     def test_unknown_backend(self) -> None:
         c = ConnectionSettings(backend="nope")

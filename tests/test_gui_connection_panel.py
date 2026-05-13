@@ -48,6 +48,8 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertEqual(out.host, src.host)
         self.assertEqual(out.port, src.port)
         self.assertEqual(out.tap, src.tap)
+        self.assertIsNone(out.hardware)
+        self.assertIsNone(out.quartus_stp)
         self.assertEqual(out.program, src.program)
         self.assertFalse(out.program_on_connect)
         self.assertEqual(out.ir_table, src.ir_table)
@@ -71,6 +73,32 @@ class TestConnectionPanel(unittest.TestCase):
         p._tap.setEditText("my-custom-tap")
 
         self.assertEqual(p.connection_settings().tap, "my-custom-tap")
+
+    def test_usb_blaster_roundtrip_connection_settings(self) -> None:
+        p = ConnectionPanel()
+        src = ConnectionSettings(
+            backend="usb_blaster",
+            tap="auto",
+            hardware="DE25-Nano [USB-1]",
+            quartus_stp=r"C:\altera_lite\25.1std\quartus\bin64\quartus_stp.exe",
+            connect_timeout_sec=37.0,
+        )
+
+        p.load_from_settings(src)
+        out = p.connection_settings()
+
+        self.assertEqual(out.backend, "usb_blaster")
+        self.assertEqual(out.tap, "auto")
+        self.assertEqual(out.hardware, "DE25-Nano [USB-1]")
+        self.assertEqual(
+            out.quartus_stp,
+            r"C:\altera_lite\25.1std\quartus\bin64\quartus_stp.exe",
+        )
+        self.assertEqual(out.connect_timeout_sec, 37.0)
+        self.assertFalse(p._host.isEnabled())
+        self.assertFalse(p._port.isEnabled())
+        self.assertFalse(p._ir.isEnabled())
+        self.assertTrue(p._hardware.isEnabled())
 
     @patch("fcapz.gui.connection_panel.QMessageBox.information")
     def test_scan_finish_reports_empty_targets(self, info_box) -> None:
