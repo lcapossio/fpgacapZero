@@ -358,7 +358,7 @@ class ConnectionPanel(QGroupBox):
             parent = Path(current).expanduser().parent
             if parent.is_dir():
                 return str(parent)
-        for env_name in ("QUARTUS_ROOTDIR", "QUARTUS_ROOTDIR_OVERRIDE"):
+        for env_name in ("QUARTUS_ROOTDIR_OVERRIDE", "QUARTUS_ROOTDIR"):
             root = os.environ.get(env_name)
             if root:
                 found = self._find_quartus_stp_dir(Path(root))
@@ -377,7 +377,8 @@ class ConnectionPanel(QGroupBox):
                 return found
         return ""
 
-    def _find_quartus_stp_dir(self, root: Path) -> str | None:
+    @staticmethod
+    def _find_quartus_stp_dir(root: Path) -> str | None:
         root = root.expanduser()
         if not root.is_dir():
             return None
@@ -392,11 +393,13 @@ class ConnectionPanel(QGroupBox):
         ):
             matches.extend(p for p in root.glob(pattern) if p.is_file())
         if matches:
-            return str(max(matches, key=self._quartus_path_version_key).parent)
+            return str(max(matches, key=ConnectionPanel._quartus_path_version_key).parent)
         return str(root)
 
     @staticmethod
     def _quartus_path_version_key(path: Path) -> tuple[int, ...]:
+        # Heuristic for preferring newer installs and bin64 over bin; this is
+        # not a strict Quartus version parser.
         nums = [int(n) for n in re.findall(r"\d+", str(path))]
         return tuple(nums) if nums else (0,)
 
