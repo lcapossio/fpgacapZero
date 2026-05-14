@@ -141,5 +141,5 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 |-------|---------|----------|
 | Unit (Python) | `pytest tests/test_host_stack.py` | Transport, Analyzer, EioController |
 | RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
-| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel-mux testbenches |
+| Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core-manager, and channel-mux testbenches |
 | Hardware | `pytest examples/arty_a7/test_hw_integration.py` | Arty A7-100T hardware regression for the reference bitstream |

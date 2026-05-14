@@ -770,8 +770,9 @@ class XilinxHwServerTransport(Transport):
         """Read *words* consecutive 32-bit registers starting at *addr*.
 
         If *addr* is the DATA window base (0x0100) and burst mode is
-        available, uses the wide USER2 DR for ~10x faster throughput.
-        Otherwise falls back to single-sequence pipelined reads on USER1.
+        available, uses the wide burst DR for ~10x faster throughput.
+        Otherwise falls back to single-sequence pipelined reads on the
+        active ELA control chain.
         """
         if words <= 0:
             return []
@@ -782,13 +783,13 @@ class XilinxHwServerTransport(Transport):
                 if self.single_chain_burst:
                     _hw_log.warning(
                         "single-chain ELA burst readback failed (%s); falling back to "
-                        "slow USER1 DATA reads. If this bitstream was built with "
+                        "slow control-chain DATA reads. If this bitstream was built with "
                         "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
                         "XilinxHwServerTransport(single_chain_burst=False).",
                         exc,
                     )
                 self._has_burst = False
-        # Non-burst path needs flush to reset USER1 pipeline
+        # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
 
     @property
@@ -820,8 +821,9 @@ class XilinxHwServerTransport(Transport):
         """Read *words* samples via the 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
-        USER1 write to BURST_PTR → idle for staging fill → IR switch
-        to USER2 → N consecutive 256-bit DR scans.  One round-trip.
+        Control-chain write to BURST_PTR → idle for staging fill → optional
+        IR switch to legacy DATA_CHAIN → N consecutive 256-bit DR scans.
+        One round-trip.
         """
         if timestamp:
             if element_width is None:
@@ -845,8 +847,9 @@ class XilinxHwServerTransport(Transport):
             )
         )
         user_total = self._user_dr_bits(self.DR_BITS)
-        ir1_cmd = self._irshift_tcl("_bq", chain=1)
-        burst_chain = 1 if self.single_chain_burst else 2
+        ctrl_chain = self._active_chain
+        ir1_cmd = self._irshift_tcl("_bq", chain=ctrl_chain)
+        burst_chain = ctrl_chain if self.single_chain_burst else 2
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         if self.use_register_ir:
@@ -875,11 +878,11 @@ class XilinxHwServerTransport(Transport):
         else:
             parts_w = [
                 "set _bq [jtag sequence]",
-                # Write BURST_PTR via USER1 (triggers start_ptr load)
+                # Write BURST_PTR via the active ELA control chain.
                 # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so the USER1 BURST_PTR update crosses into the burst
+                # Idle so the BURST_PTR update crosses into the burst
                 # reader and the first 256-bit staging word fills before
                 # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
                 # more margin than the raw ~33 TCK memory-fill latency.

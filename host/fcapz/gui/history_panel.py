@@ -31,6 +31,12 @@ from PySide6.QtWidgets import (
 
 from ..analyzer import Analyzer, CaptureResult, vcd_simulation_times
 from .gtkw_writer import write_gtkw_for_capture
+from .multi_capture_wave import (
+    WaveCapture,
+    write_merged_gtkw,
+    write_merged_surfer_command_file,
+    write_merged_vcd,
+)
 from .settings import default_gui_config_path, live_wave_dir
 from .surfer_command_writer import write_surfer_command_file_for_capture
 from .surfer_wcp import SurferWcpBridge
@@ -48,6 +54,7 @@ class HistoryEntry:
     result: CaptureResult
     vcd_path: Path
     work_dir: Path
+    label: str
 
 
 class HistoryPanel(QWidget):
@@ -69,17 +76,17 @@ class HistoryPanel(QWidget):
         self._surfer_wcp = SurferWcpBridge(self)
         self._surfer_wcp.status_message.connect(self.status_message.emit)
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["#", "Time", "Samples", "Flags"])
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(["#", "Time", "Core", "Samples", "Flags"])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(lambda _i: self._on_open_viewer())
 
         self._viewer_combo = QComboBox()
         self._viewer_combo.setMinimumWidth(120)
 
-        self._open_btn = QPushButton("Open in viewer")
+        self._open_btn = QPushButton("Open selected in viewer")
         self._open_btn.clicked.connect(self._on_open_viewer)
 
         self._reveal_btn = QPushButton("Open capture folder")
@@ -220,19 +227,22 @@ class HistoryPanel(QWidget):
             result=result,
             vcd_path=vcd,
             work_dir=work,
+            label=self._capture_label(analyzer, idx),
         )
         self._entries.append(ent)
         row = self._table.rowCount()
         self._table.insertRow(row)
         self._table.setItem(row, 0, QTableWidgetItem(str(idx)))
         self._table.setItem(row, 1, QTableWidgetItem(ent.when.strftime("%H:%M:%S")))
-        self._table.setItem(row, 2, QTableWidgetItem(str(len(result.samples))))
+        self._table.setItem(row, 2, QTableWidgetItem(ent.label))
+        self._table.setItem(row, 3, QTableWidgetItem(str(len(result.samples))))
         flag = "overflow" if result.overflow else "ok"
-        self._table.setItem(row, 3, QTableWidgetItem(flag))
-        for c in range(4):
+        self._table.setItem(row, 4, QTableWidgetItem(flag))
+        for c in range(5):
             it = self._table.item(row, c)
             if it is not None:
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self._table.clearSelection()
         self._table.selectRow(row)
         self._sync_buttons()
 
@@ -240,19 +250,31 @@ class HistoryPanel(QWidget):
             i = self._viewer_combo.currentIndex()
             self._launch_viewer_for_entry(ent, i, silent=True)
 
-    def selected_entry(self) -> HistoryEntry | None:
+    def selected_entries(self) -> list[HistoryEntry]:
         rows = self._table.selectionModel().selectedRows()
         if not rows:
-            return None
-        r = rows[0].row()
-        if 0 <= r < len(self._entries):
-            return self._entries[r]
+            return []
+        out: list[HistoryEntry] = []
+        for row in sorted(rows, key=lambda ix: ix.row()):
+            r = row.row()
+            if 0 <= r < len(self._entries):
+                out.append(self._entries[r])
+        return out
+
+    def selected_entry(self) -> HistoryEntry | None:
+        entries = self.selected_entries()
+        if entries:
+            return entries[-1]
         return None
 
     def _sync_buttons(self) -> None:
-        has_row = self.selected_entry() is not None
+        selected = self.selected_entries()
+        has_row = bool(selected)
         has_viewer = self._viewer_combo.count() > 0
         can_export = has_row
+        self._open_btn.setText(
+            "Open selected in viewer" if len(selected) > 1 else "Open in viewer",
+        )
         self._open_btn.setEnabled(has_row and has_viewer)
         self._reveal_btn.setEnabled(has_row)
         self._exp_json.setEnabled(can_export)
@@ -282,6 +304,44 @@ class HistoryPanel(QWidget):
         if isinstance(viewer, SurferViewer):
             scmd = work_dir / "capture.surfer.txt"
             write_surfer_command_file_for_capture(ent.result, scmd)
+            return scmd
+        return None
+
+    @staticmethod
+    def _capture_label(analyzer: Analyzer, idx: int) -> str:
+        inst = analyzer.instance
+        if inst is not None:
+            return f"ela{inst}"
+        return f"capture{idx}"
+
+    @staticmethod
+    def _wave_captures(entries: list[HistoryEntry]) -> list[WaveCapture]:
+        used: dict[str, int] = {}
+        out: list[WaveCapture] = []
+        for ent in entries:
+            label = ent.label
+            n = used.get(label, 0)
+            used[label] = n + 1
+            if n:
+                label = f"{label}_{n + 1}"
+            out.append(WaveCapture(label=label, result=ent.result))
+        return out
+
+    def _prepare_merged_sidecars(
+        self,
+        viewer: WaveformViewer,
+        captures: list[WaveCapture],
+        *,
+        vcd_path: Path,
+        work_dir: Path,
+    ) -> Path | None:
+        if isinstance(viewer, GtkWaveViewer):
+            gtkw = work_dir / "capture.gtkw"
+            write_merged_gtkw(captures, vcd_path, gtkw)
+            return gtkw
+        if isinstance(viewer, SurferViewer):
+            scmd = work_dir / "capture.surfer.txt"
+            write_merged_surfer_command_file(captures, scmd)
             return scmd
         return None
 
@@ -367,6 +427,63 @@ class HistoryPanel(QWidget):
             surfer_marker_pretrigger=surfer_marker_pretrigger,
         )
 
+    def _launch_viewer_for_entries(
+        self,
+        entries: list[HistoryEntry],
+        combo_index: int,
+        *,
+        silent: bool,
+    ) -> None:
+        if len(entries) == 1:
+            self._launch_viewer_for_entry(entries[0], combo_index, silent=silent)
+            return
+        if combo_index < 0 or combo_index >= len(self._viewer_rows):
+            return
+        label, viewer = self._viewer_rows[combo_index]
+        captures = self._wave_captures(entries)
+        if self._reuse_viewer.isChecked():
+            root = self._live_wave_root
+            root.mkdir(parents=True, exist_ok=True)
+            vcd_path = root / "capture.vcd"
+            work_dir = root
+        else:
+            work_dir = Path(tempfile.mkdtemp(prefix="fcapz-gui-merged-"))
+            vcd_path = work_dir / "capture.vcd"
+        try:
+            write_merged_vcd(captures, vcd_path)
+            save_path = self._prepare_merged_sidecars(
+                viewer,
+                captures,
+                vcd_path=vcd_path,
+                work_dir=work_dir,
+            )
+        except (OSError, ValueError) as exc:
+            if silent:
+                self.status_message.emit(f"Merged wave export: {exc}")
+            else:
+                QMessageBox.warning(self, "Merged wave export", str(exc))
+            return
+        try:
+            argv = viewer.launch_argv(vcd_path, save_file=save_path)
+        except (OSError, ValueError) as exc:
+            if silent:
+                self.status_message.emit(str(exc))
+            else:
+                QMessageBox.warning(self, "Viewer", str(exc))
+            return
+        self._start_viewer_process(
+            label,
+            argv,
+            silent=silent,
+            surfer_wcp=isinstance(viewer, SurferViewer) and self._reuse_viewer.isChecked(),
+            surfer_marker_time=None,
+            surfer_marker_pretrigger=(
+                -1000 - abs(hash(tuple(cap.label for cap in captures)))
+                if isinstance(viewer, SurferViewer)
+                else None
+            ),
+        )
+
     def _running_viewer_process(self) -> QProcess | None:
         for p in self._viewer_processes:
             st = p.state()
@@ -411,6 +528,7 @@ class HistoryPanel(QWidget):
             and surfer_marker_pretrigger != self._last_surfer_marker_pretrigger
         )
         if same_running:
+            running = self._running_viewer_process()
             if surfer_marker_changed:
                 self.status_message.emit(
                     f"{viewer_label}: pre-trigger changed; reopening to apply marker.",
@@ -418,6 +536,8 @@ class HistoryPanel(QWidget):
             else:
                 if surfer_wcp and wcp_ready:
                     self._surfer_wcp.send_reload()
+                    if running is not None:
+                        schedule_vertical_split_with_viewer(self, running)
                     self.status_message.emit(
                         f"Updated live wave for {viewer_label} - reloaded in Surfer (WCP).",
                     )
@@ -429,6 +549,8 @@ class HistoryPanel(QWidget):
                     # Fall through to replace the viewer so auto re-arm still
                     # shows the newest capture even without a WCP session.
                 elif unix_file_watcher_ok:
+                    if running is not None:
+                        schedule_vertical_split_with_viewer(self, running)
                     self.status_message.emit(
                         f"Updated live wave for {viewer_label} — "
                         "reload if the viewer did not refresh.",
@@ -480,11 +602,11 @@ class HistoryPanel(QWidget):
         proc.start()
 
     def _on_open_viewer(self) -> None:
-        ent = self.selected_entry()
-        if ent is None:
+        entries = self.selected_entries()
+        if not entries:
             return
         i = self._viewer_combo.currentIndex()
-        self._launch_viewer_for_entry(ent, i, silent=False)
+        self._launch_viewer_for_entries(entries, i, silent=False)
 
     def _on_reveal_folder(self) -> None:
         ent = self.selected_entry()
@@ -517,6 +639,8 @@ class HistoryPanel(QWidget):
                 a.write_json(ent.result, path)
             elif fmt == "csv":
                 a.write_csv(ent.result, path)
+            elif fmt == "vcd" and len(self.selected_entries()) > 1:
+                write_merged_vcd(self._wave_captures(self.selected_entries()), Path(path))
             else:
                 a.write_vcd(ent.result, path)
         except OSError as exc:
