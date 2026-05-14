@@ -160,6 +160,8 @@ module fcapz_ejtaguart #(
     wire [7:0]  tx_fifo_rdata;
     wire        tx_fifo_empty;
     wire [TX_AW:0] tx_fifo_wr_count;
+    wire        tx_fifo_wr_rst_busy_unused;
+    wire        tx_fifo_rd_rst_busy_unused;
 
     reg         tx_wr_pulse;
 
@@ -177,8 +179,10 @@ module fcapz_ejtaguart #(
         .rd_en   (tx_fifo_rd_en_r),
         .rd_data (tx_fifo_rdata),
         .rd_empty(tx_fifo_empty),
+        .rd_rst_busy(tx_fifo_rd_rst_busy_unused),
         .rd_count(),
-        .wr_count(tx_fifo_wr_count)
+        .wr_count(tx_fifo_wr_count),
+        .wr_rst_busy(tx_fifo_wr_rst_busy_unused)
     );
 
     // tx_free: TX_FIFO_DEPTH - wr_count, saturated to 255
@@ -192,6 +196,8 @@ module fcapz_ejtaguart #(
     wire [7:0]  rx_fifo_rdata;
     wire        rx_fifo_empty;
     wire [RX_AW:0] rx_fifo_rd_count;
+    wire        rx_fifo_wr_rst_busy_unused;
+    wire        rx_fifo_rd_rst_busy_unused;
 
     reg         rx_rd_pulse;
     reg         rx_fifo_wr_en_r;
@@ -211,8 +217,10 @@ module fcapz_ejtaguart #(
         .rd_en   (rx_rd_pulse),
         .rd_data (rx_fifo_rdata),
         .rd_empty(rx_fifo_empty),
+        .rd_rst_busy(rx_fifo_rd_rst_busy_unused),
         .rd_count(rx_fifo_rd_count),
-        .wr_count()
+        .wr_count(),
+        .wr_rst_busy(rx_fifo_wr_rst_busy_unused)
     );
 
     wire rx_ready = !rx_fifo_empty;

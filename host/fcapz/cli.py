@@ -223,7 +223,15 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 
 def _make_transport(args: argparse.Namespace):
     if args.backend == "openocd":
-        return OpenOcdTransport(host=args.host, port=args.port, tap=args.tap)
+        tap_name = args.tap.removesuffix(".tap")
+        ir_table = (
+            OpenOcdTransport.IR_TABLE_GOWIN
+            if tap_name.lower().startswith("gw")
+            else None
+        )
+        return OpenOcdTransport(
+            host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
+        )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
     bitfile = getattr(args, "program", None)
