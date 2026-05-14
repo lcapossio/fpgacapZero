@@ -148,7 +148,7 @@ module fcapz_ela #(
             SAMPLE_W_must_be_at_most_256 _sample_w_check_FAILED();
     endgenerate
 
-    localparam PTR_W = $clog2(DEPTH);
+    localparam PTR_W = $clog2(DEPTH+1);
     // Used by the single-segment pre-arm rolling buffer. Keep this explicit
     // instead of slicing DEPTH, because power-of-two DEPTH would truncate to 0.
     localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
@@ -348,8 +348,8 @@ module fcapz_ela #(
             reg [SAMPLE_W-1:0] pipe [0:INPUT_PIPE-1];
             genvar pi;
             for (pi = 0; pi < INPUT_PIPE; pi = pi + 1) begin : g_stage
-                always @(posedge sample_clk or posedge sample_rst) begin
-                    if (sample_rst)
+                always @(posedge sample_clk) begin
+                    if (sample_rst == 1'b1)
                         pipe[pi] <= {SAMPLE_W{1'b0}};
                     else if (pi == 0)
                         pipe[pi] <= probe_muxed;
@@ -464,8 +464,8 @@ module fcapz_ela #(
             assign ts_counter_cur = ts_counter;
 
             // Free-running counter in sample_clk
-            always @(posedge sample_clk or posedge sample_rst) begin
-                if (sample_rst)
+            always @(posedge sample_clk) begin
+                if (sample_rst == 1'b1)
                     ts_counter <= {TIMESTAMP_W{1'b0}};
                 else
                     ts_counter <= ts_counter + 1'b1;
@@ -644,8 +644,8 @@ module fcapz_ela #(
 
     // Register compare hits when the input path is already pipelined.  This
     // keeps wide relational comparators off the capture-control critical path.
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             simple_hit_a_q <= 1'b0;
             simple_hit_b_q <= 1'b0;
             seq_hit_a_q    <= 1'b0;
@@ -785,8 +785,8 @@ module fcapz_ela #(
     end
 
     // ---- CDC: arm/reset toggles --------------------------------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             arm_toggle_sync1   <= 1'b0; arm_toggle_sync2   <= 1'b0;
             reset_toggle_sync1 <= 1'b0; reset_toggle_sync2 <= 1'b0;
             startup_arm_pending <= (STARTUP_ARM != 0);
@@ -804,8 +804,8 @@ module fcapz_ela #(
 
     // ---- CDC: config registers ---------------------------------------------
     integer si;
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             pretrig_len_sync1  <= 0; pretrig_len_sync2  <= 0;
             posttrig_len_sync1 <= 0; posttrig_len_sync2 <= 0;
             trig_mode_sync1    <= 0; trig_mode_sync2    <= 0;
@@ -892,8 +892,8 @@ module fcapz_ela #(
     // Phase 2: external trigger_in synchronizer
     generate
         if (HAS_EXT_TRIG) begin : g_ext_trig_sync
-            always @(posedge sample_clk or posedge sample_rst) begin
-                if (sample_rst) begin
+            always @(posedge sample_clk) begin
+                if (sample_rst == 1'b1) begin
                     trig_in_sync1 <= 1'b0;
                     trig_in_sync2 <= 1'b0;
                 end else begin
@@ -910,8 +910,8 @@ module fcapz_ela #(
     endgenerate
 
     // ---- Latch config on arm -----------------------------------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             pretrig_len      <= 0;
             posttrig_len     <= 0;
             trig_cmp_mode_a  <= 4'd0;  // EQ
@@ -1003,14 +1003,14 @@ module fcapz_ela #(
     end
 
     // ---- Previous sample register ------------------------------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) probe_prev <= {SAMPLE_W{1'b0}};
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) probe_prev <= {SAMPLE_W{1'b0}};
         else            probe_prev <= active_probe;
     end
 
     // ---- Phase 1: Decimation counter (sample_clk domain) -------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             decim_count <= 24'h0;
         end else begin
             if (!HAS_DECIM) begin
@@ -1054,8 +1054,8 @@ module fcapz_ela #(
     // Register the RAM write command so address, data, and enable stay
     // aligned and the trigger/WEA path does not have to reach the BRAM in
     // the same cycle as trigger evaluation.
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             mem_we_a_q     <= 1'b0;
             mem_wr_addr_q  <= {PTR_W{1'b0}};
             mem_wr_data_q  <= {SAMPLE_W{1'b0}};
@@ -1071,8 +1071,8 @@ module fcapz_ela #(
     end
 
     // Phase 2: trigger_out pulse
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst)
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1)
             trigger_out_r <= 1'b0;
         else
             trigger_out_r <= (armed && !triggered && pretrigger_ready &&
@@ -1090,8 +1090,8 @@ module fcapz_ela #(
             : seg_base + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
 
     integer seg_i;
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             armed       <= 1'b0;
             triggered   <= 1'b0;
             done        <= 1'b0;
@@ -1354,8 +1354,8 @@ module fcapz_ela #(
     reg [2:0] rd_phase;
     // Track whether current read targets timestamp vs sample memory
     reg rd_is_ts;
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
+    always @(posedge sample_clk) begin
+        if (sample_rst == 1'b1) begin
             rd_req_sync1         <= 1'b0;
             rd_req_sync2         <= 1'b0;
             rd_req_sync3         <= 1'b0;
@@ -1438,8 +1438,8 @@ module fcapz_ela #(
         end
     end
 
-    always @(posedge jtag_clk or posedge jtag_rst) begin
-        if (jtag_rst) begin
+    always @(posedge jtag_clk) begin
+        if (jtag_rst == 1'b1) begin
             rd_ack_sync1  <= 1'b0;
             rd_ack_sync2  <= 1'b0;
             rd_data_sync1 <= {SAMPLE_W{1'b0}};
@@ -1513,7 +1513,11 @@ module fcapz_ela #(
     endfunction
 
     always @(*) begin
-        jtag_rdata_mux = 32'h0;
+        // defaults
+        jtag_rdata_mux = jtag_addr;
+        seq_rd_stage = 0;
+        seq_rd_off = 0;
+
         case (jtag_addr)
             // VERSION layout (defined in rtl/fcapz_version.vh, generated
             // from the repo-root VERSION file by tools/sync_version.py):
@@ -1523,7 +1527,7 @@ module fcapz_ela #(
             // Hosts must verify VERSION[15:0] equals the LA magic before
             // trusting any other ELA register on this chain.
             ADDR_VERSION:     jtag_rdata_mux = `FCAPZ_ELA_VERSION_REG;
-            ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
+/*            ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
             ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, done, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata_mux = SAMPLE_W;
             ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
@@ -1560,6 +1564,7 @@ module fcapz_ela #(
             ADDR_TRIG_DELAY:  jtag_rdata_mux = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
+
             default: begin
                 if (seq_addr_hit) begin
                     seq_rd_stage = seq_rd_stage_w;
@@ -1573,7 +1578,7 @@ module fcapz_ela #(
                         default: jtag_rdata_mux = 32'h0;
                     endcase
                 end
-            end
+            end*/
         endcase
     end
 

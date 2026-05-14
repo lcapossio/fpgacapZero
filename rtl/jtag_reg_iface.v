@@ -41,8 +41,8 @@ module jtag_reg_iface (
     assign reg_clk = tck;
     assign reg_rst = arst;
 
-    always @(posedge tck or posedge arst) begin
-        if (arst) begin
+    always @(posedge tck) begin
+        if (arst == 1'b1) begin
             sr <= 49'h0;
             reg_wr_en <= 1'b0;
             reg_rd_en <= 1'b0;

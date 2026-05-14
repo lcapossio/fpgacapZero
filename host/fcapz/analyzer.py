@@ -686,6 +686,24 @@ class Analyzer:
             compare_caps = int(vals[8])
         else:
             _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+
+            print(f"{hex(_ADDR_VERSION)} = {hex(_vread(_ADDR_VERSION))}")
+            print(f"{hex(_ADDR_CTRL)} = {hex(_vread(_ADDR_CTRL))}")
+            print(f"{hex(_ADDR_STATUS)} = {hex(_vread(_ADDR_STATUS))}")
+            print(f"{hex(_ADDR_SAMPLE_W)} = {hex(_vread(_ADDR_SAMPLE_W))}")
+            print(f"{hex(_ADDR_DEPTH)} = {hex(_vread(_ADDR_DEPTH))}")
+            print(f"{hex(_ADDR_PRETRIG)} = {hex(_vread(_ADDR_PRETRIG))}")
+            print(f"{hex(_ADDR_POSTTRIG)} = {hex(_vread(_ADDR_POSTTRIG))}")
+            print(f"{hex(_ADDR_CAPTURE_LEN)} = {hex(_vread(_ADDR_CAPTURE_LEN))}")
+            print(f"{hex(_ADDR_TRIG_MODE)} = {hex(_vread(_ADDR_TRIG_MODE))}")
+            print(f"{hex(_ADDR_TRIG_VALUE)} = {hex(_vread(_ADDR_TRIG_VALUE))}")
+            print(f"{hex(_ADDR_TRIG_MASK)} = {hex(_vread(_ADDR_TRIG_MASK))}")
+            print(f"{hex(_ADDR_CHAN_SEL)} = {hex(_vread(_ADDR_CHAN_SEL))}")
+
+            print()
+
+            return (0,0,0)
+
             version = int(_vread(_ADDR_VERSION))
             sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
             depth = int(self.transport.read_reg(_ADDR_DEPTH))
