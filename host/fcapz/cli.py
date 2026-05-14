@@ -8,7 +8,14 @@ import json
 import sys
 from pathlib import Path
 
-from .analyzer import Analyzer, CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
+from .analyzer import (
+    Analyzer,
+    CaptureConfig,
+    ElaManager,
+    ProbeSpec,
+    SequencerStage,
+    TriggerConfig,
+)
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -254,6 +261,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
     )
     p.add_argument(
+        "--chain",
+        type=int,
+        default=1,
+        help="ELA control BSCAN USER chain (default 1)",
+    )
+    p.add_argument(
+        "--ela-instance",
+        type=int,
+        default=None,
+        help="Core-manager ELA slot on the selected chain (default: current/legacy slot)",
+    )
+    p.add_argument(
         "--program",
         metavar="BITFILE",
         default=None,
@@ -266,6 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("probe", help="Read core identity registers")
+    sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
 
     cfg = sub.add_parser("configure", help="Write capture configuration")
@@ -392,12 +412,30 @@ def build_parser() -> argparse.ArgumentParser:
     # -- EIO subcommands ---------------------------------------------------
     eio_probe = sub.add_parser("eio-probe", help="Read EIO core identity and widths")
     eio_probe.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_probe.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
     eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_read.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
     eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_write.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help="Managed core slot on the selected chain",
+    )
     eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
 
     # -- AXI subcommands ---------------------------------------------------
@@ -505,7 +543,7 @@ def main() -> int:
 
     # -- EIO commands ------------------------------------------------------
     if args.cmd in ("eio-probe", "eio-read", "eio-write"):
-        eio = EioController(transport, chain=args.chain)
+        eio = EioController(transport, chain=args.chain, instance=args.instance)
         try:
             eio.connect()
             if args.cmd == "eio-probe":
@@ -513,6 +551,7 @@ def main() -> int:
                     "in_w": eio.in_w,
                     "out_w": eio.out_w,
                     "chain": args.chain,
+                    "instance": args.instance,
                 }, indent=2))
             elif args.cmd == "eio-read":
                 print(f"0x{eio.read_inputs():X}")
@@ -621,10 +660,15 @@ def main() -> int:
                     pass
 
     # -- Analyzer commands -------------------------------------------------
-    analyzer = Analyzer(transport)
+    analyzer = Analyzer(transport, chain=args.chain, instance=args.ela_instance)
 
     try:
         analyzer.connect()
+        if args.cmd == "ela-list":
+            manager = ElaManager(transport, chain=args.chain)
+            print(json.dumps(manager.probe_all(), indent=2))
+            return 0
+
         if args.cmd == "probe":
             print(json.dumps(analyzer.probe(), indent=2))
             return 0
