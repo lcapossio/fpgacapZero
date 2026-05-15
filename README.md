@@ -396,13 +396,24 @@ pip install fpgacapzero[mcp]
 fcapz-mcp
 ```
 
-The server speaks MCP over stdio and provides tools such as `fcapz_status`,
-`fcapz_connect`, `fcapz_probe`, `fcapz_capture`, `fcapz_eio_connect`,
-`fcapz_eio_read`, and `fcapz_eio_write`. EIO writes and FPGA programming are
-disabled by default; enable them explicitly:
+The server speaks MCP over stdio and exposes the host RPC lab controls for ELA,
+Embedded I/O, JTAG-to-AXI4, and eJTAG-UART:
+
+| Area | MCP tools |
+| --- | --- |
+| Session/status | `fcapz_status` |
+| ELA | `fcapz_connect`, `fcapz_close`, `fcapz_probe`, `fcapz_configure`, `fcapz_arm`, `fcapz_capture` |
+| Embedded I/O | `fcapz_eio_connect`, `fcapz_eio_close`, `fcapz_eio_read`, `fcapz_eio_write` |
+| JTAG-to-AXI4 | `fcapz_axi_connect`, `fcapz_axi_close`, `fcapz_axi_read`, `fcapz_axi_write`, `fcapz_axi_write_block`, `fcapz_axi_dump` |
+| eJTAG-UART | `fcapz_uart_connect`, `fcapz_uart_close`, `fcapz_uart_send`, `fcapz_uart_recv`, `fcapz_uart_status` |
+
+EIO writes, AXI writes, UART sends, and FPGA programming are disabled by
+default; enable them explicitly:
 
 ```bash
 fcapz-mcp --allow-eio-write
+fcapz-mcp --allow-axi-write
+fcapz-mcp --allow-uart-send
 fcapz-mcp --allow-program --bitfile-root ./build/bitstreams
 ```
 

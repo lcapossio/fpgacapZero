@@ -43,6 +43,10 @@ class FakeRpc:
                 "channel": req.get("channel", 0),
                 "result": {"samples": [1, 2]},
             }
+        if cmd == "configure":
+            return {"ok": True, "schema_version": "test"}
+        if cmd == "arm":
+            return {"ok": True, "schema_version": "test"}
         if cmd == "eio_connect":
             return {
                 "ok": True,
@@ -57,6 +61,28 @@ class FakeRpc:
             return {"ok": True, "schema_version": "test", "value": 5}
         if cmd == "eio_write":
             return {"ok": True, "schema_version": "test"}
+        if cmd == "axi_connect":
+            return {"ok": True, "schema_version": "test", "data_width": 32, "chain": req["chain"]}
+        if cmd == "axi_close":
+            return {"ok": True, "schema_version": "test"}
+        if cmd == "axi_read":
+            return {"ok": True, "schema_version": "test", "value": "0x12345678"}
+        if cmd == "axi_write":
+            return {"ok": True, "schema_version": "test", "resp": "OKAY"}
+        if cmd == "axi_write_block":
+            return {"ok": True, "schema_version": "test", "count": len(req["data"])}
+        if cmd == "axi_dump":
+            return {"ok": True, "schema_version": "test", "words": ["0x00000001"]}
+        if cmd == "uart_connect":
+            return {"ok": True, "schema_version": "test", "chain": req["chain"]}
+        if cmd == "uart_close":
+            return {"ok": True, "schema_version": "test"}
+        if cmd == "uart_send":
+            return {"ok": True, "schema_version": "test", "bytes_sent": 2}
+        if cmd == "uart_recv":
+            return {"ok": True, "schema_version": "test", "data": "aGk=", "bytes_received": 2}
+        if cmd == "uart_status":
+            return {"ok": True, "schema_version": "test", "rx_count": 1, "tx_space": 2}
         raise AssertionError(f"unexpected cmd {cmd}")
 
 
@@ -176,6 +202,16 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True})
         self.assertEqual(session.status()["last_capture_summary"], {"ok": True})
 
+    def test_configure_and_arm_are_separate_rpc_commands(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        session.configure({"pretrigger": 1, "posttrigger": 2})
+        session.arm()
+
+        self.assertEqual(rpc.requests[0], {"cmd": "configure", "pretrigger": 1, "posttrigger": 2})
+        self.assertEqual(rpc.requests[1], {"cmd": "arm"})
+
     def test_capture_rejects_unknown_config_keys(self):
         session = FcapzMcpSession(rpc=FakeRpc())
 
@@ -194,6 +230,14 @@ class FcapzMcpSessionTests(unittest.TestCase):
             session.capture()
         with self.assertRaises(PermissionError):
             session.eio_write(1)
+        with self.assertRaises(PermissionError):
+            session.axi_write(0, 1)
+        with self.assertRaises(PermissionError):
+            session.uart_send(text="hi")
+        with self.assertRaises(PermissionError):
+            session.configure({})
+        with self.assertRaises(PermissionError):
+            session.arm()
         with self.assertRaises(PermissionError):
             session.connect(program="design.bit")
 
@@ -219,6 +263,55 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(rpc.requests[0]["chain"], 3)
         self.assertEqual(rpc.requests[1], {"cmd": "eio_close"})
         self.assertEqual(rpc.requests[2]["chain"], 0)
+
+    def test_axi_tools_route_through_rpc_and_gate_writes(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(allow_axi_write=True),
+        )
+
+        session.axi_connect(backend="openocd", port=6666)
+        self.assertEqual(rpc.requests[-1]["cmd"], "axi_connect")
+        self.assertEqual(rpc.requests[-1]["chain"], 4)
+        self.assertEqual(rpc.requests[-1]["tap"], "xc7a100t.tap")
+        self.assertEqual(session.axi_read("0x10")["value"], "0x12345678")
+        self.assertEqual(session.axi_write("0x10", "0xCAFE")["resp"], "OKAY")
+        self.assertEqual(session.axi_write_block(0x20, [1, "0x2"])["count"], 2)
+        self.assertEqual(session.axi_dump(0x20, 1)["words"], ["0x00000001"])
+        session.axi_close()
+        self.assertFalse(session.status()["axi_connected"])
+
+    def test_axi_write_requires_explicit_capability(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaises(PermissionError):
+            session.axi_write(0, 1)
+        with self.assertRaises(PermissionError):
+            session.axi_write_block(0, [1])
+
+    def test_uart_tools_route_through_rpc_and_gate_sends(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(allow_uart_send=True),
+        )
+
+        session.uart_connect(backend="hw_server")
+        self.assertEqual(rpc.requests[-1]["cmd"], "uart_connect")
+        self.assertEqual(rpc.requests[-1]["chain"], 4)
+        self.assertEqual(session.uart_send(text="hi")["bytes_sent"], 2)
+        self.assertEqual(rpc.requests[-1]["data"], "aGk=")
+        self.assertEqual(session.uart_recv(16, timeout=0.25)["bytes_received"], 2)
+        self.assertEqual(session.uart_status()["rx_count"], 1)
+        session.uart_close()
+        self.assertFalse(session.status()["uart_connected"])
+
+    def test_uart_send_requires_explicit_capability(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaises(PermissionError):
+            session.uart_send(text="hi")
 
     def test_program_requires_explicit_capability(self):
         session = FcapzMcpSession(rpc=FakeRpc())
@@ -257,6 +350,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
     def test_main_rejects_conflicting_safety_flags(self):
         with self.assertRaises(SystemExit):
             main(["--read-only", "--allow-eio-write"])
+        with self.assertRaises(SystemExit):
+            main(["--read-only", "--allow-axi-write"])
+        with self.assertRaises(SystemExit):
+            main(["--read-only", "--allow-uart-send"])
         with self.assertRaises(SystemExit):
             main(["--read-only", "--allow-program"])
         with self.assertRaises(SystemExit):
@@ -315,15 +412,30 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_close",
                 "fcapz_probe",
                 "fcapz_capture",
+                "fcapz_configure",
+                "fcapz_arm",
                 "fcapz_eio_connect",
                 "fcapz_eio_close",
                 "fcapz_eio_read",
                 "fcapz_eio_write",
+                "fcapz_axi_connect",
+                "fcapz_axi_close",
+                "fcapz_axi_read",
+                "fcapz_axi_write",
+                "fcapz_axi_write_block",
+                "fcapz_axi_dump",
+                "fcapz_uart_connect",
+                "fcapz_uart_close",
+                "fcapz_uart_send",
+                "fcapz_uart_recv",
+                "fcapz_uart_status",
                 "fcapz_status",
             },
         )
         self.assertTrue(tools["fcapz_probe"].annotations.readOnlyHint)
         self.assertTrue(tools["fcapz_eio_write"].annotations.destructiveHint)
+        self.assertTrue(tools["fcapz_axi_write"].annotations.destructiveHint)
+        self.assertTrue(tools["fcapz_uart_send"].annotations.destructiveHint)
 
 
 if __name__ == "__main__":

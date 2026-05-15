@@ -10,6 +10,7 @@ package; the SDK is only imported when building/running the server.
 from __future__ import annotations
 
 import argparse
+import base64
 import queue
 import json
 import sys
@@ -31,6 +32,8 @@ class McpCapabilities:
 
     allow_capture: bool = True
     allow_eio_write: bool = False
+    allow_axi_write: bool = False
+    allow_uart_send: bool = False
     allow_program: bool = False
     bitfile_root: Path | None = None
     rpc_timeout_sec: float = 30.0
@@ -52,6 +55,8 @@ class FcapzMcpSession:
     capabilities: McpCapabilities = field(default_factory=McpCapabilities)
     connected: bool = False
     eio_connected: bool = False
+    axi_connected: bool = False
+    uart_connected: bool = False
     last_probe: JsonDict | None = None
     last_capture: JsonDict | None = None
     last_capture_summary: JsonDict | None = None
@@ -335,6 +340,58 @@ class FcapzMcpSession:
         self.last_capture_summary = self._capture_summary()
         return dict(self.last_capture_summary or {})
 
+    def configure(self, config: JsonDict | None = None) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("configure tools are disabled for this MCP server")
+        req: JsonDict = {"cmd": "configure"}
+        if config:
+            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
+            if unknown:
+                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
+            req.update(config)
+        return self._rpc_call(req)
+
+    def arm(self) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("arm tools are disabled for this MCP server")
+        return self._rpc_call({"cmd": "arm"})
+
+    def _bridge_connect_req(
+        self,
+        *,
+        cmd: str,
+        backend: str,
+        host: str,
+        port: int | None,
+        tap: str | None,
+        chain: int | None,
+        hardware: str | None,
+        quartus_stp: str | None,
+        spi_url: str | None,
+        spi_frequency: float | None,
+        spi_cs: int | None,
+        spi_timeout: float | None,
+    ) -> JsonDict:
+        req: JsonDict = {
+            "cmd": cmd,
+            "backend": backend,
+            "chain": 4 if chain is None else int(chain),
+        }
+        self._add_connection_fields(
+            req,
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+        return req
+
     def eio_connect(
         self,
         *,
@@ -391,13 +448,150 @@ class FcapzMcpSession:
             )
         return self._rpc_call({"cmd": "eio_write", "value": int(value)})
 
+    def axi_connect(
+        self,
+        *,
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        if self.axi_connected:
+            self.axi_close()
+        response = self._rpc_call(
+            self._bridge_connect_req(
+                cmd="axi_connect",
+                backend=backend,
+                host=host,
+                port=port,
+                tap=tap,
+                chain=chain,
+                hardware=hardware,
+                quartus_stp=quartus_stp,
+                spi_url=spi_url,
+                spi_frequency=spi_frequency,
+                spi_cs=spi_cs,
+                spi_timeout=spi_timeout,
+            )
+        )
+        self.axi_connected = True
+        return response
+
+    def axi_close(self) -> JsonDict:
+        if not self.axi_connected:
+            return {"ok": True}
+        response = self._rpc_call({"cmd": "axi_close"})
+        self.axi_connected = False
+        return response
+
+    def axi_read(self, addr: int | str) -> JsonDict:
+        return self._rpc_call({"cmd": "axi_read", "addr": addr})
+
+    def axi_write(self, addr: int | str, data: int | str, wstrb: int | str = "0xF") -> JsonDict:
+        if not self.capabilities.allow_axi_write:
+            raise PermissionError(
+                "AXI writes are disabled; restart with --allow-axi-write to enable them"
+            )
+        return self._rpc_call({"cmd": "axi_write", "addr": addr, "data": data, "wstrb": wstrb})
+
+    def axi_write_block(
+        self,
+        addr: int | str,
+        data: list[int | str],
+        *,
+        burst: bool = False,
+    ) -> JsonDict:
+        if not self.capabilities.allow_axi_write:
+            raise PermissionError(
+                "AXI writes are disabled; restart with --allow-axi-write to enable them"
+            )
+        return self._rpc_call(
+            {"cmd": "axi_write_block", "addr": addr, "data": list(data), "burst": bool(burst)}
+        )
+
+    def axi_dump(self, addr: int | str, count: int, *, burst: bool = False) -> JsonDict:
+        return self._rpc_call(
+            {"cmd": "axi_dump", "addr": addr, "count": int(count), "burst": bool(burst)}
+        )
+
+    def uart_connect(
+        self,
+        *,
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        if self.uart_connected:
+            self.uart_close()
+        response = self._rpc_call(
+            self._bridge_connect_req(
+                cmd="uart_connect",
+                backend=backend,
+                host=host,
+                port=port,
+                tap=tap,
+                chain=chain,
+                hardware=hardware,
+                quartus_stp=quartus_stp,
+                spi_url=spi_url,
+                spi_frequency=spi_frequency,
+                spi_cs=spi_cs,
+                spi_timeout=spi_timeout,
+            )
+        )
+        self.uart_connected = True
+        return response
+
+    def uart_close(self) -> JsonDict:
+        if not self.uart_connected:
+            return {"ok": True}
+        response = self._rpc_call({"cmd": "uart_close"})
+        self.uart_connected = False
+        return response
+
+    def uart_send(self, data_base64: str | None = None, text: str | None = None) -> JsonDict:
+        if not self.capabilities.allow_uart_send:
+            raise PermissionError(
+                "UART sends are disabled; restart with --allow-uart-send to enable them"
+            )
+        if data_base64 is None:
+            if text is None:
+                raise ValueError("provide either data_base64 or text")
+            data_base64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        return self._rpc_call({"cmd": "uart_send", "data": data_base64})
+
+    def uart_recv(self, count: int, timeout: float = 1.0) -> JsonDict:
+        return self._rpc_call({"cmd": "uart_recv", "count": int(count), "timeout": float(timeout)})
+
+    def uart_status(self) -> JsonDict:
+        return self._rpc_call({"cmd": "uart_status"})
+
     def status(self) -> JsonDict:
         return {
             "connected": self.connected,
             "eio_connected": self.eio_connected,
+            "axi_connected": self.axi_connected,
+            "uart_connected": self.uart_connected,
             "capabilities": {
                 "allow_capture": self.capabilities.allow_capture,
                 "allow_eio_write": self.capabilities.allow_eio_write,
+                "allow_axi_write": self.capabilities.allow_axi_write,
+                "allow_uart_send": self.capabilities.allow_uart_send,
                 "allow_program": self.capabilities.allow_program,
                 "bitfile_root": (
                     str(self.capabilities.bitfile_root)
@@ -526,6 +720,23 @@ def build_mcp_server(session: FcapzMcpSession):
         )
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
+        """Configure the connected ELA without arming it.
+
+        config accepts the same capture fields as fcapz_capture. This is useful
+        when an agent must configure trigger settings and arm later in a
+        separate step.
+        """
+
+        return session.configure(config=config)
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_arm() -> JsonDict:
+        """Arm the connected ELA using the current hardware configuration."""
+
+        return session.arm()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_eio_connect(
         backend: str = "hw_server",
         host: str = "127.0.0.1",
@@ -581,6 +792,142 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.eio_write(value)
 
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_axi_connect(
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        """Connect to an eJTAG-to-AXI4 bridge.
+
+        chain defaults to 4. Backend fields mirror fcapz_connect and are
+        validated before reaching the RPC layer.
+        """
+
+        return session.axi_connect(
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            chain=chain,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
+    def fcapz_axi_close() -> JsonDict:
+        """Close the active AXI bridge connection."""
+
+        return session.axi_close()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_axi_read(addr: int | str) -> JsonDict:
+        """Read one 32-bit AXI word from addr, which may be an integer or hex string."""
+
+        return session.axi_read(addr)
+
+    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    def fcapz_axi_write(
+        addr: int | str,
+        data: int | str,
+        wstrb: int | str = "0xF",
+    ) -> JsonDict:
+        """Write one 32-bit AXI word when AXI write access is enabled."""
+
+        return session.axi_write(addr, data, wstrb)
+
+    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    def fcapz_axi_write_block(
+        addr: int | str,
+        data: list[int | str],
+        burst: bool = False,
+    ) -> JsonDict:
+        """Write a block of AXI words when AXI write access is enabled."""
+
+        return session.axi_write_block(addr, data, burst=burst)
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_axi_dump(addr: int | str, count: int, burst: bool = False) -> JsonDict:
+        """Read count 32-bit AXI words starting at addr."""
+
+        return session.axi_dump(addr, count, burst=burst)
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_uart_connect(
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        """Connect to an eJTAG-UART bridge.
+
+        chain defaults to 4. Backend fields mirror fcapz_connect and are
+        validated before reaching the RPC layer.
+        """
+
+        return session.uart_connect(
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            chain=chain,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
+    def fcapz_uart_close() -> JsonDict:
+        """Close the active UART bridge connection."""
+
+        return session.uart_close()
+
+    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    def fcapz_uart_send(
+        data_base64: str | None = None,
+        text: str | None = None,
+    ) -> JsonDict:
+        """Send bytes over eJTAG-UART when UART send access is enabled.
+
+        Pass data_base64 for arbitrary bytes or text for UTF-8 text.
+        """
+
+        return session.uart_send(data_base64=data_base64, text=text)
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_uart_recv(count: int, timeout: float = 1.0) -> JsonDict:
+        """Receive up to count bytes from eJTAG-UART; timeout is in seconds."""
+
+        return session.uart_recv(count, timeout)
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_uart_status() -> JsonDict:
+        """Return eJTAG-UART status counters and FIFO state."""
+
+        return session.uart_status()
+
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
     def fcapz_status() -> JsonDict:
         """Return current MCP server session status."""
@@ -616,12 +963,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--read-only",
         action="store_true",
-        help="Disable capture and EIO-write tools; probe/EIO-read remain available",
+        help=(
+            "Disable capture/configure/arm and write/send tools; "
+            "probe/read/status tools remain available"
+        ),
     )
     parser.add_argument(
         "--allow-eio-write",
         action="store_true",
         help="Allow fcapz_eio_write to drive fabric outputs",
+    )
+    parser.add_argument(
+        "--allow-axi-write",
+        action="store_true",
+        help="Allow fcapz_axi_write and fcapz_axi_write_block to modify AXI memory/registers",
+    )
+    parser.add_argument(
+        "--allow-uart-send",
+        action="store_true",
+        help="Allow fcapz_uart_send to transmit bytes into the target",
     )
     parser.add_argument(
         "--allow-program",
@@ -641,13 +1001,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.read_only and (args.allow_eio_write or args.allow_program):
-        parser.error("--read-only cannot be combined with --allow-eio-write or --allow-program")
+    if args.read_only and (
+        args.allow_eio_write
+        or args.allow_axi_write
+        or args.allow_uart_send
+        or args.allow_program
+    ):
+        parser.error(
+            "--read-only cannot be combined with write/program enable flags"
+        )
     if args.bitfile_root is not None and not args.allow_program:
         parser.error("--bitfile-root requires --allow-program")
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
         allow_eio_write=bool(args.allow_eio_write),
+        allow_axi_write=bool(args.allow_axi_write),
+        allow_uart_send=bool(args.allow_uart_send),
         allow_program=bool(args.allow_program),
         bitfile_root=args.bitfile_root,
     )
