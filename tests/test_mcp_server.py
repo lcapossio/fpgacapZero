@@ -202,6 +202,16 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True})
         self.assertEqual(session.status()["last_capture_summary"], {"ok": True})
 
+    def test_drop_last_capture_releases_cached_payload(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        session.capture()
+        self.assertIsNotNone(session.last_capture)
+        self.assertEqual(session.drop_last_capture(), {"ok": True})
+
+        self.assertIsNone(session.last_capture)
+        self.assertIsNone(session.status()["last_capture_summary"])
+
     def test_configure_and_arm_are_separate_rpc_commands(self):
         rpc = FakeRpc()
         session = FcapzMcpSession(rpc=rpc)
@@ -252,6 +262,15 @@ class FcapzMcpSessionTests(unittest.TestCase):
         session.eio_write(2)
         self.assertEqual(rpc.requests[-1], {"cmd": "eio_write", "value": 2})
         self.assertTrue(session.status()["eio_connected"])
+
+    def test_eio_read_is_cached_and_cleared_on_close(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        self.assertEqual(session.eio_read()["value"], 5)
+        self.assertEqual(session.status()["last_eio_read"]["value"], 5)
+        session.eio_close()
+
+        self.assertIsNone(session.status()["last_eio_read"])
 
     def test_eio_connect_defaults_chain_by_backend(self):
         rpc = FakeRpc()
@@ -373,6 +392,17 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertIn("fcapz-mcp: schema exploded", text)
         self.assertIn("Traceback", text)
 
+    def test_main_shuts_down_session_when_run_returns(self):
+        class DoneServer:
+            def run(self, **kwargs):
+                return None
+
+        with patch.object(mcp_server, "build_mcp_server", return_value=DoneServer()):
+            with patch.object(FcapzMcpSession, "shutdown") as shutdown:
+                self.assertEqual(main([]), 0)
+
+        shutdown.assert_called_once()
+
     def test_status_returns_copies(self):
         session = FcapzMcpSession(rpc=FakeRpc())
         session.probe()
@@ -412,6 +442,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_close",
                 "fcapz_probe",
                 "fcapz_capture",
+                "fcapz_drop_last_capture",
                 "fcapz_configure",
                 "fcapz_arm",
                 "fcapz_eio_connect",

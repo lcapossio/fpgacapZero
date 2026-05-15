@@ -380,8 +380,10 @@ eio.close()
 
 ### MCP server
 
-`fcapz` can expose its host lab controls through an MCP server for coding
-agents and other MCP clients. This branch supports the same RPC backends as the
+`fcapz` can expose its host lab controls through a single-client MCP server for
+coding agents and other MCP clients. The current server is intended for stdio
+use: one MCP client owns one hardware session, and concurrent clients should run
+separate server processes. This branch supports the same RPC backends as the
 host RPC layer (`hw_server` and `openocd`); newer backend-specific fields such
 as Quartus cable names and SPI adapter settings are forwarded for compatibility
 when those transports are available. The MCP tools accept the same connection
@@ -402,7 +404,7 @@ Embedded I/O, JTAG-to-AXI4, and eJTAG-UART:
 | Area | MCP tools |
 | --- | --- |
 | Session/status | `fcapz_status` |
-| ELA | `fcapz_connect`, `fcapz_close`, `fcapz_probe`, `fcapz_configure`, `fcapz_arm`, `fcapz_capture` |
+| ELA | `fcapz_connect`, `fcapz_close`, `fcapz_probe`, `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_drop_last_capture` |
 | Embedded I/O | `fcapz_eio_connect`, `fcapz_eio_close`, `fcapz_eio_read`, `fcapz_eio_write` |
 | JTAG-to-AXI4 | `fcapz_axi_connect`, `fcapz_axi_close`, `fcapz_axi_read`, `fcapz_axi_write`, `fcapz_axi_write_block`, `fcapz_axi_dump` |
 | eJTAG-UART | `fcapz_uart_connect`, `fcapz_uart_close`, `fcapz_uart_send`, `fcapz_uart_recv`, `fcapz_uart_status` |
@@ -436,8 +438,10 @@ Example MCP stdio client configuration:
 }
 ```
 
-Available resources include `fcapz://status`, `fcapz://last-probe`, and
-`fcapz://last-capture`.
+Available resources include `fcapz://status`, `fcapz://last-probe`,
+`fcapz://last-capture`, and `fcapz://last-eio-read`. Large captures stay
+available through `fcapz://last-capture` until the next capture, ELA close, or
+an explicit `fcapz_drop_last_capture` call.
 
 #### JTAG-to-AXI4 Bridge
 

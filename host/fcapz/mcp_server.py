@@ -60,6 +60,7 @@ class FcapzMcpSession:
     last_probe: JsonDict | None = None
     last_capture: JsonDict | None = None
     last_capture_summary: JsonDict | None = None
+    last_eio_read: JsonDict | None = None
     _rpc_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
@@ -309,6 +310,11 @@ class FcapzMcpSession:
         self.last_capture_summary = None
         return response
 
+    def drop_last_capture(self) -> JsonDict:
+        self.last_capture = None
+        self.last_capture_summary = None
+        return {"ok": True}
+
     def probe(self) -> JsonDict:
         response = self._rpc_call({"cmd": "probe"})
         self.last_probe = dict(response.get("probe", {}))
@@ -433,13 +439,17 @@ class FcapzMcpSession:
 
     def eio_close(self) -> JsonDict:
         if not self.eio_connected:
+            self.last_eio_read = None
             return {"ok": True}
         response = self._rpc_call({"cmd": "eio_close"})
         self.eio_connected = False
+        self.last_eio_read = None
         return response
 
     def eio_read(self) -> JsonDict:
-        return self._rpc_call({"cmd": "eio_read"})
+        response = self._rpc_call({"cmd": "eio_read"})
+        self.last_eio_read = dict(response)
+        return response
 
     def eio_write(self, value: int) -> JsonDict:
         if not self.capabilities.allow_eio_write:
@@ -605,6 +615,9 @@ class FcapzMcpSession:
                 if self.last_capture_summary is not None
                 else None
             ),
+            "last_eio_read": (
+                dict(self.last_eio_read) if self.last_eio_read is not None else None
+            ),
         }
 
     def _capture_summary(self) -> JsonDict | None:
@@ -614,6 +627,13 @@ class FcapzMcpSession:
         keys = ("format", "sample_count", "overflow", "channel", "summary")
         summary.update({key: self.last_capture[key] for key in keys if key in self.last_capture})
         return summary
+
+    def shutdown(self) -> None:
+        for close in (self.close, self.eio_close, self.axi_close, self.uart_close):
+            try:
+                close()
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
 
 
 def build_mcp_server(session: FcapzMcpSession):
@@ -718,6 +738,12 @@ def build_mcp_server(session: FcapzMcpSession):
             fmt=format,
             summarize=summarize,
         )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
+    def fcapz_drop_last_capture() -> JsonDict:
+        """Forget the cached full capture payload exposed by fcapz://last-capture."""
+
+        return session.drop_last_capture()
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
@@ -952,6 +978,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return json.dumps(session.last_capture or {}, indent=2)
 
+    @mcp.resource("fcapz://last-eio-read")
+    def fcapz_last_eio_read() -> str:
+        """Last EIO read response."""
+
+        return json.dumps(session.last_eio_read or {}, indent=2)
+
     return mcp
 
 
@@ -1020,7 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
         allow_program=bool(args.allow_program),
         bitfile_root=args.bitfile_root,
     )
-    server = build_mcp_server(FcapzMcpSession(capabilities=capabilities))
+    session = FcapzMcpSession(capabilities=capabilities)
+    server = build_mcp_server(session)
     run: Callable[..., Any] = server.run
     try:
         run(transport="stdio")
@@ -1028,6 +1061,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fcapz-mcp: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return 1
+    finally:
+        session.shutdown()
     return 0
 
 
