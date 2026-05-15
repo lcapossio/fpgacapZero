@@ -28,6 +28,7 @@ classifiers = [
 [project.scripts]
 fcapz = "fcapz.cli:main"
 fcapz-gui = "fcapz.gui.main:main"
+fcapz-mcp = "fcapz.mcp_server:main"
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
@@ -44,6 +45,7 @@ dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 litex = ["litex"]
+mcp = ["mcp>=1.26.0,<1.27.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

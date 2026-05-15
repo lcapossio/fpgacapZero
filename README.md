@@ -378,6 +378,56 @@ eio.set_bit(0, 1)               # set single bit without disturbing others
 eio.close()
 ```
 
+### MCP server
+
+`fcapz` can expose its host lab controls through an MCP server for coding
+agents and other MCP clients. This branch supports the same RPC backends as the
+host RPC layer (`hw_server` and `openocd`); newer backend-specific fields such
+as Quartus cable names and SPI adapter settings are forwarded for compatibility
+when those transports are available. The MCP tools accept the same connection
+shape as the host RPC layer: `backend`, `host`, `port`, `tap`,
+`single_chain_burst`, `hardware`, `quartus_stp`, `spi_url`, `spi_frequency`,
+`spi_cs`, and `spi_timeout`. Backend-specific fields are validated before the
+RPC call, so SPI requests do not carry TAP defaults and Quartus requests do not
+carry SPI adapter settings. Install the optional dependency and run:
+
+```bash
+pip install fpgacapzero[mcp]
+fcapz-mcp
+```
+
+The server speaks MCP over stdio and provides tools such as `fcapz_status`,
+`fcapz_connect`, `fcapz_probe`, `fcapz_capture`, `fcapz_eio_connect`,
+`fcapz_eio_read`, and `fcapz_eio_write`. EIO writes and FPGA programming are
+disabled by default; enable them explicitly:
+
+```bash
+fcapz-mcp --allow-eio-write
+fcapz-mcp --allow-program --bitfile-root ./build/bitstreams
+```
+
+For safer diagnostic sessions, use read-only mode:
+
+```bash
+fcapz-mcp --read-only
+```
+
+Example MCP stdio client configuration:
+
+```json
+{
+  "mcpServers": {
+    "fpgacapzero": {
+      "command": "fcapz-mcp",
+      "args": ["--read-only"]
+    }
+  }
+}
+```
+
+Available resources include `fcapz://status`, `fcapz://last-probe`, and
+`fcapz://last-capture`.
+
 #### JTAG-to-AXI4 Bridge
 
 ```python

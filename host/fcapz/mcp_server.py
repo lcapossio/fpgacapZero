@@ -1,0 +1,666 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+"""MCP server for fpgacapZero lab automation.
+
+The MCP SDK is an optional dependency. Import this module freely in the normal
+package; the SDK is only imported when building/running the server.
+"""
+
+from __future__ import annotations
+
+import argparse
+import queue
+import json
+import sys
+import threading
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .rpc import RpcServer
+
+
+JsonDict = dict[str, Any]
+
+
+@dataclass
+class McpCapabilities:
+    """Safety switches for MCP-exposed hardware operations."""
+
+    allow_capture: bool = True
+    allow_eio_write: bool = False
+    allow_program: bool = False
+    bitfile_root: Path | None = None
+    rpc_timeout_sec: float = 30.0
+
+
+class FcapzMcpError(RuntimeError):
+    """Error raised for structured MCP/session failures."""
+
+    def __init__(self, message: str, *, payload: JsonDict | None = None) -> None:
+        super().__init__(message)
+        self.payload = dict(payload or {"error": message})
+
+
+@dataclass
+class FcapzMcpSession:
+    """Small stateful facade over :class:`RpcServer` for MCP tools."""
+
+    rpc: RpcServer = field(default_factory=RpcServer)
+    capabilities: McpCapabilities = field(default_factory=McpCapabilities)
+    connected: bool = False
+    eio_connected: bool = False
+    last_probe: JsonDict | None = None
+    last_capture: JsonDict | None = None
+    last_capture_summary: JsonDict | None = None
+    _rpc_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
+    _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
+
+    _CAPTURE_CONFIG_KEYS = frozenset({
+        "pretrigger",
+        "posttrigger",
+        "trigger_mode",
+        "trigger_value",
+        "trigger_mask",
+        "sample_width",
+        "depth",
+        "sample_clock_hz",
+        "probes",
+        "probe_file",
+        "channel",
+        "decimation",
+        "ext_trigger_mode",
+        "stor_qual_mode",
+        "stor_qual_value",
+        "stor_qual_mask",
+        "startup_arm",
+        "trigger_holdoff",
+        "trigger_delay",
+    })
+
+    def _rpc_call(self, req: JsonDict) -> JsonDict:
+        with self._rpc_lock:
+            if self._active_rpc_worker is not None:
+                if self._active_rpc_worker.is_alive():
+                    raise RuntimeError(
+                        f"previous fcapz RPC call {self._active_rpc_cmd!r} is still "
+                        "running after a timeout; restart the MCP server before "
+                        "issuing more hardware commands"
+                    )
+                self._active_rpc_worker = None
+                self._active_rpc_cmd = None
+
+        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+        def run_call() -> None:
+            try:
+                result_queue.put((True, self.rpc.handle(req)))
+            except BaseException as exc:
+                result_queue.put((False, exc))
+
+        worker = threading.Thread(target=run_call, name="fcapz-mcp-rpc", daemon=True)
+        with self._rpc_lock:
+            self._active_rpc_worker = worker
+            self._active_rpc_cmd = str(req.get("cmd"))
+            worker.start()
+        worker.join(self.capabilities.rpc_timeout_sec)
+        if worker.is_alive():
+            raise TimeoutError(
+                f"fcapz RPC call {req.get('cmd')!r} timed out after "
+                f"{self.capabilities.rpc_timeout_sec:g}s"
+            )
+        with self._rpc_lock:
+            self._active_rpc_worker = None
+            self._active_rpc_cmd = None
+        ok, result = result_queue.get_nowait()
+        if not ok:
+            raise result  # type: ignore[misc]
+        return self._ok_response(result)  # type: ignore[arg-type]
+
+    def _ok_response(self, response: JsonDict) -> JsonDict:
+        if not response.get("ok", False):
+            error = response.get("error", response)
+            message = error if isinstance(error, str) else json.dumps(error, sort_keys=True)
+            raise FcapzMcpError(message, payload=response)
+        return response
+
+    @staticmethod
+    def _default_tap(backend: str) -> str:
+        return "xc7a100t.tap" if backend == "openocd" else "xc7a100t"
+
+    @staticmethod
+    def _default_eio_chain(backend: str) -> int:
+        if backend in ("usb_blaster", "spi"):
+            return 0
+        return 3
+
+    @staticmethod
+    def _reject_fields(backend: str, fields: dict[str, object | None]) -> None:
+        present = sorted(name for name, value in fields.items() if value is not None)
+        if present:
+            raise ValueError(
+                f"{', '.join(present)} not supported for backend {backend!r}"
+            )
+
+    def _add_connection_fields(
+        self,
+        req: JsonDict,
+        *,
+        backend: str,
+        host: str,
+        port: int | None,
+        tap: str | None,
+        hardware: str | None,
+        quartus_stp: str | None,
+        spi_url: str | None,
+        spi_frequency: float | None,
+        spi_cs: int | None,
+        spi_timeout: float | None,
+    ) -> None:
+        if backend in ("hw_server", "openocd"):
+            self._reject_fields(
+                backend,
+                {
+                    "hardware": hardware,
+                    "quartus_stp": quartus_stp,
+                    "spi_url": spi_url,
+                    "spi_frequency": spi_frequency,
+                    "spi_cs": spi_cs,
+                    "spi_timeout": spi_timeout,
+                },
+            )
+            req["host"] = host
+            req["tap"] = tap or self._default_tap(backend)
+            if port is not None:
+                req["port"] = int(port)
+            return
+
+        if backend == "usb_blaster":
+            self._reject_fields(
+                backend,
+                {
+                    "tap": tap,
+                    "spi_url": spi_url,
+                    "spi_frequency": spi_frequency,
+                    "spi_cs": spi_cs,
+                    "spi_timeout": spi_timeout,
+                    "port": port,
+                    "host": None if host == "127.0.0.1" else host,
+                },
+            )
+            if hardware is not None:
+                req["hardware"] = hardware
+            if quartus_stp is not None:
+                req["quartus_stp"] = quartus_stp
+            return
+
+        if backend == "spi":
+            self._reject_fields(
+                backend,
+                {
+                    "tap": tap,
+                    "hardware": hardware,
+                    "quartus_stp": quartus_stp,
+                    "port": port,
+                    "host": None if host == "127.0.0.1" else host,
+                },
+            )
+            if spi_url is not None:
+                req["spi_url"] = spi_url
+            if spi_frequency is not None:
+                req["spi_frequency"] = float(spi_frequency)
+            if spi_cs is not None:
+                req["spi_cs"] = int(spi_cs)
+            if spi_timeout is not None:
+                req["spi_timeout"] = float(spi_timeout)
+            return
+
+        raise ValueError(f"unknown backend: {backend}")
+
+    def connect(
+        self,
+        *,
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        program: str | None = None,
+        single_chain_burst: bool = True,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        program_path = self._validated_program_path(program, backend=backend)
+        if self.connected:
+            self.close()
+        req: JsonDict = {
+            "cmd": "connect",
+            "backend": backend,
+        }
+        self._add_connection_fields(
+            req,
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+        if backend == "hw_server":
+            req["single_chain_burst"] = single_chain_burst
+        elif single_chain_burst is not True:
+            raise ValueError(f"single_chain_burst not supported for backend {backend!r}")
+        if program_path is not None:
+            req["program"] = str(program_path)
+        response = self._rpc_call(req)
+        self.connected = True
+        return response
+
+    def _validated_program_path(self, program: str | None, *, backend: str) -> Path | None:
+        if not program:
+            return None
+        if backend != "hw_server":
+            raise ValueError(
+                "program= is only supported for backend 'hw_server' in this MCP server"
+            )
+        if not self.capabilities.allow_program:
+            raise PermissionError(
+                "FPGA programming is disabled; restart with --allow-program to enable it"
+            )
+        path = Path(program).expanduser().resolve()
+        if path.suffix.lower() != ".bit":
+            raise ValueError(f"program must be a .bit file, got {path}")
+        if not path.is_file():
+            raise FileNotFoundError(f"program bitfile not found: {path}")
+        root = self.capabilities.bitfile_root
+        if root is not None:
+            root_resolved = root.expanduser().resolve()
+            if path != root_resolved and root_resolved not in path.parents:
+                raise ValueError(
+                    f"program bitfile {path} is outside allowed root {root_resolved}"
+                )
+        return path
+
+    def close(self) -> JsonDict:
+        if not self.connected:
+            self.last_probe = None
+            self.last_capture = None
+            self.last_capture_summary = None
+            return {"ok": True}
+        response = self._rpc_call({"cmd": "close"})
+        self.connected = False
+        self.last_probe = None
+        self.last_capture = None
+        self.last_capture_summary = None
+        return response
+
+    def probe(self) -> JsonDict:
+        response = self._rpc_call({"cmd": "probe"})
+        self.last_probe = dict(response.get("probe", {}))
+        return response
+
+    def capture(
+        self,
+        *,
+        config: JsonDict | None = None,
+        timeout: float = 10.0,
+        fmt: str = "json",
+        summarize: bool = False,
+    ) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("capture tools are disabled for this MCP server")
+        req: JsonDict = {
+            "cmd": "capture",
+            "timeout": float(timeout),
+            "format": fmt,
+            "summarize": bool(summarize),
+        }
+        if config:
+            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
+            if unknown:
+                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
+            req = {**config, **req}
+        response = self._rpc_call(req)
+        self.last_capture = response
+        self.last_capture_summary = self._capture_summary()
+        return dict(self.last_capture_summary or {})
+
+    def eio_connect(
+        self,
+        *,
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        if self.eio_connected:
+            self.eio_close()
+        req: JsonDict = {
+            "cmd": "eio_connect",
+            "backend": backend,
+            "chain": self._default_eio_chain(backend) if chain is None else int(chain),
+        }
+        self._add_connection_fields(
+            req,
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+        response = self._rpc_call(req)
+        self.eio_connected = True
+        return response
+
+    def eio_close(self) -> JsonDict:
+        if not self.eio_connected:
+            return {"ok": True}
+        response = self._rpc_call({"cmd": "eio_close"})
+        self.eio_connected = False
+        return response
+
+    def eio_read(self) -> JsonDict:
+        return self._rpc_call({"cmd": "eio_read"})
+
+    def eio_write(self, value: int) -> JsonDict:
+        if not self.capabilities.allow_eio_write:
+            raise PermissionError(
+                "EIO writes are disabled; restart with --allow-eio-write to enable them"
+            )
+        return self._rpc_call({"cmd": "eio_write", "value": int(value)})
+
+    def status(self) -> JsonDict:
+        return {
+            "connected": self.connected,
+            "eio_connected": self.eio_connected,
+            "capabilities": {
+                "allow_capture": self.capabilities.allow_capture,
+                "allow_eio_write": self.capabilities.allow_eio_write,
+                "allow_program": self.capabilities.allow_program,
+                "bitfile_root": (
+                    str(self.capabilities.bitfile_root)
+                    if self.capabilities.bitfile_root is not None
+                    else None
+                ),
+            },
+            "last_probe": dict(self.last_probe) if self.last_probe is not None else None,
+            "last_capture_summary": (
+                dict(self.last_capture_summary)
+                if self.last_capture_summary is not None
+                else None
+            ),
+        }
+
+    def _capture_summary(self) -> JsonDict | None:
+        if self.last_capture is None:
+            return None
+        summary: JsonDict = {"ok": True}
+        keys = ("format", "sample_count", "overflow", "channel", "summary")
+        summary.update({key: self.last_capture[key] for key in keys if key in self.last_capture})
+        return summary
+
+
+def build_mcp_server(session: FcapzMcpSession):
+    """Build and return a FastMCP app.
+
+    Kept separate so unit tests can cover :class:`FcapzMcpSession` without the
+    optional MCP SDK installed.
+    """
+
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:
+        raise RuntimeError(
+            "The MCP SDK is required for `fcapz-mcp`. Install with "
+            "`pip install fpgacapzero[mcp]` or `pip install mcp`."
+        ) from exc
+
+    mcp = FastMCP("fpgacapZero")
+
+    def tool(**annotations: Any):
+        def decorate(fn: Callable[..., Any]):
+            return mcp.tool(annotations=annotations)(fn)
+
+        return decorate
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_connect(
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        program: str | None = None,
+        single_chain_burst: bool = True,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        """Connect to an ELA core.
+
+        Supported by this branch's RPC layer: backend="hw_server" and
+        backend="openocd". Backend-specific parameters are accepted and
+        forwarded for compatibility with newer transports: hardware selects a
+        Quartus cable, quartus_stp selects the Quartus STP executable, spi_url
+        selects a pyftdi SPI adapter, spi_frequency is in Hz, spi_cs is the SPI
+        chip-select index, and spi_timeout is in seconds. Other timeout values
+        are also seconds. Backend-irrelevant fields are rejected instead of
+        forwarded. program is hw_server-only, disabled unless fcapz-mcp was
+        started with --allow-program, and must be an existing .bit file.
+        """
+
+        return session.connect(
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            program=program,
+            single_chain_burst=single_chain_burst,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
+    def fcapz_close() -> JsonDict:
+        """Close the active ELA connection."""
+
+        return session.close()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_probe() -> JsonDict:
+        """Read ELA identity, dimensions, and feature registers."""
+
+        return session.probe()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_capture(
+        config: JsonDict | None = None,
+        timeout: float = 10.0,
+        format: str = "json",
+        summarize: bool = False,
+    ) -> JsonDict:
+        """Configure, arm, and capture samples from the ELA.
+
+        timeout is in seconds. format is "json", "csv", or "vcd". config may
+        contain capture fields only: pretrigger, posttrigger, trigger_mode,
+        trigger_value, trigger_mask, sample_width, depth, sample_clock_hz,
+        probes, probe_file, channel, decimation, ext_trigger_mode,
+        stor_qual_mode/value/mask, startup_arm, trigger_holdoff, trigger_delay.
+        The tool returns summary metadata only; fetch fcapz://last-capture for
+        full sample payloads.
+        """
+
+        return session.capture(
+            config=config,
+            timeout=timeout,
+            fmt=format,
+            summarize=summarize,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    def fcapz_eio_connect(
+        backend: str = "hw_server",
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+        spi_url: str | None = None,
+        spi_frequency: float | None = None,
+        spi_cs: int | None = None,
+        spi_timeout: float | None = None,
+    ) -> JsonDict:
+        """Connect to an Embedded I/O core.
+
+        chain defaults by backend: 3 for hw_server/openocd, 0 for
+        usb_blaster/spi. Pass chain explicitly for non-default JTAG USER chains,
+        Intel virtual JTAG instance indices, or managed core slots. Backend
+        fields mirror fcapz_connect: hardware/quartus_stp for Quartus USB
+        Blaster sessions and spi_url/spi_frequency/spi_cs/spi_timeout for SPI
+        register transports.
+        """
+
+        return session.eio_connect(
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            chain=chain,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            spi_url=spi_url,
+            spi_frequency=spi_frequency,
+            spi_cs=spi_cs,
+            spi_timeout=spi_timeout,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
+    def fcapz_eio_close() -> JsonDict:
+        """Close the active EIO connection."""
+
+        return session.eio_close()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_eio_read() -> JsonDict:
+        """Read the current EIO input vector."""
+
+        return session.eio_read()
+
+    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    def fcapz_eio_write(value: int) -> JsonDict:
+        """Write the EIO output vector when write access is enabled."""
+
+        return session.eio_write(value)
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_status() -> JsonDict:
+        """Return current MCP server session status."""
+
+        return session.status()
+
+    @mcp.resource("fcapz://status")
+    def fcapz_status_resource() -> str:
+        """Current MCP server session status."""
+
+        return json.dumps(session.status(), indent=2)
+
+    @mcp.resource("fcapz://last-probe")
+    def fcapz_last_probe() -> str:
+        """Last ELA probe response."""
+
+        return json.dumps(session.last_probe or {}, indent=2)
+
+    @mcp.resource("fcapz://last-capture")
+    def fcapz_last_capture() -> str:
+        """Last capture response."""
+
+        return json.dumps(session.last_capture or {}, indent=2)
+
+    return mcp
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="fcapz-mcp",
+        description="Run an MCP server for fpgacapZero lab automation",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Disable capture and EIO-write tools; probe/EIO-read remain available",
+    )
+    parser.add_argument(
+        "--allow-eio-write",
+        action="store_true",
+        help="Allow fcapz_eio_write to drive fabric outputs",
+    )
+    parser.add_argument(
+        "--allow-program",
+        action="store_true",
+        help="Allow fcapz_connect(program=...) to program a .bit file",
+    )
+    parser.add_argument(
+        "--bitfile-root",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Only allow programming .bit files under this directory",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.read_only and (args.allow_eio_write or args.allow_program):
+        parser.error("--read-only cannot be combined with --allow-eio-write or --allow-program")
+    if args.bitfile_root is not None and not args.allow_program:
+        parser.error("--bitfile-root requires --allow-program")
+    capabilities = McpCapabilities(
+        allow_capture=not args.read_only,
+        allow_eio_write=bool(args.allow_eio_write),
+        allow_program=bool(args.allow_program),
+        bitfile_root=args.bitfile_root,
+    )
+    server = build_mcp_server(FcapzMcpSession(capabilities=capabilities))
+    run: Callable[..., Any] = server.run
+    try:
+        run(transport="stdio")
+    except Exception as exc:
+        print(f"fcapz-mcp: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
