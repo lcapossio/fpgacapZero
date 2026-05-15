@@ -9,6 +9,7 @@ hardware or network connection required.
 
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -305,6 +306,15 @@ class FakeSpiPort:
         return bytes(len(data))
 
 
+class HangingSpiPort:
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def exchange(self, data: bytes, duplex: bool = True) -> bytes:
+        self.release.wait(10)
+        return bytes(len(data))
+
+
 class SpiRegisterTransportTests(unittest.TestCase):
     def test_read_reg_uses_spi_read_frame(self) -> None:
         spi = FakeSpiPort()
@@ -339,6 +349,23 @@ class SpiRegisterTransportTests(unittest.TestCase):
         t = SpiRegisterTransport()
         with self.assertRaisesRegex(RuntimeError, "not connected"):
             t.read_reg(0)
+
+    def test_exchange_timeout_closes_transport(self) -> None:
+        spi = HangingSpiPort()
+        t = SpiRegisterTransport(
+            url="ftdi://test/1",
+            spi=spi,
+            exchange_timeout_sec=0.01,
+        )
+
+        try:
+            with self.assertRaisesRegex(TimeoutError, "SPI exchange timed out"):
+                t.read_reg(0x0010)
+            self.assertIsNone(t._spi)
+            with self.assertRaisesRegex(RuntimeError, "not connected"):
+                t.read_reg(0x0010)
+        finally:
+            spi.release.set()
 
 
 # ---------------------------------------------------------------------------

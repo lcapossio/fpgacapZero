@@ -56,7 +56,19 @@ def test_ela_rtl_sources_rejects_unknown_vendor():
         ela_rtl_sources("mystery")
 
 
-@pytest.mark.parametrize("vendor", ["ice40", "ice40up", "ice40_ultraplus", "lattice_ice40"])
+@pytest.mark.parametrize(
+    "vendor",
+    [
+        "ice40",
+        "iCE40",
+        "ice-40",
+        "ice40up",
+        "ice40-up",
+        "ice40_ultraplus",
+        "lattice_ice40",
+        "lattice-ice40",
+    ],
+)
 def test_ela_rtl_sources_includes_ice40_spi_wrapper(vendor):
     sources = [path.as_posix() for path in ela_rtl_sources(vendor, rtl_dir="rtl")]
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import shutil
 import socket
@@ -391,12 +392,14 @@ class SpiRegisterTransport(Transport):
         frequency: float = 1_000_000.0,
         cs: int = 0,
         mode: int = 0,
+        exchange_timeout_sec: float = 5.0,
         spi: object | None = None,
     ) -> None:
         self.url = url
         self.frequency = float(frequency)
         self.cs = int(cs)
         self.mode = int(mode)
+        self.exchange_timeout_sec = float(exchange_timeout_sec)
         self._spi = spi
         self._controller = None
         self._lock = threading.Lock()
@@ -449,7 +452,37 @@ class SpiRegisterTransport(Transport):
             exchange = getattr(self._spi, "exchange", None)
             if exchange is None:
                 raise RuntimeError("SPI port object does not provide exchange()")
-            result = exchange(data, duplex=True)
+            result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+            def run_exchange() -> None:
+                try:
+                    result_queue.put((True, exchange(data, duplex=True)))
+                except BaseException as exc:
+                    result_queue.put((False, exc))
+
+            worker = threading.Thread(
+                target=run_exchange,
+                name="fcapz-spi-exchange",
+                daemon=True,
+            )
+            worker.start()
+            worker.join(self.exchange_timeout_sec)
+            if worker.is_alive():
+                controller = self._controller
+                if controller is not None:
+                    try:
+                        controller.terminate()
+                    except Exception:
+                        pass
+                self._controller = None
+                self._spi = None
+                raise TimeoutError(
+                    f"SPI exchange timed out after {self.exchange_timeout_sec:g}s "
+                    f"on {self.url!r}; transport was closed"
+                )
+            ok, result = result_queue.get_nowait()
+            if not ok:
+                raise result  # type: ignore[misc]
         return bytes(result)
 
     def read_reg(self, addr: int) -> int:

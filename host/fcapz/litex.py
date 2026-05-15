@@ -56,8 +56,8 @@ _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
 
 _VENDOR_ALIASES: dict[str, str] = {
     "ice40up": "ice40",
-    "ice40_ultraplus": "ice40",
-    "lattice_ice40": "ice40",
+    "ice40ultraplus": "ice40",
+    "latticeice40": "ice40",
 }
 
 _WRAPPER_MODULES = {
@@ -78,7 +78,7 @@ class LiteXProbeField:
 def ela_rtl_sources(vendor: str = "xilinx7", rtl_dir: str | Path | None = None) -> list[Path]:
     """Return the RTL source list needed for a LiteX ELA instance."""
 
-    vendor_key = vendor.lower()
+    vendor_key = _normalize_vendor(vendor)
     vendor_key = _VENDOR_ALIASES.get(vendor_key, vendor_key)
     if vendor_key not in _VENDOR_ELA_SOURCES:
         known = ", ".join(sorted((*_VENDOR_ELA_SOURCES, *_VENDOR_ALIASES)))
@@ -87,6 +87,10 @@ def ela_rtl_sources(vendor: str = "xilinx7", rtl_dir: str | Path | None = None) 
     base = Path(rtl_dir) if rtl_dir is not None else _RTL_DIR
     rel_paths = (*_COMMON_ELA_SOURCES, *_VENDOR_ELA_SOURCES[vendor_key])
     return [base / rel for rel in rel_paths]
+
+
+def _normalize_vendor(vendor: str) -> str:
+    return "".join(ch for ch in vendor.lower() if ch.isalnum())
 
 
 def add_ela_sources(

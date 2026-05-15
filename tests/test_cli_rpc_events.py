@@ -700,6 +700,7 @@ class MakeTransportTests(unittest.TestCase):
             spi_url="ftdi://ftdi:232h/2",
             spi_frequency=2_000_000.0,
             spi_cs=1,
+            spi_timeout=2.5,
             host="127.0.0.1",
             port=6666,
             tap="xc7a100t.tap",
@@ -712,7 +713,31 @@ class MakeTransportTests(unittest.TestCase):
             url="ftdi://ftdi:232h/2",
             frequency=2_000_000.0,
             cs=1,
+            exchange_timeout_sec=2.5,
         )
+
+    def test_spi_backend_uses_spi_defaults(self):
+        args = argparse.Namespace(
+            backend="spi",
+            spi_url=None,
+            spi_frequency=None,
+            spi_cs=None,
+            spi_timeout=None,
+        )
+        with patch("fcapz.cli.SpiRegisterTransport", autospec=True) as spi_cls:
+            _make_transport(args)
+
+        spi_cls.assert_called_once_with(
+            url="ftdi://ftdi:232h/1",
+            frequency=1_000_000.0,
+            cs=0,
+            exchange_timeout_sec=5.0,
+        )
+
+    def test_spi_options_require_spi_backend(self):
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--backend", "openocd", "--spi-url", "ftdi://bad/1", "probe"])
 
 
 if __name__ == "__main__":

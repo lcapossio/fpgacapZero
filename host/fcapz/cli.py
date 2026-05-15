@@ -23,6 +23,29 @@ from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
 from .transport import OpenOcdTransport, SpiRegisterTransport, XilinxHwServerTransport
 
+_SPI_DEFAULT_URL = "ftdi://ftdi:232h/1"
+_SPI_DEFAULT_FREQUENCY = 1_000_000.0
+_SPI_DEFAULT_CS = 0
+_SPI_DEFAULT_TIMEOUT_SEC = 5.0
+
+
+class _FcapzArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        ns = super().parse_args(args=args, namespace=namespace)
+        self._validate_backend_args(ns)
+        return ns
+
+    def _validate_backend_args(self, args: argparse.Namespace) -> None:
+        spi_only = [
+            ("spi_url", "--spi-url"),
+            ("spi_frequency", "--spi-frequency"),
+            ("spi_cs", "--spi-cs"),
+            ("spi_timeout", "--spi-timeout"),
+        ]
+        supplied = [flag for attr, flag in spi_only if getattr(args, attr, None) is not None]
+        if args.backend != "spi" and supplied:
+            self.error(f"{', '.join(supplied)} require --backend spi")
+
 
 def _positive_int(value: str) -> int:
     """argparse type: strictly positive integer."""
@@ -224,9 +247,26 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 def _make_transport(args: argparse.Namespace):
     if args.backend == "spi":
         return SpiRegisterTransport(
-            url=args.spi_url,
-            frequency=args.spi_frequency,
-            cs=args.spi_cs,
+            url=(
+                args.spi_url
+                if getattr(args, "spi_url", None) is not None
+                else _SPI_DEFAULT_URL
+            ),
+            frequency=(
+                args.spi_frequency
+                if getattr(args, "spi_frequency", None) is not None
+                else _SPI_DEFAULT_FREQUENCY
+            ),
+            cs=(
+                args.spi_cs
+                if getattr(args, "spi_cs", None) is not None
+                else _SPI_DEFAULT_CS
+            ),
+            exchange_timeout_sec=(
+                args.spi_timeout
+                if getattr(args, "spi_timeout", None) is not None
+                else _SPI_DEFAULT_TIMEOUT_SEC
+            ),
         )
     if args.backend == "openocd":
         tap_name = args.tap.removesuffix(".tap")
@@ -249,7 +289,7 @@ def _make_transport(args: argparse.Namespace):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="fcapz", description="fpgacapZero host CLI")
+    p = _FcapzArgumentParser(prog="fcapz", description="fpgacapZero host CLI")
     p.add_argument(
         "--gui-config",
         type=Path,
@@ -263,20 +303,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
     p.add_argument(
         "--spi-url",
-        default="ftdi://ftdi:232h/1",
-        help="pyftdi URL for --backend spi, for example ftdi://ftdi:232h/1",
+        default=None,
+        help=(
+            "pyftdi URL for --backend spi, for example ftdi://ftdi:232h/1 "
+            f"(default: {_SPI_DEFAULT_URL})"
+        ),
     )
     p.add_argument(
         "--spi-frequency",
         type=_positive_float,
-        default=1_000_000.0,
-        help="SPI clock frequency in Hz for --backend spi",
+        default=None,
+        help=f"SPI clock frequency in Hz for --backend spi (default: {_SPI_DEFAULT_FREQUENCY:g})",
     )
     p.add_argument(
         "--spi-cs",
         type=_non_negative_int,
-        default=0,
-        help="SPI chip-select index for --backend spi",
+        default=None,
+        help=f"SPI chip-select index for --backend spi (default: {_SPI_DEFAULT_CS})",
+    )
+    p.add_argument(
+        "--spi-timeout",
+        type=_positive_float,
+        default=None,
+        metavar="SEC",
+        help=(
+            "per-exchange timeout in seconds for --backend spi "
+            f"(default: {_SPI_DEFAULT_TIMEOUT_SEC:g})"
+        ),
     )
     p.add_argument(
         "--two-chain-burst",

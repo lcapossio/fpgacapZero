@@ -2,7 +2,7 @@
   "name": "fpgacapZero",
   "version": "0.1.0",
   "manifest_note": "Source manifest for FuseSoC-style and external build tooling; keep in sync when adding or removing RTL files.",
-  "description": "Open-source, vendor-agnostic FPGA debug cores: Embedded Logic Analyzer (ELA) for waveform capture and Embedded I/O (EIO) for runtime read/write of fabric signals, over JTAG where the FPGA exposes a user TAP and over SPI for Lattice iCE40. Includes single-instantiation wrappers for Xilinx 7-series/UltraScale, Lattice ECP5/iCE40, Intel/Altera, and Gowin.",
+  "description": "Open-source, vendor-agnostic FPGA debug cores: Embedded Logic Analyzer (ELA) for waveform capture and Embedded I/O (EIO) for runtime read/write of fabric signals, over JTAG where the FPGA exposes a user TAP and over SPI for Lattice iCE40. Includes single-instantiation wrappers for Xilinx 7-series/UltraScale, Lattice ECP5/iCE40, Intel/Altera, Gowin, and Microchip PolarFire.",
   "author": "Leonardo Capossio - bard0 design - <hello@bard0.com>",
   "license": "MIT",
   "language": "verilog",
