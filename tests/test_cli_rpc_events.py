@@ -29,7 +29,11 @@ from fcapz.cli import (
     _uint16,
     build_parser,
 )
-from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
+from fcapz.transport import (
+    OpenOcdTransport,
+    SpiRegisterTransport,
+    XilinxHwServerTransport,
+)
 from fcapz.events import (
     ProbeDefinition,
     find_bursts,
@@ -689,6 +693,22 @@ class MakeTransportTests(unittest.TestCase):
         t = _make_transport(args)
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
+
+    def test_spi_backend_uses_spi_transport(self):
+        args = argparse.Namespace(
+            backend="spi",
+            spi_url="ftdi://ftdi:232h/2",
+            spi_frequency=2_000_000.0,
+            spi_cs=1,
+            host="127.0.0.1",
+            port=6666,
+            tap="xc7a100t.tap",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, SpiRegisterTransport)
+        self.assertEqual(t.url, "ftdi://ftdi:232h/2")
+        self.assertEqual(t.frequency, 2_000_000.0)
+        self.assertEqual(t.cs, 1)
 
 
 if __name__ == "__main__":

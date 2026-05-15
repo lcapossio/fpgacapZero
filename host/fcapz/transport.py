@@ -413,13 +413,25 @@ class SpiRegisterTransport(Transport):
             ) from exc
 
         controller = SpiController()
-        controller.configure(self.url)
+        try:
+            controller.configure(self.url)
+            self._spi = controller.get_port(
+                cs=self.cs,
+                freq=self.frequency,
+                mode=self.mode,
+            )
+        except Exception as exc:
+            try:
+                controller.terminate()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"could not open SPI adapter {self.url!r}: {exc}. "
+                "Check the FTDI URL, device connection, and USB driver. "
+                "On Windows, pyftdi requires a libusb/WinUSB driver binding "
+                "for the FTDI interface, commonly installed with Zadig."
+            ) from exc
         self._controller = controller
-        self._spi = controller.get_port(
-            cs=self.cs,
-            freq=self.frequency,
-            mode=self.mode,
-        )
 
     def close(self) -> None:
         controller = self._controller
@@ -472,6 +484,9 @@ class SpiRegisterTransport(Transport):
             raise RuntimeError(f"SPI write returned {len(response)} byte(s), expected 8")
 
     def read_block(self, addr: int, words: int) -> List[int]:
+        # Bring-up implementation: one full SPI transaction per word. This is
+        # portable but slow for large captures; a batched transfer can replace
+        # it once the iCE40 wire protocol is hardware-validated.
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 

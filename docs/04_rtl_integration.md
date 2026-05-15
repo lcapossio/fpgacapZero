@@ -54,6 +54,11 @@ implements the same `Transport` API as the JTAG backends. This path currently
 supports ELA register access and word-by-word sample readback; it does not use
 the wide burst DR path because there is no native JTAG DR on iCE40.
 
+On Windows, pyftdi cannot use the stock FTDI VCP/D2XX driver. Bind the FTDI
+interface used for SPI to WinUSB/libusb with Zadig before using
+`--backend spi`; otherwise opening the `ftdi://...` URL will fail even when the
+adapter is plugged in.
+
 ### Validation Levels
 
 The ELA core is shared across vendors, so the behavioral simulation suite
