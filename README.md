@@ -463,6 +463,7 @@ Pick the wrapper for your FPGA vendor — one instantiation each for ELA and EIO
 //                                              UltraScale, Artix/Kintex/
 //                                              Virtex/Zynq UltraScale+)
 //   fcapz_ela_ecp5     / fcapz_eio_ecp5      — Lattice ECP5
+//   fcapz_ela_ice40_spi                       — Lattice iCE40 over external SPI
 //   fcapz_ela_intel    / fcapz_eio_intel     — Intel / Altera
 //   fcapz_ela_gowin    / fcapz_eio_gowin     — Gowin GW1N / GW2A
 //   fcapz_ela_polarfire / fcapz_eio_polarfire — Microchip PolarFire-family
@@ -550,6 +551,7 @@ for details.
 | **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 standalone, or managed USER1 slot with `fcapz_debug_multi_xilinx7` | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
+| **iCE40 / iCE40 UltraPlus** | external SPI pins | n/a | `fcapz_ela_ice40_spi` word readback | *deferred* | *deferred* | *deferred* |
 | **Gowin** | GW_JTAG | One primitive; wrapper selects ER1 or ER2 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
 
@@ -584,6 +586,12 @@ On PolarFire-family devices, UJTAG exposes two user instructions from one
 primitive. To use ELA and EIO together, enable `EIO_EN=1` on the ELA wrapper;
 EIO shares USER1 through the wrapper's register-bus mux.
 
+Lattice iCE40 devices do not expose an ECP5-style user JTAG primitive to the
+fabric, so the iCE40 path uses `fcapz_ela_ice40_spi` and the host
+`SpiRegisterTransport` instead of native JTAG. Connect `spi_sck`, `spi_cs_n`,
+`spi_mosi`, and `spi_miso` to pins reachable from an FTDI/MPSSE or equivalent
+SPI adapter. Readback uses the normal DATA register window word-by-word.
+
 ### JTAG protocol and register reference
 
 Bit-level DR layouts, ELA/EIO **address maps**, EJTAG-AXI / EJTAG-UART bridge
@@ -604,6 +612,7 @@ from the RTL.
 | Xilinx 7-series wrappers (`*_xilinx7.v`) | Implemented and hardware-validated on Arty A7-100T |
 | Xilinx UltraScale / UltraScale+ wrappers (`*_xilinxus.v`) | Implemented in RTL (BSCANE2, identical to 7-series); not yet hardware-validated |
 | Lattice / Intel / Gowin TAP wrappers | Implemented in RTL, host validation still limited |
+| Lattice iCE40 / iCE40 UltraPlus | Implemented via external SPI register transport; hardware validation needed |
 | Microchip PolarFire-family TAP wrappers | Implemented in RTL, host validation still limited |
 | Runtime channel mux | Implemented in RTL and host API/CLI/RPC |
 | EIO over real transports | Implemented — USER3 on Xilinx; wrapper-shared chain on ECP5, Gowin, and PolarFire-family devices |

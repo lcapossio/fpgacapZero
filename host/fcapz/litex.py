@@ -51,6 +51,13 @@ _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
     "intel": ("fcapz_ela_intel.v", "jtag_tap/jtag_tap_intel.v"),
     "gowin": ("fcapz_ela_gowin.v", "jtag_tap/jtag_tap_gowin.v"),
     "polarfire": ("fcapz_ela_polarfire.v", "jtag_tap/jtag_tap_polarfire.v"),
+    "ice40": ("fcapz_spi_reg_iface.v", "fcapz_ela_ice40_spi.v"),
+}
+
+_VENDOR_ALIASES: dict[str, str] = {
+    "ice40up": "ice40",
+    "ice40_ultraplus": "ice40",
+    "lattice_ice40": "ice40",
 }
 
 _WRAPPER_MODULES = {
@@ -72,8 +79,9 @@ def ela_rtl_sources(vendor: str = "xilinx7", rtl_dir: str | Path | None = None) 
     """Return the RTL source list needed for a LiteX ELA instance."""
 
     vendor_key = vendor.lower()
+    vendor_key = _VENDOR_ALIASES.get(vendor_key, vendor_key)
     if vendor_key not in _VENDOR_ELA_SOURCES:
-        known = ", ".join(sorted(_VENDOR_ELA_SOURCES))
+        known = ", ".join(sorted((*_VENDOR_ELA_SOURCES, *_VENDOR_ALIASES)))
         raise ValueError(f"unsupported ELA vendor {vendor!r}; expected one of: {known}")
 
     base = Path(rtl_dir) if rtl_dir is not None else _RTL_DIR

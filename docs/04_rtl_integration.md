@@ -30,6 +30,7 @@ features they expose.
 | Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
 | Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
+| Lattice iCE40 / iCE40 UltraPlus | `_ice40_spi` | ❌ implemented via external SPI register transport; not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
 | Gowin GW1N / GW2A | `_gowin` | ❌ |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
@@ -37,6 +38,21 @@ features they expose.
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)
 "Adding a new transport / vendor wrapper" for the porting guide.
+
+### Lattice iCE40 note
+
+fpgacapZero's vendor wrappers rely on a user-accessible JTAG primitive inside
+the FPGA fabric: `BSCANE2`, `JTAGG`, `sld_virtual_jtag`, `GW_JTAG`, or `UJTAG`.
+Lattice iCE40 devices do not provide an ECP5-style `JTAGG` primitive to user
+RTL, and the open-source iCE40 primitive library does not model a fabric
+`SB_JTAG` cell.
+
+The iCE40 wrapper therefore uses a different attachment path:
+`fcapz_ela_ice40_spi` exposes a mode-0 SPI register port on normal user pins.
+Host software talks to that port through `SpiRegisterTransport`, which
+implements the same `Transport` API as the JTAG backends. This path currently
+supports ELA register access and word-by-word sample readback; it does not use
+the wide burst DR path because there is no native JTAG DR on iCE40.
 
 ### Validation Levels
 

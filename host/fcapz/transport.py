@@ -369,6 +369,112 @@ class OpenOcdTransport(Transport):
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
+class SpiRegisterTransport(Transport):
+    """Register transport for fcapz SPI wrappers.
+
+    This transport is intended for devices such as Lattice iCE40 where the
+    fabric does not expose a native user-JTAG primitive. It uses a tiny
+    byte-oriented SPI protocol implemented by ``fcapz_spi_reg_iface.v``.
+
+    Protocol, SPI mode 0, MSB-first bytes:
+      - read:  ``00 aa aa 00 00 00 00 00`` -> response in bytes 4..7
+      - write: ``80 aa aa dd dd dd dd 00``
+    """
+
+    CMD_READ = 0x00
+    CMD_WRITE = 0x80
+
+    def __init__(
+        self,
+        url: str = "ftdi://ftdi:232h/1",
+        *,
+        frequency: float = 1_000_000.0,
+        cs: int = 0,
+        mode: int = 0,
+        spi: object | None = None,
+    ) -> None:
+        self.url = url
+        self.frequency = float(frequency)
+        self.cs = int(cs)
+        self.mode = int(mode)
+        self._spi = spi
+        self._controller = None
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        if self._spi is not None:
+            return
+        try:
+            from pyftdi.spi import SpiController
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyftdi is required for SpiRegisterTransport. Install with "
+                "`pip install pyftdi` or `pip install fpgacapzero[spi]`."
+            ) from exc
+
+        controller = SpiController()
+        controller.configure(self.url)
+        self._controller = controller
+        self._spi = controller.get_port(
+            cs=self.cs,
+            freq=self.frequency,
+            mode=self.mode,
+        )
+
+    def close(self) -> None:
+        controller = self._controller
+        if controller is not None:
+            try:
+                controller.terminate()
+            finally:
+                self._controller = None
+                self._spi = None
+
+    def _exchange(self, data: bytes) -> bytes:
+        if self._spi is None:
+            raise RuntimeError("not connected - call connect() first")
+        with self._lock:
+            exchange = getattr(self._spi, "exchange", None)
+            if exchange is None:
+                raise RuntimeError("SPI port object does not provide exchange()")
+            result = exchange(data, duplex=True)
+        return bytes(result)
+
+    def read_reg(self, addr: int) -> int:
+        frame = bytes([
+            self.CMD_READ,
+            (addr >> 8) & 0xFF,
+            addr & 0xFF,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ])
+        response = self._exchange(frame)
+        if len(response) != 8:
+            raise RuntimeError(f"SPI read returned {len(response)} byte(s), expected 8")
+        return int.from_bytes(response[4:8], byteorder="big", signed=False)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        frame = bytes([
+            self.CMD_WRITE,
+            (addr >> 8) & 0xFF,
+            addr & 0xFF,
+            (value >> 24) & 0xFF,
+            (value >> 16) & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+            0x00,
+        ])
+        response = self._exchange(frame)
+        if len(response) != 8:
+            raise RuntimeError(f"SPI write returned {len(response)} byte(s), expected 8")
+
+    def read_block(self, addr: int, words: int) -> List[int]:
+        return [self.read_reg(addr + i * 4) for i in range(words)]
+
+
 class XilinxHwServerTransport(Transport):
     """
     Xilinx hw_server transport using a persistent XSDB session.

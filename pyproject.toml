@@ -43,6 +43,7 @@ include = ["fcapz*"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
+spi = ["pyftdi>=0.55"]
 litex = ["litex"]
 
 [tool.pytest.ini_options]

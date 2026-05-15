@@ -21,7 +21,7 @@ from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, XilinxHwServerTransport
+from .transport import OpenOcdTransport, SpiRegisterTransport, XilinxHwServerTransport
 
 
 def _positive_int(value: str) -> int:
@@ -222,6 +222,12 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 
 
 def _make_transport(args: argparse.Namespace):
+    if args.backend == "spi":
+        return SpiRegisterTransport(
+            url=args.spi_url,
+            frequency=args.spi_frequency,
+            cs=args.spi_cs,
+        )
     if args.backend == "openocd":
         tap_name = args.tap.removesuffix(".tap")
         ir_table = (
@@ -251,10 +257,27 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to gui.toml (default: per-user fpgacapzero config directory)",
     )
-    p.add_argument("--backend", choices=["openocd", "hw_server"], default="hw_server")
+    p.add_argument("--backend", choices=["openocd", "hw_server", "spi"], default="hw_server")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
+    p.add_argument(
+        "--spi-url",
+        default="ftdi://ftdi:232h/1",
+        help="pyftdi URL for --backend spi, for example ftdi://ftdi:232h/1",
+    )
+    p.add_argument(
+        "--spi-frequency",
+        type=_positive_float,
+        default=1_000_000.0,
+        help="SPI clock frequency in Hz for --backend spi",
+    )
+    p.add_argument(
+        "--spi-cs",
+        type=_non_negative_int,
+        default=0,
+        help="SPI chip-select index for --backend spi",
+    )
     p.add_argument(
         "--two-chain-burst",
         action="store_true",

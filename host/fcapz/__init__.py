@@ -32,6 +32,7 @@ from .probes import (
 )
 from .transport import (
     OpenOcdTransport,
+    SpiRegisterTransport,
     Transport,
     VendorStubTransport,
     XilinxHwServerTransport,
@@ -49,6 +50,7 @@ __all__ = [
     "TriggerConfig",
     "Transport",
     "OpenOcdTransport",
+    "SpiRegisterTransport",
     "XilinxHwServerTransport",
     "VendorStubTransport",
     "connect_timing_logs_enabled",

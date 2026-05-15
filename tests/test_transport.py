@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from fcapz.transport import (
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
+    SpiRegisterTransport,
     Transport,
     XilinxHwServerTransport,
     parse_xsdb_jtag_targets,
@@ -284,6 +285,60 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             r"OpenOCD drscan failed.*GW1NR-9C\.tap.*Tap 'GW1NR-9C\.tap' not found",
         ):
             t.raw_dr_scan(0, 49)
+
+
+class FakeSpiPort:
+    def __init__(self) -> None:
+        self.regs: dict[int, int] = {}
+        self.frames: list[bytes] = []
+
+    def exchange(self, data: bytes, duplex: bool = True) -> bytes:
+        self.frames.append(bytes(data))
+        if data[0] == SpiRegisterTransport.CMD_READ:
+            addr = (data[1] << 8) | data[2]
+            value = self.regs.get(addr, 0)
+            return bytes([0, 0, 0, 0]) + value.to_bytes(4, "big")
+        if data[0] == SpiRegisterTransport.CMD_WRITE:
+            addr = (data[1] << 8) | data[2]
+            self.regs[addr] = int.from_bytes(data[3:7], "big")
+            return bytes(len(data))
+        return bytes(len(data))
+
+
+class SpiRegisterTransportTests(unittest.TestCase):
+    def test_read_reg_uses_spi_read_frame(self) -> None:
+        spi = FakeSpiPort()
+        spi.regs[0x0010] = 0x1234_ABCD
+        t = SpiRegisterTransport(spi=spi)
+
+        self.assertEqual(t.read_reg(0x0010), 0x1234_ABCD)
+        self.assertEqual(spi.frames[-1], bytes([0x00, 0x00, 0x10, 0, 0, 0, 0, 0]))
+
+    def test_write_reg_uses_spi_write_frame(self) -> None:
+        spi = FakeSpiPort()
+        t = SpiRegisterTransport(spi=spi)
+
+        t.write_reg(0x0028, 0xDEAD_BEEF)
+
+        self.assertEqual(spi.regs[0x0028], 0xDEAD_BEEF)
+        self.assertEqual(
+            spi.frames[-1],
+            bytes([0x80, 0x00, 0x28, 0xDE, 0xAD, 0xBE, 0xEF, 0x00]),
+        )
+
+    def test_read_block_reads_consecutive_words(self) -> None:
+        spi = FakeSpiPort()
+        spi.regs[0x0100] = 1
+        spi.regs[0x0104] = 2
+        spi.regs[0x0108] = 3
+        t = SpiRegisterTransport(spi=spi)
+
+        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+
+    def test_read_before_connect_raises(self) -> None:
+        t = SpiRegisterTransport()
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            t.read_reg(0)
 
 
 # ---------------------------------------------------------------------------

@@ -311,6 +311,7 @@ meaningful impact without writing a single line of host Python.
 |--------|-------------|----------|-------------|----------|--------------|
 | Xilinx 7-series / UltraScale | `fcapz_ela_xilinx7.v` | `jtag_tap_xilinx7.v` | yes | yes | **yes** (Arty A7-100T) |
 | Lattice ECP5 | `fcapz_ela_ecp5.v` | `jtag_tap_ecp5.v` | — | yes | **needed** |
+| Lattice iCE40 / iCE40 UltraPlus | `fcapz_ela_ice40_spi.v` | external SPI pins | yes | — | **needed** |
 | Intel / Altera | `fcapz_ela_intel.v` | `jtag_tap_intel.v` | — | yes | **needed** |
 | Gowin | `fcapz_ela_gowin.v` | `jtag_tap_gowin.v` | — | yes | **needed** |
 
@@ -371,6 +372,19 @@ Suggested toolchain: [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-bu
 (`yosys` + `nextpnr-ecp5` + `ecppack`). The build script can be a simple
 Python script using `subprocess` to call these tools — model it after
 `sim/run_sim.py` for consistency.
+
+### Lattice iCE40
+
+iCE40 devices are Lattice parts, but they are not a smaller ECP5 from the
+debug-wrapper point of view. iCE40 does not provide an ECP5-style `JTAGG`
+primitive to RTL, so the fpgacapZero iCE40 path uses
+`fcapz_ela_ice40_spi.v` plus the host `SpiRegisterTransport`.
+
+A useful iCE40 board contribution should connect `spi_sck`, `spi_cs_n`,
+`spi_mosi`, and `spi_miso` to pins reachable by an FTDI/MPSSE, Raspberry Pi,
+MCU, or other SPI host. Include the board constraints, an OSS CAD Suite build
+script (`yosys`, `nextpnr-ice40`, `icepack`), and a smoke test that probes the
+VERSION, SAMPLE_W, DEPTH, and STATUS registers before attempting a capture.
 
 ### Intel / Altera
 

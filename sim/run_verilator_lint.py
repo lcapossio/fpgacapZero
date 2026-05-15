@@ -44,6 +44,14 @@ EIO_CORE = (
     RTL / "fcapz_eio.v",
 )
 
+ICE40_SPI_WRAPPER_SOURCES = (
+    RTL / "reset_sync.v",
+    RTL / "dpram.v",
+    RTL / "trig_compare.v",
+    RTL / "fcapz_ela.v",
+    RTL / "fcapz_spi_reg_iface.v",
+)
+
 EJTAG_AXI_CORE = (
     RTL / "fcapz_async_fifo.v",
     RTL / "fcapz_ejtagaxi.v",
@@ -147,6 +155,11 @@ TARGETS = (
         name="fcapz_ejtaguart",
         top="fcapz_ejtaguart",
         sources=EJTAG_UART_CORE,
+    ),
+    LintTarget(
+        name="fcapz_spi_reg_iface",
+        top="fcapz_spi_reg_iface",
+        sources=(RTL / "fcapz_spi_reg_iface.v",),
     ),
     LintTarget(
         name="jtag_tap_xilinx7",
@@ -326,6 +339,14 @@ TARGETS = (
             RTL / "fcapz_eio.v",
             RTL / "jtag_tap" / "jtag_tap_gowin.v",
             RTL / "fcapz_eio_gowin.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_ela_ice40_spi",
+        top="fcapz_ela_ice40_spi",
+        sources=(
+            *ICE40_SPI_WRAPPER_SOURCES,
+            RTL / "fcapz_ela_ice40_spi.v",
         ),
     ),
     LintTarget(

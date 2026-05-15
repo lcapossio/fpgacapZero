@@ -57,7 +57,8 @@ jobs:
           import fcapz
           from fcapz import (
               Analyzer, CaptureConfig, TriggerConfig, ProbeSpec, SequencerStage,
-              CaptureResult, Transport, OpenOcdTransport, XilinxHwServerTransport,
+              CaptureResult, Transport, OpenOcdTransport, SpiRegisterTransport,
+              XilinxHwServerTransport,
               VendorStubTransport,
               find_edges, find_rising_edges, find_falling_edges, find_bursts,
               frequency_estimate, summarize, ProbeDefinition,

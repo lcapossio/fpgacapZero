@@ -68,6 +68,12 @@ TESTBENCHES = {
             RTL / "jtag_pipe_iface.v",
         ],
     ),
+    "fcapz_spi_reg_iface": (
+        TB / "fcapz_spi_reg_iface_tb.sv",
+        [
+            RTL / "fcapz_spi_reg_iface.v",
+        ],
+    ),
     "fcapz_ela_xilinx7_single_chain": (
         TB / "fcapz_ela_xilinx7_single_chain_tb.sv",
         [
@@ -115,6 +121,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_config_matrix",
     "jtag_burst_read",
     "jtag_pipe_iface",
+    "fcapz_spi_reg_iface",
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "fcapz_core_manager",
@@ -139,6 +146,9 @@ LINT_TARGETS = [
     RTL / "fcapz_ejtagaxi_xilinx7.v",
     RTL / "fcapz_ejtaguart.v",
     RTL / "fcapz_ejtaguart_xilinx7.v",
+    # Lattice iCE40 SPI wrapper (no native fabric JTAG primitive).
+    RTL / "fcapz_spi_reg_iface.v",
+    RTL / "fcapz_ela_ice40_spi.v",
     RTL / "jtag_tap" / "jtag_tap_xilinxus.v",
     RTL / "fcapz_ela_xilinxus.v",
     RTL / "fcapz_eio_xilinxus.v",
