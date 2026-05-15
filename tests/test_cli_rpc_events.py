@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fcapz.analyzer import (
     Analyzer,
@@ -31,7 +32,6 @@ from fcapz.cli import (
 )
 from fcapz.transport import (
     OpenOcdTransport,
-    SpiRegisterTransport,
     XilinxHwServerTransport,
 )
 from fcapz.events import (
@@ -704,14 +704,15 @@ class MakeTransportTests(unittest.TestCase):
             port=6666,
             tap="xc7a100t.tap",
         )
-        t = _make_transport(args)
-        self.assertIsInstance(t, SpiRegisterTransport)
-        self.assertEqual(t.url, "ftdi://ftdi:232h/2")
-        self.assertEqual(t.frequency, 2_000_000.0)
-        self.assertEqual(t.cs, 1)
-        self.assertFalse(hasattr(t, "host"))
-        self.assertFalse(hasattr(t, "port"))
-        self.assertFalse(hasattr(t, "tap"))
+        with patch("fcapz.cli.SpiRegisterTransport", autospec=True) as spi_cls:
+            t = _make_transport(args)
+
+        self.assertIs(t, spi_cls.return_value)
+        spi_cls.assert_called_once_with(
+            url="ftdi://ftdi:232h/2",
+            frequency=2_000_000.0,
+            cs=1,
+        )
 
 
 if __name__ == "__main__":

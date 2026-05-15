@@ -150,7 +150,7 @@ module fcapz_spi_reg_iface_tb;
             spi_xfer_byte_with_pause(addr[7:0], junk);
             spi_xfer_byte(8'h00, junk);
             spi_xfer_byte(8'h00, rx1);
-            spi_xfer_byte(8'h00, rx2);
+            spi_xfer_byte_with_pause(8'h00, rx2);
             spi_xfer_byte(8'h00, rx3);
             spi_xfer_byte(8'h00, rx4);
             spi_cs_n = 1'b1;
