@@ -339,6 +339,15 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             session.uart_send(text="hi")
 
+    def test_uart_send_rejects_ambiguous_payload_sources(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(),
+            capabilities=McpCapabilities(allow_uart_send=True),
+        )
+
+        with self.assertRaisesRegex(ValueError, "only one"):
+            session.uart_send(data_base64="aGk=", text="hi")
+
     def test_program_requires_explicit_capability(self):
         session = FcapzMcpSession(rpc=FakeRpc())
 
@@ -415,6 +424,21 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 self.assertEqual(main([]), 0)
 
         shutdown.assert_called_once()
+
+    def test_shutdown_reports_one_summary_for_close_errors(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        stderr = io.StringIO()
+
+        with patch.object(session, "close", side_effect=RuntimeError("ela bad")):
+            with patch.object(session, "eio_close", side_effect=RuntimeError("eio bad")):
+                with redirect_stderr(stderr):
+                    session.shutdown()
+
+        text = stderr.getvalue()
+        self.assertIn("errors during shutdown", text)
+        self.assertIn("close: RuntimeError: ela bad", text)
+        self.assertIn("eio_close: RuntimeError: eio bad", text)
+        self.assertNotIn("Traceback", text)
 
     def test_status_returns_copies(self):
         session = FcapzMcpSession(rpc=FakeRpc())

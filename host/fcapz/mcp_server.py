@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ._version import __version__
 from .rpc import RpcServer
 
 
@@ -142,11 +143,7 @@ class FcapzMcpSession:
         try:
             return importlib.metadata.version("fpgacapzero")
         except importlib.metadata.PackageNotFoundError:
-            version_file = Path(__file__).resolve().parents[2] / "VERSION"
-            try:
-                return version_file.read_text(encoding="utf-8").strip()
-            except OSError:
-                return None
+            return __version__ or None
 
     @staticmethod
     def _default_tap(backend: str) -> str:
@@ -594,6 +591,8 @@ class FcapzMcpSession:
             raise PermissionError(
                 "UART sends are disabled; restart with --allow-uart-send to enable them"
             )
+        if data_base64 is not None and text is not None:
+            raise ValueError("provide only one of data_base64 or text")
         if data_base64 is None:
             if text is None:
                 raise ValueError("provide either data_base64 or text")
@@ -640,23 +639,42 @@ class FcapzMcpSession:
     def _capture_summary(self) -> JsonDict | None:
         if self.last_capture is None:
             return None
-        summary: JsonDict = {"ok": True}
-        bulky_keys = {"result", "samples", "content", "csv", "vcd", "data", "words"}
-        summary.update(
-            {
-                key: value
-                for key, value in self.last_capture.items()
-                if key not in bulky_keys and key != "ok"
-            }
-        )
+        # Keep tool results compact while allowing newly added top-level metadata
+        # to surface automatically. Update this set when RPC adds bulky payloads.
+        bulky_keys = {
+            "content",
+            "csv",
+            "data",
+            "raw_dump",
+            "result",
+            "samples",
+            "timestamps",
+            "vcd",
+            "words",
+        }
+        summary: JsonDict = {
+            key: value for key, value in self.last_capture.items() if key not in bulky_keys
+        }
+        summary.setdefault("ok", True)
         return summary
 
     def shutdown(self) -> None:
-        for close in (self.close, self.eio_close, self.axi_close, self.uart_close):
+        errors: list[str] = []
+        for name, close in (
+            ("close", self.close),
+            ("eio_close", self.eio_close),
+            ("axi_close", self.axi_close),
+            ("uart_close", self.uart_close),
+        ):
             try:
                 close()
-            except Exception:
-                traceback.print_exc(file=sys.stderr)
+            except Exception as exc:
+                errors.append(f"{name}: {exc.__class__.__name__}: {exc}")
+        if errors:
+            print(
+                "fcapz-mcp: errors during shutdown: " + "; ".join(errors),
+                file=sys.stderr,
+            )
 
 
 def build_mcp_server(session: FcapzMcpSession):
