@@ -445,6 +445,9 @@ observed RPC schema version so agents can detect compatibility drift. Large
 captures stay available through `fcapz://last-capture` until the next capture,
 ELA close, or an explicit `fcapz_drop_last_capture` call.
 
+AXI MCP tools use integer byte addresses and integer 32-bit data words in their
+JSON schemas. Convert hex strings such as `0x40000000` before calling the tool.
+
 #### JTAG-to-AXI4 Bridge
 
 ```python

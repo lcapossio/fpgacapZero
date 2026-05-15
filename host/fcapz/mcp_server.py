@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ._version import __version__
-from .rpc import RpcServer
+from .rpc import _SCHEMA_VERSION, RpcServer
 
 
 JsonDict = dict[str, Any]
@@ -63,7 +63,7 @@ class FcapzMcpSession:
     last_capture: JsonDict | None = None
     last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
-    last_rpc_schema_version: str | None = None
+    last_rpc_schema_version: str | None = _SCHEMA_VERSION
     _rpc_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
@@ -323,6 +323,8 @@ class FcapzMcpSession:
         return response
 
     def drop_last_capture(self) -> JsonDict:
+        # Captures may contain large sample payloads. Probe and EIO caches are small
+        # enough to retain until overwritten or closed.
         self.last_capture = None
         self.last_capture_summary = None
         return {"ok": True}
@@ -513,20 +515,22 @@ class FcapzMcpSession:
         self.axi_connected = False
         return response
 
-    def axi_read(self, addr: int | str) -> JsonDict:
-        return self._rpc_call({"cmd": "axi_read", "addr": addr})
+    def axi_read(self, addr: int) -> JsonDict:
+        return self._rpc_call({"cmd": "axi_read", "addr": int(addr)})
 
-    def axi_write(self, addr: int | str, data: int | str, wstrb: int | str = "0xF") -> JsonDict:
+    def axi_write(self, addr: int, data: int, wstrb: int = 0xF) -> JsonDict:
         if not self.capabilities.allow_axi_write:
             raise PermissionError(
                 "AXI writes are disabled; restart with --allow-axi-write to enable them"
             )
-        return self._rpc_call({"cmd": "axi_write", "addr": addr, "data": data, "wstrb": wstrb})
+        return self._rpc_call(
+            {"cmd": "axi_write", "addr": int(addr), "data": int(data), "wstrb": int(wstrb)}
+        )
 
     def axi_write_block(
         self,
-        addr: int | str,
-        data: list[int | str],
+        addr: int,
+        data: list[int],
         *,
         burst: bool = False,
     ) -> JsonDict:
@@ -535,12 +539,17 @@ class FcapzMcpSession:
                 "AXI writes are disabled; restart with --allow-axi-write to enable them"
             )
         return self._rpc_call(
-            {"cmd": "axi_write_block", "addr": addr, "data": list(data), "burst": bool(burst)}
+            {
+                "cmd": "axi_write_block",
+                "addr": int(addr),
+                "data": [int(word) for word in data],
+                "burst": bool(burst),
+            }
         )
 
-    def axi_dump(self, addr: int | str, count: int, *, burst: bool = False) -> JsonDict:
+    def axi_dump(self, addr: int, count: int, *, burst: bool = False) -> JsonDict:
         return self._rpc_call(
-            {"cmd": "axi_dump", "addr": addr, "count": int(count), "burst": bool(burst)}
+            {"cmd": "axi_dump", "addr": int(addr), "count": int(count), "burst": bool(burst)}
         )
 
     def uart_connect(
@@ -900,34 +909,49 @@ def build_mcp_server(session: FcapzMcpSession):
         return session.axi_close()
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
-    def fcapz_axi_read(addr: int | str) -> JsonDict:
-        """Read one 32-bit AXI word from addr, which may be an integer or hex string."""
+    def fcapz_axi_read(addr: int) -> JsonDict:
+        """Read one 32-bit AXI word from a byte address.
+
+        addr is an integer byte address, not a word index. Use decimal JSON
+        integers; convert hex strings such as "0x40000000" before calling.
+        """
 
         return session.axi_read(addr)
 
     @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
     def fcapz_axi_write(
-        addr: int | str,
-        data: int | str,
-        wstrb: int | str = "0xF",
+        addr: int,
+        data: int,
+        wstrb: int = 0xF,
     ) -> JsonDict:
-        """Write one 32-bit AXI word when AXI write access is enabled."""
+        """Write one 32-bit AXI word when AXI write access is enabled.
+
+        addr is an integer byte address. data is a 32-bit integer word. wstrb is
+        a 4-bit integer byte-lane mask where bit 0 controls addr[7:0].
+        """
 
         return session.axi_write(addr, data, wstrb)
 
     @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
     def fcapz_axi_write_block(
-        addr: int | str,
-        data: list[int | str],
+        addr: int,
+        data: list[int],
         burst: bool = False,
     ) -> JsonDict:
-        """Write a block of AXI words when AXI write access is enabled."""
+        """Write 32-bit AXI words starting at an integer byte address.
+
+        data is a list of integer words. When burst is false, words are written
+        sequentially; when true, the bridge uses its burst write path.
+        """
 
         return session.axi_write_block(addr, data, burst=burst)
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
-    def fcapz_axi_dump(addr: int | str, count: int, burst: bool = False) -> JsonDict:
-        """Read count 32-bit AXI words starting at addr."""
+    def fcapz_axi_dump(addr: int, count: int, burst: bool = False) -> JsonDict:
+        """Read count 32-bit AXI words starting at an integer byte address.
+
+        count is measured in 32-bit words, not bytes.
+        """
 
         return session.axi_dump(addr, count, burst=burst)
 

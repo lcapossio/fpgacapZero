@@ -209,6 +209,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
             {"ok": True, "schema_version": "test"},
         )
 
+    def test_status_reports_rpc_schema_before_first_rpc(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        self.assertIsInstance(session.status()["rpc_schema_version"], str)
+        self.assertIsNotNone(session.status()["rpc_schema_version"])
+
     def test_drop_last_capture_releases_cached_payload(self):
         session = FcapzMcpSession(rpc=FakeRpc())
 
@@ -301,9 +307,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(rpc.requests[-1]["cmd"], "axi_connect")
         self.assertEqual(rpc.requests[-1]["chain"], 4)
         self.assertEqual(rpc.requests[-1]["tap"], "xc7a100t.tap")
-        self.assertEqual(session.axi_read("0x10")["value"], "0x12345678")
-        self.assertEqual(session.axi_write("0x10", "0xCAFE")["resp"], "OKAY")
-        self.assertEqual(session.axi_write_block(0x20, [1, "0x2"])["count"], 2)
+        self.assertEqual(session.axi_read(0x10)["value"], "0x12345678")
+        self.assertEqual(session.axi_write(0x10, 0xCAFE)["resp"], "OKAY")
+        self.assertEqual(rpc.requests[-1]["wstrb"], 0xF)
+        self.assertEqual(session.axi_write_block(0x20, [1, 0x2])["count"], 2)
         self.assertEqual(session.axi_dump(0x20, 1)["words"], ["0x00000001"])
         session.axi_close()
         self.assertFalse(session.status()["axi_connected"])
@@ -504,6 +511,14 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertTrue(tools["fcapz_eio_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_axi_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_uart_send"].annotations.destructiveHint)
+        self.assertEqual(
+            tools["fcapz_axi_read"].inputSchema["properties"]["addr"]["type"],
+            "integer",
+        )
+        self.assertEqual(
+            tools["fcapz_axi_write"].inputSchema["properties"]["wstrb"]["default"],
+            15,
+        )
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
     def test_resources_are_compact_and_report_unavailable_when_empty(self):
