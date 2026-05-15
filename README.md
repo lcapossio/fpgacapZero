@@ -127,6 +127,7 @@ pip install -e ".[dev]"
 pytest tests/ -v
 python sim/run_sim.py
 python sim/run_vhdl_sim.py
+python sim/run_hdl_parity.py
 ```
 
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
@@ -134,6 +135,9 @@ first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
 `python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
 EIO and ELA cores.
+`python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
+translated core generics and register addresses still match the source Verilog,
+then runs the paired Verilog and VHDL regressions in one job.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator driver lint for issues such as
 one register assigned from two always blocks.
@@ -715,6 +719,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
 | `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
+| `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
@@ -783,6 +788,16 @@ Runs the VHDL EIO and ELA testbenches. The VHDL ELA testbench includes capture,
 edge trigger, decimation, external trigger, timestamps, segmented capture, probe
 mux, startup arm, trigger holdoff, `INPUT_PIPE=1`, storage qualification,
 sequencer, relational compare, and dual compare coverage.
+
+When changing the source Verilog for a translated core, run:
+
+```bash
+python sim/run_hdl_parity.py
+```
+
+This is the CI parity gate for the VHDL port. It fails if EIO/ELA public
+generics or register address constants diverge between Verilog and VHDL, then
+runs the Verilog source regressions and translated VHDL regressions back to back.
 
 ### Tests
 

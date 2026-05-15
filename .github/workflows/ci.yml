@@ -139,7 +139,7 @@ jobs:
       - name: Run all RTL testbenches
         run: python sim/run_sim.py
 
-  # -- 6. VHDL simulation (ghdl) ---------------------------------------------
+  # -- 7. VHDL simulation (ghdl) ---------------------------------------------
   sim-vhdl:
     name: VHDL simulation (ghdl)
     runs-on: ubuntu-latest
@@ -154,3 +154,19 @@ jobs:
           python-version: "3.11"
       - name: Run all VHDL testbenches
         run: python sim/run_vhdl_sim.py
+
+  # -- 8. Verilog/VHDL parity gate -------------------------------------------
+  hdl-parity:
+    name: HDL parity (Verilog source vs VHDL port)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HDL simulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog ghdl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run HDL parity checks
+        run: python sim/run_hdl_parity.py

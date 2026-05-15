@@ -164,8 +164,10 @@ module fcapz_core_manager_tb;
         expect_bits({7'b0, burst_timestamp}, 8'h00, "burst_timestamp follows slot1");
         expect_bits({4'h0, burst_start_ptr}, 8'h0B, "burst_start_ptr follows slot1");
 
-        write_reg(16'hF008, 32'h0000_0007);
-        read_reg(16'hF008, 32'h0000_0001, "out-of-range active write ignored");
+        write_reg(16'hF008, 32'h0000_0004);
+        read_reg(16'hF008, 32'h0000_0001, "out-of-range active write 4 ignored");
+        write_reg(16'hF014, 32'h0000_0004);
+        read_reg(16'hF014, 32'h0000_0002, "out-of-range descriptor write 4 ignored");
 
         if (errors == 0) begin
             $display("fcapz_core_manager_tb PASS");

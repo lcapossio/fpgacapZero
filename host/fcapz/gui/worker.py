@@ -89,10 +89,11 @@ class CaptureWorker(QObject):
 
     def run_single(self, cfg: CaptureConfig, timeout: float, *, immediate: bool) -> None:
         try:
-            use = self._analyzer.immediate_variant(cfg) if immediate else cfg
-            self._analyzer.configure(use)
-            self._analyzer.arm()
-            result = self._analyzer.capture(timeout)
+            with self._analyzer.transport.transaction_lock():
+                use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+                self._analyzer.configure(use)
+                self._analyzer.arm()
+                result = self._analyzer.capture(timeout)
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 — surfaced via GUI
             _log.exception("Single capture failed")
@@ -102,10 +103,11 @@ class CaptureWorker(QObject):
         try:
             self.reset_cancel()
             while not self._cancel_cont:
-                use = self._analyzer.immediate_variant(cfg) if immediate else cfg
-                self._analyzer.configure(use)
-                self._analyzer.arm()
-                result = self._analyzer.capture(timeout)
+                with self._analyzer.transport.transaction_lock():
+                    use = self._analyzer.immediate_variant(cfg) if immediate else cfg
+                    self._analyzer.configure(use)
+                    self._analyzer.arm()
+                    result = self._analyzer.capture(timeout)
                 self.progress.emit(result)
                 self._sleep_interruptible(self._inter_cycle_delay_s)
             self.finished.emit(None)

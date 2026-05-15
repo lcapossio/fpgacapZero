@@ -72,7 +72,10 @@ def run_tb(name: str) -> bool:
     if not run_cmd(["ghdl", "-e", "--std=08", f"--workdir={WORK}", entity], f"elaborate {entity}"):
         return False
 
-    return run_cmd(["ghdl", "-r", "--std=08", f"--workdir={WORK}", entity], f"simulate {entity}")
+    return run_cmd(
+        ["ghdl", "-r", "--std=08", f"--workdir={WORK}", entity, "--assert-level=error"],
+        f"simulate {entity}",
+    )
 
 
 def main() -> None:

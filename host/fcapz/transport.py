@@ -136,6 +136,20 @@ class Transport(ABC):
       during :meth:`connect`.
     """
 
+    def transaction_lock(self) -> threading.RLock:
+        """Return the shared host-side lock for multi-register transactions.
+
+        Analyzer and EIO controllers can share one physical JTAG transport while
+        selecting different core-manager slots.  This lock serializes those
+        higher-level register sequences so one controller cannot switch
+        ``MGR_ACTIVE`` between another controller's read/modify/write halves.
+        """
+        lock = self.__dict__.get("_fcapz_transaction_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self.__dict__["_fcapz_transaction_lock"] = lock
+        return lock
+
     @abstractmethod
     def connect(self) -> None:
         """Open the transport connection.

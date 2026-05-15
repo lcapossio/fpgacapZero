@@ -42,6 +42,9 @@ architecture rtl of fcapz_eio is
     signal probe_in_pad : std_logic_vector(IN_PAD - 1 downto 0);
     signal in_sync1     : std_logic_vector(IN_PAD - 1 downto 0) := (others => '0');
     signal in_sync2     : std_logic_vector(IN_PAD - 1 downto 0) := (others => '0');
+    attribute ASYNC_REG : string;
+    attribute ASYNC_REG of in_sync1 : signal is "TRUE";
+    attribute ASYNC_REG of in_sync2 : signal is "TRUE";
 begin
     probe_out <= out_regs(OUT_W - 1 downto 0);
 
