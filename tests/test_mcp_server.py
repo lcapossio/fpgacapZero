@@ -41,6 +41,7 @@ class FakeRpc:
                 "sample_count": 2,
                 "overflow": False,
                 "channel": req.get("channel", 0),
+                "trigger_index": 1,
                 "result": {"samples": [1, 2]},
             }
         if cmd == "configure":
@@ -194,6 +195,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(rpc.requests[-1]["pretrigger"], 4)
         self.assertEqual(rpc.requests[-1]["timeout"], 2.5)
         self.assertEqual(session.status()["last_capture_summary"]["sample_count"], 2)
+        self.assertEqual(session.status()["last_capture_summary"]["trigger_index"], 1)
         self.assertEqual(session.last_capture["result"], {"samples": [1, 2]})
 
     def test_capture_summary_always_reports_success(self):
@@ -201,8 +203,11 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         response = session.capture()
 
-        self.assertEqual(response, {"ok": True})
-        self.assertEqual(session.status()["last_capture_summary"], {"ok": True})
+        self.assertEqual(response, {"ok": True, "schema_version": "test"})
+        self.assertEqual(
+            session.status()["last_capture_summary"],
+            {"ok": True, "schema_version": "test"},
+        )
 
     def test_drop_last_capture_releases_cached_payload(self):
         session = FcapzMcpSession(rpc=FakeRpc())
@@ -349,6 +354,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only supported for backend 'hw_server'"):
             session.connect(backend="openocd", program="design.bit")
 
+    def test_program_permission_is_checked_before_backend_specificity(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaisesRegex(PermissionError, "programming is disabled"):
+            session.connect(backend="openocd", program="design.bit")
+
     def test_program_requires_bitfile_under_root(self):
         rpc = FakeRpc()
         root = Path.cwd() / "virtual-bitfiles" / "allowed"
@@ -469,6 +480,21 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertTrue(tools["fcapz_eio_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_axi_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_uart_send"].annotations.destructiveHint)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_resources_are_compact_and_report_unavailable_when_empty(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        resources = {
+            str(resource.uri): resource
+            for resource in asyncio.run(server.list_resources())
+        }
+
+        self.assertIn("fcapz://last-probe", resources)
+        self.assertEqual(str(resources["fcapz://last-probe"].uri), "fcapz://last-probe")
+        body = asyncio.run(server.read_resource("fcapz://last-probe"))
+        self.assertEqual(body[0].content, '{"available":false}')
 
 
 if __name__ == "__main__":

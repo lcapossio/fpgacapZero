@@ -290,13 +290,13 @@ class FcapzMcpSession:
     def _validated_program_path(self, program: str | None, *, backend: str) -> Path | None:
         if not program:
             return None
-        if backend != "hw_server":
-            raise ValueError(
-                "program= is only supported for backend 'hw_server' in this MCP server"
-            )
         if not self.capabilities.allow_program:
             raise PermissionError(
                 "FPGA programming is disabled; restart with --allow-program to enable it"
+            )
+        if backend != "hw_server":
+            raise ValueError(
+                "program= is only supported for backend 'hw_server' in this MCP server"
             )
         path = Path(program).expanduser().resolve()
         if path.suffix.lower() != ".bit":
@@ -641,8 +641,14 @@ class FcapzMcpSession:
         if self.last_capture is None:
             return None
         summary: JsonDict = {"ok": True}
-        keys = ("format", "sample_count", "overflow", "channel", "summary")
-        summary.update({key: self.last_capture[key] for key in keys if key in self.last_capture})
+        bulky_keys = {"result", "samples", "content", "csv", "vcd", "data", "words"}
+        summary.update(
+            {
+                key: value
+                for key, value in self.last_capture.items()
+                if key not in bulky_keys and key != "ok"
+            }
+        )
         return summary
 
     def shutdown(self) -> None:
@@ -981,25 +987,32 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_status_resource() -> str:
         """Current MCP server session status."""
 
-        return json.dumps(session.status(), indent=2)
+        return json.dumps(session.status(), separators=(",", ":"))
 
     @mcp.resource("fcapz://last-probe")
     def fcapz_last_probe() -> str:
         """Last ELA probe response."""
 
-        return json.dumps(session.last_probe or {}, indent=2)
+        payload = session.last_probe if session.last_probe is not None else {"available": False}
+        return json.dumps(payload, separators=(",", ":"))
 
     @mcp.resource("fcapz://last-capture")
     def fcapz_last_capture() -> str:
         """Last capture response."""
 
-        return json.dumps(session.last_capture or {}, indent=2)
+        payload = session.last_capture if session.last_capture is not None else {"available": False}
+        return json.dumps(payload, separators=(",", ":"))
 
     @mcp.resource("fcapz://last-eio-read")
     def fcapz_last_eio_read() -> str:
         """Last EIO read response."""
 
-        return json.dumps(session.last_eio_read or {}, indent=2)
+        payload = (
+            session.last_eio_read
+            if session.last_eio_read is not None
+            else {"available": False}
+        )
+        return json.dumps(payload, separators=(",", ":"))
 
     return mcp
 
