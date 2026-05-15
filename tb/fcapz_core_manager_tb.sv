@@ -166,8 +166,14 @@ module fcapz_core_manager_tb;
 
         write_reg(16'hF008, 32'h0000_0004);
         read_reg(16'hF008, 32'h0000_0001, "out-of-range active write 4 ignored");
+        write_reg(16'hF008, 32'h0000_0003);
+        read_reg(16'hF008, 32'h0000_0001, "out-of-range active write NUM_SLOTS ignored");
+        write_reg(16'hF008, 32'hFFFF_FFFF);
+        read_reg(16'hF008, 32'h0000_0001, "out-of-range active write all ones ignored");
         write_reg(16'hF014, 32'h0000_0004);
         read_reg(16'hF014, 32'h0000_0002, "out-of-range descriptor write 4 ignored");
+        write_reg(16'hF014, 32'h0000_0003);
+        read_reg(16'hF014, 32'h0000_0002, "out-of-range descriptor write NUM_SLOTS ignored");
 
         if (errors == 0) begin
             $display("fcapz_core_manager_tb PASS");

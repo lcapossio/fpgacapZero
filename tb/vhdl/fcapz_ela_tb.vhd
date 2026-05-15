@@ -203,6 +203,7 @@ begin
         variable cap_len : std_logic_vector(31 downto 0);
         variable ts0 : std_logic_vector(31 downto 0);
         variable ts1 : std_logic_vector(31 downto 0);
+        variable ts2 : std_logic_vector(31 downto 0);
 
         procedure check(constant message : in string; constant cond : in boolean) is
         begin
@@ -459,7 +460,9 @@ begin
         check("TS capture: done", status(2) = '1');
         read_ts(x"0140", ts0);
         read_ts(x"0144", ts1);
-        check("TS monotonic", unsigned(ts1) >= unsigned(ts0));
+        read_ts(x"0148", ts2);
+        check("TS samples strictly advance 0->1", unsigned(ts1) > unsigned(ts0));
+        check("TS samples strictly advance 1->2", unsigned(ts2) > unsigned(ts1));
 
         report "=== Test 6: Segmented capture ===";
         read_seg(x"00B8", word);
@@ -564,6 +567,8 @@ begin
         check("INPUT_PIPE=1: done", status(2) = '1');
         read_pipe(x"001C", cap_len);
         check("INPUT_PIPE=1: CAPTURE_LEN=1", cap_len = x"00000001");
+        read_pipe(x"0100", word);
+        check("INPUT_PIPE=1: captured sample readback is 1", word = x"00000001");
 
         report "=== Test 10: Sequencer, SQ, relational, and dual compare ===";
         read_combo(x"003C", word);
@@ -598,9 +603,44 @@ begin
         read_combo(x"001C", cap_len);
         check("Sequencer LT capture length is 3", cap_len = x"00000003");
 
+        write_combo(x"0004", x"00000002");
+        for i in 0 to 8 loop wait until rising_edge(sample_clk); end loop;
+        write_combo(x"0040", x"00010400"); -- stage 0: EQ 0x08, count 1, next stage 1
+        write_combo(x"0044", x"00000008");
+        write_combo(x"0048", x"000000FF");
+        write_combo(x"0054", x"00011000"); -- stage 1: EQ 0x0A, count 1, final
+        write_combo(x"0058", x"0000000A");
+        write_combo(x"005C", x"000000FF");
+        write_combo(x"0014", x"00000000");
+        write_combo(x"0018", x"00000002");
+        write_combo(x"0004", x"00000001");
+        probe_in_combo <= x"08";
+        for i in 0 to 10 loop wait until rising_edge(sample_clk); end loop;
+        read_combo(x"0008", status);
+        check("Sequencer stage 0 advances without triggering", status(1) = '0' and status(2) = '0');
+        for i in 0 to 48 loop
+            wait until rising_edge(sample_clk);
+            if (i mod 4) < 2 then
+                probe_in_combo <= x"0A";
+            else
+                probe_in_combo <= x"08";
+            end if;
+        end loop;
+        for i in 0 to 80 loop wait until rising_edge(sample_clk); end loop;
+        read_combo(x"0008", status);
+        check("Sequencer stage 1 final trigger reaches done", status(2) = '1');
+        read_combo(x"001C", cap_len);
+        check("Sequencer stage progression capture length is 3", cap_len = x"00000003");
+
         report "=== Summary: " & integer'image(pass_count) & " passed, " &
                integer'image(fail_count) & " failed ===";
         assert fail_count = 0 report "ELA VHDL testbench: failures detected" severity failure;
         finish;
+    end process;
+
+    p_watchdog : process
+    begin
+        wait for 200 us;
+        assert false report "fcapz_ela_tb timed out" severity failure;
     end process;
 end architecture sim;

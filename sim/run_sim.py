@@ -159,6 +159,9 @@ LINT_TARGETS = [
     # Heterogeneous managed ELA/EIO wrapper shape: per-slot widths, depths,
     # timestamps, clocks, and EIO widths.
     SIM / "lint_debug_multi_hetero_xilinx7.v",
+    # EIO-only manager shape catches NUM_ELAS=0 elaboration and zero-width
+    # replication issues.
+    SIM / "lint_debug_multi_eio_only_xilinx7.v",
 ]
 
 LINT_STUBS = [

@@ -30,35 +30,36 @@ module fcapz_debug_multi_xilinx7 #(
     parameter USER1_DATA_EN = 1,
     parameter EIO_IN_W = 1,
     parameter EIO_OUT_W = 1,
+    parameter ELA_PORT_COUNT = (NUM_ELAS > 0) ? NUM_ELAS : 1,
     // Per-slot overrides. The scalar parameters above remain the max/default
     // shape so existing instantiations can keep using one shared setting.
-    parameter [NUM_ELAS*32-1:0] ELA_SAMPLE_WS = {NUM_ELAS{SAMPLE_W}},
-    parameter [NUM_ELAS*32-1:0] ELA_DEPTHS = {NUM_ELAS{DEPTH}},
-    parameter [NUM_ELAS*32-1:0] ELA_TRIG_STAGES = {NUM_ELAS{TRIG_STAGES}},
-    parameter [NUM_ELAS*32-1:0] ELA_STOR_QUALS = {NUM_ELAS{STOR_QUAL}},
-    parameter [NUM_ELAS*32-1:0] ELA_INPUT_PIPES = {NUM_ELAS{INPUT_PIPE}},
-    parameter [NUM_ELAS*32-1:0] ELA_NUM_CHANNELS = {NUM_ELAS{NUM_CHANNELS}},
-    parameter [NUM_ELAS*32-1:0] ELA_DECIM_ENS = {NUM_ELAS{DECIM_EN}},
-    parameter [NUM_ELAS*32-1:0] ELA_EXT_TRIG_ENS = {NUM_ELAS{EXT_TRIG_EN}},
-    parameter [NUM_ELAS*32-1:0] ELA_TIMESTAMP_WS = {NUM_ELAS{TIMESTAMP_W}},
-    parameter [NUM_ELAS*32-1:0] ELA_NUM_SEGMENTS = {NUM_ELAS{NUM_SEGMENTS}},
-    parameter [NUM_ELAS*32-1:0] ELA_PROBE_MUX_WS = {NUM_ELAS{PROBE_MUX_W}},
-    parameter [NUM_ELAS*32-1:0] ELA_STARTUP_ARMS = {NUM_ELAS{STARTUP_ARM}},
-    parameter [NUM_ELAS*32-1:0] ELA_DEFAULT_TRIG_EXTS = {NUM_ELAS{DEFAULT_TRIG_EXT}},
-    parameter [NUM_ELAS*32-1:0] ELA_REL_COMPARES = {NUM_ELAS{REL_COMPARE}},
-    parameter [NUM_ELAS*32-1:0] ELA_DUAL_COMPARES = {NUM_ELAS{DUAL_COMPARE}},
-    parameter [NUM_ELAS*32-1:0] ELA_USER1_DATA_ENS = {NUM_ELAS{USER1_DATA_EN}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_SAMPLE_WS = {ELA_PORT_COUNT{SAMPLE_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DEPTHS = {ELA_PORT_COUNT{DEPTH}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_TRIG_STAGES = {ELA_PORT_COUNT{TRIG_STAGES}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_STOR_QUALS = {ELA_PORT_COUNT{STOR_QUAL}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_INPUT_PIPES = {ELA_PORT_COUNT{INPUT_PIPE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_NUM_CHANNELS = {ELA_PORT_COUNT{NUM_CHANNELS}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DECIM_ENS = {ELA_PORT_COUNT{DECIM_EN}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_EXT_TRIG_ENS = {ELA_PORT_COUNT{EXT_TRIG_EN}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_TIMESTAMP_WS = {ELA_PORT_COUNT{TIMESTAMP_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_NUM_SEGMENTS = {ELA_PORT_COUNT{NUM_SEGMENTS}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_PROBE_MUX_WS = {ELA_PORT_COUNT{PROBE_MUX_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_STARTUP_ARMS = {ELA_PORT_COUNT{STARTUP_ARM}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DEFAULT_TRIG_EXTS = {ELA_PORT_COUNT{DEFAULT_TRIG_EXT}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_REL_COMPARES = {ELA_PORT_COUNT{REL_COMPARE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DUAL_COMPARES = {ELA_PORT_COUNT{DUAL_COMPARE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_USER1_DATA_ENS = {ELA_PORT_COUNT{USER1_DATA_EN}},
     parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_IN_WS =
         {((NUM_EIOS > 0) ? NUM_EIOS : 1){EIO_IN_W}},
     parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_OUT_WS =
         {((NUM_EIOS > 0) ? NUM_EIOS : 1){EIO_OUT_W}}
 ) (
-    input  wire [NUM_ELAS-1:0] ela_sample_clk,
-    input  wire [NUM_ELAS-1:0] ela_sample_rst,
-    input  wire [NUM_ELAS*(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] ela_probe_in,
-    input  wire [NUM_ELAS-1:0] ela_trigger_in,
-    output wire [NUM_ELAS-1:0] ela_trigger_out,
-    output wire [NUM_ELAS-1:0] ela_armed_out,
+    input  wire [ELA_PORT_COUNT-1:0] ela_sample_clk,
+    input  wire [ELA_PORT_COUNT-1:0] ela_sample_rst,
+    input  wire [ELA_PORT_COUNT*(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] ela_probe_in,
+    input  wire [ELA_PORT_COUNT-1:0] ela_trigger_in,
+    output wire [ELA_PORT_COUNT-1:0] ela_trigger_out,
+    output wire [ELA_PORT_COUNT-1:0] ela_armed_out,
     input  wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_IN_W-1:0] eio_probe_in,
     output wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_OUT_W-1:0] eio_probe_out
 );
@@ -71,11 +72,22 @@ module fcapz_debug_multi_xilinx7 #(
     localparam PROBE_W = (PROBE_MUX_W > 0) ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS;
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
     localparam EIO_SLOT_BASE = NUM_ELAS;
-    localparam [NUM_SLOTS*16-1:0] SLOT_CORE_IDS =
-        ({NUM_SLOTS{16'h494F}} << (NUM_ELAS*16)) | {NUM_ELAS{16'h4C41}};
+    function [NUM_SLOTS*16-1:0] make_slot_core_ids;
+        input integer unused;
+        integer idx;
+        begin
+            make_slot_core_ids = {NUM_SLOTS{16'h0000}};
+            for (idx = 0; idx < NUM_ELAS; idx = idx + 1)
+                make_slot_core_ids[idx*16 +: 16] = 16'h4C41;
+            for (idx = 0; idx < EIO_COUNT; idx = idx + 1)
+                make_slot_core_ids[(EIO_SLOT_BASE + idx)*16 +: 16] = 16'h494F;
+        end
+    endfunction
+
+    localparam [NUM_SLOTS*16-1:0] SLOT_CORE_IDS = make_slot_core_ids(0);
 
     function integer ela_param32;
-        input [NUM_ELAS*32-1:0] values;
+        input [ELA_PORT_COUNT*32-1:0] values;
         input integer idx;
         begin
             ela_param32 = values[idx*32 +: 32];

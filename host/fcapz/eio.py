@@ -25,6 +25,7 @@ on the ``EioController`` instance as ``version_major`` /
 
 from __future__ import annotations
 
+from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
 from .transport import Transport
 
 # ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
@@ -36,7 +37,6 @@ _ADDR_IN_W     = 0x0004
 _ADDR_OUT_W    = 0x0008
 _ADDR_IN_BASE  = 0x0010
 _ADDR_OUT_BASE = 0x0100
-_ADDR_MGR_ACTIVE = 0xF008
 
 
 class EioController:

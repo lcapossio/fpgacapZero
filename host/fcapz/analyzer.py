@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ._version import _version_tuple
+from .registers import ADDR_MGR_ACTIVE
 from .transport import Transport
 
 _ADDR_VERSION = 0x0000
@@ -68,7 +69,7 @@ _ADDR_TRIG_DELAY = 0x00D4
 
 _ADDR_MGR_VERSION = 0xF000
 _ADDR_MGR_COUNT = 0xF004
-_ADDR_MGR_ACTIVE = 0xF008
+_ADDR_MGR_ACTIVE = ADDR_MGR_ACTIVE
 _ADDR_MGR_STRIDE = 0xF00C
 _ADDR_MGR_CAPS = 0xF010
 _ADDR_MGR_DESC_INDEX = 0xF014

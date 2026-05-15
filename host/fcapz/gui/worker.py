@@ -199,7 +199,7 @@ class ConnectWorker(QObject):
                 topology = {"chain": 1, "manager": manager_info, "slots": slots}
                 analyzer.select_instance(0)
                 _conn_log.info(
-                    "USER1 core manager detected: %d slots; GUI ELA capture uses slot 0",
+                    "USER1 core manager detected: %d slots; GUI ELA capture defaults to slot 0",
                     int(manager_info.get("num_slots", 0)),
                 )
             info = analyzer.probe_optional()
