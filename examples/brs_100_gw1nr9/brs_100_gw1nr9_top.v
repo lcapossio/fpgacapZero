@@ -107,6 +107,10 @@ localparam int DEPTH                = 512;
         .DEPTH          (DEPTH),
         .EIO_EN         (0)
     ) u_ela (
+        .sysclk         (i_sysclk),
+            // TODO: different clock for demonstration
+            // purposes...
+
         .sample_clk     (i_sysclk),
         .sample_rst     (i_sysclk_reset),
         .probe_in       (i_counter),
@@ -115,6 +119,8 @@ localparam int DEPTH                = 512;
         .eio_probe_out  (),
             // NOTE: external trigger ports
             // tie off if not used
+
+        .debug          (i_leds),
 
         .tms_pad_i      (tms_pad_i),
         .tck_pad_i      (tck_pad_i),
@@ -201,7 +207,7 @@ localparam int DEPTH                = 512;
     // NOTE: Leds
     // ------------
 
-    always @(posedge i_sysclk) begin
+/*    always @(posedge i_sysclk) begin
         if (i_second_tick == 1'b1) begin
             i_leds[0] <= ~i_leds[0];
         end
@@ -218,14 +224,15 @@ localparam int DEPTH                = 512;
         if (i_sysclk_resetn == 1'b0) begin
             i_leds <= 0;
         end
-    end
-    assign pad_leds_n = ~i_leds;
+    end*/
+    assign pad_leds_n = i_leds;
         // NOTE:
         //          led[4]: TODO
         //          led[3]: TODO
         //          led[2]: TODO
         //          led[1]: TODO
         //          led[0]: heartbeat
+
 
 
 endmodule

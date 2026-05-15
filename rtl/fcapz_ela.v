@@ -45,6 +45,8 @@ module fcapz_ela #(
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1     // 0=disable slow USER1 DATA window readback
 ) (
+    output reg  [5:0]                       debug,
+
     input  wire                              sample_clk,
     input  wire                              sample_rst,
     input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : NUM_CHANNELS*SAMPLE_W)-1:0] probe_in,
@@ -1511,6 +1513,8 @@ module fcapz_ela #(
             end
         end
     endfunction
+
+    assign debug = jtag_addr[5:0];
 
     always @(*) begin
         // defaults

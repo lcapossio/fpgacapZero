@@ -44,12 +44,17 @@ module fcapz_ela_gowin #(
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
 ) (
+    input  wire                             sysclk,
+        // NOTE: <TODO>
+
     input  wire                             sample_clk,
     input  wire                             sample_rst,
     input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
     // EIO ports (active when EIO_EN=1)
     input  wire [EIO_IN_W-1:0]              eio_probe_in,
     output wire [EIO_OUT_W-1:0]             eio_probe_out,
+
+    output reg  [5:0]                       debug,
 
     input  wire                             tms_pad_i,
     input  wire                             tck_pad_i,
@@ -58,7 +63,7 @@ module fcapz_ela_gowin #(
 );
 
     // TAP signals
-    wire tap_tck, tap_tdi;
+    wire tap_tdi;
     wire [1:0] tap_tdo, tap_capture, tap_shift, tap_update, tap_sel;
 
     // Register bus
@@ -81,7 +86,8 @@ module fcapz_ela_gowin #(
 
     // ---- TAP wrapper ----
     jtag_tap_gowin u_tap_ctrl (
-        .tck            (tap_tck),
+        .sysclk         (sysclk),
+
         .tdi            (tap_tdi),
         .tdo            (tap_tdo),
         .capture        (tap_capture),
@@ -89,23 +95,26 @@ module fcapz_ela_gowin #(
         .update         (tap_update),
         .sel            (tap_sel),
 
+        .debug          (debug),
+
         .tms_pad_i      (tms_pad_i),
         .tck_pad_i      (tck_pad_i),
         .tdi_pad_i      (tdi_pad_i),
         .tdo_pad_o      (tdo_pad_o)
     );
 
+
     reset_sync u_rst_sync_ctrl (
-        .clk    (tap_tck),
-        .arst   (sample_rst),
-        .srst   (jtag_rst_ctrl)
+        .clk            (sysclk),
+        .arst           (sample_rst),
+        .srst           (jtag_rst_ctrl)
     );
 
     // ---- Register interface ----
     jtag_reg_iface u_reg (
         .arst       (jtag_rst_ctrl),
 
-        .tck        (tap_tck),
+        .tck        (sysclk),
         .tdi        (tap_tdi),
         .tdo        (tap_tdo[0]),
         .capture    (tap_capture[0]),
@@ -187,6 +196,7 @@ module fcapz_ela_gowin #(
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
                 .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
+                .debug(),
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in), .trigger_in(1'b0),
                 .trigger_out(ela_trigger_out_unused),

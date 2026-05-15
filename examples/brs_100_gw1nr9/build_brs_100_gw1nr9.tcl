@@ -59,6 +59,15 @@ foreach src $verilog_files {
     add_file -type verilog $src
 }
 
+set systemverilog_files [list \
+    $repo_path/rtl/dff_sync.sv \
+    $repo_path/rtl/dff_reg_sync.sv
+]
+
+foreach src $systemverilog_files {
+    add_file -type verilog $src
+}
+
 add_file "${this_path}/brs_100_gw1nr9_loc.cst"
 add_file "${this_path}/brs_100_gw1nr9_timing.sdc"
 
