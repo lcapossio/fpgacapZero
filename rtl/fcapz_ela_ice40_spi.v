@@ -10,6 +10,9 @@
 // spi_mosi/spi_miso to pins reachable by the host adapter and use the host
 // SpiRegisterTransport. Sample readback is the normal 32-bit DATA register
 // window, so it is functional and portable but not burst-accelerated.
+//
+// The ELA register clock is spi_sck. It only advances during host SPI
+// transactions, unlike the free-running TCK in the native JTAG wrappers.
 
 module fcapz_ela_ice40_spi #(
     parameter SAMPLE_W      = 8,
@@ -37,12 +40,12 @@ module fcapz_ela_ice40_spi #(
     localparam PTR_W = $clog2(DEPTH);
 
     wire        reg_clk;
-    wire        reg_rst;
     wire        reg_wr_en;
     wire        reg_rd_en;
     wire [15:0] reg_addr;
     wire [31:0] reg_wdata;
     wire [31:0] reg_rdata;
+    wire        jtag_rst_ctrl;
 
     wire [PTR_W-1:0] burst_rd_addr_dummy = {PTR_W{1'b0}};
     wire [SAMPLE_W-1:0] burst_rd_data_unused;
@@ -59,12 +62,17 @@ module fcapz_ela_ice40_spi #(
         .spi_mosi(spi_mosi),
         .spi_miso(spi_miso),
         .reg_clk(reg_clk),
-        .reg_rst(reg_rst),
         .reg_wr_en(reg_wr_en),
         .reg_rd_en(reg_rd_en),
         .reg_addr(reg_addr),
         .reg_wdata(reg_wdata),
         .reg_rdata(reg_rdata)
+    );
+
+    reset_sync u_rst_sync_ctrl (
+        .clk(reg_clk),
+        .arst(sample_rst),
+        .srst(jtag_rst_ctrl)
     );
 
     fcapz_ela #(
@@ -87,7 +95,7 @@ module fcapz_ela_ice40_spi #(
         .trigger_out(trigger_out_unused),
         .armed_out(armed_out_unused),
         .jtag_clk(reg_clk),
-        .jtag_rst(sample_rst | reg_rst),
+        .jtag_rst(jtag_rst_ctrl),
         .jtag_wr_en(reg_wr_en),
         .jtag_rd_en(reg_rd_en),
         .jtag_addr(reg_addr),

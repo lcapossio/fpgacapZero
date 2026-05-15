@@ -7,7 +7,6 @@ module fcapz_spi_reg_iface_tb;
     wire spi_miso;
 
     wire reg_clk;
-    wire reg_rst;
     wire reg_wr_en;
     wire reg_rd_en;
     wire [15:0] reg_addr;
@@ -23,7 +22,6 @@ module fcapz_spi_reg_iface_tb;
         .spi_mosi(spi_mosi),
         .spi_miso(spi_miso),
         .reg_clk(reg_clk),
-        .reg_rst(reg_rst),
         .reg_wr_en(reg_wr_en),
         .reg_rd_en(reg_rd_en),
         .reg_addr(reg_addr),
@@ -80,22 +78,47 @@ module fcapz_spi_reg_iface_tb;
     endtask
 
     task spi_read_reg(input [15:0] addr, output [31:0] value);
-        reg [7:0] rx0;
+        reg [7:0] junk;
         reg [7:0] rx1;
         reg [7:0] rx2;
         reg [7:0] rx3;
+        reg [7:0] rx4;
         begin
             spi_cs_n = 1'b0;
-            spi_xfer_byte(8'h00, rx0);
-            spi_xfer_byte(addr[15:8], rx0);
-            spi_xfer_byte(addr[7:0], rx0);
-            spi_xfer_byte(8'h00, rx0);
-            spi_xfer_byte(8'h00, rx0);
+            spi_xfer_byte(8'h00, junk);
+            spi_xfer_byte(addr[15:8], junk);
+            spi_xfer_byte(addr[7:0], junk);
+            spi_xfer_byte(8'h00, junk);
             spi_xfer_byte(8'h00, rx1);
             spi_xfer_byte(8'h00, rx2);
             spi_xfer_byte(8'h00, rx3);
+            spi_xfer_byte(8'h00, rx4);
             spi_cs_n = 1'b1;
-            value = {rx0, rx1, rx2, rx3};
+            value = {rx1, rx2, rx3, rx4};
+            #20;
+        end
+    endtask
+
+    task spi_partial_write(input [15:0] addr);
+        reg [7:0] junk;
+        begin
+            spi_cs_n = 1'b0;
+            spi_xfer_byte(8'h80, junk);
+            spi_xfer_byte(addr[15:8], junk);
+            spi_xfer_byte(addr[7:0], junk);
+            spi_xfer_byte(8'hca, junk);
+            spi_cs_n = 1'b1;
+            #20;
+        end
+    endtask
+
+    task idle_sck_pulses(input integer count);
+        integer i;
+        bit ignored;
+        begin
+            spi_cs_n = 1'b1;
+            for (i = 0; i < count; i = i + 1)
+                tick(1'b1, ignored);
             #20;
         end
     endtask
@@ -113,6 +136,8 @@ module fcapz_spi_reg_iface_tb;
 
     initial begin
         mem[16'h0010 >> 2] = 32'h1234_abcd;
+        mem[16'h0020 >> 2] = 32'h5566_7788;
+        mem[16'h0030 >> 2] = 32'ha5a5_5a5a;
 
         spi_write_reg(16'h0028, 32'hdead_beef);
         expect_eq(mem[16'h0028 >> 2], 32'hdead_beef, "write_reg");
@@ -121,6 +146,25 @@ module fcapz_spi_reg_iface_tb;
             reg [31:0] value;
             spi_read_reg(16'h0010, value);
             expect_eq(value, 32'h1234_abcd, "read_reg");
+        end
+
+        begin
+            reg [31:0] first;
+            reg [31:0] second;
+            spi_read_reg(16'h0010, first);
+            spi_read_reg(16'h0020, second);
+            expect_eq(first, 32'h1234_abcd, "back_to_back_read_first");
+            expect_eq(second, 32'h5566_7788, "back_to_back_read_second");
+        end
+
+        spi_partial_write(16'h0030);
+        expect_eq(mem[16'h0030 >> 2], 32'ha5a5_5a5a, "partial_write_ignored");
+
+        begin
+            reg [31:0] value_after_idle;
+            idle_sck_pulses(12);
+            spi_read_reg(16'h0020, value_after_idle);
+            expect_eq(value_after_idle, 32'h5566_7788, "sck_while_cs_high_ignored");
         end
 
         if (failures != 0) begin

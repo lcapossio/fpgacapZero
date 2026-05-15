@@ -13,11 +13,15 @@
 //
 // Write transaction, 8 bytes:
 //   MOSI: 0x80 addr[15:8] addr[7:0] wdata[31:24] ... wdata[7:0] 0x00
+//   The final byte is padding; reg_wr_en fires as that byte begins.
 //
 // The generated register strobes are synchronous to spi_sck, which is also
-// exported as reg_clk. Keep SCK comfortably slower than the target device's
-// timing allows; this is intended as a portable bring-up/debug transport, not
-// a high-throughput capture path.
+// exported as reg_clk. reg_clk only toggles while the SPI master is clocking a
+// transaction, so downstream register logic must tolerate a bursty clock. Read
+// data is captured after the address bytes, so reg_rdata must be a zero-cycle
+// combinational response to reg_addr/reg_rd_en. Keep SCK comfortably slower
+// than the target device's timing allows; this is intended as a portable
+// bring-up/debug transport, not a high-throughput capture path.
 
 module fcapz_spi_reg_iface (
     input  wire        spi_sck,
@@ -26,7 +30,6 @@ module fcapz_spi_reg_iface (
     output reg         spi_miso,
 
     output wire        reg_clk,
-    output reg         reg_rst,
     output wire        reg_wr_en,
     output wire        reg_rd_en,
     output reg  [15:0] reg_addr,
@@ -57,7 +60,6 @@ module fcapz_spi_reg_iface (
         byte_idx = 4'd0;
         rx_shift = 8'h00;
         cmd = 8'h00;
-        reg_rst = 1'b0;
         reg_addr = 16'h0000;
         reg_wdata = 32'h0000_0000;
         tx_word = 32'h0000_0000;
@@ -73,7 +75,6 @@ module fcapz_spi_reg_iface (
             byte_idx <= 4'd0;
             rx_shift <= 8'h00;
             cmd <= 8'h00;
-            reg_rst <= 1'b0;
             reg_addr <= 16'h0000;
             reg_wdata <= 32'h0000_0000;
             tx_word <= 32'h0000_0000;
@@ -81,7 +82,6 @@ module fcapz_spi_reg_iface (
             read_cmd <= 1'b0;
             write_cmd <= 1'b0;
         end else begin
-            reg_rst <= 1'b0;
             rx_shift <= rx_byte;
 
             if (bit_idx == 3'd7) begin
