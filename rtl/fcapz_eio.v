@@ -102,6 +102,7 @@ module fcapz_eio #(
     // ---- Register read mux --------------------------------------------------
     always @(*) begin : p_rdata
         integer i;
+        i = 0;
         jtag_rdata = 32'h0;
         if (jtag_addr == ADDR_VERSION) begin
             // {major[7:0], minor[7:0], core_id[15:0]="IO"=0x494F}, generated

@@ -35,7 +35,8 @@ which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
 throughput (the Xilinx hw_server transport does this for the ELA
 burst readback). Default Xilinx builds keep those wide burst scans on
-USER1; pass `single_chain_burst=False` only for legacy two-chain builds.
+the selected ELA control chain; pass `single_chain_burst=False` only
+for legacy two-chain builds.
 
 For single-chain burst readback, the host verifies stability instead of
 trusting the first transaction.  The invariant is simple: after the ELA
@@ -121,7 +122,8 @@ logger `fcapz.gui.connect`.
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
 256-bit DR burst path used for sample data. Default Xilinx transports
-use USER1; `single_chain_burst=False` selects legacy DATA_CHAIN readout.
+use the selected ELA control chain; `single_chain_burst=False` selects
+legacy DATA_CHAIN readout.
 
 The key difference from a sample burst:
 
@@ -213,7 +215,8 @@ swap one for the other without changing the IR table.
 | Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
 | Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
-| Lattice ECP5, Intel, Gowin | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
+| Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
+| Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
 
 The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
 register sits in series with the PL TAP's DR on the TDI side, so every
@@ -551,12 +554,12 @@ something new.
    `{rnw_bit, addr[15:0], data[31:0]}` (49 bits total, LSB first).
    Don't confuse the order; don't drop the rnw bit.
 3. **Sharing state between controllers without `select_chain`.**
-   The ELA controller needs chain 1, EIO needs chain 3, AXI/UART
-   need chain 4.  If your transport doesn't switch the IR opcode
+   The ELA controller needs its configured chain (default 1), EIO
+   usually needs chain 3, and AXI/UART usually need chain 4.
+   If your transport doesn't switch the IR opcode
    between calls, you'll silently scan against the wrong chain
-   and read garbage.  The cooperating controller pattern (each
-   controller restores chain 1 on exit) only works if your
-   `select_chain` actually emits a new `irscan`.
+   and read garbage.  The cooperating controller pattern only works
+   if your `select_chain` actually emits a new `irscan`.
 4. **Not raising the right exceptions.**  The host stack and the
    tests assume:
    - `RuntimeError` if called before `connect()` or after `close()`

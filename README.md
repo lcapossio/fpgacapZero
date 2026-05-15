@@ -134,6 +134,9 @@ first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
 `python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
 EIO and ELA cores.
+Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
+the full Verilog RTL matrix through Verilator driver lint for issues such as
+one register assigned from two always blocks.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -563,11 +566,17 @@ for details.
 
 | Vendor | Primitive | User chains | ELA | EIO (needs 1) | EJTAG-AXI (needs 1) | EJTAG-UART (needs 1) |
 |--------|-----------|:-----------:|:---:|:---:|:---:|:---:|
-| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 | USER4 | USER4 (shared) |
+| **Xilinx** | BSCANE2 | 4 (USER1-4) | USER1 control + default burst; optional USER2 legacy burst | USER3 standalone, or managed USER1 slot with `fcapz_debug_multi_xilinx7` | USER4 | USER4 (shared) |
 | **Intel** | sld_virtual_jtag | Unlimited | inst 0 by default; optional inst 1 | inst 2 | inst 3 | inst 5 |
 | **ECP5** | JTAGG | 2 (ER1+ER2) | ER1 by default; optional ER2 | `EIO_EN=1` on ER1 | *deferred to v2* | *deferred to v2* |
-| **Gowin** | JTAG | 1 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
+| **Gowin** | GW_JTAG | One primitive; wrapper selects ER1 or ER2 | No burst | `EIO_EN=1` | *deferred to v2* | *deferred to v2* |
 | **PolarFire-family** | UJTAG | 2 (USER1+USER2) | USER1 control + USER2 burst | `EIO_EN=1` on USER1 | *deferred to v2* | *deferred to v2* |
+
+Single-core ELA/EIO wrappers are available across the vendor rows above.
+Managed multi-core wrappers are Xilinx 7-series only in this revision
+(`fcapz_debug_multi_xilinx7`); the portable `fcapz_core_manager` is shared,
+but ECP5, Gowin, Intel, PolarFire, and UltraScale wrappers still need their
+own TAP-specific shells.
 
 **Verified Xilinx 7-series IR codes** (xc7a100t, Arty A7):
 USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
@@ -582,9 +591,13 @@ Xilinx ELA wrappers default to `SINGLE_CHAIN_BURST=1`: USER1 carries both
 control and 256-bit burst readout. Set `SINGLE_CHAIN_BURST=0` only for the
 legacy USER2 dual-chain burst path.
 
-On Gowin, the single chain means **no burst readback** — sample data is read
-word-by-word through the sample DATA window (functional but slower). Details
-are in the manual (see below).
+On Gowin, the wrapper keeps readback on the 49-bit register path rather than
+adding a burst readback chain. Sample data is read word-by-word through the
+sample DATA window (functional but slower). Details are in the manual (see
+below).
+Do not instantiate separate Gowin ELA and EIO wrappers in one design: Gowin
+allows one `GW_JTAG` primitive, so use `EIO_EN=1` to share the ELA wrapper's
+register bus instead.
 
 On PolarFire-family devices, UJTAG exposes two user instructions from one
 primitive. To use ELA and EIO together, enable `EIO_EN=1` on the ELA wrapper;
@@ -645,7 +658,7 @@ the JTAG TAP/register/readout plumbing, not only `fcapz_ela.v`.
 | 32b x 1024, dual comparator, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | Wider samples mainly add BRAM/FFs |
 | `arty_a7_top` (placed, pre-`DEBUG_EN` always-on debug) | 3,244 | 4,562 | 3.5 | Historical baseline for the same validation reference |
 | `arty_a7_top` (placed, `DEBUG_EN=0`) | 2,318 | 3,168 | 3.5 | Bridge debug telemetry disabled; previous reference before the EJTAG-AXI FIFO trim |
-| **`arty_a7_top` (placed, trimmed EJTAG-AXI FIFOs, `DEBUG_EN=0`)** | **2,371** | **3,356** | **1.5** | Current reference: ELA with `INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4` + EIO 8/8 + EJTAG-AXI + `axi4_test_slave`; bridge debug telemetry disabled; EJTAG-AXI command/response queues set to 16 entries |
+| **`arty_a7_top` (placed, trimmed EJTAG-AXI FIFOs, `DEBUG_EN=0`)** | **2,371** | **3,356** | **1.5** | Current reference: USER1 debug manager with 2x ELA (`INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4`) + 2x EIO 8/8 + EJTAG-AXI + `axi4_test_slave`; bridge debug telemetry disabled; EJTAG-AXI command/response queues set to 16 entries |
 
 Optional ELA parameters (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`,
 `NUM_SEGMENTS`, channel mux, etc.) add registers, comparators, and
@@ -699,7 +712,8 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
-| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, and channel mux testbenches |
+| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
+| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
 | `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
@@ -710,7 +724,12 @@ Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 Those board-level checks now require every adjacent Arty counter sample to
 increment by +1 when decimation is disabled, so partial burst readback
-corruption is caught instead of hidden by a shorter valid prefix.
+corruption is caught instead of hidden by a shorter valid prefix. The managed
+Arty bitstream exercises two ELAs on the same USER chain with independent
+sample domains: ELA0 captures a 150 MHz counter and ELA1 captures a 130 MHz
+xored counter. In the GUI History panel, select captures from both ELAs and
+open/export them as one merged VCD so Surfer or GTKWave can display the two
+waveforms together.
 
 [↑ Top](#readme-top)
 
@@ -741,6 +760,7 @@ cores.
 ```bash
 python sim/run_sim.py
 python sim/run_sim.py --lint-only
+python sim/run_verilator_lint.py --self-test
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
@@ -748,7 +768,10 @@ the testbenches. The ELA configuration matrix covers small/scalable build
 shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
 registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
-list.
+list. The Verilator lint command complements that broad elaboration pass with
+a full-project Verilog RTL matrix and stricter procedural-driver checks; its
+self-test must fail a deliberately bad multi-driver fixture before the job is
+considered valid.
 
 ### Simulation (GHDL VHDL)
 

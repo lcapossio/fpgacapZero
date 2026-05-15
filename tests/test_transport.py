@@ -228,6 +228,11 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         self.assertEqual(t.ir_table[3], 0x26)  # USER3
         self.assertEqual(t.ir_table[4], 0x27)  # USER4
 
+    def test_ir_table_gowin_preset(self):
+        """Gowin GW_JTAG ER1/ER2 have their own IR opcodes."""
+        t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_GOWIN)
+        self.assertEqual(t.ir_table, {1: 0x42, 2: 0x43})
+
     def test_ir_table_alias(self):
         """IR_TABLE_US is the same dict as IR_TABLE_XILINX_ULTRASCALE."""
         self.assertIs(
@@ -268,6 +273,17 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         self.assertEqual(len(cmds), 2)
         self.assertTrue(any("irscan" in c for c in cmds))
         self.assertFalse(any("runtest" in c for c in cmds))
+
+    def test_drscan_non_hex_response_raises_runtime_error(self):
+        """OpenOCD errors should not leak raw int(..., 16) ValueError text."""
+        t = OpenOcdTransport(tap="GW1NR-9C.tap")
+        t._cmd = MagicMock(return_value="Tap 'GW1NR-9C.tap' not found")  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"OpenOCD drscan failed.*GW1NR-9C\.tap.*Tap 'GW1NR-9C\.tap' not found",
+        ):
+            t.raw_dr_scan(0, 49)
 
 
 # ---------------------------------------------------------------------------
@@ -415,9 +431,10 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
-    def test_single_chain_burst_uses_user1_for_wide_scans(self):
-        """Single-chain burst keeps both BURST_PTR and 256-bit scans on USER1."""
+    def test_single_chain_burst_uses_active_chain_for_wide_scans(self):
+        """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()
+        t.select_chain(2)
         t._cached_sps = 32
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
@@ -432,8 +449,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         vals = t._read_block_burst(8)
 
         self.assertEqual(vals, list(range(8)))
-        self.assertIn("-hex 6 02", sent[0])
-        self.assertNotIn("-hex 6 03", sent[0])
+        self.assertIn("-hex 6 03", sent[0])
+        self.assertNotIn("-hex 6 02", sent[0])
         self.assertIn("-bits 256", sent[0])
 
     def test_single_chain_burst_requires_stable_repeated_readback(self):

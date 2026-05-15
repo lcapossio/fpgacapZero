@@ -65,6 +65,13 @@ module fcapz_ejtaguart #(
             BAUD_RATE_too_high_for_CLK_HZ _baud_check_FAILED();
     endgenerate
 
+    // Simulation-only baud error check scratch registers.  Keep these outside
+    // the unnamed initial block so strict Verilog parsers do not require
+    // SystemVerilog block declarations.
+    integer baud_check_div;
+    integer baud_check_actual;
+    integer baud_check_err;
+
     // Simulation-friendly versions of the same checks.
     initial begin
         if (TX_FIFO_DEPTH & (TX_FIFO_DEPTH - 1))
@@ -75,16 +82,14 @@ module fcapz_ejtaguart #(
             $error("BAUD_RATE too high for CLK_HZ: divider must be >= 4");
         // Check realized baud error: |actual_baud - BAUD_RATE| / BAUD_RATE
         // actual_baud = CLK_HZ / divider, divider = CLK_HZ / BAUD_RATE
-        begin
-            integer div, actual, err;
-            div    = CLK_HZ / BAUD_RATE;
-            actual = CLK_HZ / div;
-            err    = (actual > BAUD_RATE) ? actual - BAUD_RATE
-                                          : BAUD_RATE - actual;
-            if (err * 100 / BAUD_RATE > 3)
-                $warning("Baud rate error > 3%%: CLK_HZ=%0d BAUD_RATE=%0d divider=%0d actual=%0d",
-                         CLK_HZ, BAUD_RATE, div, actual);
-        end
+        baud_check_div    = CLK_HZ / BAUD_RATE;
+        baud_check_actual = CLK_HZ / baud_check_div;
+        baud_check_err    = (baud_check_actual > BAUD_RATE)
+                            ? baud_check_actual - BAUD_RATE
+                            : BAUD_RATE - baud_check_actual;
+        if (baud_check_err * 100 / BAUD_RATE > 3)
+            $warning("Baud rate error > 3%%: CLK_HZ=%0d BAUD_RATE=%0d divider=%0d actual=%0d",
+                     CLK_HZ, BAUD_RATE, baud_check_div, baud_check_actual);
     end
 
     // ---- Constants -----------------------------------------------------------
@@ -160,6 +165,8 @@ module fcapz_ejtaguart #(
     wire [7:0]  tx_fifo_rdata;
     wire        tx_fifo_empty;
     wire [TX_AW:0] tx_fifo_wr_count;
+    wire        tx_fifo_wr_rst_busy_unused;
+    wire        tx_fifo_rd_rst_busy_unused;
 
     reg         tx_wr_pulse;
 
@@ -177,8 +184,10 @@ module fcapz_ejtaguart #(
         .rd_en   (tx_fifo_rd_en_r),
         .rd_data (tx_fifo_rdata),
         .rd_empty(tx_fifo_empty),
+        .rd_rst_busy(tx_fifo_rd_rst_busy_unused),
         .rd_count(),
-        .wr_count(tx_fifo_wr_count)
+        .wr_count(tx_fifo_wr_count),
+        .wr_rst_busy(tx_fifo_wr_rst_busy_unused)
     );
 
     // tx_free: TX_FIFO_DEPTH - wr_count, saturated to 255
@@ -192,6 +201,8 @@ module fcapz_ejtaguart #(
     wire [7:0]  rx_fifo_rdata;
     wire        rx_fifo_empty;
     wire [RX_AW:0] rx_fifo_rd_count;
+    wire        rx_fifo_wr_rst_busy_unused;
+    wire        rx_fifo_rd_rst_busy_unused;
 
     reg         rx_rd_pulse;
     reg         rx_fifo_wr_en_r;
@@ -211,8 +222,10 @@ module fcapz_ejtaguart #(
         .rd_en   (rx_rd_pulse),
         .rd_data (rx_fifo_rdata),
         .rd_empty(rx_fifo_empty),
+        .rd_rst_busy(rx_fifo_rd_rst_busy_unused),
         .rd_count(rx_fifo_rd_count),
-        .wr_count()
+        .wr_count(),
+        .wr_rst_busy(rx_fifo_wr_rst_busy_unused)
     );
 
     wire rx_ready = !rx_fifo_empty;

@@ -112,10 +112,13 @@ chapter 17 for details.
 
 ## How the cores fit together
 
-Each core uses a **separate JTAG USER chain** (USER1 through USER4
-on Xilinx 7-series / UltraScale, equivalent on other vendors), so
-multiple cores can coexist in the same bitstream and the host stack
-can talk to all of them in one xsdb / OpenOCD session.
+By default, each core uses a **separate JTAG USER chain** (USER1 through
+USER4 on Xilinx 7-series / UltraScale, equivalent on other vendors), so
+multiple cores can coexist in the same bitstream and the host stack can
+talk to all of them in one xsdb / OpenOCD session.  Xilinx 7-series
+designs can also put multiple ELA and EIO slots behind one USER1 core
+manager (`fcapz_debug_multi_xilinx7`) when you want more debug endpoints
+than free USER chains.
 
 | Core | Default chain | Default IR (7-series) | Default IR (UltraScale) |
 |------|---------------|-----------------------|-------------------------|
@@ -129,12 +132,13 @@ have to memorise either set: the Python transport ships named
 `IR_TABLE_XILINX7` and `IR_TABLE_XILINX_ULTRASCALE` (alias
 `IR_TABLE_US`) presets — see [chapter 14](14_transports.md).
 
-ELA and EIO are completely independent.  The two bridges (AXI and
-UART) can share USER4 by being instantiated at the same time only if
+ELA and EIO are independent cores, but they may be hosted either on
+separate chains or in managed slots on one chain.  The two bridges (AXI
+and UART) can share USER4 by being instantiated at the same time only if
 you arbitrate them externally; in practice you pick one bridge per
-bitstream.  The reference Arty A7 design includes ELA + EIO + AXI
-together, and a separate "uart loopback" bitstream includes ELA +
-EIO + UART.
+bitstream.  The reference Arty A7 design includes a USER1 manager with
+2x ELA and 2x EIO plus AXI on USER4, and a separate "uart loopback"
+bitstream includes ELA + EIO + UART.
 
 ## The host stack
 
@@ -194,7 +198,7 @@ needed.  See [chapter 14](14_transports.md) and
 | Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ❌ |
-| Gowin GW1N / GW2A | Gowin `JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |
+| Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ❌ |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 
 The wrappers are all single-instantiation: pick the one for your

@@ -167,6 +167,7 @@ module fcapz_ela #(
     localparam HAS_SEGMENTS = (NUM_SEGMENTS > 1);
     localparam HAS_CHANNEL_MUX = (NUM_CHANNELS > 1);
     localparam HAS_PROBE_MUX = (PROBE_MUX_W > 0);
+    localparam TS_MUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
 
     // Phase 4: segment derived params
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
@@ -437,6 +438,7 @@ module fcapz_ela #(
     wire [SAMPLE_W-1:0]  mem_din_a_ram;
     wire [TS_DATA_W-1:0] mem_ts_din_a_ram;
     wire [TS_DATA_W-1:0] ts_counter_cur;
+    wire [TS_MUX_W-1:0] ts_dout_a_mux;
 
     assign mem_we_a_ram   = (INPUT_PIPE >= 1) ? mem_we_a_q : mem_we_a;
     assign mem_din_a_ram  = (INPUT_PIPE >= 1) ? mem_wr_data_q : active_probe;
@@ -479,9 +481,11 @@ module fcapz_ela #(
                 .addr_b (burst_rd_addr),
                 .dout_b (ts_dout_b)
             );
+            assign ts_dout_a_mux = ts_dout_a;
             assign burst_rd_ts_data = ts_dout_b;
         end else begin : g_no_ts
             assign ts_counter_cur = {TS_DATA_W{1'b0}};
+            assign ts_dout_a_mux = 1'b0;
             assign burst_rd_ts_data = 1'b0;
         end
     endgenerate
@@ -974,7 +978,6 @@ module fcapz_ela #(
             decim_ratio      <= HAS_DECIM ? jtag_decim : 24'h0;
             // Phase 2: external trigger
             ext_trig_mode    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
-            trig_holdoff     <= trig_holdoff_sync2;
             // Trigger delay (sample clocks) — latched on arm
             trig_delay       <= trig_delay_sync2;
             // Sequencer stages
@@ -1145,6 +1148,7 @@ module fcapz_ela #(
                     pre_count <= {PTR_W+1{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
+                trig_holdoff <= trig_holdoff_sync2;
                 trig_holdoff_active <= (trig_holdoff_sync2 != 16'h0);
                 trig_holdoff_count  <= (trig_holdoff_sync2 != 16'h0)
                     ? (trig_holdoff_sync2 - 16'h1) : 16'h0;
@@ -1382,7 +1386,7 @@ module fcapz_ela #(
             if (rd_phase == RD_CAPTURE) begin
                 rd_data_sample <= mem_dout_a;
                 if (TIMESTAMP_W > 0 && rd_is_ts)
-                    ts_rd_data_sample <= g_ts.ts_dout_a;
+                    ts_rd_data_sample <= ts_dout_a_mux;
                 mem_rd_pending <= 1'b0;
                 rd_phase <= RD_ACK;
             end else if (rd_phase == RD_ACK) begin

@@ -247,6 +247,10 @@ class OpenOcdTransport(Transport):
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
         1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
     }
+    # Gowin GW_JTAG exposes ER1/ER2 IR opcodes.  Current RTL wrappers still
+    # instantiate one GW_JTAG primitive each, so combining cores should use the
+    # wrapper's address-muxed EIO_EN path unless the design shares the primitive.
+    IR_TABLE_GOWIN: dict[int, int] = {1: 0x42, 2: 0x43}
     # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this
@@ -327,7 +331,7 @@ class OpenOcdTransport(Transport):
     def _dr_scan(self, value: int) -> int:
         hex_in = f"0x{value:013x}"
         result = self._cmd(f"drscan {self.tap} 49 {hex_in}")
-        return int(result.split()[0], 16)
+        return self._parse_drscan_result(result, command="drscan", width=49)
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via irscan + drscan on the OpenOCD socket."""
@@ -335,7 +339,17 @@ class OpenOcdTransport(Transport):
         hex_width = (width + 3) // 4
         hex_in = f"0x{bits:0{hex_width}x}"
         result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
-        return int(result.split()[0], 16)
+        return self._parse_drscan_result(result, command="drscan", width=width)
+
+    def _parse_drscan_result(self, result: str, *, command: str, width: int) -> int:
+        token = result.split()[0] if result.split() else ""
+        try:
+            return int(token, 16)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"OpenOCD {command} failed or returned non-hex data "
+                f"for tap {self.tap!r}, width {width}: {result!r}"
+            ) from exc
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
@@ -756,8 +770,9 @@ class XilinxHwServerTransport(Transport):
         """Read *words* consecutive 32-bit registers starting at *addr*.
 
         If *addr* is the DATA window base (0x0100) and burst mode is
-        available, uses the wide USER2 DR for ~10x faster throughput.
-        Otherwise falls back to single-sequence pipelined reads on USER1.
+        available, uses the wide burst DR for ~10x faster throughput.
+        Otherwise falls back to single-sequence pipelined reads on the
+        active ELA control chain.
         """
         if words <= 0:
             return []
@@ -768,13 +783,13 @@ class XilinxHwServerTransport(Transport):
                 if self.single_chain_burst:
                     _hw_log.warning(
                         "single-chain ELA burst readback failed (%s); falling back to "
-                        "slow USER1 DATA reads. If this bitstream was built with "
+                        "slow control-chain DATA reads. If this bitstream was built with "
                         "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
                         "XilinxHwServerTransport(single_chain_burst=False).",
                         exc,
                     )
                 self._has_burst = False
-        # Non-burst path needs flush to reset USER1 pipeline
+        # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
 
     @property
@@ -806,8 +821,9 @@ class XilinxHwServerTransport(Transport):
         """Read *words* samples via the 256-bit burst DR.
 
         Packs everything into a **single** ``jtag sequence``:
-        USER1 write to BURST_PTR → idle for staging fill → IR switch
-        to USER2 → N consecutive 256-bit DR scans.  One round-trip.
+        Control-chain write to BURST_PTR → idle for staging fill → optional
+        IR switch to legacy DATA_CHAIN → N consecutive 256-bit DR scans.
+        One round-trip.
         """
         if timestamp:
             if element_width is None:
@@ -831,8 +847,9 @@ class XilinxHwServerTransport(Transport):
             )
         )
         user_total = self._user_dr_bits(self.DR_BITS)
-        ir1_cmd = self._irshift_tcl("_bq", chain=1)
-        burst_chain = 1 if self.single_chain_burst else 2
+        ctrl_chain = self._active_chain
+        ir1_cmd = self._irshift_tcl("_bq", chain=ctrl_chain)
+        burst_chain = ctrl_chain if self.single_chain_burst else 2
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         if self.use_register_ir:
@@ -861,11 +878,11 @@ class XilinxHwServerTransport(Transport):
         else:
             parts_w = [
                 "set _bq [jtag sequence]",
-                # Write BURST_PTR via USER1 (triggers start_ptr load)
+                # Write BURST_PTR via the active ELA control chain.
                 # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so the USER1 BURST_PTR update crosses into the burst
+                # Idle so the BURST_PTR update crosses into the burst
                 # reader and the first 256-bit staging word fills before
                 # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
                 # more margin than the raw ~33 TCK memory-fill latency.

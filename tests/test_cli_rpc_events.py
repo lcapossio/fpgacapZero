@@ -20,6 +20,7 @@ from fcapz.analyzer import (
 from fcapz.cli import (
     _build_config,
     _chain_shape_kwargs,
+    _make_transport,
     _non_negative_int,
     _parse_trigger_sequence,
     _positive_float,
@@ -28,7 +29,7 @@ from fcapz.cli import (
     _uint16,
     build_parser,
 )
-from fcapz.transport import XilinxHwServerTransport
+from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
 from fcapz.events import (
     ProbeDefinition,
     find_bursts,
@@ -651,6 +652,43 @@ class ChainShapeKwargsTests(unittest.TestCase):
         self.assertTrue(t.use_register_ir)
         # In register mode, dr_extra_bits is forced to 0 (xsdb handles bypass).
         self.assertEqual(t.dr_extra_bits, 0)
+
+
+class MakeTransportTests(unittest.TestCase):
+    """CLI transport construction convenience."""
+
+    def test_openocd_gowin_tap_uses_gowin_ir_table(self):
+        args = argparse.Namespace(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="GW1NR-9C.tap",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
+
+    def test_openocd_future_gowin_tap_uses_gowin_ir_table(self):
+        args = argparse.Namespace(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="GW5A-25.tap",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
+
+    def test_openocd_xilinx_tap_keeps_default_ir_table(self):
+        args = argparse.Namespace(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="xc7a100t.tap",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
 
 
 if __name__ == "__main__":

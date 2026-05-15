@@ -125,15 +125,18 @@ module fcapz_ela_ecp5 #(
             wire [15:0] ela_addr;
             wire [31:0] ela_wdata, ela_rdata;
             wire        eio_wr_en_i;
+            wire        eio_rd_en_unused;
             wire [15:0] eio_addr_i;
             wire [31:0] eio_wdata_i, eio_rdata_i;
+            wire        ela_trigger_out_unused;
+            wire        ela_armed_out_unused;
 
             fcapz_regbus_mux u_mux (
                 .addr(jtag_addr), .wr_en(jtag_wr_en), .rd_en(jtag_rd_en),
                 .wdata(jtag_wdata), .rdata(jtag_rdata),
                 .a_wr_en(ela_wr_en), .a_rd_en(ela_rd_en),
                 .a_addr(ela_addr), .a_wdata(ela_wdata), .a_rdata(ela_rdata),
-                .b_wr_en(eio_wr_en_i), .b_rd_en(),
+                .b_wr_en(eio_wr_en_i), .b_rd_en(eio_rd_en_unused),
                 .b_addr(eio_addr_i), .b_wdata(eio_wdata_i), .b_rdata(eio_rdata_i)
             );
 
@@ -146,6 +149,9 @@ module fcapz_ela_ecp5 #(
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
+                .trigger_in(1'b0),
+                .trigger_out(ela_trigger_out_unused),
+                .armed_out(ela_armed_out_unused),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
@@ -164,6 +170,9 @@ module fcapz_ela_ecp5 #(
                 .jtag_rdata(eio_rdata_i)
             );
         end else begin : g_ela_only
+            wire ela_trigger_out_unused;
+            wire ela_armed_out_unused;
+
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
@@ -173,6 +182,9 @@ module fcapz_ela_ecp5 #(
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
+                .trigger_in(1'b0),
+                .trigger_out(ela_trigger_out_unused),
+                .armed_out(ela_armed_out_unused),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
