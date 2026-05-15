@@ -206,7 +206,7 @@ def run_rtl_lint() -> bool:
     common = [
         "iverilog",
         "-Wall",
-        "-g2012",
+        "-g2001",
         "-I",
         str(RTL),
         "-y",
