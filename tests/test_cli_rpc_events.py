@@ -709,6 +709,9 @@ class MakeTransportTests(unittest.TestCase):
         self.assertEqual(t.url, "ftdi://ftdi:232h/2")
         self.assertEqual(t.frequency, 2_000_000.0)
         self.assertEqual(t.cs, 1)
+        self.assertFalse(hasattr(t, "host"))
+        self.assertFalse(hasattr(t, "port"))
+        self.assertFalse(hasattr(t, "tap"))
 
 
 if __name__ == "__main__":

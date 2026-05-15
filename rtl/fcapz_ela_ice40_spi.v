@@ -69,6 +69,8 @@ module fcapz_ela_ice40_spi #(
         .reg_rdata(reg_rdata)
     );
 
+    // reg_clk is SPI SCK, so reset deassertion completes on the first two SCK
+    // edges of the next host transaction if sample_rst drops while SPI is idle.
     reset_sync u_rst_sync_ctrl (
         .clk(reg_clk),
         .arst(sample_rst),

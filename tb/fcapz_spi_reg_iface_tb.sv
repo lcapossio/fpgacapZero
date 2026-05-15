@@ -60,6 +60,20 @@ module fcapz_spi_reg_iface_tb;
         end
     endtask
 
+    task spi_xfer_byte_with_pause(input [7:0] tx, output [7:0] rx);
+        integer i;
+        bit miso_bit;
+        begin
+            rx = 8'h00;
+            for (i = 7; i >= 0; i = i - 1) begin
+                tick(tx[i], miso_bit);
+                rx[i] = miso_bit;
+                if (i == 4)
+                    #1000;
+            end
+        end
+    endtask
+
     task spi_write_reg(input [15:0] addr, input [31:0] value);
         reg [7:0] rx;
         begin
@@ -123,6 +137,28 @@ module fcapz_spi_reg_iface_tb;
         end
     endtask
 
+    task spi_read_reg_with_pause(input [15:0] addr, output [31:0] value);
+        reg [7:0] junk;
+        reg [7:0] rx1;
+        reg [7:0] rx2;
+        reg [7:0] rx3;
+        reg [7:0] rx4;
+        begin
+            spi_cs_n = 1'b0;
+            spi_xfer_byte(8'h00, junk);
+            spi_xfer_byte(addr[15:8], junk);
+            spi_xfer_byte_with_pause(addr[7:0], junk);
+            spi_xfer_byte(8'h00, junk);
+            spi_xfer_byte(8'h00, rx1);
+            spi_xfer_byte(8'h00, rx2);
+            spi_xfer_byte(8'h00, rx3);
+            spi_xfer_byte(8'h00, rx4);
+            spi_cs_n = 1'b1;
+            value = {rx1, rx2, rx3, rx4};
+            #20;
+        end
+    endtask
+
     task expect_eq(input [31:0] got, input [31:0] exp, input [255:0] msg);
         begin
             if (got !== exp) begin
@@ -161,10 +197,22 @@ module fcapz_spi_reg_iface_tb;
         expect_eq(mem[16'h0030 >> 2], 32'ha5a5_5a5a, "partial_write_ignored");
 
         begin
+            reg [31:0] value_after_partial;
+            spi_read_reg(16'h0020, value_after_partial);
+            expect_eq(value_after_partial, 32'h5566_7788, "partial_write_state_clean");
+        end
+
+        begin
             reg [31:0] value_after_idle;
             idle_sck_pulses(12);
             spi_read_reg(16'h0020, value_after_idle);
             expect_eq(value_after_idle, 32'h5566_7788, "sck_while_cs_high_ignored");
+        end
+
+        begin
+            reg [31:0] value_after_pause;
+            spi_read_reg_with_pause(16'h0010, value_after_pause);
+            expect_eq(value_after_pause, 32'h1234_abcd, "mid_transaction_pause");
         end
 
         if (failures != 0) begin
