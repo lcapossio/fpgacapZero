@@ -32,28 +32,25 @@ if {[info exists ::env(APPDATA)]} {
 
 set_param project.enableUnifiedSimulation 0
 
-if {[info exists ::env(FPGACAP_PROJECT_DIR)]} {
-    set project_dir [file normalize $::env(FPGACAP_PROJECT_DIR)]
-} else {
-    set project_dir $root/vivado/$project_name
-}
-
 if {[llength [current_project -quiet]] > 0} {
     close_project
 }
 
-create_project $project_name $project_dir -part $part -force
-
-add_files [list \
-    $root/rtl/fcapz_version.vh \
+set vhdl_sources [list \
     $root/rtl/vhdl/pkg/fcapz_pkg.vhd \
     $root/rtl/vhdl/pkg/fcapz_util_pkg.vhd \
     $root/rtl/vhdl/core/fcapz_dpram.vhd \
     $root/rtl/vhdl/core/fcapz_ela.vhd \
     $root/rtl/vhdl/core/fcapz_eio.vhd \
+    $example_dir/arty_a7_top.vhd \
+]
+
+set verilog_sources [list \
     $root/rtl/reset_sync.v \
     $root/rtl/dpram.v \
     $root/rtl/trig_compare.v \
+    $root/rtl/fcapz_core_manager.v \
+    $root/rtl/fcapz_debug_multi_xilinx7.v \
     $root/rtl/fcapz_ela_xilinx7.v \
     $root/rtl/jtag_reg_iface.v \
     $root/rtl/jtag_pipe_iface.v \
@@ -64,24 +61,11 @@ add_files [list \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
     $root/tb/axi4_test_slave.v \
-    $example_dir/arty_a7_top.vhd \
 ]
 
-set_property file_type "Verilog Header" [get_files $root/rtl/fcapz_version.vh]
-set_property is_global_include true [get_files $root/rtl/fcapz_version.vh]
-set_property file_type "VHDL 2008" [get_files [list \
-    $root/rtl/vhdl/pkg/fcapz_pkg.vhd \
-    $root/rtl/vhdl/pkg/fcapz_util_pkg.vhd \
-    $root/rtl/vhdl/core/fcapz_dpram.vhd \
-    $root/rtl/vhdl/core/fcapz_ela.vhd \
-    $root/rtl/vhdl/core/fcapz_eio.vhd \
-    $example_dir/arty_a7_top.vhd \
-]]
-
-update_compile_order -fileset sources_1
-
-add_files -fileset constrs_1 $example_dir/arty_a7.xdc
-set_property top arty_a7_top [current_fileset]
+read_vhdl -vhdl2008 $vhdl_sources
+read_verilog $verilog_sources
+read_xdc $example_dir/arty_a7.xdc
 
 synth_design -top arty_a7_top -part $part
 opt_design

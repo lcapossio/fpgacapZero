@@ -93,6 +93,8 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_dpram.vhd",
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_ela.vhd",
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_eio.vhd",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
     _ROOT / "rtl" / "jtag_reg_iface.v",
     _ROOT / "rtl" / "jtag_pipe_iface.v",
@@ -125,10 +127,15 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime:
             stale.append(src.name)
     if stale:
+        build_cmd = (
+            "python examples/arty_a7/build_vhdl.py"
+            if _BITSTREAM_VARIANT == "vhdl"
+            else "python examples/arty_a7/build.py"
+        )
         return (
             f"bitstream is stale — these sources are newer than "
             f"{bitpath.name}: {', '.join(stale)}. "
-            f"Re-run: python examples/arty_a7/build.py"
+            f"Re-run: {build_cmd}"
         )
     return None
 
