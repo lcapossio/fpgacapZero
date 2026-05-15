@@ -112,6 +112,8 @@ class FcapzMcpSessionTests(unittest.TestCase):
         probe = session.probe()
 
         self.assertTrue(session.status()["connected"])
+        self.assertEqual(session.status()["rpc_schema_version"], "test")
+        self.assertIsNotNone(session.status()["mcp_server_version"])
         self.assertEqual(probe["probe"]["sample_width"], 8)
         self.assertEqual(session.status()["last_probe"]["depth"], 1024)
         self.assertEqual(rpc.requests[0]["backend"], "openocd")

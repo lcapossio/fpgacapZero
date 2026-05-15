@@ -439,9 +439,11 @@ Example MCP stdio client configuration:
 ```
 
 Available resources include `fcapz://status`, `fcapz://last-probe`,
-`fcapz://last-capture`, and `fcapz://last-eio-read`. Large captures stay
-available through `fcapz://last-capture` until the next capture, ELA close, or
-an explicit `fcapz_drop_last_capture` call.
+`fcapz://last-capture`, and `fcapz://last-eio-read`. `fcapz_status` and
+`fcapz://status` include both the MCP server package version and the last
+observed RPC schema version so agents can detect compatibility drift. Large
+captures stay available through `fcapz://last-capture` until the next capture,
+ELA close, or an explicit `fcapz_drop_last_capture` call.
 
 #### JTAG-to-AXI4 Bridge
 

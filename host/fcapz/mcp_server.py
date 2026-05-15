@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.metadata
 import queue
 import json
 import sys
@@ -61,6 +62,7 @@ class FcapzMcpSession:
     last_capture: JsonDict | None = None
     last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
+    last_rpc_schema_version: str | None = None
     _rpc_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
@@ -131,7 +133,20 @@ class FcapzMcpSession:
             error = response.get("error", response)
             message = error if isinstance(error, str) else json.dumps(error, sort_keys=True)
             raise FcapzMcpError(message, payload=response)
+        if "schema_version" in response:
+            self.last_rpc_schema_version = str(response["schema_version"])
         return response
+
+    @staticmethod
+    def _server_version() -> str | None:
+        try:
+            return importlib.metadata.version("fpgacapzero")
+        except importlib.metadata.PackageNotFoundError:
+            version_file = Path(__file__).resolve().parents[2] / "VERSION"
+            try:
+                return version_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
 
     @staticmethod
     def _default_tap(backend: str) -> str:
@@ -593,6 +608,8 @@ class FcapzMcpSession:
 
     def status(self) -> JsonDict:
         return {
+            "mcp_server_version": self._server_version(),
+            "rpc_schema_version": self.last_rpc_schema_version,
             "connected": self.connected,
             "eio_connected": self.eio_connected,
             "axi_connected": self.axi_connected,
