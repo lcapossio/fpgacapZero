@@ -16,6 +16,7 @@ import queue
 import json
 import sys
 import threading
+from threading import RLock
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +65,7 @@ class FcapzMcpSession:
     last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
-    _rpc_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _rpc_lock: RLock = field(default_factory=RLock, init=False, repr=False)
     _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
 
@@ -91,17 +92,6 @@ class FcapzMcpSession:
     })
 
     def _rpc_call(self, req: JsonDict) -> JsonDict:
-        with self._rpc_lock:
-            if self._active_rpc_worker is not None:
-                if self._active_rpc_worker.is_alive():
-                    raise RuntimeError(
-                        f"previous fcapz RPC call {self._active_rpc_cmd!r} is still "
-                        "running after a timeout; restart the MCP server before "
-                        "issuing more hardware commands"
-                    )
-                self._active_rpc_worker = None
-                self._active_rpc_cmd = None
-
         result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
         def run_call() -> None:
@@ -112,6 +102,15 @@ class FcapzMcpSession:
 
         worker = threading.Thread(target=run_call, name="fcapz-mcp-rpc", daemon=True)
         with self._rpc_lock:
+            if self._active_rpc_worker is not None:
+                if self._active_rpc_worker.is_alive():
+                    raise RuntimeError(
+                        f"previous fcapz RPC call {self._active_rpc_cmd!r} is still "
+                        "running after a timeout; restart the MCP server before "
+                        "issuing more hardware commands"
+                    )
+                self._active_rpc_worker = None
+                self._active_rpc_cmd = None
             self._active_rpc_worker = worker
             self._active_rpc_cmd = str(req.get("cmd"))
             worker.start()
@@ -122,8 +121,9 @@ class FcapzMcpSession:
                 f"{self.capabilities.rpc_timeout_sec:g}s"
             )
         with self._rpc_lock:
-            self._active_rpc_worker = None
-            self._active_rpc_cmd = None
+            if self._active_rpc_worker is worker:
+                self._active_rpc_worker = None
+                self._active_rpc_cmd = None
         ok, result = result_queue.get_nowait()
         if not ok:
             raise result  # type: ignore[misc]
@@ -168,7 +168,7 @@ class FcapzMcpSession:
         req: JsonDict,
         *,
         backend: str,
-        host: str,
+        host: str | None,
         port: int | None,
         tap: str | None,
         hardware: str | None,
@@ -190,7 +190,7 @@ class FcapzMcpSession:
                     "spi_timeout": spi_timeout,
                 },
             )
-            req["host"] = host
+            req["host"] = host or "127.0.0.1"
             req["tap"] = tap or self._default_tap(backend)
             if port is not None:
                 req["port"] = int(port)
@@ -206,7 +206,7 @@ class FcapzMcpSession:
                     "spi_cs": spi_cs,
                     "spi_timeout": spi_timeout,
                     "port": port,
-                    "host": None if host == "127.0.0.1" else host,
+                    "host": host,
                 },
             )
             if hardware is not None:
@@ -223,7 +223,7 @@ class FcapzMcpSession:
                     "hardware": hardware,
                     "quartus_stp": quartus_stp,
                     "port": port,
-                    "host": None if host == "127.0.0.1" else host,
+                    "host": host,
                 },
             )
             if spi_url is not None:
@@ -242,7 +242,7 @@ class FcapzMcpSession:
         self,
         *,
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         program: str | None = None,
@@ -329,6 +329,11 @@ class FcapzMcpSession:
         self.last_capture_summary = None
         return {"ok": True}
 
+    def get_last_capture(self) -> JsonDict:
+        if self.last_capture is None:
+            return {"available": False}
+        return dict(self.last_capture)
+
     def probe(self) -> JsonDict:
         response = self._rpc_call({"cmd": "probe"})
         self.last_probe = dict(response.get("probe", {}))
@@ -340,7 +345,7 @@ class FcapzMcpSession:
         config: JsonDict | None = None,
         timeout: float = 10.0,
         fmt: str = "json",
-        summarize: bool = False,
+        include_event_summary: bool = False,
     ) -> JsonDict:
         if not self.capabilities.allow_capture:
             raise PermissionError("capture tools are disabled for this MCP server")
@@ -348,7 +353,7 @@ class FcapzMcpSession:
             "cmd": "capture",
             "timeout": float(timeout),
             "format": fmt,
-            "summarize": bool(summarize),
+            "summarize": bool(include_event_summary),
         }
         if config:
             unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
@@ -381,7 +386,7 @@ class FcapzMcpSession:
         *,
         cmd: str,
         backend: str,
-        host: str,
+        host: str | None,
         port: int | None,
         tap: str | None,
         chain: int | None,
@@ -416,7 +421,7 @@ class FcapzMcpSession:
         self,
         *,
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,
@@ -476,7 +481,7 @@ class FcapzMcpSession:
         self,
         *,
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,
@@ -556,7 +561,7 @@ class FcapzMcpSession:
         self,
         *,
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,
@@ -712,7 +717,7 @@ def build_mcp_server(session: FcapzMcpSession):
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_connect(
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         program: str | None = None,
@@ -769,24 +774,25 @@ def build_mcp_server(session: FcapzMcpSession):
         config: JsonDict | None = None,
         timeout: float = 10.0,
         format: str = "json",
-        summarize: bool = False,
+        include_event_summary: bool = False,
     ) -> JsonDict:
         """Configure, arm, and capture samples from the ELA.
 
-        timeout is in seconds. format is "json", "csv", or "vcd". config may
-        contain capture fields only: pretrigger, posttrigger, trigger_mode,
-        trigger_value, trigger_mask, sample_width, depth, sample_clock_hz,
-        probes, probe_file, channel, decimation, ext_trigger_mode,
-        stor_qual_mode/value/mask, startup_arm, trigger_holdoff, trigger_delay.
-        The tool returns summary metadata only; fetch fcapz://last-capture for
-        full sample payloads.
+        timeout is in seconds. format is "json", "csv", or "vcd".
+        include_event_summary asks the RPC layer to add decoded event metadata
+        to the capture result. config may contain capture fields only:
+        pretrigger, posttrigger, trigger_mode, trigger_value, trigger_mask,
+        sample_width, depth, sample_clock_hz, probes, probe_file, channel,
+        decimation, ext_trigger_mode, stor_qual_mode/value/mask, startup_arm,
+        trigger_holdoff, trigger_delay. The tool returns summary metadata only;
+        use fcapz_get_last_capture or fcapz://last-capture for full payloads.
         """
 
         return session.capture(
             config=config,
             timeout=timeout,
             fmt=format,
-            summarize=summarize,
+            include_event_summary=include_event_summary,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -794,6 +800,12 @@ def build_mcp_server(session: FcapzMcpSession):
         """Forget the cached full capture payload exposed by fcapz://last-capture."""
 
         return session.drop_last_capture()
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_get_last_capture() -> JsonDict:
+        """Return the cached full capture payload for clients without resource support."""
+
+        return session.get_last_capture()
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
@@ -815,7 +827,7 @@ def build_mcp_server(session: FcapzMcpSession):
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_eio_connect(
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,
@@ -871,7 +883,7 @@ def build_mcp_server(session: FcapzMcpSession):
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_axi_connect(
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,
@@ -958,7 +970,7 @@ def build_mcp_server(session: FcapzMcpSession):
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_uart_connect(
         backend: str = "hw_server",
-        host: str = "127.0.0.1",
+        host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
         chain: int | None = None,

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import io
 import importlib.util
+import tempfile
 import threading
 import unittest
 from contextlib import redirect_stderr
@@ -177,6 +178,8 @@ class FcapzMcpSessionTests(unittest.TestCase):
             session.connect(backend="hw_server", spi_url="ftdi://ftdi:232h/1")
         with self.assertRaisesRegex(ValueError, "tap not supported"):
             session.connect(backend="spi", tap="xc7a100t.tap")
+        with self.assertRaisesRegex(ValueError, "host not supported"):
+            session.connect(backend="spi", host="127.0.0.1")
         with self.assertRaisesRegex(ValueError, "hardware not supported"):
             session.eio_connect(backend="spi", hardware="USB-Blaster")
 
@@ -220,10 +223,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         session.capture()
         self.assertIsNotNone(session.last_capture)
+        self.assertEqual(session.get_last_capture()["result"], {"samples": [1, 2]})
         self.assertEqual(session.drop_last_capture(), {"ok": True})
 
         self.assertIsNone(session.last_capture)
         self.assertIsNone(session.status()["last_capture_summary"])
+        self.assertEqual(session.get_last_capture(), {"available": False})
 
     def test_configure_and_arm_are_separate_rpc_commands(self):
         rpc = FakeRpc()
@@ -378,10 +383,13 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
     def test_program_requires_bitfile_under_root(self):
         rpc = FakeRpc()
-        root = Path.cwd() / "virtual-bitfiles" / "allowed"
-        bitfile = root / "design.bit"
-        other = root.parent / "other.bit"
-        with patch.object(Path, "is_file", return_value=True):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmpdir:
+            root = Path(tmpdir) / "allowed"
+            root.mkdir()
+            bitfile = root / "design.bit"
+            bitfile.write_bytes(b"bit")
+            other = root.parent / "other.bit"
+            other.write_bytes(b"bit")
             session = FcapzMcpSession(
                 rpc=rpc,
                 capabilities=McpCapabilities(
@@ -487,6 +495,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_probe",
                 "fcapz_capture",
                 "fcapz_drop_last_capture",
+                "fcapz_get_last_capture",
                 "fcapz_configure",
                 "fcapz_arm",
                 "fcapz_eio_connect",

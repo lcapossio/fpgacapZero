@@ -390,8 +390,8 @@ when those transports are available. The MCP tools accept the same connection
 shape as the host RPC layer: `backend`, `host`, `port`, `tap`,
 `single_chain_burst`, `hardware`, `quartus_stp`, `spi_url`, `spi_frequency`,
 `spi_cs`, and `spi_timeout`. Backend-specific fields are validated before the
-RPC call, so SPI requests do not carry TAP defaults and Quartus requests do not
-carry SPI adapter settings. Install the optional dependency and run:
+RPC call, so SPI requests do not carry host/TAP defaults and Quartus requests do
+not carry SPI adapter settings. Install the optional dependency and run:
 
 ```bash
 pip install fpgacapzero[mcp]
@@ -404,7 +404,7 @@ Embedded I/O, JTAG-to-AXI4, and eJTAG-UART:
 | Area | MCP tools |
 | --- | --- |
 | Session/status | `fcapz_status` |
-| ELA | `fcapz_connect`, `fcapz_close`, `fcapz_probe`, `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_drop_last_capture` |
+| ELA | `fcapz_connect`, `fcapz_close`, `fcapz_probe`, `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_get_last_capture`, `fcapz_drop_last_capture` |
 | Embedded I/O | `fcapz_eio_connect`, `fcapz_eio_close`, `fcapz_eio_read`, `fcapz_eio_write` |
 | JTAG-to-AXI4 | `fcapz_axi_connect`, `fcapz_axi_close`, `fcapz_axi_read`, `fcapz_axi_write`, `fcapz_axi_write_block`, `fcapz_axi_dump` |
 | eJTAG-UART | `fcapz_uart_connect`, `fcapz_uart_close`, `fcapz_uart_send`, `fcapz_uart_recv`, `fcapz_uart_status` |
@@ -443,7 +443,8 @@ Available resources include `fcapz://status`, `fcapz://last-probe`,
 `fcapz://status` include both the MCP server package version and the last
 observed RPC schema version so agents can detect compatibility drift. Large
 captures stay available through `fcapz://last-capture` until the next capture,
-ELA close, or an explicit `fcapz_drop_last_capture` call.
+ELA close, or an explicit `fcapz_drop_last_capture` call. Clients without MCP
+resource support can call `fcapz_get_last_capture` for the same full payload.
 
 AXI MCP tools use integer byte addresses and integer 32-bit data words in their
 JSON schemas. Convert hex strings such as `0x40000000` before calling the tool.
