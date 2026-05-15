@@ -223,13 +223,27 @@ begin
             jtag_wr_en <= '0';
         end procedure;
 
+        procedure wait_readback(constant addr : in std_logic_vector(15 downto 0)) is
+        begin
+            if unsigned(addr) >= to_unsigned(16#0100#, 16) then
+                for i in 0 to 8 loop
+                    wait until rising_edge(sample_clk);
+                end loop;
+                for i in 0 to 2 loop
+                    wait until rising_edge(jtag_clk);
+                end loop;
+            else
+                wait until rising_edge(jtag_clk);
+            end if;
+        end procedure;
+
         procedure read_default(constant addr : in std_logic_vector(15 downto 0); variable data : out std_logic_vector(31 downto 0)) is
         begin
             wait until rising_edge(jtag_clk);
             jtag_addr <= addr; jtag_rd_en <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata;
         end procedure;
 
@@ -247,7 +261,7 @@ begin
             jtag_addr_ts <= addr; jtag_rd_en_ts <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en_ts <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata_ts;
         end procedure;
 
@@ -265,7 +279,7 @@ begin
             jtag_addr_seg <= addr; jtag_rd_en_seg <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en_seg <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata_seg;
         end procedure;
 
@@ -283,7 +297,7 @@ begin
             jtag_addr_pmux <= addr; jtag_rd_en_pmux <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en_pmux <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata_pmux;
         end procedure;
 
@@ -301,7 +315,7 @@ begin
             jtag_addr_pipe <= addr; jtag_rd_en_pipe <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en_pipe <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata_pipe;
         end procedure;
 
@@ -319,7 +333,7 @@ begin
             jtag_addr_combo <= addr; jtag_rd_en_combo <= '1';
             wait until rising_edge(jtag_clk);
             jtag_rd_en_combo <= '0';
-            wait until rising_edge(jtag_clk);
+            wait_readback(addr);
             data := jtag_rdata_combo;
         end procedure;
     begin
