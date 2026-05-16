@@ -9,9 +9,10 @@ controls from [chapter 11](11_rpc_server.md). It is meant for coding agents and
 other MCP clients that need to drive an FPGA debug session through tools and
 resources instead of a human CLI.
 
-If you are wiring an agent to this server, skim the Tools and Resources tables
-first, then come back to the safety flags before enabling any write-like action.
-Human operators can read the chapter top to bottom.
+If you are wiring an agent to this server, skim the [Tools](#tools) and
+[Resources](#resources) tables first, then come back to the safety flags before
+enabling any write-like action. Human operators can read the chapter top to
+bottom.
 
 ## Install
 
@@ -105,16 +106,16 @@ The branch's live RPC layer supports:
 
 | Backend | Connection fields | Options |
 | --- | --- | --- |
-| `hw_server` | `host`, `port`, `tap`, optional `program` | `single_chain_burst` |
+| `hw_server` | `host`, `port`, `tap`, optional `program` | `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap` | - |
 
 The MCP layer also validates and forwards newer backend-specific fields for
 compatibility with transports on adjacent branches:
 
-| Backend | Fields |
-| --- | --- |
-| `usb_blaster` | `hardware`, `quartus_stp` |
-| `spi` | `spi_url`, `spi_frequency`, `spi_cs`, `spi_timeout` |
+| Backend | Connection fields | Options |
+| --- | --- | --- |
+| `usb_blaster` | `hardware`, `quartus_stp` | - |
+| `spi` | `spi_url` | `spi_frequency`, `spi_cs`, `spi_timeout` |
 
 Backend-irrelevant fields are rejected instead of being silently forwarded.
 `hw_server` and `openocd` default `host` to `127.0.0.1` when omitted. `spi` and
@@ -210,9 +211,9 @@ UTF-8 text. Passing both is rejected.
 
 ## Resources
 
-| Resource | Populated by | Payload |
+| Resource | Updated by | Payload |
 | --- | --- | --- |
-| `fcapz://status` | session state | Same information as `fcapz_status`. |
+| `fcapz://status` | always available | Same information as `fcapz_status`. |
 | `fcapz://last-probe` | `fcapz_probe` | Last ELA probe result, or `{"available":false}`. |
 | `fcapz://last-capture` | `fcapz_capture` | Last full capture response, or `{"available":false}`. |
 | `fcapz://last-eio-read` | `fcapz_eio_read` | Last EIO read response, or `{"available":false}`. |
@@ -237,7 +238,8 @@ that can push a large payload directly into the agent's model context.
 Agents should check these fields if they depend on exact response shapes.
 Patch-version changes should be backward compatible; major-version or RPC schema
 changes should be treated as protocol changes until the agent has been updated
-or explicitly tested against that server.
+or explicitly tested against that server. Before 1.0, minor-version bumps may
+also include protocol changes.
 
 ## Example Flows
 
@@ -291,7 +293,7 @@ fcapz_uart_close()
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
 | `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
 | Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | Restart the MCP server if the next call reports a previous RPC still running; consider backend-specific timeout settings for slow hardware. |
-| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper usually needs to restart `fcapz-mcp` before issuing more hardware commands. |
+| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | SPI or USB-Blaster rejects `host` | Those backends do not use host/port sockets. | Omit `host` entirely for those backends. |
 
