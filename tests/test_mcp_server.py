@@ -460,6 +460,18 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(payload["errors"][0]["message"], "ela bad")
         self.assertNotIn("traceback", payload["errors"][0])
 
+    def test_shutdown_includes_traceback_when_env_set(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        stderr = io.StringIO()
+
+        with patch.dict("os.environ", {"FCAPZ_MCP_DEBUG_SHUTDOWN": "YES"}):
+            with patch.object(session, "close", side_effect=RuntimeError("ela bad")):
+                with redirect_stderr(stderr):
+                    session.shutdown()
+
+        payload = json.loads(stderr.getvalue())
+        self.assertIn("Traceback", payload["errors"][0]["traceback"])
+
     def test_status_returns_copies(self):
         session = FcapzMcpSession(rpc=FakeRpc())
         session.probe()

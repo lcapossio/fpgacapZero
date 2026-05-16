@@ -47,6 +47,7 @@ line to stderr:
 ```
 
 Set `FCAPZ_MCP_DEBUG_SHUTDOWN=1` to include tracebacks in that JSON payload.
+Accepted true values are `1`, `true`, `yes`, and `on` (case-insensitive).
 
 ## MCP Client Configuration
 
@@ -65,6 +66,13 @@ Example stdio client configuration:
 
 Use `--read-only` for diagnostic sessions where the agent should not arm
 captures or drive target-side state. Probe/read/status tools remain available.
+
+MCP tool calls are JSON objects containing a tool `name` and `arguments`.
+For example:
+
+```json
+{"name":"fcapz_status","arguments":{}}
+```
 
 ## Safety Flags
 
@@ -104,6 +112,11 @@ Backend-irrelevant fields are rejected instead of being silently forwarded.
 `hw_server` and `openocd` default `host` to `127.0.0.1` when omitted. `spi` and
 `usb_blaster` have no host concept, so even explicit `host="127.0.0.1"` is
 rejected.
+
+The MCP session enforces a 30 second RPC response timeout by default. Backend
+transports may also have their own timeouts; whichever timeout is shorter fires
+first. If the MCP timeout fires while the backend call keeps running, the server
+refuses new hardware commands until the process is restarted.
 
 ## Tools
 
@@ -208,6 +221,7 @@ Configure now, arm later:
 fcapz_connect(backend="openocd", port=6666, tap="xc7a100t.tap")
 fcapz_configure(config={"pretrigger": 128, "posttrigger": 1024})
 fcapz_arm()
+fcapz_close()
 ```
 
 Capture and then explicitly release the large payload:

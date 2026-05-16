@@ -678,7 +678,12 @@ class FcapzMcpSession:
         return summary
 
     def shutdown(self) -> None:
-        include_trace = os.environ.get("FCAPZ_MCP_DEBUG_SHUTDOWN") in ("1", "true", "yes")
+        include_trace = os.environ.get("FCAPZ_MCP_DEBUG_SHUTDOWN", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         errors: list[JsonDict] = []
         for name, close in (
             ("close", self.close),
