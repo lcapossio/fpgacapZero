@@ -863,6 +863,7 @@ module fcapz_ela_tb;
         check("SEG: done", status[2] == 1'b1);
         jtag_read_seg(16'h00BC, seg_status);
         check("SEG: all_seg_done flag", seg_status[31] == 1'b1);
+        $display("PARITY_SEG_HOLDOFF_REWRITE status=0x%08x seg=0x%08x", status, seg_status);
 
         // ---- Test 19: NUM_SEGMENTS=1 regression (dut_seg features) ---------
         $display("\n=== Test 19: Feature flags for segmented DUT ===");

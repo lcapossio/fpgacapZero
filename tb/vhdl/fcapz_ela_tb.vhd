@@ -484,6 +484,8 @@ begin
         check("SEG: done", status(2) = '1');
         read_seg(x"00BC", word);
         check("SEG: all segments done", word(31) = '1');
+        report "PARITY_SEG_HOLDOFF_REWRITE status=0x" & to_hstring(status) &
+               " seg=0x" & to_hstring(word);
 
         report "=== Test 7: Probe mux and readback ===";
         read_pmux(x"00D0", word);
@@ -607,6 +609,11 @@ begin
         check("Sequencer LT capture reaches done", status(2) = '1');
         read_combo(x"001C", cap_len);
         check("Sequencer LT capture length is 3", cap_len = x"00000003");
+        read_combo(x"00BC", word);
+        check("Sequencer LT capture reports all segments done", word(31) = '1');
+        read_combo(x"0140", ts0);
+        read_combo(x"0144", ts1);
+        check("Sequencer LT timestamps advance", unsigned(ts1) > unsigned(ts0));
 
         write_combo(x"0004", x"00000002");
         for i in 0 to 8 loop wait until rising_edge(sample_clk); end loop;
@@ -636,6 +643,8 @@ begin
         check("Sequencer stage 1 final trigger reaches done", status(2) = '1');
         read_combo(x"001C", cap_len);
         check("Sequencer stage progression capture length is 3", cap_len = x"00000003");
+        read_combo(x"0100", word);
+        check("Sequencer stage progression readback is valid", word(7 downto 0) = x"08" or word(7 downto 0) = x"0A");
 
         report "=== Summary: " & integer'image(pass_count) & " passed, " &
                integer'image(fail_count) & " failed ===";
