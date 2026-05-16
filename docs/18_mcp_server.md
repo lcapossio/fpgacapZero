@@ -9,6 +9,10 @@ controls from [chapter 11](11_rpc_server.md). It is meant for coding agents and
 other MCP clients that need to drive an FPGA debug session through tools and
 resources instead of a human CLI.
 
+If you are wiring an agent to this server, skim the Tools and Resources tables
+first, then come back to the safety flags before enabling any write-like action.
+Human operators can read the chapter top to bottom.
+
 ## Install
 
 Install the MCP optional dependency:
@@ -99,10 +103,10 @@ safety policy first.
 
 The branch's live RPC layer supports:
 
-| Backend | Main fields |
-| --- | --- |
-| `hw_server` | `host`, `port`, `tap`, `single_chain_burst`, optional `program` |
-| `openocd` | `host`, `port`, `tap` |
+| Backend | Connection fields | Options |
+| --- | --- | --- |
+| `hw_server` | `host`, `port`, `tap`, optional `program` | `single_chain_burst` |
+| `openocd` | `host`, `port`, `tap` | - |
 
 The MCP layer also validates and forwards newer backend-specific fields for
 compatibility with transports on adjacent branches:
@@ -129,7 +133,7 @@ refuses new hardware commands until the process is restarted.
 | Tool | Requires | Purpose |
 | --- | --- | --- |
 | `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
-| `fcapz_connect` | programming requires `--allow-program` only when `program` is used | Connect to an ELA core. |
+| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` is set | Connect to an ELA core. |
 | `fcapz_close` | always available | Close the active ELA connection. Idempotent. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
 | `fcapz_configure` | capture enabled; blocked by `--read-only` | Configure the connected ELA without arming. |
@@ -206,12 +210,12 @@ UTF-8 text. Passing both is rejected.
 
 ## Resources
 
-| Resource | Payload |
-| --- | --- |
-| `fcapz://status` | Same information as `fcapz_status`. |
-| `fcapz://last-probe` | Last ELA probe result, or `{"available":false}`. |
-| `fcapz://last-capture` | Last full capture response, or `{"available":false}`. |
-| `fcapz://last-eio-read` | Last EIO read response, or `{"available":false}`. |
+| Resource | Populated by | Payload |
+| --- | --- | --- |
+| `fcapz://status` | session state | Same information as `fcapz_status`. |
+| `fcapz://last-probe` | `fcapz_probe` | Last ELA probe result, or `{"available":false}`. |
+| `fcapz://last-capture` | `fcapz_capture` | Last full capture response, or `{"available":false}`. |
+| `fcapz://last-eio-read` | `fcapz_eio_read` | Last EIO read response, or `{"available":false}`. |
 
 Resource JSON is compact. MCP clients that display resources can pretty-print it
 locally.
@@ -231,6 +235,9 @@ that can push a large payload directly into the agent's model context.
 | `rpc_schema_version` | The RPC schema version. It is seeded before the first RPC and updated from successful RPC responses. |
 
 Agents should check these fields if they depend on exact response shapes.
+Patch-version changes should be backward compatible; major-version or RPC schema
+changes should be treated as protocol changes until the agent has been updated
+or explicitly tested against that server.
 
 ## Example Flows
 
@@ -284,7 +291,7 @@ fcapz_uart_close()
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
 | `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
 | Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | Restart the MCP server if the next call reports a previous RPC still running; consider backend-specific timeout settings for slow hardware. |
-| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | Restart the MCP server before issuing more hardware commands. |
+| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper usually needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | SPI or USB-Blaster rejects `host` | Those backends do not use host/port sockets. | Omit `host` entirely for those backends. |
 
