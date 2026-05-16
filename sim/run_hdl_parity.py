@@ -242,6 +242,35 @@ def check_static_parity() -> bool:
     return True
 
 
+def check_semantic_tripwires() -> bool:
+    """Check source-level invariants that name/value parity cannot express."""
+
+    errors: list[str] = []
+    verilog_ela = (RTL / "fcapz_ela.v").read_text(encoding="utf-8")
+    vhdl_ela = (RTL_VHDL / "fcapz_ela.vhd").read_text(encoding="utf-8")
+    verilog_tb = (ROOT / "tb" / "fcapz_ela_tb.sv").read_text(encoding="utf-8")
+    vhdl_tb = (ROOT / "tb" / "vhdl" / "fcapz_ela_tb.vhd").read_text(encoding="utf-8")
+
+    if not re.search(r"\btrig_holdoff\s*<=\s*trig_holdoff_sync2\s*;", verilog_ela):
+        errors.append("fcapz_ela: Verilog must latch TRIG_HOLDOFF on arm")
+    if not re.search(r"\btrig_holdoff\s*<=\s*trig_holdoff_sync2\s*;", vhdl_ela, flags=re.I):
+        errors.append("fcapz_ela: VHDL must latch TRIG_HOLDOFF on arm")
+    if not re.search(r"trig_holdoff_active\s*<=\s*'1'\s+when\s+trig_holdoff\s*>\s*0", vhdl_ela, flags=re.I):
+        errors.append("fcapz_ela: VHDL segmented re-arm must use latched TRIG_HOLDOFF")
+    if "mid-capture rewrite must not affect re-armed segments" not in verilog_tb:
+        errors.append("fcapz_ela_tb.sv: missing mid-capture TRIG_HOLDOFF rewrite regression")
+    if 'write_seg(x"00DC", x"000003E8")' not in vhdl_tb:
+        errors.append("fcapz_ela_tb.vhd: missing mid-capture TRIG_HOLDOFF rewrite regression")
+
+    if errors:
+        print("[hdl-parity] semantic parity tripwires failed:")
+        for error in errors:
+            print(f"  - {error}")
+        return False
+    print("[hdl-parity] semantic parity tripwires passed.")
+    return True
+
+
 def run_cmd(cmd: list[str], label: str) -> bool:
     print(f"[hdl-parity] {label}: {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=ROOT, text=True)
@@ -284,6 +313,7 @@ def main() -> None:
     ok = True
     if not args.sim_only:
         ok &= check_static_parity()
+        ok &= check_semantic_tripwires()
     if not args.static_only:
         ok &= run_sim_parity()
 

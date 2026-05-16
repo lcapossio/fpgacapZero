@@ -285,6 +285,7 @@ architecture rtl of fcapz_ela is
     signal seq_counter       : natural range 0 to 65535 := 0;
     signal trig_delay_pending: std_logic := '0';
     signal trig_delay_count  : natural range 0 to 65535 := 0;
+    signal trig_holdoff      : natural range 0 to 65535 := 0;
     signal trig_holdoff_count: natural range 0 to 65535 := 0;
     signal trig_holdoff_active : std_logic := '0';
     signal pipe_probe        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
@@ -750,6 +751,7 @@ begin
             seq_counter <= 0;
             trig_delay_pending <= '0';
             trig_delay_count <= 0;
+            trig_holdoff <= 0;
             trig_holdoff_count <= 0;
             trig_holdoff_active <= '0';
             trigger_in_sync1 <= '0';
@@ -939,6 +941,7 @@ begin
                 segment_wrapped <= '0';
                 trig_delay_pending <= '0';
                 trig_delay_count <= 0;
+                trig_holdoff <= trig_holdoff_sync2;
                 trig_holdoff_active <= '0';
                 seq_state <= 0;
                 seq_counter <= 0;
@@ -965,6 +968,7 @@ begin
                 segment_wrapped <= '0';
                 trig_delay_pending <= '0';
                 trig_delay_count <= 0;
+                trig_holdoff <= trig_holdoff_sync2;
                 trig_holdoff_active <= '1' when trig_holdoff_sync2 > 0 else '0';
                 trig_holdoff_count <= trig_holdoff_sync2 - 1 when trig_holdoff_sync2 > 0 else 0;
                 seq_state <= 0;
@@ -1095,8 +1099,8 @@ begin
                                 wr_ptr <= seg_base(next_segment);
                                 segment_wrapped <= '0';
                                 trig_delay_pending <= '0';
-                                trig_holdoff_active <= '1' when trig_holdoff_sync2 > 0 else '0';
-                                trig_holdoff_count <= trig_holdoff_sync2 - 1 when trig_holdoff_sync2 > 0 else 0;
+                                trig_holdoff_active <= '1' when trig_holdoff > 0 else '0';
+                                trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else 0;
                                 seq_state <= 0;
                                 seq_counter <= 0;
                                 hit_pipe <= '0';

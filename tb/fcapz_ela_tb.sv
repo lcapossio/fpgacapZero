@@ -845,6 +845,7 @@ module fcapz_ela_tb;
         jtag_write_seg(16'h0024, 32'd3);
         jtag_write_seg(16'h0028, 32'h03); // mask = 0x03 (match lower 2 bits)
         jtag_write_seg(16'h0004, 32'h1);  // ARM
+        jtag_write_seg(16'h00DC, 32'd1000); // mid-capture rewrite must not affect re-armed segments
 
         probe_in_seg = '0;
         repeat (80) begin

@@ -473,6 +473,7 @@ begin
         write_seg(x"0024", x"00000003");
         write_seg(x"0028", x"00000003");
         write_seg(x"0004", x"00000001");
+        write_seg(x"00DC", x"000003E8");
         probe_in_seg <= x"00";
         for i in 0 to 80 loop
             wait until rising_edge(sample_clk);
