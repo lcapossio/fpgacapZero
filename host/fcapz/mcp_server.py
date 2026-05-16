@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import importlib.metadata
+import os
 import queue
 import json
 import sys
@@ -121,6 +122,8 @@ class FcapzMcpSession:
                 f"{self.capabilities.rpc_timeout_sec:g}s"
             )
         with self._rpc_lock:
+            # A timed-out worker may finish after a later call has reserved the slot.
+            # Only the owner may clear the active marker.
             if self._active_rpc_worker is worker:
                 self._active_rpc_worker = None
                 self._active_rpc_cmd = None
@@ -325,9 +328,10 @@ class FcapzMcpSession:
     def drop_last_capture(self) -> JsonDict:
         # Captures may contain large sample payloads. Probe and EIO caches are small
         # enough to retain until overwritten or closed.
+        had_capture = self.last_capture is not None
         self.last_capture = None
         self.last_capture_summary = None
-        return {"ok": True}
+        return {"ok": True, "had_capture": had_capture}
 
     def get_last_capture(self) -> JsonDict:
         if self.last_capture is None:
@@ -353,6 +357,7 @@ class FcapzMcpSession:
             "cmd": "capture",
             "timeout": float(timeout),
             "format": fmt,
+            # MCP names this by intent; RPC still uses its historical field.
             "summarize": bool(include_event_summary),
         }
         if config:
@@ -673,7 +678,8 @@ class FcapzMcpSession:
         return summary
 
     def shutdown(self) -> None:
-        errors: list[str] = []
+        include_trace = os.environ.get("FCAPZ_MCP_DEBUG_SHUTDOWN") in ("1", "true", "yes")
+        errors: list[JsonDict] = []
         for name, close in (
             ("close", self.close),
             ("eio_close", self.eio_close),
@@ -683,10 +689,23 @@ class FcapzMcpSession:
             try:
                 close()
             except Exception as exc:
-                errors.append(f"{name}: {exc.__class__.__name__}: {exc}")
+                error: JsonDict = {
+                    "step": name,
+                    "type": exc.__class__.__name__,
+                    "message": str(exc),
+                }
+                if include_trace:
+                    error["traceback"] = traceback.format_exc()
+                errors.append(error)
         if errors:
             print(
-                "fcapz-mcp: errors during shutdown: " + "; ".join(errors),
+                json.dumps(
+                    {
+                        "event": "shutdown_errors",
+                        "errors": errors,
+                    },
+                    separators=(",", ":"),
+                ),
                 file=sys.stderr,
             )
 
@@ -803,7 +822,11 @@ def build_mcp_server(session: FcapzMcpSession):
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
     def fcapz_get_last_capture() -> JsonDict:
-        """Return the cached full capture payload for clients without resource support."""
+        """Return the cached full capture payload for clients without resource support.
+
+        This can be large enough to flood model context after deep captures. Prefer
+        fcapz://last-capture when the MCP client supports resources.
+        """
 
         return session.get_last_capture()
 

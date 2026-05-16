@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import io
 import importlib.util
+import json
 import tempfile
 import threading
 import unittest
@@ -224,11 +225,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
         session.capture()
         self.assertIsNotNone(session.last_capture)
         self.assertEqual(session.get_last_capture()["result"], {"samples": [1, 2]})
-        self.assertEqual(session.drop_last_capture(), {"ok": True})
+        self.assertEqual(session.drop_last_capture(), {"ok": True, "had_capture": True})
 
         self.assertIsNone(session.last_capture)
         self.assertIsNone(session.status()["last_capture_summary"])
         self.assertEqual(session.get_last_capture(), {"available": False})
+        self.assertEqual(session.drop_last_capture(), {"ok": True, "had_capture": False})
 
     def test_configure_and_arm_are_separate_rpc_commands(self):
         rpc = FakeRpc()
@@ -383,6 +385,8 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
     def test_program_requires_bitfile_under_root(self):
         rpc = FakeRpc()
+        # Keep files under the repo workspace so Windows path/drive resolution
+        # cannot affect Path.parents checks.
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmpdir:
             root = Path(tmpdir) / "allowed"
             root.mkdir()
@@ -440,7 +444,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         shutdown.assert_called_once()
 
-    def test_shutdown_reports_one_summary_for_close_errors(self):
+    def test_shutdown_reports_json_summary_for_close_errors(self):
         session = FcapzMcpSession(rpc=FakeRpc())
         stderr = io.StringIO()
 
@@ -449,11 +453,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 with redirect_stderr(stderr):
                     session.shutdown()
 
-        text = stderr.getvalue()
-        self.assertIn("errors during shutdown", text)
-        self.assertIn("close: RuntimeError: ela bad", text)
-        self.assertIn("eio_close: RuntimeError: eio bad", text)
-        self.assertNotIn("Traceback", text)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["event"], "shutdown_errors")
+        self.assertEqual(payload["errors"][0]["step"], "close")
+        self.assertEqual(payload["errors"][0]["type"], "RuntimeError")
+        self.assertEqual(payload["errors"][0]["message"], "ela bad")
+        self.assertNotIn("traceback", payload["errors"][0])
 
     def test_status_returns_copies(self):
         session = FcapzMcpSession(rpc=FakeRpc())
