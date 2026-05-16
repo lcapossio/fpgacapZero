@@ -165,7 +165,7 @@ begin
     dut_pipe : entity work.fcapz_ela
         generic map (
             SAMPLE_W => SAMPLE_W, DEPTH => PIPE_DEPTH, DECIM_EN => 1,
-            EXT_TRIG_EN => 1, TIMESTAMP_W => 32, NUM_SEGMENTS => 4, INPUT_PIPE => 1
+            EXT_TRIG_EN => 1, TIMESTAMP_W => 32, NUM_SEGMENTS => 1, INPUT_PIPE => 1
         )
         port map (
             sample_clk => sample_clk, sample_rst => sample_rst, probe_in => probe_in_pipe,
@@ -550,9 +550,9 @@ begin
         check("TRIG_HOLDOFF: early hit ignored", status(1) = '0' and status(2) = '0');
         write_default(x"00DC", x"00000000");
 
-        report "=== Test 9: INPUT_PIPE=1 capture ===";
+        report "=== Test 9: INPUT_PIPE=1 full-depth capture ===";
         write_pipe(x"0014", x"00000000");
-        write_pipe(x"0018", x"00000000");
+        write_pipe(x"0018", x"000003FF");
         write_pipe(x"0020", x"00000001");
         write_pipe(x"0024", x"00000000");
         write_pipe(x"0028", x"000000FF");
@@ -566,9 +566,13 @@ begin
         read_pipe(x"0008", status);
         check("INPUT_PIPE=1: done", status(2) = '1');
         read_pipe(x"001C", cap_len);
-        check("INPUT_PIPE=1: CAPTURE_LEN=1", cap_len = x"00000001");
+        check("INPUT_PIPE=1: CAPTURE_LEN=1024", cap_len = x"00000400");
         read_pipe(x"0100", word);
-        check("INPUT_PIPE=1: captured sample readback is 1", word = x"00000001");
+        check("INPUT_PIPE=1: first sample readback is 1", word = x"00000001");
+        read_pipe(x"0200", word);
+        check("INPUT_PIPE=1: mid-depth sample readback is 65", word = x"00000041");
+        read_pipe(x"10FC", word);
+        check("INPUT_PIPE=1: last depth sample wraps to 0", word = x"00000000");
 
         report "=== Test 10: Sequencer, SQ, relational, and dual compare ===";
         read_combo(x"003C", word);

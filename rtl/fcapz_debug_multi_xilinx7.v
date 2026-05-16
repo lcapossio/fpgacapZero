@@ -244,6 +244,25 @@ module fcapz_debug_multi_xilinx7 #(
             wire [ELA_TS_W_SAFE-1:0] ela_burst_rd_ts_data;
             wire [ELA_PTR_W-1:0] ela_burst_start_ptr;
 
+            initial begin
+                if (ELA_PROBE_W > PROBE_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d probe width %0d exceeds scalar slot width %0d",
+                           i, ELA_PROBE_W, PROBE_W);
+                end
+                if (ELA_SAMPLE_W > SAMPLE_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d SAMPLE_W %0d exceeds scalar SAMPLE_W %0d",
+                           i, ELA_SAMPLE_W, SAMPLE_W);
+                end
+                if (ELA_TS_W_SAFE > TS_W_SAFE) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d TIMESTAMP_W %0d exceeds scalar TIMESTAMP_W %0d",
+                           i, ELA_TIMESTAMP_W, TIMESTAMP_W);
+                end
+                if (ELA_PTR_W > PTR_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d DEPTH %0d exceeds scalar DEPTH %0d",
+                           i, ELA_DEPTH, DEPTH);
+                end
+            end
+
             fcapz_ela #(
                 .SAMPLE_W(ELA_SAMPLE_W),
                 .DEPTH(ELA_DEPTH),
@@ -283,18 +302,43 @@ module fcapz_debug_multi_xilinx7 #(
                 .burst_start_ptr(ela_burst_start_ptr)
             );
 
-            assign slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W] =
-                {{(SAMPLE_W-ELA_SAMPLE_W){1'b0}}, ela_burst_rd_data};
-            assign slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE] =
-                {{(TS_W_SAFE-ELA_TS_W_SAFE){1'b0}}, ela_burst_rd_ts_data};
-            assign slot_burst_start_ptr[i*PTR_W +: PTR_W] =
-                {{(PTR_W-ELA_PTR_W){1'b0}}, ela_burst_start_ptr};
+            if (ELA_SAMPLE_W < SAMPLE_W) begin : g_data_pad
+                assign slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W] =
+                    {{(SAMPLE_W-ELA_SAMPLE_W){1'b0}}, ela_burst_rd_data};
+            end else begin : g_data_no_pad
+                assign slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W] = ela_burst_rd_data[SAMPLE_W-1:0];
+            end
+
+            if (ELA_TS_W_SAFE < TS_W_SAFE) begin : g_ts_pad
+                assign slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE] =
+                    {{(TS_W_SAFE-ELA_TS_W_SAFE){1'b0}}, ela_burst_rd_ts_data};
+            end else begin : g_ts_no_pad
+                assign slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE] = ela_burst_rd_ts_data[TS_W_SAFE-1:0];
+            end
+
+            if (ELA_PTR_W < PTR_W) begin : g_ptr_pad
+                assign slot_burst_start_ptr[i*PTR_W +: PTR_W] =
+                    {{(PTR_W-ELA_PTR_W){1'b0}}, ela_burst_start_ptr};
+            end else begin : g_ptr_no_pad
+                assign slot_burst_start_ptr[i*PTR_W +: PTR_W] = ela_burst_start_ptr[PTR_W-1:0];
+            end
         end
 
         for (i = 0; i < EIO_COUNT; i = i + 1) begin : g_eios
             localparam integer EIO_IN_W_I = eio_param32(EIO_IN_WS, i);
             localparam integer EIO_OUT_W_I = eio_param32(EIO_OUT_WS, i);
             wire [EIO_OUT_W_I-1:0] eio_probe_out_i;
+
+            initial begin
+                if (EIO_IN_W_I > EIO_IN_W) begin
+                    $error("fcapz_debug_multi_xilinx7: EIO %0d IN_W %0d exceeds scalar EIO_IN_W %0d",
+                           i, EIO_IN_W_I, EIO_IN_W);
+                end
+                if (EIO_OUT_W_I > EIO_OUT_W) begin
+                    $error("fcapz_debug_multi_xilinx7: EIO %0d OUT_W %0d exceeds scalar EIO_OUT_W %0d",
+                           i, EIO_OUT_W_I, EIO_OUT_W);
+                end
+            end
 
             fcapz_eio #(
                 .IN_W(EIO_IN_W_I),
@@ -310,8 +354,12 @@ module fcapz_debug_multi_xilinx7 #(
                 .jtag_rdata(slot_rdata[(EIO_SLOT_BASE+i)*32 +: 32])
             );
 
-            assign eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W] =
-                {{(EIO_OUT_W-EIO_OUT_W_I){1'b0}}, eio_probe_out_i};
+            if (EIO_OUT_W_I < EIO_OUT_W) begin : g_eio_out_pad
+                assign eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W] =
+                    {{(EIO_OUT_W-EIO_OUT_W_I){1'b0}}, eio_probe_out_i};
+            end else begin : g_eio_out_no_pad
+                assign eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W] = eio_probe_out_i[EIO_OUT_W-1:0];
+            end
             assign slot_burst_rd_data[(EIO_SLOT_BASE+i)*SAMPLE_W +: SAMPLE_W] = {SAMPLE_W{1'b0}};
             assign slot_burst_rd_ts_data[(EIO_SLOT_BASE+i)*TS_W_SAFE +: TS_W_SAFE] = {TS_W_SAFE{1'b0}};
             assign slot_burst_start[EIO_SLOT_BASE+i] = 1'b0;
