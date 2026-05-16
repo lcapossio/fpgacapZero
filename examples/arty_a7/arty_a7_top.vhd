@@ -217,10 +217,6 @@ architecture rtl of arty_a7_top is
     signal led_sync1         : std_logic_vector(3 downto 0) := (others => '0');
     signal led_sync2         : std_logic_vector(3 downto 0) := (others => '0');
 
-    attribute ASYNC_REG : string;
-    attribute ASYNC_REG of led_sync1 : signal is "TRUE";
-    attribute ASYNC_REG of led_sync2 : signal is "TRUE";
-
     signal bridge_awaddr  : std_logic_vector(31 downto 0);
     signal bridge_wdata   : std_logic_vector(31 downto 0);
     signal bridge_araddr  : std_logic_vector(31 downto 0);
