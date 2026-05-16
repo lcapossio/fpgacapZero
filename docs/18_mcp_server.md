@@ -76,10 +76,12 @@ For example:
 
 ## Safety Flags
 
-Write-like operations are disabled by default:
+Write-like operations are disabled by default. `--read-only` is broader: it
+also disables capture-side actions that change ELA state.
 
-| Flag | Enables |
+| Flag | Effect |
 | --- | --- |
+| `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, and all write/send/program enable flags. |
 | `--allow-eio-write` | `fcapz_eio_write` |
 | `--allow-axi-write` | `fcapz_axi_write`, `fcapz_axi_write_block` |
 | `--allow-uart-send` | `fcapz_uart_send` |
@@ -87,9 +89,11 @@ Write-like operations are disabled by default:
 
 `--read-only` cannot be combined with any write/program enable flag.
 
-Programming is intentionally `hw_server`-only in the MCP layer. If `program` is
-passed while programming is disabled, the server reports the permission error
-before backend-specific validation so agents see the global safety policy first.
+Programming is intentionally `hw_server`-only in the MCP layer.
+
+If `program` is passed while programming is disabled, the server reports the
+permission error before backend-specific validation so agents see the global
+safety policy first.
 
 ## Backends And Connection Fields
 
@@ -122,21 +126,45 @@ refuses new hardware commands until the process is restarted.
 
 ### Session and ELA
 
-| Tool | Purpose |
-| --- | --- |
-| `fcapz_status` | Return session state, safety capabilities, MCP server version, and RPC schema version. |
-| `fcapz_connect` | Connect to an ELA core. |
-| `fcapz_close` | Close the active ELA connection. Idempotent. |
-| `fcapz_probe` | Read ELA identity, dimensions, and feature registers. |
-| `fcapz_configure` | Configure the connected ELA without arming. |
-| `fcapz_arm` | Arm the connected ELA using the current hardware configuration. |
-| `fcapz_capture` | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
-| `fcapz_get_last_capture` | Return the cached full capture payload for clients without MCP resource support. Can be large. |
-| `fcapz_drop_last_capture` | Drop the cached full capture payload and report whether one existed. |
+| Tool | Requires | Purpose |
+| --- | --- | --- |
+| `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
+| `fcapz_connect` | programming requires `--allow-program` only when `program` is used | Connect to an ELA core. |
+| `fcapz_close` | always available | Close the active ELA connection. Idempotent. |
+| `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
+| `fcapz_configure` | capture enabled; blocked by `--read-only` | Configure the connected ELA without arming. |
+| `fcapz_arm` | capture enabled; blocked by `--read-only` | Arm the connected ELA using the current hardware configuration. |
+| `fcapz_capture` | capture enabled; blocked by `--read-only` | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
+| `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without MCP resource support. Can be large. |
+| `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
 
 `fcapz_capture` takes `include_event_summary` to ask the RPC layer for decoded
 event metadata. The MCP name is deliberately more explicit than the RPC field
 name (`summarize`).
+
+Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
+
+| Key | Meaning |
+| --- | --- |
+| `pretrigger` | Number of samples to retain before the trigger point. |
+| `posttrigger` | Number of samples to retain after the trigger point. |
+| `trigger_mode` | Trigger comparator/mode selection. |
+| `trigger_value` | Trigger compare value. |
+| `trigger_mask` | Trigger compare mask. |
+| `sample_width` | Expected sample width in bits. |
+| `depth` | Capture depth in samples. |
+| `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
+| `probes` | Probe definitions, matching the RPC/Python probe schema. |
+| `probe_file` | Path to a probe definition file. |
+| `channel` | Capture channel or runtime probe mux channel. |
+| `decimation` | Sample decimation factor. |
+| `ext_trigger_mode` | External trigger mode. |
+| `stor_qual_mode` | Storage qualification mode. |
+| `stor_qual_value` | Storage qualification compare value. |
+| `stor_qual_mask` | Storage qualification compare mask. |
+| `startup_arm` | Arm from hardware startup behavior when supported. |
+| `trigger_holdoff` | Trigger holdoff count. |
+| `trigger_delay` | Delay between trigger match and capture stop window. |
 
 ### Embedded I/O
 
@@ -230,13 +258,14 @@ Capture and then explicitly release the large payload:
 fcapz_capture(config={"pretrigger": 64, "posttrigger": 4096}, timeout=10.0)
 read resource fcapz://last-capture
 fcapz_drop_last_capture()
+fcapz_close()
 ```
 
 AXI read:
 
 ```text
 fcapz_axi_connect(backend="hw_server", chain=4)
-fcapz_axi_read(addr=1073741824)
+fcapz_axi_read(addr=1073741824)  # 0x40000000
 fcapz_axi_close()
 ```
 
@@ -254,6 +283,7 @@ fcapz_uart_close()
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
 | `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
+| Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | Restart the MCP server if the next call reports a previous RPC still running; consider backend-specific timeout settings for slow hardware. |
 | A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | Restart the MCP server before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | SPI or USB-Blaster rejects `host` | Those backends do not use host/port sockets. | Omit `host` entirely for those backends. |
