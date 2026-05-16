@@ -94,6 +94,19 @@ architecture sim of fcapz_ela_tb is
     signal burst_timestamp_pipe : std_logic;
     signal burst_start_ptr_pipe : std_logic_vector(fcapz_clog2(PIPE_DEPTH) - 1 downto 0);
 
+    signal probe_in_pipe_seg : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal jtag_wr_en_pipe_seg : std_logic := '0';
+    signal jtag_rd_en_pipe_seg : std_logic := '0';
+    signal jtag_addr_pipe_seg : std_logic_vector(15 downto 0) := (others => '0');
+    signal jtag_wdata_pipe_seg : std_logic_vector(31 downto 0) := (others => '0');
+    signal jtag_rdata_pipe_seg : std_logic_vector(31 downto 0);
+    signal burst_rd_addr_pipe_seg : std_logic_vector(fcapz_clog2(PIPE_DEPTH) - 1 downto 0) := (others => '0');
+    signal burst_rd_data_pipe_seg : std_logic_vector(SAMPLE_W - 1 downto 0);
+    signal burst_rd_ts_data_pipe_seg : std_logic_vector(31 downto 0);
+    signal burst_start_pipe_seg : std_logic;
+    signal burst_timestamp_pipe_seg : std_logic;
+    signal burst_start_ptr_pipe_seg : std_logic_vector(fcapz_clog2(PIPE_DEPTH) - 1 downto 0);
+
     signal probe_in_combo : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal jtag_wr_en_combo : std_logic := '0';
     signal jtag_rd_en_combo : std_logic := '0';
@@ -176,6 +189,23 @@ begin
             burst_rd_data => burst_rd_data_pipe, burst_rd_ts_data => burst_rd_ts_data_pipe,
             burst_start => burst_start_pipe, burst_timestamp => burst_timestamp_pipe,
             burst_start_ptr => burst_start_ptr_pipe
+        );
+
+    dut_pipe_seg : entity work.fcapz_ela
+        generic map (
+            SAMPLE_W => SAMPLE_W, DEPTH => PIPE_DEPTH, DECIM_EN => 1,
+            TIMESTAMP_W => 32, NUM_SEGMENTS => 4, INPUT_PIPE => 1
+        )
+        port map (
+            sample_clk => sample_clk, sample_rst => sample_rst, probe_in => probe_in_pipe_seg,
+            trigger_in => '0', trigger_out => open, armed_out => open,
+            jtag_clk => jtag_clk, jtag_rst => jtag_rst, jtag_wr_en => jtag_wr_en_pipe_seg,
+            jtag_rd_en => jtag_rd_en_pipe_seg, jtag_addr => jtag_addr_pipe_seg,
+            jtag_wdata => jtag_wdata_pipe_seg, jtag_rdata => jtag_rdata_pipe_seg,
+            burst_rd_addr => burst_rd_addr_pipe_seg, burst_rd_data => burst_rd_data_pipe_seg,
+            burst_rd_ts_data => burst_rd_ts_data_pipe_seg,
+            burst_start => burst_start_pipe_seg, burst_timestamp => burst_timestamp_pipe_seg,
+            burst_start_ptr => burst_start_ptr_pipe_seg
         );
 
     dut_combo : entity work.fcapz_ela
@@ -318,6 +348,24 @@ begin
             jtag_rd_en_pipe <= '0';
             wait_readback(addr);
             data := jtag_rdata_pipe;
+        end procedure;
+
+        procedure write_pipe_seg(constant addr : in std_logic_vector(15 downto 0); constant data : in std_logic_vector(31 downto 0)) is
+        begin
+            wait until rising_edge(jtag_clk);
+            jtag_addr_pipe_seg <= addr; jtag_wdata_pipe_seg <= data; jtag_wr_en_pipe_seg <= '1';
+            wait until rising_edge(jtag_clk);
+            jtag_wr_en_pipe_seg <= '0';
+        end procedure;
+
+        procedure read_pipe_seg(constant addr : in std_logic_vector(15 downto 0); variable data : out std_logic_vector(31 downto 0)) is
+        begin
+            wait until rising_edge(jtag_clk);
+            jtag_addr_pipe_seg <= addr; jtag_rd_en_pipe_seg <= '1';
+            wait until rising_edge(jtag_clk);
+            jtag_rd_en_pipe_seg <= '0';
+            wait_readback(addr);
+            data := jtag_rdata_pipe_seg;
         end procedure;
 
         procedure write_combo(constant addr : in std_logic_vector(15 downto 0); constant data : in std_logic_vector(31 downto 0)) is
@@ -577,7 +625,32 @@ begin
         read_pipe(x"10FC", word);
         check("INPUT_PIPE=1: last depth sample wraps to 0", word = x"00000000");
 
-        report "=== Test 10: Sequencer, SQ, relational, and dual compare ===";
+        report "=== Test 10: INPUT_PIPE=1 full-depth segmented capture ===";
+        read_pipe_seg(x"00B8", word);
+        check("INPUT_PIPE=1 segmented: NUM_SEGMENTS=4", word = x"00000004");
+        write_pipe_seg(x"0014", x"00000000");
+        write_pipe_seg(x"0018", x"00000003");
+        write_pipe_seg(x"0020", x"00000001");
+        write_pipe_seg(x"0024", x"00000003");
+        write_pipe_seg(x"0028", x"00000003");
+        write_pipe_seg(x"0004", x"00000001");
+        probe_in_pipe_seg <= x"00";
+        for i in 0 to 160 loop
+            wait until rising_edge(sample_clk);
+            probe_in_pipe_seg <= std_logic_vector(unsigned(probe_in_pipe_seg) + 1);
+        end loop;
+        for i in 0 to 120 loop wait until rising_edge(sample_clk); end loop;
+        read_pipe_seg(x"0008", status);
+        check("INPUT_PIPE=1 segmented: done", status(2) = '1');
+        check("INPUT_PIPE=1 segmented: overflow clear", status(3) = '0');
+        read_pipe_seg(x"001C", cap_len);
+        check("INPUT_PIPE=1 segmented: CAPTURE_LEN=4", cap_len = x"00000004");
+        read_pipe_seg(x"00BC", word);
+        check("INPUT_PIPE=1 segmented: all segments done", word(31) = '1');
+        read_pipe_seg(x"0100", word);
+        check("INPUT_PIPE=1 segmented: first segment readback valid", word(7 downto 0) /= x"00");
+
+        report "=== Test 11: Sequencer, SQ, relational, and dual compare ===";
         read_combo(x"003C", word);
         check("Combo FEATURES advertise SQ", word(4) = '1');
         check("Combo FEATURES advertise 4 segments", word(23 downto 16) = x"04");
