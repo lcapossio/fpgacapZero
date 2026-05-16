@@ -393,6 +393,8 @@ shape as the host RPC layer: `backend`, `host`, `port`, `tap`,
 RPC call, so SPI requests do not carry host/TAP defaults and Quartus requests do
 not carry SPI adapter settings. Install the optional dependency and run:
 
+Full details are in [manual chapter 18 - MCP server](docs/18_mcp_server.md).
+
 ```bash
 pip install fpgacapzero[mcp]
 fcapz-mcp
