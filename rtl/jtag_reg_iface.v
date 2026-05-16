@@ -21,7 +21,8 @@ module jtag_reg_iface (
     input  wire        tdi,
     output wire        tdo,
     input  wire        capture,
-    input  wire        shift_en,
+    input  wire        shift_in_en,
+    input  wire        shift_out_en,
     input  wire        update,
     input  wire        sel,
 
@@ -36,8 +37,9 @@ module jtag_reg_iface (
 );
 
     reg [48:0] sr;
+    reg [31:0] sr_out;
 
-    assign tdo     = sr[0];
+    assign tdo     = sr_out[0];
     assign reg_clk = tck;
     assign reg_rst = arst;
 
@@ -53,9 +55,7 @@ module jtag_reg_iface (
             reg_rd_en <= 1'b0;
 
             if (sel) begin
-                if (capture) begin
-                    sr[31:0] <= reg_rdata;
-                end else if (shift_en) begin
+                if (shift_in_en) begin
                     sr <= {tdi, sr[48:1]};
                 end else if (update) begin
                     if (sr[48]) begin
@@ -66,6 +66,13 @@ module jtag_reg_iface (
                         reg_addr <= sr[47:32];
                         reg_rd_en <= 1'b1;
                     end
+                end
+
+                if (capture) begin
+                    sr_out[31:0] <= reg_rdata;
+                end else if (shift_out_en) begin
+                    sr_out <= {reg_rdata[31], sr_out[31:1]};
+                        // NOTE: <TODO>
                 end
             end
         end

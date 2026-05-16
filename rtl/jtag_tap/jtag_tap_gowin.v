@@ -17,11 +17,10 @@ module jtag_tap_gowin #(
     output reg          tdi,
     input  reg  [1:0]   tdo,
     output reg  [1:0]   capture,
-    output reg  [1:0]   shift,
+    output reg  [1:0]   shift_in,
+    output reg  [1:0]   shift_out,
     output reg  [1:0]   update,
     output reg  [1:0]   sel,
-
-    output reg  [5:0]   debug,
 
     input  wire         tms_pad_i,
     input  wire         tck_pad_i,
@@ -47,6 +46,7 @@ module jtag_tap_gowin #(
     wire        jtck;
     wire        jtdi;
     wire        jshift_capture;
+    reg         jshift_capture_d1;
     wire        jupdate;
     wire [1:0]  jce;
     reg         jtck_d1;
@@ -56,6 +56,7 @@ module jtag_tap_gowin #(
     reg [4:0]   jtag_in_reg;
     reg         jtdi_reg;
     reg         jshift_capture_reg;
+    reg         jshift_capture_reg_d1;
     reg         jupdate_reg;
     reg [1:0]   jce_reg;
     reg         s_reg;
@@ -94,8 +95,6 @@ module jtag_tap_gowin #(
 
     assign jtag_in_jtck = { jtck_jtck, jtdi_jtck, jshift_capture_jtck, jupdate_jtck, jce_jtck };
 
-    assign debug = jtag_in_jtck;
-
     dff_reg_sync #(
         .pREG_LEN       ($size(jtag_in)),
         .pSYNC_STAGES   (2)
@@ -128,7 +127,8 @@ module jtag_tap_gowin #(
     always @(posedge sysclk) begin
         if (jtck_en == 1'b1) begin
             // defaults
-            jupdate_d1 <= jupdate;
+            jupdate_d1          <= jupdate;
+            jshift_capture_d1   <= jshift_capture;
 
             if (jshift_capture == 1'b1) begin
                 jhold_reg <= 1'b1;
@@ -140,7 +140,7 @@ module jtag_tap_gowin #(
 
     always @(posedge sysclk) begin
         if (jtck_en == 1'b1) begin
-            if (jshift_capture == 1'b1) begin
+            if (jshift_capture_d1 == 1'b1) begin
                 if (jce[0] == 1'b1) begin
                     s_reg <= 1'b0;
                 end
@@ -160,7 +160,8 @@ module jtag_tap_gowin #(
         out_en_reg <= jtck_en;
 
         if (jtck_en == 1'b1) begin
-            jtag_in_reg <= jtag_in[4:0];
+            jtag_in_reg             <= jtag_in[4:0];
+            jshift_capture_reg_d1   <= jshift_capture_reg;
         end
     end
 
@@ -172,16 +173,18 @@ module jtag_tap_gowin #(
 
     always_comb begin
         // defaults
-        capture = 0;
-        shift   = 0;
-        update  = 0;
-        sel     = 0;
+        capture     = 0;
+        shift_out   = 0;
+        shift_in    = 0;
+        update      = 0;
+        sel         = 0;
 
         if (out_en_reg == 1'b1) begin
             for (int i = 0; i < 2; i++) begin
-                capture[i]  = jce_reg[i] & (~jshift_capture_reg) & (~jhold_reg);
+                capture[i]      = jce_reg[i] & (~jshift_capture_reg) & (~jhold_reg);
 
-                shift[i]    = jce_reg[i] & jshift_capture_reg;
+                shift_out[i]    = jce_reg[i] & jshift_capture_reg;
+                shift_in[i]     = jce_reg[i] & jshift_capture_reg_d1;
             end
 
             update[0]   = jupdate_reg & ~s_reg;

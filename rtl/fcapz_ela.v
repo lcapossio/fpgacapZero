@@ -45,8 +45,6 @@ module fcapz_ela #(
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1     // 0=disable slow USER1 DATA window readback
 ) (
-    output reg  [5:0]                       debug,
-
     input  wire                              sample_clk,
     input  wire                              sample_rst,
     input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : NUM_CHANNELS*SAMPLE_W)-1:0] probe_in,
@@ -1514,11 +1512,9 @@ module fcapz_ela #(
         end
     endfunction
 
-    assign debug = jtag_addr[5:0];
-
     always @(*) begin
         // defaults
-        jtag_rdata_mux = jtag_addr;
+        jtag_rdata_mux = 0;
         seq_rd_stage = 0;
         seq_rd_off = 0;
 
@@ -1531,7 +1527,7 @@ module fcapz_ela #(
             // Hosts must verify VERSION[15:0] equals the LA magic before
             // trusting any other ELA register on this chain.
             ADDR_VERSION:     jtag_rdata_mux = `FCAPZ_ELA_VERSION_REG;
-/*            ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
+            ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
             ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, done, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata_mux = SAMPLE_W;
             ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
@@ -1582,7 +1578,7 @@ module fcapz_ela #(
                         default: jtag_rdata_mux = 32'h0;
                     endcase
                 end
-            end*/
+            end
         endcase
     end
 

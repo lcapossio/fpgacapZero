@@ -54,8 +54,6 @@ module fcapz_ela_gowin #(
     input  wire [EIO_IN_W-1:0]              eio_probe_in,
     output wire [EIO_OUT_W-1:0]             eio_probe_out,
 
-    output reg  [5:0]                       debug,
-
     input  wire                             tms_pad_i,
     input  wire                             tck_pad_i,
     input  wire                             tdi_pad_i,
@@ -64,7 +62,8 @@ module fcapz_ela_gowin #(
 
     // TAP signals
     wire tap_tdi;
-    wire [1:0] tap_tdo, tap_capture, tap_shift, tap_update, tap_sel;
+    wire [1:0] tap_tdo, tap_capture, tap_update, tap_sel;
+    wire [1:0] tap_shift_in, tap_shift_out;
 
     // Register bus
     wire        jtag_clk, jtag_rst;
@@ -91,11 +90,10 @@ module fcapz_ela_gowin #(
         .tdi            (tap_tdi),
         .tdo            (tap_tdo),
         .capture        (tap_capture),
-        .shift          (tap_shift),
+        .shift_in       (tap_shift_in),
+        .shift_out      (tap_shift_out),
         .update         (tap_update),
         .sel            (tap_sel),
-
-        .debug          (debug),
 
         .tms_pad_i      (tms_pad_i),
         .tck_pad_i      (tck_pad_i),
@@ -112,23 +110,24 @@ module fcapz_ela_gowin #(
 
     // ---- Register interface ----
     jtag_reg_iface u_reg (
-        .arst       (jtag_rst_ctrl),
+        .arst           (jtag_rst_ctrl),
 
-        .tck        (sysclk),
-        .tdi        (tap_tdi),
-        .tdo        (tap_tdo[0]),
-        .capture    (tap_capture[0]),
-        .shift_en   (tap_shift[0]),
-        .update     (tap_update[0]),
-        .sel        (tap_sel[0]),
+        .tck            (sysclk),
+        .tdi            (tap_tdi),
+        .tdo            (tap_tdo[0]),
+        .capture        (tap_capture[0]),
+        .shift_in_en    (tap_shift_in[0]),
+        .shift_out_en   (tap_shift_out[0]),
+        .update         (tap_update[0]),
+        .sel            (tap_sel[0]),
 
-        .reg_clk    (jtag_clk),
-        .reg_rst    (jtag_rst),
-        .reg_wr_en  (jtag_wr_en),
-        .reg_rd_en  (jtag_rd_en),
-        .reg_addr   (jtag_addr),
-        .reg_wdata  (jtag_wdata),
-        .reg_rdata  (jtag_rdata)
+        .reg_clk        (jtag_clk),
+        .reg_rst        (jtag_rst),
+        .reg_wr_en      (jtag_wr_en),
+        .reg_rd_en      (jtag_rd_en),
+        .reg_addr       (jtag_addr),
+        .reg_wdata      (jtag_wdata),
+        .reg_rdata      (jtag_rdata)
     );
 
     // ---- ELA + optional EIO via address mux ----
@@ -196,7 +195,6 @@ module fcapz_ela_gowin #(
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
                 .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
-                .debug(),
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in), .trigger_in(1'b0),
                 .trigger_out(ela_trigger_out_unused),

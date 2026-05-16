@@ -120,8 +120,6 @@ localparam int DEPTH                = 512;
             // NOTE: external trigger ports
             // tie off if not used
 
-        .debug          (i_leds),
-
         .tms_pad_i      (tms_pad_i),
         .tck_pad_i      (tck_pad_i),
         .tdi_pad_i      (tdi_pad_i),
@@ -207,7 +205,7 @@ localparam int DEPTH                = 512;
     // NOTE: Leds
     // ------------
 
-/*    always @(posedge i_sysclk) begin
+    always @(posedge i_sysclk) begin
         if (i_second_tick == 1'b1) begin
             i_leds[0] <= ~i_leds[0];
         end
@@ -224,8 +222,8 @@ localparam int DEPTH                = 512;
         if (i_sysclk_resetn == 1'b0) begin
             i_leds <= 0;
         end
-    end*/
-    assign pad_leds_n = i_leds;
+    end
+    assign pad_leds_n = ~i_leds;
         // NOTE:
         //          led[4]: TODO
         //          led[3]: TODO
