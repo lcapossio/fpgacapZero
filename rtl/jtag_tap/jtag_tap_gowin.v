@@ -8,71 +8,193 @@
 //
 // Gowin devices expose user logic through one GW_JTAG primitive per design.
 // That primitive provides two user DR chains (ER1/ER2, selected by IR
-// 0x42/0x43 on the devices checked so far).  CHAIN selects which ER this
-// wrapper instance routes, but do not instantiate multiple standalone Gowin
-// fcapz wrappers in the same design unless you refactor them to share one
-// GW_JTAG instance.
+// 0x42/0x43 on the devices checked so far).
 
 module jtag_tap_gowin #(
-    parameter CHAIN = 1
 ) (
-    output wire tck,
-    output wire tdi,
-    input  wire tdo,
-    output wire capture,
-    output wire shift,
-    output wire update,
-    output wire sel
+    input               sysclk,
+
+    output reg          tdi,
+    input  reg  [1:0]   tdo,
+    output reg  [1:0]   capture,
+    output reg  [1:0]   shift_in,
+    output reg  [1:0]   shift_out,
+    output reg  [1:0]   update,
+    output reg  [1:0]   sel,
+
+    input  wire         tms_pad_i,
+    input  wire         tck_pad_i,
+    input  wire         tdi_pad_i,
+    output wire         tdo_pad_o
 );
 
-    wire jtck, jtdi;
-    wire jreset;
-    wire jrti1, jrti2;
-    wire jshift_capture, jupdate;
-    wire jpause;
-    wire jce1, jce2;
+    // jtck domain
+    // -------------
 
-    generate
-        if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
-            // Synthesis/iverilog trip on the unresolved module; Verilator
-            // evaluates the initial $error path during --lint-only.
-`ifndef VERILATOR
-            __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ u_invalid_chain();
-`endif
-            initial begin
-                $error("jtag_tap_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
-                $finish;
-            end
-        end
-    endgenerate
+    wire        jtck_jtck;
+    wire        jtdi_jtck;
+    wire        jshift_capture_jtck;
+    wire        jupdate_jtck;
+    wire [1:0]  jce_jtck;
+    wire [5:0]  jtag_in_jtck;
+
+
+    // sysclk domain
+    // -------------
+
+    wire [5:0]  jtag_in;
+    wire        jtck;
+    wire        jtdi;
+    wire        jshift_capture;
+    reg         jshift_capture_d1;
+    wire        jupdate;
+    wire [1:0]  jce;
+    reg         jtck_d1;
+    reg         jupdate_d1;
+    wire        jtck_en;
+
+    reg [4:0]   jtag_in_reg;
+    reg         jtdi_reg;
+    reg         jshift_capture_reg;
+    reg         jshift_capture_reg_d1;
+    reg         jupdate_reg;
+    reg [1:0]   jce_reg;
+    reg         s_reg;
+    reg         jhold_reg;
+    reg         out_en_reg;
+
+
+    // NOTE: GoWIN
+    // JTAG TAP
+    // -------------
 
     GW_JTAG u_jtag (
-        .tck_o                (jtck),
-        .tdi_o                (jtdi),
-        .test_logic_reset_o   (jreset),
-        .run_test_idle_er1_o  (jrti1),
-        .run_test_idle_er2_o  (jrti2),
-        .shift_dr_capture_dr_o(jshift_capture),
-        .pause_dr_o           (jpause),
-        .update_dr_o          (jupdate),
-        .enable_er1_o         (jce1),
-        .enable_er2_o         (jce2),
-        .tdo_er1_i            ((CHAIN == 1) ? tdo : 1'b0),
-        .tdo_er2_i            ((CHAIN == 2) ? tdo : 1'b0)
+        .tck_pad_i              (tck_pad_i),
+        .tms_pad_i              (tms_pad_i),
+        .tdi_pad_i              (tdi_pad_i),
+        .tdo_pad_o              (tdo_pad_o),
+
+        .tck_o                  (jtck_jtck),
+        .tdi_o                  (jtdi_jtck),
+        .test_logic_reset_o     (),
+        .run_test_idle_er1_o    (),
+        .run_test_idle_er2_o    (),
+        .shift_dr_capture_dr_o  (jshift_capture_jtck),
+        .pause_dr_o             (),
+        .update_dr_o            (jupdate_jtck),
+        .enable_er1_o           (jce_jtck[0]),
+        .enable_er2_o           (jce_jtck[1]),
+        .tdo_er1_i              (tdo[0]),
+        .tdo_er2_i              (tdo[1])
     );
 
-    assign tck     = jtck;
-    assign tdi     = jtdi;
-    assign shift   = jshift_capture & ~jpause;
-    assign update  = jupdate;
-    assign sel     = (CHAIN == 1) ? jce1 : jce2;
 
-    // GW_JTAG combines CAPTURE-DR and SHIFT-DR into one pulse/level, so
-    // derive the one-cycle capture strobe from the selected chain enable
-    // rising edge.  Gate PAUSE-DR out so a pause/resume sequence cannot
-    // look like a fresh CAPTURE-DR to the register interface.
-    reg sel_prev;
-    always @(posedge jtck) sel_prev <= sel;
-    assign capture = sel & ~sel_prev & jshift_capture & ~jpause;
+    // NOTE: synchronize *_jtck
+    // signals to 'sysclk' domain
+    // ----------------------------
+
+    assign jtag_in_jtck = { jtck_jtck, jtdi_jtck, jshift_capture_jtck, jupdate_jtck, jce_jtck };
+
+    dff_reg_sync #(
+        .pREG_LEN       ($size(jtag_in)),
+        .pSYNC_STAGES   (2)
+    ) jtag_in_sync_i (
+        .clk            (sysclk),
+        .srst           (1'b0),
+        .syncreg        (jtag_in),
+
+        .asyncreg       (jtag_in_jtck)
+    );
+
+    assign { jtck, jtdi, jshift_capture, jupdate, jce } = jtag_in;
+
+
+    // NOTE: derive
+    // 'jtck_en' strobe
+    // ------------------
+
+    always @(posedge sysclk) begin
+        jtck_d1 <= jtck;
+    end
+
+    assign jtck_en = jtck_d1 & ~jtck;
+
+
+    // NOTE: derive
+    // jhold / s regs
+    // ----------------
+
+    always @(posedge sysclk) begin
+        if (jtck_en == 1'b1) begin
+            // defaults
+            jupdate_d1          <= jupdate;
+            jshift_capture_d1   <= jshift_capture;
+
+            if (jshift_capture == 1'b1) begin
+                jhold_reg <= 1'b1;
+            end else if ((jupdate == 1'b0) && (jupdate_d1 == 1'b1)) begin
+                jhold_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge sysclk) begin
+        if (jtck_en == 1'b1) begin
+            if (jshift_capture_d1 == 1'b1) begin
+                if (jce[0] == 1'b1) begin
+                    s_reg <= 1'b0;
+                end
+                if (jce[1] == 1'b1) begin
+                    s_reg <= 1'b1;
+                end
+            end
+        end
+    end
+
+
+    // NOTE: capture 'jtag_in_reg'
+    // to align with jhold / s regs
+    // -----------------------------
+
+    always @(posedge sysclk) begin
+        out_en_reg <= jtck_en;
+
+        if (jtck_en == 1'b1) begin
+            jtag_in_reg             <= jtag_in[4:0];
+            jshift_capture_reg_d1   <= jshift_capture_reg;
+        end
+    end
+
+    assign { jtdi_reg, jshift_capture_reg, jupdate_reg, jce_reg } = jtag_in_reg;
+
+
+    // NOTE: output
+    // ----------------
+
+    always_comb begin
+        // defaults
+        capture     = 0;
+        shift_out   = 0;
+        shift_in    = 0;
+        update      = 0;
+        sel         = 0;
+
+        if (out_en_reg == 1'b1) begin
+            for (int i = 0; i < 2; i++) begin
+                capture[i]      = jce_reg[i] & (~jshift_capture_reg) & (~jhold_reg);
+
+                shift_out[i]    = jce_reg[i] & jshift_capture_reg;
+                shift_in[i]     = jce_reg[i] & jshift_capture_reg_d1;
+            end
+
+            update[0]   = jupdate_reg & ~s_reg;
+            update[1]   = jupdate_reg & s_reg;
+
+            sel[0]      = jce_reg[0];
+            sel[1]      = jce_reg[1];
+        end
+    end
+
+    assign tdi = jtdi_reg;
 
 endmodule

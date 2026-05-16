@@ -765,6 +765,7 @@ class Analyzer:
             compare_caps = int(vals[8])
         else:
             _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+
             version = int(_vread(_ADDR_VERSION))
             sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
             depth = int(self.transport.read_reg(_ADDR_DEPTH))
