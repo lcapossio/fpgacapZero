@@ -250,7 +250,13 @@ PARITY_MARKERS = (
 # The extractor intentionally compares scalar summaries, not multi-line tables.
 def run_cmd(cmd: list[str], label: str) -> tuple[bool, str]:
     print(f"[hdl-parity] {label}: {' '.join(cmd)}", flush=True)
-    result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    result = subprocess.run(
+        cmd,
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode != 0:
