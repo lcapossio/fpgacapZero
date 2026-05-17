@@ -147,7 +147,7 @@ class LockCheckingTransport(FakeTransport):
         return _TrackedTransaction(self)
 
     def _record_if_unlocked(self, op: str, addr: int) -> None:
-        if addr < 0xF000 and self._lock_depth == 0:
+        if self._lock_depth == 0:
             self.unlocked_ops.append((op, addr))
 
     def read_reg(self, addr: int) -> int:
@@ -156,6 +156,7 @@ class LockCheckingTransport(FakeTransport):
 
     def write_reg(self, addr: int, value: int) -> None:
         if addr == 0xF008:
+            self._record_if_unlocked("write", addr)
             self.manager_writes.append(int(value))
         else:
             self._record_if_unlocked("write", addr)
