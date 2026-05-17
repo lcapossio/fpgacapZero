@@ -89,7 +89,11 @@ class EioController:
     def _select_instance(self) -> None:
         self._select_chain()
         if self._instance is not None:
-            self._t.write_reg(_ADDR_MGR_ACTIVE, self._instance)
+            self._t.select_manager_instance_cached(
+                self._chain,
+                _ADDR_MGR_ACTIVE,
+                self._instance,
+            )
 
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
@@ -107,6 +111,7 @@ class EioController:
         with self._t.transaction_lock():
             self._select_chain()
             self._t.connect()
+            self._t.invalidate_manager_instance_cache()
             self._select_instance()
             version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
             core_id = version & 0xFFFF

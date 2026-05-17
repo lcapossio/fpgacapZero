@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -243,6 +244,16 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
     return list(range(n))
 
 
+def _selected_transaction(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.transport.transaction_lock():
+            self._select_instance()
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Analyzer:
     def __init__(
         self,
@@ -277,9 +288,14 @@ class Analyzer:
                 raise
 
     def _select_instance(self) -> None:
-        self._select_chain()
-        if self._instance is not None:
-            self.transport.write_reg(_ADDR_MGR_ACTIVE, self._instance)
+        with self.transport.transaction_lock():
+            self._select_chain()
+            if self._instance is not None:
+                self.transport.select_manager_instance_cached(
+                    self._chain,
+                    _ADDR_MGR_ACTIVE,
+                    self._instance,
+                )
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -287,14 +303,17 @@ class Analyzer:
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
         behavior for bitstreams without a manager.
         """
-        self._instance = None if instance is None else int(instance)
-        self._manager_slot_caps = None
-        self._select_instance()
+        with self.transport.transaction_lock():
+            self._instance = None if instance is None else int(instance)
+            self._manager_slot_caps = None
+            self._select_instance()
 
     def connect(self) -> None:
-        self._select_chain()
-        self.transport.connect()
-        self._select_instance()
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.connect()
+            self.transport.invalidate_manager_instance_cache()
+            self._select_instance()
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -305,6 +324,7 @@ class Analyzer:
                 return
         self.transport.close()
 
+    @_selected_transaction
     def reset(self) -> None:
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
@@ -329,6 +349,7 @@ class Analyzer:
                     raise ValueError(f"probe '{probe.name}' overlaps another probe")
                 occupied.add(bit)
 
+    @_selected_transaction
     def configure(self, config: CaptureConfig) -> None:
         self._select_instance()
         if config.pretrigger < 0 or config.posttrigger < 0:
@@ -428,6 +449,7 @@ class Analyzer:
 
         self._config = config
 
+    @_selected_transaction
     def immediate_variant(self, base: CaptureConfig) -> CaptureConfig:
         """Return a config that commits the trigger as soon as pretrigger is ready.
 
@@ -459,21 +481,24 @@ class Analyzer:
         )
         return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
 
+    @_selected_transaction
     def arm(self) -> None:
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
-        self._select_instance()
         deadline = time.monotonic() + timeout
         read_status = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         while time.monotonic() < deadline:
-            status = read_status(_ADDR_STATUS)
+            with self.transport.transaction_lock():
+                self._select_instance()
+                status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
         return False
 
+    @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
         self._select_instance()
@@ -513,14 +538,16 @@ class Analyzer:
 
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""
-        if self._instance is None:
-            return True
-        if self._manager_slot_caps is None:
-            self._select_chain()
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
-            self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
-        return bool(self._manager_slot_caps & 0x1)
+        with self.transport.transaction_lock():
+            if self._instance is None:
+                return True
+            if self._manager_slot_caps is None:
+                self._select_chain()
+                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
+                self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
+            return bool(self._manager_slot_caps & 0x1)
 
+    @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
@@ -528,36 +555,37 @@ class Analyzer:
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
-        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
             raise TimeoutError("capture did not complete within timeout")
 
-        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        status = read_reg(_ADDR_STATUS)
-        fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-        reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
-        if 0 < reported_total <= self._config.depth:
-            total = reported_total
-        else:
-            total = fallback_total
-        sw = self._config.sample_width
-        words_per_sample = (sw + 31) // 32
-        raw = self._read_data_words(total * words_per_sample)
-        mask = (1 << sw) - 1
-        if words_per_sample == 1:
-            samples = [v & mask for v in raw]
-        else:
-            # Wide samples: reassemble from 32-bit chunks.
-            samples = []
-            for i in range(0, len(raw), words_per_sample):
-                val = 0
-                for j in range(min(words_per_sample, len(raw) - i)):
-                    val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
-                samples.append(val & mask)
+        with self.transport.transaction_lock():
+            self._select_instance()
+            read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            status = read_reg(_ADDR_STATUS)
+            fallback_total = self._config.pretrigger + self._config.posttrigger + 1
+            reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
+            if 0 < reported_total <= self._config.depth:
+                total = reported_total
+            else:
+                total = fallback_total
+            sw = self._config.sample_width
+            words_per_sample = (sw + 31) // 32
+            raw = self._read_data_words(total * words_per_sample)
+            mask = (1 << sw) - 1
+            if words_per_sample == 1:
+                samples = [v & mask for v in raw]
+            else:
+                # Wide samples: reassemble from 32-bit chunks.
+                samples = []
+                for i in range(0, len(raw), words_per_sample):
+                    val = 0
+                    for j in range(min(words_per_sample, len(raw) - i)):
+                        val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
+                    samples.append(val & mask)
 
-        timestamps = self._read_timestamps(total)
+            timestamps = self._read_timestamps(total)
 
         return CaptureResult(
             config=self._config,
@@ -572,6 +600,7 @@ class Analyzer:
         """Wait until all segments have completed capture."""
         return self.wait_done(timeout, poll_interval)
 
+    @_selected_transaction
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
         """Read back data from a specific segment after all segments are done."""
         self._select_instance()
@@ -747,6 +776,7 @@ class Analyzer:
             yield result
             yielded += 1
 
+    @_selected_transaction
     def _read_ela_probe_registers_raw(
         self,
     ) -> tuple[int, int, int, int, int, int, int, int, int]:
@@ -889,41 +919,48 @@ class CoreManager:
 
     def probe(self) -> Dict:
         """Read manager identity and slot count."""
-        self._select_chain()
-        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = int(read(_ADDR_MGR_VERSION))
-        core_id = version & 0xFFFF
-        if core_id != _CORE_MANAGER_CORE_ID:
-            raise RuntimeError(
-                f"core manager identity check failed at VERSION[15:0]: "
-                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
-            )
-        caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
-        info = {
-            "version_major": (version >> 24) & 0xFF,
-            "version_minor": (version >> 16) & 0xFF,
-            "core_id": core_id,
-            "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
-            "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
-            "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
-            "capabilities": caps,
-        }
-        return info
+        with self.transport.transaction_lock():
+            self._select_chain()
+            read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            version = int(read(_ADDR_MGR_VERSION))
+            core_id = version & 0xFFFF
+            if core_id != _CORE_MANAGER_CORE_ID:
+                raise RuntimeError(
+                    f"core manager identity check failed at VERSION[15:0]: "
+                    f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
+                    f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
+                )
+            caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
+            info = {
+                "version_major": (version >> 24) & 0xFF,
+                "version_minor": (version >> 16) & 0xFF,
+                "core_id": core_id,
+                "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
+                "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
+                "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
+                "capabilities": caps,
+            }
+            return info
 
     def slot_info(self, instance: int) -> Dict:
         """Return descriptor info for one slot when the manager supports it."""
-        self._select_chain()
-        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
-        return {
-            "instance": int(instance),
-            "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-            "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
-        }
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+            return {
+                "instance": int(instance),
+                "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
+                "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+            }
 
     def select_raw(self, instance: int) -> None:
-        self._select_chain()
-        self.transport.write_reg(_ADDR_MGR_ACTIVE, int(instance))
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.select_manager_instance_cached(
+                self._chain,
+                _ADDR_MGR_ACTIVE,
+                int(instance),
+            )
 
     def select(self, instance: int) -> Analyzer:
         """Select *instance* and return an Analyzer bound to that slot."""

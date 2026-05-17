@@ -150,6 +150,29 @@ class Transport(ABC):
             self.__dict__["_fcapz_transaction_lock"] = lock
         return lock
 
+    def select_manager_instance_cached(
+        self,
+        chain: int,
+        active_addr: int,
+        instance: int,
+    ) -> None:
+        """Write a core-manager active slot only when the transport changed.
+
+        The active manager slot is a sticky hardware register.  Host controllers
+        sharing one transport use this cache under :meth:`transaction_lock` to
+        avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
+        agree on which slot was last selected.
+        """
+        key = (int(chain), int(instance))
+        if self.__dict__.get("_fcapz_manager_active_cache") == key:
+            return
+        self.write_reg(active_addr, int(instance))
+        self.__dict__["_fcapz_manager_active_cache"] = key
+
+    def invalidate_manager_instance_cache(self) -> None:
+        """Forget the cached core-manager active slot selection."""
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
+
     @abstractmethod
     def connect(self) -> None:
         """Open the transport connection.
