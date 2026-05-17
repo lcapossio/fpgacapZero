@@ -104,15 +104,15 @@ safety policy first.
 
 The branch's live RPC layer supports:
 
-| Backend | Connection fields | Options |
+| Backend | Target fields | Optional fields |
 | --- | --- | --- |
-| `hw_server` | `host`, `port`, `tap`, optional `program` | `single_chain_burst` defaults to `true` |
+| `hw_server` | `host`, `port`, `tap` | `program`, `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap` | - |
 
 The MCP layer also validates and forwards newer backend-specific fields for
 compatibility with transports on adjacent branches:
 
-| Backend | Connection fields | Options |
+| Backend | Target fields | Optional fields |
 | --- | --- | --- |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
 | `spi` | `spi_url` | `spi_frequency`, `spi_cs`, `spi_timeout` |
@@ -137,11 +137,13 @@ refuses new hardware commands until the process is restarted.
 | `fcapz_connect` | none for plain connect; `--allow-program` if `program=` is set | Connect to an ELA core. |
 | `fcapz_close` | always available | Close the active ELA connection. Idempotent. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
-| `fcapz_configure` | capture enabled; blocked by `--read-only` | Configure the connected ELA without arming. |
-| `fcapz_arm` | capture enabled; blocked by `--read-only` | Arm the connected ELA using the current hardware configuration. |
-| `fcapz_capture` | capture enabled; blocked by `--read-only` | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
+| `fcapz_configure` | capture* | Configure the connected ELA without arming. |
+| `fcapz_arm` | capture* | Arm the connected ELA using the current hardware configuration. |
+| `fcapz_capture` | capture* | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without MCP resource support. Can be large. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
+
+`capture*` tools are enabled by default and blocked by `--read-only`.
 
 `fcapz_capture` takes `include_event_summary` to ask the RPC layer for decoded
 event metadata. The MCP name is deliberately more explicit than the RPC field
@@ -213,7 +215,7 @@ UTF-8 text. Passing both is rejected.
 
 | Resource | Updated by | Payload |
 | --- | --- | --- |
-| `fcapz://status` | always available | Same information as `fcapz_status`. |
+| `fcapz://status` | session lifecycle; live snapshot on each fetch | Same information as `fcapz_status`. |
 | `fcapz://last-probe` | `fcapz_probe` | Last ELA probe result, or `{"available":false}`. |
 | `fcapz://last-capture` | `fcapz_capture` | Last full capture response, or `{"available":false}`. |
 | `fcapz://last-eio-read` | `fcapz_eio_read` | Last EIO read response, or `{"available":false}`. |
@@ -239,7 +241,8 @@ Agents should check these fields if they depend on exact response shapes.
 Patch-version changes should be backward compatible; major-version or RPC schema
 changes should be treated as protocol changes until the agent has been updated
 or explicitly tested against that server. Before 1.0, minor-version bumps may
-also include protocol changes.
+also include protocol changes. As of this chapter update, fpgacapZero is in the
+`0.x` series (`0.4.0`).
 
 ## Example Flows
 
