@@ -449,6 +449,7 @@ module fcapz_ela_tb;
 
         jtag_read(16'h001C, cap_len);
         check($sformatf("CAPTURE_LEN = %0d (expect 6)", cap_len), cap_len == 6);
+        $display("PARITY_VALUE_CAPTURE status=0x%08x cap=0x%08x", status, cap_len);
 
         $display("  Captured samples:");
         for (i = 0; i < 6; i++) begin
@@ -595,6 +596,7 @@ module fcapz_ela_tb;
         check("DECIM=3: done", status[2] == 1'b1);
         jtag_read(16'h001C, cap_len);
         check($sformatf("DECIM=3: CAPTURE_LEN=%0d (expect 4)", cap_len), cap_len == 4);
+        $display("PARITY_DECIM3_CAPTURE status=0x%08x cap=0x%08x", status, cap_len);
 
         // ---- Test 11: Ext trigger disabled ---------------------------------
         $display("\n=== Test 11: Ext trigger disabled ===");
@@ -655,6 +657,7 @@ module fcapz_ela_tb;
         jtag_read(16'h0008, status);
         check("Ext OR: done", status[2] == 1'b1);
         check("Ext OR: triggered", status[1] == 1'b1);
+        $display("PARITY_EXT_OR status=0x%08x", status);
 
         // ---- Test 13: Ext trigger AND mode ---------------------------------
         $display("\n=== Test 13: Ext trigger AND mode ===");
@@ -944,6 +947,7 @@ module fcapz_ela_tb;
         jtag_read_pmux(16'h0100, sample_word);
         check($sformatf("Probe mux slice 2: first sample=0xFF (got 0x%02x)", sample_word[7:0]),
               sample_word[7:0] == 8'hFF);
+        $display("PARITY_PROBE_MUX_SLICE2 status=0x%08x data=0x%08x", status, sample_word);
 
         // ---- Test 22: PROBE_SEL register round-trip -------------------------
         $display("\n=== Test 22: PROBE_SEL register round-trip ===");
@@ -1027,6 +1031,8 @@ module fcapz_ela_tb;
         check($sformatf("Delay=4: trig sample = 12 (got 0x%02x)",
               sample_word[7:0]),
               sample_word[SAMPLE_W-1:0] == 8'd12);
+        $display("PARITY_DELAY4_CAPTURE status=0x%08x cap=0x%08x trig=0x%08x",
+                 status, cap_len, sample_word);
         jtag_read(16'h0100 + 0*4, sample_word);
         check($sformatf("Delay=4: pre[0] = 10 (got 0x%02x)",
               sample_word[7:0]),

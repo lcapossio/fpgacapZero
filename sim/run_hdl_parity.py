@@ -242,7 +242,14 @@ def check_static_parity() -> bool:
     return True
 
 
-PARITY_MARKERS = ("PARITY_SEG_HOLDOFF_REWRITE",)
+PARITY_MARKERS = (
+    "PARITY_VALUE_CAPTURE",
+    "PARITY_DECIM3_CAPTURE",
+    "PARITY_EXT_OR",
+    "PARITY_SEG_HOLDOFF_REWRITE",
+    "PARITY_PROBE_MUX_SLICE2",
+    "PARITY_DELAY4_CAPTURE",
+)
 
 
 def run_cmd(cmd: list[str], label: str) -> tuple[bool, str]:

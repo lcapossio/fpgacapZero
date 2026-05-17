@@ -431,6 +431,8 @@ begin
         check("Value capture: triggered", status(1) = '1');
         read_default(x"001C", cap_len);
         check("Value capture: CAPTURE_LEN=6", cap_len = x"00000006");
+        report "PARITY_VALUE_CAPTURE status=0x" & to_hstring(status) &
+               " cap=0x" & to_hstring(cap_len);
 
         report "=== Test 3: Edge trigger ===";
         write_default(x"0004", x"00000002");
@@ -467,6 +469,8 @@ begin
         check("DECIM=3: done", status(2) = '1');
         read_default(x"001C", cap_len);
         check("DECIM=3: CAPTURE_LEN=4", cap_len = x"00000004");
+        report "PARITY_DECIM3_CAPTURE status=0x" & to_hstring(status) &
+               " cap=0x" & to_hstring(cap_len);
 
         write_default(x"0004", x"00000002");
         for i in 0 to 8 loop wait until rising_edge(sample_clk); end loop;
@@ -486,6 +490,7 @@ begin
         for i in 0 to 80 loop wait until rising_edge(sample_clk); end loop;
         read_default(x"0008", status);
         check("External OR: done", status(2) = '1');
+        report "PARITY_EXT_OR status=0x" & to_hstring(status);
 
         report "=== Test 5: Timestamp capture ===";
         read_ts(x"003C", word);
@@ -553,6 +558,8 @@ begin
         check("Probe mux slice 2: done", status(2) = '1');
         read_pmux(x"0100", word);
         check("Probe mux first sample is 0xFF", word(7 downto 0) = x"FF");
+        report "PARITY_PROBE_MUX_SLICE2 status=0x" & to_hstring(status) &
+               " data=0x" & to_hstring(word);
 
         report "=== Test 8: Trigger delay and startup/holdoff ===";
         write_default(x"0004", x"00000002");
@@ -572,8 +579,11 @@ begin
         for i in 0 to 100 loop wait until rising_edge(sample_clk); end loop;
         read_default(x"0008", status);
         check("Delay=4: done", status(2) = '1');
+        read_default(x"001C", cap_len);
         read_default(x"0108", word);
         check("Delay=4: trigger sample is 12", word(7 downto 0) = x"0C");
+        report "PARITY_DELAY4_CAPTURE status=0x" & to_hstring(status) &
+               " cap=0x" & to_hstring(cap_len) & " trig=0x" & to_hstring(word);
         write_default(x"00D4", x"00000000");
 
         write_default(x"00D8", x"00000001");
