@@ -6,8 +6,9 @@
 
 Verilog is the development source for the portable EIO/ELA cores.  This script
 is the CI gate for the VHDL port: it checks that public generics/parameters and
-register address constants remain aligned, then runs the matching Verilog and
-VHDL regression benches in one job.
+register address constants remain aligned, then runs the Verilog and VHDL
+regression benches in one job.  The Verilog run covers parity and Verilog-only
+testbenches; marker comparison is applied to the translated cores.
 """
 
 from __future__ import annotations
@@ -108,15 +109,6 @@ CORES = (
         ),
     ),
 )
-
-
-VERILOG_PARITY_TESTS = (
-    "fcapz_eio",
-    "fcapz_ela",
-    "fcapz_ela_bug_probe",
-    "fcapz_ela_config_matrix",
-)
-VHDL_PARITY_TESTS = ("fcapz_eio", "fcapz_ela")
 
 
 def strip_comments(text: str) -> str:
@@ -300,12 +292,12 @@ def compare_sim_markers(verilog_output: str, vhdl_output: str) -> bool:
 
 def run_sim_parity() -> bool:
     verilog_ok, verilog_output = run_cmd(
-        [sys.executable, "sim/run_sim.py", *VERILOG_PARITY_TESTS],
-        "source Verilog regressions",
+        [sys.executable, "sim/run_sim.py", "--skip-lint"],
+        "all source Verilog regressions",
     )
     vhdl_ok, vhdl_output = run_cmd(
-        [sys.executable, "sim/run_vhdl_sim.py", *VHDL_PARITY_TESTS],
-        "translated VHDL regressions",
+        [sys.executable, "sim/run_vhdl_sim.py"],
+        "all translated VHDL regressions",
     )
     ok = verilog_ok and vhdl_ok
     if ok:
