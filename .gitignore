@@ -23,6 +23,8 @@ packages/
 # Simulation artifacts
 sim/*.vvp
 sim/*.vcd
+sim/ghdl/
+*.cf
 
 # OS
 .DS_Store

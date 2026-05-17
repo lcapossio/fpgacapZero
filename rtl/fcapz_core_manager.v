@@ -48,7 +48,6 @@ module fcapz_core_manager #(
 );
 
     localparam IDX_W = (NUM_SLOTS <= 2) ? 1 : $clog2(NUM_SLOTS);
-    localparam [IDX_W:0] NUM_SLOTS_LIMIT = NUM_SLOTS;
     localparam PTR_W = $clog2(DEPTH);
     localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     localparam [15:0] MANAGER_CORE_ID = 16'h434D; // ASCII "CM"
@@ -68,6 +67,7 @@ module fcapz_core_manager #(
     reg [IDX_W-1:0] desc_idx;
 
     wire manager_hit = (jtag_addr[15:8] == 8'hF0);
+    wire requested_idx_valid = (jtag_wdata < NUM_SLOTS);
     wire [NUM_SLOTS-1:0] active_onehot = {{(NUM_SLOTS-1){1'b0}}, 1'b1} << active_idx;
 
     integer i;
@@ -77,10 +77,10 @@ module fcapz_core_manager #(
             desc_idx <= {IDX_W{1'b0}};
         end else if (jtag_wr_en) begin
             if (jtag_addr == ADDR_MGR_ACTIVE) begin
-                if ({1'b0, jtag_wdata[IDX_W-1:0]} < NUM_SLOTS_LIMIT)
+                if (requested_idx_valid)
                     active_idx <= jtag_wdata[IDX_W-1:0];
             end else if (jtag_addr == ADDR_MGR_DESC_INDEX) begin
-                if ({1'b0, jtag_wdata[IDX_W-1:0]} < NUM_SLOTS_LIMIT)
+                if (requested_idx_valid)
                     desc_idx <= jtag_wdata[IDX_W-1:0];
             end
         end

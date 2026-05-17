@@ -126,11 +126,21 @@ and readback behavior without switching cores.
 pip install -e ".[dev]"
 pytest tests/ -v
 python sim/run_sim.py
+python sim/run_vhdl_sim.py
+python sim/run_hdl_parity.py
 ```
 
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
 first, then the default simulation regression.  Use
 `python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+`python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
+EIO and ELA cores.
+`python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
+translated core generics and register addresses still match the source Verilog,
+then runs the paired Verilog and VHDL regressions in one job. Matching
+testbench scenarios should emit one-line `PARITY_*` markers with scalar
+`key=value` fields so the gate can compare observed behavior. Keep marker data
+on the same line; summarize tables or sample streams into stable scalar fields.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator driver lint for issues such as
 one register assigned from two always blocks.
@@ -508,7 +518,23 @@ fcapz_ela_ecp5 #(
 );
 ```
 
-VHDL wrappers are also provided in `rtl/vhdl/`.
+VHDL sources are kept under `rtl/vhdl/`: shared packages in `pkg/`, translated
+cores in `core/`, and vendor wrappers in the wrapper files as they are added.
+The current VHDL regression covers EIO and ELA with GHDL:
+
+```bash
+python sim/run_vhdl_sim.py
+```
+
+The Arty A7 VHDL reference build is mixed-language: the ELA and EIO cores are
+VHDL, while the existing Xilinx TAP wrappers, EJTAG-AXI bridge, AXI test slave,
+and top-level glue remain Verilog. Vivado handles that flow directly:
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+This produces `examples/arty_a7/arty_a7_top_vhdl.bit`.
 
 ### LiteX integration
 
@@ -695,8 +721,13 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
 | `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
+| `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
+| `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
+The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
+VHDL reference bitstream, build `examples/arty_a7/arty_a7_top_vhdl.bit` and set
+`FPGACAP_BITFILE` plus `FPGACAP_BITSTREAM_VARIANT=vhdl`.
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 Those board-level checks now require every adjacent Arty counter sample to
@@ -716,9 +747,21 @@ waveforms together.
 
 ```bash
 vivado -mode batch -source examples/arty_a7/build_arty.tcl
+# or use the Python wrapper
+python examples/arty_a7/build.py
 ```
 
 Produces `examples/arty_a7/arty_a7_top.bit`.
+
+### Mixed-language VHDL Arty build (Vivado)
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+Produces `examples/arty_a7/arty_a7_top_vhdl.bit`. This build uses the translated
+VHDL ELA and EIO cores together with the existing Verilog wrappers and bridge
+cores.
 
 ### Simulation (Icarus Verilog)
 
@@ -738,6 +781,30 @@ a full-project Verilog RTL matrix and stricter procedural-driver checks; its
 self-test must fail a deliberately bad multi-driver fixture before the job is
 considered valid.
 
+### Simulation (GHDL VHDL)
+
+```bash
+python sim/run_vhdl_sim.py
+```
+
+Runs the VHDL EIO and ELA testbenches. The VHDL ELA testbench includes capture,
+edge trigger, decimation, external trigger, timestamps, segmented capture, probe
+mux, startup arm, trigger holdoff, `INPUT_PIPE=1`, storage qualification,
+sequencer, relational compare, and dual compare coverage.
+
+When changing the source Verilog for a translated core, run:
+
+```bash
+python sim/run_hdl_parity.py
+```
+
+This is the CI parity gate for the VHDL port. It fails if EIO/ELA public
+generics or register address constants diverge between Verilog and VHDL, then
+runs the Verilog source regressions and translated VHDL regressions back to back.
+For behavior shared by both benches, emit one-line `PARITY_*` markers using
+stable `key=value` summaries. The parity gate compares those observed marker
+payloads exactly, so avoid multi-line marker payloads.
+
 ### Tests
 
 ```bash
@@ -746,6 +813,16 @@ python -m pytest tests/ -v
 
 # Hardware integration tests (requires Arty A7 + hw_server + built bitstream)
 python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# Same hardware integration suite against the mixed-language VHDL Arty bitstream
+FPGACAP_BITFILE=examples/arty_a7/arty_a7_top_vhdl.bit \
+FPGACAP_BITSTREAM_VARIANT=vhdl \
+python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# PowerShell equivalent
+$env:FPGACAP_BITFILE='examples/arty_a7/arty_a7_top_vhdl.bit'
+$env:FPGACAP_BITSTREAM_VARIANT='vhdl'
+python -m pytest examples\arty_a7\test_hw_integration.py -v
 
 # Force-skip hardware integration tests (e.g. laptop without board)
 FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -783,10 +860,18 @@ fpgacapZero/
     jtag_tap/
       jtag_tap_*.v           Vendor TAP primitive adapters
     vhdl/
-      fcapz_ela_*.vhd        VHDL ELA wrappers
-      fcapz_eio_*.vhd        VHDL EIO wrappers
+      pkg/                   VHDL packages and shared helpers
+      core/
+        fcapz_dpram.vhd      VHDL block-RAM inference helper
+        fcapz_ela.vhd        VHDL ELA core
+        fcapz_eio.vhd        VHDL EIO core
+      fcapz_ela_*.vhd        VHDL ELA vendor wrappers
+      fcapz_eio_*.vhd        VHDL EIO vendor wrappers
   tb/
     *_tb.sv, *_tb.v          RTL simulations and focused regressions
+    vhdl/
+      fcapz_ela_tb.vhd       VHDL ELA regression
+      fcapz_eio_tb.vhd       VHDL EIO regression
     fcapz_ela_config_matrix_tb.sv
                              ELA parameter/configuration matrix
     fcapz_ela_xilinx7_single_chain_tb.sv
@@ -808,8 +893,12 @@ fpgacapZero/
     gui/                     PySide6 desktop GUI modules and assets
   examples/arty_a7/
     arty_a7_top.v            Reference design top-level
+    arty_a7_top.vhd          Mixed-language VHDL-core reference top-level
     arty_a7.xdc              Pin constraints
     build_arty.tcl           Vivado batch build
+    build_arty_vhdl.tcl      Vivado mixed-language VHDL-core batch build
+    build.py                 Python wrapper for Verilog reference build
+    build_vhdl.py            Python wrapper for VHDL reference build
     arty_a7*.cfg             OpenOCD configs
     test_hw_integration.py   Hardware integration tests
   tests/

@@ -136,6 +136,43 @@ class Transport(ABC):
       during :meth:`connect`.
     """
 
+    def transaction_lock(self) -> threading.RLock:
+        """Return the shared host-side lock for multi-register transactions.
+
+        Analyzer and EIO controllers can share one physical JTAG transport while
+        selecting different core-manager slots.  This lock serializes those
+        higher-level register sequences so one controller cannot switch
+        ``MGR_ACTIVE`` between another controller's read/modify/write halves.
+        """
+        lock = self.__dict__.get("_fcapz_transaction_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self.__dict__["_fcapz_transaction_lock"] = lock
+        return lock
+
+    def select_manager_instance_cached(
+        self,
+        chain: int,
+        active_addr: int,
+        instance: int,
+    ) -> None:
+        """Write a core-manager active slot only when the transport changed.
+
+        The active manager slot is a sticky hardware register.  Host controllers
+        sharing one transport use this cache under :meth:`transaction_lock` to
+        avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
+        agree on which slot was last selected.
+        """
+        key = (int(chain), int(instance))
+        if self.__dict__.get("_fcapz_manager_active_cache") == key:
+            return
+        self.write_reg(active_addr, int(instance))
+        self.__dict__["_fcapz_manager_active_cache"] = key
+
+    def invalidate_manager_instance_cache(self) -> None:
+        """Forget the cached core-manager active slot selection."""
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
+
     @abstractmethod
     def connect(self) -> None:
         """Open the transport connection.

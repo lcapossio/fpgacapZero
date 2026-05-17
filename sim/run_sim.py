@@ -7,6 +7,7 @@
 Usage:
     python sim/run_sim.py            # run RTL lint + all testbenches
     python sim/run_sim.py --lint-only
+    python sim/run_sim.py --skip-lint
     python sim/run_sim.py fcapz_ela   # run specific testbench
     python sim/run_sim.py fcapz_eio
 """
@@ -159,6 +160,9 @@ LINT_TARGETS = [
     # Heterogeneous managed ELA/EIO wrapper shape: per-slot widths, depths,
     # timestamps, clocks, and EIO widths.
     SIM / "lint_debug_multi_hetero_xilinx7.v",
+    # EIO-only manager shape catches NUM_ELAS=0 elaboration and zero-width
+    # replication issues.
+    SIM / "lint_debug_multi_eio_only_xilinx7.v",
 ]
 
 LINT_STUBS = [
@@ -237,10 +241,19 @@ def main() -> None:
         action="store_true",
         help="run iverilog -Wall RTL elaboration lint and skip simulations",
     )
+    parser.add_argument(
+        "--skip-lint",
+        action="store_true",
+        help="skip iverilog -Wall RTL elaboration lint before simulations",
+    )
     args = parser.parse_args()
 
-    if not run_rtl_lint():
-        sys.exit(1)
+    if args.lint_only and args.skip_lint:
+        parser.error("--lint-only and --skip-lint are mutually exclusive")
+
+    if not args.skip_lint:
+        if not run_rtl_lint():
+            sys.exit(1)
     if args.lint_only:
         print(f"\n{'='*60}")
         print(f"RTL lint passed for {len(LINT_TARGETS)} target(s).")

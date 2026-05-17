@@ -13,17 +13,16 @@ concurrency:
 
 jobs:
   # ── 0. Version sync guard ──────────────────────────────────────────
-  # Catches the "I bumped VERSION but forgot to regenerate
-  # rtl/fcapz_version.vh" foot-gun before any other job wastes minutes.
+  # Catches stale generated HDL constants before any other job wastes minutes.
   version-sync:
-    name: VERSION ↔ rtl/fcapz_version.vh in sync
+    name: VERSION and HDL constants in sync
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Verify fcapz_version.vh is regenerated from VERSION
+      - name: Verify HDL version constants are regenerated from VERSION
         run: python tools/sync_version.py --check
 
   # ── 1. Python lint ────────────────────────────────────────────────
@@ -126,16 +125,18 @@ jobs:
       - name: Run Verilator lint and MULTIDRIVEN self-test
         run: python sim/run_verilator_lint.py --self-test
 
-  # -- 6. RTL simulation (iverilog + vvp) ---------------------------
-  sim:
-    name: RTL simulation (iverilog + vvp)
+  # -- 6. Verilog/VHDL simulation and parity gate ----------------------------
+  hdl-parity:
+    name: HDL simulation + parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install iverilog
-        run: sudo apt-get install -y iverilog
+      - name: Install HDL simulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog ghdl
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run all RTL testbenches
-        run: python sim/run_sim.py
+      - name: Run full HDL regressions and parity checks
+        run: python sim/run_hdl_parity.py

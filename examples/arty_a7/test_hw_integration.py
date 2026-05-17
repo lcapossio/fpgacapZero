@@ -44,7 +44,10 @@ from pathlib import Path
 # Skip the entire module if HW_SKIP env var is set
 _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
 
-BITFILE = str(Path(__file__).resolve().parent / "arty_a7_top.bit")
+_EXAMPLE_DIR = Path(__file__).resolve().parent
+_BITFILE_ENV = os.environ.get("FPGACAP_BITFILE")
+BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / "arty_a7_top.bit")
+_BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").lower()
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
@@ -60,7 +63,7 @@ ELA1_SAMPLE_CLOCK_HZ = 130_000_000
 _ROOT = Path(__file__).resolve().parents[2]
 
 # RTL and design sources that feed the bitstream (must match build_arty.tcl)
-_BITSTREAM_SOURCES = [
+_BITSTREAM_SOURCES_VERILOG = [
     _ROOT / "rtl" / "fcapz_version.vh",
     _ROOT / "rtl" / "reset_sync.v",
     _ROOT / "rtl" / "dpram.v",
@@ -79,9 +82,38 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_eio.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "tb" / "axi4_test_slave.v",
-    Path(__file__).resolve().parent / "arty_a7_top.v",
-    Path(__file__).resolve().parent / "arty_a7.xdc",
+    _EXAMPLE_DIR / "arty_a7_top.v",
+    _EXAMPLE_DIR / "arty_a7.xdc",
 ]
+
+_BITSTREAM_SOURCES_VHDL = [
+    _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+    _ROOT / "rtl" / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_dpram.vhd",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_ela.vhd",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_eio.vhd",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
+    _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_pipe_iface.v",
+    _ROOT / "rtl" / "jtag_burst_read.v",
+    _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_async_fifo.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "tb" / "axi4_test_slave.v",
+    _EXAMPLE_DIR / "arty_a7_top.vhd",
+    _EXAMPLE_DIR / "arty_a7.xdc",
+]
+
+_BITSTREAM_SOURCES = (
+    _BITSTREAM_SOURCES_VHDL
+    if _BITSTREAM_VARIANT == "vhdl"
+    else _BITSTREAM_SOURCES_VERILOG
+)
 
 
 def _check_bitstream_freshness() -> str | None:
@@ -95,10 +127,15 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime:
             stale.append(src.name)
     if stale:
+        build_cmd = (
+            "python examples/arty_a7/build_vhdl.py"
+            if _BITSTREAM_VARIANT == "vhdl"
+            else "python examples/arty_a7/build.py"
+        )
         return (
             f"bitstream is stale — these sources are newer than "
             f"{bitpath.name}: {', '.join(stale)}. "
-            f"Re-run: python examples/arty_a7/build.py"
+            f"Re-run: {build_cmd}"
         )
     return None
 
