@@ -252,6 +252,10 @@ PARITY_MARKERS = (
 )
 
 
+# Parity markers are a testbench convention for observed Verilog/VHDL behavior.
+# Keep each marker on one line as:
+#   PARITY_NAME key=value key=value
+# The extractor intentionally compares scalar summaries, not multi-line tables.
 def run_cmd(cmd: list[str], label: str) -> tuple[bool, str]:
     print(f"[hdl-parity] {label}: {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

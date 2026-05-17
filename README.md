@@ -137,7 +137,10 @@ first, then the default simulation regression.  Use
 EIO and ELA cores.
 `python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
 translated core generics and register addresses still match the source Verilog,
-then runs the paired Verilog and VHDL regressions in one job.
+then runs the paired Verilog and VHDL regressions in one job. Matching
+testbench scenarios should emit one-line `PARITY_*` markers with scalar
+`key=value` fields so the gate can compare observed behavior. Keep marker data
+on the same line; summarize tables or sample streams into stable scalar fields.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator driver lint for issues such as
 one register assigned from two always blocks.
@@ -798,6 +801,9 @@ python sim/run_hdl_parity.py
 This is the CI parity gate for the VHDL port. It fails if EIO/ELA public
 generics or register address constants diverge between Verilog and VHDL, then
 runs the Verilog source regressions and translated VHDL regressions back to back.
+For behavior shared by both benches, emit one-line `PARITY_*` markers using
+stable `key=value` summaries. The parity gate compares those observed marker
+payloads exactly, so avoid multi-line marker payloads.
 
 ### Tests
 
