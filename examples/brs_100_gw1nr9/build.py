@@ -181,13 +181,15 @@ def load_linux_dependencies(gowin: str):
     if not lib_path.exists():
         raise RuntimeError(f"{str(lib_path)} doesn't exist - check GoWIN IDE install")
 
-    libfreetype_path = Path(f"/lib/x86_64-linux-gnu/libfreetype.so")
+    libfreetype_path = Path("/lib/x86_64-linux-gnu/libfreetype.so")
     if not libfreetype_path.exists():
-        raise RuntimeError(f"Unable to find '{str(libfreetype_path)}' - is 'libfreetype6-dev' installed?")
+        s = str(libfreetype_path)
+        raise RuntimeError(f"Unable to find '{s}', is 'libfreetype6-dev' installed?")
 
-    libz_path = Path(f"/lib/x86_64-linux-gnu/libz.so.1")
+    libz_path = Path("/lib/x86_64-linux-gnu/libz.so.1")
     if not libz_path.exists():
-        raise RuntimeError(f"Unable to find '{str(libz_path)}' - is 'zlib1g' / 'zlib1g-dev' installed?")
+        s = str(libz_path)
+        raise RuntimeError(f"Unable to find '{s}', is 'zlib1g' / 'zlib1g-dev' installed?")
 
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = lib_path
