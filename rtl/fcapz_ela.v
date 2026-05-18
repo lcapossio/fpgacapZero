@@ -148,7 +148,7 @@ module fcapz_ela #(
             SAMPLE_W_must_be_at_most_256 _sample_w_check_FAILED();
     endgenerate
 
-    localparam PTR_W = $clog2(DEPTH);
+    localparam PTR_W = $clog2(DEPTH+1);
     // Used by the single-segment pre-arm rolling buffer. Keep this explicit
     // instead of slicing DEPTH, because power-of-two DEPTH would truncate to 0.
     localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
@@ -1513,7 +1513,11 @@ module fcapz_ela #(
     endfunction
 
     always @(*) begin
-        jtag_rdata_mux = 32'h0;
+        // defaults
+        jtag_rdata_mux = 0;
+        seq_rd_stage = 0;
+        seq_rd_off = 0;
+
         case (jtag_addr)
             // VERSION layout (defined in rtl/fcapz_version.vh, generated
             // from the repo-root VERSION file by tools/sync_version.py):
@@ -1560,6 +1564,7 @@ module fcapz_ela #(
             ADDR_TRIG_DELAY:  jtag_rdata_mux = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
+
             default: begin
                 if (seq_addr_hit) begin
                     seq_rd_stage = seq_rd_stage_w;
