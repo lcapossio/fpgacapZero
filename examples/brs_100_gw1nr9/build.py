@@ -256,10 +256,11 @@ def main() -> int:
 
     if sys.platform == "linux":
         env = load_linux_dependencies(gowin)
+        cmd = [ f"{gowin}/IDE/bin/{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
     elif sys.platform == "win32":
         env = load_windows_dependencies(gowin)
+        cmd = [ f"{gowin}\\IDE\\bin\\{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
 
-    cmd = [ f"{gowin}/IDE/bin/{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
     try:
         result = subprocess.run(cmd, env=env, check=False)
     except FileNotFoundError as exc:
