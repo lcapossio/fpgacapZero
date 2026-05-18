@@ -14,6 +14,8 @@ module jtag_tap_gowin #(
 ) (
     input               sysclk,
 
+    output              activity,
+
     output reg          tdi,
     input  reg  [1:0]   tdo,
     output reg  [1:0]   capture,
@@ -195,6 +197,8 @@ module jtag_tap_gowin #(
         end
     end
 
-    assign tdi = jtdi_reg;
+    assign tdi      = jtdi_reg;
+
+    assign activity = out_en_reg;
 
 endmodule

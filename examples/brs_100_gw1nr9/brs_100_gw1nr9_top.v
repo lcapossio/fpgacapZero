@@ -113,6 +113,7 @@ localparam int DEPTH                = 512;
         .sysclk         (i_sysclk),
             // TODO: different clock for demonstration
             // purposes...
+        .jtag_activity  (i_jtag_activity),
 
         .sample_clk     (i_sysclk),
         .sample_rst     (i_sysclk_reset),
@@ -214,12 +215,12 @@ localparam int DEPTH                = 512;
         end
 
         if (i_jtag_activity == 1'b1) begin
-            // TODO
+            // NOTE: <TODO - not proper CDC>
 
             i_leds[1] <= 1'b1;
         end
 
-        if (|i_millisecond_counter[6:0] == 1'b1) begin
+        if (|i_millisecond_counter[6:0] == 1'b0) begin
             i_leds[5:1] <= 0;
         end
         if (i_sysclk_resetn == 1'b0) begin

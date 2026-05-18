@@ -47,6 +47,8 @@ module fcapz_ela_gowin #(
     input  wire                             sysclk,
         // NOTE: <TODO>
 
+    output wire                             jtag_activity,
+
     input  wire                             sample_clk,
     input  wire                             sample_rst,
     input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
@@ -86,6 +88,8 @@ module fcapz_ela_gowin #(
     // ---- TAP wrapper ----
     jtag_tap_gowin u_tap_ctrl (
         .sysclk         (sysclk),
+
+        .activity       (jtag_activity),
 
         .tdi            (tap_tdi),
         .tdo            (tap_tdo),
