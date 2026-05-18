@@ -5,13 +5,13 @@
 
 module dff_sync #(
     parameter pSYNC_STAGES    = 2,
-        // NOTE: minimum 1
+        // NOTE: minimum 2; this is the total number of sync flops.
     parameter pSYNC_DEFAULT   = 1'b0
 ) (
     // ------ 'clk' synchronous ------
     input       clk,
     input       srst,
-    output reg  sync,
+    output wire sync,
 
     // ------ asynchronous ------
     input       async
@@ -21,23 +21,27 @@ module dff_sync #(
     //  Internal signals
     // ----------------------------------------------
 
-    logic [pSYNC_STAGES-1:0] i_sync_stages = {(pSYNC_STAGES){pSYNC_DEFAULT}};
+    generate
+        if (pSYNC_STAGES < 2) begin : g_invalid_sync_stages
+`ifndef VERILATOR
+            __FCAPZ_DFF_SYNC_REQUIRES_AT_LEAST_TWO_STAGES__ invalid();
+`endif
+            initial begin
+                $error("dff_sync: pSYNC_STAGES must be >= 2");
+                $finish;
+            end
+        end
+    endgenerate
 
+    reg [pSYNC_STAGES-1:0] sync_stages;
 
-    // ----------------------------------------------
-    //  Synchronization
-    // ----------------------------------------------
+    assign sync = sync_stages[pSYNC_STAGES-1];
 
-    always@(posedge clk) begin
+    always @(posedge clk) begin
         if (srst == 1'b1) begin
-            i_sync_stages   <= {(pSYNC_STAGES){pSYNC_DEFAULT}};
-            sync            <= pSYNC_DEFAULT;
-
+            sync_stages <= {pSYNC_STAGES{pSYNC_DEFAULT}};
         end else begin
-            i_sync_stages       <= i_sync_stages << 1;
-            i_sync_stages[0]    <= async;
-
-            sync                <= i_sync_stages[$bits(i_sync_stages)-1];
+            sync_stages <= {sync_stages[pSYNC_STAGES-2:0], async};
         end
     end
 
