@@ -52,6 +52,8 @@ set verilog_files [list \
     $repo_path/rtl/fcapz_ejtagaxi.v \
     $repo_path/rtl/fcapz_eio.v \
     $repo_path/rtl/fcapz_eio_gowin.v \
+    $repo_path/rtl/dff_sync.v \
+    $repo_path/rtl/dff_reg_sync.v \
     \
     $repo_path/rtl/gowin/gw_jtag.v \
     \
@@ -59,15 +61,6 @@ set verilog_files [list \
 ]
 
 foreach src $verilog_files {
-    add_file -type verilog $src
-}
-
-set systemverilog_files [list \
-    $repo_path/rtl/dff_sync.v \
-    $repo_path/rtl/dff_reg_sync.v
-]
-
-foreach src $systemverilog_files {
     add_file -type verilog $src
 }
 
