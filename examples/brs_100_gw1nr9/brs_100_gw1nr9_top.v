@@ -20,7 +20,7 @@ module brs_100_gw1nr9_top #()
 localparam int CLK_FREQUENCY_MHZ    = 51;
 localparam int CLK_FREQUENCY_HZ     = CLK_FREQUENCY_MHZ * 1000000;
 localparam int SAMPLE_W             = 8;
-localparam int CHANNELS             = 2;
+localparam int CHANNELS             = 6;
 localparam int DEPTH                = 64;
 
 
@@ -30,6 +30,7 @@ localparam int DEPTH                = 64;
 
     reg [5:0]                       i_leds;
     reg [1:0]                       i_buttons;
+    reg [32-1:0]                    i_pad;
 
     reg                             i_sysclk;
     reg                             i_sysclk_resetn = 1'b0;
@@ -44,7 +45,7 @@ localparam int DEPTH                = 64;
     reg [9:0]                       i_millisecond_counter;
 
     reg [SAMPLE_W-1:0]              i_counter;
-    reg [(SAMPLE_W*CHANNELS)-1:-0]  i_probe;
+    reg [(SAMPLE_W*CHANNELS)-1:0]   i_probe;
 
 
     // JTAG Clock
@@ -68,15 +69,17 @@ localparam int DEPTH                = 64;
 
     always @(posedge i_sysclk) begin
         if (i_sysclk_resetn == 1'b0) begin
-            i_counter <= 0;
-            i_buttons <= 0;
+            i_counter   <= 0;
+            i_buttons   <= 0;
+            i_pad       <= 0;
         end else begin
-            i_counter <= i_counter + 1'b1;
-            i_buttons <= ~pad_user_buttons_n;
+            i_counter   <= i_counter + 1'b1;
+            i_buttons   <= ~pad_user_buttons_n;
+            i_pad       <= pad_io[32:1];
         end
     end
 
-    assign i_probe = { 6'b000000, i_buttons, i_counter};
+    assign i_probe = { i_pad, 6'b000000, i_buttons, i_counter};
 
     fcapz_ela_gowin #(
         .SAMPLE_W       (SAMPLE_W),
@@ -225,19 +228,22 @@ localparam int DEPTH                = 64;
 
             i_leds[1] <= 1'b1;
         end
-
-        i_leds[3:2] <= i_buttons[1:0];
-
         if (|i_millisecond_counter[6:0] == 1'b0) begin
             i_leds[1] <= 0;
         end
+
+        i_leds[3:2] <= i_buttons[1:0];
+        i_leds[4]   <= i_pad[0];
+        i_leds[5]   <= i_pad[1];
+
         if (i_sysclk_resetn == 1'b0) begin
             i_leds <= 0;
         end
     end
     assign pad_leds_n = ~i_leds;
         // NOTE:
-        //          led[4]: TODO
+        //          led[5]: i_pad[1]
+        //          led[4]: i_pad[0]
         //          led[3]: i_buttons[1]
         //          led[2]: i_buttons[0]
         //          led[1]: JTAG Activity
