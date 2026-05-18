@@ -44,8 +44,10 @@ module fcapz_ela_gowin #(
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
 ) (
-    input  wire                             sysclk,
-        // NOTE: <TODO>
+    input  wire                             clk,
+        // NOTE: this clock must be
+        // at least ~10x the JTAG TCK
+        // (~2 MHz for BR-100-GW1NR9)
 
     output wire                             jtag_activity,
 
@@ -87,7 +89,7 @@ module fcapz_ela_gowin #(
 
     // ---- TAP wrapper ----
     jtag_tap_gowin u_tap_ctrl (
-        .sysclk         (sysclk),
+        .sysclk         (clk),
 
         .activity       (jtag_activity),
 
@@ -107,7 +109,7 @@ module fcapz_ela_gowin #(
 
 
     reset_sync u_rst_sync_ctrl (
-        .clk            (sysclk),
+        .clk            (clk),
         .arst           (sample_rst),
         .srst           (jtag_rst_ctrl)
     );
@@ -116,7 +118,7 @@ module fcapz_ela_gowin #(
     jtag_reg_iface_gowin u_reg (
         .arst           (jtag_rst_ctrl),
 
-        .tck            (sysclk),
+        .tck            (clk),
         .tdi            (tap_tdi),
         .tdo            (tap_tdo[0]),
         .capture        (tap_capture[0]),

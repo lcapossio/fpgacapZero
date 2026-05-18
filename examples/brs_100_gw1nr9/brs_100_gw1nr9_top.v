@@ -88,8 +88,10 @@ localparam int DEPTH                = 64;
         .EIO_EN         (0)
     ) u_ela (
         .sysclk         (i_jtagclk),
-            // TODO: different clock for demonstration
-            // purposes...
+            // NOTE: this is a separate clock
+            // only for demonstration purposes...
+            // this clock must be at least ~10x
+            // the JTAG TCK (~2 MHz for BR-100-GW1NR9)
         .jtag_activity  (i_jtag_activity_jtagclk),
 
         .sample_clk     (i_sysclk),
@@ -224,7 +226,8 @@ localparam int DEPTH                = 64;
         end
 
         if (i_jtag_activity_jtagclk == 1'b1) begin
-            // NOTE: <TODO - not proper CDC>
+            // NOTE: this isn't proper CDC...
+            // fit for demonstration only.
 
             i_leds[1] <= 1'b1;
         end
