@@ -22,47 +22,6 @@ localparam int CLK_FREQUENCY_HZ     = CLK_FREQUENCY_MHZ * 1000000;
 localparam int SAMPLE_W             = 8;
 localparam int DEPTH                = 512;
 
-    // ----------------------------------------------
-    //  Constants
-    // ----------------------------------------------
-
-    wire    c_vcc;
-    wire    c_gnd;
-
-    assign  c_vcc = 1'b1;
-    assign  c_gnd = 1'b0;
-
-
-    // ----------------------------------------------
-    //  Definitions
-    // ----------------------------------------------
-
-    defparam rpll_51mhz_inst.FCLKIN             = "27";
-    defparam rpll_51mhz_inst.DYN_IDIV_SEL       = "false";
-
-    defparam rpll_51mhz_inst.IDIV_SEL           = 8;
-    defparam rpll_51mhz_inst.FBDIV_SEL          = 16;
-    defparam rpll_51mhz_inst.ODIV_SEL           = 8;
-        // NOTE: 51 Mhz
-
-    defparam rpll_51mhz_inst.DYN_FBDIV_SEL      = "false";
-    defparam rpll_51mhz_inst.DYN_ODIV_SEL       = "false";
-    defparam rpll_51mhz_inst.PSDA_SEL           = "0100";
-    defparam rpll_51mhz_inst.DYN_DA_EN          = "false";
-    defparam rpll_51mhz_inst.DUTYDA_SEL         = "1000";
-    defparam rpll_51mhz_inst.CLKOUT_FT_DIR      = 1'b1;
-    defparam rpll_51mhz_inst.CLKOUTP_FT_DIR     = 1'b1;
-    defparam rpll_51mhz_inst.CLKOUT_DLY_STEP    = 0;
-    defparam rpll_51mhz_inst.CLKOUTP_DLY_STEP   = 0;
-    defparam rpll_51mhz_inst.CLKFB_SEL          = "internal";
-    defparam rpll_51mhz_inst.CLKOUT_BYPASS      = "false";
-    defparam rpll_51mhz_inst.CLKOUTP_BYPASS     = "false";
-    defparam rpll_51mhz_inst.CLKOUTD_BYPASS     = "false";
-    defparam rpll_51mhz_inst.DYN_SDIV_SEL       = 2;
-    defparam rpll_51mhz_inst.CLKOUTD_SRC        = "CLKOUT";
-    defparam rpll_51mhz_inst.CLKOUTD3_SRC       = "CLKOUT";
-    defparam rpll_51mhz_inst.DEVICE             = "GW1NR-9C";
-
 
     // ----------------------------------------------
     //  Internal signals
@@ -82,10 +41,17 @@ localparam int DEPTH                = 512;
     reg     [19:0]      i_millisecond_div_counter;
     reg     [9:0]       i_millisecond_counter;
 
-    reg                 i_jtag_activity;
-
     reg [SAMPLE_W-1:0]  i_counter;
 
+
+    // JTAG Clock
+    // -----------
+
+    reg                 i_jtagclk;
+    reg                 i_jtagclk_resetn = 1'b0;
+    reg                 i_jtagclk_reset;
+
+    reg                 i_jtag_activity_jtagclk;
 
 
     // ----------------------------------------------
@@ -110,10 +76,10 @@ localparam int DEPTH                = 512;
         .DEPTH          (DEPTH),
         .EIO_EN         (0)
     ) u_ela (
-        .sysclk         (i_sysclk),
+        .sysclk         (i_jtagclk),
             // TODO: different clock for demonstration
             // purposes...
-        .jtag_activity  (i_jtag_activity),
+        .jtag_activity  (i_jtag_activity_jtagclk),
 
         .sample_clk     (i_sysclk),
         .sample_rst     (i_sysclk_reset),
@@ -135,26 +101,58 @@ localparam int DEPTH                = 512;
     // NOTE: Clocking
     // ------------
 
-    rPLL rpll_51mhz_inst (
-        .CLKOUT     (i_sysclk),
-        .LOCK       (i_sysclk_resetn),
+    rPLL #(
+        .FCLKIN     ("27"),
+        .IDIV_SEL   (2),
+            // NOTE: PFD = 9 MHz (range: 3-400 MHz)
+        .FBDIV_SEL  (1),
+            // NOTE: CLKOUT = 9 MHz (range: 3.125-500 MHz)
+        .ODIV_SEL   (32)
+            // NOTE: VCO = 432 MHz (range: 400-1000 MHz)
+    ) rpll_18mhz_inst (
+        .CLKIN      (pad_clk_27Mhz),
+        .CLKOUT     (i_jtagclk),
+        .LOCK       (i_jtagclk_resetn),
+
         .CLKOUTP    (),
         .CLKOUTD    (),
         .CLKOUTD3   (),
+        .RESET      (1'b0),
+        .RESET_P    (1'b0),
+        .CLKFB      (1'b0),
+        .FBDSEL     (6'b0),
+        .IDSEL      (6'b0),
+        .ODSEL      (6'b0),
+        .PSDA       (4'b0),
+        .DUTYDA     (4'b0),
+        .FDLY       (4'b0)
+    );
 
-        .RESET      (c_gnd),
-        .RESET_P    (c_gnd),
-
+    rPLL #(
+        .FCLKIN     ("27"),
+        .IDIV_SEL   (8),
+            // NOTE: PFD = 3 MHz (range: 3-400 MHz)
+        .FBDIV_SEL  (19),
+            // NOTE: CLKOUT = 60 MHz (range: 3.125-500 MHz)
+        .ODIV_SEL   (8)
+            // NOTE: VCO = 480 MHz (range: 400-1000 MHz)
+    ) rpll_60mhz_inst (
         .CLKIN      (pad_clk_27Mhz),
+        .CLKOUT     (i_sysclk),
+        .LOCK       (i_sysclk_resetn),
 
-        .CLKFB      (c_gnd),
-
-        .FBDSEL     ({c_gnd,c_gnd,c_gnd,c_gnd,c_gnd,c_gnd}),
-        .IDSEL      ({c_gnd,c_gnd,c_gnd,c_gnd,c_gnd,c_gnd}),
-        .ODSEL      ({c_gnd,c_gnd,c_gnd,c_gnd,c_gnd,c_gnd}),
-        .PSDA       ({c_gnd,c_gnd,c_gnd,c_gnd}),
-        .DUTYDA     ({c_gnd,c_gnd,c_gnd,c_gnd}),
-        .FDLY       ({c_vcc,c_vcc,c_vcc,c_vcc})
+        .CLKOUTP    (),
+        .CLKOUTD    (),
+        .CLKOUTD3   (),
+        .RESET      (1'b0),
+        .RESET_P    (1'b0),
+        .CLKFB      (1'b0),
+        .FBDSEL     (6'b0),
+        .IDSEL      (6'b0),
+        .ODSEL      (6'b0),
+        .PSDA       (4'b0),
+        .DUTYDA     (4'b0),
+        .FDLY       (4'b0)
     );
 
     assign i_sysclk_reset = ~i_sysclk_resetn;
@@ -214,7 +212,7 @@ localparam int DEPTH                = 512;
             i_leds[0] <= ~i_leds[0];
         end
 
-        if (i_jtag_activity == 1'b1) begin
+        if (i_jtag_activity_jtagclk == 1'b1) begin
             // NOTE: <TODO - not proper CDC>
 
             i_leds[1] <= 1'b1;
@@ -232,8 +230,8 @@ localparam int DEPTH                = 512;
         //          led[4]: TODO
         //          led[3]: TODO
         //          led[2]: TODO
-        //          led[1]: TODO
-        //          led[0]: heartbeat
+        //          led[1]: JTAG Activity
+        //          led[0]: Heartbeat
 
 
 
