@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+# Copyright (c) 2026 Craig Haywood - BrisbaneSilicon - <support@brisbanesilicon.com.au>
 
 """Launch a GoWIN batch build of the BRS-100-GW1NR9 reference design.
 
