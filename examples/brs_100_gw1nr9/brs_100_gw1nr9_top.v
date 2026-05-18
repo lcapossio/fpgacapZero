@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Craig Haywood - BrisbaneSilicon - <support@brisbanesilicon.com.au>
+
 `timescale 1ns/1ps
 
 module brs_100_gw1nr9_top #()
@@ -107,6 +110,10 @@ localparam int DEPTH                = 512;
         .DEPTH          (DEPTH),
         .EIO_EN         (0)
     ) u_ela (
+        .sysclk         (i_sysclk),
+            // TODO: different clock for demonstration
+            // purposes...
+
         .sample_clk     (i_sysclk),
         .sample_rst     (i_sysclk_reset),
         .probe_in       (i_counter),
@@ -226,6 +233,7 @@ localparam int DEPTH                = 512;
         //          led[2]: TODO
         //          led[1]: TODO
         //          led[0]: heartbeat
+
 
 
 endmodule

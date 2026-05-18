@@ -44,6 +44,9 @@ module fcapz_ela_gowin #(
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
 ) (
+    input  wire                             sysclk,
+        // NOTE: <TODO>
+
     input  wire                             sample_clk,
     input  wire                             sample_rst,
     input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
@@ -58,8 +61,9 @@ module fcapz_ela_gowin #(
 );
 
     // TAP signals
-    wire tap_tck, tap_tdi;
-    wire [1:0] tap_tdo, tap_capture, tap_shift, tap_update, tap_sel;
+    wire tap_tdi;
+    wire [1:0] tap_tdo, tap_capture, tap_update, tap_sel;
+    wire [1:0] tap_shift_in, tap_shift_out;
 
     // Register bus
     wire        jtag_clk, jtag_rst;
@@ -81,11 +85,13 @@ module fcapz_ela_gowin #(
 
     // ---- TAP wrapper ----
     jtag_tap_gowin u_tap_ctrl (
-        .tck            (tap_tck),
+        .sysclk         (sysclk),
+
         .tdi            (tap_tdi),
         .tdo            (tap_tdo),
         .capture        (tap_capture),
-        .shift          (tap_shift),
+        .shift_in       (tap_shift_in),
+        .shift_out      (tap_shift_out),
         .update         (tap_update),
         .sel            (tap_sel),
 
@@ -95,31 +101,33 @@ module fcapz_ela_gowin #(
         .tdo_pad_o      (tdo_pad_o)
     );
 
+
     reset_sync u_rst_sync_ctrl (
-        .clk    (tap_tck),
-        .arst   (sample_rst),
-        .srst   (jtag_rst_ctrl)
+        .clk            (sysclk),
+        .arst           (sample_rst),
+        .srst           (jtag_rst_ctrl)
     );
 
     // ---- Register interface ----
-    jtag_reg_iface u_reg (
-        .arst       (jtag_rst_ctrl),
+    jtag_reg_iface_gowin u_reg (
+        .arst           (jtag_rst_ctrl),
 
-        .tck        (tap_tck),
-        .tdi        (tap_tdi),
-        .tdo        (tap_tdo[0]),
-        .capture    (tap_capture[0]),
-        .shift_en   (tap_shift[0]),
-        .update     (tap_update[0]),
-        .sel        (tap_sel[0]),
+        .tck            (sysclk),
+        .tdi            (tap_tdi),
+        .tdo            (tap_tdo[0]),
+        .capture        (tap_capture[0]),
+        .shift_in_en    (tap_shift_in[0]),
+        .shift_out_en   (tap_shift_out[0]),
+        .update         (tap_update[0]),
+        .sel            (tap_sel[0]),
 
-        .reg_clk    (jtag_clk),
-        .reg_rst    (jtag_rst),
-        .reg_wr_en  (jtag_wr_en),
-        .reg_rd_en  (jtag_rd_en),
-        .reg_addr   (jtag_addr),
-        .reg_wdata  (jtag_wdata),
-        .reg_rdata  (jtag_rdata)
+        .reg_clk        (jtag_clk),
+        .reg_rst        (jtag_rst),
+        .reg_wr_en      (jtag_wr_en),
+        .reg_rd_en      (jtag_rd_en),
+        .reg_addr       (jtag_addr),
+        .reg_wdata      (jtag_wdata),
+        .reg_rdata      (jtag_rdata)
     );
 
     // ---- ELA + optional EIO via address mux ----
