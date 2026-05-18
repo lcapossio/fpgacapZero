@@ -20,38 +20,41 @@ module brs_100_gw1nr9_top #()
 localparam int CLK_FREQUENCY_MHZ    = 51;
 localparam int CLK_FREQUENCY_HZ     = CLK_FREQUENCY_MHZ * 1000000;
 localparam int SAMPLE_W             = 8;
-localparam int DEPTH                = 512;
+localparam int CHANNELS             = 2;
+localparam int DEPTH                = 64;
 
 
     // ----------------------------------------------
     //  Internal signals
     // ----------------------------------------------
 
-    reg [5:0]           i_leds;
+    reg [5:0]                       i_leds;
+    reg [1:0]                       i_buttons;
 
-    reg                 i_sysclk;
-    reg                 i_sysclk_resetn = 1'b0;
-    reg                 i_sysclk_reset;
+    reg                             i_sysclk;
+    reg                             i_sysclk_resetn = 1'b0;
+    reg                             i_sysclk_reset;
 
-    reg                 i_microsecond_tick;
-    reg                 i_millisecond_tick;
-    reg                 i_second_tick;
+    reg                             i_microsecond_tick;
+    reg                             i_millisecond_tick;
+    reg                             i_second_tick;
 
-    reg     [8:0]       i_microsecond_div_counter;
-    reg     [19:0]      i_millisecond_div_counter;
-    reg     [9:0]       i_millisecond_counter;
+    reg [8:0]                       i_microsecond_div_counter;
+    reg [19:0]                      i_millisecond_div_counter;
+    reg [9:0]                       i_millisecond_counter;
 
-    reg [SAMPLE_W-1:0]  i_counter;
+    reg [SAMPLE_W-1:0]              i_counter;
+    reg [(SAMPLE_W*CHANNELS)-1:-0]  i_probe;
 
 
     // JTAG Clock
     // -----------
 
-    reg                 i_jtagclk;
-    reg                 i_jtagclk_resetn = 1'b0;
-    reg                 i_jtagclk_reset;
+    reg                             i_jtagclk;
+    reg                             i_jtagclk_resetn = 1'b0;
+    reg                             i_jtagclk_reset;
 
-    reg                 i_jtag_activity_jtagclk;
+    reg                             i_jtag_activity_jtagclk;
 
 
     // ----------------------------------------------
@@ -65,15 +68,20 @@ localparam int DEPTH                = 512;
 
     always @(posedge i_sysclk) begin
         if (i_sysclk_resetn == 1'b0) begin
-            i_counter <= {SAMPLE_W{1'b0}};
+            i_counter <= 0;
+            i_buttons <= 0;
         end else begin
             i_counter <= i_counter + 1'b1;
+            i_buttons <= ~pad_user_buttons_n;
         end
     end
+
+    assign i_probe = { 6'b000000, i_buttons, i_counter};
 
     fcapz_ela_gowin #(
         .SAMPLE_W       (SAMPLE_W),
         .DEPTH          (DEPTH),
+        .NUM_CHANNELS   (CHANNELS),
         .EIO_EN         (0)
     ) u_ela (
         .sysclk         (i_jtagclk),
@@ -83,7 +91,7 @@ localparam int DEPTH                = 512;
 
         .sample_clk     (i_sysclk),
         .sample_rst     (i_sysclk_reset),
-        .probe_in       (i_counter),
+        .probe_in       (i_probe),
 
         .eio_probe_in   (0),
         .eio_probe_out  (),
@@ -218,8 +226,10 @@ localparam int DEPTH                = 512;
             i_leds[1] <= 1'b1;
         end
 
+        i_leds[3:2] <= i_buttons[1:0];
+
         if (|i_millisecond_counter[6:0] == 1'b0) begin
-            i_leds[5:1] <= 0;
+            i_leds[1] <= 0;
         end
         if (i_sysclk_resetn == 1'b0) begin
             i_leds <= 0;
@@ -228,8 +238,8 @@ localparam int DEPTH                = 512;
     assign pad_leds_n = ~i_leds;
         // NOTE:
         //          led[4]: TODO
-        //          led[3]: TODO
-        //          led[2]: TODO
+        //          led[3]: i_buttons[1]
+        //          led[2]: i_buttons[0]
         //          led[1]: JTAG Activity
         //          led[0]: Heartbeat
 
