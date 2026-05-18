@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Craig Haywood - BrisbaneSilicon - <support@brisbanesilicon.com.au>
 
-module dff_sync
-#(
-    parameter int   pSYNC_STAGES,
+`timescale 1ns/1ps
+
+module dff_sync #(
+    parameter pSYNC_STAGES    = 2,
         // NOTE: minimum 1
-    parameter logic pSYNC_DEFAULT = 1'b0
-)
-(
+    parameter pSYNC_DEFAULT   = 1'b0
+) (
     // ------ 'clk' synchronous ------
-    input  logic clk,
-    input  logic srst,
-    output logic sync = pSYNC_DEFAULT,
+    input       clk,
+    input       srst,
+    output reg  sync,
 
     // ------ asynchronous ------
-    input  logic async
+    input       async
 );
 
     // ----------------------------------------------
@@ -28,7 +28,7 @@ module dff_sync
     //  Synchronization
     // ----------------------------------------------
 
-    always@(posedge clk) begin : SyncStage
+    always@(posedge clk) begin
         if (srst == 1'b1) begin
             i_sync_stages   <= {(pSYNC_STAGES){pSYNC_DEFAULT}};
             sync            <= pSYNC_DEFAULT;
@@ -39,6 +39,6 @@ module dff_sync
 
             sync                <= i_sync_stages[$bits(i_sync_stages)-1];
         end
-    end : SyncStage
+    end
 
-endmodule : dff_sync
+endmodule

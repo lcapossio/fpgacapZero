@@ -6,6 +6,10 @@
 `timescale 1ns/1ps
 
 module GW_JTAG (
+    input wire tck_pad_i,
+    input wire tms_pad_i,
+    input wire tdi_pad_i,
+    output wire tdo_pad_o,
     output wire tck_o,
     output wire tdi_o,
     output wire test_logic_reset_o,

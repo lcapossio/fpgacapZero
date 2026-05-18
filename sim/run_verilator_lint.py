@@ -94,6 +94,16 @@ TARGETS = (
         sources=(RTL / "dpram.v",),
     ),
     LintTarget(
+        name="dff_sync",
+        top="dff_sync",
+        sources=(RTL / "dff_sync.v",),
+    ),
+    LintTarget(
+        name="dff_reg_sync",
+        top="dff_reg_sync",
+        sources=(RTL / "dff_reg_sync.v",),
+    ),
+    LintTarget(
         name="reset_sync",
         top="reset_sync",
         sources=(RTL / "reset_sync.v",),

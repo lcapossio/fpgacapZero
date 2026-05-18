@@ -38,11 +38,7 @@ module fcapz_eio_gowin #(
     wire [31:0] jtag_wdata, jtag_rdata;
 
     // ---- TAP wrapper ----
-    jtag_tap_gowin #(.CHAIN(CHAIN)) u_tap (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
-        .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
-    );
+    // TODO
 
     // ---- Register interface ----
     jtag_reg_iface u_reg (

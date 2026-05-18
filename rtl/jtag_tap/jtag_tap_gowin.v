@@ -10,14 +10,13 @@
 // That primitive provides two user DR chains (ER1/ER2, selected by IR
 // 0x42/0x43 on the devices checked so far).
 
-module jtag_tap_gowin #(
-) (
+module jtag_tap_gowin (
     input               sysclk,
 
-    output              activity,
+    output wire         activity,
 
-    output reg          tdi,
-    input  reg  [1:0]   tdo,
+    output wire         tdi,
+    input  wire [1:0]   tdo,
     output reg  [1:0]   capture,
     output reg  [1:0]   shift_in,
     output reg  [1:0]   shift_out,
@@ -55,12 +54,12 @@ module jtag_tap_gowin #(
     reg         jupdate_d1;
     wire        jtck_en;
 
-    reg [4:0]   jtag_in_reg;
-    reg         jtdi_reg;
-    reg         jshift_capture_reg;
+    reg  [4:0]  jtag_in_reg;
+    wire        jtdi_reg;
+    wire        jshift_capture_reg;
     reg         jshift_capture_reg_d1;
-    reg         jupdate_reg;
-    reg [1:0]   jce_reg;
+    wire        jupdate_reg;
+    wire [1:0]  jce_reg;
     reg         s_reg;
     reg         jhold_reg;
     reg         out_en_reg;
@@ -98,7 +97,7 @@ module jtag_tap_gowin #(
     assign jtag_in_jtck = { jtck_jtck, jtdi_jtck, jshift_capture_jtck, jupdate_jtck, jce_jtck };
 
     dff_reg_sync #(
-        .pREG_LEN       ($size(jtag_in)),
+        .pREG_LEN       (6),
         .pSYNC_STAGES   (2)
     ) jtag_in_sync_i (
         .clk            (sysclk),
@@ -173,7 +172,8 @@ module jtag_tap_gowin #(
     // NOTE: output
     // ----------------
 
-    always_comb begin
+    integer i;
+    always @(*) begin
         // defaults
         capture     = 0;
         shift_out   = 0;
@@ -182,7 +182,7 @@ module jtag_tap_gowin #(
         sel         = 0;
 
         if (out_en_reg == 1'b1) begin
-            for (int i = 0; i < 2; i++) begin
+            for (i = 0; i < 2; i++) begin
                 capture[i]      = jce_reg[i] & (~jshift_capture_reg) & (~jhold_reg);
 
                 shift_out[i]    = jce_reg[i] & jshift_capture_reg;

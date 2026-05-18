@@ -63,8 +63,8 @@ foreach src $verilog_files {
 }
 
 set systemverilog_files [list \
-    $repo_path/rtl/dff_sync.sv \
-    $repo_path/rtl/dff_reg_sync.sv
+    $repo_path/rtl/dff_sync.v \
+    $repo_path/rtl/dff_reg_sync.v
 ]
 
 foreach src $systemverilog_files {

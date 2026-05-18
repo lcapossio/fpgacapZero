@@ -87,7 +87,7 @@ localparam int DEPTH                = 64;
         .NUM_CHANNELS   (CHANNELS),
         .EIO_EN         (0)
     ) u_ela (
-        .sysclk         (i_jtagclk),
+        .clk            (i_jtagclk),
             // NOTE: this is a separate clock
             // only for demonstration purposes...
             // this clock must be at least ~10x
@@ -251,7 +251,5 @@ localparam int DEPTH                = 64;
         //          led[2]: i_buttons[0]
         //          led[1]: JTAG Activity
         //          led[0]: Heartbeat
-
-
 
 endmodule
