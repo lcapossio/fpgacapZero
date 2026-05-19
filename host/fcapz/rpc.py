@@ -30,15 +30,18 @@ class RpcServer:
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
         self._state_lock = threading.RLock()
+        self._cancel_generation = 0
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
         return {"ok": True, "schema_version": _SCHEMA_VERSION, **payload}
 
     def _ensure_analyzer(self) -> Analyzer:
-        if self._analyzer is None:
+        with self._state_lock:
+            analyzer = self._analyzer
+        if analyzer is None:
             raise RuntimeError("not connected")
-        return self._analyzer
+        return analyzer
 
     @staticmethod
     def _cancel_transport(transport: Transport | None) -> None:
@@ -61,6 +64,7 @@ class RpcServer:
         process or OpenOCD socket behind.
         """
         with self._state_lock:
+            self._cancel_generation += 1
             analyzer, self._analyzer = self._analyzer, None
             eio_transport, self._eio_transport = self._eio_transport, None
             axi_transport, self._axi_transport = self._axi_transport, None
@@ -256,6 +260,8 @@ class RpcServer:
                 old_analyzer, self._analyzer = self._analyzer, None
             if old_analyzer is not None:
                 old_analyzer.close()
+            with self._state_lock:
+                generation = self._cancel_generation
             analyzer = Analyzer(self._build_transport(req))
             with self._state_lock:
                 self._analyzer = analyzer
@@ -266,6 +272,16 @@ class RpcServer:
                     if self._analyzer is analyzer:
                         self._analyzer = None
                 raise
+            with self._state_lock:
+                if generation != self._cancel_generation:
+                    if self._analyzer is analyzer:
+                        self._analyzer = None
+                    cancel_raced = True
+                else:
+                    cancel_raced = False
+            if cancel_raced:
+                analyzer.close(fast=True)
+                raise RuntimeError("connect completed after cancellation")
             return self._ok()
 
         if cmd == "close":
@@ -311,6 +327,8 @@ class RpcServer:
             elif old_transport is not None:
                 old_transport.close()
             chain = int(req.get("chain", 3))
+            with self._state_lock:
+                generation = self._cancel_generation
             transport = self._build_transport(req)
             with self._state_lock:
                 self._eio_transport = transport
@@ -327,8 +345,17 @@ class RpcServer:
                         self._eio_transport = None
                 raise
             with self._state_lock:
-                self._eio = eio
-            return self._ok(in_w=self._eio.in_w, out_w=self._eio.out_w, chain=chain)
+                if generation != self._cancel_generation:
+                    if self._eio_transport is transport:
+                        self._eio_transport = None
+                    cancel_raced = True
+                else:
+                    self._eio = eio
+                    cancel_raced = False
+            if cancel_raced:
+                eio.close()
+                raise RuntimeError("eio_connect completed after cancellation")
+            return self._ok(in_w=eio.in_w, out_w=eio.out_w, chain=chain)
 
         if cmd == "eio_close":
             with self._state_lock:
@@ -339,14 +366,18 @@ class RpcServer:
             return self._ok()
 
         if cmd == "eio_read":
-            if self._eio is None:
+            with self._state_lock:
+                eio = self._eio
+            if eio is None:
                 raise RuntimeError("eio not connected")
-            return self._ok(value=self._eio.read_inputs())
+            return self._ok(value=eio.read_inputs())
 
         if cmd == "eio_write":
-            if self._eio is None:
+            with self._state_lock:
+                eio = self._eio
+            if eio is None:
                 raise RuntimeError("eio not connected")
-            self._eio.write_outputs(int(req["value"]))
+            eio.write_outputs(int(req["value"]))
             return self._ok()
 
         if cmd == "axi_connect":
@@ -364,6 +395,8 @@ class RpcServer:
                 except Exception:
                     pass
             chain = int(req.get("chain", 4))
+            with self._state_lock:
+                generation = self._cancel_generation
             transport = self._build_transport(req)
             ctrl = EjtagAxiController(transport, chain=chain)
             with self._state_lock:
@@ -381,7 +414,16 @@ class RpcServer:
                         self._axi_transport = None
                 raise
             with self._state_lock:
-                self._axi = ctrl
+                if generation != self._cancel_generation:
+                    if self._axi_transport is transport:
+                        self._axi_transport = None
+                    cancel_raced = True
+                else:
+                    self._axi = ctrl
+                    cancel_raced = False
+            if cancel_raced:
+                ctrl.close()
+                raise RuntimeError("axi_connect completed after cancellation")
             return self._ok(**info)
 
         if cmd == "axi_close":
@@ -396,45 +438,53 @@ class RpcServer:
             return self._ok()
 
         if cmd == "axi_read":
-            if self._axi is None:
+            with self._state_lock:
+                axi = self._axi
+            if axi is None:
                 raise RuntimeError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
-            val = self._axi.axi_read(addr)
+            val = axi.axi_read(addr)
             return self._ok(value=f"0x{val:08X}")
 
         if cmd == "axi_write":
-            if self._axi is None:
+            with self._state_lock:
+                axi = self._axi
+            if axi is None:
                 raise RuntimeError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data = int(req["data"], 16) if isinstance(req["data"], str) else int(req["data"])
             wstrb_raw = req.get("wstrb", "0xF")
             wstrb = int(wstrb_raw, 16) if isinstance(wstrb_raw, str) else int(wstrb_raw)
-            resp = self._axi.axi_write(addr, data, wstrb=wstrb)
+            resp = axi.axi_write(addr, data, wstrb=wstrb)
             return self._ok(resp=resp)
 
         if cmd == "axi_write_block":
-            if self._axi is None:
+            with self._state_lock:
+                axi = self._axi
+            if axi is None:
                 raise RuntimeError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data_raw = req["data"]
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
             burst = bool(req.get("burst", False))
             if burst:
-                self._axi.burst_write(addr, data)
+                axi.burst_write(addr, data)
             else:
-                self._axi.write_block(addr, data)
+                axi.write_block(addr, data)
             return self._ok(count=len(data))
 
         if cmd == "axi_dump":
-            if self._axi is None:
+            with self._state_lock:
+                axi = self._axi
+            if axi is None:
                 raise RuntimeError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             count = int(req["count"])
             burst = bool(req.get("burst", False))
             if burst:
-                words = self._axi.burst_read(addr, count)
+                words = axi.burst_read(addr, count)
             else:
-                words = self._axi.read_block(addr, count)
+                words = axi.read_block(addr, count)
             return self._ok(words=[f"0x{w:08X}" for w in words])
 
         if cmd == "uart_connect":
@@ -452,6 +502,8 @@ class RpcServer:
                 except Exception:
                     pass
             chain = int(req.get("chain", 4))
+            with self._state_lock:
+                generation = self._cancel_generation
             transport = self._build_transport(req)
             ctrl = EjtagUartController(transport, chain=chain)
             with self._state_lock:
@@ -468,7 +520,16 @@ class RpcServer:
                         self._uart_transport = None
                 raise
             with self._state_lock:
-                self._uart = ctrl
+                if generation != self._cancel_generation:
+                    if self._uart_transport is transport:
+                        self._uart_transport = None
+                    cancel_raced = True
+                else:
+                    self._uart = ctrl
+                    cancel_raced = False
+            if cancel_raced:
+                ctrl.close()
+                raise RuntimeError("uart_connect completed after cancellation")
             return self._ok(**info)
 
         if cmd == "uart_close":
@@ -483,26 +544,32 @@ class RpcServer:
             return self._ok()
 
         if cmd == "uart_send":
-            if self._uart is None:
+            with self._state_lock:
+                uart = self._uart
+            if uart is None:
                 raise RuntimeError("uart not connected")
             raw = req.get("data", "")
             data = base64.b64decode(raw)
-            self._uart.send(data)
+            uart.send(data)
             return self._ok(bytes_sent=len(data))
 
         if cmd == "uart_recv":
-            if self._uart is None:
+            with self._state_lock:
+                uart = self._uart
+            if uart is None:
                 raise RuntimeError("uart not connected")
             count = int(req.get("count", 0))
             timeout = float(req.get("timeout", 1.0))
-            data = self._uart.recv(count=count, timeout=timeout)
+            data = uart.recv(count=count, timeout=timeout)
             return self._ok(data=base64.b64encode(data).decode("ascii"),
                             bytes_received=len(data))
 
         if cmd == "uart_status":
-            if self._uart is None:
+            with self._state_lock:
+                uart = self._uart
+            if uart is None:
                 raise RuntimeError("uart not connected")
-            return self._ok(**self._uart.status())
+            return self._ok(**uart.status())
 
         raise ValueError(f"unknown cmd: {cmd}")
 

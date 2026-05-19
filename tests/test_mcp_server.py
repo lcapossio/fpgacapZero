@@ -324,6 +324,25 @@ class FcapzMcpSessionTests(unittest.TestCase):
             len(session.last_capture_json_text().encode("utf-8")),
         )
 
+    def test_get_last_capture_chunk_rejects_mid_utf8_offset(self):
+        session = FcapzMcpSession(rpc=UnicodeCaptureRpc())
+
+        session.capture()
+        session.last_capture_json = json.dumps(
+            session.last_capture,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        session.last_capture_json_bytes = session.last_capture_json.encode("utf-8")
+        session.last_capture_size_bytes = len(session.last_capture_json_bytes)
+        payload = session.last_capture_json_text().encode("utf-8")
+        mid_char_offset = next(
+            idx for idx, byte in enumerate(payload) if byte & 0xC0 == 0x80
+        )
+
+        with self.assertRaisesRegex(ValueError, "UTF-8 character boundary"):
+            session.get_last_capture_chunk(offset=mid_char_offset, max_bytes=16)
+
     def test_get_last_capture_chunk_validates_bounds(self):
         session = FcapzMcpSession(rpc=FakeRpc())
         session.capture()
@@ -521,9 +540,16 @@ class FcapzMcpSessionTests(unittest.TestCase):
             main(["--bitfile-root", "."])
         with self.assertRaises(SystemExit):
             main(["--rpc-cancel-grace", "-1"])
+        with self.assertRaises(SystemExit):
+            main(["--rpc-cancel-grace", "0"])
+        with self.assertRaises(SystemExit):
+            main(["--rpc-timeout", "0"])
 
-    def test_parser_accepts_rpc_cancel_grace(self):
-        args = mcp_server.build_parser().parse_args(["--rpc-cancel-grace", "2.5"])
+    def test_parser_accepts_rpc_timeout_and_cancel_grace(self):
+        args = mcp_server.build_parser().parse_args(
+            ["--rpc-timeout", "12.5", "--rpc-cancel-grace", "2.5"]
+        )
+        self.assertEqual(args.rpc_timeout, 12.5)
         self.assertEqual(args.rpc_cancel_grace, 2.5)
 
     def test_main_prints_traceback_on_startup_error(self):
@@ -640,9 +666,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
                     session.connect()
             payload = json.loads(stderr.getvalue())
             self.assertEqual(payload["event"], "rpc_cancel_error")
-            self.assertEqual(payload["cmd"], "connect")
-            self.assertEqual(payload["type"], "RuntimeError")
-            self.assertEqual(payload["message"], "cancel bad")
+            self.assertEqual(payload["errors"][0]["step"], "cancel_active")
+            self.assertEqual(payload["errors"][0]["cmd"], "connect")
+            self.assertEqual(payload["errors"][0]["type"], "RuntimeError")
+            self.assertEqual(payload["errors"][0]["message"], "cancel bad")
             with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
                 session.probe()
         finally:

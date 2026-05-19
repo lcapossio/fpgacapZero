@@ -167,9 +167,14 @@ class FcapzMcpSession:
     def _emit_rpc_cancel_error(cmd: str, exc: BaseException) -> None:
         payload = {
             "event": "rpc_cancel_error",
-            "cmd": cmd,
-            "type": exc.__class__.__name__,
-            "message": str(exc),
+            "errors": [
+                {
+                    "step": "cancel_active",
+                    "cmd": cmd,
+                    "type": exc.__class__.__name__,
+                    "message": str(exc),
+                }
+            ],
         }
         print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
 
@@ -399,7 +404,7 @@ class FcapzMcpSession:
                 "truncated": True,
                 "size_bytes": size_bytes,
                 "max_bytes": int(max_bytes),
-                "summary": dict(self.last_capture_summary or {}),
+                "summary": self._bounded_capture_summary(),
                 "message": (
                     "cached capture is larger than max_bytes; use "
                     "fcapz_get_last_capture_chunk for bounded retrieval"
@@ -428,6 +433,8 @@ class FcapzMcpSession:
         payload_bytes = self._last_capture_json_bytes()
         size_bytes = self._last_capture_size_bytes()
         start = min(offset_i, size_bytes)
+        if start < size_bytes and payload_bytes[start] & 0xC0 == 0x80:
+            raise ValueError("offset must point to a UTF-8 character boundary")
         end = min(size_bytes, start + max_bytes_i)
         while end > start:
             try:
@@ -477,7 +484,11 @@ class FcapzMcpSession:
             req = {**config, **req}
         response = self._rpc_call(req)
         self.last_capture = response
-        self.last_capture_json = json.dumps(response, separators=(",", ":"))
+        self.last_capture_json = json.dumps(
+            response,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
         self.last_capture_size_bytes = len(self.last_capture_json_bytes)
         self.last_capture_summary = self._capture_summary()
@@ -777,7 +788,11 @@ class FcapzMcpSession:
         if self.last_capture is None:
             return json.dumps({"available": False}, separators=(",", ":"))
         if self.last_capture_json is None:
-            self.last_capture_json = json.dumps(self.last_capture, separators=(",", ":"))
+            self.last_capture_json = json.dumps(
+                self.last_capture,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
             self.last_capture_size_bytes = len(self.last_capture_json_bytes)
         return self.last_capture_json
@@ -816,6 +831,17 @@ class FcapzMcpSession:
         }
         summary.setdefault("ok", True)
         return summary
+
+    def _bounded_capture_summary(self, max_bytes: int = 8192) -> JsonDict:
+        summary = dict(self.last_capture_summary or {})
+        payload = json.dumps(summary, separators=(",", ":")).encode("utf-8")
+        if len(payload) <= max_bytes:
+            return summary
+        return {
+            "truncated": True,
+            "size_bytes": len(payload),
+            "max_bytes": max_bytes,
+        }
 
     def shutdown(self) -> None:
         include_trace = os.environ.get("FCAPZ_MCP_DEBUG_SHUTDOWN", "").strip().lower() in {
@@ -1239,8 +1265,6 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_last_capture() -> str:
         """Last capture response."""
 
-        if session.last_capture is None:
-            return json.dumps({"available": False}, separators=(",", ":"))
         return session.last_capture_json_text()
 
     @mcp.resource("fcapz://last-eio-read")
@@ -1298,6 +1322,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only allow programming .bit files under this directory",
     )
     parser.add_argument(
+        "--rpc-timeout",
+        type=float,
+        default=30.0,
+        metavar="SEC",
+        help="Seconds to wait for one RPC call before attempting backend cancellation",
+    )
+    parser.add_argument(
         "--rpc-cancel-grace",
         type=float,
         default=_RPC_CANCEL_GRACE_SEC,
@@ -1321,8 +1352,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.bitfile_root is not None and not args.allow_program:
         parser.error("--bitfile-root requires --allow-program")
-    if args.rpc_cancel_grace < 0:
-        parser.error("--rpc-cancel-grace must be >= 0")
+    if args.rpc_timeout <= 0:
+        parser.error("--rpc-timeout must be > 0")
+    if args.rpc_cancel_grace <= 0:
+        parser.error("--rpc-cancel-grace must be > 0")
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
         allow_eio_write=bool(args.allow_eio_write),
@@ -1330,6 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_uart_send=bool(args.allow_uart_send),
         allow_program=bool(args.allow_program),
         bitfile_root=args.bitfile_root,
+        rpc_timeout_sec=float(args.rpc_timeout),
         rpc_cancel_grace_sec=float(args.rpc_cancel_grace),
     )
     session = FcapzMcpSession(capabilities=capabilities)

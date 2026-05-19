@@ -58,7 +58,7 @@ If backend cancellation fails after a tool timeout, the server writes a compact
 JSON line to stderr:
 
 ```json
-{"event":"rpc_cancel_error","cmd":"connect","type":"RuntimeError","message":"..."}
+{"event":"rpc_cancel_error","errors":[{"step":"cancel_active","cmd":"connect","type":"RuntimeError","message":"..."}]}
 ```
 
 ## MCP Client Configuration
@@ -129,16 +129,17 @@ Backend-irrelevant fields are rejected instead of being silently forwarded.
 `usb_blaster` have no host concept, so even explicit `host="127.0.0.1"` is
 rejected.
 
-The MCP session enforces a 30 second RPC response timeout by default. Backend
-transports may also have their own timeouts; whichever timeout is shorter fires
-first. If the MCP timeout fires, the server asks the RPC layer to cancel active
-transports and treats that as a session-wide reset: ELA, EIO, AXI, UART, cached
-probe data, and cached capture data are all cleared if the worker unwinds.
-Xilinx `xsdb` sessions are killed quickly and OpenOCD sockets are closed; other
-backends use best-effort `close()`. If a backend cannot be cancelled promptly,
-the server refuses new hardware commands until the process is restarted.
-`--rpc-cancel-grace SEC` controls how long the MCP layer waits for the worker to
-unwind after cancellation before declaring it still active.
+The MCP session enforces a 30 second RPC response timeout by default; override
+it with `--rpc-timeout SEC`. Backend transports may also have their own
+timeouts; whichever timeout is shorter fires first. If the MCP timeout fires,
+the server asks the RPC layer to cancel active transports and treats that as a
+session-wide reset: ELA, EIO, AXI, UART, cached probe data, and cached capture
+data are all cleared if the worker unwinds. Xilinx `xsdb` sessions are killed
+quickly and OpenOCD sockets are closed; other backends use best-effort
+`close()`. If a backend cannot be cancelled promptly, the server refuses new
+hardware commands until the process is restarted. `--rpc-cancel-grace SEC`
+controls how long the MCP layer waits for the worker to unwind after
+cancellation before declaring it still active. It must be greater than zero.
 
 ## Tools
 
@@ -242,11 +243,13 @@ Large captures stay in memory until the next capture, `fcapz_close`, or
 `fcapz://last-capture`; tool-only clients should prefer
 `fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow
 the byte `next_offset` until it is `null`. Chunks are UTF-8 JSON text and never
-split a multibyte character. `fcapz_get_last_capture` has a 1 MiB default guard
-and returns a compact truncation marker for larger captures unless
-`max_bytes=null` is passed as an explicit escape hatch.
+split a multibyte character; callers must pass either `0` or a returned
+`next_offset`, because offsets in the middle of a UTF-8 character are rejected.
+`fcapz_get_last_capture` has a 1 MiB default guard and returns a compact
+truncation marker for larger captures unless `max_bytes=null` is passed as an
+explicit escape hatch.
 
-## Version Fields
+## Status Fields
 
 `fcapz_status` and `fcapz://status` include:
 
@@ -260,8 +263,7 @@ Agents should check these fields if they depend on exact response shapes.
 Patch-version changes should be backward compatible; major-version or RPC schema
 changes should be treated as protocol changes until the agent has been updated
 or explicitly tested against that server. Before 1.0, minor-version bumps may
-also include protocol changes. As of this chapter update, fpgacapZero is in the
-`0.x` series (`0.4.0`).
+also include protocol changes.
 
 ## Example Flows
 
