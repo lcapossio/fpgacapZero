@@ -32,6 +32,7 @@ JsonDict = dict[str, Any]
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
 _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
+_RPC_CANCEL_GRACE_SEC = 1.0
 
 
 @dataclass
@@ -122,9 +123,22 @@ class FcapzMcpSession:
             worker.start()
         worker.join(self.capabilities.rpc_timeout_sec)
         if worker.is_alive():
+            cancel = getattr(self.rpc, "cancel_active", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:
+                    pass
+            worker.join(_RPC_CANCEL_GRACE_SEC)
+            if not worker.is_alive():
+                with self._rpc_lock:
+                    if self._active_rpc_worker is worker:
+                        self._active_rpc_worker = None
+                        self._active_rpc_cmd = None
+                self._reset_session_state_after_cancel()
             raise TimeoutError(
                 f"fcapz RPC call {req.get('cmd')!r} timed out after "
-                f"{self.capabilities.rpc_timeout_sec:g}s"
+                f"{self.capabilities.rpc_timeout_sec:g}s; attempted backend cancellation"
             )
         with self._rpc_lock:
             # A timed-out worker may finish after a later call has reserved the slot.
@@ -145,6 +159,17 @@ class FcapzMcpSession:
         if "schema_version" in response:
             self.last_rpc_schema_version = str(response["schema_version"])
         return response
+
+    def _reset_session_state_after_cancel(self) -> None:
+        self.connected = False
+        self.eio_connected = False
+        self.axi_connected = False
+        self.uart_connected = False
+        self.last_probe = None
+        self.last_capture = None
+        self.last_capture_json = None
+        self.last_capture_summary = None
+        self.last_eio_read = None
 
     @staticmethod
     def _server_version() -> str | None:

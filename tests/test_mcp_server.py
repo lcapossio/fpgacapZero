@@ -98,6 +98,16 @@ class BlockingRpc:
         return {"ok": True, "schema_version": "test"}
 
 
+class CancellableBlockingRpc(BlockingRpc):
+    def __init__(self):
+        super().__init__()
+        self.cancelled = False
+
+    def cancel_active(self):
+        self.cancelled = True
+        self.release.set()
+
+
 class SparseCaptureRpc(FakeRpc):
     def handle(self, req):
         self.requests.append(dict(req))
@@ -538,6 +548,24 @@ class FcapzMcpSessionTests(unittest.TestCase):
             worker = session._active_rpc_worker
             if worker is not None:
                 worker.join(timeout=1.0)
+
+    def test_rpc_timeout_cancels_backend_and_allows_next_call(self):
+        rpc = CancellableBlockingRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(rpc_timeout_sec=0.01),
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+            session.connect()
+
+        self.assertTrue(rpc.cancelled)
+        self.assertIsNone(session._active_rpc_worker)
+        self.assertFalse(session.status()["connected"])
+        self.assertEqual(session.status()["last_capture_size_bytes"], None)
+
+        rpc.handle = FakeRpc().handle  # type: ignore[method-assign]
+        self.assertEqual(session.probe()["probe"]["sample_width"], 8)
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
     def test_build_mcp_server_registers_tools_when_sdk_available(self):

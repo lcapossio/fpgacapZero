@@ -23,6 +23,7 @@ class RpcServer:
     def __init__(self):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
+        self._eio_transport: Transport | None = None
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
@@ -36,6 +37,43 @@ class RpcServer:
         if self._analyzer is None:
             raise RuntimeError("not connected")
         return self._analyzer
+
+    @staticmethod
+    def _cancel_transport(transport: Transport | None) -> None:
+        if transport is None:
+            return
+        try:
+            transport.cancel()
+        except Exception:
+            try:
+                transport.close()
+            except Exception:
+                pass
+
+    def cancel_active(self) -> None:
+        """Best-effort abort of all active hardware backends.
+
+        Called by the MCP layer when an RPC worker exceeds its response
+        timeout. This tears down the blocking transport I/O underneath the
+        worker, so the thread can unwind instead of leaving an orphaned xsdb
+        process or OpenOCD socket behind.
+        """
+        analyzer, self._analyzer = self._analyzer, None
+        eio_transport, self._eio_transport = self._eio_transport, None
+        axi_transport, self._axi_transport = self._axi_transport, None
+        uart_transport, self._uart_transport = self._uart_transport, None
+        self._eio = None
+        self._axi = None
+        self._uart = None
+
+        if analyzer is not None:
+            try:
+                analyzer.close(fast=True)
+            except Exception:
+                self._cancel_transport(getattr(analyzer, "transport", None))
+        self._cancel_transport(eio_transport)
+        self._cancel_transport(axi_transport)
+        self._cancel_transport(uart_transport)
 
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
@@ -253,15 +291,28 @@ class RpcServer:
         if cmd == "eio_connect":
             if self._eio is not None:
                 self._eio.close()
+                self._eio_transport = None
             chain = int(req.get("chain", 3))
-            self._eio = EioController(self._build_transport(req), chain=chain)
-            self._eio.connect()
+            transport = self._build_transport(req)
+            self._eio_transport = transport
+            eio = EioController(transport, chain=chain)
+            try:
+                eio.connect()
+            except Exception:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                self._eio_transport = None
+                raise
+            self._eio = eio
             return self._ok(in_w=self._eio.in_w, out_w=self._eio.out_w, chain=chain)
 
         if cmd == "eio_close":
             if self._eio is not None:
                 self._eio.close()
                 self._eio = None
+                self._eio_transport = None
             return self._ok()
 
         if cmd == "eio_read":
@@ -291,6 +342,7 @@ class RpcServer:
                 self._axi_transport = None
             chain = int(req.get("chain", 4))
             transport = self._build_transport(req)
+            self._axi_transport = transport
             ctrl = EjtagAxiController(transport, chain=chain)
             try:
                 info = ctrl.connect()  # opens transport + probes bridge
@@ -300,9 +352,9 @@ class RpcServer:
                     transport.close()
                 except Exception:
                     pass
+                self._axi_transport = None
                 raise
             self._axi = ctrl
-            self._axi_transport = transport
             return self._ok(**info)
 
         if cmd == "axi_close":
@@ -373,6 +425,7 @@ class RpcServer:
                 self._uart_transport = None
             chain = int(req.get("chain", 4))
             transport = self._build_transport(req)
+            self._uart_transport = transport
             ctrl = EjtagUartController(transport, chain=chain)
             try:
                 info = ctrl.connect()
@@ -381,9 +434,9 @@ class RpcServer:
                     transport.close()
                 except Exception:
                     pass
+                self._uart_transport = None
                 raise
             self._uart = ctrl
-            self._uart_transport = transport
             return self._ok(**info)
 
         if cmd == "uart_close":

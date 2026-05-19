@@ -124,8 +124,10 @@ rejected.
 
 The MCP session enforces a 30 second RPC response timeout by default. Backend
 transports may also have their own timeouts; whichever timeout is shorter fires
-first. If the MCP timeout fires while the backend call keeps running, the server
-refuses new hardware commands until the process is restarted.
+first. If the MCP timeout fires, the server asks the RPC layer to cancel active
+transports. Xilinx `xsdb` sessions are killed quickly and OpenOCD sockets are
+closed; if a backend cannot be cancelled promptly, the server refuses new
+hardware commands until the process is restarted.
 
 ## Tools
 
@@ -301,7 +303,7 @@ fcapz_uart_close()
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
 | `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
-| Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | Restart the MCP server if the next call reports a previous RPC still running; consider backend-specific timeout settings for slow hardware. |
+| Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | The server attempted backend cancellation. Retry only if `fcapz_status` responds; restart if the next call reports a previous RPC still running. |
 | A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | SPI or USB-Blaster rejects `host` | Those backends do not use host/port sockets. | Omit `host` entirely for those backends. |

@@ -151,6 +151,10 @@ class Transport(ABC):
         """Close the transport.  Must be idempotent — safe to call multiple times."""
         raise NotImplementedError
 
+    def cancel(self) -> None:
+        """Best-effort abort for an in-flight backend operation."""
+        self.close()
+
     @abstractmethod
     def read_reg(self, addr: int) -> int:
         """Read a 32-bit register at *addr*.
@@ -304,6 +308,9 @@ class OpenOcdTransport(Transport):
             except OSError:
                 pass
             self._sock = None
+
+    def cancel(self) -> None:
+        self.close()
 
     def _cmd(self, tcl: str) -> str:
         if not self._sock:
@@ -689,6 +696,9 @@ class XilinxHwServerTransport(Transport):
         except subprocess.TimeoutExpired:
             pass
         self._proc = None
+
+    def cancel(self) -> None:
+        self.close_fast()
 
     # -- chain selection -----------------------------------------------------
 
