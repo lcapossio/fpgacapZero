@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import traceback
 from typing import Any, Dict
 
@@ -28,6 +29,7 @@ class RpcServer:
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
+        self._state_lock = threading.RLock()
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
@@ -58,13 +60,14 @@ class RpcServer:
         worker, so the thread can unwind instead of leaving an orphaned xsdb
         process or OpenOCD socket behind.
         """
-        analyzer, self._analyzer = self._analyzer, None
-        eio_transport, self._eio_transport = self._eio_transport, None
-        axi_transport, self._axi_transport = self._axi_transport, None
-        uart_transport, self._uart_transport = self._uart_transport, None
-        self._eio = None
-        self._axi = None
-        self._uart = None
+        with self._state_lock:
+            analyzer, self._analyzer = self._analyzer, None
+            eio_transport, self._eio_transport = self._eio_transport, None
+            axi_transport, self._axi_transport = self._axi_transport, None
+            uart_transport, self._uart_transport = self._uart_transport, None
+            self._eio = None
+            self._axi = None
+            self._uart = None
 
         if analyzer is not None:
             try:
@@ -249,16 +252,27 @@ class RpcServer:
         cmd = req.get("cmd")
 
         if cmd == "connect":
-            if self._analyzer is not None:
-                self._analyzer.close()
-            self._analyzer = Analyzer(self._build_transport(req))
-            self._analyzer.connect()
+            with self._state_lock:
+                old_analyzer, self._analyzer = self._analyzer, None
+            if old_analyzer is not None:
+                old_analyzer.close()
+            analyzer = Analyzer(self._build_transport(req))
+            with self._state_lock:
+                self._analyzer = analyzer
+            try:
+                analyzer.connect()
+            except Exception:
+                with self._state_lock:
+                    if self._analyzer is analyzer:
+                        self._analyzer = None
+                raise
             return self._ok()
 
         if cmd == "close":
-            if self._analyzer is not None:
-                self._analyzer.close()
-                self._analyzer = None
+            with self._state_lock:
+                analyzer, self._analyzer = self._analyzer, None
+            if analyzer is not None:
+                analyzer.close()
             return self._ok()
 
         analyzer = self._ensure_analyzer()
@@ -289,12 +303,17 @@ class RpcServer:
             return self._ok(**payload)
 
         if cmd == "eio_connect":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio_transport = None
+            with self._state_lock:
+                old_eio, self._eio = self._eio, None
+                old_transport, self._eio_transport = self._eio_transport, None
+            if old_eio is not None:
+                old_eio.close()
+            elif old_transport is not None:
+                old_transport.close()
             chain = int(req.get("chain", 3))
             transport = self._build_transport(req)
-            self._eio_transport = transport
+            with self._state_lock:
+                self._eio_transport = transport
             eio = EioController(transport, chain=chain)
             try:
                 eio.connect()
@@ -303,16 +322,20 @@ class RpcServer:
                     transport.close()
                 except Exception:
                     pass
-                self._eio_transport = None
+                with self._state_lock:
+                    if self._eio_transport is transport:
+                        self._eio_transport = None
                 raise
-            self._eio = eio
+            with self._state_lock:
+                self._eio = eio
             return self._ok(in_w=self._eio.in_w, out_w=self._eio.out_w, chain=chain)
 
         if cmd == "eio_close":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            with self._state_lock:
+                eio, self._eio = self._eio, None
                 self._eio_transport = None
+            if eio is not None:
+                eio.close()
             return self._ok()
 
         if cmd == "eio_read":
@@ -327,44 +350,49 @@ class RpcServer:
             return self._ok()
 
         if cmd == "axi_connect":
-            if self._axi is not None:
+            with self._state_lock:
+                old_axi, self._axi = self._axi, None
+                old_transport, self._axi_transport = self._axi_transport, None
+            if old_axi is not None:
                 try:
-                    self._axi.close()
+                    old_axi.close()
                 except Exception:
                     pass
-                self._axi = None
-                self._axi_transport = None
-            elif self._axi_transport is not None:
+            elif old_transport is not None:
                 try:
-                    self._axi_transport.close()
+                    old_transport.close()
                 except Exception:
                     pass
-                self._axi_transport = None
             chain = int(req.get("chain", 4))
             transport = self._build_transport(req)
-            self._axi_transport = transport
             ctrl = EjtagAxiController(transport, chain=chain)
+            with self._state_lock:
+                self._axi_transport = transport
             try:
                 info = ctrl.connect()  # opens transport + probes bridge
             except Exception:
-                # Clean up on failure — don't leak the session
+                # Clean up on failure; don't leak the session.
                 try:
                     transport.close()
                 except Exception:
                     pass
-                self._axi_transport = None
+                with self._state_lock:
+                    if self._axi_transport is transport:
+                        self._axi_transport = None
                 raise
-            self._axi = ctrl
+            with self._state_lock:
+                self._axi = ctrl
             return self._ok(**info)
 
         if cmd == "axi_close":
-            if self._axi is not None:
+            with self._state_lock:
+                axi, self._axi = self._axi, None
+                self._axi_transport = None
+            if axi is not None:
                 try:
-                    self._axi.close()  # sends RESET + closes transport
+                    axi.close()  # sends RESET + closes transport
                 except Exception:
                     pass
-                self._axi = None
-                self._axi_transport = None
             return self._ok()
 
         if cmd == "axi_read":
@@ -410,23 +438,24 @@ class RpcServer:
             return self._ok(words=[f"0x{w:08X}" for w in words])
 
         if cmd == "uart_connect":
-            if self._uart is not None:
+            with self._state_lock:
+                old_uart, self._uart = self._uart, None
+                old_transport, self._uart_transport = self._uart_transport, None
+            if old_uart is not None:
                 try:
-                    self._uart.close()
+                    old_uart.close()
                 except Exception:
                     pass
-                self._uart = None
-                self._uart_transport = None
-            elif self._uart_transport is not None:
+            elif old_transport is not None:
                 try:
-                    self._uart_transport.close()
+                    old_transport.close()
                 except Exception:
                     pass
-                self._uart_transport = None
             chain = int(req.get("chain", 4))
             transport = self._build_transport(req)
-            self._uart_transport = transport
             ctrl = EjtagUartController(transport, chain=chain)
+            with self._state_lock:
+                self._uart_transport = transport
             try:
                 info = ctrl.connect()
             except Exception:
@@ -434,19 +463,23 @@ class RpcServer:
                     transport.close()
                 except Exception:
                     pass
-                self._uart_transport = None
+                with self._state_lock:
+                    if self._uart_transport is transport:
+                        self._uart_transport = None
                 raise
-            self._uart = ctrl
+            with self._state_lock:
+                self._uart = ctrl
             return self._ok(**info)
 
         if cmd == "uart_close":
-            if self._uart is not None:
+            with self._state_lock:
+                uart, self._uart = self._uart, None
+                self._uart_transport = None
+            if uart is not None:
                 try:
-                    self._uart.close()
+                    uart.close()
                 except Exception:
                     pass
-                self._uart = None
-                self._uart_transport = None
             return self._ok()
 
         if cmd == "uart_send":

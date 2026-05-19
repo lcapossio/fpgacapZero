@@ -46,6 +46,7 @@ class McpCapabilities:
     allow_program: bool = False
     bitfile_root: Path | None = None
     rpc_timeout_sec: float = 30.0
+    rpc_cancel_grace_sec: float = _RPC_CANCEL_GRACE_SEC
 
 
 class FcapzMcpError(RuntimeError):
@@ -129,9 +130,9 @@ class FcapzMcpSession:
             if callable(cancel):
                 try:
                     cancel()
-                except Exception:
-                    pass
-            worker.join(_RPC_CANCEL_GRACE_SEC)
+                except Exception as exc:
+                    self._emit_rpc_cancel_error(str(req.get("cmd")), exc)
+            worker.join(self.capabilities.rpc_cancel_grace_sec)
             if not worker.is_alive():
                 with self._rpc_lock:
                     if self._active_rpc_worker is worker:
@@ -161,6 +162,16 @@ class FcapzMcpSession:
         if "schema_version" in response:
             self.last_rpc_schema_version = str(response["schema_version"])
         return response
+
+    @staticmethod
+    def _emit_rpc_cancel_error(cmd: str, exc: BaseException) -> None:
+        payload = {
+            "event": "rpc_cancel_error",
+            "cmd": cmd,
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+        print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
 
     def _reset_session_state_after_cancel(self) -> None:
         self.connected = False
@@ -740,6 +751,8 @@ class FcapzMcpSession:
                 "allow_axi_write": self.capabilities.allow_axi_write,
                 "allow_uart_send": self.capabilities.allow_uart_send,
                 "allow_program": self.capabilities.allow_program,
+                "rpc_timeout_sec": self.capabilities.rpc_timeout_sec,
+                "rpc_cancel_grace_sec": self.capabilities.rpc_cancel_grace_sec,
                 "bitfile_root": (
                     str(self.capabilities.bitfile_root)
                     if self.capabilities.bitfile_root is not None
@@ -1284,6 +1297,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="Only allow programming .bit files under this directory",
     )
+    parser.add_argument(
+        "--rpc-cancel-grace",
+        type=float,
+        default=_RPC_CANCEL_GRACE_SEC,
+        metavar="SEC",
+        help="Seconds to wait for an RPC worker to unwind after backend cancellation",
+    )
     return parser
 
 
@@ -1301,6 +1321,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.bitfile_root is not None and not args.allow_program:
         parser.error("--bitfile-root requires --allow-program")
+    if args.rpc_cancel_grace < 0:
+        parser.error("--rpc-cancel-grace must be >= 0")
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
         allow_eio_write=bool(args.allow_eio_write),
@@ -1308,6 +1330,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_uart_send=bool(args.allow_uart_send),
         allow_program=bool(args.allow_program),
         bitfile_root=args.bitfile_root,
+        rpc_cancel_grace_sec=float(args.rpc_cancel_grace),
     )
     session = FcapzMcpSession(capabilities=capabilities)
     server = build_mcp_server(session)

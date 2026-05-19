@@ -108,6 +108,20 @@ class CancellableBlockingRpc(BlockingRpc):
         self.release.set()
 
 
+class FailingCancelRpc(BlockingRpc):
+    def cancel_active(self):
+        raise RuntimeError("cancel bad")
+
+
+class StubbornCancelRpc(BlockingRpc):
+    def __init__(self):
+        super().__init__()
+        self.cancelled = False
+
+    def cancel_active(self):
+        self.cancelled = True
+
+
 class SparseCaptureRpc(FakeRpc):
     def handle(self, req):
         self.requests.append(dict(req))
@@ -505,6 +519,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
             main(["--read-only", "--allow-program"])
         with self.assertRaises(SystemExit):
             main(["--bitfile-root", "."])
+        with self.assertRaises(SystemExit):
+            main(["--rpc-cancel-grace", "-1"])
+
+    def test_parser_accepts_rpc_cancel_grace(self):
+        args = mcp_server.build_parser().parse_args(["--rpc-cancel-grace", "2.5"])
+        self.assertEqual(args.rpc_cancel_grace, 2.5)
 
     def test_main_prints_traceback_on_startup_error(self):
         class BrokenServer:
@@ -602,6 +622,57 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         rpc.handle = FakeRpc().handle  # type: ignore[method-assign]
         self.assertEqual(session.probe()["probe"]["sample_width"], 8)
+
+    def test_rpc_timeout_reports_cancel_failure(self):
+        rpc = FailingCancelRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(
+                rpc_timeout_sec=0.01,
+                rpc_cancel_grace_sec=0.01,
+            ),
+        )
+        stderr = io.StringIO()
+
+        try:
+            with redirect_stderr(stderr):
+                with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+                    session.connect()
+            payload = json.loads(stderr.getvalue())
+            self.assertEqual(payload["event"], "rpc_cancel_error")
+            self.assertEqual(payload["cmd"], "connect")
+            self.assertEqual(payload["type"], "RuntimeError")
+            self.assertEqual(payload["message"], "cancel bad")
+            with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
+                session.probe()
+        finally:
+            rpc.release.set()
+            worker = session._active_rpc_worker
+            if worker is not None:
+                worker.join(timeout=1.0)
+
+    def test_rpc_timeout_keeps_slot_when_cancelled_worker_does_not_exit(self):
+        rpc = StubbornCancelRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(
+                rpc_timeout_sec=0.01,
+                rpc_cancel_grace_sec=0.01,
+            ),
+        )
+
+        try:
+            with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+                session.connect()
+            self.assertTrue(rpc.cancelled)
+            self.assertIsNotNone(session._active_rpc_worker)
+            with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
+                session.probe()
+        finally:
+            rpc.release.set()
+            worker = session._active_rpc_worker
+            if worker is not None:
+                worker.join(timeout=1.0)
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
     def test_build_mcp_server_registers_tools_when_sdk_available(self):
