@@ -343,6 +343,33 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "UTF-8 character boundary"):
             session.get_last_capture_chunk(offset=mid_char_offset, max_bytes=16)
 
+    def test_get_last_capture_chunk_rejects_invalid_utf8_start_offset(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.last_capture = {"ok": True}
+        session.last_capture_json = None
+        session.last_capture_json_bytes = b'{"bad":"\xff"}'
+        session.last_capture_size_bytes = len(session.last_capture_json_bytes)
+
+        with self.assertRaisesRegex(ValueError, "UTF-8 character boundary"):
+            session.get_last_capture_chunk(offset=8, max_bytes=16)
+
+    def test_get_last_capture_bounds_large_summary(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.last_capture = {"ok": True}
+        session.last_capture_summary = {"events": ["x" * 9000]}
+        session.last_capture_json = '{"ok":true,"result":"' + ("x" * 200) + '"}'
+        session.last_capture_json_bytes = session.last_capture_json.encode("utf-8")
+        session.last_capture_size_bytes = len(session.last_capture_json_bytes)
+
+        response = session.get_last_capture(max_bytes=16)
+
+        self.assertTrue(response["truncated"])
+        self.assertEqual(
+            response["summary"]["summary_status"]["truncated"],
+            True,
+        )
+        self.assertNotIn("events", response["summary"])
+
     def test_get_last_capture_chunk_validates_bounds(self):
         session = FcapzMcpSession(rpc=FakeRpc())
         session.capture()

@@ -433,7 +433,7 @@ class FcapzMcpSession:
         payload_bytes = self._last_capture_json_bytes()
         size_bytes = self._last_capture_size_bytes()
         start = min(offset_i, size_bytes)
-        if start < size_bytes and payload_bytes[start] & 0xC0 == 0x80:
+        if start < size_bytes and not self._is_utf8_start_byte(payload_bytes[start]):
             raise ValueError("offset must point to a UTF-8 character boundary")
         end = min(size_bytes, start + max_bytes_i)
         while end > start:
@@ -786,7 +786,11 @@ class FcapzMcpSession:
 
     def last_capture_json_text(self) -> str:
         if self.last_capture is None:
-            return json.dumps({"available": False}, separators=(",", ":"))
+            return json.dumps(
+                {"available": False},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         if self.last_capture_json is None:
             self.last_capture_json = json.dumps(
                 self.last_capture,
@@ -809,6 +813,10 @@ class FcapzMcpSession:
         if self.last_capture_size_bytes is None:
             self.last_capture_size_bytes = len(self._last_capture_json_bytes())
         return self.last_capture_size_bytes
+
+    @staticmethod
+    def _is_utf8_start_byte(byte: int) -> bool:
+        return byte < 0x80 or 0xC2 <= byte <= 0xF4
 
     def _capture_summary(self) -> JsonDict | None:
         if self.last_capture is None:
@@ -838,9 +846,11 @@ class FcapzMcpSession:
         if len(payload) <= max_bytes:
             return summary
         return {
-            "truncated": True,
-            "size_bytes": len(payload),
-            "max_bytes": max_bytes,
+            "summary_status": {
+                "truncated": True,
+                "size_bytes": len(payload),
+                "max_bytes": max_bytes,
+            },
         }
 
     def shutdown(self) -> None:

@@ -43,6 +43,30 @@ class RpcServer:
             raise RuntimeError("not connected")
         return analyzer
 
+    def _commit_connected(
+        self,
+        generation: int,
+        *,
+        controller_attr: str,
+        controller: Any,
+        transport_attr: str | None = None,
+        transport: Transport | None = None,
+    ) -> bool:
+        """Install a connected object unless cancellation raced the connect."""
+        with self._state_lock:
+            if generation != self._cancel_generation:
+                if getattr(self, controller_attr) is controller:
+                    setattr(self, controller_attr, None)
+                if (
+                    transport_attr is not None
+                    and transport is not None
+                    and getattr(self, transport_attr) is transport
+                ):
+                    setattr(self, transport_attr, None)
+                return False
+            setattr(self, controller_attr, controller)
+            return True
+
     @staticmethod
     def _cancel_transport(transport: Transport | None) -> None:
         if transport is None:
@@ -62,6 +86,10 @@ class RpcServer:
         timeout. This tears down the blocking transport I/O underneath the
         worker, so the thread can unwind instead of leaving an orphaned xsdb
         process or OpenOCD socket behind.
+
+        Transport construction itself is best-effort: if a backend blocks before
+        a transport object is installed in this server, the MCP layer's
+        still-running worker guard is the fallback.
         """
         with self._state_lock:
             self._cancel_generation += 1
@@ -272,14 +300,11 @@ class RpcServer:
                     if self._analyzer is analyzer:
                         self._analyzer = None
                 raise
-            with self._state_lock:
-                if generation != self._cancel_generation:
-                    if self._analyzer is analyzer:
-                        self._analyzer = None
-                    cancel_raced = True
-                else:
-                    cancel_raced = False
-            if cancel_raced:
+            if not self._commit_connected(
+                generation,
+                controller_attr="_analyzer",
+                controller=analyzer,
+            ):
                 analyzer.close(fast=True)
                 raise RuntimeError("connect completed after cancellation")
             return self._ok()
@@ -344,15 +369,13 @@ class RpcServer:
                     if self._eio_transport is transport:
                         self._eio_transport = None
                 raise
-            with self._state_lock:
-                if generation != self._cancel_generation:
-                    if self._eio_transport is transport:
-                        self._eio_transport = None
-                    cancel_raced = True
-                else:
-                    self._eio = eio
-                    cancel_raced = False
-            if cancel_raced:
+            if not self._commit_connected(
+                generation,
+                controller_attr="_eio",
+                controller=eio,
+                transport_attr="_eio_transport",
+                transport=transport,
+            ):
                 eio.close()
                 raise RuntimeError("eio_connect completed after cancellation")
             return self._ok(in_w=eio.in_w, out_w=eio.out_w, chain=chain)
@@ -413,15 +436,13 @@ class RpcServer:
                     if self._axi_transport is transport:
                         self._axi_transport = None
                 raise
-            with self._state_lock:
-                if generation != self._cancel_generation:
-                    if self._axi_transport is transport:
-                        self._axi_transport = None
-                    cancel_raced = True
-                else:
-                    self._axi = ctrl
-                    cancel_raced = False
-            if cancel_raced:
+            if not self._commit_connected(
+                generation,
+                controller_attr="_axi",
+                controller=ctrl,
+                transport_attr="_axi_transport",
+                transport=transport,
+            ):
                 ctrl.close()
                 raise RuntimeError("axi_connect completed after cancellation")
             return self._ok(**info)
@@ -519,15 +540,13 @@ class RpcServer:
                     if self._uart_transport is transport:
                         self._uart_transport = None
                 raise
-            with self._state_lock:
-                if generation != self._cancel_generation:
-                    if self._uart_transport is transport:
-                        self._uart_transport = None
-                    cancel_raced = True
-                else:
-                    self._uart = ctrl
-                    cancel_raced = False
-            if cancel_raced:
+            if not self._commit_connected(
+                generation,
+                controller_attr="_uart",
+                controller=ctrl,
+                transport_attr="_uart_transport",
+                transport=transport,
+            ):
                 ctrl.close()
                 raise RuntimeError("uart_connect completed after cancellation")
             return self._ok(**info)

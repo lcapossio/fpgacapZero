@@ -140,6 +140,9 @@ quickly and OpenOCD sockets are closed; other backends use best-effort
 hardware commands until the process is restarted. `--rpc-cancel-grace SEC`
 controls how long the MCP layer waits for the worker to unwind after
 cancellation before declaring it still active. It must be greater than zero.
+Transport construction is still best-effort: if a backend blocks before a
+transport object exists, cancellation cannot nudge that backend directly and the
+same still-running worker guard applies.
 
 ## Tools
 
@@ -257,7 +260,15 @@ explicit escape hatch.
 | --- | --- |
 | `mcp_server_version` | The installed fpgacapZero package version. |
 | `rpc_schema_version` | The RPC schema version. It is seeded before the first RPC and updated from successful RPC responses. |
+| `connected` | Whether an ELA connection is active. |
+| `eio_connected` | Whether an EIO connection is active. |
+| `axi_connected` | Whether an AXI bridge connection is active. |
+| `uart_connected` | Whether a UART bridge connection is active. |
+| `capabilities` | Server safety and timeout settings, including write/program enables, `bitfile_root`, `rpc_timeout_sec`, and `rpc_cancel_grace_sec`. |
+| `last_probe` | Last probe result, or `null` before probing or after close/drop-reset paths. |
+| `last_capture_summary` | Compact summary of the last capture, or `null` when no capture is cached. |
 | `last_capture_size_bytes` | Compact JSON byte size of the cached full capture, or `null` when no capture is cached. |
+| `last_eio_read` | Last EIO read response, or `null` before any EIO read. |
 
 Agents should check these fields if they depend on exact response shapes.
 Patch-version changes should be backward compatible; major-version or RPC schema
