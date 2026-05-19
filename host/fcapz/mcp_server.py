@@ -69,6 +69,8 @@ class FcapzMcpSession:
     last_probe: JsonDict | None = None
     last_capture: JsonDict | None = None
     last_capture_json: str | None = None
+    last_capture_json_bytes: bytes | None = None
+    last_capture_size_bytes: int | None = None
     last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
@@ -168,6 +170,8 @@ class FcapzMcpSession:
         self.last_probe = None
         self.last_capture = None
         self.last_capture_json = None
+        self.last_capture_json_bytes = None
+        self.last_capture_size_bytes = None
         self.last_capture_summary = None
         self.last_eio_read = None
 
@@ -347,6 +351,8 @@ class FcapzMcpSession:
             self.last_probe = None
             self.last_capture = None
             self.last_capture_json = None
+            self.last_capture_json_bytes = None
+            self.last_capture_size_bytes = None
             self.last_capture_summary = None
             return {"ok": True}
         response = self._rpc_call({"cmd": "close"})
@@ -354,6 +360,8 @@ class FcapzMcpSession:
         self.last_probe = None
         self.last_capture = None
         self.last_capture_json = None
+        self.last_capture_json_bytes = None
+        self.last_capture_size_bytes = None
         self.last_capture_summary = None
         return response
 
@@ -363,6 +371,8 @@ class FcapzMcpSession:
         had_capture = self.last_capture is not None
         self.last_capture = None
         self.last_capture_json = None
+        self.last_capture_json_bytes = None
+        self.last_capture_size_bytes = None
         self.last_capture_summary = None
         return {"ok": True, "had_capture": had_capture}
 
@@ -384,7 +394,11 @@ class FcapzMcpSession:
                     "fcapz_get_last_capture_chunk for bounded retrieval"
                 ),
             }
-        return dict(self.last_capture)
+        response = dict(self.last_capture)
+        response.setdefault("available", True)
+        response.setdefault("truncated", False)
+        response.setdefault("size_bytes", size_bytes)
+        return response
 
     def get_last_capture_chunk(
         self,
@@ -400,19 +414,27 @@ class FcapzMcpSession:
             raise ValueError("offset must be >= 0")
         if max_bytes_i <= 0:
             raise ValueError("max_bytes must be > 0")
-        payload = self._last_capture_json()
-        size_bytes = len(payload.encode("utf-8"))
-        start = min(offset_i, len(payload))
-        end = min(len(payload), start + max_bytes_i)
+        payload_bytes = self._last_capture_json_bytes()
+        size_bytes = self._last_capture_size_bytes()
+        start = min(offset_i, size_bytes)
+        end = min(size_bytes, start + max_bytes_i)
+        while end > start:
+            try:
+                chunk = payload_bytes[start:end].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        else:
+            chunk = ""
         return {
             "available": True,
-            "encoding": "json",
+            "encoding": "json-utf8",
             "offset": start,
             "max_bytes": max_bytes_i,
             "size_bytes": size_bytes,
-            "chunk": payload[start:end],
-            "next_offset": None if end >= len(payload) else end,
-            "eof": end >= len(payload),
+            "chunk": chunk,
+            "next_offset": None if end >= size_bytes else end,
+            "eof": end >= size_bytes,
         }
 
     def probe(self) -> JsonDict:
@@ -445,6 +467,8 @@ class FcapzMcpSession:
         response = self._rpc_call(req)
         self.last_capture = response
         self.last_capture_json = json.dumps(response, separators=(",", ":"))
+        self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
+        self.last_capture_size_bytes = len(self.last_capture_json_bytes)
         self.last_capture_summary = self._capture_summary()
         return dict(self.last_capture_summary or {})
 
@@ -736,15 +760,27 @@ class FcapzMcpSession:
             ),
         }
 
-    def _last_capture_json(self) -> str:
+    def last_capture_json_text(self) -> str:
         if self.last_capture is None:
             return json.dumps({"available": False}, separators=(",", ":"))
         if self.last_capture_json is None:
             self.last_capture_json = json.dumps(self.last_capture, separators=(",", ":"))
+            self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
+            self.last_capture_size_bytes = len(self.last_capture_json_bytes)
         return self.last_capture_json
 
+    def _last_capture_json_bytes(self) -> bytes:
+        if self.last_capture is None:
+            return json.dumps({"available": False}, separators=(",", ":")).encode("utf-8")
+        if self.last_capture_json_bytes is None:
+            self.last_capture_json_bytes = self.last_capture_json_text().encode("utf-8")
+            self.last_capture_size_bytes = len(self.last_capture_json_bytes)
+        return self.last_capture_json_bytes
+
     def _last_capture_size_bytes(self) -> int:
-        return len(self._last_capture_json().encode("utf-8"))
+        if self.last_capture_size_bytes is None:
+            self.last_capture_size_bytes = len(self._last_capture_json_bytes())
+        return self.last_capture_size_bytes
 
     def _capture_summary(self) -> JsonDict | None:
         if self.last_capture is None:
@@ -1192,7 +1228,7 @@ def build_mcp_server(session: FcapzMcpSession):
 
         if session.last_capture is None:
             return json.dumps({"available": False}, separators=(",", ":"))
-        return session._last_capture_json()
+        return session.last_capture_json_text()
 
     @mcp.resource("fcapz://last-eio-read")
     def fcapz_last_eio_read() -> str:

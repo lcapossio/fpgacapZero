@@ -116,6 +116,20 @@ class SparseCaptureRpc(FakeRpc):
         return super().handle(req)
 
 
+class UnicodeCaptureRpc(FakeRpc):
+    def handle(self, req):
+        self.requests.append(dict(req))
+        if req["cmd"] == "capture":
+            return {
+                "ok": True,
+                "schema_version": "test",
+                "format": "json",
+                "sample_count": 1,
+                "result": {"samples": [1], "probe": "信号"},
+            }
+        return super().handle(req)
+
+
 class FcapzMcpSessionTests(unittest.TestCase):
     def test_connect_probe_and_status_track_session_state(self):
         rpc = FakeRpc()
@@ -235,7 +249,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         session.capture()
         self.assertIsNotNone(session.last_capture)
-        self.assertEqual(session.get_last_capture()["result"], {"samples": [1, 2]})
+        full = session.get_last_capture()
+        self.assertFalse(full["truncated"])
+        self.assertGreater(full["size_bytes"], 0)
+        self.assertEqual(full["result"], {"samples": [1, 2]})
         self.assertEqual(session.drop_last_capture(), {"ok": True, "had_capture": True})
 
         self.assertIsNone(session.last_capture)
@@ -267,12 +284,31 @@ class FcapzMcpSessionTests(unittest.TestCase):
         payload = json.loads(first["chunk"] + second["chunk"])
 
         self.assertTrue(first["available"])
-        self.assertEqual(first["encoding"], "json")
+        self.assertEqual(first["encoding"], "json-utf8")
         self.assertEqual(first["offset"], 0)
         self.assertFalse(first["eof"])
         self.assertTrue(second["eof"])
         self.assertIsNone(second["next_offset"])
         self.assertEqual(payload["result"], {"samples": [1, 2]})
+
+    def test_get_last_capture_chunk_uses_utf8_byte_offsets(self):
+        session = FcapzMcpSession(rpc=UnicodeCaptureRpc())
+
+        session.capture()
+        chunks = []
+        offset = 0
+        while offset is not None:
+            page = session.get_last_capture_chunk(offset=offset, max_bytes=17)
+            self.assertLessEqual(len(page["chunk"].encode("utf-8")), 17)
+            chunks.append(page["chunk"])
+            offset = page["next_offset"]
+        payload = json.loads("".join(chunks))
+
+        self.assertEqual(payload["result"]["probe"], "信号")
+        self.assertEqual(
+            session.status()["last_capture_size_bytes"],
+            len(session.last_capture_json_text().encode("utf-8")),
+        )
 
     def test_get_last_capture_chunk_validates_bounds(self):
         session = FcapzMcpSession(rpc=FakeRpc())

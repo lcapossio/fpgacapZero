@@ -230,9 +230,10 @@ Large captures stay in memory until the next capture, `fcapz_close`, or
 `fcapz_drop_last_capture`. Resource-aware clients should prefer
 `fcapz://last-capture`; tool-only clients should prefer
 `fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow
-`next_offset` until it is `null`. `fcapz_get_last_capture` has a 1 MiB default
-guard and returns a compact truncation marker for larger captures unless
-`max_bytes=null` is passed.
+the byte `next_offset` until it is `null`. Chunks are UTF-8 JSON text and never
+split a multibyte character. `fcapz_get_last_capture` has a 1 MiB default guard
+and returns a compact truncation marker for larger captures unless
+`max_bytes=null` is passed as an explicit escape hatch.
 
 ## Version Fields
 
