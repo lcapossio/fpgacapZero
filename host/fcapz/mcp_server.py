@@ -30,6 +30,10 @@ from .rpc import _SCHEMA_VERSION, RpcServer
 JsonDict = dict[str, Any]
 
 
+_DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
+_DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
+
+
 @dataclass
 class McpCapabilities:
     """Safety switches for MCP-exposed hardware operations."""
@@ -63,6 +67,7 @@ class FcapzMcpSession:
     uart_connected: bool = False
     last_probe: JsonDict | None = None
     last_capture: JsonDict | None = None
+    last_capture_json: str | None = None
     last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
@@ -316,12 +321,14 @@ class FcapzMcpSession:
         if not self.connected:
             self.last_probe = None
             self.last_capture = None
+            self.last_capture_json = None
             self.last_capture_summary = None
             return {"ok": True}
         response = self._rpc_call({"cmd": "close"})
         self.connected = False
         self.last_probe = None
         self.last_capture = None
+        self.last_capture_json = None
         self.last_capture_summary = None
         return response
 
@@ -330,13 +337,58 @@ class FcapzMcpSession:
         # enough to retain until overwritten or closed.
         had_capture = self.last_capture is not None
         self.last_capture = None
+        self.last_capture_json = None
         self.last_capture_summary = None
         return {"ok": True, "had_capture": had_capture}
 
-    def get_last_capture(self) -> JsonDict:
+    def get_last_capture(self, max_bytes: int | None = _DEFAULT_FULL_CAPTURE_MAX_BYTES) -> JsonDict:
         if self.last_capture is None:
             return {"available": False}
+        if max_bytes is not None and int(max_bytes) < 0:
+            raise ValueError("max_bytes must be >= 0 or null")
+        size_bytes = self._last_capture_size_bytes()
+        if max_bytes is not None and size_bytes > int(max_bytes):
+            return {
+                "available": True,
+                "truncated": True,
+                "size_bytes": size_bytes,
+                "max_bytes": int(max_bytes),
+                "summary": dict(self.last_capture_summary or {}),
+                "message": (
+                    "cached capture is larger than max_bytes; use "
+                    "fcapz_get_last_capture_chunk for bounded retrieval"
+                ),
+            }
         return dict(self.last_capture)
+
+    def get_last_capture_chunk(
+        self,
+        *,
+        offset: int = 0,
+        max_bytes: int = _DEFAULT_CAPTURE_CHUNK_BYTES,
+    ) -> JsonDict:
+        if self.last_capture is None:
+            return {"available": False}
+        offset_i = int(offset)
+        max_bytes_i = int(max_bytes)
+        if offset_i < 0:
+            raise ValueError("offset must be >= 0")
+        if max_bytes_i <= 0:
+            raise ValueError("max_bytes must be > 0")
+        payload = self._last_capture_json()
+        size_bytes = len(payload.encode("utf-8"))
+        start = min(offset_i, len(payload))
+        end = min(len(payload), start + max_bytes_i)
+        return {
+            "available": True,
+            "encoding": "json",
+            "offset": start,
+            "max_bytes": max_bytes_i,
+            "size_bytes": size_bytes,
+            "chunk": payload[start:end],
+            "next_offset": None if end >= len(payload) else end,
+            "eof": end >= len(payload),
+        }
 
     def probe(self) -> JsonDict:
         response = self._rpc_call({"cmd": "probe"})
@@ -367,6 +419,7 @@ class FcapzMcpSession:
             req = {**config, **req}
         response = self._rpc_call(req)
         self.last_capture = response
+        self.last_capture_json = json.dumps(response, separators=(",", ":"))
         self.last_capture_summary = self._capture_summary()
         return dict(self.last_capture_summary or {})
 
@@ -650,10 +703,23 @@ class FcapzMcpSession:
                 if self.last_capture_summary is not None
                 else None
             ),
+            "last_capture_size_bytes": (
+                self._last_capture_size_bytes() if self.last_capture is not None else None
+            ),
             "last_eio_read": (
                 dict(self.last_eio_read) if self.last_eio_read is not None else None
             ),
         }
+
+    def _last_capture_json(self) -> str:
+        if self.last_capture is None:
+            return json.dumps({"available": False}, separators=(",", ":"))
+        if self.last_capture_json is None:
+            self.last_capture_json = json.dumps(self.last_capture, separators=(",", ":"))
+        return self.last_capture_json
+
+    def _last_capture_size_bytes(self) -> int:
+        return len(self._last_capture_json().encode("utf-8"))
 
     def _capture_summary(self) -> JsonDict | None:
         if self.last_capture is None:
@@ -826,14 +892,31 @@ def build_mcp_server(session: FcapzMcpSession):
         return session.drop_last_capture()
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
-    def fcapz_get_last_capture() -> JsonDict:
+    def fcapz_get_last_capture(
+        max_bytes: int | None = _DEFAULT_FULL_CAPTURE_MAX_BYTES,
+    ) -> JsonDict:
         """Return the cached full capture payload for clients without resource support.
 
-        This can be large enough to flood model context after deep captures. Prefer
-        fcapz://last-capture when the MCP client supports resources.
+        max_bytes defaults to 1 MiB. Larger captures return a compact truncated
+        marker plus summary metadata instead of flooding model context. Pass
+        max_bytes=null to force the full payload, or prefer
+        fcapz_get_last_capture_chunk / fcapz://last-capture for large captures.
         """
 
-        return session.get_last_capture()
+        return session.get_last_capture(max_bytes=max_bytes)
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_get_last_capture_chunk(
+        offset: int = 0,
+        max_bytes: int = _DEFAULT_CAPTURE_CHUNK_BYTES,
+    ) -> JsonDict:
+        """Return a bounded JSON text chunk of the cached capture payload.
+
+        Use this for large captures when the client has no MCP resource support.
+        The returned next_offset is null when the chunk reaches EOF.
+        """
+
+        return session.get_last_capture_chunk(offset=offset, max_bytes=max_bytes)
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
@@ -1082,8 +1165,9 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_last_capture() -> str:
         """Last capture response."""
 
-        payload = session.last_capture if session.last_capture is not None else {"available": False}
-        return json.dumps(payload, separators=(",", ":"))
+        if session.last_capture is None:
+            return json.dumps({"available": False}, separators=(",", ":"))
+        return session._last_capture_json()
 
     @mcp.resource("fcapz://last-eio-read")
     def fcapz_last_eio_read() -> str:

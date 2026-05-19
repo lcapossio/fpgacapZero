@@ -140,7 +140,8 @@ refuses new hardware commands until the process is restarted.
 | `fcapz_configure` | capture* | Configure the connected ELA without arming. |
 | `fcapz_arm` | capture* | Arm the connected ELA using the current hardware configuration. |
 | `fcapz_capture` | capture* | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
-| `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without MCP resource support. Can be large. |
+| `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
+| `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
 
 `capture*` tools are enabled by default and blocked by `--read-only`.
@@ -225,8 +226,11 @@ locally.
 
 Large captures stay in memory until the next capture, `fcapz_close`, or
 `fcapz_drop_last_capture`. Resource-aware clients should prefer
-`fcapz://last-capture`; tool-only clients can call `fcapz_get_last_capture`, but
-that can push a large payload directly into the agent's model context.
+`fcapz://last-capture`; tool-only clients should prefer
+`fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow
+`next_offset` until it is `null`. `fcapz_get_last_capture` has a 1 MiB default
+guard and returns a compact truncation marker for larger captures unless
+`max_bytes=null` is passed.
 
 ## Version Fields
 
@@ -236,6 +240,7 @@ that can push a large payload directly into the agent's model context.
 | --- | --- |
 | `mcp_server_version` | The installed fpgacapZero package version. |
 | `rpc_schema_version` | The RPC schema version. It is seeded before the first RPC and updated from successful RPC responses. |
+| `last_capture_size_bytes` | Compact JSON byte size of the cached full capture, or `null` when no capture is cached. |
 
 Agents should check these fields if they depend on exact response shapes.
 Patch-version changes should be backward compatible; major-version or RPC schema
@@ -268,7 +273,8 @@ Capture and then explicitly release the large payload:
 
 ```text
 fcapz_capture(config={"pretrigger": 64, "posttrigger": 4096}, timeout=10.0)
-read resource fcapz://last-capture
+fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)
+repeat with next_offset until null
 fcapz_drop_last_capture()
 fcapz_close()
 ```

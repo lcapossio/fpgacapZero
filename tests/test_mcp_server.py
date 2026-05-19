@@ -199,6 +199,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(rpc.requests[-1]["pretrigger"], 4)
         self.assertEqual(rpc.requests[-1]["timeout"], 2.5)
         self.assertEqual(session.status()["last_capture_summary"]["sample_count"], 2)
+        self.assertGreater(session.status()["last_capture_size_bytes"], 0)
         self.assertEqual(session.status()["last_capture_summary"]["trigger_index"], 1)
         self.assertEqual(session.last_capture["result"], {"samples": [1, 2]})
 
@@ -231,6 +232,46 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertIsNone(session.status()["last_capture_summary"])
         self.assertEqual(session.get_last_capture(), {"available": False})
         self.assertEqual(session.drop_last_capture(), {"ok": True, "had_capture": False})
+
+    def test_get_last_capture_truncates_large_tool_result(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        session.capture()
+        response = session.get_last_capture(max_bytes=16)
+
+        self.assertTrue(response["available"])
+        self.assertTrue(response["truncated"])
+        self.assertGreater(response["size_bytes"], 16)
+        self.assertEqual(response["summary"]["sample_count"], 2)
+        self.assertIn("fcapz_get_last_capture_chunk", response["message"])
+        self.assertEqual(session.get_last_capture(max_bytes=None)["result"], {"samples": [1, 2]})
+        with self.assertRaisesRegex(ValueError, "max_bytes"):
+            session.get_last_capture(max_bytes=-1)
+
+    def test_get_last_capture_chunk_pages_compact_json(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        session.capture()
+        first = session.get_last_capture_chunk(offset=0, max_bytes=24)
+        second = session.get_last_capture_chunk(offset=first["next_offset"], max_bytes=1000)
+        payload = json.loads(first["chunk"] + second["chunk"])
+
+        self.assertTrue(first["available"])
+        self.assertEqual(first["encoding"], "json")
+        self.assertEqual(first["offset"], 0)
+        self.assertFalse(first["eof"])
+        self.assertTrue(second["eof"])
+        self.assertIsNone(second["next_offset"])
+        self.assertEqual(payload["result"], {"samples": [1, 2]})
+
+    def test_get_last_capture_chunk_validates_bounds(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.capture()
+
+        with self.assertRaisesRegex(ValueError, "offset"):
+            session.get_last_capture_chunk(offset=-1)
+        with self.assertRaisesRegex(ValueError, "max_bytes"):
+            session.get_last_capture_chunk(max_bytes=0)
 
     def test_configure_and_arm_are_separate_rpc_commands(self):
         rpc = FakeRpc()
@@ -513,6 +554,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_capture",
                 "fcapz_drop_last_capture",
                 "fcapz_get_last_capture",
+                "fcapz_get_last_capture_chunk",
                 "fcapz_configure",
                 "fcapz_arm",
                 "fcapz_eio_connect",
