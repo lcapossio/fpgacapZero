@@ -16,16 +16,22 @@ set brs_100_gw1nr9_dir  "brs_100_gw1nr9"
 set build_dir           "out"
 
 set this_path            "${repo_path}/${examples_dir}/${brs_100_gw1nr9_dir}"
+set output_dir           "${this_path}/${build_dir}"
+if {[info exists ::env(FPGACAP_PROJECT_DIR)] && $::env(FPGACAP_PROJECT_DIR) ne ""} {
+    set project_dir $::env(FPGACAP_PROJECT_DIR)
+} else {
+    set project_dir $output_dir
+}
 
-if {[file isdirectory $build_dir]} {
+if {[file isdirectory $project_dir]} {
     puts "Cleanup previous build"
-    file delete -force $build_dir
+    file delete -force $project_dir
 }
 
 puts "Creating Gowin EDA project, specs:"
 puts "\tTarget part number: ${target_part_number}"
 puts "\tTarget part version: ${target_part_version}"
-create_project -name $project_name -dir $build_dir -pn $target_part_number -device_version $target_part_version -force
+create_project -name $project_name -dir $project_dir -pn $target_part_number -device_version $target_part_version -force
 
 set_option -verilog_std sysv2017
 set_option -vhdl_std vhd2008
@@ -78,4 +84,5 @@ puts "Launching Place-and-Route"
 run pnr
 
 puts "Deploying Bitstream"
-file copy -force impl/pnr/${project_name}.fs ${this_path}/${build_dir}/fcapz_brs_100_gw1nr9.fs
+file mkdir $output_dir
+file copy -force ${project_dir}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs

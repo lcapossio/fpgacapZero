@@ -262,7 +262,7 @@ def main() -> int:
         cmd = [ f"{gowin}\\IDE\\bin\\{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
 
     try:
-        result = subprocess.run(cmd, env=env, check=False)
+        result = subprocess.run(cmd, cwd=PROJECT_PARENT, env=env, check=False)
     except FileNotFoundError as exc:
         print(f"error: failed to launch gw_sh: {exc}", file=sys.stderr)
         return 3
