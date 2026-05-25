@@ -17,6 +17,9 @@ Usage
     python examples/brs_100_gw1nr9/build.py --gowin PATH/TO/GoWIN/INSTALL
         # NOTE: if GoWIN installation isn't on PATH
 
+    python examples/brs_100_gw1nr9/build.py --gowin PATH/TO/gw_sh
+        # NOTE: explicit gw_sh executable path also works
+
 Exit code 0 on success, non-zero otherwise.
 """
 
@@ -36,10 +39,7 @@ BITFILE = ROOT / "examples" / "brs_100_gw1nr9" / PROJECT_NAME / "fcapz_brs_100_g
 PROJECT_PARENT = ROOT / "examples" / "brs_100_gw1nr9"
 PROJECT_DIR = PROJECT_PARENT / PROJECT_NAME
 
-if sys.platform == "linux":
-    GW_SH_PROC = "gw_sh"
-if sys.platform == "win32":
-    GW_SH_PROC = "gw_sh.exe"
+GW_SH_PROC = "gw_sh.exe" if sys.platform == "win32" else "gw_sh"
 
 # GoWIN helper processes that hold file handles into the project's runs
 # directory.  If a previous build was killed mid-synthesis, these can be
@@ -165,19 +165,30 @@ def cleanup_orphans() -> int:
     return killed
 
 
-def find_gowin(explicit: str | None) -> str:
+def find_gowin(explicit: str | None) -> Path:
     if explicit:
-        return explicit
+        path = Path(explicit).expanduser()
+        if path.is_file():
+            return path.resolve()
+
+        gw_sh = path / "IDE" / "bin" / GW_SH_PROC
+        if gw_sh.is_file():
+            return gw_sh.resolve()
+
+        raise RuntimeError(
+            f"--gowin must be a GoWIN install root or {GW_SH_PROC} executable: {path}"
+        )
 
     found = shutil.which(GW_SH_PROC)
     if not found:
         raise RuntimeError(
             f"{GW_SH_PROC} not on PATH; pass --gowin or source GoWIN's settings script"
         )
-    return found
+    return Path(found).resolve()
 
-def load_linux_dependencies(gowin: str):
-    lib_path = Path(f"{gowin}/IDE/lib")
+def load_linux_dependencies(gw_sh: Path):
+    ide_path = gw_sh.parent.parent
+    lib_path = ide_path / "lib"
     if not lib_path.exists():
         raise RuntimeError(f"{str(lib_path)} doesn't exist - check GoWIN IDE install")
 
@@ -197,10 +208,11 @@ def load_linux_dependencies(gowin: str):
 
     return env
 
-def load_windows_dependencies(gowin: str):
+def load_windows_dependencies(gw_sh: Path):
     env = os.environ.copy()
 
     # TODO: anything to do here ?
+    _ = gw_sh
 
     return env
 
@@ -209,10 +221,14 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--gowin", default=None, help="Path to GoWIN installation")
+    parser.add_argument(
+        "--gowin",
+        default=None,
+        help="Path to GoWIN installation root or gw_sh executable",
+    )
     args = parser.parse_args()
 
-    gowin = find_gowin(args.gowin)
+    gw_sh = find_gowin(args.gowin)
 
     # Clean up orphaned GoWIN helper processes from a prior killed build
     # before launching — otherwise they hold file handles into the runs
@@ -255,11 +271,14 @@ def main() -> int:
         return 2
 
     if sys.platform == "linux":
-        env = load_linux_dependencies(gowin)
-        cmd = [ f"{gowin}/IDE/bin/{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
+        env = load_linux_dependencies(gw_sh)
+        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT)]
     elif sys.platform == "win32":
-        env = load_windows_dependencies(gowin)
-        cmd = [ f"{gowin}\\IDE\\bin\\{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
+        env = load_windows_dependencies(gw_sh)
+        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT)]
+    else:
+        print(f"error: unsupported platform: {sys.platform}", file=sys.stderr)
+        return 2
 
     try:
         result = subprocess.run(cmd, cwd=PROJECT_PARENT, env=env, check=False)
