@@ -17,7 +17,7 @@ module brs_100_gw1nr9_top #()
     input   wire    tdi_pad_i,
     output  wire    tdo_pad_o
 );
-localparam int CLK_FREQUENCY_MHZ    = 51;
+localparam int CLK_FREQUENCY_MHZ    = 60;
 localparam int CLK_FREQUENCY_HZ     = CLK_FREQUENCY_MHZ * 1000000;
 localparam int SAMPLE_W             = 8;
 localparam int CHANNELS             = 6;
