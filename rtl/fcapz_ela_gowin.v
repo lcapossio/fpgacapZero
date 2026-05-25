@@ -76,6 +76,19 @@ module fcapz_ela_gowin #(
     wire [31:0] jtag_wdata, jtag_rdata;
     wire        jtag_rst_ctrl;
     localparam PTR_W = $clog2(DEPTH);
+    localparam CHAIN_IDX = CHAIN - 1;
+
+    generate
+        if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
+`ifndef VERILATOR
+            __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ invalid();
+`endif
+            initial begin
+                $error("fcapz_ela_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
+                $finish;
+            end
+        end
+    endgenerate
 
     // Gowin exposes only one user chain here, so USER2 burst readout is not
     // instantiated. Keep the core burst interface tied off; USER1 readback
@@ -120,12 +133,12 @@ module fcapz_ela_gowin #(
 
         .tck            (clk),
         .tdi            (tap_tdi),
-        .tdo            (tap_tdo[0]),
-        .capture        (tap_capture[0]),
-        .shift_in_en    (tap_shift_in[0]),
-        .shift_out_en   (tap_shift_out[0]),
-        .update         (tap_update[0]),
-        .sel            (tap_sel[0]),
+        .tdo            (tap_tdo[CHAIN_IDX]),
+        .capture        (tap_capture[CHAIN_IDX]),
+        .shift_in_en    (tap_shift_in[CHAIN_IDX]),
+        .shift_out_en   (tap_shift_out[CHAIN_IDX]),
+        .update         (tap_update[CHAIN_IDX]),
+        .sel            (tap_sel[CHAIN_IDX]),
 
         .reg_clk        (jtag_clk),
         .reg_rst        (jtag_rst),
