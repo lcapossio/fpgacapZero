@@ -149,6 +149,7 @@ module fcapz_ela #(
     endgenerate
 
     localparam PTR_W = $clog2(DEPTH);
+    localparam LEN_W = $clog2(DEPTH+1);
     // Used by the single-segment pre-arm rolling buffer. Keep this explicit
     // instead of slicing DEPTH, because power-of-two DEPTH would truncate to 0.
     localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
@@ -299,8 +300,8 @@ module fcapz_ela #(
     reg reset_toggle_sync1, reset_toggle_sync2;
 
     // Narrowed to the bits actually used on the sample side, reducing FF count.
-    reg [PTR_W-1:0]    pretrig_len_sync1,  pretrig_len_sync2;
-    reg [PTR_W-1:0]    posttrig_len_sync1, posttrig_len_sync2;
+    reg [LEN_W-1:0]    pretrig_len_sync1,  pretrig_len_sync2;
+    reg [LEN_W-1:0]    posttrig_len_sync1, posttrig_len_sync2;
     reg [1:0]          trig_mode_sync1,    trig_mode_sync2;
     reg [SAMPLE_W-1:0] trig_value_sync1,   trig_value_sync2;
     reg [SAMPLE_W-1:0] trig_mask_sync1,    trig_mask_sync2;
@@ -363,15 +364,15 @@ module fcapz_ela #(
 
     // ---- Sample-domain state -----------------------------------------------
     reg armed, triggered, done, overflow;
-    reg [PTR_W-1:0]  pretrig_len, posttrig_len;
+    reg [LEN_W-1:0]  pretrig_len, posttrig_len;
     reg [3:0] trig_cmp_mode_a, trig_cmp_mode_b;
     reg [1:0] trig_combine;
     reg [SAMPLE_W-1:0] trig_value, trig_mask;
     reg [SAMPLE_W-1:0] trig_value_b, trig_mask_b;
     reg [PTR_W-1:0] wr_ptr, trig_ptr, start_ptr;
-    reg [PTR_W-1:0] post_count;
-    reg [PTR_W:0]   pre_count;
-    reg [PTR_W:0]   capture_len;  // one extra bit: can equal DEPTH (= 2^PTR_W)
+    reg [LEN_W-1:0] post_count;
+    reg [LEN_W-1:0] pre_count;
+    reg [LEN_W-1:0] capture_len;  // can equal DEPTH
     reg [SAMPLE_W-1:0] probe_prev;
     // Trigger delay: when the comparator fires, count down trig_delay
     // sample-clock cycles before committing trig_ptr.  During the
@@ -604,7 +605,7 @@ module fcapz_ela #(
 
     wire seq_count_reached = (seq_count_target[seq_state] == 16'h0) ||
                              ((seq_counter + 16'h1) >= seq_count_target[seq_state]);
-    wire pretrigger_ready = pre_count >= {1'b0, pretrig_len};
+    wire pretrigger_ready = pre_count >= pretrig_len;
     wire trigger_holdoff_done = !trig_holdoff_active;
 
     // Internal trigger signal (before ext trigger combination)
@@ -832,9 +833,9 @@ module fcapz_ela #(
                 seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b0}};
             end
         end else begin
-            pretrig_len_sync1  <= jtag_pretrig_len[PTR_W-1:0];
+            pretrig_len_sync1  <= jtag_pretrig_len[LEN_W-1:0];
             pretrig_len_sync2  <= pretrig_len_sync1;
-            posttrig_len_sync1 <= jtag_posttrig_len[PTR_W-1:0];
+            posttrig_len_sync1 <= jtag_posttrig_len[LEN_W-1:0];
             posttrig_len_sync2 <= posttrig_len_sync1;
             trig_mode_sync1    <= jtag_trig_mode[1:0];
             trig_mode_sync2    <= trig_mode_sync1;
@@ -1028,7 +1029,11 @@ module fcapz_ela #(
 
     // ---- Capture state machine ---------------------------------------------
     reg mem_rd_pending;
-    wire [PTR_W-1:0] post_store_limit = posttrig_len;
+    wire [LEN_W-1:0] post_store_limit = posttrig_len;
+    wire [LEN_W:0] config_capture_len =
+        {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
+    wire [LEN_W:0] capture_len_next =
+        {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
     assign segment_auto_rearm_now = HAS_SEGMENTS && armed && !done && triggered &&
         (cur_segment != NUM_SEGMENTS - 1) &&
         ((post_count >= post_store_limit) ||
@@ -1085,9 +1090,9 @@ module fcapz_ela #(
     wire [PTR_W-1:0] wr_seg_off = wr_ptr - seg_base;
     wire [PTR_W-1:0] trig_seg_off = trig_ptr - seg_base;
     wire [PTR_W-1:0] capture_start_ptr =
-        (HAS_SEGMENTS && !segment_wrapped && trig_seg_off < pretrig_len)
+        (HAS_SEGMENTS && !segment_wrapped && {1'b0, trig_seg_off} < pretrig_len)
             ? seg_base
-            : seg_base + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len) & (SEG_DEPTH - 1));
+            : seg_base + ((trig_ptr - seg_base + SEG_DEPTH - pretrig_len[PTR_W-1:0]) & (SEG_DEPTH - 1));
 
     integer seg_i;
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -1099,9 +1104,9 @@ module fcapz_ela #(
             wr_ptr      <= {PTR_W{1'b0}};
             trig_ptr    <= {PTR_W{1'b0}};
             start_ptr   <= {PTR_W{1'b0}};
-            post_count  <= {PTR_W{1'b0}};
-            pre_count   <= {PTR_W+1{1'b0}};
-            capture_len <= {PTR_W+1{1'b0}};
+            post_count  <= {LEN_W{1'b0}};
+            pre_count   <= {LEN_W{1'b0}};
+            capture_len <= {LEN_W{1'b0}};
             seq_state   <= {SEQ_STATE_W{1'b0}};
             seq_counter <= 16'h0;
             trig_holdoff       <= 16'h0;
@@ -1122,9 +1127,9 @@ module fcapz_ela #(
                 done        <= 1'b0;
                 overflow    <= 1'b0;
                 wr_ptr      <= {PTR_W{1'b0}};
-                post_count  <= {PTR_W{1'b0}};
-                pre_count   <= {PTR_W+1{1'b0}};
-                capture_len <= {PTR_W+1{1'b0}};
+                post_count  <= {LEN_W{1'b0}};
+                pre_count   <= {LEN_W{1'b0}};
+                capture_len <= {LEN_W{1'b0}};
                 trig_holdoff_active <= 1'b0;
                 trig_holdoff_count  <= 16'h0;
                 trig_delay_pending <= 1'b0;
@@ -1143,9 +1148,9 @@ module fcapz_ela #(
                 done        <= 1'b0;
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
-                post_count  <= {PTR_W{1'b0}};
+                post_count  <= {LEN_W{1'b0}};
                 if (HAS_SEGMENTS)
-                    pre_count <= {PTR_W+1{1'b0}};
+                    pre_count <= {LEN_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
                 trig_holdoff <= trig_holdoff_sync2;
@@ -1160,9 +1165,9 @@ module fcapz_ela #(
                 segment_wrapped <= 1'b0;
                 // Overflow check: use SEG_DEPTH for segmented mode
                 if (NUM_SEGMENTS > 1)
-                    overflow <= (pretrig_len_sync2 + posttrig_len_sync2 + 1 > SEG_DEPTH);
+                    overflow <= (config_capture_len > SEG_DEPTH);
                 else
-                    overflow <= (pretrig_len_sync2 + posttrig_len_sync2 + 1 > DEPTH);
+                    overflow <= (config_capture_len > DEPTH);
             end
 
             // Issue #10: in single-segment mode, keep BRAM populated before
@@ -1219,8 +1224,8 @@ module fcapz_ela #(
                         if (trig_delay_count == 16'h0) begin
                             triggered          <= 1'b1;
                             trig_ptr           <= wr_ptr;
-                            post_count         <= {PTR_W{1'b0}};
-                            capture_len        <= pretrig_len + posttrig_len + 1'b1;
+                            post_count         <= {LEN_W{1'b0}};
+                            capture_len        <= capture_len_next[LEN_W-1:0];
                             trig_delay_pending <= 1'b0;
                         end else begin
                             trig_delay_count <= trig_delay_count - 1'b1;
@@ -1230,8 +1235,8 @@ module fcapz_ela #(
                             // Zero delay: legacy behavior, commit immediately.
                             triggered   <= 1'b1;
                             trig_ptr    <= wr_ptr;
-                            post_count  <= {PTR_W{1'b0}};
-                            capture_len <= pretrig_len + posttrig_len + 1'b1;
+                            post_count  <= {LEN_W{1'b0}};
+                            capture_len <= capture_len_next[LEN_W-1:0];
                         end else begin
                             // Enter delay countdown.  trig_delay_count is
                             // the number of *additional* cycles after this
@@ -1266,8 +1271,8 @@ module fcapz_ela #(
                                 cur_segment <= cur_segment + 1'b1;
                                 seg_count   <= seg_count + 1'b1;
                                 triggered   <= 1'b0;
-                                post_count  <= {PTR_W{1'b0}};
-                                pre_count   <= {PTR_W+1{1'b0}};
+                                post_count  <= {LEN_W{1'b0}};
+                                pre_count   <= {LEN_W{1'b0}};
                                 seq_state   <= {SEQ_STATE_W{1'b0}};
                                 seq_counter <= 16'h0;
                                 trig_holdoff_active <= (trig_holdoff != 16'h0);
@@ -1304,8 +1309,8 @@ module fcapz_ela #(
                                     cur_segment <= cur_segment + 1'b1;
                                     seg_count   <= seg_count + 1'b1;
                                     triggered   <= 1'b0;
-                                    post_count  <= {PTR_W{1'b0}};
-                                    pre_count   <= {PTR_W+1{1'b0}};
+                                    post_count  <= {LEN_W{1'b0}};
+                                    pre_count   <= {LEN_W{1'b0}};
                                     seq_state   <= {SEQ_STATE_W{1'b0}};
                                     seq_counter <= 16'h0;
                                     trig_holdoff_active <= (trig_holdoff != 16'h0);
@@ -1513,7 +1518,11 @@ module fcapz_ela #(
     endfunction
 
     always @(*) begin
-        jtag_rdata_mux = 32'h0;
+        // defaults
+        jtag_rdata_mux = 0;
+        seq_rd_stage = 0;
+        seq_rd_off = 0;
+
         case (jtag_addr)
             // VERSION layout (defined in rtl/fcapz_version.vh, generated
             // from the repo-root VERSION file by tools/sync_version.py):
@@ -1560,6 +1569,7 @@ module fcapz_ela #(
             ADDR_TRIG_DELAY:  jtag_rdata_mux = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
+
             default: begin
                 if (seq_addr_hit) begin
                     seq_rd_stage = seq_rd_stage_w;

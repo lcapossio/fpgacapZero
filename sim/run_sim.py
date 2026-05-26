@@ -124,6 +124,8 @@ DEFAULT_TESTBENCHES = [
 LINT_TARGETS = [
     RTL / "dpram.v",
     RTL / "reset_sync.v",
+    RTL / "dff_reg_sync.v",
+    RTL / "dff_sync.v",
     RTL / "trig_compare.v",
     RTL / "jtag_reg_iface.v",
     RTL / "jtag_burst_read.v",
