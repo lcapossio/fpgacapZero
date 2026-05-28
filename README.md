@@ -2,7 +2,7 @@
   <img src="docs/assets/fcapz-logo.png" alt="fpgacapZero logo" width="180">
 </p>
 
-# fpgacapZero
+# fpgacapZero (fcapz)
 
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -808,6 +808,7 @@ fpgacapZero/
     litex.py                 LiteX ELA integration helper
     gui/                     PySide6 desktop GUI modules and assets
   examples/arty_a7/
+    README.md                Arty A7 reference design guide
     arty_a7_top.v            Reference design top-level
     arty_a7.xdc              Pin constraints
     build_arty.tcl           Vivado batch build
