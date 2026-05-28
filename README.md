@@ -814,6 +814,12 @@ fpgacapZero/
     build_arty.tcl           Vivado batch build
     arty_a7*.cfg             OpenOCD configs
     test_hw_integration.py   Hardware integration tests
+  examples/brs_100_gw1nr9/
+    README.md                Brisbane Silicon BRS-100-GW1NR9 guide
+    brs_100_gw1nr9_top.v     Gowin reference design top-level
+    brs_100_gw1nr9_loc.cst   Gowin pin constraints
+    build_brs_100_gw1nr9.tcl Gowin batch build
+    brs_100_gw1nr9.cfg       OpenOCD config
   tests/
     test_*.py                Host, CLI/RPC, transport, LiteX, probe-file,
                              bridge, GUI, and viewer tests
