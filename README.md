@@ -50,6 +50,7 @@ specs.
 - [Building from source](#building-from-source)
 - [Project structure](#project-structure)
 - [Author](#author)
+- [Contributors](#contributors)
 - [License](#license)
 
 Jump within this page: [↑ Top](#readme-top)
@@ -830,6 +831,12 @@ fpgacapZero/
 ## Author
 
 Leonardo Capossio — [bard0 design](https://www.bard0.com) — <hello@bard0.com>
+
+[↑ Top](#readme-top)
+
+## Contributors
+
+- [Brisbane Silicon](https://github.com/BrisbaneSilicon)
 
 [↑ Top](#readme-top)
 
