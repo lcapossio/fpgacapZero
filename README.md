@@ -128,6 +128,7 @@ pytest tests/ -v
 python sim/run_sim.py
 python sim/run_vhdl_sim.py
 python sim/run_hdl_parity.py
+python sim/run_formal_hdl_parity.py --interface-only
 ```
 
 `python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
@@ -141,6 +142,10 @@ then runs the paired Verilog and VHDL regressions in one job. Matching
 testbench scenarios should emit one-line `PARITY_*` markers with scalar
 `key=value` fields so the gate can compare observed behavior. Keep marker data
 on the same line; summarize tables or sample streams into stable scalar fields.
+`python sim/run_formal_hdl_parity.py` is the manifest-driven formal parity
+runner for the translated portable cores. It checks Verilog/VHDL interfaces and,
+with GHDL plus Yosys installed, attempts sequential equivalence proofs for the
+parameter sets in `sim/parity/*.yml`.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator lint for issues such as one
 register assigned from two always blocks. It also rejects SystemVerilog-only
@@ -723,6 +728,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
 | `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
 | `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
+| `hdl-formal-parity` | Manual `workflow_dispatch` job running `python sim/run_formal_hdl_parity.py` with GHDL/Yosys for manifest-driven sequential equivalence |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
@@ -804,6 +810,17 @@ runs the Verilog source regressions and translated VHDL regressions back to back
 For behavior shared by both benches, emit one-line `PARITY_*` markers using
 stable `key=value` summaries. The parity gate compares those observed marker
 payloads exactly, so avoid multi-line marker payloads.
+
+For the translateHDL-style formal layer, run:
+
+```bash
+python sim/run_formal_hdl_parity.py
+```
+
+The manifests in `sim/parity/` describe the source Verilog side, translated VHDL
+side, and representative parameter sets. Normal CI checks those manifests with
+`--interface-only`; the full GHDL/Yosys proof is available as the manual
+`hdl-formal-parity` workflow job.
 
 ### Tests
 

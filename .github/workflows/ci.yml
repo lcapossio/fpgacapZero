@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 # Cancel in-progress runs on the same branch when a new push lands.
 concurrency:
@@ -126,3 +127,22 @@ jobs:
           python-version: "3.11"
       - name: Run full HDL regressions and parity checks
         run: python sim/run_hdl_parity.py
+      - name: Verify formal parity manifests
+        run: python sim/run_formal_hdl_parity.py --interface-only
+
+  # -- 6. Manual formal Verilog/VHDL equivalence proof -----------------------
+  hdl-formal-parity:
+    name: HDL formal parity (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install formal HDL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl yosys
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run formal Verilog/VHDL parity proofs
+        run: python sim/run_formal_hdl_parity.py
