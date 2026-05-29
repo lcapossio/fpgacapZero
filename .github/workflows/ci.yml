@@ -97,23 +97,9 @@ jobs:
             tests/test_host_stack.py::AnalyzerTests::test_capture_reads_32_bit_timestamps_via_burst_block \
             -v --tb=short
 
-  # ── 4. RTL elaboration (iverilog -Wall) ──────────────────────────
+  # ── 4. Strict RTL lint (Verilator) ───────────────────────────────
   lint-rtl:
-    name: RTL elaboration (iverilog -Wall)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install iverilog
-        run: sudo apt-get install -y iverilog
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Run shared RTL lint regression
-        run: python sim/run_sim.py --lint-only
-
-  # -- 5. Full RTL driver lint (Verilator) --------------------------
-  lint-rtl-verilator:
-    name: RTL driver lint (Verilator)
+    name: Strict RTL lint (Verilator)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -122,10 +108,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run Verilator lint and MULTIDRIVEN self-test
+      - name: Run strict Verilator RTL lint
         run: python sim/run_verilator_lint.py --self-test
 
-  # -- 6. Verilog/VHDL simulation and parity gate ----------------------------
+  # -- 5. Verilog/VHDL simulation and parity gate ----------------------------
   hdl-parity:
     name: HDL simulation + parity
     runs-on: ubuntu-latest

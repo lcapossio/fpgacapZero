@@ -142,8 +142,9 @@ testbench scenarios should emit one-line `PARITY_*` markers with scalar
 `key=value` fields so the gate can compare observed behavior. Keep marker data
 on the same line; summarize tables or sample streams into stable scalar fields.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
-the full Verilog RTL matrix through Verilator driver lint for issues such as
-one register assigned from two always blocks.
+the full Verilog RTL matrix through Verilator lint for issues such as one
+register assigned from two always blocks. It also rejects SystemVerilog-only
+`++`/`--` operators in `.v` files.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -718,8 +719,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
-| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
-| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
+| `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches `++`/`--` in `.v` files and one reg driven by multiple always blocks |
 | `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
 | `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
 | `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
@@ -777,9 +777,9 @@ shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
 registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
 list. The Verilator lint command complements that broad elaboration pass with
-a full-project Verilog RTL matrix and stricter procedural-driver checks; its
-self-test must fail a deliberately bad multi-driver fixture before the job is
-considered valid.
+a full-project Verilog RTL matrix, a `.v` portability check for `++`/`--`, and
+stricter procedural-driver checks; its self-test must fail deliberately bad
+syntax and multi-driver fixtures before the job is considered valid.
 
 ### Simulation (GHDL VHDL)
 
