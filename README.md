@@ -834,6 +834,14 @@ fpgacapZero/
     brs_100_gw1nr9_loc.cst   Gowin pin constraints
     build_brs_100_gw1nr9.tcl Gowin batch build
     brs_100_gw1nr9.cfg       OpenOCD config
+  examples/de25_nano/
+    README.md                DE25-Nano Agilex 5 reference design guide
+    de25_nano_top.v          Intel/Altera ELA + EIO reference top-level
+    de25_nano.qsf            Quartus device and pin assignments
+    de25_nano.sdc            Quartus timing constraints
+    build_de25_nano.tcl      Quartus batch build
+    build.py                 Quartus batch build launcher
+    run_hw_tests.py          Build, program, and run USB-Blaster smoke tests
   tests/
     test_*.py                Host, CLI/RPC, transport, LiteX, probe-file,
                              bridge, GUI, and viewer tests
