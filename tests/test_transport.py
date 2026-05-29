@@ -520,6 +520,30 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
         self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 4)
 
+    def test_read_block_data_window_uses_burst_data_chain(self):
+        scripts: list[str] = []
+        packed = sum(value << (idx * 8) for idx, value in enumerate([1, 2, 3, 4, 5]))
+        sample_width_reads: list[int] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def read_reg_verified(self, addr):
+                sample_width_reads.append(addr)
+                return 8
+
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0:0256b} {packed:0256b}"
+
+        t = FakeQuartus(burst_data_chain=7, burst_prefill_idle_cycles=123)
+        t.select_chain(5)
+        self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
+        self.assertEqual(sample_width_reads, [0x000C])
+        self.assertEqual(len(scripts), 2)
+        self.assertIn("-instance_index 5", scripts[0])
+        self.assertIn("-instance_index 7", scripts[0])
+        self.assertIn("device_run_test_idle -num_clocks 123", scripts[0])
+        self.assertIn("-length 256", scripts[0])
+
     def test_read_block_zero_words_is_noop(self):
         class FakeQuartus(QuartusStpTransport):
             def _send(self, script):

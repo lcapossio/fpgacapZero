@@ -402,6 +402,8 @@ class QuartusStpTransport(Transport):
     """
 
     DR_BITS = 49
+    BURST_DR_BITS = 256
+    ADDR_BURST_PTR = 0x002C
     # Same idle gap used by the other transports for rtl/jtag_reg_iface.v's
     # CDC pipeline between the request scan and the response-capture scan.
     READ_IDLE_CYCLES = 20
@@ -420,6 +422,8 @@ class QuartusStpTransport(Transport):
         lock_timeout_ms: int = 10_000,
         read_timeout_sec: float | None = None,
         read_idle_cycles: int = READ_IDLE_CYCLES,
+        burst_data_chain: int = 2,
+        burst_prefill_idle_cycles: int = 160,
     ):
         self.hardware_name = hardware_name
         self.device_name = device_name
@@ -427,6 +431,8 @@ class QuartusStpTransport(Transport):
         self._quartus_stp_argv = list(quartus_stp_argv) if quartus_stp_argv else None
         self.lock_timeout_ms = int(lock_timeout_ms)
         self.read_idle_cycles = int(read_idle_cycles)
+        self.burst_data_chain = int(burst_data_chain)
+        self.burst_prefill_idle_cycles = int(burst_prefill_idle_cycles)
         if read_timeout_sec is None:
             read_timeout_sec = float(os.environ.get("FCAPZ_QUARTUS_TIMEOUT", "60"))
         self.read_timeout_sec = float(read_timeout_sec)
@@ -583,9 +589,23 @@ class QuartusStpTransport(Transport):
         )
         return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
 
+    def read_reg_verified(self, addr: int) -> int:
+        """Read a Quartus virtual JTAG register twice and return the second value."""
+        self.read_reg(addr)
+        return self.read_reg(addr)
+
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
+        if addr == 0x0100:
+            try:
+                return self._read_block_burst(words)
+            except RuntimeError as exc:
+                _quartus_log.warning(
+                    "Quartus ELA burst readback failed (%s); falling back to "
+                    "slow control-chain DATA reads",
+                    exc,
+                )
         instance = self._active_chain
         body = ["set __fcapz_reads {}"]
         body.append(self._virtual_ir_tcl(instance))
@@ -615,9 +635,138 @@ class QuartusStpTransport(Transport):
         if len(tokens) != words:
             raise RuntimeError(
                 f"Quartus read_block returned {len(tokens)} values, expected {words}: "
-            f"{captured!r}"
+                f"{captured!r}"
+            )
+        return [
+            self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF
+            for token in tokens
+        ]
+
+    def read_timestamp_block(
+        self, addr: int, words: int, timestamp_width: int
+    ) -> List[int]:
+        """Read timestamp words through the Intel/Altera DATA_CHAIN burst path."""
+        if words <= 0:
+            return []
+        if timestamp_width > 0:
+            try:
+                return self._read_block_burst(
+                    words,
+                    timestamp=True,
+                    element_width=timestamp_width,
+                )
+            except RuntimeError as exc:
+                _quartus_log.warning(
+                    "Quartus ELA timestamp burst readback failed (%s); falling back "
+                    "to slow control-chain timestamp reads",
+                    exc,
+                )
+        return self.read_block(addr, words)
+
+    @property
+    def _burst_samples_per_scan(self) -> int:
+        if not hasattr(self, "_cached_sps"):
+            sw = self.read_reg_verified(0x000C)
+            if sw < 1:
+                sw = 8
+            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
+        return self._cached_sps
+
+    def _read_block_burst(
+        self,
+        words: int,
+        *,
+        timestamp: bool = False,
+        element_width: int | None = None,
+    ) -> List[int]:
+        if timestamp:
+            if element_width is None:
+                element_width = 32
+            per_scan = max(1, self.BURST_DR_BITS // element_width)
+        else:
+            per_scan = self._burst_samples_per_scan
+            element_width = self.BURST_DR_BITS // per_scan
+        n_scans = (words + per_scan - 1) // per_scan
+        prime_scans = 1
+        ctrl_chain = self._active_chain
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
         )
-        return [self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF for token in tokens]
+
+        def run_once() -> List[int]:
+            body = ["set __fcapz_burst {}"]
+            body.append(self._virtual_ir_tcl(ctrl_chain))
+            body.append(
+                self._dr_shift_tcl(
+                    ctrl_chain,
+                    burst_frame,
+                    self.DR_BITS,
+                    "__fcapz_burst_ptr_discard",
+                )
+            )
+            body.append(
+                "device_run_test_idle "
+                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            )
+            body.append(self._virtual_ir_tcl(self.burst_data_chain))
+            for idx in range(n_scans + prime_scans):
+                var = f"__fcapz_burst_{idx}"
+                body.append(
+                    self._dr_shift_tcl(
+                        self.burst_data_chain, 0, self.BURST_DR_BITS, var
+                    )
+                )
+                body.append(f"lappend __fcapz_burst ${var}")
+            captured = self._send(
+                self._locked_script(
+                    body=body,
+                    result="__fcapz_burst",
+                    status="__fcapz_burst_status",
+                    error="__fcapz_burst_error",
+                )
+            )
+            return self._parse_burst_tokens(
+                captured.split(),
+                words,
+                skip_scans=prime_scans,
+                element_width=element_width,
+            )
+
+        previous = run_once()
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("Quartus DATA_CHAIN burst readback did not stabilize")
+
+    def _parse_burst_tokens(
+        self,
+        tokens: list[str],
+        total_words: int,
+        *,
+        skip_scans: int,
+        element_width: int,
+    ) -> List[int]:
+        values: list[int] = []
+        mask = (1 << element_width) - 1
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        for scan_idx, token in enumerate(tokens):
+            if scan_idx < skip_scans:
+                continue
+            scan_value = self._shift_string_to_int(token, self.BURST_DR_BITS)
+            for sample_idx in range(per_scan):
+                if len(values) >= total_words:
+                    break
+                values.append((scan_value >> (sample_idx * element_width)) & mask)
+        if len(values) != total_words:
+            raise RuntimeError(
+                f"Quartus DATA_CHAIN burst returned {len(values)} values, "
+                f"expected {total_words}: {tokens!r}"
+            )
+        return values
 
     def _validate_instance(self, instance: int) -> None:
         if instance < 1:

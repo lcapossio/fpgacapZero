@@ -842,6 +842,7 @@ fpgacapZero/
     build_de25_nano.tcl      Quartus batch build
     build.py                 Quartus batch build launcher
     run_hw_tests.py          Build, program, and run USB-Blaster smoke tests
+    test_hw_integration.py   Hardware integration tests
   tests/
     test_*.py                Host, CLI/RPC, transport, LiteX, probe-file,
                              bridge, GUI, and viewer tests

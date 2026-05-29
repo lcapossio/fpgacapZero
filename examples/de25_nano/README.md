@@ -2,7 +2,7 @@
 
 This example targets the Terasic DE25-Nano Agilex 5 board connected through
 the onboard USB-Blaster III cable. It instantiates the fpgacapZero Intel ELA
-and EIO wrappers using `sld_virtual_jtag`.
+and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 
 ## Files
 
@@ -14,6 +14,7 @@ and EIO wrappers using `sld_virtual_jtag`.
 | `build_de25_nano.tcl` | Quartus batch build script |
 | `build.py` | Preferred build launcher |
 | `run_hw_tests.py` | Build, program, probe, and optional capture runner |
+| `test_hw_integration.py` | Pytest hardware integration regression tests |
 
 ## JTAG Instances
 
@@ -22,6 +23,7 @@ and EIO wrappers using `sld_virtual_jtag`.
 | 1 | ELA control/register path |
 | 2 | ELA burst readout |
 | 3 | EIO |
+| 4 | EJTAG-AXI bridge |
 
 ## Board I/O
 
@@ -29,6 +31,7 @@ and EIO wrappers using `sld_virtual_jtag`.
 - `KEY[1:0]`, `SW[3:0]`, and counter bits are visible through EIO input probes.
 - `LEDR[7:0]` are active-low and driven from EIO outputs, with `LEDR[0]`
   also showing a heartbeat.
+- EIO output bits 4-6 feed the ELA external-trigger test hooks.
 
 Pin assignments come from the Terasic DE25-Nano user manual:
 `CLOCK1_50` is `PIN_V16`, `KEY[0]`/`KEY[1]` are `PIN_C8`/`PIN_C11`,
@@ -68,4 +71,32 @@ python examples/de25_nano/run_hw_tests.py \
   --no-build \
   --no-program \
   --capture
+```
+
+## Hardware Regression Tests
+
+To run the pytest suite after building and programming:
+
+```sh
+python examples/de25_nano/run_hw_tests.py \
+  --hardware "DE25-Nano [USB-1]" \
+  --pytest
+```
+
+The pytest suite mirrors the Arty A7 hardware regression coverage where the
+DE25-Nano design has equivalent Intel/Altera plumbing: ELA identity/registers,
+captures, trigger delay, decimation, timestamps, segmented capture, EIO
+read/write, and EJTAG-AXI read/write/burst/error paths.
+
+## Soak Test
+
+For a 10-minute board soak, reuse the programmed bitstream and run repeated
+ELA/EIO/AXI checks in one Quartus session:
+
+```sh
+python examples/de25_nano/run_hw_tests.py \
+  --hardware "DE25-Nano [USB-1]" \
+  --no-build \
+  --no-program \
+  --soak-seconds 600
 ```
