@@ -76,24 +76,35 @@ if {[file exists $project_xpr]} {
     if {[get_runs -quiet synth_1] ne {}} {
         reset_run synth_1
     }
-    # Make sure the auto-generated version header is registered as a
-    # global Verilog include in this project.  Re-running the script
-    # after rtl/fcapz_version.vh appeared (option-B v0.3.0) needs this
-    # one-shot upgrade or the build fails with `FCAPZ_ELA_VERSION_REG
-    # macro undefined`.
-    if {[llength [get_files -quiet $root/rtl/fcapz_version.vh]] == 0} {
-        add_files $root/rtl/fcapz_version.vh
-        set_property file_type "Verilog Header" \
-            [get_files $root/rtl/fcapz_version.vh]
-        set_property is_global_include true \
-            [get_files $root/rtl/fcapz_version.vh]
+    foreach src [list \
+        $root/rtl/fcapz_version.vh \
+        $root/rtl/reset_sync.v \
+        $root/rtl/dpram.v \
+        $root/rtl/trig_compare.v \
+        $root/rtl/fcapz_ela.v \
+        $root/rtl/fcapz_core_manager.v \
+        $root/rtl/fcapz_debug_multi_xilinx7.v \
+        $root/rtl/fcapz_ela_xilinx7.v \
+        $root/rtl/jtag_reg_iface.v \
+        $root/rtl/jtag_pipe_iface.v \
+        $root/rtl/jtag_burst_read.v \
+        $root/rtl/jtag_tap/jtag_tap_xilinx7.v \
+        $root/rtl/fcapz_async_fifo.v \
+        $root/rtl/fcapz_ejtagaxi.v \
+        $root/rtl/fcapz_ejtagaxi_xilinx7.v \
+        $root/rtl/fcapz_eio.v \
+        $root/rtl/fcapz_eio_xilinx7.v \
+        $root/tb/axi4_test_slave.v \
+        $example_dir/arty_a7_top.v \
+    ] {
+        if {[llength [get_files -quiet $src]] == 0} {
+            add_files $src
+        }
     }
-    if {[llength [get_files -quiet $root/rtl/reset_sync.v]] == 0} {
-        add_files $root/rtl/reset_sync.v
-    }
-    if {[llength [get_files -quiet $root/rtl/jtag_pipe_iface.v]] == 0} {
-        add_files $root/rtl/jtag_pipe_iface.v
-    }
+    set_property file_type "Verilog Header" \
+        [get_files $root/rtl/fcapz_version.vh]
+    set_property is_global_include true \
+        [get_files $root/rtl/fcapz_version.vh]
 } else {
     # No .xpr but partial peripheral dirs may exist from a killed build.
     # Use -force to clear them now that we've removed the stale locks.
@@ -106,6 +117,8 @@ if {[file exists $project_xpr]} {
         $root/rtl/dpram.v \
         $root/rtl/trig_compare.v \
         $root/rtl/fcapz_ela.v \
+        $root/rtl/fcapz_core_manager.v \
+        $root/rtl/fcapz_debug_multi_xilinx7.v \
         $root/rtl/fcapz_ela_xilinx7.v \
         $root/rtl/jtag_reg_iface.v \
         $root/rtl/jtag_pipe_iface.v \

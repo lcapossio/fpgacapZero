@@ -387,6 +387,165 @@ and the no-priming-scan protocol automatically.  If the transport does
 not implement that method the host falls back to the USER1 path, which
 is correct but significantly slower.
 
+## Multiple debug cores on one USER chain
+
+Multi-ELA designs use the same generic core manager as mixed ELA/EIO designs.
+The manager keeps the legacy ELA register map at `0x0000` and adds a small
+directory/select block at `0xF000`. Slot 0 is active after reset, so an old
+host still sees the first ELA exactly where it expects `VERSION`.
+
+The active-slot model is deliberate: it avoids carving the 16-bit register
+space into fixed windows that would conflict with deep DATA/timestamp windows,
+and it lets the existing 256-bit burst pipe read from the same selected ELA
+that was armed.
+
+```verilog
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .NUM_EIOS(0),
+    .SAMPLE_W(32),
+    .TIMESTAMP_W(32),
+    .CTRL_CHAIN(1),
+    .DEPTH(1024)
+) u_debug (
+    .ela_sample_clk({clk_axi, clk_cpu}),
+    .ela_sample_rst({rst_axi, rst_cpu}),
+    .ela_probe_in({axi_state, cpu_state}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in(1'b0),
+    .eio_probe_out()
+);
+```
+
+The lower-level `fcapz_core_manager` is also available if you already have
+custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
+yourself.  At this revision the packaged multi-core wrapper is Xilinx
+7-series only; other vendors still use their single-core wrappers until
+equivalent debug-manager wrappers are added.
+
+Each managed ELA has its own `ela_sample_clk[i]` and `ela_sample_rst[i]`.
+Use `{NUM_ELAS{clk}}` / `{NUM_ELAS{rst}}` when every ELA samples the same
+domain, or pass different clocks and resets to capture unrelated fabric
+domains behind one USER chain.  The wrapper resets the shared JTAG pipe when
+any ELA reset is asserted.
+
+Each ELA can also override the scalar/default wrapper settings with packed
+per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the
+maximum burst-pipe width while making core 0 a 16-bit ELA and core 1 a
+32-bit ELA:
+
+```verilog
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .NUM_EIOS(0),
+    .SAMPLE_W(32),                 // max/default width
+    .DEPTH(1024),                  // max/default depth
+    .ELA_SAMPLE_WS({32'd32, 32'd16}),
+    .ELA_DEPTHS({32'd1024, 32'd512}),
+    .ELA_TIMESTAMP_WS({32'd32, 32'd0}),
+    .ELA_NUM_SEGMENTS({32'd4, 32'd1})
+) u_debug (...);
+```
+
+The scalar parameters remain the defaults for existing designs.  Per-slot
+vectors exist for ELA sample width, depth, trigger stages, storage
+qualification, input pipe, channel count, decimation, external trigger,
+timestamp width, segment count, probe mux width, startup arm, default external
+trigger mode, relational compare, dual comparator, and USER1 DATA readout.
+
+Fast 256-bit burst readout is available only for managed ELA slots whose
+`SAMPLE_W`, `DEPTH`, `TIMESTAMP_W`, and `NUM_SEGMENTS` match the wrapper's
+max/default burst-pipe shape.  Heterogeneous slots still work through the
+normal 49-bit DATA window; the host checks the manager descriptor and falls
+back automatically.
+
+Manager registers:
+
+| Address | Name | Access | Description |
+|---|---|
+| `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
+| `0xF004` | MGR_COUNT | RO | Number of slots. |
+| `0xF008` | MGR_ACTIVE | RW | Active ELA slot. Non-manager register and burst accesses target this slot. |
+| `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
+| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
+| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
+| `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
+
+Host-side, select the ELA instance explicitly:
+
+```bash
+fcapz --backend hw_server --tap xc7a100t ela-list
+fcapz --backend hw_server --tap xc7a100t --ela-instance 1 probe
+```
+
+```python
+transport = XilinxHwServerTransport(fpga_name="xc7a100t")
+manager = ElaManager(transport)
+transport.connect()
+print(manager.probe_all())
+
+ela0 = Analyzer(transport, instance=0)
+ela1 = Analyzer(transport, instance=1)
+```
+
+Multiple `Analyzer` objects can share one transport session; each analyzer
+re-selects its configured manager slot before probe, configure, arm, status
+polling, and readback. Do not run captures from two Python threads against
+the same transport at the same time. The transport serializes low-level I/O,
+but capture workflows still share FPGA JTAG bandwidth and should be sequenced
+deliberately.
+
+The first manager implementation assumes homogeneous burst shape across slots
+(`SAMPLE_W`, `TIMESTAMP_W`, and `DEPTH` match). If we need heterogeneous ELAs,
+the manager should grow per-slot metadata and mux to a maximum-width burst
+pipe, or we should group different shapes under separate manager instances.
+
+Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
+Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected
+slot exposes its native register map at `0x0000`, so ELA host code still
+talks to ELA registers and EIO host code still talks to EIO registers.
+
+```verilog
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .EIO_EN(1),
+    .NUM_EIOS(2),
+    .SAMPLE_W(32),
+    .TIMESTAMP_W(32),
+    .EIO_IN_W(8),
+    .EIO_OUT_W(16),
+    .EIO_IN_WS({32'd12, 32'd8}),
+    .EIO_OUT_WS({32'd16, 32'd4})
+) u_debug (
+    .ela_sample_clk({clk1, clk0}),
+    .ela_sample_rst({rst1, rst0}),
+    .ela_probe_in({probe1, probe0}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in({gpio_status1, gpio_status0}),
+    .eio_probe_out({gpio_control1, gpio_control0})
+);
+```
+
+Host-side:
+
+```python
+manager = ElaManager(transport)
+print(manager.probe())                   # num_slots, active, capabilities
+print(manager.slot_info(2))              # EIO0: {"core_id": 0x494F, ...}
+print(manager.slot_info(3))              # EIO1: {"core_id": 0x494F, ...}
+
+ela1 = Analyzer(transport, instance=1)
+eio = EioController(transport, chain=1, instance=2)
+```
+
+The Arty A7 reference design uses this pattern: two ELA slots and two EIO
+slots share USER1, while EJTAG-AXI remains on USER4.
+
 ## Segmented memory (`NUM_SEGMENTS > 1`)
 
 Segmented memory splits the buffer into N equal-sized segments and
@@ -549,10 +708,11 @@ What happens at runtime:
 4. When the countdown reaches zero, `trig_ptr <- wr_ptr` is
    committed and the post-trigger countdown begins normally.
 
-Verified end-to-end on Arty A7 silicon: trigger on counter == 0x10
+Verified end-to-end on Arty A7 silicon: trigger on ELA0 counter == 0x10
 with `trigger_delay=4` → captured trigger sample = 0x14 (= cause + 4
-counter ticks, since the reference design's probe is a free-running
-counter).
+counter ticks, since the reference design's ELA0 probe is a free-running
+150 MHz counter). The same Arty manager bitstream also exposes ELA1 on a
+separate 130 MHz sample clock with its own xored counter probe.
 
 `trigger_delay = 0` (the default) reproduces the legacy zero-delay
 behavior exactly.  Range is `0..65535`.

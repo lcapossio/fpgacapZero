@@ -8,7 +8,7 @@
 
 # ── System clock (100 MHz) ─────────────────────────────────────
 set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports clk]
-create_clock -period 6.667 -name sys_clk [get_ports clk]
+create_clock -period 10.000 -name board_clk [get_ports clk]
 
 # ── Push-buttons (active-high) ─────────────────────────────────
 set_property -dict {PACKAGE_PIN D9  IOSTANDARD LVCMOS33} [get_ports {btn[0]}]
@@ -31,5 +31,5 @@ create_clock -name tck_bscan -period 100.0 \
     [get_pins -hierarchical -filter {NAME =~ *u_bscan/TCK}]
 
 set_clock_groups -asynchronous \
-    -group [get_clocks sys_clk] \
+    -group [get_clocks -include_generated_clocks board_clk] \
     -group [get_clocks tck_bscan]

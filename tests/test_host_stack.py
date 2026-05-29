@@ -14,7 +14,9 @@ from fcapz.analyzer import (
     Analyzer,
     CaptureConfig,
     CaptureResult,
+    CORE_MANAGER_CORE_ID,
     ELA_CORE_ID,
+    ElaManager,
     SequencerStage,
     TriggerConfig,
     expected_ela_version_reg,
@@ -57,6 +59,16 @@ class FakeTransport(Transport):
             },
         }
         self._active_chain: int = 1
+        self._active_ela: int = 0
+        self._manager_regs: dict[int, int] = {
+            0xF000: ((_version_tuple()[0] & 0xFF) << 24)
+            | ((_version_tuple()[1] & 0xFF) << 16)
+            | CORE_MANAGER_CORE_ID,
+            0xF004: 1,
+            0xF008: 0,
+            0xF00C: 0,
+            0xF010: 1,
+        }
         self.data = [1, 2, 3, 4]
 
     @property
@@ -81,6 +93,8 @@ class FakeTransport(Transport):
         return bits  # simple echo
 
     def read_reg(self, addr: int) -> int:
+        if addr in self._manager_regs:
+            return self._manager_regs[addr]
         return self.regs.get(addr, 0)
 
     def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
@@ -90,6 +104,13 @@ class FakeTransport(Transport):
         return out
 
     def write_reg(self, addr: int, value: int) -> None:
+        if addr == 0xF008:
+            self._active_ela = int(value)
+            self._manager_regs[addr] = int(value)
+            return
+        if addr in self._manager_regs:
+            self._manager_regs[addr] = value
+            return
         self.regs[addr] = value
 
     def read_block(self, addr: int, words: int):
@@ -143,6 +164,157 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(len(result.samples), 4)
         self.assertEqual(data["trigger"]["value"], 7)
         self.assertEqual(data["sample_width"], 8)
+
+    def test_analyzer_selects_configured_chain(self):
+        transport = FakeTransport()
+        transport._chain_regs[2] = dict(transport._chain_regs[1])
+        transport._chain_regs[2][0x000C] = 16
+        analyzer = Analyzer(transport, chain=2)
+
+        analyzer.connect()
+        info = analyzer.probe()
+
+        self.assertEqual(analyzer.bscan_chain, 2)
+        self.assertEqual(transport._active_chain, 2)
+        self.assertEqual(info["sample_width"], 16)
+
+    def test_ela_manager_selects_instances_on_one_chain(self):
+        class ManagedElaTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF004] = 2
+                self._slots = [dict(self.regs), dict(self.regs)]
+                self._slots[0][0x000C] = 8
+                self._slots[1][0x000C] = 16
+
+            def read_reg(self, addr: int) -> int:
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = value
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+                return [self.read_reg(a) for a in addrs]
+
+        transport = ManagedElaTransport()
+        manager = ElaManager(transport, chain=1)
+
+        minfo = manager.probe()
+        all_info = manager.probe_all()
+
+        self.assertEqual(minfo["num_slots"], 2)
+        self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
+        self.assertEqual([info["instance"] for info in all_info], [0, 1])
+
+        analyzer = Analyzer(transport, instance=1)
+        self.assertEqual(analyzer.probe()["sample_width"], 16)
+        self.assertEqual(transport._manager_regs[0xF008], 1)
+
+    def test_core_manager_describes_and_skips_non_ela_slots(self):
+        class MixedCoreTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF000] = (
+                    ((_version_tuple()[0] & 0xFF) << 24)
+                    | ((_version_tuple()[1] & 0xFF) << 16)
+                    | CORE_MANAGER_CORE_ID
+                )
+                self._manager_regs[0xF004] = 3
+                self._manager_regs[0xF010] = 0x3
+                self._manager_regs[0xF014] = 0
+                self._slots = [dict(self.regs), dict(self.regs), {
+                    0x0000: _expected_eio_version_reg(),
+                    0x0004: 8,
+                    0x0008: 8,
+                }]
+                self._slots[1][0x000C] = 16
+
+            def read_reg(self, addr: int) -> int:
+                if addr == 0xF018:
+                    return [ELA_CORE_ID, ELA_CORE_ID, EIO_CORE_ID][self._manager_regs[0xF014]]
+                if addr == 0xF01C:
+                    return [1, 1, 0][self._manager_regs[0xF014]]
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = int(value)
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+                return [self.read_reg(a) for a in addrs]
+
+        transport = MixedCoreTransport()
+        manager = ElaManager(transport, chain=1)
+
+        minfo = manager.probe()
+        all_info = manager.probe_all()
+
+        self.assertEqual(minfo["core_id"], CORE_MANAGER_CORE_ID)
+        self.assertEqual(minfo["num_slots"], 3)
+        self.assertEqual(manager.slot_info(2)["core_id"], EIO_CORE_ID)
+        self.assertEqual([info["sample_width"] for info in all_info], [8, 16])
+        self.assertEqual([info["instance"] for info in all_info], [0, 1])
+
+    def test_managed_no_burst_slot_uses_slow_data_window(self):
+        class NoBurstManagedTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs[0xF004] = 2
+                self._manager_regs[0xF010] = 0x3
+                self._manager_regs[0xF014] = 0
+                self._slots = [dict(self.regs), dict(self.regs)]
+                self._slots[1][0x001C] = 3
+                self.slow_reads: list[int] = []
+
+            def read_reg(self, addr: int) -> int:
+                if addr == 0xF01C:
+                    return 0  # selected slot has no fast burst support
+                if addr in self._manager_regs:
+                    return self._manager_regs[addr]
+                if addr >= 0x0100:
+                    self.slow_reads.append(addr)
+                    return 0x40 + ((addr - 0x0100) // 4)
+                return self._slots[self._active_ela].get(addr, 0)
+
+            def write_reg(self, addr: int, value: int) -> None:
+                if addr == 0xF008:
+                    self._active_ela = int(value)
+                    self._manager_regs[addr] = int(value)
+                    return
+                if addr in self._manager_regs:
+                    self._manager_regs[addr] = int(value)
+                    return
+                self._slots[self._active_ela][addr] = value
+
+            def read_block(self, addr: int, words: int):
+                raise AssertionError("fast read_block should not be used")
+
+        transport = NoBurstManagedTransport()
+        analyzer = Analyzer(transport, instance=1)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.samples, [0x40, 0x41, 0x42])
+        self.assertEqual(transport.slow_reads, [0x0100, 0x0104, 0x0108])
 
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
@@ -769,6 +941,28 @@ class EioControllerTests(unittest.TestCase):
         self.assertEqual(t._active_chain, 1)
         self.assertEqual(eio.in_w, 8)
         self.assertEqual(eio.bscan_chain, 3)
+
+    def test_managed_instance_selected_before_each_access(self):
+        """EIO can live behind the active-slot manager on USER1."""
+        t = FakeVioTransport()
+        writes: list[tuple[int, int]] = []
+        orig_write = t.write_reg
+
+        def traced_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            orig_write(addr, value)
+
+        t.write_reg = traced_write  # type: ignore[method-assign]
+        eio = EioController(t, chain=1, instance=2)
+
+        eio.connect()
+        eio.read_inputs()
+        eio.write_outputs(0x5A)
+        eio.read_outputs()
+
+        self.assertEqual(t.connect_chain, 1)
+        self.assertGreaterEqual(writes.count((0xF008, 2)), 4)
+        self.assertEqual(t.regs[0x0100], 0x5A)
 
 
 class MultiSegmentTests(unittest.TestCase):

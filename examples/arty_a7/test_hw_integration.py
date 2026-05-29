@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,8 @@ FPGA = "xc7a100t"
 # COMPARE_PIPE=1 from that setting, so the visible trigger decision sample is
 # one sample after the comparator match.
 TRIGGER_DECISION_LATENCY = 1
+ELA0_SAMPLE_CLOCK_HZ = 150_000_000
+ELA1_SAMPLE_CLOCK_HZ = 130_000_000
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -63,6 +66,8 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "dpram.v",
     _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
     _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
     _ROOT / "rtl" / "jtag_reg_iface.v",
     _ROOT / "rtl" / "jtag_pipe_iface.v",
@@ -137,6 +142,133 @@ class TestProbe(unittest.TestCase):
             self.assertEqual(info["core_id"], ELA_CORE_ID)
             self.assertEqual(info["sample_width"], 8)
             self.assertEqual(info["depth"], 1024)
+        finally:
+            a.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestMultiElaManager(unittest.TestCase):
+    """Validate the Arty bitstream exposes two ELA slots on USER1."""
+
+    def test_manager_enumerates_and_isolates_ela_slots(self):
+        from fcapz.analyzer import (
+            Analyzer,
+            ELA_CORE_ID,
+            CORE_MANAGER_CORE_ID,
+            ElaManager,
+        )
+
+        t = _make_transport()
+        try:
+            t.connect()
+            manager = ElaManager(t)
+            minfo = manager.probe()
+            self.assertEqual(minfo["core_id"], CORE_MANAGER_CORE_ID)
+            self.assertEqual(minfo["num_slots"], 4)
+            self.assertEqual(
+                [manager.slot_info(i)["core_id"] for i in range(4)],
+                [ELA_CORE_ID, ELA_CORE_ID, 0x494F, 0x494F],
+            )
+
+            slots = manager.probe_all()
+            self.assertEqual([s["instance"] for s in slots], [0, 1])
+            for slot in slots:
+                self.assertEqual(slot["core_id"], ELA_CORE_ID)
+                self.assertEqual(slot["sample_width"], 8)
+                self.assertEqual(slot["depth"], 1024)
+
+            # Prove manager selection routes the normal ELA register map to
+            # independent per-slot state, not just the same ELA twice.
+            ela0 = Analyzer(t, instance=0)
+            ela1 = Analyzer(t, instance=1)
+            ela0.select_instance(0)
+            t.write_reg(0x0014, 11)  # PRETRIG_LEN
+            ela1.select_instance(1)
+            t.write_reg(0x0014, 22)
+
+            ela0.select_instance(0)
+            self.assertEqual(t.read_reg(0x0014), 11)
+            ela1.select_instance(1)
+            self.assertEqual(t.read_reg(0x0014), 22)
+        finally:
+            t.close()
+
+    def test_first_ela_captures_150mhz_counter(self):
+        """ELA0 samples the plain counter in the generated 150 MHz domain."""
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+        a = Analyzer(_make_transport(), instance=0)
+        try:
+            a.connect()
+            cfg = CaptureConfig(
+                pretrigger=4,
+                posttrigger=8,
+                trigger=TriggerConfig(
+                    mode="value_match",
+                    value=0x40,
+                    mask=0xFF,
+                ),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
+            )
+            a.configure(cfg)
+            a.arm()
+            result = a.capture(timeout=5.0)
+            samples = [s & 0xFF for s in result.samples]
+            errors = [
+                (i - 1, samples[i - 1], samples[i])
+                for i in range(1, len(samples))
+                if ((samples[i] - samples[i - 1]) & 0xFF) != 1
+            ]
+            self.assertEqual(errors, [], f"ELA0 counter errors in samples={samples}")
+            self.assertIn(0x40, samples)
+            if result.timestamps:
+                gaps = [
+                    result.timestamps[i] - result.timestamps[i - 1]
+                    for i in range(1, len(result.timestamps))
+                ]
+                self.assertTrue(all(g == 1 for g in gaps), result.timestamps)
+        finally:
+            a.close()
+
+    def test_second_ela_captures_130mhz_xored_counter(self):
+        """ELA1 samples a separate xored counter in the 130 MHz domain."""
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+        a = Analyzer(_make_transport(), instance=1)
+        try:
+            a.connect()
+            cfg = CaptureConfig(
+                pretrigger=4,
+                posttrigger=8,
+                trigger=TriggerConfig(
+                    mode="value_match",
+                    value=0xA5,
+                    mask=0xFF,
+                ),
+                sample_width=8,
+                depth=1024,
+                sample_clock_hz=ELA1_SAMPLE_CLOCK_HZ,
+            )
+            a.configure(cfg)
+            a.arm()
+            result = a.capture(timeout=5.0)
+            samples = [s & 0xFF for s in result.samples]
+            decoded = [s ^ 0xA5 for s in samples]
+            errors = [
+                (i - 1, decoded[i - 1], decoded[i])
+                for i in range(1, len(decoded))
+                if ((decoded[i] - decoded[i - 1]) & 0xFF) != 1
+            ]
+            self.assertEqual(errors, [], f"ELA1 decoded counter errors in samples={samples}")
+            self.assertIn(0xA5, samples)
+            if result.timestamps:
+                gaps = [
+                    result.timestamps[i] - result.timestamps[i - 1]
+                    for i in range(1, len(result.timestamps))
+                ]
+                self.assertTrue(all(g == 1 for g in gaps), result.timestamps)
         finally:
             a.close()
 
@@ -383,11 +515,12 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
         from fcapz.eio import EioController
 
         self.t = _make_transport()
-        self.a = Analyzer(self.t)
+        self.a = Analyzer(self.t, instance=0)
         self.a.connect()
-        self.eio = EioController(self.t, chain=3)
+        self.eio = EioController(self.t, chain=1, instance=2)
         self.eio.attach()
         self._set_eio_outputs(0)
+        self.a.select_instance(0)
 
     def tearDown(self):
         try:
@@ -396,11 +529,9 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             self.a.close()
 
     def _set_eio_outputs(self, value: int) -> None:
-        self.t.select_chain(3)
-        try:
-            self.eio.write_outputs(value)
-        finally:
-            self.t.select_chain(1)
+        self.eio.write_outputs(value)
+        self.assertEqual(self.eio.read_outputs(), value & 0xFF)
+        time.sleep(0.001)
 
     def test_register_roundtrip(self):
         """STARTUP_ARM / TRIG_HOLDOFF read back correctly on silicon."""
@@ -468,6 +599,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             ext_trigger_mode=2,
         )
         self.a.configure(cfg)
+        self.a.reset()
         self._set_eio_outputs(1 << 5)
         self.a.arm()
 
@@ -501,6 +633,7 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
             ext_trigger_mode=2,
         )
         self.a.configure(cfg)
+        self.a.reset()
         self._set_eio_outputs(1 << 6)
         self.a.arm()
 
@@ -595,7 +728,7 @@ class TestDecimation(unittest.TestCase):
     def test_decim_zero_baseline(self):
         """DECIM=0 captures every cycle (same as before)."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=self.TriggerConfig(mode="value_match", value=0x10, mask=0xFF),
             decimation=0,
@@ -615,7 +748,7 @@ class TestDecimation(unittest.TestCase):
         pretrigger = 2
         trigger_value = 0x20
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=pretrigger, posttrigger=5,
             trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
@@ -667,7 +800,7 @@ class TestTimestamps(unittest.TestCase):
     def test_timestamps_monotonic(self):
         """Captured timestamps are strictly increasing."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=5,
             trigger=self.TriggerConfig(mode="value_match", value=0x30, mask=0xFF),
         )
@@ -685,7 +818,7 @@ class TestTimestamps(unittest.TestCase):
         pretrigger = 1
         trigger_value = 0x40
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=pretrigger, posttrigger=4,
             trigger=self.TriggerConfig(mode="value_match", value=trigger_value, mask=0xFF),
             decimation=3,
@@ -737,7 +870,7 @@ class TestSegmentedCapture(unittest.TestCase):
         Segment depth = 1024/4 = 256, so pretrig+posttrig+1 <= 256.
         """
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
@@ -759,7 +892,7 @@ class TestSegmentedCapture(unittest.TestCase):
     def test_segment_data_independent(self):
         """Each segment has its own capture data, not shared."""
         cfg = self.CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=0, posttrigger=2,
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
@@ -806,7 +939,7 @@ class TestExtTrigger(unittest.TestCase):
         from fcapz.analyzer import CaptureConfig, TriggerConfig
 
         cfg = CaptureConfig(
-            sample_width=8, depth=1024, sample_clock_hz=100e6,
+            sample_width=8, depth=1024, sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             pretrigger=2, posttrigger=3,
             trigger=TriggerConfig(mode="value_match", value=0x50, mask=0xFF),
             ext_trigger_mode=0,
@@ -817,18 +950,30 @@ class TestExtTrigger(unittest.TestCase):
         self.assertEqual(len(result.samples), 6)
 
 
-# ── EIO tests (USER3) ─────────────────────────────────────────────────
+# ── EIO tests (managed USER1 slot 2) ─────────────────────────────────
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioProbe(unittest.TestCase):
-    """EIO: probe identity and widths on chain 3."""
+    """EIO: probe identity and widths through the USER1 debug manager."""
 
     def test_eio_probe(self):
         from fcapz.eio import EioController
 
         t = _make_transport()
-        eio = EioController(t, chain=3)
+        eio = EioController(t, chain=1, instance=2)
+        try:
+            eio.connect()
+            self.assertEqual(eio.in_w, 8)
+            self.assertEqual(eio.out_w, 8)
+        finally:
+            eio.close()
+
+    def test_second_eio_probe(self):
+        from fcapz.eio import EioController
+
+        t = _make_transport()
+        eio = EioController(t, chain=1, instance=3)
         try:
             eio.connect()
             self.assertEqual(eio.in_w, 8)
@@ -839,12 +984,12 @@ class TestEioProbe(unittest.TestCase):
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioReadWrite(unittest.TestCase):
-    """EIO: read inputs and write outputs via JTAG USER3."""
+    """EIO: read inputs and write outputs through managed USER1 slot 2."""
 
     def setUp(self):
         from fcapz.eio import EioController
 
-        self.eio = EioController(_make_transport(), chain=3)
+        self.eio = EioController(_make_transport(), chain=1, instance=2)
         self.eio.connect()
 
     def tearDown(self):
@@ -869,6 +1014,18 @@ class TestEioReadWrite(unittest.TestCase):
         self.eio.write_outputs(0xA5)
         readback = self.eio.read_outputs()
         self.assertEqual(readback, 0xA5)
+
+    def test_second_eio_write_read_outputs(self):
+        """Second EIO slot has independent output storage."""
+        from fcapz.eio import EioController
+
+        eio1 = EioController(_make_transport(), chain=1, instance=3)
+        try:
+            eio1.connect()
+            eio1.write_outputs(0x3C)
+            self.assertEqual(eio1.read_outputs(), 0x3C)
+        finally:
+            eio1.close()
 
     def test_write_zero_outputs(self):
         """Write 0 and verify readback."""

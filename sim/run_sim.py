@@ -91,6 +91,12 @@ TESTBENCHES = {
             RTL / "fcapz_eio.v",
         ],
     ),
+    "fcapz_core_manager": (
+        TB / "fcapz_core_manager_tb.sv",
+        [
+            RTL / "fcapz_core_manager.v",
+        ],
+    ),
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
@@ -111,12 +117,15 @@ DEFAULT_TESTBENCHES = [
     "jtag_pipe_iface",
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
+    "fcapz_core_manager",
     "chan_mux",
 ]
 
 LINT_TARGETS = [
     RTL / "dpram.v",
     RTL / "reset_sync.v",
+    RTL / "dff_reg_sync.v",
+    RTL / "dff_sync.v",
     RTL / "trig_compare.v",
     RTL / "jtag_reg_iface.v",
     RTL / "jtag_burst_read.v",
@@ -124,6 +133,8 @@ LINT_TARGETS = [
     RTL / "fcapz_async_fifo.v",
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",
+    RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_eio.v",
     RTL / "fcapz_eio_xilinx7.v",
     RTL / "fcapz_ejtagaxi.v",
@@ -147,6 +158,9 @@ LINT_TARGETS = [
     # g_shared generate branch is elaborated (default EIO_EN=0 lint
     # would dead-code-eliminate it).
     SIM / "lint_eio_en_xilinx7.v",
+    # Heterogeneous managed ELA/EIO wrapper shape: per-slot widths, depths,
+    # timestamps, clocks, and EIO widths.
+    SIM / "lint_debug_multi_hetero_xilinx7.v",
 ]
 
 LINT_STUBS = [
@@ -194,7 +208,7 @@ def run_rtl_lint() -> bool:
     common = [
         "iverilog",
         "-Wall",
-        "-g2012",
+        "-g2001",
         "-I",
         str(RTL),
         "-y",

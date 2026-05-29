@@ -34,6 +34,8 @@ subcommand follows:
 | `--hardware HARDWARE` | auto | Quartus hardware name for `usb_blaster`; required if more than one Quartus JTAG cable is connected |
 | `--quartus-stp PATH` | PATH lookup | Path to `quartus_stp` for `usb_blaster` |
 | `--program BITFILE` | none | Program the FPGA with this bitfile before running the subcommand (hw_server only) |
+| `--chain N` | `1` | ELA control BSCAN USER chain for `probe`, `arm`, `configure`, and `capture` |
+| `--ela-instance N` | none | Core-manager ELA slot on the selected chain; omit for legacy single-ELA bitstreams or the current active slot |
 
 Examples:
 
@@ -69,6 +71,7 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 | Subcommand | What it does |
 |---|---|
 | `probe` | Read core identity registers (version, sample width, depth, features) |
+| `ela-list` | Read the core manager and probe every ELA slot on the selected chain |
 | `arm` | Arm capture without configuring (advanced) |
 | `configure` | Write capture configuration without arming |
 | `capture` | Configure + arm + capture + export to file |
@@ -90,6 +93,19 @@ Read the core's identity, version, and FEATURES registers:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t probe
+```
+
+If the ELA wrapper was instantiated on another USER chain, pass `--chain`:
+
+```bash
+fcapz --backend hw_server --port 3121 --tap xc7a100t --chain 2 probe
+```
+
+For a managed multi-ELA design on one chain, list slots and select one:
+
+```bash
+fcapz --backend hw_server --port 3121 --tap xc7a100t ela-list
+fcapz --backend hw_server --port 3121 --tap xc7a100t --ela-instance 1 probe
 ```
 
 Output (formatted JSON to stdout):
@@ -357,7 +373,14 @@ wrote 0x55
 `VALUE` accepts decimal or `0x` hex.
 
 All three EIO subcommands take `--chain N` (default 3) to override
-the BSCANE2 USER chain.
+the BSCANE2 USER chain. For mixed-manager designs where EIO shares USER1,
+also pass `--instance N` to select the EIO slot before each register access.
+
+```bash
+fcapz --backend hw_server --tap xc7a100t eio-probe --chain 1 --instance 2
+fcapz --backend hw_server --tap xc7a100t eio-write --chain 1 --instance 2 0x11
+fcapz --backend hw_server --tap xc7a100t eio-read --chain 1 --instance 2
+```
 
 ## AXI subcommands
 

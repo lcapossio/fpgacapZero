@@ -42,8 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..analyzer import Analyzer, CaptureConfig, CaptureResult
-from ..eio import EioController
+from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
+from ..eio import EIO_CORE_ID, EioController
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
 from .branding import GUI_DISPLAY_TITLE
@@ -52,6 +52,7 @@ from .capture_panel import CapturePanel
 from .connection_panel import ConnectionPanel
 from .eio_panel import EioPanel
 from .history_panel import HistoryPanel
+from .hierarchy_panel import HierarchyPanel
 from .log_panel import LogPanel
 from .probe_panel import ProbePanel
 from .reject_spin_combo_wheel import install_reject_spin_combo_wheel_filter
@@ -124,7 +125,7 @@ _DOCK_FEATURES = (
 )
 
 # Bump when dock object names / layout schema change so old blobs are not restored.
-_WINDOW_STATE_VERSION = 6
+_WINDOW_STATE_VERSION = 7
 
 # Shipped ``saveState(_WINDOW_STATE_VERSION)`` blob (docks + main toolbar). Regenerate when
 # the schema bumps or the preferred first-run layout changes (filename must match version).
@@ -233,6 +234,7 @@ class MainWindow(QMainWindow):
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
         self._uart: EjtagUartController | None = None
+        self._jtag_topology: Mapping[str, Any] | None = None
 
         self._conn = ConnectionPanel()
         self._conn.connect_requested.connect(self._on_connect)
@@ -241,6 +243,7 @@ class MainWindow(QMainWindow):
 
         self._probe = ProbePanel()
         self._capture = CapturePanel()
+        self._capture.ela_core_changed.connect(self._on_ela_core_changed)
         self._capture.wire_handlers(
             on_configure=self._on_configure,
             on_arm=self._on_arm_clicked,
@@ -260,6 +263,7 @@ class MainWindow(QMainWindow):
 
         self._eio_panel = EioPanel()
         self._eio_panel.attach_requested.connect(self._on_eio_attach)
+        self._eio_panel.detach_requested.connect(self._on_eio_detach)
         self._axi_panel = AxiPanel()
         self._axi_panel.attach_requested.connect(self._on_axi_attach)
         self._uart_panel = UartPanel()
@@ -338,6 +342,14 @@ class MainWindow(QMainWindow):
         )
         self._dock_probe.setFeatures(_DOCK_FEATURES)
 
+        self._hierarchy = HierarchyPanel()
+        self._dock_hierarchy = QDockWidget("JTAG hierarchy", self)
+        self._dock_hierarchy.setObjectName("dock_jtag_hierarchy")
+        self._dock_hierarchy.setWidget(
+            scroll_wrap(self._hierarchy, min_width=240, min_height=160),
+        )
+        self._dock_hierarchy.setFeatures(_DOCK_FEATURES)
+
         self._dock_log = QDockWidget("Log", self)
         self._dock_log.setObjectName("dock_log")
         self._dock_log.setWidget(
@@ -357,6 +369,7 @@ class MainWindow(QMainWindow):
             *self._workbench_docks,
             self._dock_conn,
             self._dock_probe,
+            self._dock_hierarchy,
             self._dock_history,
             self._dock_log,
         ]
@@ -375,6 +388,11 @@ class MainWindow(QMainWindow):
         self._dock_capture.raise_()
 
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_probe)
+        self.splitDockWidget(
+            self._dock_probe,
+            self._dock_hierarchy,
+            Qt.Orientation.Vertical,
+        )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_history)
 
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_log)
@@ -479,6 +497,7 @@ class MainWindow(QMainWindow):
         self,
         analyzer: Analyzer,
         info: Mapping[str, Any] | None,
+        topology: Mapping[str, Any] | None,
     ) -> None:
         QApplication.restoreOverrideCursor()
         conn = self._conn.connection_settings()
@@ -500,14 +519,33 @@ class MainWindow(QMainWindow):
                 "docks on their BSCAN chains if present.",
             )
         self._analyzer = analyzer
+        self._jtag_topology = topology
         if info is not None:
             self._probe.set_probe_info(info)
             self._capture.set_hw_probe_info(info)
         else:
             self._probe.set_probe_info(None)
             self._capture.set_hw_probe_info(None)
+        self._hierarchy.set_topology(topology, info)
         self._history.set_analyzer_ref(analyzer)
         self._eio_panel.set_transport(analyzer.transport)
+        ela_slots = []
+        eio_slots = []
+        if topology is not None:
+            ela_slots = [
+                int(s.get("instance", 0))
+                for s in topology.get("slots", [])
+                if isinstance(s, Mapping) and (int(s.get("core_id", 0)) & 0xFFFF) == ELA_CORE_ID
+            ]
+            eio_slots = [
+                int(s.get("instance", 0))
+                for s in topology.get("slots", [])
+                if isinstance(s, Mapping) and (int(s.get("core_id", 0)) & 0xFFFF) == EIO_CORE_ID
+            ]
+        self._capture.set_managed_ela_slots(ela_slots, current=0)
+        self._eio_panel.set_managed_eio_slots(eio_slots)
+        self._dock_capture.setWindowTitle("ELA")
+        self._dock_eio.setWindowTitle("EIO")
         self._axi_panel.set_transport_available(True)
         self._uart_panel.set_transport_available(True)
         if info is not None and hw_attach_only:
@@ -526,6 +564,8 @@ class MainWindow(QMainWindow):
             msg = "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available)."
         self._conn.set_connected(True, msg)
         self.statusBar().showMessage(msg)
+        if eio_slots:
+            self._on_eio_attach()
 
         gui = load_gui_settings(self._config_path)
         gui.connection = conn
@@ -1164,6 +1204,8 @@ class MainWindow(QMainWindow):
         self._history.set_analyzer_ref(None)
         self._clear_subsidiary_controllers()
         self._probe.clear()
+        self._hierarchy.clear()
+        self._jtag_topology = None
         self._capture.clear_hw()
         self._conn.set_connected(False)
         self.statusBar().showMessage("Disconnected")
@@ -1179,13 +1221,19 @@ class MainWindow(QMainWindow):
         self._axi_panel.set_transport_available(False)
         self._uart_panel.clear()
         self._uart_panel.set_transport_available(False)
+        self._dock_capture.setWindowTitle("ELA capture")
+        self._dock_eio.setWindowTitle("EIO")
 
     def _on_eio_attach(self) -> None:
         if self._analyzer is None:
             return
         t = self._analyzer.transport
         try:
-            eio = EioController(t, chain=self._eio_panel.chain())
+            eio = EioController(
+                t,
+                chain=self._eio_panel.chain(),
+                instance=self._eio_panel.instance(),
+            )
             eio.attach()
         except (OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, "EIO attach", str(exc))
@@ -1193,7 +1241,48 @@ class MainWindow(QMainWindow):
         self._eio = eio
         self._eio_panel.bind_eio(t, eio)
         self.statusBar().showMessage("EIO attached")
-        _log.info("EIO attached (chain=%d)", self._eio_panel.chain())
+        _log.info(
+            "EIO attached (chain=%d, instance=%s)",
+            self._eio_panel.chain(),
+            self._eio_panel.instance(),
+        )
+
+    def _on_eio_detach(self) -> None:
+        self._eio = None
+        self._eio_panel.detach_eio()
+        if self._analyzer is not None and self._ela_present:
+            try:
+                self._analyzer.select_instance(0)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        self.statusBar().showMessage("EIO detached")
+        _log.info("EIO detached")
+
+    def _on_ela_core_changed(self, instance: int) -> None:
+        if self._analyzer is None:
+            return
+        try:
+            self._analyzer.select_instance(int(instance))
+            info = self._analyzer.probe_optional()
+        except (OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.warning(self, "ELA core", str(exc))
+            return
+        self._ela_present = info is not None
+        self._probe.set_probe_info(info)
+        self._capture.set_hw_probe_info(info)
+        if info is not None:
+            self._capture.set_managed_ela_slots(
+                [
+                    int(s.get("instance", 0))
+                    for s in (self._jtag_topology or {}).get("slots", [])
+                    if isinstance(s, Mapping)
+                    and (int(s.get("core_id", 0)) & 0xFFFF) == ELA_CORE_ID
+                ],
+                current=int(instance),
+            )
+            self.statusBar().showMessage(f"ELA core {int(instance)} selected")
+            _log.info("ELA core selected (instance=%d)", int(instance))
+        self._sync_toolbar_actions()
 
     def _on_axi_attach(self) -> None:
         if self._analyzer is None:
@@ -1316,7 +1405,7 @@ class MainWindow(QMainWindow):
         if self._analyzer is None:
             return
         if not self._continuous_mode:
-            self._history.add_capture(self._analyzer, result)
+            self._record_capture(result)
             return
         self._cont_pending_result = result
         if not self._cont_ui_timer.isActive():
@@ -1328,7 +1417,7 @@ class MainWindow(QMainWindow):
         pending = self._cont_pending_result
         self._cont_pending_result = None
         if pending is not None:
-            self._history.add_capture(self._analyzer, pending)
+            self._record_capture(pending)
         if self._continuous_mode and self._cont_pending_result is not None:
             self._cont_ui_timer.start()
 
@@ -1340,7 +1429,7 @@ class MainWindow(QMainWindow):
         pending = self._cont_pending_result
         self._cont_pending_result = None
         if pending is not None:
-            self._history.add_capture(self._analyzer, pending)
+            self._record_capture(pending)
 
     def _on_worker_finished(self, result: CaptureResult | None) -> None:
         was_cont = self._continuous_mode
@@ -1357,11 +1446,16 @@ class MainWindow(QMainWindow):
                 len(result.samples),
                 result.overflow,
             )
-            self._history.add_capture(self._analyzer, result)
+            self._record_capture(result)
             self._persist_trigger_snapshot(result.config)
         elif was_cont and result is None:
             _log.info("Auto re-arm capture stopped")
         self._sync_toolbar_actions()
+
+    def _record_capture(self, result: CaptureResult) -> None:
+        if self._analyzer is None:
+            return
+        self._history.add_capture(self._analyzer, result)
 
     def _on_worker_failed(self, message: str) -> None:
         _log.error("Capture worker failed: %s", message)

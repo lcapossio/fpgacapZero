@@ -189,38 +189,37 @@ wrappers are available through `ela_rtl_sources()` for custom integration.
 
 ## Adding more cores in the same design
 
-The reference Arty A7 design uses three cores in one bitstream:
+The reference Arty A7 design uses one USER1 debug manager plus AXI on USER4:
 
 ```verilog
-// 1. ELA on USER1 (control + burst data by default)
-fcapz_ela_xilinx7 #(
-    .SAMPLE_W (8),
-    .DEPTH    (1024)
-) u_ela (
-    .sample_clk  (clk_100mhz),
-    .sample_rst  (rst),
-    .probe_in    (counter[7:0]),
-    .trigger_in  (1'b0),
-    .trigger_out ()
+// 1. Managed USER1 debug chain: ELA0, ELA1, EIO0, EIO1.
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS(2),
+    .EIO_EN(1),
+    .NUM_EIOS(2),
+    .SAMPLE_W(8),
+    .DEPTH(1024),
+    .EIO_IN_W(8),
+    .EIO_OUT_W(8)
+) u_debug (
+    .ela_sample_clk({clk_130mhz, clk_150mhz}),
+    .ela_sample_rst({rst_130mhz, rst_150mhz}),
+    .ela_probe_in({counter_130 ^ 8'hA5, counter_150}),
+    .ela_trigger_in(2'b00),
+    .ela_trigger_out(),
+    .ela_armed_out(),
+    .eio_probe_in({eio1_in, eio0_in}),
+    .eio_probe_out({eio1_out, eio0_out})
 );
 
-// 2. EIO on USER3
-fcapz_eio_xilinx7 #(
-    .IN_W  (8),
-    .OUT_W (8)
-) u_eio (
-    .probe_in  (gpio_in),
-    .probe_out (gpio_out)
-);
-
-// 3. EJTAG-AXI bridge on USER4
+// 2. EJTAG-AXI bridge on USER4
 fcapz_ejtagaxi_xilinx7 #(
     .ADDR_W     (32),
     .DATA_W     (32),
     .FIFO_DEPTH (16)
 ) u_axi (
-    .axi_clk      (clk_100mhz),
-    .axi_rst      (rst),
+    .axi_clk      (clk_150mhz),
+    .axi_rst      (rst_150mhz),
     // ... 30 AXI signals connected to your AXI slave or interconnect ...
 );
 ```
@@ -320,6 +319,7 @@ module fcapz_ela_xilinx7 #(
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
+| `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_xilinx7` only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
@@ -414,8 +414,9 @@ eio.write_outputs(0x1)
 - You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
   `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
   USER chain).
-- A future third core on the same chain (EJTAG-AXI/UART) would need a
-  wider address mux or a hierarchical `fcapz_regbus_mux`.
+- For multiple ELAs plus EIO on one Xilinx 7-series chain, prefer
+  `fcapz_debug_multi_xilinx7`; it uses the descriptor-capable `"CM"`
+  active-slot manager instead of the older fixed `0x8000` EIO address window.
 
 ## EIO wrapper parameter reference
 

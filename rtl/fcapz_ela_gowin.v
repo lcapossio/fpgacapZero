@@ -44,17 +44,30 @@ module fcapz_ela_gowin #(
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
 ) (
-    input  wire                              sample_clk,
-    input  wire                              sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0]  probe_in,
+    input  wire                             clk,
+        // NOTE: this clock must be
+        // at least ~10x the JTAG TCK
+        // (~2 MHz for BR-100-GW1NR9)
+
+    output wire                             jtag_activity,
+
+    input  wire                             sample_clk,
+    input  wire                             sample_rst,
+    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
     // EIO ports (active when EIO_EN=1)
-    input  wire [EIO_IN_W-1:0]               eio_probe_in,
-    output wire [EIO_OUT_W-1:0]              eio_probe_out
+    input  wire [EIO_IN_W-1:0]              eio_probe_in,
+    output wire [EIO_OUT_W-1:0]             eio_probe_out,
+
+    input  wire                             tms_pad_i,
+    input  wire                             tck_pad_i,
+    input  wire                             tdi_pad_i,
+    output wire                             tdo_pad_o
 );
 
     // TAP signals
-    wire tap_tck, tap_tdi, tap_tdo;
-    wire tap_capture, tap_shift, tap_update, tap_sel;
+    wire tap_tdi;
+    wire [1:0] tap_tdo, tap_capture, tap_update, tap_sel;
+    wire [1:0] tap_shift_in, tap_shift_out;
 
     // Register bus
     wire        jtag_clk, jtag_rst;
@@ -63,6 +76,19 @@ module fcapz_ela_gowin #(
     wire [31:0] jtag_wdata, jtag_rdata;
     wire        jtag_rst_ctrl;
     localparam PTR_W = $clog2(DEPTH);
+    localparam CHAIN_IDX = CHAIN - 1;
+
+    generate
+        if (CHAIN < 1 || CHAIN > 2) begin : g_invalid_chain
+`ifndef VERILATOR
+            __FCAPZ_GOWIN_CHAIN_MUST_BE_1_OR_2__ invalid();
+`endif
+            initial begin
+                $error("fcapz_ela_gowin CHAIN must be 1 (ER1) or 2 (ER2)");
+                $finish;
+            end
+        end
+    endgenerate
 
     // Gowin exposes only one user chain here, so USER2 burst readout is not
     // instantiated. Keep the core burst interface tied off; USER1 readback
@@ -75,28 +101,52 @@ module fcapz_ela_gowin #(
     wire [PTR_W-1:0] burst_start_ptr_unused;
 
     // ---- TAP wrapper ----
-    jtag_tap_gowin #(.CHAIN(CHAIN)) u_tap_ctrl (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
-        .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+    jtag_tap_gowin u_tap_ctrl (
+        .sysclk         (clk),
+
+        .activity       (jtag_activity),
+
+        .tdi            (tap_tdi),
+        .tdo            (tap_tdo),
+        .capture        (tap_capture),
+        .shift_in       (tap_shift_in),
+        .shift_out      (tap_shift_out),
+        .update         (tap_update),
+        .sel            (tap_sel),
+
+        .tms_pad_i      (tms_pad_i),
+        .tck_pad_i      (tck_pad_i),
+        .tdi_pad_i      (tdi_pad_i),
+        .tdo_pad_o      (tdo_pad_o)
     );
 
+
     reset_sync u_rst_sync_ctrl (
-        .clk(tap_tck),
-        .arst(sample_rst),
-        .srst(jtag_rst_ctrl)
+        .clk            (clk),
+        .arst           (sample_rst),
+        .srst           (jtag_rst_ctrl)
     );
 
     // ---- Register interface ----
-    jtag_reg_iface u_reg (
-        .arst(jtag_rst_ctrl),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
-        .capture(tap_capture), .shift_en(tap_shift),
-        .update(tap_update), .sel(tap_sel),
-        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
-        .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
-        .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
-        .reg_rdata(jtag_rdata)
+    jtag_reg_iface_gowin u_reg (
+        .arst           (jtag_rst_ctrl),
+
+        .tck            (clk),
+        .tdi            (tap_tdi),
+        .tdo            (tap_tdo[CHAIN_IDX]),
+        .capture        (tap_capture[CHAIN_IDX]),
+        .shift_in_en    (tap_shift_in[CHAIN_IDX]),
+        .shift_out_en   (tap_shift_out[CHAIN_IDX]),
+        .update         (tap_update[CHAIN_IDX]),
+        .sel            (tap_sel[CHAIN_IDX]),
+
+        .reg_clk        (jtag_clk),
+        .reg_rst        (jtag_rst),
+        .reg_wr_en      (jtag_wr_en),
+        .reg_rd_en      (jtag_rd_en),
+        .reg_addr       (jtag_addr),
+        .reg_wdata      (jtag_wdata),
+        .reg_rdata      (jtag_rdata)
     );
 
     // ---- ELA + optional EIO via address mux ----

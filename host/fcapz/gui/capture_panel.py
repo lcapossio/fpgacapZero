@@ -7,7 +7,7 @@ import argparse
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QSettings, QSignalBlocker
+from PySide6.QtCore import QSettings, QSignalBlocker, Signal
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -124,6 +124,8 @@ _SEQ_HEADERS = (
 class CapturePanel(QGroupBox):
     """ELA capture parameters including optional hardware trigger sequencer stages."""
 
+    ela_core_changed = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("ELA capture", parent)
         self._hw_sample_w: int | None = None
@@ -145,6 +147,12 @@ class CapturePanel(QGroupBox):
             "Then sample width and depth load from hardware and the capture buttons unlock.",
         )
         self._hw_label.setWordWrap(True)
+
+        self._ela_core = QComboBox()
+        self._ela_core.addItem("core 0", 0)
+        self._ela_core.setEnabled(False)
+        self._ela_core.setToolTip("Detected ELA core behind the USER-chain manager.")
+        self._ela_core.currentIndexChanged.connect(self._on_ela_core_changed)
 
         self._profiles: dict[str, ProbeProfile] = {}
 
@@ -325,6 +333,7 @@ class CapturePanel(QGroupBox):
 
         form_main = QFormLayout()
         form_main.addRow(self._hw_label)
+        form_main.addRow("ELA core", self._ela_core)
         form_main.addRow("Probe profile", self._profile_pick)
         form_main.addRow("Trigger preset", self._preset)
         form_main.addRow("Pre-trigger samples", row_pre)
@@ -405,6 +414,7 @@ class CapturePanel(QGroupBox):
         self._hw_num_segments = 1
         self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy = False
+        self.set_managed_ela_slots([], current=0)
         self._btn_stop.setEnabled(False)
         self._hw_label.setText(
             "Connect first (toolbar or Connection panel). "
@@ -899,6 +909,7 @@ class CapturePanel(QGroupBox):
             self._hw_probe_mux_w = 0
             self._hw_num_segments = 1
             self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
+            self.set_managed_ela_slots([], current=0)
             self._btn_stop.setEnabled(False)
             self._hw_label.setText(
                 "JTAG connected — no fcapz ELA on USER1. Capture controls stay disabled; "
@@ -944,6 +955,27 @@ class CapturePanel(QGroupBox):
         self._refresh_seq_ui_state()
         self._apply_hw_feature_availability()
         self._refresh_pre_post_validity()
+
+    def set_managed_ela_slots(self, slots: list[int], *, current: int = 0) -> None:
+        with QSignalBlocker(self._ela_core):
+            self._ela_core.clear()
+            if slots:
+                for slot in slots:
+                    self._ela_core.addItem(f"core {int(slot)}", int(slot))
+                idx = self._ela_core.findData(int(current))
+                self._ela_core.setCurrentIndex(idx if idx >= 0 else 0)
+                self._ela_core.setEnabled(len(slots) > 1)
+            else:
+                self._ela_core.addItem("core 0", 0)
+                self._ela_core.setCurrentIndex(0)
+                self._ela_core.setEnabled(False)
+
+    def selected_ela_instance(self) -> int:
+        data = self._ela_core.currentData()
+        return int(data) if data is not None else 0
+
+    def _on_ela_core_changed(self, _index: int) -> None:
+        self.ela_core_changed.emit(self.selected_ela_instance())
 
     def set_busy(self, busy: bool, *, continuous: bool = False) -> None:
         self._ui_busy = busy

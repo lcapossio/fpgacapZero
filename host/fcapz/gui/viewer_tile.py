@@ -304,6 +304,9 @@ def schedule_vertical_split_with_viewer(host: QWidget, proc: QProcess) -> None:
     remaining = [14]
 
     def _tick() -> None:
+        state = getattr(proc, "state", None)
+        if not callable(state):
+            return
         if proc.state() == QProcess.ProcessState.NotRunning:
             return
         ok = _try_vertical_split(host, proc)

@@ -18,6 +18,8 @@ _ADDR_VERSION = 0x0000
 # this magic before touching any other ELA register on the same chain.
 ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
+CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
+_CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
 
 
 def expected_ela_version_reg() -> int:
@@ -63,6 +65,15 @@ _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
 _ADDR_PROBE_MUX_W = 0x00D0
 _ADDR_TRIG_DELAY = 0x00D4
+
+_ADDR_MGR_VERSION = 0xF000
+_ADDR_MGR_COUNT = 0xF004
+_ADDR_MGR_ACTIVE = 0xF008
+_ADDR_MGR_STRIDE = 0xF00C
+_ADDR_MGR_CAPS = 0xF010
+_ADDR_MGR_DESC_INDEX = 0xF014
+_ADDR_MGR_DESC_CORE = 0xF018
+_ADDR_MGR_DESC_CAPS = 0xF01C
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
@@ -232,14 +243,57 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
 
 
 class Analyzer:
-    def __init__(self, transport: Transport):
+    def __init__(
+        self,
+        transport: Transport,
+        *,
+        chain: int = 1,
+        instance: int | None = None,
+    ):
         self.transport = transport
+        self._chain = int(chain)
+        self._instance = None if instance is None else int(instance)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
+        self._manager_slot_caps: int | None = None
+
+    @property
+    def bscan_chain(self) -> int:
+        """BSCAN USER chain used for this ELA control interface."""
+        return self._chain
+
+    @property
+    def instance(self) -> int | None:
+        """Core-manager slot selected before accesses, or ``None`` for legacy direct mode."""
+        return self._instance
+
+    def _select_chain(self) -> None:
+        try:
+            self.transport.select_chain(self._chain)
+        except NotImplementedError:
+            if self._chain != 1:
+                raise
+
+    def _select_instance(self) -> None:
+        self._select_chain()
+        if self._instance is not None:
+            self.transport.write_reg(_ADDR_MGR_ACTIVE, self._instance)
+
+    def select_instance(self, instance: int | None) -> None:
+        """Select a core-manager slot for subsequent analyzer operations.
+
+        ``None`` leaves the active slot untouched and preserves legacy direct-ELA
+        behavior for bitstreams without a manager.
+        """
+        self._instance = None if instance is None else int(instance)
+        self._manager_slot_caps = None
+        self._select_instance()
 
     def connect(self) -> None:
+        self._select_chain()
         self.transport.connect()
+        self._select_instance()
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -251,6 +305,7 @@ class Analyzer:
         self.transport.close()
 
     def reset(self) -> None:
+        self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
 
     @staticmethod
@@ -274,6 +329,7 @@ class Analyzer:
                 occupied.add(bit)
 
     def configure(self, config: CaptureConfig) -> None:
+        self._select_instance()
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
         if config.pretrigger + config.posttrigger + 1 > config.depth:
@@ -381,6 +437,7 @@ class Analyzer:
         External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
         cannot block an immediate run.
         """
+        self._select_instance()
         _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
@@ -402,9 +459,11 @@ class Analyzer:
         return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
 
     def arm(self) -> None:
+        self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
+        self._select_instance()
         deadline = time.monotonic() + timeout
         read_status = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
         while time.monotonic() < deadline:
@@ -416,6 +475,7 @@ class Analyzer:
 
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
+        self._select_instance()
         if self._hw_timestamp_w == 0:
             return []
         sw = self._config.sample_width if self._config else 8
@@ -425,7 +485,7 @@ class Analyzer:
         ts_word_count = total * ts_words_per
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
         used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
-        if used_timestamp_burst:
+        if used_timestamp_burst and self._selected_slot_has_burst():
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
@@ -442,15 +502,32 @@ class Analyzer:
         if used_timestamp_burst and any(
             timestamps[i] <= timestamps[i - 1] for i in range(1, len(timestamps))
         ):
-            # Some Xilinx hw_server runs occasionally return one stale USER2
-            # timestamp scan after the sample burst. USER1 timestamp reads are
-            # slower but deterministic, so fall back rather than reporting bad
-            # timing metadata with otherwise-good samples.
+            # Some Xilinx hw_server runs occasionally return one stale burst
+            # timestamp scan after the sample burst. Control-chain timestamp
+            # reads are slower but deterministic, so fall back rather than
+            # reporting bad timing metadata with otherwise-good samples.
             raw = self.transport.read_block(ts_base, ts_word_count)
             timestamps = [v & mask for v in raw]
         return timestamps
 
+    def _selected_slot_has_burst(self) -> bool:
+        """Return whether the active managed slot participates in fast burst readback."""
+        if self._instance is None:
+            return True
+        if self._manager_slot_caps is None:
+            self._select_chain()
+            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
+            self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
+        return bool(self._manager_slot_caps & 0x1)
+
+    def _read_data_words(self, total_words: int) -> list[int]:
+        if self._selected_slot_has_burst():
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
+
     def capture(self, timeout: float = 10.0) -> CaptureResult:
+        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
@@ -466,7 +543,7 @@ class Analyzer:
             total = fallback_total
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
-        raw = self.transport.read_block(_ADDR_DATA_BASE, total * words_per_sample)
+        raw = self._read_data_words(total * words_per_sample)
         mask = (1 << sw) - 1
         if words_per_sample == 1:
             samples = [v & mask for v in raw]
@@ -496,6 +573,7 @@ class Analyzer:
 
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
         """Read back data from a specific segment after all segments are done."""
+        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
 
@@ -514,7 +592,7 @@ class Analyzer:
 
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
-        raw = self.transport.read_block(_ADDR_DATA_BASE, total * words_per_sample)
+        raw = self._read_data_words(total * words_per_sample)
         mask = (1 << sw) - 1
         if words_per_sample == 1:
             samples = [v & mask for v in raw]
@@ -671,7 +749,8 @@ class Analyzer:
     def _read_ela_probe_registers_raw(
         self,
     ) -> tuple[int, int, int, int, int, int, int, int, int]:
-        """Read USER1 ELA identity / feature registers (may be a non-ELA core)."""
+        """Read ELA identity / feature registers on this analyzer's chain."""
+        self._select_instance()
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -743,10 +822,10 @@ class Analyzer:
         }
 
     def probe_optional(self) -> Optional[Dict]:
-        """Like :meth:`probe` but returns ``None`` if USER1 is not an fcapz ELA.
+        """Like :meth:`probe` but returns ``None`` if this chain has no fcapz ELA.
 
         Use this when the host should stay connected for subsidiary BSCAN cores
-        (EIO, EJTAG-AXI, UART, …) even if the primary USER1 register window does
+        (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
         not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
         """
         version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
@@ -787,3 +866,96 @@ class Analyzer:
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
         return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+
+
+class CoreManager:
+    """Host helper for active-slot debug-core managers on one USER chain."""
+
+    def __init__(self, transport: Transport, *, chain: int = 1):
+        self.transport = transport
+        self._chain = int(chain)
+
+    @property
+    def bscan_chain(self) -> int:
+        return self._chain
+
+    def _select_chain(self) -> None:
+        try:
+            self.transport.select_chain(self._chain)
+        except NotImplementedError:
+            if self._chain != 1:
+                raise
+
+    def probe(self) -> Dict:
+        """Read manager identity and slot count."""
+        self._select_chain()
+        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        version = int(read(_ADDR_MGR_VERSION))
+        core_id = version & 0xFFFF
+        if core_id != _CORE_MANAGER_CORE_ID:
+            raise RuntimeError(
+                f"core manager identity check failed at VERSION[15:0]: "
+                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
+                f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
+            )
+        caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
+        info = {
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+            "core_id": core_id,
+            "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
+            "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
+            "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
+            "capabilities": caps,
+        }
+        return info
+
+    def slot_info(self, instance: int) -> Dict:
+        """Return descriptor info for one slot when the manager supports it."""
+        self._select_chain()
+        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+        return {
+            "instance": int(instance),
+            "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
+            "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+        }
+
+    def select_raw(self, instance: int) -> None:
+        self._select_chain()
+        self.transport.write_reg(_ADDR_MGR_ACTIVE, int(instance))
+
+    def select(self, instance: int) -> Analyzer:
+        """Select *instance* and return an Analyzer bound to that slot."""
+        analyzer = Analyzer(self.transport, chain=self._chain, instance=instance)
+        analyzer.select_instance(instance)
+        return analyzer
+
+    def analyzers(self) -> list[Analyzer]:
+        """Return one Analyzer per manager slot.
+
+        For a mixed core manager, this returns all slots; callers can use
+        :meth:`slot_info` or :meth:`probe_all` to filter by core type.
+        """
+        info = self.probe()
+        return [
+            Analyzer(self.transport, chain=self._chain, instance=i)
+            for i in range(max(0, int(info["num_slots"])))
+        ]
+
+    def probe_all(self) -> list[Dict]:
+        """Probe every LA slot and include the slot index in each dict."""
+        out: list[Dict] = []
+        for idx, analyzer in enumerate(self.analyzers()):
+            try:
+                info = analyzer.probe()
+            except RuntimeError:
+                continue
+            else:
+                info["instance"] = idx
+                info["chain"] = self._chain
+                out.append(info)
+        return out
+
+
+class ElaManager(CoreManager):
+    """Compatibility name for manager helpers used by multi-ELA designs."""
