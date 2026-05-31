@@ -294,6 +294,14 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
 class QuartusStpTransportTests(unittest.TestCase):
     """Intel/Altera USB-Blaster transport helpers."""
 
+    @staticmethod
+    def _quartus_burst_token(values: list[int], element_width: int = 8) -> str:
+        packed = 0
+        mask = (1 << element_width) - 1
+        for idx, value in enumerate(values):
+            packed |= (value & mask) << (idx * element_width)
+        return f"{packed:0256b}"
+
     def test_shift_string_is_fixed_width_binary_value(self):
         self.assertEqual(QuartusStpTransport._int_to_shift_string(0b0101, 4), "0101")
         self.assertEqual(QuartusStpTransport._shift_string_to_int("0101", 4), 0b0101)
@@ -543,6 +551,117 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIn("-instance_index 7", scripts[0])
         self.assertIn("device_run_test_idle -num_clocks 123", scripts[0])
         self.assertIn("-length 256", scripts[0])
+
+    def test_quartus_burst_primes_data_chain_before_returned_scans(self):
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 32)
+        fresh0 = self._quartus_burst_token(list(range(32)))
+        fresh1 = self._quartus_burst_token(list(range(32, 64)))
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh0} {fresh1}"
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        self.assertEqual(t._read_block_burst(33), list(range(33)))
+        self.assertEqual(len(scripts), 2)
+        self.assertEqual(scripts[0].count("-length 256"), 3)
+
+    def test_quartus_burst_requires_stable_repeated_readback(self):
+        prime = self._quartus_burst_token([0xAA] * 32)
+        responses = [
+            f"{prime} {self._quartus_burst_token([0x10] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x20] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x30] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x40] * 32)}",
+        ]
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, _script):
+                return responses.pop(0)
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
+            t._read_block_burst(8)
+
+    def test_quartus_burst_accepts_first_stale_then_stable_pair(self):
+        prime = self._quartus_burst_token([0xAA] * 32)
+        stale = f"{prime} {self._quartus_burst_token([0xEE] * 32)}"
+        fresh = f"{prime} {self._quartus_burst_token(list(range(32)))}"
+        responses = [stale, fresh, fresh]
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, _script):
+                return responses.pop(0)
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        self.assertEqual(t._read_block_burst(8), list(range(8)))
+        self.assertEqual(responses, [])
+
+    def test_quartus_timestamp_burst_primes_and_selects_timestamp_stream(self):
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 8, element_width=32)
+        fresh = self._quartus_burst_token(list(range(8)), element_width=32)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh}"
+
+        t = FakeQuartus()
+        self.assertEqual(
+            t._read_block_burst(8, timestamp=True, element_width=32),
+            list(range(8)),
+        )
+        timestamp_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0x80000000
+        self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
+        self.assertEqual(scripts[0].count("-length 256"), 2)
+
+    def test_quartus_read_block_falls_back_and_disables_failed_burst(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{1:049b} {2:049b}"
+
+        t = FakeQuartus()
+        t._read_block_burst = MagicMock(side_effect=RuntimeError("DATA_CHAIN missing"))  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
+            self.assertEqual(t.read_block(0x0100, 2), [1, 2])
+        self.assertIn("falling back", "\n".join(logs.output))
+        self.assertFalse(t._burst_available)
+
+        self.assertEqual(t.read_block(0x0100, 2), [1, 2])
+        t._read_block_burst.assert_called_once_with(2)
+        self.assertEqual(len(scripts), 2)
+
+    def test_quartus_timestamp_block_falls_back_and_disables_failed_burst(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{4:049b} {5:049b}"
+
+        t = FakeQuartus()
+        t._read_block_burst = MagicMock(side_effect=RuntimeError("timestamp missing"))  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
+            self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
+        self.assertIn("timestamp burst readback failed", "\n".join(logs.output))
+        self.assertFalse(t._burst_available)
+        t._read_block_burst.assert_called_once_with(
+            2,
+            timestamp=True,
+            element_width=32,
+        )
+        self.assertEqual(len(scripts), 1)
 
     def test_read_block_zero_words_is_noop(self):
         class FakeQuartus(QuartusStpTransport):

@@ -444,6 +444,7 @@ class QuartusStpTransport(Transport):
         self._stdout_lines: queue.Queue[str | None] = queue.Queue()
         self._stp_io_lock = threading.Lock()
         self._poisoned = False
+        self._has_burst = True
 
     def connect(self) -> None:
         argv = self._quartus_stp_argv
@@ -469,6 +470,7 @@ class QuartusStpTransport(Transport):
             bufsize=1,
         )
         self._poisoned = False
+        self._has_burst = True
         self._stdout_lines = queue.Queue()
         self._stderr_lines = []
         if self._proc.poll() is not None:
@@ -597,15 +599,16 @@ class QuartusStpTransport(Transport):
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
-        if addr == 0x0100:
+        if addr == 0x0100 and self._burst_available:
             try:
                 return self._read_block_burst(words)
-            except RuntimeError as exc:
+            except (ConnectionError, RuntimeError) as exc:
                 _quartus_log.warning(
                     "Quartus ELA burst readback failed (%s); falling back to "
                     "slow control-chain DATA reads",
                     exc,
                 )
+                self._has_burst = False
         instance = self._active_chain
         body = ["set __fcapz_reads {}"]
         body.append(self._virtual_ir_tcl(instance))
@@ -648,20 +651,25 @@ class QuartusStpTransport(Transport):
         """Read timestamp words through the Intel/Altera DATA_CHAIN burst path."""
         if words <= 0:
             return []
-        if timestamp_width > 0:
+        if timestamp_width > 0 and self._burst_available:
             try:
                 return self._read_block_burst(
                     words,
                     timestamp=True,
                     element_width=timestamp_width,
                 )
-            except RuntimeError as exc:
+            except (ConnectionError, RuntimeError) as exc:
                 _quartus_log.warning(
                     "Quartus ELA timestamp burst readback failed (%s); falling back "
                     "to slow control-chain timestamp reads",
                     exc,
                 )
+                self._has_burst = False
         return self.read_block(addr, words)
+
+    @property
+    def _burst_available(self) -> bool:
+        return bool(self._has_burst)
 
     @property
     def _burst_samples_per_scan(self) -> int:
