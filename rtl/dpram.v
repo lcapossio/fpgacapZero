@@ -29,6 +29,12 @@ module dpram #(
 
     (* ram_style = "auto" *)
     reg [WIDTH-1:0] mem [0:DEPTH-1];
+    integer i;
+
+    initial begin
+        for (i = 0; i < DEPTH; i = i + 1)
+            mem[i] = {WIDTH{1'b0}};
+    end
 
     // Port A: write-first read
     always @(posedge clk_a) begin

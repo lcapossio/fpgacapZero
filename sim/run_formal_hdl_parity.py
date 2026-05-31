@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -279,6 +280,7 @@ def prep_side(read_cmds: list[str], top: str, name: str) -> list[str]:
         "flatten",
         "memory_map",
         "async2sync",
+        "setundef -zero",
         "opt -full",
         f"rename {top} {name}",
         f"design -stash {name}",
@@ -319,7 +321,7 @@ def prove_config(
             "opt -full",
             "equiv_struct",
             "equiv_simple",
-            f"equiv_induct -seq {induct_depth}",
+            f"equiv_induct -undef -seq {induct_depth}",
             "equiv_status",
         ]
     ) + "\n"
@@ -338,6 +340,33 @@ def prove_config(
     if bounded_depth <= 0:
         return "FAIL", f"{count} unproven equivalence point(s)"
 
+    reset_inputs = manifest.get("formal", {}).get("reset_inputs", [])
+    reset_cycles = int(manifest.get("formal", {}).get("reset_cycles", 0))
+    clock_inputs = manifest.get("formal", {}).get("clock_inputs", [])
+    zero_inputs = manifest.get("formal", {}).get("zero_inputs", [])
+    reset_args: list[str] = []
+    for cycle in range(1, bounded_depth + 1):
+        for clock in clock_inputs:
+            reset_args.extend(["-set-at", str(cycle), f"in_{clock}", "1"])
+        for signal in zero_inputs:
+            reset_args.extend(["-set-at", str(cycle), f"in_{signal}", "0"])
+    for cycle in range(1, reset_cycles + 1):
+        for reset in reset_inputs:
+            reset_args.extend(["-set-at", str(cycle), f"in_{reset}", "1"])
+    if reset_cycles:
+        for cycle in range(reset_cycles + 1, bounded_depth + 1):
+            for reset in reset_inputs:
+                reset_args.extend(["-set-at", str(cycle), f"in_{reset}", "0"])
+        reset_args.extend(["-prove-skip", str(reset_cycles)])
+    dump_vcd = os.environ.get("FORMAL_PARITY_DUMP_VCD")
+    dump_args = f" -dump_vcd {Path(dump_vcd).as_posix()}" if dump_vcd else ""
+    show_extra = os.environ.get("FORMAL_PARITY_SHOW", "")
+    show_args = "".join(
+        f" -show {signal.strip()}"
+        for signal in show_extra.split(",")
+        if signal.strip()
+    )
+
     bounded = "\n".join(
         [
             *prep_side(gold_read, golden["top"], "gold"),
@@ -345,10 +374,14 @@ def prove_config(
             "design -reset",
             "design -copy-from gold -as gold gold",
             "design -copy-from gate -as gate gate",
-            "miter -equiv -make_assert -flatten gold gate miter",
+            "miter -equiv -make_assert -make_outputs -make_outcmp -flatten gold gate miter",
             "hierarchy -top miter",
             "opt -full",
-            f"sat -seq {bounded_depth} -prove-asserts",
+            "sat "
+            f"-seq {bounded_depth} "
+            "-set-init-zero "
+            + " ".join(reset_args)
+            + f" -prove-asserts -show-ports{show_args}{dump_args}",
         ]
     ) + "\n"
     _, bounded_output = run(["yosys", "-"], input_text=bounded)

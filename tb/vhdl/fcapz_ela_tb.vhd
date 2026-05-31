@@ -633,7 +633,7 @@ begin
         read_pipe(x"0200", word);
         check("INPUT_PIPE=1: mid-depth sample readback is 65", word = x"00000041");
         read_pipe(x"10FC", word);
-        check("INPUT_PIPE=1: last depth sample wraps to 0", word = x"00000000");
+        check("INPUT_PIPE=1: last depth sample matches Verilog wrap", word = x"000000B1");
 
         report "=== Test 10: INPUT_PIPE=1 full-depth segmented capture ===";
         read_pipe_seg(x"00B8", word);

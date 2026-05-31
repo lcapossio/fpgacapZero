@@ -137,6 +137,7 @@ architecture rtl of fcapz_ela is
     constant SEG_DEPTH        : positive := DEPTH / NUM_SEGMENTS;
     constant SEG_PTR_W        : positive := fcapz_clog2(SEG_DEPTH);
     constant SEG_IDX_W        : positive := fcapz_clog2(NUM_SEGMENTS);
+    constant SEQ_STATE_W      : positive := fcapz_clog2(TRIG_STAGES);
     constant TS_WIDTH         : positive := fcapz_nonzero_width(TIMESTAMP_W);
     constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
 
@@ -188,19 +189,20 @@ architecture rtl of fcapz_ela is
 
     type seg_ptr_t is array (0 to NUM_SEGMENTS - 1) of natural range 0 to DEPTH - 1;
     type reg32_array_t is array (natural range <>) of std_logic_vector(31 downto 0);
+    type sample_array_t is array (natural range <>) of std_logic_vector(SAMPLE_W - 1 downto 0);
 
     signal jtag_ctrl         : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_pretrig_len  : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_posttrig_len : std_logic_vector(31 downto 0) := (others => '0');
-    signal jtag_trig_mode    : std_logic_vector(31 downto 0) := (others => '0');
+    signal jtag_trig_mode    : std_logic_vector(31 downto 0) := x"00000001";
     signal jtag_trig_value   : std_logic_vector(31 downto 0) := (others => '0');
-    signal jtag_trig_mask    : std_logic_vector(31 downto 0) := (others => '0');
+    signal jtag_trig_mask    : std_logic_vector(31 downto 0) := x"FFFFFFFF";
     signal jtag_sq_mode      : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_value     : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_mask      : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_seq_cfg      : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal jtag_seq_value_a  : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal jtag_seq_mask_a   : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
+    signal jtag_seq_mask_a   : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
     signal jtag_seq_value_b  : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal jtag_seq_mask_b   : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
     signal jtag_decim        : std_logic_vector(23 downto 0) := (others => '0');
@@ -208,20 +210,46 @@ architecture rtl of fcapz_ela is
     signal jtag_probe_sel    : natural range 0 to 255 := 0;
     signal jtag_chan_sel     : natural range 0 to 255 := 0;
     signal jtag_seg_sel      : natural range 0 to NUM_SEGMENTS - 1 := 0;
-    signal jtag_startup_arm  : std_logic := '0';
+    signal jtag_startup_arm  : std_logic := bool_to_sl(STARTUP_ARM /= 0);
     signal jtag_trig_delay   : std_logic_vector(15 downto 0) := (others => '0');
     signal jtag_trig_holdoff : std_logic_vector(15 downto 0) := (others => '0');
 
-    signal pretrig_len_sync1      : natural range 0 to DEPTH := 0;
-    signal pretrig_len_sync2      : natural range 0 to DEPTH := 0;
-    signal posttrig_len_sync1     : natural range 0 to DEPTH := 0;
-    signal posttrig_len_sync2     : natural range 0 to DEPTH := 0;
+    signal pretrig_len_sync1      : natural range 0 to DEPTH - 1 := 0;
+    signal pretrig_len_sync2      : natural range 0 to DEPTH - 1 := 0;
+    signal posttrig_len_sync1     : natural range 0 to DEPTH - 1 := 0;
+    signal posttrig_len_sync2     : natural range 0 to DEPTH - 1 := 0;
     signal trig_mode_sync1        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mode_sync2        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_value_sync1       : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_value_sync2       : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mask_sync1        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mask_sync2        : std_logic_vector(31 downto 0) := (others => '0');
+    signal cap_pretrig_len        : natural range 0 to DEPTH - 1 := 0;
+    signal cap_posttrig_len       : natural range 0 to DEPTH - 1 := 0;
+    signal cap_trig_mode          : std_logic_vector(31 downto 0) := x"00000001";
+    signal cap_trig_value         : std_logic_vector(31 downto 0) := (others => '0');
+    signal cap_trig_mask          : std_logic_vector(31 downto 0) := x"FFFFFFFF";
+    signal cap_trig_delay         : natural range 0 to 65535 := 0;
+    signal cap_trig_cmp_mode_a    : std_logic_vector(3 downto 0) := (others => '0');
+    signal cap_trig_cmp_mode_b    : std_logic_vector(3 downto 0) := (others => '0');
+    signal cap_trig_combine       : std_logic_vector(1 downto 0) := (others => '0');
+    signal cap_trig_value_a       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal cap_trig_mask_a        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal cap_trig_value_b       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal cap_trig_mask_b        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal cap_chan_sel           : natural range 0 to 255 := 0;
+    signal cap_probe_sel          : natural range 0 to 255 := 0;
+    signal cap_decim_ratio        : natural range 0 to 16#FFFFFF# := 0;
+    signal cap_trig_ext_mode      : std_logic_vector(1 downto 0) := std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
+    signal cap_sq_enable          : std_logic := '0';
+    signal cap_sq_mode            : std_logic_vector(3 downto 0) := (others => '0');
+    signal cap_sq_value           : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal cap_sq_mask            : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal cap_seq_cfg            : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
+    signal cap_seq_value_a        : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
+    signal cap_seq_mask_a         : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    signal cap_seq_value_b        : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
+    signal cap_seq_mask_b         : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
     signal decim_sync1            : natural range 0 to 16#FFFFFF# := 0;
     signal decim_sync2            : natural range 0 to 16#FFFFFF# := 0;
     signal trig_ext_sync1         : std_logic_vector(1 downto 0) := std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
@@ -258,7 +286,7 @@ architecture rtl of fcapz_ela is
     signal arm_sync          : std_logic_vector(2 downto 0) := (others => '0');
     signal reset_sync        : std_logic_vector(2 downto 0) := (others => '0');
 
-    signal armed             : std_logic := bool_to_sl(STARTUP_ARM /= 0);
+    signal armed             : std_logic := '0';
     signal triggered         : std_logic := '0';
     signal done              : std_logic := '0';
     signal overflow          : std_logic := '0';
@@ -268,9 +296,9 @@ architecture rtl of fcapz_ela is
     signal wr_ptr            : natural range 0 to DEPTH - 1 := 0;
     signal start_ptr         : natural range 0 to DEPTH - 1 := 0;
     signal trig_ptr          : natural range 0 to DEPTH - 1 := 0;
-    signal pre_count         : natural range 0 to DEPTH := 0;
-    signal post_count        : natural range 0 to DEPTH := 0;
-    signal capture_len       : natural range 0 to DEPTH + 1 := 0;
+    signal pre_count         : natural range 0 to (2 * DEPTH) - 1 := 0;
+    signal post_count        : natural range 0 to DEPTH - 1 := 0;
+    signal capture_len       : natural range 0 to (2 * DEPTH) - 1 := 0;
     signal probe_prev        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal decim_count       : natural range 0 to 16#FFFFFF# := 0;
     signal timestamp_counter : unsigned(TS_WIDTH - 1 downto 0) := (others => '0');
@@ -288,6 +316,7 @@ architecture rtl of fcapz_ela is
     signal trig_holdoff      : natural range 0 to 65535 := 0;
     signal trig_holdoff_count: natural range 0 to 65535 := 0;
     signal trig_holdoff_active : std_logic := '0';
+    signal startup_arm_pending : std_logic := bool_to_sl(STARTUP_ARM /= 0);
     signal pipe_probe        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal hit_pipe          : std_logic := '0';
     signal sq_pipe           : std_logic := '1';
@@ -296,6 +325,12 @@ architecture rtl of fcapz_ela is
     signal mem_we_a          : std_logic := '0';
     signal mem_we_a_q        : std_logic := '0';
     signal mem_we_a_ram      : std_logic := '0';
+    signal comb_hit          : std_logic := '0';
+    signal comb_hit_eff      : std_logic := '0';
+    signal comb_sq_ok        : std_logic := '1';
+    signal comb_store_ok     : std_logic := '0';
+    signal comb_trigger_commit_now : std_logic := '0';
+    signal comb_seq_stage_hit : std_logic := '0';
     signal mem_addr_a        : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal mem_addr_a_eff    : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal mem_wr_addr_q     : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
@@ -394,7 +429,7 @@ architecture rtl of fcapz_ela is
 
     function next_ptr(ptr : natural; base : natural) return natural is
     begin
-        if ptr = base + SEG_DEPTH - 1 then
+        if ptr < base or ptr >= base + SEG_DEPTH - 1 then
             return base;
         end if;
         return ptr + 1;
@@ -417,11 +452,8 @@ architecture rtl of fcapz_ela is
         if trig < base or trig >= base + SEG_DEPTH then
             return base;
         end if;
-        if pre_len + post_len + 1 >= SEG_DEPTH then
-            return base;
-        end if;
         off := trig - base;
-        if wrapped = '0' and off < pre_len then
+        if NUM_SEGMENTS > 1 and wrapped = '0' and off < pre_len then
             return base;
         end if;
         return base + ((off + SEG_DEPTH - (pre_len mod SEG_DEPTH)) mod SEG_DEPTH);
@@ -430,7 +462,7 @@ architecture rtl of fcapz_ela is
     function seq_next(cfg : std_logic_vector(31 downto 0)) return natural is
         variable nxt : natural;
     begin
-        nxt := to_integer(unsigned(cfg(11 downto 10)));
+        nxt := to_integer(unsigned(cfg(10 + SEQ_STATE_W - 1 downto 10)));
         if nxt >= TRIG_STAGES then
             return 0;
         end if;
@@ -456,7 +488,7 @@ begin
         report "fcapz_ela: DEFAULT_TRIG_EXT must be 0-3"
         severity failure;
 
-    trigger_out <= trigger_out_i;
+    trigger_out <= trigger_out_i when EXT_TRIG_EN /= 0 else '0';
     armed_out <= armed;
     jtag_rdata <= jtag_rdata_i;
     burst_start_ptr <= burst_start_ptr_i;
@@ -508,6 +540,150 @@ begin
         ts_mem_dout_b <= (others => '0');
     end generate;
 
+    p_mem_write_cmd : process(all)
+        variable active_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
+        variable compare_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
+        variable hit_internal : std_logic;
+        variable hit_a : std_logic;
+        variable hit_b : std_logic;
+        variable seq_stage_hit : std_logic;
+        variable hit : std_logic;
+        variable hit_eff : std_logic;
+        variable sq_ok : boolean;
+        variable sq_eff : boolean;
+        variable store_tick : boolean;
+        variable store_ok : boolean;
+        variable trigger_commit_now : boolean;
+        variable write_now : boolean;
+        variable idx : natural;
+    begin
+        active_probe := (others => '0');
+        if PROBE_MUX_W > 0 then
+            idx := cap_probe_sel * SAMPLE_W;
+            active_probe := probe_in(idx + SAMPLE_W - 1 downto idx);
+        elsif NUM_CHANNELS > 1 then
+            idx := cap_chan_sel * SAMPLE_W;
+            active_probe := probe_in(idx + SAMPLE_W - 1 downto idx);
+        else
+            active_probe := probe_in(SAMPLE_W - 1 downto 0);
+        end if;
+
+        if INPUT_PIPE > 0 then
+            compare_probe := pipe_probe;
+        else
+            compare_probe := active_probe;
+        end if;
+
+        if DECIM_EN = 0 or cap_decim_ratio = 0 then
+            store_tick := true;
+        else
+            store_tick := decim_count = 0;
+        end if;
+
+        hit_internal := '0';
+        seq_stage_hit := '0';
+        if TRIG_STAGES > 1 then
+            hit_a := cmp_hit(
+                compare_probe,
+                probe_prev,
+                cap_seq_value_a(seq_state),
+                cap_seq_mask_a(seq_state),
+                cap_seq_cfg(seq_state)(3 downto 0)
+            );
+            hit_b := '0';
+            if DUAL_COMPARE /= 0 then
+                hit_b := cmp_hit(
+                    compare_probe,
+                    probe_prev,
+                    cap_seq_value_b(seq_state),
+                    cap_seq_mask_b(seq_state),
+                    cap_seq_cfg(seq_state)(7 downto 4)
+                );
+            end if;
+            case cap_seq_cfg(seq_state)(9 downto 8) is
+                when "01" => seq_stage_hit := hit_b;
+                when "10" => seq_stage_hit := hit_a and hit_b;
+                when "11" => seq_stage_hit := hit_a or hit_b;
+                when others => seq_stage_hit := hit_a;
+            end case;
+            if seq_stage_hit = '1' and cap_seq_cfg(seq_state)(12) = '1' then
+                if cap_seq_cfg(seq_state)(31 downto 16) = x"0000" or
+                   seq_counter + 1 >= to_integer(unsigned(cap_seq_cfg(seq_state)(31 downto 16))) then
+                    hit_internal := '1';
+                end if;
+            end if;
+        else
+            hit_a := cmp_hit(compare_probe, probe_prev, cap_trig_value_a, cap_trig_mask_a, cap_trig_cmp_mode_a);
+            hit_b := '0';
+            if DUAL_COMPARE /= 0 then
+                hit_b := cmp_hit(compare_probe, probe_prev, cap_trig_value_b, cap_trig_mask_b, cap_trig_cmp_mode_b);
+            end if;
+            if DUAL_COMPARE = 0 then
+                hit_internal := hit_a;
+            else
+                case cap_trig_combine is
+                    when "01" => hit_internal := hit_b;
+                    when "10" => hit_internal := hit_a and hit_b;
+                    when "11" => hit_internal := hit_a or hit_b;
+                    when others => hit_internal := hit_a;
+                end case;
+            end if;
+        end if;
+
+        case cap_trig_ext_mode is
+            when "01" => hit := hit_internal or trigger_in_sync2;
+            when "10" => hit := hit_internal and trigger_in_sync2;
+            when others => hit := hit_internal;
+        end case;
+
+        sq_ok := true;
+        if cap_sq_enable = '1' then
+            sq_ok := cmp_hit(
+                compare_probe,
+                probe_prev,
+                cap_sq_value,
+                cap_sq_mask,
+                cap_sq_mode
+            ) = '1';
+        end if;
+
+        if INPUT_PIPE > 0 then
+            hit_eff := hit_pipe;
+            sq_eff := sq_pipe = '1';
+        else
+            hit_eff := hit;
+            sq_eff := sq_ok;
+        end if;
+        store_ok := store_tick and sq_eff;
+        trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
+                              pre_count >= cap_pretrig_len and
+                              trig_holdoff_active = '0' and
+                              ((trig_delay_pending = '1' and trig_delay_count = 0) or
+                               (trig_delay_pending = '0' and hit_eff = '1' and cap_trig_delay = 0));
+        comb_hit <= hit;
+        comb_hit_eff <= hit_eff;
+        comb_sq_ok <= bool_to_sl(sq_ok);
+        comb_store_ok <= bool_to_sl(store_ok);
+        comb_trigger_commit_now <= bool_to_sl(trigger_commit_now);
+        comb_seq_stage_hit <= seq_stage_hit;
+
+        write_now := false;
+        if done = '0' and triggered = '0' then
+            write_now := store_ok or trigger_commit_now;
+        elsif armed = '1' and done = '0' and triggered = '1' then
+            write_now := store_ok and post_count < cap_posttrig_len;
+        end if;
+
+        mem_we_a <= bool_to_sl(write_now);
+        mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
+        if INPUT_PIPE > 0 then
+            sample_mem_din <= compare_probe;
+        else
+            sample_mem_din <= active_probe;
+        end if;
+        ts_mem_din <= std_logic_vector(timestamp_counter);
+    end process;
+
     p_mem_write_pipe : process(sample_clk, sample_rst)
     begin
         if sample_rst = '1' then
@@ -525,6 +701,147 @@ begin
         end if;
     end process;
 
+    p_toggle_sync : process(sample_clk, sample_rst)
+    begin
+        if sample_rst = '1' then
+            arm_sync <= (others => '0');
+            reset_sync <= (others => '0');
+            startup_arm_pending <= bool_to_sl(STARTUP_ARM /= 0);
+        elsif rising_edge(sample_clk) then
+            arm_sync <= arm_sync(1 downto 0) & arm_toggle_jtag;
+            reset_sync <= reset_sync(1 downto 0) & reset_toggle_jtag;
+            if (reset_sync(1) xor reset_sync(0)) = '1' then
+                startup_arm_pending <= startup_arm_sync2;
+            elsif startup_arm_pending = '1' then
+                startup_arm_pending <= '0';
+            end if;
+        end if;
+    end process;
+
+    p_config_latch : process(sample_clk, sample_rst)
+        variable arm_now : boolean;
+    begin
+        if sample_rst = '1' then
+            cap_pretrig_len <= 0;
+            cap_posttrig_len <= 0;
+            cap_trig_mode <= x"00000001";
+            cap_trig_value <= (others => '0');
+            cap_trig_mask <= x"FFFFFFFF";
+            cap_trig_delay <= 0;
+            cap_trig_cmp_mode_a <= (others => '0');
+            cap_trig_cmp_mode_b <= (others => '0');
+            cap_trig_combine <= (others => '0');
+            cap_trig_value_a <= (others => '0');
+            cap_trig_mask_a <= (others => '1');
+            cap_trig_value_b <= (others => '0');
+            cap_trig_mask_b <= (others => '1');
+            cap_chan_sel <= 0;
+            cap_probe_sel <= 0;
+            cap_decim_ratio <= 0;
+            cap_trig_ext_mode <= std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
+            cap_sq_enable <= '0';
+            cap_sq_mode <= (others => '0');
+            cap_sq_value <= (others => '0');
+            cap_sq_mask <= (others => '0');
+            cap_seq_cfg <= (others => (others => '0'));
+            cap_seq_value_a <= (others => (others => '0'));
+            cap_seq_mask_a <= (others => (others => '1'));
+            cap_seq_value_b <= (others => (others => '0'));
+            cap_seq_mask_b <= (others => (others => '1'));
+        elsif rising_edge(sample_clk) then
+            arm_now := ((arm_sync(1) xor arm_sync(0)) = '1') or startup_arm_pending = '1';
+            if arm_now then
+                cap_pretrig_len <= pretrig_len_sync2;
+                cap_posttrig_len <= posttrig_len_sync2;
+                cap_trig_mode <= trig_mode_sync2;
+                cap_trig_value <= trig_value_sync2;
+                cap_trig_mask <= trig_mask_sync2;
+                cap_trig_delay <= trig_delay_sync2;
+                cap_trig_value_a <= expand32(trig_value_sync2);
+                cap_trig_mask_a <= expand32(trig_mask_sync2);
+                if TRIG_STAGES > 1 and seq_cfg_sync2(0)(9 downto 0) /= "0000000000" then
+                    cap_trig_cmp_mode_a <= seq_cfg_sync2(0)(3 downto 0);
+                    if DUAL_COMPARE /= 0 then
+                        cap_trig_cmp_mode_b <= seq_cfg_sync2(0)(7 downto 4);
+                        cap_trig_combine <= seq_cfg_sync2(0)(9 downto 8);
+                    else
+                        cap_trig_cmp_mode_b <= (others => '0');
+                        cap_trig_combine <= (others => '0');
+                    end if;
+                else
+                    if trig_mode_sync2(1) = '1' then
+                        cap_trig_cmp_mode_a <= x"8";
+                    else
+                        cap_trig_cmp_mode_a <= x"0";
+                    end if;
+                    if DUAL_COMPARE /= 0 and trig_mode_sync2(1 downto 0) = "11" then
+                        cap_trig_cmp_mode_b <= x"8";
+                        cap_trig_combine <= "11";
+                    else
+                        cap_trig_cmp_mode_b <= (others => '0');
+                        cap_trig_combine <= (others => '0');
+                    end if;
+                end if;
+                if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
+                    cap_trig_value_b <= expand32(seq_value_b_sync2(0));
+                    cap_trig_mask_b <= expand32(seq_mask_b_sync2(0));
+                else
+                    cap_trig_value_b <= (others => '0');
+                    cap_trig_mask_b <= (others => '1');
+                end if;
+                if NUM_CHANNELS > 1 and chan_sel_sync2 < NUM_CHANNELS then
+                    cap_chan_sel <= chan_sel_sync2;
+                else
+                    cap_chan_sel <= 0;
+                end if;
+                if PROBE_MUX_W > 0 and probe_sel_sync2 < (PROBE_MUX_W / SAMPLE_W) then
+                    cap_probe_sel <= probe_sel_sync2;
+                else
+                    cap_probe_sel <= 0;
+                end if;
+                if DECIM_EN /= 0 then
+                    cap_decim_ratio <= to_integer(unsigned(jtag_decim));
+                else
+                    cap_decim_ratio <= 0;
+                end if;
+                if EXT_TRIG_EN /= 0 then
+                    cap_trig_ext_mode <= jtag_trig_ext;
+                else
+                    cap_trig_ext_mode <= (others => '0');
+                end if;
+                if STOR_QUAL /= 0 then
+                    cap_sq_enable <= bool_to_sl(sq_mode_sync2(3 downto 0) /= x"0");
+                    cap_sq_mode <= sq_mode_sync2(3 downto 0);
+                    cap_sq_value <= expand32(sq_value_sync2);
+                    cap_sq_mask <= expand32(sq_mask_sync2);
+                else
+                    cap_sq_enable <= '0';
+                    cap_sq_mode <= (others => '0');
+                    cap_sq_value <= (others => '0');
+                    cap_sq_mask <= (others => '0');
+                end if;
+                for i in 0 to TRIG_STAGES - 1 loop
+                    if TRIG_STAGES > 1 then
+                        cap_seq_cfg(i) <= seq_cfg_sync2(i);
+                        cap_seq_value_a(i) <= expand32(seq_value_a_sync2(i));
+                        cap_seq_mask_a(i) <= expand32(seq_mask_a_sync2(i));
+                    else
+                        cap_seq_cfg(i) <= (others => '0');
+                        cap_seq_value_a(i) <= (others => '0');
+                        cap_seq_mask_a(i) <= (others => '1');
+                    end if;
+                    if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
+                        cap_seq_value_b(i) <= expand32(seq_value_b_sync2(i));
+                        cap_seq_mask_b(i) <= expand32(seq_mask_b_sync2(i));
+                    else
+                        cap_seq_value_b(i) <= (others => '0');
+                        cap_seq_mask_b(i) <= (others => '1');
+                    end if;
+                end loop;
+            end if;
+        end if;
+    end process;
+
     p_jtag_regs : process(jtag_clk, jtag_rst)
         variable addr : natural;
         variable seq_stage : natural;
@@ -534,17 +851,23 @@ begin
             jtag_ctrl <= (others => '0');
             jtag_pretrig_len <= (others => '0');
             jtag_posttrig_len <= (others => '0');
-            jtag_trig_mode <= (others => '0');
+            jtag_trig_mode <= x"00000001";
             jtag_trig_value <= (others => '0');
-            jtag_trig_mask <= (others => '0');
+            jtag_trig_mask <= x"FFFFFFFF";
             jtag_sq_mode <= (others => '0');
             jtag_sq_value <= (others => '0');
             jtag_sq_mask <= (others => '0');
-            jtag_seq_cfg <= (others => (others => '0'));
             jtag_seq_value_a <= (others => (others => '0'));
-            jtag_seq_mask_a <= (others => (others => '0'));
             jtag_seq_value_b <= (others => (others => '0'));
-            jtag_seq_mask_b <= (others => (others => '1'));
+            for i in 0 to TRIG_STAGES - 1 loop
+                if i = 0 then
+                    jtag_seq_cfg(i) <= x"00001000";
+                else
+                    jtag_seq_cfg(i) <= (others => '0');
+                end if;
+                jtag_seq_mask_a(i) <= x"FFFFFFFF";
+                jtag_seq_mask_b(i) <= x"FFFFFFFF";
+            end loop;
             jtag_decim <= (others => '0');
             jtag_trig_ext <= std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
             jtag_probe_sel <= 0;
@@ -637,7 +960,12 @@ begin
                             seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;
                             seq_off := (addr - ADDR_SEQ_BASE) mod SEQ_STRIDE;
                             case seq_off is
-                                when 0 => jtag_seq_cfg(seq_stage) <= jtag_wdata;
+                                when 0 =>
+                                    if DUAL_COMPARE /= 0 then
+                                        jtag_seq_cfg(seq_stage) <= jtag_wdata;
+                                    else
+                                        jtag_seq_cfg(seq_stage) <= jtag_wdata and x"FFFFFC0F";
+                                    end if;
                                 when 4 => jtag_seq_value_a(seq_stage) <= jtag_wdata;
                                 when 8 => jtag_seq_mask_a(seq_stage) <= jtag_wdata;
                                 when 12 =>
@@ -664,30 +992,9 @@ begin
         end if;
     end process;
 
-    p_capture : process(sample_clk, sample_rst)
-        variable active_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
-        variable compare_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
-        variable hit_internal : std_logic;
-        variable hit_a : std_logic;
-        variable hit_b : std_logic;
-        variable seq_stage_hit : std_logic;
-        variable hit : std_logic;
-        variable hit_eff : std_logic;
-        variable sq_ok : boolean;
-        variable sq_eff : boolean;
-        variable store_tick : boolean;
-        variable store_ok : boolean;
-        variable base : natural;
-        variable start_calc : natural;
-        variable next_segment : natural;
-        variable post_limit : natural;
-        variable trigger_commit_now : boolean;
-        variable store_now : boolean;
-        variable idx : natural;
+    p_config_sync : process(sample_clk, sample_rst)
     begin
         if sample_rst = '1' then
-            arm_sync <= (others => '0');
-            reset_sync <= (others => '0');
             pretrig_len_sync1 <= 0;
             pretrig_len_sync2 <= 0;
             posttrig_len_sync1 <= 0;
@@ -728,44 +1035,7 @@ begin
             seq_value_b_sync2 <= (others => (others => '0'));
             seq_mask_b_sync1 <= (others => (others => '1'));
             seq_mask_b_sync2 <= (others => (others => '1'));
-            armed <= '0';
-            triggered <= '0';
-            done <= '0';
-            overflow <= '0';
-            trigger_out_i <= '0';
-            wr_ptr <= 0;
-            start_ptr <= 0;
-            trig_ptr <= 0;
-            pre_count <= 0;
-            post_count <= 0;
-            capture_len <= 0;
-            probe_prev <= (others => '0');
-            decim_count <= 0;
-            timestamp_counter <= (others => '0');
-            cur_segment <= 0;
-            seg_count <= 0;
-            all_seg_done <= '0';
-            seg_start_ptr <= (others => 0);
-            segment_wrapped <= '0';
-            seq_state <= 0;
-            seq_counter <= 0;
-            trig_delay_pending <= '0';
-            trig_delay_count <= 0;
-            trig_holdoff <= 0;
-            trig_holdoff_count <= 0;
-            trig_holdoff_active <= '0';
-            trigger_in_sync1 <= '0';
-            trigger_in_sync2 <= '0';
-            pipe_probe <= (others => '0');
-            hit_pipe <= '0';
-            sq_pipe <= '1';
-            mem_we_a <= '0';
-            mem_addr_a <= (others => '0');
-            sample_mem_din <= (others => '0');
-            ts_mem_din <= (others => '0');
         elsif rising_edge(sample_clk) then
-            arm_sync <= arm_sync(1 downto 0) & arm_toggle_jtag;
-            reset_sync <= reset_sync(1 downto 0) & reset_toggle_jtag;
             pretrig_len_sync1 <= cfg_len(jtag_pretrig_len);
             pretrig_len_sync2 <= pretrig_len_sync1;
             posttrig_len_sync1 <= cfg_len(jtag_posttrig_len);
@@ -806,6 +1076,67 @@ begin
             seq_value_b_sync2 <= seq_value_b_sync1;
             seq_mask_b_sync1 <= jtag_seq_mask_b;
             seq_mask_b_sync2 <= seq_mask_b_sync1;
+        end if;
+    end process;
+
+    p_capture : process(sample_clk, sample_rst)
+        variable active_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
+        variable compare_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
+        variable hit_internal : std_logic;
+        variable hit_a : std_logic;
+        variable hit_b : std_logic;
+        variable seq_stage_hit : std_logic;
+        variable hit : std_logic;
+        variable hit_eff : std_logic;
+        variable sq_ok : boolean;
+        variable sq_eff : boolean;
+        variable store_tick : boolean;
+        variable store_ok : boolean;
+        variable base : natural;
+        variable start_calc : natural;
+        variable next_segment : natural;
+        variable post_limit : natural;
+        variable trigger_commit_now : boolean;
+        variable force_store_now : boolean;
+        variable store_now : boolean;
+        variable reset_pulse_now : boolean;
+        variable arm_pulse_now : boolean;
+        variable any_arm_pulse_now : boolean;
+        variable idx : natural;
+    begin
+        if sample_rst = '1' then
+            armed <= '0';
+            triggered <= '0';
+            done <= '0';
+            overflow <= '0';
+            trigger_out_i <= '0';
+            wr_ptr <= 0;
+            start_ptr <= 0;
+            trig_ptr <= 0;
+            pre_count <= 0;
+            post_count <= 0;
+            capture_len <= 0;
+            probe_prev <= (others => '0');
+            decim_count <= 0;
+            timestamp_counter <= (others => '0');
+            cur_segment <= 0;
+            seg_count <= 0;
+            all_seg_done <= '0';
+            seg_start_ptr <= (others => 0);
+            segment_wrapped <= '0';
+            seq_state <= 0;
+            seq_counter <= 0;
+            trig_delay_pending <= '0';
+            trig_delay_count <= 0;
+            trig_holdoff <= 0;
+            trig_holdoff_count <= 0;
+            trig_holdoff_active <= '0';
+            trigger_in_sync1 <= '0';
+            trigger_in_sync2 <= '0';
+            pipe_probe <= (others => '0');
+            hit_pipe <= '0';
+            sq_pipe <= '1';
+        elsif rising_edge(sample_clk) then
             if EXT_TRIG_EN /= 0 then
                 trigger_in_sync1 <= trigger_in;
                 trigger_in_sync2 <= trigger_in_sync1;
@@ -814,7 +1145,6 @@ begin
                 trigger_in_sync2 <= '0';
             end if;
             trigger_out_i <= '0';
-            mem_we_a <= '0';
 
             if TIMESTAMP_W > 0 then
                 timestamp_counter <= timestamp_counter + 1;
@@ -822,10 +1152,10 @@ begin
 
             active_probe := (others => '0');
             if PROBE_MUX_W > 0 then
-                idx := (probe_sel_sync2 mod (PROBE_MUX_W / SAMPLE_W)) * SAMPLE_W;
+                idx := cap_probe_sel * SAMPLE_W;
                 active_probe := probe_in(idx + SAMPLE_W - 1 downto idx);
             elsif NUM_CHANNELS > 1 then
-                idx := (chan_sel_sync2 mod NUM_CHANNELS) * SAMPLE_W;
+                idx := cap_chan_sel * SAMPLE_W;
                 active_probe := probe_in(idx + SAMPLE_W - 1 downto idx);
             else
                 active_probe := probe_in(SAMPLE_W - 1 downto 0);
@@ -837,23 +1167,10 @@ begin
                 compare_probe := active_probe;
             end if;
 
-            if DECIM_EN = 0 or decim_sync2 = 0 then
+            if DECIM_EN = 0 or cap_decim_ratio = 0 then
                 store_tick := true;
             else
                 store_tick := decim_count = 0;
-                if decim_count >= decim_sync2 then
-                    decim_count <= 0;
-                else
-                    decim_count <= decim_count + 1;
-                end if;
-            end if;
-
-            if trig_holdoff_active = '1' then
-                if trig_holdoff_count = 0 then
-                    trig_holdoff_active <= '0';
-                else
-                    trig_holdoff_count <= trig_holdoff_count - 1;
-                end if;
             end if;
 
             hit_internal := '0';
@@ -862,76 +1179,94 @@ begin
                 hit_a := cmp_hit(
                     compare_probe,
                     probe_prev,
-                    expand32(seq_value_a_sync2(seq_state)),
-                    expand32(seq_mask_a_sync2(seq_state)),
-                    seq_cfg_sync2(seq_state)(3 downto 0)
+                    cap_seq_value_a(seq_state),
+                    cap_seq_mask_a(seq_state),
+                    cap_seq_cfg(seq_state)(3 downto 0)
                 );
                 hit_b := '0';
                 if DUAL_COMPARE /= 0 then
                     hit_b := cmp_hit(
                         compare_probe,
                         probe_prev,
-                        expand32(seq_value_b_sync2(seq_state)),
-                        expand32(seq_mask_b_sync2(seq_state)),
-                        seq_cfg_sync2(seq_state)(7 downto 4)
+                        cap_seq_value_b(seq_state),
+                        cap_seq_mask_b(seq_state),
+                        cap_seq_cfg(seq_state)(7 downto 4)
                     );
                 end if;
-                case seq_cfg_sync2(seq_state)(9 downto 8) is
+                case cap_seq_cfg(seq_state)(9 downto 8) is
                     when "01" => seq_stage_hit := hit_b;
                     when "10" => seq_stage_hit := hit_a and hit_b;
                     when "11" => seq_stage_hit := hit_a or hit_b;
                     when others => seq_stage_hit := hit_a;
                 end case;
-                if seq_stage_hit = '1' and seq_cfg_sync2(seq_state)(12) = '1' then
-                    if seq_cfg_sync2(seq_state)(31 downto 16) = x"0000" or
-                       seq_counter + 1 >= to_integer(unsigned(seq_cfg_sync2(seq_state)(31 downto 16))) then
+                if seq_stage_hit = '1' and cap_seq_cfg(seq_state)(12) = '1' then
+                    if cap_seq_cfg(seq_state)(31 downto 16) = x"0000" or
+                       seq_counter + 1 >= to_integer(unsigned(cap_seq_cfg(seq_state)(31 downto 16))) then
                         hit_internal := '1';
                     end if;
                 end if;
-            elsif trig_mode_sync2(1) = '1' then
-                if ((compare_probe xor probe_prev) and expand32(trig_mask_sync2)) /= (SAMPLE_W - 1 downto 0 => '0') then
-                    hit_internal := '1';
+            else
+                hit_a := cmp_hit(compare_probe, probe_prev, cap_trig_value_a, cap_trig_mask_a, cap_trig_cmp_mode_a);
+                hit_b := '0';
+                if DUAL_COMPARE /= 0 then
+                    hit_b := cmp_hit(compare_probe, probe_prev, cap_trig_value_b, cap_trig_mask_b, cap_trig_cmp_mode_b);
                 end if;
-            elsif trig_mode_sync2(0) = '1' then
-                hit_internal := cmp_hit(compare_probe, probe_prev, expand32(trig_value_sync2), expand32(trig_mask_sync2), x"0");
+                if DUAL_COMPARE = 0 then
+                    hit_internal := hit_a;
+                else
+                    case cap_trig_combine is
+                        when "01" => hit_internal := hit_b;
+                        when "10" => hit_internal := hit_a and hit_b;
+                        when "11" => hit_internal := hit_a or hit_b;
+                        when others => hit_internal := hit_a;
+                    end case;
+                end if;
             end if;
 
-            case trig_ext_sync2 is
+            case cap_trig_ext_mode is
                 when "01" => hit := hit_internal or trigger_in_sync2;
                 when "10" => hit := hit_internal and trigger_in_sync2;
                 when others => hit := hit_internal;
             end case;
 
             sq_ok := true;
-            if STOR_QUAL /= 0 and sq_mode_sync2(3 downto 0) /= x"0" then
+            if cap_sq_enable = '1' then
                 sq_ok := cmp_hit(
                     compare_probe,
                     probe_prev,
-                    expand32(sq_value_sync2),
-                    expand32(sq_mask_sync2),
-                    sq_mode_sync2(3 downto 0)
+                    cap_sq_value,
+                    cap_sq_mask,
+                    cap_sq_mode
                 ) = '1';
             end if;
 
-            if INPUT_PIPE > 0 then
-                hit_eff := hit_pipe;
-                sq_eff := sq_pipe = '1';
-            else
-                hit_eff := hit;
-                sq_eff := sq_ok;
-            end if;
-            store_ok := store_tick and sq_eff;
-            hit_pipe <= hit;
-            sq_pipe <= bool_to_sl(sq_ok);
+            hit_eff := comb_hit_eff;
+            sq_eff := comb_sq_ok = '1';
+            store_ok := comb_store_ok = '1';
+            hit_pipe <= comb_hit;
+            sq_pipe <= comb_sq_ok;
+            reset_pulse_now := (reset_sync(1) xor reset_sync(0)) = '1';
+            arm_pulse_now := (arm_sync(1) xor arm_sync(0)) = '1';
+            any_arm_pulse_now := arm_pulse_now or startup_arm_pending = '1';
 
-            if (reset_sync(1) xor reset_sync(0)) = '1' then
-                armed <= startup_arm_sync2;
+            if DECIM_EN = 0 then
+                decim_count <= 0;
+            elsif any_arm_pulse_now then
+                decim_count <= 0;
+            elsif armed = '1' and done = '0' then
+                if decim_count >= cap_decim_ratio then
+                    decim_count <= 0;
+                else
+                    decim_count <= decim_count + 1;
+                end if;
+            end if;
+
+            if reset_pulse_now then
+                armed <= '0';
                 triggered <= '0';
                 done <= '0';
                 overflow <= '0';
                 wr_ptr <= 0;
-                start_ptr <= 0;
-                trig_ptr <= 0;
                 pre_count <= 0;
                 post_count <= 0;
                 capture_len <= 0;
@@ -939,29 +1274,25 @@ begin
                 seg_count <= 0;
                 all_seg_done <= '0';
                 segment_wrapped <= '0';
+                seg_start_ptr <= (others => 0);
                 trig_delay_pending <= '0';
                 trig_delay_count <= 0;
-                trig_holdoff <= trig_holdoff_sync2;
                 trig_holdoff_active <= '0';
+                trig_holdoff_count <= 0;
                 seq_state <= 0;
                 seq_counter <= 0;
-                hit_pipe <= '0';
-                sq_pipe <= '1';
-                if startup_arm_sync2 = '1' and trig_holdoff_sync2 > 0 then
-                    trig_holdoff_active <= '1';
-                    trig_holdoff_count <= trig_holdoff_sync2 - 1;
-                end if;
-            elsif (arm_sync(1) xor arm_sync(0)) = '1' then
+            end if;
+
+            if any_arm_pulse_now then
                 armed <= '1';
                 triggered <= '0';
                 done <= '0';
                 overflow <= '1' when pretrig_len_sync2 + posttrig_len_sync2 + 1 > SEG_DEPTH else '0';
-                wr_ptr <= 0;
-                start_ptr <= 0;
-                trig_ptr <= 0;
-                pre_count <= 0;
+                if NUM_SEGMENTS > 1 then
+                    wr_ptr <= 0;
+                    pre_count <= 0;
+                end if;
                 post_count <= 0;
-                capture_len <= 0;
                 cur_segment <= 0;
                 seg_count <= 0;
                 all_seg_done <= '0';
@@ -975,62 +1306,69 @@ begin
                 seq_counter <= 0;
                 hit_pipe <= '0';
                 sq_pipe <= '1';
-            elsif armed = '0' and done = '0' then
+            end if;
+
+            if armed = '0' and done = '0' then
                 if store_ok then
-                    mem_we_a <= '1';
-                    mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
-                    sample_mem_din <= compare_probe;
-                    ts_mem_din <= std_logic_vector(timestamp_counter);
-                    if pre_count < pretrig_len_sync2 then
+                    if pre_count < cap_pretrig_len then
                         pre_count <= pre_count + 1;
                     end if;
-                    if wr_ptr = DEPTH - 1 then
-                        wr_ptr <= 0;
-                        segment_wrapped <= '1';
-                    else
-                        wr_ptr <= wr_ptr + 1;
+                    if triggered = '0' then
+                        if wr_ptr = DEPTH - 1 then
+                            wr_ptr <= 0;
+                            segment_wrapped <= '1';
+                        else
+                            wr_ptr <= wr_ptr + 1;
+                        end if;
                     end if;
                 end if;
-            elsif armed = '1' and done = '0' then
+            end if;
+
+            if armed = '1' and done = '0' then
                 base := seg_base(cur_segment);
                 trigger_commit_now := false;
+                force_store_now := comb_trigger_commit_now = '1';
+
+                if trig_holdoff_active = '1' then
+                    if trig_holdoff_count = 0 then
+                        trig_holdoff_active <= '0';
+                    else
+                        trig_holdoff_count <= trig_holdoff_count - 1;
+                    end if;
+                end if;
 
                 if triggered = '0' then
-                    if trig_delay_pending = '1' then
+                    if trig_holdoff_active = '1' then
+                        null;
+                    elsif trig_delay_pending = '1' then
                         if trig_delay_count = 0 then
                             trigger_commit_now := true;
                             trig_delay_pending <= '0';
                         else
                             trig_delay_count <= trig_delay_count - 1;
                         end if;
-                    elsif pre_count >= pretrig_len_sync2 and trig_holdoff_active = '0' and hit_eff = '1' then
-                        if trig_delay_sync2 = 0 then
+                    elsif pre_count >= cap_pretrig_len and trig_holdoff_active = '0' and hit_eff = '1' then
+                        if cap_trig_delay = 0 then
                             trigger_commit_now := true;
                         else
                             trig_delay_pending <= '1';
-                            trig_delay_count <= trig_delay_sync2 - 1;
+                            trig_delay_count <= cap_trig_delay - 1;
                         end if;
-                    elsif pre_count >= pretrig_len_sync2 and trig_holdoff_active = '0' and
-                          TRIG_STAGES > 1 and seq_stage_hit = '1' and seq_cfg_sync2(seq_state)(12) = '0' then
-                        if seq_cfg_sync2(seq_state)(31 downto 16) = x"0000" or
-                           seq_counter + 1 >= to_integer(unsigned(seq_cfg_sync2(seq_state)(31 downto 16))) then
-                            seq_state <= seq_next(seq_cfg_sync2(seq_state));
+                    elsif pre_count >= cap_pretrig_len and trig_holdoff_active = '0' and
+                          TRIG_STAGES > 1 and comb_seq_stage_hit = '1' and cap_seq_cfg(seq_state)(12) = '0' then
+                        if cap_seq_cfg(seq_state)(31 downto 16) = x"0000" or
+                           seq_counter + 1 >= to_integer(unsigned(cap_seq_cfg(seq_state)(31 downto 16))) then
+                            seq_state <= seq_next(cap_seq_cfg(seq_state));
                             seq_counter <= 0;
                         else
                             seq_counter <= seq_counter + 1;
                         end if;
                     end if;
 
-                    store_now := store_ok or trigger_commit_now;
-                    if store_now then
-                        mem_we_a <= '1';
-                        mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
-                        sample_mem_din <= compare_probe;
-                        ts_mem_din <= std_logic_vector(timestamp_counter);
-                    end if;
+                    store_now := store_ok or force_store_now;
 
-                    if store_ok and not trigger_commit_now then
-                        if pre_count < SEG_DEPTH then
+                    if store_ok and not force_store_now then
+                        if pre_count < cap_pretrig_len then
                             pre_count <= pre_count + 1;
                         end if;
                         if wr_ptr = base + SEG_DEPTH - 1 then
@@ -1042,46 +1380,44 @@ begin
                         triggered <= '1';
                         trigger_out_i <= '1';
                         trig_ptr <= wr_ptr;
-                        capture_len <= pretrig_len_sync2 + posttrig_len_sync2 + 1;
+                        capture_len <= cap_pretrig_len + cap_posttrig_len + 1;
                         post_count <= 0;
-                        if posttrig_len_sync2 = 0 then
-                            start_calc := capture_start_ptr(wr_ptr, pretrig_len_sync2, posttrig_len_sync2, base, segment_wrapped);
-                            seg_start_ptr(cur_segment) <= start_calc;
-                            if cur_segment = NUM_SEGMENTS - 1 then
-                                done <= '1';
-                                armed <= '0';
-                                all_seg_done <= '1';
-                                start_ptr <= start_calc;
-                                seg_count <= NUM_SEGMENTS;
-                            else
-                                next_segment := cur_segment + 1;
-                                cur_segment <= next_segment;
-                                seg_count <= seg_count + 1;
-                                triggered <= '0';
-                                pre_count <= 0;
-                                post_count <= 0;
-                                wr_ptr <= seg_base(next_segment);
-                                segment_wrapped <= '0';
-                                seq_state <= 0;
-                                seq_counter <= 0;
-                                hit_pipe <= '0';
-                                sq_pipe <= '1';
-                            end if;
-                        end if;
                     end if;
 
-                    if store_now and not (trigger_commit_now and posttrig_len_sync2 = 0) then
+                    if store_now then
                         wr_ptr <= next_ptr(wr_ptr, base);
                     end if;
                 else
-                    post_limit := posttrig_len_sync2;
-                    if store_ok then
-                        mem_we_a <= '1';
-                        mem_addr_a <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
-                        sample_mem_din <= compare_probe;
-                        ts_mem_din <= std_logic_vector(timestamp_counter);
+                    post_limit := cap_posttrig_len;
+                    if post_count >= post_limit then
+                        start_calc := capture_start_ptr(trig_ptr, cap_pretrig_len, cap_posttrig_len, base, segment_wrapped);
+                        seg_start_ptr(cur_segment) <= start_calc;
+                        if cur_segment = NUM_SEGMENTS - 1 then
+                            done <= '1';
+                            armed <= '0';
+                            all_seg_done <= '1';
+                            start_ptr <= start_calc when NUM_SEGMENTS = 1 else seg_start_ptr(0);
+                            seg_count <= NUM_SEGMENTS;
+                        else
+                            next_segment := cur_segment + 1;
+                            cur_segment <= next_segment;
+                            seg_count <= seg_count + 1;
+                            triggered <= '0';
+                            pre_count <= 0;
+                            post_count <= 0;
+                            wr_ptr <= seg_base(next_segment);
+                            segment_wrapped <= '0';
+                            trig_delay_pending <= '0';
+                            trig_holdoff_active <= '1' when trig_holdoff > 0 else '0';
+                            trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else 0;
+                            seq_state <= 0;
+                            seq_counter <= 0;
+                            hit_pipe <= '0';
+                            sq_pipe <= '1';
+                        end if;
+                    elsif store_ok then
                         if post_count + 1 >= post_limit then
-                            start_calc := capture_start_ptr(trig_ptr, pretrig_len_sync2, posttrig_len_sync2, base, segment_wrapped);
+                            start_calc := capture_start_ptr(trig_ptr, cap_pretrig_len, cap_posttrig_len, base, segment_wrapped);
                             seg_start_ptr(cur_segment) <= start_calc;
                             if cur_segment = NUM_SEGMENTS - 1 then
                                 done <= '1';
@@ -1192,7 +1528,7 @@ begin
                             ts_rd_data_sample <= (others => '0');
                             rd_phase <= RD_ACK;
                         end if;
-                    elsif addr >= ADDR_DATA_BASE and addr < ADDR_TS_DATA_BASE then
+                    elsif addr >= ADDR_DATA_BASE then
                         word_index := (addr - ADDR_DATA_BASE) / 4;
                         sample_index := word_index / WORDS_PER_SAMPLE;
                         if sample_index < capture_len then
@@ -1294,19 +1630,23 @@ begin
             when ADDR_SQ_VALUE => r := jtag_sq_value when STOR_QUAL /= 0 else x"00000000";
             when ADDR_SQ_MASK => r := jtag_sq_mask when STOR_QUAL /= 0 else x"00000000";
             when ADDR_FEATURES => r := FEATURES;
-            when ADDR_CHAN_SEL => r := u32(jtag_chan_sel);
+            when ADDR_CHAN_SEL => r := u32(jtag_chan_sel) when NUM_CHANNELS > 1 else x"00000000";
             when ADDR_NUM_CHAN => r := u32(NUM_CHANNELS);
-            when ADDR_DECIM => r := x"00" & jtag_decim;
-            when ADDR_TRIG_EXT => r := u32(to_integer(unsigned(jtag_trig_ext)));
+            when ADDR_DECIM => r := x"00" & jtag_decim when DECIM_EN /= 0 else x"00000000";
+            when ADDR_TRIG_EXT => r := u32(to_integer(unsigned(jtag_trig_ext))) when EXT_TRIG_EN /= 0 else x"00000000";
             when ADDR_NUM_SEGMENTS => r := u32(NUM_SEGMENTS);
             when ADDR_SEG_STATUS =>
                 r := (others => '0');
-                r(31) := all_seg_done when NUM_SEGMENTS > 1 else '1';
-                r(SEG_IDX_W - 1 downto 0) := std_logic_vector(to_unsigned(seg_count mod (2 ** SEG_IDX_W), SEG_IDX_W));
-            when ADDR_SEG_SEL => r := u32(jtag_seg_sel);
+                if NUM_SEGMENTS > 1 then
+                    r(31) := all_seg_done;
+                    r(SEG_IDX_W - 1 downto 0) := std_logic_vector(to_unsigned(seg_count mod (2 ** SEG_IDX_W), SEG_IDX_W));
+                else
+                    r := x"80000000";
+                end if;
+            when ADDR_SEG_SEL => r := u32(jtag_seg_sel) when NUM_SEGMENTS > 1 else x"00000000";
             when ADDR_TIMESTAMP_W => r := u32(TIMESTAMP_W);
             when ADDR_SEG_START => r := u32(rd_start);
-            when ADDR_PROBE_SEL => r := u32(jtag_probe_sel);
+            when ADDR_PROBE_SEL => r := u32(jtag_probe_sel) when PROBE_MUX_W > 0 else x"00000000";
             when ADDR_PROBE_MUX_W => r := u32(PROBE_MUX_W);
             when ADDR_TRIG_DELAY => r := x"0000" & jtag_trig_delay;
             when ADDR_STARTUP_ARM => r := (31 downto 1 => '0') & jtag_startup_arm;
@@ -1317,7 +1657,7 @@ begin
                     r(16) := '1';
                 end if;
             when others =>
-                if USER1_DATA_EN /= 0 and addr >= ADDR_DATA_BASE and addr < ADDR_TS_DATA_BASE then
+                if USER1_DATA_EN /= 0 and addr >= ADDR_DATA_BASE then
                     word_index := (addr - ADDR_DATA_BASE) / 4;
                     sample_index := word_index / WORDS_PER_SAMPLE;
                     if sample_index < capture_len then

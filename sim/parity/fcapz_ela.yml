@@ -28,6 +28,15 @@
   "formal": {
     "induct_depth": 24,
     "bounded_depth": 48,
+    "reset_inputs": [
+      "sample_rst",
+      "jtag_rst"
+    ],
+    "clock_inputs": [
+      "sample_clk",
+      "jtag_clk"
+    ],
+    "reset_cycles": 2,
     "modules": [
       {
         "name": "fcapz_ela",
