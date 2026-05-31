@@ -66,12 +66,15 @@ def run(
             input=input_text,
             text=True,
             stdout=stdout,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE if output is not None else subprocess.STDOUT,
         )
     finally:
         if handle is not None:
             handle.close()
-    text = "" if output is not None else (result.stdout or "")
+    if output is not None:
+        text = result.stderr or ""
+    else:
+        text = result.stdout or ""
     if text:
         print(text, end="" if text.endswith("\n") else "\n")
     return result.returncode, text
@@ -236,19 +239,21 @@ def ghdl_synth(
         if code != 0:
             return False
     generics = [f"-g{name}={int(value)}" for name, value in params.items()]
-    code, _ = run(
+    synth_options = [str(opt) for opt in side.get("synth_options", [])]
+    code, output_text = run(
         [
             "ghdl",
             "--synth",
             f"--std={std}",
             f"--workdir={work}",
             "--out=verilog",
+            *synth_options,
             *generics,
             side["top"],
         ],
         output=out,
     )
-    return code == 0
+    return code == 0 and "error:" not in output_text.lower()
 
 
 def yosys_read_verilog(
@@ -257,11 +262,12 @@ def yosys_read_verilog(
     params: dict[str, int],
 ) -> list[str]:
     joined = " ".join(source.as_posix() for source in sources)
-    chparam = "".join(f" -chparam {name} {int(value)}" for name, value in params.items())
-    return [
-        f"read_verilog -sv -I{RTL.as_posix()} {joined}",
-        f"hierarchy -check -top {side['top']}{chparam}",
-    ]
+    cmds = [f"read_verilog -sv -defer -I{RTL.as_posix()} {joined}"]
+    if params:
+        sets = " ".join(f"-set {name} {int(value)}" for name, value in params.items())
+        cmds.append(f"chparam {sets} {side['top']}")
+    cmds.append(f"hierarchy -check -top {side['top']}")
+    return cmds
 
 
 def prep_side(read_cmds: list[str], top: str, name: str) -> list[str]:
@@ -320,6 +326,9 @@ def prove_config(
     _, output = run(["yosys", "-"], input_text=script)
     if "Equivalence successfully proven" in output:
         return "PASS", "equiv_induct closed"
+    if "ERROR:" in output:
+        error = next(line for line in output.splitlines() if "ERROR:" in line)
+        return "FAIL", error
 
     unproven = re.search(r"Found a total of (\d+) unproven", output) or re.search(
         r"(\d+) are unproven",

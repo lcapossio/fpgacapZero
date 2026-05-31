@@ -15,6 +15,9 @@
     "language": "vhdl",
     "std": "08",
     "top": "fcapz_ela",
+    "synth_options": [
+      "--latches"
+    ],
     "sources": [
       "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
       "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
