@@ -32,7 +32,14 @@ import time
 import unittest
 from pathlib import Path
 
-_SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_SKIP = _env_bool("FPGACAP_SKIP_HW")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_DIR = Path(__file__).resolve().parent

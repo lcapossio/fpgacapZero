@@ -118,11 +118,11 @@ def _assert_counter_capture(result, iteration: int) -> None:
         regressions = [
             (i - 1, result.timestamps[i - 1], result.timestamps[i])
             for i in range(1, len(result.timestamps))
-            if result.timestamps[i] < result.timestamps[i - 1]
+            if result.timestamps[i] <= result.timestamps[i - 1]
         ]
         if regressions:
             raise RuntimeError(
-                f"soak iteration {iteration}: regressing timestamps {regressions}; "
+                f"soak iteration {iteration}: non-increasing timestamps {regressions}; "
                 f"timestamps={result.timestamps}"
             )
 
