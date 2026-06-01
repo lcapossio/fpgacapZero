@@ -89,6 +89,14 @@ def require_tools(*names: str) -> bool:
     return True
 
 
+def find_tool(*names: str) -> str | None:
+    for name in names:
+        path = shutil.which(name)
+        if path is not None:
+            return path
+    return None
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -257,6 +265,76 @@ def ghdl_synth(
     return code == 0 and "error:" not in output_text.lower()
 
 
+def normalize_ghdl_isignal_aliases(netlist: Path) -> None:
+    """Rename GHDL's hidden ``nNNN`` state registers back to signal names.
+
+    GHDL emits many VHDL signals as a public combinational alias driven by an
+    anonymous state register, e.g. ``foo = n1234; // (isignal)``. Yosys then
+    sees the real flop as ``n1234`` and cannot line it up with the Verilog
+    state named ``foo`` during induction. This pass keeps the synthesized logic
+    identical while restoring those state names for SEC.
+    """
+
+    text = netlist.read_text(encoding="utf-8")
+    reg_decl_re = re.compile(
+        r"^\s*reg(?P<width>\s+\[[^\]]+\])?\s+(?P<name>[A-Za-z_][A-Za-z0-9_$]*)\s*;",
+        re.M,
+    )
+    reg_widths = {
+        match.group("name"): (match.group("width") or "")
+        for match in reg_decl_re.finditer(text)
+    }
+    alias_re = re.compile(
+        r"^\s*always @\*\n"
+        r"\s*(?P<public>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*"
+        r"(?P<hidden>n\d+)\s*;\s*// \(isignal\)\n",
+        re.M,
+    )
+
+    rename: dict[str, str] = {}
+    for match in alias_re.finditer(text):
+        public = match.group("public")
+        hidden = match.group("hidden")
+        if (
+            public in reg_widths
+            and hidden in reg_widths
+            and public != hidden
+            and reg_widths[public] == reg_widths[hidden]
+        ):
+            rename.setdefault(hidden, public)
+
+    if not rename:
+        return
+
+    for hidden, public in rename.items():
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_$]){re.escape(hidden)}(?![A-Za-z0-9_$])",
+            public,
+            text,
+        )
+
+    text = re.sub(
+        r"^\s*always @\*\n"
+        r"\s*(?P<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?P=name)\s*;\s*"
+        r"// \(isignal\)\n",
+        "",
+        text,
+        flags=re.M,
+    )
+
+    seen_regs: set[str] = set()
+    lines: list[str] = []
+    for line in text.splitlines():
+        match = reg_decl_re.match(line)
+        if match:
+            name = match.group("name")
+            if name in seen_regs:
+                continue
+            seen_regs.add(name)
+        lines.append(line)
+    netlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def yosys_read_verilog(
     side: dict[str, Any],
     sources: list[Path],
@@ -294,6 +372,7 @@ def prove_config(
     work: Path,
     induct_depth: int,
     bounded_depth: int,
+    yosys: str,
 ) -> tuple[str, str]:
     golden = manifest["golden"]
     candidate = manifest["candidate"]
@@ -301,6 +380,7 @@ def prove_config(
     vhdl_work = work / "ghdl"
     if not ghdl_synth(manifest_path, candidate, params, vhdl_work, vhdl_netlist):
         return "FAIL", "GHDL synthesis failed"
+    normalize_ghdl_isignal_aliases(vhdl_netlist)
 
     gold_read = yosys_read_verilog(
         golden,
@@ -325,7 +405,7 @@ def prove_config(
             "equiv_status",
         ]
     ) + "\n"
-    _, output = run(["yosys", "-"], input_text=script)
+    _, output = run([yosys, "-"], input_text=script)
     if "Equivalence successfully proven" in output:
         return "PASS", "equiv_induct closed"
     if "ERROR:" in output:
@@ -384,7 +464,7 @@ def prove_config(
             + f" -prove-asserts -show-ports{show_args}{dump_args}",
         ]
     ) + "\n"
-    _, bounded_output = run(["yosys", "-"], input_text=bounded)
+    _, bounded_output = run([yosys, "-"], input_text=bounded)
     if "no model found" in bounded_output:
         return (
             "BOUNDED",
@@ -402,6 +482,10 @@ def run_manifest(manifest_path: Path) -> bool:
     formal = manifest["formal"]
     induct_depth = int(formal.get("induct_depth", 20))
     bounded_depth = int(formal.get("bounded_depth", 0))
+    yosys = find_tool("yosys", "yowasp-yosys")
+    if yosys is None:
+        print("[formal-parity] missing required tool(s): yosys or yowasp-yosys", file=sys.stderr)
+        return False
 
     with tempfile.TemporaryDirectory(prefix=".formal_hdl_", dir=ROOT) as tmp:
         work = Path(tmp)
@@ -415,6 +499,7 @@ def run_manifest(manifest_path: Path) -> bool:
                     work,
                     induct_depth,
                     bounded_depth,
+                    yosys,
                 )
                 print(
                     f"[formal-parity] {manifest['name']} {module['name']}[{tag}]: "
@@ -452,7 +537,9 @@ def main() -> None:
         print(f"[formal-parity] interface checks passed for {len(loaded)} manifest(s).")
         return
 
-    if not require_tools("ghdl", "yosys"):
+    if not require_tools("ghdl") or find_tool("yosys", "yowasp-yosys") is None:
+        if find_tool("yosys", "yowasp-yosys") is None:
+            print("[formal-parity] missing required tool(s): yosys or yowasp-yosys", file=sys.stderr)
         sys.exit(1)
 
     ok = True
