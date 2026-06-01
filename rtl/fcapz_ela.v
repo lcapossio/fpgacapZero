@@ -174,6 +174,7 @@ module fcapz_ela #(
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
     localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam SEG_IDX_W = (NUM_SEGMENTS > 1) ? $clog2(NUM_SEGMENTS) : 1;
+    localparam [PTR_W-1:0] SEG_DEPTH_LAST = SEG_DEPTH - 1;
 
     // Static assert: SEG_DEPTH must be a power-of-two (bitmask wrap arithmetic)
     generate
@@ -307,6 +308,8 @@ module fcapz_ela #(
     reg [SAMPLE_W-1:0] trig_mask_sync1,    trig_mask_sync2;
     reg [7:0]          chan_sel_sync1,     chan_sel_sync2;
     reg [7:0]          probe_sel_sync1,   probe_sel_sync2;
+    reg [23:0]         decim_sync1,       decim_sync2;
+    reg [1:0]          trig_ext_sync1,    trig_ext_sync2;
     reg                startup_arm_sync1, startup_arm_sync2;
     reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
     reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
@@ -814,6 +817,8 @@ module fcapz_ela #(
             trig_mask_sync1    <= 0; trig_mask_sync2    <= 0;
             chan_sel_sync1     <= 0; chan_sel_sync2     <= 0;
             probe_sel_sync1   <= 0; probe_sel_sync2   <= 0;
+            decim_sync1       <= 0; decim_sync2       <= 0;
+            trig_ext_sync1    <= DEFAULT_TRIG_EXT_MODE; trig_ext_sync2 <= DEFAULT_TRIG_EXT_MODE;
             startup_arm_sync1 <= (STARTUP_ARM != 0); startup_arm_sync2 <= (STARTUP_ARM != 0);
             trig_holdoff_sync1 <= 0; trig_holdoff_sync2 <= 0;
             trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
@@ -847,6 +852,10 @@ module fcapz_ela #(
             chan_sel_sync2     <= HAS_CHANNEL_MUX ? chan_sel_sync1 : 8'h0;
             probe_sel_sync1   <= HAS_PROBE_MUX ? jtag_probe_sel : 8'h0;
             probe_sel_sync2   <= HAS_PROBE_MUX ? probe_sel_sync1 : 8'h0;
+            decim_sync1       <= HAS_DECIM ? jtag_decim : 24'h0;
+            decim_sync2       <= HAS_DECIM ? decim_sync1 : 24'h0;
+            trig_ext_sync1    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
+            trig_ext_sync2    <= HAS_EXT_TRIG ? trig_ext_sync1 : 2'd0;
             startup_arm_sync1 <= jtag_startup_arm;
             startup_arm_sync2 <= startup_arm_sync1;
             trig_holdoff_sync1 <= jtag_trig_holdoff;
@@ -976,9 +985,9 @@ module fcapz_ela #(
             sq_value         <= HAS_STOR_QUAL ? sq_value_sync2 : {SAMPLE_W{1'b0}};
             sq_mask          <= HAS_STOR_QUAL ? sq_mask_sync2 : {SAMPLE_W{1'b0}};
             // Phase 1: decimation
-            decim_ratio      <= HAS_DECIM ? jtag_decim : 24'h0;
+            decim_ratio      <= HAS_DECIM ? decim_sync2 : 24'h0;
             // Phase 2: external trigger
-            ext_trig_mode    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
+            ext_trig_mode    <= HAS_EXT_TRIG ? trig_ext_sync2 : 2'd0;
             // Trigger delay (sample clocks) — latched on arm
             trig_delay       <= trig_delay_sync2;
             // Sequencer stages
@@ -1061,6 +1070,11 @@ module fcapz_ela #(
     // the same cycle as trigger evaluation.
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
+            mem_we_a_q     <= 1'b0;
+            mem_wr_addr_q  <= {PTR_W{1'b0}};
+            mem_wr_data_q  <= {SAMPLE_W{1'b0}};
+            mem_wr_ts_q    <= {TS_DATA_W{1'b0}};
+        end else if (reset_pulse || any_arm_pulse) begin
             mem_we_a_q     <= 1'b0;
             mem_wr_addr_q  <= {PTR_W{1'b0}};
             mem_wr_data_q  <= {SAMPLE_W{1'b0}};
@@ -1172,8 +1186,10 @@ module fcapz_ela #(
 
             // Issue #10: in single-segment mode, keep BRAM populated before
             // arm so a fast trigger can use real pre-arm history instead of
-            // waiting for a post-arm prefill window.
-            if (!armed && !done) begin
+            // waiting for a post-arm prefill window.  Segmented captures reset
+            // the write pointer on each arm, so pre-arm writes there would only
+            // leak stale samples into segment 0.
+            if (!HAS_SEGMENTS && !armed && !done) begin
                 if (mem_we_a) begin
                     wr_ptr <= wr_ptr + 1'b1;
                     if (wr_ptr >= DEPTH_LAST)
@@ -1198,7 +1214,7 @@ module fcapz_ela #(
                     wr_ptr <= wr_ptr + 1'b1;
                     // Phase 4: segment-aware wrap
                     if (NUM_SEGMENTS > 1) begin
-                        if (wr_seg_off + 1'b1 >= SEG_DEPTH[PTR_W-1:0]) begin
+                        if (wr_seg_off >= SEG_DEPTH_LAST) begin
                             wr_ptr <= seg_base;
                             segment_wrapped <= 1'b1;
                         end else begin

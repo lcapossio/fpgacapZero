@@ -44,6 +44,8 @@ module fcapz_ela_intel #(
 );
 
     localparam PTR_W = $clog2(DEPTH);
+    // Segment depth for burst read ring-wrap (equals DEPTH when unsegmented).
+    localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
 
     // TAP signals — control (USER1)
     wire tap1_tck, tap1_tdi, tap1_tdo;
@@ -135,7 +137,7 @@ module fcapz_ela_intel #(
     // ---- Burst read engine ----
     jtag_burst_read #(
         .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH), .BURST_W(BURST_W)
+        .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
     ) u_burst (
         .arst(jtag_rst_data),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),

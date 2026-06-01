@@ -324,6 +324,7 @@ module fcapz_ela_bug_probe_tb;
 
     initial begin
         logic [31:0] word0, word1, word2, status, seg_status;
+        logic [31:0] wrap_samples [0:12];
         int i;
 
         repeat (4) @(posedge sample_clk);
@@ -641,6 +642,45 @@ module fcapz_ela_bug_probe_tb;
               word1[7:0] == 8'd92);
         check("second post-trigger sample follows trigger sample",
               word2[7:0] == 8'd93);
+
+        $display("\n=== Regression 11: segmented post-trigger wraps within segment ===");
+        write_segtrig(16'h0004, 32'h2);
+        wait_sample(8);
+        write_segtrig(16'h0014, 32'd4);
+        write_segtrig(16'h0018, 32'd8);
+        write_segtrig(16'h0020, 32'h1);
+        write_segtrig(16'h0024, 32'd250);
+        write_segtrig(16'h0028, 32'hFF);
+        write_segtrig(16'h00B4, 32'd0);
+        write_segtrig(16'h00DC, 32'd0);
+        write_segtrig(16'h00C0, 32'd0);
+        probe_segtrig = '0;
+        ext_trig_segtrig = 1'b0;
+        write_segtrig(16'h0004, 32'h1);
+        repeat (1120) begin
+            @(posedge sample_clk);
+            probe_segtrig <= probe_segtrig + 1'b1;
+        end
+        wait_sample(40);
+        write_segtrig(16'h00C0, 32'd0);
+        wait_sample(8);
+        for (i = 0; i < 13; i = i + 1)
+            read_segtrig(16'h0100 + i*4, wrap_samples[i]);
+        $display("  seg0 samples=%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                 wrap_samples[0][7:0], wrap_samples[1][7:0], wrap_samples[2][7:0],
+                 wrap_samples[3][7:0], wrap_samples[4][7:0], wrap_samples[5][7:0],
+                 wrap_samples[6][7:0], wrap_samples[7][7:0], wrap_samples[8][7:0],
+                 wrap_samples[9][7:0], wrap_samples[10][7:0], wrap_samples[11][7:0],
+                 wrap_samples[12][7:0]);
+        begin
+            logic wrap_ok;
+            wrap_ok = 1'b1;
+            for (i = 1; i < 13; i = i + 1) begin
+                if (wrap_samples[i][7:0] != ((wrap_samples[i-1][7:0] + 8'd1) & 8'hFF))
+                    wrap_ok = 1'b0;
+            end
+            check("segment 0 capture is contiguous across offset wrap", wrap_ok);
+        end
 
         $display("\n=== Regression summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);
