@@ -126,9 +126,9 @@ jobs:
       - name: Run Verilator lint and MULTIDRIVEN self-test
         run: python sim/run_verilator_lint.py --self-test
 
-  # -- 6. RTL simulation (iverilog + vvp) ---------------------------
+  # -- 6. RTL simulation (cocotb + Icarus) --------------------------
   sim:
-    name: RTL simulation (iverilog + vvp)
+    name: RTL simulation (cocotb + Icarus)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,5 +137,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run all RTL testbenches
-        run: python sim/run_sim.py
+      - name: Install cocotb dependencies
+        run: pip install -e ".[hdl]"
+      - name: Run cocotb RTL regression
+        run: python sim/run_cocotb.py --runner native --clean
