@@ -15,6 +15,7 @@ dfx_runtime.txt
 # Build artifacts
 dist/
 packages/
+build/verilator_ela_coverage/
 *.bit
 *.bin
 !host/fcapz/gui/assets/default_window_state_v6.bin

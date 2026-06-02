@@ -135,6 +135,9 @@ first, then the default simulation regression.  Use
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator driver lint for issues such as
 one register assigned from two always blocks.
+Run `python sim/run_verilator_ela_coverage.py --runner wsl` when changing ELA
+behavior and you want Verilator simulation plus merged line/toggle and bound
+functional coverage for the Verilog ELA benches.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -727,6 +730,7 @@ Produces `examples/arty_a7/arty_a7_top.bit`.
 python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
+python sim/run_verilator_ela_coverage.py --runner wsl
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
@@ -738,6 +742,15 @@ list. The Verilator lint command complements that broad elaboration pass with
 a full-project Verilog RTL matrix and stricter procedural-driver checks; its
 self-test must fail a deliberately bad multi-driver fixture before the job is
 considered valid.
+
+The Verilator ELA coverage command builds and runs `fcapz_ela`,
+`fcapz_ela_bug_probe`, and `fcapz_ela_config_matrix` as Verilator simulations.
+It writes merged coverage to `build/verilator_ela_coverage/merged.dat` and
+annotated source under `build/verilator_ela_coverage/annotated/`. The runner
+also binds `tb/fcapz_ela_func_cov.sv` into each `fcapz_ela` instance so
+`--coverage-user` records functional events such as arm/reset, trigger commit,
+pre/post stores, overflow, segment completion, burst starts, and optional
+feature register activity.
 
 ### Tests
 
