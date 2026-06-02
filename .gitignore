@@ -16,6 +16,7 @@ dfx_runtime.txt
 dist/
 packages/
 build/cocotb_ela/
+build/cocotb/
 build/verilator_ela_coverage/
 *.bit
 *.bin

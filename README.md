@@ -734,6 +734,7 @@ Produces `examples/arty_a7/arty_a7_top.bit`.
 python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
+python sim/run_cocotb.py --runner wsl
 python sim/run_verilator_ela_coverage.py --runner wsl
 python sim/run_cocotb_ela.py --runner wsl --hdl verilog
 ```
@@ -764,6 +765,12 @@ core sources as the SystemVerilog benches; the VHDL target expects a VHDL core
 source passed with `--vhdl-source` unless `rtl/vhdl/core/fcapz_ela.vhd` exists.
 It writes a small language-agnostic functional coverage JSON report under
 `build/cocotb_ela/`.
+
+The general cocotb command runs the non-ELA cocotb replacements for the RTL
+simulation benches (`trig_compare`, JTAG pipe/burst, EIO, core manager,
+channel mux, Xilinx7 single-chain wrapper, async FIFO equivalence, EJTAG-AXI,
+EJTAG-AXI reset regression, and EJTAG-UART), and then runs the ELA cocotb suite
+unless `--skip-ela` is passed.
 
 ### Tests
 

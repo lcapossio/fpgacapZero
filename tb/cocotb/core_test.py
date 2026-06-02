@@ -1,0 +1,1206 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+from __future__ import annotations
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import Edge, RisingEdge, FallingEdge, Timer
+
+
+async def tick(signal) -> None:
+    await RisingEdge(signal)
+    await Timer(1, units="ns")
+
+
+async def idle_tap(dut, n: int, *, shift_name: str = "shift_en") -> None:
+    dut.sel.value = 0
+    dut.capture.value = 0
+    getattr(dut, shift_name).value = 0
+    dut.update.value = 0
+    dut.tdi.value = 0
+    for _ in range(n):
+        await tick(dut.tck)
+
+
+def make_frame(addr: int, data: int, write: bool) -> int:
+    return ((1 if write else 0) << 48) | ((addr & 0xFFFF) << 32) | (data & 0xFFFF_FFFF)
+
+
+async def scan_reg(dut, frame: int, *, shift_name: str = "shift_en", tdo=None) -> int:
+    if tdo is None:
+        tdo = dut.tdo
+    captured = 0
+    dut.sel.value = 1
+    dut.capture.value = 1
+    await tick(dut.tck)
+    dut.capture.value = 0
+    getattr(dut, shift_name).value = 1
+    for i in range(49):
+        dut.tdi.value = (frame >> i) & 1
+        if i < 32 and int(tdo.value):
+            captured |= 1 << i
+        await tick(dut.tck)
+    getattr(dut, shift_name).value = 0
+    dut.tdi.value = 0
+    dut.update.value = 1
+    await tick(dut.tck)
+    dut.update.value = 0
+    dut.sel.value = 0
+    return captured
+
+
+async def scan_burst(dut, *, shift_name: str = "shift_en", tdo=None, bits: int = 256) -> int:
+    if tdo is None:
+        tdo = dut.tdo
+    captured = 0
+    dut.sel.value = 1
+    dut.capture.value = 1
+    await tick(dut.tck)
+    dut.capture.value = 0
+    getattr(dut, shift_name).value = 1
+    for i in range(bits):
+        dut.tdi.value = 0
+        if int(tdo.value):
+            captured |= 1 << i
+        await tick(dut.tck)
+    getattr(dut, shift_name).value = 0
+    dut.update.value = 1
+    await tick(dut.tck)
+    dut.update.value = 0
+    dut.sel.value = 0
+    return captured
+
+
+def sample_at(bits: int, index: int, width: int = 8) -> int:
+    return (bits >> (index * width)) & ((1 << width) - 1)
+
+
+async def jtag_write(dut, addr: int, data: int) -> None:
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_addr.value = addr
+    dut.jtag_wdata.value = data
+    dut.jtag_wr_en.value = 1
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_wr_en.value = 0
+
+
+async def jtag_read(dut, addr: int, settle: int = 8) -> int:
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_addr.value = addr
+    if hasattr(dut, "jtag_rd_en"):
+        dut.jtag_rd_en.value = 1
+        await RisingEdge(dut.jtag_clk)
+        dut.jtag_rd_en.value = 0
+        for _ in range(settle):
+            await RisingEdge(dut.jtag_clk)
+    else:
+        await RisingEdge(dut.jtag_clk)
+    return int(dut.jtag_rdata.value)
+
+
+async def arm_ela(dut) -> None:
+    await jtag_write(dut, 0x0004, 1)
+    for _ in range(80):
+        await RisingEdge(dut.sample_clk)
+        if int(dut.armed_out.value):
+            return
+    raise AssertionError("ELA did not arm")
+
+
+@cocotb.test()
+async def trig_compare_light(dut):
+    cases = (
+        (0x12, 0x10, 0x12, 0xFF, 0, 1),
+        (0x12, 0x10, 0x10, 0xFF, 1, 1),
+        (0x01, 0x00, 0x00, 0xFF, 6, 1),
+        (0x00, 0x01, 0x00, 0xFF, 7, 1),
+        (0x5D, 0x55, 0x00, 0xFF, 8, 1),
+        (0x05, 0x10, 0x10, 0xFF, 2, 0),
+        (0x20, 0x10, 0x10, 0xFF, 3, 0),
+        (0x10, 0x10, 0x10, 0xFF, 4, 0),
+        (0x10, 0x10, 0x10, 0xFF, 5, 0),
+    )
+    for probe, prev, value, mask, mode, expected in cases:
+        dut.probe.value = probe
+        dut.probe_prev.value = prev
+        dut.value.value = value
+        dut.mask.value = mask
+        dut.mode.value = mode
+        await Timer(1, units="ns")
+        assert int(dut.hit.value) == expected
+
+
+@cocotb.test()
+async def trig_compare_full(dut):
+    cases = (
+        (0x12, 0x10, 0x12, 0xFF, 0, 1),
+        (0x12, 0x10, 0x10, 0xFF, 1, 1),
+        (0x01, 0x00, 0x00, 0xFF, 6, 1),
+        (0x00, 0x01, 0x00, 0xFF, 7, 1),
+        (0x5D, 0x55, 0x00, 0xFF, 8, 1),
+        (0x05, 0x10, 0x10, 0xFF, 2, 1),
+        (0x20, 0x10, 0x10, 0xFF, 3, 1),
+        (0x10, 0x10, 0x10, 0xFF, 4, 1),
+        (0x10, 0x10, 0x10, 0xFF, 5, 1),
+    )
+    for probe, prev, value, mask, mode, expected in cases:
+        dut.probe.value = probe
+        dut.probe_prev.value = prev
+        dut.value.value = value
+        dut.mask.value = mask
+        dut.mode.value = mode
+        await Timer(1, units="ns")
+        assert int(dut.hit.value) == expected
+
+
+async def burst_mem_driver(dut) -> None:
+    while True:
+        await RisingEdge(dut.tck)
+        dut.sample_data.value = int(dut.mem_addr.value) & 0xFF
+        if len(dut.timestamp_data) > 1:
+            dut.timestamp_data.value = 0xA500_0000 | int(dut.mem_addr.value)
+
+
+async def start_burst(dut, ptr: int, timestamp: bool) -> None:
+    dut.sel.value = 0
+    dut.burst_ptr_in.value = ptr
+    dut.burst_timestamp.value = int(timestamp)
+    dut.burst_start.value = 0 if int(dut.burst_start.value) else 1
+    await tick(dut.tck)
+
+
+def assert_sample_sequence(bits: int, start: int, count: int = 32) -> None:
+    for i in range(count):
+        assert sample_at(bits, i) == ((start + i) & 0xFF)
+
+
+def assert_timestamp_sequence(bits: int, start: int, count: int = 8) -> None:
+    for i in range(count):
+        got = sample_at(bits, i, 32)
+        exp = 0xA500_0000 | ((start + i) & 0xFF)
+        assert got == exp
+
+
+@cocotb.test()
+async def jtag_burst_read_protocol(dut):
+    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    cocotb.start_soon(burst_mem_driver(dut))
+    dut.arst.value = 1
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift_en.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.sample_data.value = 0
+    dut.timestamp_data.value = 0
+    dut.burst_start.value = 0
+    dut.burst_timestamp.value = 0
+    dut.burst_ptr_in.value = 0
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+
+    await start_burst(dut, 42, False)
+    await idle_tap(dut, 80)
+    await scan_burst(dut)
+    scan = await scan_burst(dut)
+    assert_sample_sequence(scan, 42)
+    scan = await scan_burst(dut)
+    assert_sample_sequence(scan, 74)
+
+    await start_burst(dut, 250, False)
+    await idle_tap(dut, 80)
+    await scan_burst(dut)
+    scan = await scan_burst(dut)
+    assert_sample_sequence(scan, 250)
+
+    await start_burst(dut, 64, True)
+    await idle_tap(dut, 80)
+    await scan_burst(dut)
+    scan = await scan_burst(dut)
+    assert_timestamp_sequence(scan, 64)
+
+
+async def pipe_bus_monitor(dut) -> None:
+    while True:
+        await RisingEdge(dut.tck)
+        dut.sample_data.value = int(dut.mem_addr.value) & 0xFF
+        dut.timestamp_data.value = 0xA500_0000 | int(dut.mem_addr.value)
+        if int(dut.reg_wr_en.value) and int(dut.reg_addr.value) == 0x002C:
+            dut.burst_ptr_in.value = 42
+            dut.burst_timestamp.value = (int(dut.reg_wdata.value) >> 31) & 1
+            dut.burst_start.value = 0 if int(dut.burst_start.value) else 1
+
+
+@cocotb.test()
+async def jtag_pipe_iface_protocol(dut):
+    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    cocotb.start_soon(pipe_bus_monitor(dut))
+    dut.arst.value = 1
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift_en.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.reg_rdata.value = 0x1234_5678
+    dut.sample_data.value = 0
+    dut.timestamp_data.value = 0
+    dut.burst_start.value = 0
+    dut.burst_timestamp.value = 0
+    dut.burst_ptr_in.value = 0
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+
+    await scan_reg(dut, make_frame(0x0024, 0xCAFE_BABE, True))
+    assert int(dut.reg_addr.value) == 0x0024
+    assert int(dut.reg_wdata.value) == 0xCAFE_BABE
+
+    await scan_reg(dut, make_frame(0, 0, False))
+    await idle_tap(dut, 4)
+    captured = await scan_reg(dut, make_frame(0, 0, False))
+    assert captured == 0x1234_5678
+
+    await scan_reg(dut, make_frame(0x002C, 0, True))
+    await idle_tap(dut, 80)
+    await scan_burst(dut)
+    first = await scan_burst(dut)
+    second = await scan_burst(dut)
+    assert_sample_sequence(first, 42)
+    assert_sample_sequence(second, 74)
+
+
+@cocotb.test()
+async def jtag_pipe_iface_segmented_alignment(dut):
+    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    dut.arst.value = 1
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift_en.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.reg_rdata.value = 0
+    dut.sample_data.value = 0
+    dut.timestamp_data.value = 0
+    dut.burst_start.value = 0
+    dut.burst_timestamp.value = 0
+    dut.burst_ptr_in.value = 256
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+    dut.sel.value = 1
+    dut.capture.value = 1
+    dut.burst_start.value = 1
+    await tick(dut.tck)
+    dut.capture.value = 0
+    dut.sel.value = 0
+    await idle_tap(dut, 4)
+    assert (int(dut.mem_addr.value) >> 8) == 1
+
+
+@cocotb.test()
+async def fcapz_eio_registers(dut):
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
+    dut.jtag_rst.value = 1
+    dut.probe_in.value = 0
+    dut.jtag_wr_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    for _ in range(3):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+
+    version = await jtag_read(dut, 0x0000, settle=0)
+    assert version & 0xFFFF == 0x494F
+    assert await jtag_read(dut, 0x0004, settle=0) == 16
+    assert await jtag_read(dut, 0x0008, settle=0) == 12
+    await jtag_write(dut, 0x0100, 0xABC)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0xABC
+    assert int(dut.probe_out.value) == 0xABC
+    await jtag_write(dut, 0x0100, 0)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0
+    assert int(dut.probe_out.value) == 0
+    await jtag_write(dut, 0x0100, 0xFFF)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0xFFF
+    assert int(dut.probe_out.value) == 0xFFF
+
+    dut.jtag_rst.value = 1
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0
+    assert int(dut.probe_out.value) == 0
+
+    dut.probe_in.value = 0xCAFE
+    for _ in range(4):
+        await RisingEdge(dut.jtag_clk)
+    assert await jtag_read(dut, 0x0010, settle=0) == 0xCAFE
+    dut.probe_in.value = 0x1234
+    for _ in range(4):
+        await RisingEdge(dut.jtag_clk)
+    assert await jtag_read(dut, 0x0010, settle=0) == 0x1234
+    assert await jtag_read(dut, 0x0200, settle=0) == 0
+
+    await jtag_write(dut, 0x0100, 0)
+    data = await jtag_read(dut, 0x0100, settle=0)
+    await jtag_write(dut, 0x0100, data | 0x8)
+    data = await jtag_read(dut, 0x0100, settle=0)
+    assert data & 0x8
+    assert data & 0xFFFF_FFF7 == 0
+    await jtag_write(dut, 0x0100, data & ~0x8)
+    assert not (await jtag_read(dut, 0x0100, settle=0) & 0x8)
+
+
+async def manager_write(dut, addr: int, data: int) -> None:
+    await FallingEdge(dut.jtag_clk)
+    dut.jtag_addr.value = addr
+    dut.jtag_wdata.value = data
+    dut.jtag_wr_en.value = 1
+    dut.jtag_rd_en.value = 0
+    await FallingEdge(dut.jtag_clk)
+    dut.jtag_wr_en.value = 0
+
+
+async def manager_read(dut, addr: int) -> int:
+    await FallingEdge(dut.jtag_clk)
+    dut.jtag_addr.value = addr
+    dut.jtag_rd_en.value = 1
+    dut.jtag_wr_en.value = 0
+    await Timer(1, units="ns")
+    data = int(dut.jtag_rdata.value)
+    await FallingEdge(dut.jtag_clk)
+    dut.jtag_rd_en.value = 0
+    return data
+
+
+@cocotb.test()
+async def fcapz_core_manager_mux(dut):
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, units="ns").start())
+    dut.jtag_rst.value = 1
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    dut.slot_rdata.value = (0x2222_0000 << 64) | (0x1111_0000 << 32)
+    dut.slot_burst_rd_data.value = (0xC2 << 16) | (0xB1 << 8) | 0xA0
+    dut.slot_burst_rd_ts_data.value = (0x2 << 8) | (0x1 << 4)
+    dut.slot_burst_start.value = 0b111
+    dut.slot_burst_timestamp.value = 0b101
+    dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+
+    assert await manager_read(dut, 0xF000) == 0x0004_434D
+    assert await manager_read(dut, 0xF004) == 3
+    assert await manager_read(dut, 0xF008) == 0
+    assert await manager_read(dut, 0xEFFF) == 0
+    assert int(dut.slot_rd_en.value) & 1
+    assert await manager_read(dut, 0xF000) == 0x0004_434D
+    assert int(dut.slot_rd_en.value) == 0
+
+    await manager_write(dut, 0xF014, 2)
+    assert await manager_read(dut, 0xF018) == 0x494F
+    assert await manager_read(dut, 0xF01C) == 0
+    await manager_write(dut, 0xF008, 1)
+    assert await manager_read(dut, 0xF008) == 1
+    assert await manager_read(dut, 0x0020) == 0x1111_0000
+    assert int(dut.slot_rd_en.value) & 0b010
+    await manager_write(dut, 0xF008, 2)
+    assert await manager_read(dut, 0x0020) == 0x2222_0000
+    assert int(dut.burst_rd_data.value) == 0
+    assert int(dut.burst_rd_ts_data.value) == 0
+    assert int(dut.burst_start.value) == 0
+    assert int(dut.burst_timestamp.value) == 0
+    assert int(dut.burst_start_ptr.value) == 0
+    await manager_write(dut, 0xF008, 1)
+    await Timer(1, units="ns")
+    assert int(dut.burst_rd_data.value) == 0xB1
+    assert int(dut.burst_rd_ts_data.value) == 1
+    assert int(dut.burst_start.value) == 1
+    assert int(dut.burst_timestamp.value) == 0
+    assert int(dut.burst_start_ptr.value) == 0xB
+    await manager_write(dut, 0xF008, 7)
+    assert await manager_read(dut, 0xF008) == 1
+
+
+@cocotb.test()
+async def fcapz_ela_channel_mux(dut):
+    cocotb.start_soon(Clock(dut.sample_clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
+    dut.sample_rst.value = 1
+    dut.jtag_rst.value = 1
+    dut.probe_in.value = (0xCC << 16) | (0xBB << 8) | 0xAA
+    dut.trigger_in.value = 0
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    dut.burst_rd_addr.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.sample_clk)
+    dut.sample_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.jtag_clk)
+
+    assert await jtag_read(dut, 0x00A4) == 3
+    assert await jtag_read(dut, 0x00A0) == 0
+
+    async def capture_channel(index: int) -> int:
+        await jtag_write(dut, 0x00A0, index)
+        await jtag_write(dut, 0x0004, 2)
+        for _ in range(10):
+            await RisingEdge(dut.sample_clk)
+        await jtag_write(dut, 0x0020, 1)
+        await jtag_write(dut, 0x0024, 0)
+        await jtag_write(dut, 0x0028, 0)
+        await jtag_write(dut, 0x0014, 0)
+        await jtag_write(dut, 0x0018, 2)
+        await arm_ela(dut)
+        for _ in range(100):
+            await RisingEdge(dut.sample_clk)
+        return await jtag_read(dut, 0x0100)
+
+    assert capture_channel
+    assert (await capture_channel(0)) & 0xFF == 0xAA
+    assert (await capture_channel(1)) & 0xFF == 0xBB
+    assert (await capture_channel(2)) & 0xFF == 0xCC
+    await jtag_write(dut, 0x00A0, 1)
+    assert await jtag_read(dut, 0x00A0) == 1
+    await jtag_write(dut, 0x00A0, 0)
+    assert await jtag_read(dut, 0x00A0) == 0
+    assert (await capture_channel(7)) & 0xFF == 0xAA
+
+
+@cocotb.test()
+async def fcapz_ela_xilinx7_single_chain(dut):
+    cocotb.start_soon(Clock(dut.sample_clk, 6, units="ns").start())
+    tap = dut.u_tap_ctrl.u_bscan
+    dut.sample_rst.value = 1
+    dut.probe_in.value = 0
+    dut.trigger_in.value = 0
+    dut.eio_probe_in.value = 0
+    tap.TCK.value = 0
+    tap.TDI.value = 0
+    tap.CAPTURE.value = 0
+    tap.SHIFT.value = 0
+    tap.UPDATE.value = 0
+    tap.SEL.value = 0
+
+    async def tck_tick() -> None:
+        tap.TCK.value = 0
+        await Timer(5, units="ns")
+        tap.TCK.value = 1
+        await Timer(1, units="ns")
+        tap.TCK.value = 0
+        await Timer(4, units="ns")
+
+    async def wrapper_idle(n: int) -> None:
+        tap.SEL.value = 0
+        tap.CAPTURE.value = 0
+        tap.SHIFT.value = 0
+        tap.UPDATE.value = 0
+        tap.TDI.value = 0
+        for _ in range(n):
+            await tck_tick()
+
+    async def wrapper_scan_reg(frame: int) -> int:
+        captured = 0
+        tap.SEL.value = 1
+        tap.CAPTURE.value = 1
+        await tck_tick()
+        tap.CAPTURE.value = 0
+        tap.SHIFT.value = 1
+        for i in range(49):
+            tap.TDI.value = (frame >> i) & 1
+            if i < 32 and int(dut.tap1_tdo.value):
+                captured |= 1 << i
+            await tck_tick()
+        tap.SHIFT.value = 0
+        tap.TDI.value = 0
+        tap.UPDATE.value = 1
+        await tck_tick()
+        tap.UPDATE.value = 0
+        tap.SEL.value = 0
+        return captured
+
+    async def wrapper_read(addr: int) -> int:
+        await wrapper_scan_reg(make_frame(addr, 0, False))
+        await wrapper_idle(2)
+        data = await wrapper_scan_reg(make_frame(addr, 0, False))
+        await wrapper_idle(2)
+        return data
+
+    async def wrapper_write(addr: int, data: int) -> None:
+        await wrapper_scan_reg(make_frame(addr, data, True))
+        await wrapper_idle(8)
+
+    async def wrapper_scan_burst() -> int:
+        bits = 0
+        tap.SEL.value = 1
+        tap.CAPTURE.value = 1
+        await tck_tick()
+        tap.CAPTURE.value = 0
+        tap.SHIFT.value = 1
+        for i in range(256):
+            tap.TDI.value = 0
+            if int(dut.tap1_tdo.value):
+                bits |= 1 << i
+            await tck_tick()
+        tap.SHIFT.value = 0
+        tap.UPDATE.value = 1
+        await tck_tick()
+        tap.UPDATE.value = 0
+        tap.SEL.value = 0
+        return bits
+
+    async def counter_driver() -> None:
+        value = 0
+        while True:
+            await RisingEdge(dut.sample_clk)
+            if int(dut.sample_rst.value):
+                value = 0
+            else:
+                value = (value + 1) & 0xFF
+            dut.probe_in.value = value
+
+    cocotb.start_soon(counter_driver())
+    await wrapper_idle(8)
+    for _ in range(8):
+        await RisingEdge(dut.sample_clk)
+    dut.sample_rst.value = 0
+    await wrapper_idle(12)
+
+    assert await wrapper_read(0x000C) == 8
+    await wrapper_write(0x0014, 4)
+    await wrapper_write(0x0018, 8)
+    await wrapper_write(0x0020, 1)
+    await wrapper_write(0x0024, 0x20)
+    await wrapper_write(0x0028, 0xFF)
+    await wrapper_write(0x0004, 1)
+
+    status = 0
+    for _ in range(200):
+        await wrapper_idle(8)
+        status = await wrapper_read(0x0008)
+        if status & 0x4:
+            break
+    assert status & 0x4
+    assert await wrapper_read(0x001C) == 13
+
+    await wrapper_write(0x002C, 0)
+    await wrapper_idle(80)
+    await wrapper_scan_burst()
+    burst = await wrapper_scan_burst()
+    prev = sample_at(burst, 0)
+    for i in range(1, 13):
+        cur = sample_at(burst, i)
+        assert cur == ((prev + 1) & 0xFF)
+        prev = cur
+
+
+@cocotb.test()
+async def fcapz_async_fifo_equiv(dut):
+    cocotb.start_soon(Clock(dut.wr_clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.rd_clk, 14, units="ns").start())
+    dut.rst.value = 1
+    dut.wr_en.value = 0
+    dut.rd_en.value = 0
+    dut.wr_data.value = 0
+
+    async def check_stable() -> None:
+        await FallingEdge(dut.rd_clk)
+        if int(dut.rd_empty_a.value) != int(dut.rd_empty_b.value):
+            raise AssertionError("rd_empty mismatch")
+        if int(dut.wr_full_a.value) != int(dut.wr_full_b.value):
+            raise AssertionError("wr_full mismatch")
+        if not int(dut.rd_empty_a.value) and not int(dut.rd_empty_b.value):
+            assert int(dut.rd_data_a.value) == int(dut.rd_data_b.value)
+
+    for _ in range(3):
+        await RisingEdge(dut.wr_clk)
+    dut.rst.value = 0
+    await RisingEdge(dut.wr_clk)
+
+    for i in range(16):
+        await RisingEdge(dut.wr_clk)
+        dut.wr_data.value = i
+        dut.wr_en.value = 1
+        await check_stable()
+    await RisingEdge(dut.wr_clk)
+    dut.wr_en.value = 0
+    for _ in range(4):
+        await check_stable()
+
+    for _ in range(16):
+        await RisingEdge(dut.rd_clk)
+        dut.rd_en.value = 1
+        await check_stable()
+    await RisingEdge(dut.rd_clk)
+    dut.rd_en.value = 0
+
+    for _ in range(4):
+        await RisingEdge(dut.wr_clk)
+    for i in range(8):
+        await RisingEdge(dut.wr_clk)
+        dut.wr_data.value = (0xA0 + i) & 0xFF
+        dut.wr_en.value = 1
+        await RisingEdge(dut.rd_clk)
+        dut.rd_en.value = 1
+        await check_stable()
+    await RisingEdge(dut.wr_clk)
+    dut.wr_en.value = 0
+    await RisingEdge(dut.rd_clk)
+    dut.rd_en.value = 0
+    for _ in range(8):
+        await check_stable()
+
+
+CMD_NOP = 0x0
+CMD_WRITE = 0x1
+CMD_READ = 0x2
+CMD_WRITE_INC = 0x3
+CMD_READ_INC = 0x4
+CMD_SET_ADDR = 0x5
+CMD_BURST_SETUP = 0x6
+CMD_BURST_WDATA = 0x7
+CMD_BURST_RDATA = 0x8
+CMD_BURST_RSTART = 0x9
+CMD_CONFIG = 0xE
+CMD_RESET = 0xF
+
+
+def axi_cmd(cmd: int, addr: int, payload: int, wstrb: int) -> int:
+    return ((cmd & 0xF) << 68) | ((wstrb & 0xF) << 64) | ((payload & 0xFFFF_FFFF) << 32) | (addr & 0xFFFF_FFFF)
+
+
+def axi_status(dout: int) -> int:
+    return (dout >> 68) & 0xF
+
+
+def axi_rdata(dout: int) -> int:
+    return dout & 0xFFFF_FFFF
+
+
+def axi_resp(dout: int) -> int:
+    return (dout >> 64) & 0x3
+
+
+async def axi_cdc_wait(dut, cycles: int = 10) -> None:
+    for _ in range(cycles):
+        await RisingEdge(dut.tck)
+
+
+async def dr_scan_72(dut, din: int) -> int:
+    dout = 0
+    await RisingEdge(dut.tck)
+    dut.sel.value = 1
+    dut.capture.value = 1
+    await RisingEdge(dut.tck)
+    dut.capture.value = 0
+    dut.shift_en.value = 1
+    for i in range(72):
+        dut.tdi.value = (din >> i) & 1
+        await FallingEdge(dut.tck)
+        if int(dut.tdo.value):
+            dout |= 1 << i
+        await RisingEdge(dut.tck)
+    dut.shift_en.value = 0
+    await RisingEdge(dut.tck)
+    dut.update.value = 1
+    await RisingEdge(dut.tck)
+    dut.update.value = 0
+    dut.sel.value = 0
+    return dout
+
+
+async def init_ejtagaxi(dut) -> None:
+    cocotb.start_soon(Clock(dut.tck, 100, units="ns").start())
+    cocotb.start_soon(Clock(dut.axi_clk, 30, units="ns").start())
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift_en.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.axi_rst.value = 1
+    for _ in range(4):
+        await RisingEdge(dut.axi_clk)
+    dut.axi_rst.value = 0
+    await axi_cdc_wait(dut, 10)
+
+
+async def issue_and_wait_valid(dut, command: int, label: str) -> int:
+    await dr_scan_72(dut, command)
+    await axi_cdc_wait(dut)
+    last = 0
+    for _ in range(32):
+        last = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        status = axi_status(last)
+        if status & 0x1:
+            return last
+        assert status & 0x2, f"{label}: became idle before prev_valid"
+        assert not (status & 0x4), f"{label}: error_sticky set"
+        await axi_cdc_wait(dut)
+    raise AssertionError(f"{label}: timed out waiting for prev_valid; last status=0x{axi_status(last):x}")
+
+
+async def drain_until_idle(dut) -> int:
+    last = 0
+    for _ in range(32):
+        last = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        if not (axi_status(last) & 0x2):
+            return last
+        await axi_cdc_wait(dut)
+    raise AssertionError(f"reset drain timed out; last status=0x{axi_status(last):x}")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_protocol(dut):
+    await init_ejtagaxi(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0xDEAD_BEEF, 0xF), "S1 write")
+    assert axi_resp(out) == 0
+    assert int(dut.mem0.value) == 0xDEAD_BEEF
+    await axi_cdc_wait(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "S2 read")
+    assert axi_rdata(out) == 0xDEAD_BEEF
+    await axi_cdc_wait(dut)
+
+    await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x1234_5678, 0xF), "S3 write")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0004, 0, 0), "S3 read")
+    assert axi_rdata(out) == 0x1234_5678
+    await axi_cdc_wait(dut)
+
+    await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xFFFF_FFFF, 0xF), "S4 full write")
+    await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xAABB_CCDD, 0x3), "S4 partial write")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0008, 0, 0), "S4 read")
+    assert axi_rdata(out) == 0xFFFF_CCDD
+    await axi_cdc_wait(dut)
+
+    await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
+    await axi_cdc_wait(dut)
+    for i in range(4):
+        await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE_INC, 0, 0xA000_0000 + i, 0xF), f"S5 write_inc {i}")
+    assert int(dut.mem4.value) == 0xA000_0000
+    assert int(dut.mem5.value) == 0xA000_0001
+    assert int(dut.mem6.value) == 0xA000_0002
+    assert int(dut.mem7.value) == 0xA000_0003
+
+    await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
+    await axi_cdc_wait(dut)
+    for i in range(4):
+        out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ_INC, 0, 0, 0), f"S6 read_inc {i}")
+        assert axi_rdata(out) == 0xA000_0000 + i
+        await axi_cdc_wait(dut)
+
+    burst_setup = (0b01 << 12) | (0b010 << 8) | 3
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x0000_0020, burst_setup, 0))
+    await axi_cdc_wait(dut)
+    for i in range(4):
+        await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, 0xB000_0000 + i, 0xF))
+        await axi_cdc_wait(dut)
+        await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        await axi_cdc_wait(dut)
+    assert int(dut.mem8.value) == 0xB000_0000
+    assert int(dut.mem9.value) == 0xB000_0001
+    assert int(dut.mem10.value) == 0xB000_0002
+    assert int(dut.mem11.value) == 0xB000_0003
+
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x0000_0020, burst_setup, 0))
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    await axi_cdc_wait(dut, 20)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    for i in range(4):
+        out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+        assert axi_rdata(out) == 0xB000_0000 + i
+        await axi_cdc_wait(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_0000, 0, 0), "S9 version")
+    assert axi_rdata(out) == 0x0004_4A58
+    await axi_cdc_wait(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_0004, 0, 0), "S9 version alias")
+    assert axi_rdata(out) == 0x0004_4A58
+    await axi_cdc_wait(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_002C, 0, 0), "S9 features")
+    assert axi_rdata(out) == 0x000F_2020
+    await axi_cdc_wait(dut)
+
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x4)
+    assert not (axi_status(out) & 0x2)
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_reset_regression(dut):
+    await init_ejtagaxi(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0x1234_5678, 0xF), "write addr 0")
+    assert axi_resp(out) == 0
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x89AB_CDEF, 0xF), "write addr 4")
+    assert axi_resp(out) == 0
+    assert int(dut.mem0.value) == 0x1234_5678
+    assert int(dut.mem1.value) == 0x89AB_CDEF
+
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    out = await drain_until_idle(dut)
+    status = axi_status(out)
+    assert not (status & 0x2)
+    assert int(dut.pending_count_probe.value) == 0
+    assert int(dut.last_cmd_probe.value) == CMD_NOP
+
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    status = axi_status(out)
+    assert not (status & 0x1)
+    assert not (status & 0x4)
+    await axi_cdc_wait(dut)
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "first post-reset read")
+    assert axi_resp(out) == 0
+    assert axi_rdata(out) == 0x1234_5678
+
+    await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0004, 0, 0))
+    await axi_cdc_wait(dut)
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ_INC, 0, 0, 0), "first post-reset read_inc")
+    assert axi_resp(out) == 0
+    assert axi_rdata(out) == 0x89AB_CDEF
+    assert int(dut.debug_tck.value) == 0
+    assert int(dut.debug_tck_edge.value) == 0
+    assert int(dut.debug_axi.value) == 0
+    assert int(dut.debug_axi_edge.value) == 0
+
+
+UART_CMD_NOP = 0x0
+UART_CMD_TX_PUSH = 0x1
+UART_CMD_RX_POP = 0x2
+UART_CMD_TXRX = 0x3
+UART_CMD_CONFIG = 0xE
+UART_CMD_RESET = 0xF
+UART_BIT_PERIOD_NS = 10_000
+UART_TX_FIFO_DEPTH = 16
+UART_RX_FIFO_DEPTH = 16
+UART_BAUD_DIV = 100
+
+
+def uart_cmd(cmd: int, tx_byte: int) -> int:
+    return ((cmd & 0xF) << 28) | (tx_byte & 0xFF)
+
+
+def uart_rx_byte(dout: int) -> int:
+    return dout & 0xFF
+
+
+def uart_tx_free(dout: int) -> int:
+    return (dout >> 8) & 0xFF
+
+
+def uart_rx_ready(dout: int) -> int:
+    return (dout >> 24) & 1
+
+
+def uart_rx_valid(dout: int) -> int:
+    return (dout >> 28) & 1
+
+
+def uart_tx_full(dout: int) -> int:
+    return (dout >> 29) & 1
+
+
+def uart_rx_overflow(dout: int) -> int:
+    return (dout >> 30) & 1
+
+
+def uart_frame_err(dout: int) -> int:
+    return (dout >> 31) & 1
+
+
+async def uart_cdc_wait(dut, cycles: int = 10) -> None:
+    for _ in range(cycles):
+        await RisingEdge(dut.tck)
+
+
+async def dr_scan_32(dut, din: int) -> int:
+    dout = 0
+    await RisingEdge(dut.tck)
+    dut.sel.value = 1
+    dut.capture.value = 1
+    await RisingEdge(dut.tck)
+    dut.capture.value = 0
+    dut.shift.value = 1
+    for i in range(32):
+        dut.tdi.value = (din >> i) & 1
+        await FallingEdge(dut.tck)
+        if int(dut.tdo.value):
+            dout |= 1 << i
+        await RisingEdge(dut.tck)
+    dut.shift.value = 0
+    await RisingEdge(dut.tck)
+    dut.update.value = 1
+    await RisingEdge(dut.tck)
+    dut.update.value = 0
+    dut.sel.value = 0
+    return dout
+
+
+async def uart_send_byte(dut, data: int, stop_high: bool = True) -> None:
+    dut.uart_rxd.value = 0
+    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    for i in range(8):
+        dut.uart_rxd.value = (data >> i) & 1
+        await Timer(UART_BIT_PERIOD_NS, units="ns")
+    dut.uart_rxd.value = 1 if stop_high else 0
+    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    dut.uart_rxd.value = 1
+
+
+async def uart_recv_byte_timeout(dut, timeout_ns: int) -> tuple[bool, int]:
+    waited = 0
+    while int(dut.uart_txd.value) == 1 and waited < timeout_ns:
+        await Timer(100, units="ns")
+        waited += 100
+    if int(dut.uart_txd.value) != 0:
+        return False, 0
+    await Timer(UART_BIT_PERIOD_NS // 2, units="ns")
+    data = 0
+    for i in range(8):
+        await Timer(UART_BIT_PERIOD_NS, units="ns")
+        data |= int(dut.uart_txd.value) << i
+    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    return True, data
+
+
+async def uart_recv_byte(dut) -> int:
+    while int(dut.uart_txd.value) == 1:
+        await Edge(dut.uart_txd)
+    await Timer(UART_BIT_PERIOD_NS // 2, units="ns")
+    data = 0
+    for i in range(8):
+        await Timer(UART_BIT_PERIOD_NS, units="ns")
+        data |= int(dut.uart_txd.value) << i
+    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    return data
+
+
+async def init_ejtaguart(dut) -> None:
+    cocotb.start_soon(Clock(dut.tck, 100, units="ns").start())
+    cocotb.start_soon(Clock(dut.uart_clk, 100, units="ns").start())
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.uart_rxd.value = 1
+    dut.uart_rst.value = 1
+    for _ in range(4):
+        await RisingEdge(dut.uart_clk)
+    dut.uart_rst.value = 0
+    await uart_cdc_wait(dut, 20)
+
+
+@cocotb.test()
+async def fcapz_ejtaguart_protocol(dut):
+    await init_ejtaguart(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x00))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x01))
+    assert uart_rx_byte(out) == 0x55
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x02))
+    assert uart_rx_byte(out) == 0x4A
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x03))
+    assert uart_rx_byte(out) == 0x04
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0x00))
+    assert uart_rx_byte(out) == 0x00
+    await uart_cdc_wait(dut)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x04))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0x00))
+    assert uart_rx_byte(out) == 0x55
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, 0xA5))
+    await uart_cdc_wait(dut)
+    valid, tx_byte = await uart_recv_byte_timeout(dut, UART_BIT_PERIOD_NS * 12)
+    assert valid
+    assert tx_byte == 0xA5
+    for _ in range(20):
+        await RisingEdge(dut.uart_clk)
+
+    await uart_send_byte(dut, 0x3C)
+    await uart_cdc_wait(dut, 40)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_byte(out) == 0x3C
+    assert uart_rx_valid(out)
+    await uart_cdc_wait(dut)
+
+    await uart_send_byte(dut, 0xBE)
+    await uart_cdc_wait(dut, 40)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_TXRX, 0x55))
+    valid, tx_byte = await uart_recv_byte_timeout(dut, UART_BIT_PERIOD_NS * 14)
+    assert valid
+    assert tx_byte == 0x55
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_byte(out) == 0xBE
+    assert uart_rx_valid(out)
+    for _ in range(UART_BAUD_DIV * 12):
+        await RisingEdge(dut.uart_clk)
+
+    await uart_send_byte(dut, 0xAA)
+    await uart_cdc_wait(dut, 40)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_ready(out)
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_ready(out)
+    assert not uart_rx_valid(out)
+    await uart_cdc_wait(dut)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_byte(out) == 0xAA
+    await uart_cdc_wait(dut)
+
+    for i in range(UART_TX_FIFO_DEPTH + 8):
+        await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, i))
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_tx_full(out)
+    for _ in range(UART_TX_FIFO_DEPTH * UART_BAUD_DIV * 12):
+        await RisingEdge(dut.uart_clk)
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 30)
+    for i in range(UART_RX_FIFO_DEPTH + 2):
+        await uart_send_byte(dut, i)
+    await uart_cdc_wait(dut, 50)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    await uart_cdc_wait(dut, 10)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_overflow(out)
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 30)
+    await uart_send_byte(dut, 0, stop_high=False)
+    await uart_cdc_wait(dut, 50)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_frame_err(out)
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 30)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert not uart_rx_overflow(out)
+    assert not uart_frame_err(out)
+    assert not uart_tx_full(out)
+    assert not uart_rx_ready(out)
+    await uart_cdc_wait(dut)
+
+    for expected in (0x11, 0x22, 0x33, 0x44):
+        await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, expected))
+        got = await uart_recv_byte(dut)
+        await uart_send_byte(dut, got)
+        await uart_cdc_wait(dut, 40)
+        await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+        await uart_cdc_wait(dut)
+        out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+        assert uart_rx_byte(out) == expected
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, 0xFF))
+    while int(dut.uart_txd.value) == 1:
+        await Edge(dut.uart_txd)
+    await Timer(UART_BIT_PERIOD_NS * 10, units="ns")
+    for _ in range(20):
+        await RisingEdge(dut.uart_clk)
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 20)
+    for _ in range(UART_BAUD_DIV * 12 * 4):
+        await RisingEdge(dut.uart_clk)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_tx_free(out) == UART_TX_FIFO_DEPTH
+    for i in range(3):
+        await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, i))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_tx_free(out) < UART_TX_FIFO_DEPTH
+    for _ in range(100):
+        await RisingEdge(dut.uart_clk)
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 30)
+    for data in (0xD1, 0xD2, 0xD3):
+        await uart_send_byte(dut, data)
+    await uart_cdc_wait(dut, 40)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    assert uart_rx_byte(out) == 0xD1
+    assert uart_rx_valid(out)
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    assert uart_rx_byte(out) == 0xD2
+    await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_byte(out) == 0xD3
+    await uart_cdc_wait(dut)
+
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
+    await uart_cdc_wait(dut, 20)
+    for _ in range(UART_BAUD_DIV * 12 * 4):
+        await RisingEdge(dut.uart_clk)
+
+    bridge_on = True
+
+    async def bridge_txd_to_rxd() -> None:
+        dut.uart_rxd.value = int(dut.uart_txd.value)
+        while bridge_on:
+            await Edge(dut.uart_txd)
+            dut.uart_rxd.value = int(dut.uart_txd.value)
+
+    bridge_task = cocotb.start_soon(bridge_txd_to_rxd())
+    stress = (0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87)
+    for data in stress:
+        await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, data))
+    for _ in range(UART_BAUD_DIV * 12 * len(stress)):
+        await RisingEdge(dut.uart_clk)
+    await uart_cdc_wait(dut)
+    await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+    await uart_cdc_wait(dut)
+    for expected in stress[:-1]:
+        out = await dr_scan_32(dut, uart_cmd(UART_CMD_RX_POP, 0))
+        assert uart_rx_byte(out) == expected
+        assert uart_rx_valid(out)
+        await uart_cdc_wait(dut)
+    out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
+    assert uart_rx_byte(out) == stress[-1]
+    assert uart_rx_valid(out)
+    bridge_on = False
+    bridge_task.kill()
+    dut.uart_rxd.value = 1
