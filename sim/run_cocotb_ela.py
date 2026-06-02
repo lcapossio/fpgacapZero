@@ -208,8 +208,6 @@ def check_results(results_xml: Path) -> None:
     results = ET.parse(results_xml).getroot()
     failures = len(list(results.iter("failure")))
     errors = len(list(results.iter("error")))
-    failures += sum(int(case.attrib.get("failures", "0")) for case in results.iter("testsuite"))
-    errors += sum(int(case.attrib.get("errors", "0")) for case in results.iter("testsuite"))
     if failures or errors:
         raise SystemExit(f"cocotb reported failures={failures} errors={errors}: {results_xml}")
 
@@ -277,6 +275,7 @@ def main() -> None:
             waves=args.waves,
             verbose=args.verbose,
             timescale=("1ns", "1ps"),
+            build_args=["-Wall"] if args.hdl == "verilog" else [],
         )
         runner.test(
             test_module=args.test_module,

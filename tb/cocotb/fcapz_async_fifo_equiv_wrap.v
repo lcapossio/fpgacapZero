@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+//
+// NOTE: dut_b sets USE_BEHAV_ASYNC_FIFO=0, which selects xpm_fifo_async. In
+// CI (and any non-vendor build) that symbol resolves to tb/xpm_fifo_async_stub.v,
+// which itself re-instantiates fcapz_async_fifo with USE_BEHAV_ASYNC_FIFO=1.
+// As a result, against the stub this test compares the behavioral FIFO with
+// itself and cannot catch divergence from the real vendor xpm_fifo_async.
+// It still catches port-list / parameter drift between fcapz_async_fifo's two
+// branches and is meant to be re-run against the real XPM in a vendor flow.
 
 `timescale 1ns/1ps
 

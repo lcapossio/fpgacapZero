@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 from pathlib import Path
@@ -104,7 +105,6 @@ class ElaFunctionalCoverage:
 
     def hit(self, name: str) -> None:
         self.bins[name] += 1
-        self.write()
 
     def write(self) -> None:
         path = os.environ.get("ELA_COCOTB_COVERAGE_JSON")
@@ -123,6 +123,7 @@ class ElaFunctionalCoverage:
 
 
 FUNCTIONAL_COVERAGE = ElaFunctionalCoverage()
+atexit.register(FUNCTIONAL_COVERAGE.write)
 
 
 class ElaDriver:

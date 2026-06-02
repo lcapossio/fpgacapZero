@@ -470,7 +470,6 @@ async def fcapz_ela_channel_mux(dut):
             await RisingEdge(dut.sample_clk)
         return await jtag_read(dut, 0x0100)
 
-    assert capture_channel
     assert (await capture_channel(0)) & 0xFF == 0xAA
     assert (await capture_channel(1)) & 0xFF == 0xBB
     assert (await capture_channel(2)) & 0xFF == 0xCC
