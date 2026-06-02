@@ -1162,6 +1162,7 @@ begin
         variable trigger_commit_now : boolean;
         variable force_store_now : boolean;
         variable store_now : boolean;
+        variable seg_start_next : seg_ptr_t;
         variable reset_pulse_now : boolean;
         variable arm_pulse_now : boolean;
         variable any_arm_pulse_now : boolean;
@@ -1304,6 +1305,7 @@ begin
             hit_eff := comb_hit_eff;
             sq_eff := comb_sq_ok = '1';
             store_ok := comb_store_ok = '1';
+            seg_start_next := seg_start_ptr;
             hit_pipe <= comb_hit;
             sq_pipe <= comb_sq_ok;
             reset_pulse_now := (reset_toggle_sync1 xor reset_toggle_sync2) = '1';
@@ -1374,6 +1376,9 @@ begin
                 seg_count <= 0;
                 all_seg_done <= '0';
                 segment_wrapped <= '0';
+                if not reset_pulse_now then
+                    seg_start_ptr <= seg_start_ptr;
+                end if;
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 trig_holdoff <= trig_holdoff_sync2;
@@ -1455,6 +1460,8 @@ begin
                         if pre_count < count_u(pretrig_len) then
                             pre_count <= pre_count + 1;
                         end if;
+                    end if;
+                    if store_now then
                         if wr_ptr = base + SEG_DEPTH - 1 then
                             segment_wrapped <= '1';
                         end if;
@@ -1481,7 +1488,14 @@ begin
                             armed <= '0';
                             start_ptr <= start_calc;
                         else
-                            seg_start_ptr(cur_segment) <= start_calc;
+                            for seg_i in 0 to NUM_SEGMENTS - 1 loop
+                                if seg_i = cur_segment then
+                                    seg_start_next(seg_i) := start_calc;
+                                else
+                                    seg_start_next(seg_i) := seg_start_ptr(seg_i);
+                                end if;
+                            end loop;
+                            seg_start_ptr <= seg_start_next;
                             if cur_segment = NUM_SEGMENTS - 1 then
                                 done <= '1';
                                 armed <= '0';
@@ -1508,20 +1522,34 @@ begin
                             end if;
                         end if;
                     elsif store_ok then
+                        if NUM_SEGMENTS > 1 then
+                            if wr_ptr = base + SEG_DEPTH - 1 then
+                                segment_wrapped <= '1';
+                            end if;
+                        end if;
                         if post_count + 1 >= post_limit then
                             start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                             if NUM_SEGMENTS = 1 then
                                 done <= '1';
                                 armed <= '0';
                                 start_ptr <= start_calc;
+                                wr_ptr <= next_ptr(wr_ptr, base);
                             else
-                                seg_start_ptr(cur_segment) <= start_calc;
+                                for seg_i in 0 to NUM_SEGMENTS - 1 loop
+                                    if seg_i = cur_segment then
+                                        seg_start_next(seg_i) := start_calc;
+                                    else
+                                        seg_start_next(seg_i) := seg_start_ptr(seg_i);
+                                    end if;
+                                end loop;
+                                seg_start_ptr <= seg_start_next;
                                 if cur_segment = NUM_SEGMENTS - 1 then
                                     done <= '1';
                                     armed <= '0';
                                     all_seg_done <= '1';
                                     start_ptr <= seg_start_ptr(0);
                                     seg_count <= NUM_SEGMENTS;
+                                    wr_ptr <= next_ptr(wr_ptr, base);
                                 else
                                     next_segment := cur_segment + 1;
                                     cur_segment <= next_segment;
@@ -1543,8 +1571,8 @@ begin
                             end if;
                         else
                             post_count <= post_count + 1;
+                            wr_ptr <= next_ptr(wr_ptr, base);
                         end if;
-                        wr_ptr <= next_ptr(wr_ptr, base);
                     end if;
                 end if;
             end if;
