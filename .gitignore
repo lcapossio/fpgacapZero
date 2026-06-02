@@ -15,6 +15,7 @@ dfx_runtime.txt
 # Build artifacts
 dist/
 packages/
+build/cocotb_ela/
 build/verilator_ela_coverage/
 *.bit
 *.bin
@@ -24,6 +25,8 @@ build/verilator_ela_coverage/
 # Simulation artifacts
 sim/*.vvp
 sim/*.vcd
+sim/ghdl/
+work-obj*.cf
 
 # OS
 .DS_Store

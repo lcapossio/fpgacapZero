@@ -138,6 +138,10 @@ one register assigned from two always blocks.
 Run `python sim/run_verilator_ela_coverage.py --runner wsl` when changing ELA
 behavior and you want Verilator simulation plus merged line/toggle and bound
 functional coverage for the Verilog ELA benches.
+Run `python sim/run_cocotb_ela.py --runner wsl --hdl verilog` to execute the
+shared cocotb ELA core stimulus. The same Python tests can target a VHDL ELA
+core with `--hdl vhdl --vhdl-source <file>` when a VHDL core implementation is
+available.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -731,6 +735,7 @@ python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
 python sim/run_verilator_ela_coverage.py --runner wsl
+python sim/run_cocotb_ela.py --runner wsl --hdl verilog
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
@@ -751,6 +756,14 @@ also binds `tb/fcapz_ela_func_cov.sv` into each `fcapz_ela` instance so
 `--coverage-user` records functional events such as arm/reset, trigger commit,
 pre/post stores, overflow, segment completion, burst starts, and optional
 feature register activity.
+
+The cocotb ELA command runs shared Python stimulus and scoreboarding directly
+against an HDL `fcapz_ela` top. It defaults to Icarus for Verilog and GHDL for
+VHDL, relaunching through WSL when requested. The Verilog target uses the same
+core sources as the SystemVerilog benches; the VHDL target expects a VHDL core
+source passed with `--vhdl-source` unless `rtl/vhdl/core/fcapz_ela.vhd` exists.
+It writes a small language-agnostic functional coverage JSON report under
+`build/cocotb_ela/`.
 
 ### Tests
 
