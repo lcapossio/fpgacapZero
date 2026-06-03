@@ -702,7 +702,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
 | `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
-| `sim` | `python sim/run_cocotb.py --runner native --clean` — runs the cocotb RTL regression, including the ELA suite and cocotb replacements for the former Verilog/SystemVerilog testbenches |
+| `sim` (matrix: `protocol`, `ela`) | sharded cocotb RTL regression on Icarus, with `iverilog -Wall` enabled per bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --clean --skip-ela` (trig compare, JTAG pipe/burst, EIO, core manager, channel mux, Xilinx7 single-chain wrapper, async-FIFO equivalence, EJTAG-AXI, EJTAG-AXI reset regression, EJTAG-UART). The `ela` shard runs `python sim/run_cocotb.py --runner native --clean ela` and exercises the 16-target cocotb ELA suite. |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are

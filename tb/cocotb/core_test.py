@@ -13,14 +13,67 @@ async def tick(signal) -> None:
     await Timer(1, units="ns")
 
 
-async def idle_tap(dut, n: int, *, shift_name: str = "shift_en") -> None:
-    dut.sel.value = 0
-    dut.capture.value = 0
-    getattr(dut, shift_name).value = 0
-    dut.update.value = 0
-    dut.tdi.value = 0
+async def _tap_idle(tap, tick_fn, n: int, *,
+                    sel: str, capture: str, shift: str, update: str, tdi: str) -> None:
+    getattr(tap, sel).value = 0
+    getattr(tap, capture).value = 0
+    getattr(tap, shift).value = 0
+    getattr(tap, update).value = 0
+    getattr(tap, tdi).value = 0
     for _ in range(n):
-        await tick(dut.tck)
+        await tick_fn()
+
+
+async def _tap_shift_frame(tap, tdo, tick_fn, frame: int, *,
+                           sel: str, capture: str, shift: str, update: str, tdi: str,
+                           bits: int = 49, capture_bits: int = 32) -> int:
+    captured = 0
+    getattr(tap, sel).value = 1
+    getattr(tap, capture).value = 1
+    await tick_fn()
+    getattr(tap, capture).value = 0
+    getattr(tap, shift).value = 1
+    for i in range(bits):
+        getattr(tap, tdi).value = (frame >> i) & 1
+        if i < capture_bits and int(tdo.value):
+            captured |= 1 << i
+        await tick_fn()
+    getattr(tap, shift).value = 0
+    getattr(tap, tdi).value = 0
+    getattr(tap, update).value = 1
+    await tick_fn()
+    getattr(tap, update).value = 0
+    getattr(tap, sel).value = 0
+    return captured
+
+
+async def _tap_shift_burst(tap, tdo, tick_fn, *,
+                           sel: str, capture: str, shift: str, update: str, tdi: str,
+                           bits: int = 256) -> int:
+    captured = 0
+    getattr(tap, sel).value = 1
+    getattr(tap, capture).value = 1
+    await tick_fn()
+    getattr(tap, capture).value = 0
+    getattr(tap, shift).value = 1
+    for i in range(bits):
+        getattr(tap, tdi).value = 0
+        if int(tdo.value):
+            captured |= 1 << i
+        await tick_fn()
+    getattr(tap, shift).value = 0
+    getattr(tap, update).value = 1
+    await tick_fn()
+    getattr(tap, update).value = 0
+    getattr(tap, sel).value = 0
+    return captured
+
+
+_DEFAULT_TAP_NAMES = dict(sel="sel", capture="capture", update="update", tdi="tdi")
+
+
+async def idle_tap(dut, n: int, *, shift_name: str = "shift_en") -> None:
+    await _tap_idle(dut, lambda: tick(dut.tck), n, shift=shift_name, **_DEFAULT_TAP_NAMES)
 
 
 def make_frame(addr: int, data: int, write: bool) -> int:
@@ -28,48 +81,17 @@ def make_frame(addr: int, data: int, write: bool) -> int:
 
 
 async def scan_reg(dut, frame: int, *, shift_name: str = "shift_en", tdo=None) -> int:
-    if tdo is None:
-        tdo = dut.tdo
-    captured = 0
-    dut.sel.value = 1
-    dut.capture.value = 1
-    await tick(dut.tck)
-    dut.capture.value = 0
-    getattr(dut, shift_name).value = 1
-    for i in range(49):
-        dut.tdi.value = (frame >> i) & 1
-        if i < 32 and int(tdo.value):
-            captured |= 1 << i
-        await tick(dut.tck)
-    getattr(dut, shift_name).value = 0
-    dut.tdi.value = 0
-    dut.update.value = 1
-    await tick(dut.tck)
-    dut.update.value = 0
-    dut.sel.value = 0
-    return captured
+    return await _tap_shift_frame(
+        dut, tdo if tdo is not None else dut.tdo, lambda: tick(dut.tck), frame,
+        shift=shift_name, **_DEFAULT_TAP_NAMES,
+    )
 
 
 async def scan_burst(dut, *, shift_name: str = "shift_en", tdo=None, bits: int = 256) -> int:
-    if tdo is None:
-        tdo = dut.tdo
-    captured = 0
-    dut.sel.value = 1
-    dut.capture.value = 1
-    await tick(dut.tck)
-    dut.capture.value = 0
-    getattr(dut, shift_name).value = 1
-    for i in range(bits):
-        dut.tdi.value = 0
-        if int(tdo.value):
-            captured |= 1 << i
-        await tick(dut.tck)
-    getattr(dut, shift_name).value = 0
-    dut.update.value = 1
-    await tick(dut.tck)
-    dut.update.value = 0
-    dut.sel.value = 0
-    return captured
+    return await _tap_shift_burst(
+        dut, tdo if tdo is not None else dut.tdo, lambda: tick(dut.tck),
+        shift=shift_name, bits=bits, **_DEFAULT_TAP_NAMES,
+    )
 
 
 def sample_at(bits: int, index: int, width: int = 8) -> int:
@@ -503,34 +525,13 @@ async def fcapz_ela_xilinx7_single_chain(dut):
         tap.TCK.value = 0
         await Timer(4, units="ns")
 
+    bscane_names = dict(sel="SEL", capture="CAPTURE", shift="SHIFT", update="UPDATE", tdi="TDI")
+
     async def wrapper_idle(n: int) -> None:
-        tap.SEL.value = 0
-        tap.CAPTURE.value = 0
-        tap.SHIFT.value = 0
-        tap.UPDATE.value = 0
-        tap.TDI.value = 0
-        for _ in range(n):
-            await tck_tick()
+        await _tap_idle(tap, tck_tick, n, **bscane_names)
 
     async def wrapper_scan_reg(frame: int) -> int:
-        captured = 0
-        tap.SEL.value = 1
-        tap.CAPTURE.value = 1
-        await tck_tick()
-        tap.CAPTURE.value = 0
-        tap.SHIFT.value = 1
-        for i in range(49):
-            tap.TDI.value = (frame >> i) & 1
-            if i < 32 and int(dut.tap1_tdo.value):
-                captured |= 1 << i
-            await tck_tick()
-        tap.SHIFT.value = 0
-        tap.TDI.value = 0
-        tap.UPDATE.value = 1
-        await tck_tick()
-        tap.UPDATE.value = 0
-        tap.SEL.value = 0
-        return captured
+        return await _tap_shift_frame(tap, dut.tap1_tdo, tck_tick, frame, **bscane_names)
 
     async def wrapper_read(addr: int) -> int:
         await wrapper_scan_reg(make_frame(addr, 0, False))
@@ -544,23 +545,7 @@ async def fcapz_ela_xilinx7_single_chain(dut):
         await wrapper_idle(8)
 
     async def wrapper_scan_burst() -> int:
-        bits = 0
-        tap.SEL.value = 1
-        tap.CAPTURE.value = 1
-        await tck_tick()
-        tap.CAPTURE.value = 0
-        tap.SHIFT.value = 1
-        for i in range(256):
-            tap.TDI.value = 0
-            if int(dut.tap1_tdo.value):
-                bits |= 1 << i
-            await tck_tick()
-        tap.SHIFT.value = 0
-        tap.UPDATE.value = 1
-        await tck_tick()
-        tap.UPDATE.value = 0
-        tap.SEL.value = 0
-        return bits
+        return await _tap_shift_burst(tap, dut.tap1_tdo, tck_tick, **bscane_names)
 
     async def counter_driver() -> None:
         value = 0

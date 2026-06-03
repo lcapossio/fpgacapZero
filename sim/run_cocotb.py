@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import platform
-import shlex
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from _runner_utils import check_results, relaunch_in_wsl, running_in_wsl
 
 ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
@@ -164,36 +163,6 @@ TARGET_BY_NAME = {target.name: target for target in TARGETS}
 DEFAULT_TARGETS = tuple(target.name for target in TARGETS)
 
 
-def windows_to_wsl_path(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    if not drive:
-        return resolved.as_posix()
-    rest = resolved.as_posix().split(":/", 1)[1]
-    return f"/mnt/{drive}/{rest}"
-
-
-def running_in_wsl() -> bool:
-    return "microsoft" in platform.release().lower()
-
-
-def relaunch_in_wsl(argv: list[str]) -> int:
-    script_args = [windows_to_wsl_path(ROOT / argv[0]), *argv[1:]]
-    script = "cd {} && python3 {}".format(
-        shlex.quote(windows_to_wsl_path(ROOT)),
-        " ".join(shlex.quote(arg) for arg in script_args),
-    )
-    return subprocess.call(["wsl.exe", "-e", "bash", "-lc", script], cwd=ROOT)
-
-
-def check_results(results_xml: Path) -> None:
-    results = ET.parse(results_xml).getroot()
-    failures = len(list(results.iter("failure")))
-    errors = len(list(results.iter("error")))
-    if failures or errors:
-        raise SystemExit(f"cocotb reported failures={failures} errors={errors}: {results_xml}")
-
-
 def run_ela(args: argparse.Namespace) -> None:
     cmd = [
         sys.executable,
@@ -249,7 +218,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", nargs="*", help=f"target name(s), or {ELA_TARGET}")
     parser.add_argument("--runner", choices=("auto", "native", "wsl"), default="auto")
-    parser.add_argument("--sim", default="icarus")
+    parser.add_argument("--sim", choices=("icarus",), default="icarus",
+                        help="cocotb simulator backend; only Icarus is supported "
+                             "(some wrappers use hierarchical refs to internal regs)")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--waves", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -260,7 +231,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if os.name == "nt" and not running_in_wsl() and args.runner in ("auto", "wsl"):
-        raise SystemExit(relaunch_in_wsl(sys.argv))
+        raise SystemExit(relaunch_in_wsl(ROOT, sys.argv))
 
     requested = tuple(args.target) if args.target else DEFAULT_TARGETS
     unknown = [name for name in requested if name not in TARGET_BY_NAME and name != ELA_TARGET]

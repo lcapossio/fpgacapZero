@@ -9,13 +9,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import platform
-import shlex
-import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from _runner_utils import check_results, relaunch_in_wsl, running_in_wsl
 
 ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
@@ -123,28 +121,6 @@ TARGETS: tuple[CocotbTarget, ...] = (
 SMOKE_TARGETS = (TARGETS[0],)
 
 
-def windows_to_wsl_path(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    if not drive:
-        return resolved.as_posix()
-    rest = resolved.as_posix().split(":/", 1)[1]
-    return f"/mnt/{drive}/{rest}"
-
-
-def running_in_wsl() -> bool:
-    return "microsoft" in platform.release().lower()
-
-
-def relaunch_in_wsl(argv: list[str]) -> int:
-    script_args = [windows_to_wsl_path(ROOT / argv[0]), *argv[1:]]
-    script = "cd {} && python3 {}".format(
-        shlex.quote(windows_to_wsl_path(ROOT)),
-        " ".join(shlex.quote(arg) for arg in script_args),
-    )
-    return subprocess.call(["wsl.exe", "-e", "bash", "-lc", script], cwd=ROOT)
-
-
 def parse_parameter(text: str) -> tuple[str, int]:
     if "=" not in text:
         raise argparse.ArgumentTypeError("parameter must be NAME=VALUE")
@@ -204,14 +180,6 @@ def selected_targets(args: argparse.Namespace) -> tuple[CocotbTarget, ...]:
     return TARGETS if args.suite == "all" else SMOKE_TARGETS
 
 
-def check_results(results_xml: Path) -> None:
-    results = ET.parse(results_xml).getroot()
-    failures = len(list(results.iter("failure")))
-    errors = len(list(results.iter("error")))
-    if failures or errors:
-        raise SystemExit(f"cocotb reported failures={failures} errors={errors}: {results_xml}")
-
-
 def merge_coverage(build_dir: Path, targets: tuple[CocotbTarget, ...]) -> Path:
     merged: dict[str, int] = {}
     total_bins = 0
@@ -244,7 +212,7 @@ def merge_coverage(build_dir: Path, targets: tuple[CocotbTarget, ...]) -> Path:
 def main() -> None:
     args = parse_args()
     if os.name == "nt" and not running_in_wsl() and args.runner in ("auto", "wsl"):
-        raise SystemExit(relaunch_in_wsl(sys.argv))
+        raise SystemExit(relaunch_in_wsl(ROOT, sys.argv))
 
     try:
         from cocotb.runner import get_runner

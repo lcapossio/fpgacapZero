@@ -21,6 +21,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from _runner_utils import windows_to_wsl_path
+
 ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
 TB = ROOT / "tb"
@@ -85,15 +87,6 @@ BENCH_BY_NAME = {bench.name: bench for bench in BENCHES}
 
 def rel(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
-
-
-def windows_to_wsl_path(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    if not drive:
-        return resolved.as_posix()
-    rest = resolved.as_posix().split(":/", 1)[1]
-    return f"/mnt/{drive}/{rest}"
 
 
 def quote_cmd(args: list[str]) -> str:
