@@ -2,7 +2,7 @@
   <img src="docs/assets/fcapz-logo.png" alt="fpgacapZero logo" width="180">
 </p>
 
-# fpgacapZero
+# fpgacapZero (fcapz)
 
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -50,6 +50,7 @@ specs.
 - [Building from source](#building-from-source)
 - [Project structure](#project-structure)
 - [Author](#author)
+- [Contributors](#contributors)
 - [License](#license)
 
 Jump within this page: [↑ Top](#readme-top)
@@ -123,17 +124,17 @@ and readback behavior without switching cores.
 ### Developer quick start
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,hdl]"
 pytest tests/ -v
-python sim/run_sim.py
+python sim/run_cocotb.py --runner native --clean
 python sim/run_vhdl_sim.py
 python sim/run_hdl_parity.py
 python sim/run_formal_hdl_parity.py --interface-only
 ```
 
-`python sim/run_sim.py` runs the shared RTL lint pass (`iverilog -Wall`)
-first, then the default simulation regression.  Use
-`python sim/run_sim.py --lint-only` when you only want the RTL lint check.
+`python sim/run_cocotb.py --runner native --clean` runs the default cocotb RTL
+simulation regression. Use `python sim/run_sim.py --lint-only` when you only
+want the shared RTL lint check (`iverilog -Wall`).
 `python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
 EIO and ELA cores.
 `python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
@@ -147,9 +148,15 @@ runner for the translated portable cores. It checks Verilog/VHDL interfaces and,
 with GHDL plus Yosys installed, attempts sequential equivalence proofs for the
 parameter sets in `sim/parity/*.yml`.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
-the full Verilog RTL matrix through Verilator lint for issues such as one
-register assigned from two always blocks. It also rejects SystemVerilog-only
-`++`/`--` operators in `.v` files.
+the full Verilog RTL matrix through Verilator driver lint for issues such as
+one register assigned from two always blocks.
+Run `python sim/run_verilator_ela_coverage.py --runner wsl` when changing ELA
+behavior and you want Verilator simulation plus merged line/toggle and bound
+functional coverage for the Verilog ELA benches.
+Run `python sim/run_cocotb_ela.py --runner wsl --hdl verilog` to execute the
+shared cocotb ELA core stimulus. The same Python tests can target a VHDL ELA
+core with `--hdl vhdl --vhdl-source <file>` when a VHDL core implementation is
+available.
 
 Use the installed `fcapz` entry point for day-to-day ELA work. The legacy
 `python -m fcapz.cli` form still works, but the package install path is
@@ -724,11 +731,10 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
-| `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches `++`/`--` in `.v` files and one reg driven by multiple always blocks |
-| `sim` | `python sim/run_sim.py` — runs the same `iverilog -Wall` lint pass, then the default RTL regression: ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core manager, and channel mux testbenches |
-| `sim-vhdl` | `python sim/run_vhdl_sim.py` - GHDL regression for the translated VHDL EIO and ELA cores |
+| `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches one reg driven by multiple always blocks |
 | `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
 | `hdl-formal-parity` | Manual `workflow_dispatch` job running `python sim/run_formal_hdl_parity.py` with GHDL/Yosys for manifest-driven sequential equivalence |
+| `sim` (matrix: `protocol`, `ela`) | sharded cocotb RTL regression on Icarus, with `iverilog -Wall` enabled per bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --clean --skip-ela` (trig compare, JTAG pipe/burst, EIO, core manager, channel mux, Xilinx7 single-chain wrapper, async-FIFO equivalence, EJTAG-AXI, EJTAG-AXI reset regression, EJTAG-UART). The `ela` shard runs `python sim/run_cocotb.py --runner native --clean ela` and exercises the 16-target cocotb ELA suite. |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
@@ -775,6 +781,9 @@ cores.
 python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
+python sim/run_cocotb.py --runner wsl
+python sim/run_verilator_ela_coverage.py --runner wsl
+python sim/run_cocotb_ela.py --runner wsl --hdl verilog
 ```
 
 The default command runs `iverilog -Wall` lint before compiling and running
@@ -821,6 +830,29 @@ The manifests in `sim/parity/` describe the source Verilog side, translated VHDL
 side, and representative parameter sets. Normal CI checks those manifests with
 `--interface-only`; the full GHDL/Yosys proof is available as the manual
 `hdl-formal-parity` workflow job.
+
+The Verilator ELA coverage command builds and runs `fcapz_ela`,
+`fcapz_ela_bug_probe`, and `fcapz_ela_config_matrix` as Verilator simulations.
+It writes merged coverage to `build/verilator_ela_coverage/merged.dat` and
+annotated source under `build/verilator_ela_coverage/annotated/`. The runner
+also binds `tb/fcapz_ela_func_cov.sv` into each `fcapz_ela` instance so
+`--coverage-user` records functional events such as arm/reset, trigger commit,
+pre/post stores, overflow, segment completion, burst starts, and optional
+feature register activity.
+
+The cocotb ELA command runs shared Python stimulus and scoreboarding directly
+against an HDL `fcapz_ela` top. It defaults to Icarus for Verilog and GHDL for
+VHDL, relaunching through WSL when requested. The Verilog target uses the same
+core sources as the SystemVerilog benches; the VHDL target expects a VHDL core
+source passed with `--vhdl-source` unless `rtl/vhdl/core/fcapz_ela.vhd` exists.
+It writes a small language-agnostic functional coverage JSON report under
+`build/cocotb_ela/`.
+
+The general cocotb command runs the non-ELA cocotb replacements for the RTL
+simulation benches (`trig_compare`, JTAG pipe/burst, EIO, core manager,
+channel mux, Xilinx7 single-chain wrapper, async FIFO equivalence, EJTAG-AXI,
+EJTAG-AXI reset regression, and EJTAG-UART), and then runs the ELA cocotb suite
+unless `--skip-ela` is passed.
 
 ### Tests
 
@@ -909,6 +941,7 @@ fpgacapZero/
     litex.py                 LiteX ELA integration helper
     gui/                     PySide6 desktop GUI modules and assets
   examples/arty_a7/
+    README.md                Arty A7 reference design guide
     arty_a7_top.v            Reference design top-level
     arty_a7_top.vhd          Mixed-language VHDL-core reference top-level
     arty_a7.xdc              Pin constraints
@@ -918,6 +951,12 @@ fpgacapZero/
     build_vhdl.py            Python wrapper for VHDL reference build
     arty_a7*.cfg             OpenOCD configs
     test_hw_integration.py   Hardware integration tests
+  examples/brs_100_gw1nr9/
+    README.md                Brisbane Silicon BRS-100-GW1NR9 guide
+    brs_100_gw1nr9_top.v     Gowin reference design top-level
+    brs_100_gw1nr9_loc.cst   Gowin pin constraints
+    build_brs_100_gw1nr9.tcl Gowin batch build
+    brs_100_gw1nr9.cfg       OpenOCD config
   tests/
     test_*.py                Host, CLI/RPC, transport, LiteX, probe-file,
                              bridge, GUI, and viewer tests
@@ -936,6 +975,12 @@ fpgacapZero/
 ## Author
 
 Leonardo Capossio — [bard0 design](https://www.bard0.com) — <hello@bard0.com>
+
+[↑ Top](#readme-top)
+
+## Contributors
+
+- [Brisbane Silicon](https://github.com/BrisbaneSilicon)
 
 [↑ Top](#readme-top)
 

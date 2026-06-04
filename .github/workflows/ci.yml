@@ -146,3 +146,33 @@ jobs:
           python-version: "3.11"
       - name: Run formal Verilog/VHDL parity proofs
         run: python sim/run_formal_hdl_parity.py
+
+  # -- 7. RTL simulation (cocotb + Icarus) --------------------------
+  # Sharded so the 16-target ELA suite runs in parallel with the protocol
+  # benches; cuts wall-clock at the cost of one extra job slot.
+  sim:
+    name: RTL simulation (cocotb + Icarus) [${{ matrix.shard }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [protocol, ela]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HDL simulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog ghdl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install cocotb dependencies
+        run: pip install -e ".[hdl]"
+      - name: Run cocotb RTL regression (protocol shard)
+        if: matrix.shard == 'protocol'
+        run: python sim/run_cocotb.py --runner native --clean --skip-ela
+      - name: Run cocotb RTL regression (ELA shard)
+        if: matrix.shard == 'ela'
+        run: python sim/run_cocotb.py --runner native --clean ela

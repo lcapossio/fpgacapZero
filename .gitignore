@@ -15,6 +15,9 @@ dfx_runtime.txt
 # Build artifacts
 dist/
 packages/
+build/cocotb_ela/
+build/cocotb/
+build/verilator_ela_coverage/
 *.bit
 *.bin
 !host/fcapz/gui/assets/default_window_state_v6.bin
@@ -34,3 +37,6 @@ Thumbs.db
 tests/_tmp/
 .codex_pytest_tmp*/
 .claude/
+
+# Local-only working notes (per PROJECTS.md no_commit/ convention)
+no_commit/
