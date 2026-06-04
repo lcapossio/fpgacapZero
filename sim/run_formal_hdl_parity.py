@@ -44,6 +44,7 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "jtag_reg_iface.yml",
     ROOT / "sim" / "parity" / "jtag_burst_read.yml",
     ROOT / "sim" / "parity" / "jtag_pipe_iface.yml",
+    ROOT / "sim" / "parity" / "fcapz_async_fifo.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
 )
@@ -357,7 +358,20 @@ def yosys_read_verilog(
     return cmds
 
 
-def prep_side(read_cmds: list[str], top: str, name: str) -> list[str]:
+def prep_side(
+    read_cmds: list[str],
+    top: str,
+    name: str,
+    renames: dict[str, str] | None = None,
+) -> list[str]:
+    rename_cmds: list[str] = []
+    if renames:
+        rename_cmds.append(f"cd {top}")
+        rename_cmds.extend(
+            f"rename {old_name} {new_name}"
+            for old_name, new_name in renames.items()
+        )
+        rename_cmds.append("cd")
     return [
         "design -reset",
         *read_cmds,
@@ -365,6 +379,7 @@ def prep_side(read_cmds: list[str], top: str, name: str) -> list[str]:
         "proc",
         "flatten",
         "memory_map",
+        *rename_cmds,
         "async2sync",
         "setundef -zero",
         "opt -full",
@@ -398,8 +413,18 @@ def prove_config(
     gate_read = yosys_read_verilog(candidate, [vhdl_netlist], {})
     script = "\n".join(
         [
-            *prep_side(gold_read, golden["top"], "gold"),
-            *prep_side(gate_read, candidate["top"], "gate"),
+            *prep_side(
+                gold_read,
+                golden["top"],
+                "gold",
+                golden.get("state_renames"),
+            ),
+            *prep_side(
+                gate_read,
+                candidate["top"],
+                "gate",
+                candidate.get("state_renames"),
+            ),
             "design -reset",
             "design -copy-from gold -as gold gold",
             "design -copy-from gate -as gate gate",
@@ -457,8 +482,18 @@ def prove_config(
 
     bounded = "\n".join(
         [
-            *prep_side(gold_read, golden["top"], "gold"),
-            *prep_side(gate_read, candidate["top"], "gate"),
+            *prep_side(
+                gold_read,
+                golden["top"],
+                "gold",
+                golden.get("state_renames"),
+            ),
+            *prep_side(
+                gate_read,
+                candidate["top"],
+                "gate",
+                candidate.get("state_renames"),
+            ),
             "design -reset",
             "design -copy-from gold -as gold gold",
             "design -copy-from gate -as gate gate",
