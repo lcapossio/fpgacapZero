@@ -664,7 +664,10 @@ CMD_RESET = 0xF
 
 
 def axi_cmd(cmd: int, addr: int, payload: int, wstrb: int) -> int:
-    return ((cmd & 0xF) << 68) | ((wstrb & 0xF) << 64) | ((payload & 0xFFFF_FFFF) << 32) | (addr & 0xFFFF_FFFF)
+    return (((cmd & 0xF) << 68)
+            | ((wstrb & 0xF) << 64)
+            | ((payload & 0xFFFF_FFFF) << 32)
+            | (addr & 0xFFFF_FFFF))
 
 
 def axi_status(dout: int) -> int:
@@ -734,7 +737,8 @@ async def issue_and_wait_valid(dut, command: int, label: str) -> int:
         assert status & 0x2, f"{label}: became idle before prev_valid"
         assert not (status & 0x4), f"{label}: error_sticky set"
         await axi_cdc_wait(dut)
-    raise AssertionError(f"{label}: timed out waiting for prev_valid; last status=0x{axi_status(last):x}")
+    raise AssertionError(
+        f"{label}: timed out waiting for prev_valid; last status=0x{axi_status(last):x}")
 
 
 async def drain_until_idle(dut) -> int:
@@ -751,7 +755,8 @@ async def drain_until_idle(dut) -> int:
 async def fcapz_ejtagaxi_protocol(dut):
     await init_ejtagaxi(dut)
 
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0xDEAD_BEEF, 0xF), "S1 write")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0xDEAD_BEEF, 0xF), "S1 write")
     assert axi_resp(out) == 0
     assert int(dut.mem0.value) == 0xDEAD_BEEF
     await axi_cdc_wait(dut)
@@ -765,8 +770,10 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert axi_rdata(out) == 0x1234_5678
     await axi_cdc_wait(dut)
 
-    await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xFFFF_FFFF, 0xF), "S4 full write")
-    await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xAABB_CCDD, 0x3), "S4 partial write")
+    await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xFFFF_FFFF, 0xF), "S4 full write")
+    await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xAABB_CCDD, 0x3), "S4 partial write")
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0008, 0, 0), "S4 read")
     assert axi_rdata(out) == 0xFFFF_CCDD
     await axi_cdc_wait(dut)
@@ -774,7 +781,9 @@ async def fcapz_ejtagaxi_protocol(dut):
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
     await axi_cdc_wait(dut)
     for i in range(4):
-        await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE_INC, 0, 0xA000_0000 + i, 0xF), f"S5 write_inc {i}")
+        await issue_and_wait_valid(
+            dut, axi_cmd(CMD_WRITE_INC, 0, 0xA000_0000 + i, 0xF),
+            f"S5 write_inc {i}")
     assert int(dut.mem4.value) == 0xA000_0000
     assert int(dut.mem5.value) == 0xA000_0001
     assert int(dut.mem6.value) == 0xA000_0002
@@ -816,7 +825,8 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert axi_rdata(out) == 0x0004_4A58
     await axi_cdc_wait(dut)
 
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_0004, 0, 0), "S9 version alias")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_CONFIG, 0x0000_0004, 0, 0), "S9 version alias")
     assert axi_rdata(out) == 0x0004_4A58
     await axi_cdc_wait(dut)
 
@@ -835,9 +845,11 @@ async def fcapz_ejtagaxi_protocol(dut):
 async def fcapz_ejtagaxi_reset_regression(dut):
     await init_ejtagaxi(dut)
 
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0x1234_5678, 0xF), "write addr 0")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0x1234_5678, 0xF), "write addr 0")
     assert axi_resp(out) == 0
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x89AB_CDEF, 0xF), "write addr 4")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x89AB_CDEF, 0xF), "write addr 4")
     assert axi_resp(out) == 0
     assert int(dut.mem0.value) == 0x1234_5678
     assert int(dut.mem1.value) == 0x89AB_CDEF
@@ -856,13 +868,15 @@ async def fcapz_ejtagaxi_reset_regression(dut):
     assert not (status & 0x4)
     await axi_cdc_wait(dut)
 
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "first post-reset read")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "first post-reset read")
     assert axi_resp(out) == 0
     assert axi_rdata(out) == 0x1234_5678
 
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0004, 0, 0))
     await axi_cdc_wait(dut)
-    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ_INC, 0, 0, 0), "first post-reset read_inc")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_READ_INC, 0, 0, 0), "first post-reset read_inc")
     assert axi_resp(out) == 0
     assert axi_rdata(out) == 0x89AB_CDEF
     assert int(dut.debug_tck.value) == 0

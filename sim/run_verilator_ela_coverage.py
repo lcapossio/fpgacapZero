@@ -111,7 +111,8 @@ class Runner:
 
     def _display(self, args: list[str]) -> str:
         if self.mode == "wsl":
-            return f"wsl.exe -e bash -lc {shlex.quote('cd ' + shlex.quote(self.root_wsl) + ' && ' + quote_cmd(args))}"
+            inner = f"cd {shlex.quote(self.root_wsl)} && {quote_cmd(args)}"
+            return f"wsl.exe -e bash -lc {shlex.quote(inner)}"
         return quote_cmd(args)
 
     def run(
@@ -145,7 +146,8 @@ def check_tools(runner: Runner) -> bool:
     result = runner.run(["verilator", "--version"], "check verilator", capture=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout + result.stderr)
-        print("verilator is not reachable; use --runner wsl if it is installed in WSL", file=sys.stderr)
+        print("verilator is not reachable; use --runner wsl if it is installed in WSL",
+              file=sys.stderr)
         return False
 
     match = re.search(r"Verilator\s+(\d+)\.(\d+)", result.stdout + result.stderr)
@@ -154,7 +156,8 @@ def check_tools(runner: Runner) -> bool:
         return False
     version = int(match.group(1)), int(match.group(2))
     if version < (5, 0):
-        print(f"Verilator 5.0 or newer is required (found {version[0]}.{version[1]})", file=sys.stderr)
+        print(f"Verilator 5.0 or newer is required (found {version[0]}.{version[1]})",
+              file=sys.stderr)
         return False
 
     cov = runner.run(["verilator_coverage", "--help"], "check verilator_coverage", capture=True)
@@ -285,16 +288,20 @@ def main() -> None:
         default=DEFAULT_BUILD,
         help="coverage output directory",
     )
-    parser.add_argument("--dry-run", action="store_true", help="print commands without running them")
-    parser.add_argument("--keep-going", action="store_true", help="continue after a bench fails")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print commands without running them")
+    parser.add_argument("--keep-going", action="store_true",
+                        help="continue after a bench fails")
     parser.add_argument(
         "--no-functional",
         action="store_true",
         help="skip the bound functional coverage module",
     )
     parser.add_argument("--no-merge", action="store_true", help="skip coverage merge")
-    parser.add_argument("--no-annotate", action="store_true", help="skip annotated coverage output")
-    parser.add_argument("--write-info", action="store_true", help="also emit lcov-compatible merged.info")
+    parser.add_argument("--no-annotate", action="store_true",
+                        help="skip annotated coverage output")
+    parser.add_argument("--write-info", action="store_true",
+                        help="also emit lcov-compatible merged.info")
     args = parser.parse_args()
 
     benches = selected_benches(args.testbench)
@@ -318,7 +325,8 @@ def main() -> None:
             ),
             (
                 f"simulate {bench.name}",
-                run_cmd(bench, build_dir, windows_exe=(runner.mode == "native" and os.name == "nt")),
+                run_cmd(bench, build_dir,
+                        windows_exe=(runner.mode == "native" and os.name == "nt")),
             ),
         ):
             result = runner.run(cmd, label)

@@ -77,17 +77,20 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "burst_start_register",
         ),
     ),
-    CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32}, ("timestamp_capture", "timestamp_decimation_gap")),
+    CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32},
+                 ("timestamp_capture", "timestamp_decimation_gap")),
     CocotbTarget("timestamp48", {"TIMESTAMP_W": 48}, ("timestamp_48_upper_word",)),
     CocotbTarget("segments4", {"NUM_SEGMENTS": 4}, ("segmented_capture",)),
     CocotbTarget("probe_mux", {"PROBE_MUX_W": 32}, ("probe_mux_slice_selection",)),
     CocotbTarget(
         "input_pipe",
-        {"DEPTH": 1024, "DECIM_EN": 1, "EXT_TRIG_EN": 1, "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
+        {"DEPTH": 1024, "DECIM_EN": 1, "EXT_TRIG_EN": 1,
+         "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
         ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
-    CocotbTarget("decim_anchor", {"DECIM_EN": 1}, ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
+    CocotbTarget("decim_anchor", {"DECIM_EN": 1},
+                 ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
     CocotbTarget("sequencer", {"TRIG_STAGES": 2}, ("sequencer_count_target_one",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
     CocotbTarget(
@@ -113,7 +116,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
     ),
     CocotbTarget(
         "config_combo",
-        {"TRIG_STAGES": 2, "STOR_QUAL": 1, "INPUT_PIPE": 1, "NUM_SEGMENTS": 4, "REL_COMPARE": 1, "DUAL_COMPARE": 1},
+        {"TRIG_STAGES": 2, "STOR_QUAL": 1, "INPUT_PIPE": 1,
+         "NUM_SEGMENTS": 4, "REL_COMPARE": 1, "DUAL_COMPARE": 1},
         ("config_combo_sq_segments",),
     ),
 )

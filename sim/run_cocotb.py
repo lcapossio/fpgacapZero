@@ -34,9 +34,13 @@ class Target:
 
 ELA_TARGET = "ela"
 
+_TRIG_COMPARE_SRC = (RTL / "trig_compare.v",)
+
 TARGETS: tuple[Target, ...] = (
-    Target("trig_compare_light", "trig_compare", (RTL / "trig_compare.v",), "trig_compare_light", {"W": 8, "REL_COMPARE": 0}),
-    Target("trig_compare_full", "trig_compare", (RTL / "trig_compare.v",), "trig_compare_full", {"W": 8, "REL_COMPARE": 1}),
+    Target("trig_compare_light", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_light", {"W": 8, "REL_COMPARE": 0}),
+    Target("trig_compare_full", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_full", {"W": 8, "REL_COMPARE": 1}),
     Target(
         "jtag_burst_read",
         "jtag_burst_read",
@@ -58,7 +62,8 @@ TARGETS: tuple[Target, ...] = (
         "jtag_pipe_iface_segmented_alignment",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
     ),
-    Target("fcapz_eio", "fcapz_eio", (RTL / "fcapz_eio.v",), "fcapz_eio_registers", {"IN_W": 16, "OUT_W": 12}),
+    Target("fcapz_eio", "fcapz_eio", (RTL / "fcapz_eio.v",),
+           "fcapz_eio_registers", {"IN_W": 16, "OUT_W": 12}),
     Target(
         "fcapz_core_manager",
         "fcapz_core_manager",
@@ -122,7 +127,9 @@ TARGETS: tuple[Target, ...] = (
     Target(
         "fcapz_async_fifo_equiv",
         "fcapz_async_fifo_equiv_wrap",
-        (TB_COCOTB / "fcapz_async_fifo_equiv_wrap.v", RTL / "fcapz_async_fifo.v", TB / "xpm_fifo_async_stub.v"),
+        (TB_COCOTB / "fcapz_async_fifo_equiv_wrap.v",
+         RTL / "fcapz_async_fifo.v",
+         TB / "xpm_fifo_async_stub.v"),
         "fcapz_async_fifo_equiv",
         {"DATA_W": 8, "DEPTH": 16},
     ),
@@ -148,14 +155,16 @@ TARGETS: tuple[Target, ...] = (
             TB / "axi4_test_slave.v",
         ),
         "fcapz_ejtagaxi_reset_regression",
-        {"DEBUG_EN": 0, "FIFO_DEPTH": 16, "CMD_FIFO_DEPTH": 32, "RESP_FIFO_DEPTH": 32, "USE_BEHAV_ASYNC_FIFO": 1},
+        {"DEBUG_EN": 0, "FIFO_DEPTH": 16, "CMD_FIFO_DEPTH": 32,
+         "RESP_FIFO_DEPTH": 32, "USE_BEHAV_ASYNC_FIFO": 1},
     ),
     Target(
         "fcapz_ejtaguart",
         "fcapz_ejtaguart",
         (RTL / "fcapz_async_fifo.v", RTL / "fcapz_ejtaguart.v"),
         "fcapz_ejtaguart_protocol",
-        {"CLK_HZ": 10_000_000, "BAUD_RATE": 100_000, "TX_FIFO_DEPTH": 16, "RX_FIFO_DEPTH": 16, "PARITY": 0},
+        {"CLK_HZ": 10_000_000, "BAUD_RATE": 100_000,
+         "TX_FIFO_DEPTH": 16, "RX_FIFO_DEPTH": 16, "PARITY": 0},
     ),
 )
 
@@ -224,7 +233,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--waves", action="store_true")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--skip-ela", action="store_true", help="run only non-ELA cocotb replacements")
+    parser.add_argument("--skip-ela", action="store_true",
+                        help="run only non-ELA cocotb replacements")
     return parser.parse_args()
 
 
@@ -236,7 +246,8 @@ def main() -> None:
     requested = tuple(args.target) if args.target else DEFAULT_TARGETS
     unknown = [name for name in requested if name not in TARGET_BY_NAME and name != ELA_TARGET]
     if unknown:
-        raise SystemExit(f"Unknown target(s): {unknown}. Available: {[ELA_TARGET, *TARGET_BY_NAME]}")
+        available = [ELA_TARGET, *TARGET_BY_NAME]
+        raise SystemExit(f"Unknown target(s): {unknown}. Available: {available}")
 
     if (not args.target or ELA_TARGET in requested) and not args.skip_ela:
         run_ela(args)

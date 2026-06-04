@@ -1474,7 +1474,7 @@ module fcapz_ela #(
                     end else if (WORDS_PER_SAMPLE == 1) begin
                         // Use sample_chunk_word so SAMPLE_W==32 does not
                         // emit the {0{1'b0}} zero-replication concat that
-                        // Verilator and several synthesis flows reject.
+                        // Some lint and synthesis flows reject.
                         jtag_rdata <= sample_chunk_word(rd_data_sync1, 0);
                     end else begin
                         jtag_rdata <= sample_chunk_word(

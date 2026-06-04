@@ -578,7 +578,8 @@ async def input_pipe_holdoff_late_ext_pulse(dut):
     ela.dut.trigger_in.value = 0
     for cycle in range(320):
         ela.dut.probe_in.value = cycle & 0xFF
-        ela.dut.trigger_in.value = 1 if any(start <= cycle <= start + 15 for start in (20, 90, 160, 230)) else 0
+        in_pulse = any(start <= cycle <= start + 15 for start in (20, 90, 160, 230))
+        ela.dut.trigger_in.value = 1 if in_pulse else 0
         await RisingEdge(ela.dut.sample_clk)
     ela.dut.trigger_in.value = 0
     assert await ela.wait_done() & 0x4
@@ -664,7 +665,12 @@ async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
     assert await ela.read(ADDR_COMPARE_CAPS) == 0x0002_01C3
-    for addr in (ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK, ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT, ADDR_SEG_SEL, ADDR_PROBE_SEL):
+    disabled_regs = (
+        ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
+        ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
+        ADDR_SEG_SEL, ADDR_PROBE_SEL,
+    )
+    for addr in disabled_regs:
         await ela.write(addr, 0xFFFF)
         assert await ela.read(addr) == 0
     assert await ela.read(ADDR_SEG_STATUS) == 0x8000_0000
@@ -783,7 +789,8 @@ async def segmented_rearm_pulses_complete(dut):
     ela.dut.trigger_in.value = 0
     for cycle in range(320):
         ela.dut.probe_in.value = cycle & 0xFF
-        ela.dut.trigger_in.value = 1 if any(start <= cycle <= start + 3 for start in (8, 80, 152, 224)) else 0
+        in_pulse = any(start <= cycle <= start + 3 for start in (8, 80, 152, 224))
+        ela.dut.trigger_in.value = 1 if in_pulse else 0
         await RisingEdge(ela.dut.sample_clk)
     ela.dut.trigger_in.value = 0
     assert await ela.wait_done() & 0x4
