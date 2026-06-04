@@ -688,7 +688,11 @@ begin
         end if;
 
         if INPUT_PIPE > 0 then
-            hit_eff := hit_pipe;
+            case ext_trig_mode is
+                when "01" => hit_eff := hit_pipe or trigger_in_sync2;
+                when "10" => hit_eff := hit_pipe and trigger_in_sync2;
+                when others => hit_eff := hit_pipe;
+            end case;
             sq_eff := (STOR_QUAL = 0) or (sq_enable = '0') or (sq_pipe = '1');
         else
             hit_eff := hit;
@@ -700,7 +704,7 @@ begin
                               trig_holdoff_active = '0' and
                               ((trig_delay_pending = '1' and trig_delay_count = 0) or
                                (trig_delay_pending = '0' and hit_eff = '1' and trig_delay = 0));
-        comb_hit <= hit;
+        comb_hit <= hit_internal;
         comb_hit_eff <= hit_eff;
         comb_sq_ok <= bool_to_sl(sq_ok);
         comb_store_ok <= bool_to_sl(store_ok);
