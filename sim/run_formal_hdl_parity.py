@@ -45,6 +45,7 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "jtag_burst_read.yml",
     ROOT / "sim" / "parity" / "jtag_pipe_iface.yml",
     ROOT / "sim" / "parity" / "fcapz_async_fifo.yml",
+    ROOT / "sim" / "parity" / "fcapz_core_manager.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
 )
