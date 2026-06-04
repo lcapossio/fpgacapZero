@@ -539,7 +539,10 @@ def main() -> None:
 
     if not require_tools("ghdl") or find_tool("yosys", "yowasp-yosys") is None:
         if find_tool("yosys", "yowasp-yosys") is None:
-            print("[formal-parity] missing required tool(s): yosys or yowasp-yosys", file=sys.stderr)
+            print(
+                "[formal-parity] missing required tool(s): yosys or yowasp-yosys",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     ok = True
