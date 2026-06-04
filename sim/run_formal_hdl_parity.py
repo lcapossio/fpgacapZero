@@ -36,6 +36,10 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
 DEFAULT_MANIFESTS = (
+    ROOT / "sim" / "parity" / "dff_sync.yml",
+    ROOT / "sim" / "parity" / "dff_reg_sync.yml",
+    ROOT / "sim" / "parity" / "reset_sync.yml",
+    ROOT / "sim" / "parity" / "trig_compare.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
 )
