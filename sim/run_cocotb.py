@@ -30,11 +30,19 @@ class Target:
     sources: tuple[Path, ...]
     testcase: str
     parameters: dict[str, int] = field(default_factory=dict)
+    vhdl_sources: tuple[Path, ...] = ()
 
 
 ELA_TARGET = "ela"
 
 _TRIG_COMPARE_SRC = (RTL / "trig_compare.v",)
+_VHDL_PKG = (RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",)
+_VHDL_ELA_SRC = (
+    RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+    RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+    RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+    RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+)
 
 TARGETS: tuple[Target, ...] = (
     Target("trig_compare_light", "trig_compare", _TRIG_COMPARE_SRC,
@@ -62,8 +70,14 @@ TARGETS: tuple[Target, ...] = (
         "jtag_pipe_iface_segmented_alignment",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
     ),
-    Target("fcapz_eio", "fcapz_eio", (RTL / "fcapz_eio.v",),
-           "fcapz_eio_registers", {"IN_W": 16, "OUT_W": 12}),
+    Target(
+        "fcapz_eio",
+        "fcapz_eio",
+        (RTL / "fcapz_eio.v",),
+        "fcapz_eio_registers",
+        {"IN_W": 16, "OUT_W": 12},
+        (*_VHDL_PKG, RTL / "vhdl" / "core" / "fcapz_eio.vhd"),
+    ),
     Target(
         "fcapz_core_manager",
         "fcapz_core_manager",
@@ -84,6 +98,7 @@ TARGETS: tuple[Target, ...] = (
         (RTL / "reset_sync.v", RTL / "fcapz_ela.v", RTL / "dpram.v", RTL / "trig_compare.v"),
         "fcapz_ela_channel_mux",
         {"SAMPLE_W": 8, "DEPTH": 16, "NUM_CHANNELS": 3},
+        _VHDL_ELA_SRC,
     ),
     Target(
         "fcapz_ela_xilinx7_single_chain",
@@ -172,14 +187,14 @@ TARGET_BY_NAME = {target.name: target for target in TARGETS}
 DEFAULT_TARGETS = tuple(target.name for target in TARGETS)
 
 
-def run_ela(args: argparse.Namespace) -> None:
+def run_ela(args: argparse.Namespace, hdl: str) -> None:
     cmd = [
         sys.executable,
         str(ROOT / "sim" / "run_cocotb_ela.py"),
         "--runner",
         "native",
         "--hdl",
-        "verilog",
+        hdl,
         "--suite",
         "all",
     ]
@@ -188,15 +203,23 @@ def run_ela(args: argparse.Namespace) -> None:
     subprocess.check_call(cmd, cwd=ROOT)
 
 
-def run_target(target: Target, args: argparse.Namespace) -> None:
+def target_supports_hdl(target: Target, hdl: str) -> bool:
+    return hdl == "verilog" or bool(target.vhdl_sources)
+
+
+def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
     from cocotb.runner import get_runner
 
-    runner = get_runner(args.sim)
-    build_dir = BUILD_ROOT / "verilog_icarus" / target.name
+    sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
+    runner = get_runner(sim)
+    build_dir = BUILD_ROOT / f"{hdl}_{sim}" / target.name
     results_xml = build_dir / "results.xml"
+    if str(TB_COCOTB) not in sys.path:
+        sys.path.insert(0, str(TB_COCOTB))
 
     runner.build(
-        verilog_sources=list(target.sources),
+        verilog_sources=list(target.sources) if hdl == "verilog" else [],
+        vhdl_sources=list(target.vhdl_sources) if hdl == "vhdl" else [],
         includes=[RTL],
         parameters=target.parameters,
         hdl_toplevel=target.top,
@@ -206,30 +229,37 @@ def run_target(target: Target, args: argparse.Namespace) -> None:
         waves=args.waves,
         verbose=args.verbose,
         timescale=("1ns", "1ps"),
-        build_args=["-Wall"],
+        build_args=["-Wall"] if hdl == "verilog" else ["--std=08"],
     )
     runner.test(
         test_module="core_test",
         hdl_toplevel=target.top,
+        hdl_toplevel_lang=hdl,
         testcase=(target.testcase,),
         build_dir=build_dir,
-        test_dir=TB_COCOTB,
+        test_dir=build_dir if hdl == "vhdl" else TB_COCOTB,
         results_xml=results_xml,
+        test_args=["--std=08"] if hdl == "vhdl" else [],
         waves=args.waves,
         verbose=args.verbose,
-        extra_env={"COCOTB_RESOLVE_X": "ZEROS", "FCAPZ_COCOTB_TARGET": target.name},
+        extra_env={
+            "COCOTB_RESOLVE_X": "ZEROS",
+            "FCAPZ_COCOTB_TARGET": target.name,
+            "FCAPZ_COCOTB_HDL": hdl,
+        },
     )
     check_results(results_xml)
-    print(f"cocotb target passed: {target.name}")
+    print(f"cocotb {hdl} target passed: {target.name}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", nargs="*", help=f"target name(s), or {ELA_TARGET}")
     parser.add_argument("--runner", choices=("auto", "native", "wsl"), default="auto")
-    parser.add_argument("--sim", choices=("icarus",), default="icarus",
-                        help="cocotb simulator backend; only Icarus is supported "
-                             "(some wrappers use hierarchical refs to internal regs)")
+    parser.add_argument("--hdl", choices=("verilog", "vhdl", "both"), default="verilog")
+    parser.add_argument("--sim", choices=("icarus", "ghdl"), default=None,
+                        help="cocotb simulator backend; defaults to Icarus for Verilog "
+                             "and GHDL for VHDL")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--waves", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -249,13 +279,28 @@ def main() -> None:
         available = [ELA_TARGET, *TARGET_BY_NAME]
         raise SystemExit(f"Unknown target(s): {unknown}. Available: {available}")
 
-    if (not args.target or ELA_TARGET in requested) and not args.skip_ela:
-        run_ela(args)
+    hdls = ("verilog", "vhdl") if args.hdl == "both" else (args.hdl,)
+    explicit_targets = bool(args.target)
 
-    for name in requested:
-        if name == ELA_TARGET:
-            continue
-        run_target(TARGET_BY_NAME[name], args)
+    for hdl in hdls:
+        if args.sim is not None and ((hdl == "verilog") != (args.sim == "icarus")):
+            raise SystemExit(f"--sim {args.sim} is not supported for --hdl {hdl}")
+        if (not args.target or ELA_TARGET in requested) and not args.skip_ela:
+            run_ela(args, hdl)
+
+        skipped: list[str] = []
+        for name in requested:
+            if name == ELA_TARGET:
+                continue
+            target = TARGET_BY_NAME[name]
+            if target_supports_hdl(target, hdl):
+                run_target(target, args, hdl)
+            elif explicit_targets:
+                raise SystemExit(f"Target {name!r} has no {hdl} implementation in this branch")
+            else:
+                skipped.append(name)
+        if skipped and hdl == "vhdl":
+            print(f"Skipped Verilog-only target(s) for VHDL run: {', '.join(skipped)}")
 
     print("cocotb regression complete")
 

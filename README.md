@@ -127,6 +127,7 @@ and readback behavior without switching cores.
 pip install -e ".[dev,hdl]"
 pytest tests/ -v
 python sim/run_cocotb.py --runner native --clean
+python sim/run_cocotb.py --runner wsl --hdl vhdl --clean
 python sim/run_vhdl_sim.py
 python sim/run_hdl_parity.py
 python sim/run_formal_hdl_parity.py --interface-only
@@ -135,6 +136,9 @@ python sim/run_formal_hdl_parity.py --interface-only
 `python sim/run_cocotb.py --runner native --clean` runs the default cocotb RTL
 simulation regression. Use `python sim/run_sim.py --lint-only` when you only
 want the shared RTL lint check (`iverilog -Wall`).
+`python sim/run_cocotb.py --runner wsl --hdl vhdl --clean` runs the same
+cocotb stimulus against every translated VHDL core target available in this
+branch.
 `python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
 EIO and ELA cores.
 `python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
@@ -782,6 +786,7 @@ python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
 python sim/run_cocotb.py --runner wsl
+python sim/run_cocotb.py --runner wsl --hdl vhdl
 python sim/run_verilator_ela_coverage.py --runner wsl
 python sim/run_cocotb_ela.py --runner wsl --hdl verilog
 ```
@@ -852,7 +857,10 @@ The general cocotb command runs the non-ELA cocotb replacements for the RTL
 simulation benches (`trig_compare`, JTAG pipe/burst, EIO, core manager,
 channel mux, Xilinx7 single-chain wrapper, async FIFO equivalence, EJTAG-AXI,
 EJTAG-AXI reset regression, and EJTAG-UART), and then runs the ELA cocotb suite
-unless `--skip-ela` is passed.
+unless `--skip-ela` is passed. With `--hdl vhdl`, it uses GHDL and the same
+Python tests for the translated VHDL EIO and ELA-derived channel-mux targets,
+plus the VHDL ELA suite; targets without VHDL implementations are skipped in a
+full run and rejected if requested explicitly.
 
 ### Tests
 
