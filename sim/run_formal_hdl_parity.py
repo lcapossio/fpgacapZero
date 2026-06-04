@@ -40,6 +40,8 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "dff_reg_sync.yml",
     ROOT / "sim" / "parity" / "reset_sync.yml",
     ROOT / "sim" / "parity" / "trig_compare.yml",
+    ROOT / "sim" / "parity" / "fcapz_regbus_mux.yml",
+    ROOT / "sim" / "parity" / "jtag_reg_iface.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
 )

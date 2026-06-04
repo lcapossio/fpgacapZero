@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "fcapz_regbus_mux_parity",
+  "description": "Formal Verilog/VHDL parity for the shared register bus mux",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_regbus_mux",
+    "sources": [
+      "../../rtl/fcapz_regbus_mux.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_regbus_mux",
+    "sources": [
+      "../../rtl/vhdl/core/fcapz_regbus_mux.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 2,
+    "bounded_depth": 2,
+    "reset_inputs": [],
+    "clock_inputs": [],
+    "reset_cycles": 0,
+    "modules": [
+      {
+        "name": "fcapz_regbus_mux",
+        "param_sets": [
+          {}
+        ]
+      }
+    ]
+  }
+}
