@@ -4,18 +4,16 @@
 
 """Check that translated VHDL cores track the source-of-truth Verilog cores.
 
-Verilog is the development source for the portable EIO/ELA cores.  This script
-is the CI gate for the VHDL port: it checks that public generics/parameters and
-register address constants remain aligned, then runs the Verilog and VHDL
-regression benches in one job.  The Verilog run covers parity and Verilog-only
-testbenches; marker comparison is applied to the translated cores.
+Verilog is the development source for the portable cores.  This lightweight CI
+guard checks that public generics/parameters and register address constants
+remain aligned.  Behavioral simulation parity is covered by the shared cocotb
+regression, which runs the same Python tests against Verilog and VHDL.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,109 +232,29 @@ def check_static_parity() -> bool:
     return True
 
 
-PARITY_MARKERS = (
-    "PARITY_VALUE_CAPTURE",
-    "PARITY_DECIM3_CAPTURE",
-    "PARITY_EXT_OR",
-    "PARITY_SEG_HOLDOFF_REWRITE",
-    "PARITY_PROBE_MUX_SLICE2",
-    "PARITY_DELAY4_CAPTURE",
-)
-
-
-# Parity markers are a testbench convention for observed Verilog/VHDL behavior.
-# Keep each marker on one line as:
-#   PARITY_NAME key=value key=value
-# The extractor intentionally compares scalar summaries, not multi-line tables.
-def run_cmd(cmd: list[str], label: str) -> tuple[bool, str]:
-    print(f"[hdl-parity] {label}: {' '.join(cmd)}", flush=True)
-    result = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.returncode != 0:
-        print(f"[hdl-parity] FAILED: {label}")
-        return False, result.stdout or ""
-    return True, result.stdout or ""
-
-
-def extract_parity_markers(output: str) -> dict[str, str]:
-    markers: dict[str, str] = {}
-    for name in PARITY_MARKERS:
-        match = re.search(rf"\b{name}\s+([^\r\n]+)", output)
-        if match:
-            markers[name] = re.sub(r"\s+", " ", match.group(1).strip()).lower()
-    return markers
-
-
-def compare_sim_markers(verilog_output: str, vhdl_output: str) -> bool:
-    verilog_markers = extract_parity_markers(verilog_output)
-    vhdl_markers = extract_parity_markers(vhdl_output)
-    errors: list[str] = []
-    for name in PARITY_MARKERS:
-        if name not in verilog_markers:
-            errors.append(f"missing Verilog observed parity marker {name}")
-        elif name not in vhdl_markers:
-            errors.append(f"missing VHDL observed parity marker {name}")
-        elif verilog_markers[name] != vhdl_markers[name]:
-            errors.append(
-                f"{name} mismatch, Verilog={verilog_markers[name]!r} VHDL={vhdl_markers[name]!r}"
-            )
-    if errors:
-        print("[hdl-parity] observed simulation parity failed:")
-        for error in errors:
-            print(f"  - {error}")
-        return False
-    print(f"[hdl-parity] observed simulation parity passed for {len(PARITY_MARKERS)} marker(s).")
-    return True
-
-
-def run_sim_parity() -> bool:
-    verilog_ok, verilog_output = run_cmd(
-        [sys.executable, "sim/run_sim.py", "--skip-lint"],
-        "all source Verilog regressions",
-    )
-    vhdl_ok, vhdl_output = run_cmd(
-        [sys.executable, "sim/run_vhdl_sim.py"],
-        "all translated VHDL regressions",
-    )
-    ok = verilog_ok and vhdl_ok
-    if ok:
-        ok &= compare_sim_markers(verilog_output, vhdl_output)
-    return ok
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--static-only",
         action="store_true",
-        help="only check generic/register-map parity",
+        help="accepted for compatibility; this runner is now static-only",
     )
     parser.add_argument(
         "--sim-only",
         action="store_true",
-        help="only run Verilog and VHDL parity simulations",
+        help="legacy option; use sim/run_cocotb.py --hdl both for simulations",
     )
     args = parser.parse_args()
 
-    if args.static_only and args.sim_only:
-        parser.error("--static-only and --sim-only are mutually exclusive")
+    if args.sim_only:
+        parser.error(
+            "legacy VHDL testbenches were retired; "
+            "run cocotb instead: python sim/run_cocotb.py --hdl both --clean"
+        )
 
-    ok = True
-    if not args.sim_only:
-        ok &= check_static_parity()
-    if not args.static_only:
-        ok &= run_sim_parity()
-
-    if not ok:
+    if not check_static_parity():
         sys.exit(1)
-    print("[hdl-parity] Verilog/VHDL parity checks passed.")
+    print("[hdl-parity] Verilog/VHDL static parity checks passed.")
 
 
 if __name__ == "__main__":

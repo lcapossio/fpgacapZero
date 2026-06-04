@@ -128,7 +128,6 @@ pip install -e ".[dev,hdl]"
 pytest tests/ -v
 python sim/run_cocotb.py --runner native --clean
 python sim/run_cocotb.py --runner wsl --hdl vhdl --clean
-python sim/run_vhdl_sim.py
 python sim/run_hdl_parity.py
 python sim/run_formal_hdl_parity.py --interface-only
 ```
@@ -139,14 +138,10 @@ want the shared RTL lint check (`iverilog -Wall`).
 `python sim/run_cocotb.py --runner wsl --hdl vhdl --clean` runs the same
 cocotb stimulus against every translated VHDL core target available in this
 branch.
-`python sim/run_vhdl_sim.py` runs the GHDL regression for the translated VHDL
-EIO and ELA cores.
 `python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
-translated core generics and register addresses still match the source Verilog,
-then runs the paired Verilog and VHDL regressions in one job. Matching
-testbench scenarios should emit one-line `PARITY_*` markers with scalar
-`key=value` fields so the gate can compare observed behavior. Keep marker data
-on the same line; summarize tables or sample streams into stable scalar fields.
+translated core generics and register addresses still match the source Verilog.
+Behavioral simulation parity is covered by the shared cocotb regression, not by
+separate VHDL testbenches.
 `python sim/run_formal_hdl_parity.py` is the manifest-driven formal parity
 runner for the translated portable cores. It checks Verilog/VHDL interfaces and,
 with GHDL plus Yosys installed, attempts sequential equivalence proofs for the
@@ -537,10 +532,11 @@ fcapz_ela_ecp5 #(
 
 VHDL sources are kept under `rtl/vhdl/`: shared packages in `pkg/`, translated
 cores in `core/`, and vendor wrappers in the wrapper files as they are added.
-The current VHDL regression covers EIO and ELA with GHDL:
+The VHDL simulation flow uses the same cocotb tests as Verilog, with GHDL as the
+VHDL simulator:
 
 ```bash
-python sim/run_vhdl_sim.py
+python sim/run_cocotb.py --runner native --hdl vhdl --clean
 ```
 
 The Arty A7 VHDL reference build is mixed-language: the ELA and EIO cores are
@@ -736,7 +732,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
 | `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches one reg driven by multiple always blocks |
-| `hdl-parity` | `python sim/run_hdl_parity.py` - generic/register-map parity plus paired source-Verilog and translated-VHDL regressions |
+| `hdl-parity` | `python sim/run_hdl_parity.py` - static generic/register-map parity for translated cores |
 | `hdl-formal-parity` | Manual `workflow_dispatch` job running `python sim/run_formal_hdl_parity.py` with GHDL/Yosys for manifest-driven sequential equivalence |
 | `sim` (matrix: `protocol`, `ela` x `verilog`, `vhdl`) | sharded cocotb RTL regression on Icarus for Verilog and GHDL for VHDL, with `iverilog -Wall` enabled per Verilog bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean --skip-ela` (all Verilog protocol targets, and the translated VHDL protocol targets when `<hdl>` is `vhdl`). The `ela` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean ela` and exercises the cocotb ELA suite against both languages. |
 
@@ -801,16 +797,15 @@ a full-project Verilog RTL matrix, a `.v` portability check for `++`/`--`, and
 stricter procedural-driver checks; its self-test must fail deliberately bad
 syntax and multi-driver fixtures before the job is considered valid.
 
-### Simulation (GHDL VHDL)
+### Simulation (cocotb Verilog/VHDL)
 
 ```bash
-python sim/run_vhdl_sim.py
+python sim/run_cocotb.py --runner native --hdl both --clean
 ```
 
-Runs the VHDL EIO and ELA testbenches. The VHDL ELA testbench includes capture,
-edge trigger, decimation, external trigger, timestamps, segmented capture, probe
-mux, startup arm, trigger holdoff, `INPUT_PIPE=1`, storage qualification,
-sequencer, relational compare, and dual compare coverage.
+Runs the shared cocotb RTL regression against both Verilog and VHDL. The VHDL
+side uses GHDL and exercises the same Python stimulus as the Verilog side, so
+there are no separate VHDL testbench sources to maintain.
 
 When changing the source Verilog for a translated core, run:
 
@@ -819,11 +814,8 @@ python sim/run_hdl_parity.py
 ```
 
 This is the CI parity gate for the VHDL port. It fails if EIO/ELA public
-generics or register address constants diverge between Verilog and VHDL, then
-runs the Verilog source regressions and translated VHDL regressions back to back.
-For behavior shared by both benches, emit one-line `PARITY_*` markers using
-stable `key=value` summaries. The parity gate compares those observed marker
-payloads exactly, so avoid multi-line marker payloads.
+generics or register address constants diverge between Verilog and VHDL. Use
+the cocotb regression for behavioral simulation parity.
 
 For the translateHDL-style formal layer, run:
 

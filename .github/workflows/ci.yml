@@ -112,20 +112,16 @@ jobs:
       - name: Run strict Verilator RTL lint
         run: python sim/run_verilator_lint.py --self-test
 
-  # -- 5. Verilog/VHDL simulation and parity gate ----------------------------
+  # -- 5. Verilog/VHDL static parity gate ------------------------------------
   hdl-parity:
-    name: HDL simulation + parity
+    name: HDL static parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install HDL simulators
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iverilog ghdl
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run full HDL regressions and parity checks
+      - name: Run static HDL parity checks
         run: python sim/run_hdl_parity.py
       - name: Verify formal parity manifests
         run: python sim/run_formal_hdl_parity.py --interface-only
