@@ -1472,7 +1472,10 @@ module fcapz_ela #(
                             ((rd_addr_jtag - ADDR_TS_DATA_BASE[15:0]) >> 2) % TS_WORDS
                         ) * 32;
                     end else if (WORDS_PER_SAMPLE == 1) begin
-                        jtag_rdata <= {{(32-SAMPLE_W){1'b0}}, rd_data_sync1};
+                        // Use sample_chunk_word so SAMPLE_W==32 does not
+                        // emit the {0{1'b0}} zero-replication concat that
+                        // Some lint and synthesis flows reject.
+                        jtag_rdata <= sample_chunk_word(rd_data_sync1, 0);
                     end else begin
                         jtag_rdata <= sample_chunk_word(
                             rd_data_sync1,
