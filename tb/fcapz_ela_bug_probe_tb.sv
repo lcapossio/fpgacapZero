@@ -421,7 +421,7 @@ module fcapz_ela_bug_probe_tb;
         write_ts(16'h0020, 32'h1);
         write_ts(16'h0024, 32'd3);
         write_ts(16'h0028, 32'hFF);
-        dut_ts.g_ts.ts_counter = 48'h0001_0000_0100;
+        dut_ts.ts_counter = 48'h0001_0000_0100;
         write_ts(16'h0004, 32'h1);
         probe_ts = '0;
         repeat (10) begin
