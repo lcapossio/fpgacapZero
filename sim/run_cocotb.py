@@ -31,12 +31,16 @@ class Target:
     testcase: str
     parameters: dict[str, int] = field(default_factory=dict)
     vhdl_sources: tuple[Path, ...] = ()
+    vhdl_top: str | None = None
+    vhdl_parameters: dict[str, int] | None = None
 
 
 ELA_TARGET = "ela"
 
 _TRIG_COMPARE_SRC = (RTL / "trig_compare.v",)
 _VHDL_PKG = (RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",)
+_VHDL_UTIL_PKG = (RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",)
+_VHDL_CORE_PKGS = (*_VHDL_PKG, *_VHDL_UTIL_PKG)
 _VHDL_ELA_SRC = (
     RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
     RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
@@ -46,15 +50,18 @@ _VHDL_ELA_SRC = (
 
 TARGETS: tuple[Target, ...] = (
     Target("trig_compare_light", "trig_compare", _TRIG_COMPARE_SRC,
-           "trig_compare_light", {"W": 8, "REL_COMPARE": 0}),
+           "trig_compare_light", {"W": 8, "REL_COMPARE": 0},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
     Target("trig_compare_full", "trig_compare", _TRIG_COMPARE_SRC,
-           "trig_compare_full", {"W": 8, "REL_COMPARE": 1}),
+           "trig_compare_full", {"W": 8, "REL_COMPARE": 1},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
     Target(
         "jtag_burst_read",
         "jtag_burst_read",
         (RTL / "jtag_burst_read.v",),
         "jtag_burst_read_protocol",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 32, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_burst_read.vhd"),
     ),
     Target(
         "jtag_pipe_iface",
@@ -62,6 +69,7 @@ TARGETS: tuple[Target, ...] = (
         (RTL / "jtag_pipe_iface.v",),
         "jtag_pipe_iface_protocol",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 32, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 1024},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
     ),
     Target(
         "jtag_pipe_iface_segmented",
@@ -69,6 +77,7 @@ TARGETS: tuple[Target, ...] = (
         (RTL / "jtag_pipe_iface.v",),
         "jtag_pipe_iface_segmented_alignment",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
     ),
     Target(
         "fcapz_eio",
@@ -91,6 +100,11 @@ TARGETS: tuple[Target, ...] = (
             "SLOT_CORE_IDS": 0x494F_4C41_4C41,
             "SLOT_HAS_BURST": 0b011,
         },
+        (*_VHDL_CORE_PKGS,
+         RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
+         TB_COCOTB / "fcapz_core_manager_cocotb_wrap.vhd"),
+        "fcapz_core_manager_cocotb_wrap",
+        {},
     ),
     Target(
         "chan_mux",
@@ -138,6 +152,19 @@ TARGETS: tuple[Target, ...] = (
             "DUAL_COMPARE": 0,
             "USER1_DATA_EN": 1,
         },
+        (*_VHDL_CORE_PKGS,
+         SIM / "bscane2_stub.vhd",
+         RTL / "vhdl" / "core" / "reset_sync.vhd",
+         RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+         RTL / "vhdl" / "core" / "trig_compare.vhd",
+         RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+         RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd",
+         RTL / "vhdl" / "core" / "jtag_reg_iface.vhd",
+         RTL / "vhdl" / "core" / "jtag_burst_read.vhd",
+         RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinx7.vhd",
+         RTL / "vhdl" / "core" / "fcapz_eio.vhd",
+         RTL / "vhdl" / "core" / "fcapz_regbus_mux.vhd",
+         RTL / "vhdl" / "fcapz_ela_xilinx7.vhd"),
     ),
     Target(
         "fcapz_async_fifo_equiv",
@@ -147,6 +174,10 @@ TARGETS: tuple[Target, ...] = (
          TB / "xpm_fifo_async_stub.v"),
         "fcapz_async_fifo_equiv",
         {"DATA_W": 8, "DEPTH": 16},
+        (*_VHDL_UTIL_PKG,
+         RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+         SIM / "xpm_fifo_async_stub.vhd",
+         TB_COCOTB / "fcapz_async_fifo_equiv_wrap.vhd"),
     ),
     Target(
         "fcapz_ejtagaxi",
@@ -235,8 +266,9 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
         verilog_sources=list(target.sources) if hdl == "verilog" else [],
         vhdl_sources=list(target.vhdl_sources) if hdl == "vhdl" else [],
         includes=[RTL],
-        parameters=target.parameters,
-        hdl_toplevel=target.top,
+        parameters=target.parameters if hdl == "verilog"
+        else (target.vhdl_parameters if target.vhdl_parameters is not None else target.parameters),
+        hdl_toplevel=target.top if hdl == "verilog" else (target.vhdl_top or target.top),
         build_dir=build_dir,
         clean=args.clean,
         always=True,
@@ -247,7 +279,7 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
     )
     runner.test(
         test_module="core_test",
-        hdl_toplevel=target.top,
+        hdl_toplevel=target.top if hdl == "verilog" else (target.vhdl_top or target.top),
         hdl_toplevel_lang=hdl,
         testcase=(target.testcase,),
         build_dir=build_dir,

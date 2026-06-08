@@ -14,13 +14,15 @@ Open-source, vendor-agnostic FPGA debug cores: an **Embedded Logic Analyzer
 read/write of fabric signals, a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
 memory-mapped bus access, and a **JTAG-to-UART Bridge (EJTAG-UART)** for
 console-style debug — all over JTAG. Drop them into any FPGA design and export
-captures to JSON, CSV, or VCD.
+captures to JSON, CSV, or VCD. The portable core RTL is available as native
+Verilog and native VHDL implementations, with shared cocotb regression coverage
+for both languages.
 
 Includes single-instantiation Verilog wrappers for **Xilinx 7-series**,
 **Xilinx UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**,
-**Gowin**, and **Microchip PolarFire / SmartFusion2 / IGLOO2**. ELA and EIO
-also provide VHDL wrappers for Xilinx 7-series, Lattice ECP5, Intel / Altera,
-and Gowin. The core RTL and Python host stack are fully portable.
+**Gowin**, and **Microchip PolarFire / SmartFusion2 / IGLOO2**. VHDL vendor
+wrappers are provided where supported; the core RTL and Python host stack are
+fully portable.
 
 📖 **[User manual](docs/README.md)** — full walkthrough of the RTL cores,
 host stack, CLI, RPC server, and desktop GUI. **JTAG register / shift maps**
