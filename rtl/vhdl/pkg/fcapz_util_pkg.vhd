@@ -1,11 +1,20 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
 package fcapz_util_pkg is
     function fcapz_clog2(n : positive) return positive;
     function fcapz_nonzero_width(n : natural) return positive;
     function fcapz_probe_width(probe_mux_w : natural; num_channels : positive; sample_w : positive) return positive;
+    function fcapz_repeat_u32(count : positive; value : natural) return std_logic_vector;
 end package fcapz_util_pkg;
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
 
 package body fcapz_util_pkg is
     function fcapz_clog2(n : positive) return positive is
@@ -36,5 +45,14 @@ package body fcapz_util_pkg is
             return probe_mux_w;
         end if;
         return num_channels * sample_w;
+    end function;
+
+    function fcapz_repeat_u32(count : positive; value : natural) return std_logic_vector is
+        variable result : std_logic_vector(count * 32 - 1 downto 0) := (others => '0');
+    begin
+        for i in 0 to count - 1 loop
+            result(i * 32 + 31 downto i * 32) := std_logic_vector(to_unsigned(value, 32));
+        end loop;
+        return result;
     end function;
 end package body fcapz_util_pkg;
