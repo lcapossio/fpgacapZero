@@ -150,28 +150,36 @@ TARGETS: tuple[Target, ...] = (
     ),
     Target(
         "fcapz_ejtagaxi",
-        "fcapz_ejtagaxi_tb_wrap",
+        "fcapz_ejtagaxi",
         (
-            TB_COCOTB / "fcapz_ejtagaxi_tb_wrap.v",
             RTL / "fcapz_async_fifo.v",
             RTL / "fcapz_ejtagaxi.v",
-            TB / "axi4_test_slave.v",
         ),
         "fcapz_ejtagaxi_protocol",
         {"FIFO_DEPTH": 16},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
     ),
     Target(
         "fcapz_ejtagaxi_reset_regression",
-        "fcapz_ejtagaxi_tb_wrap",
+        "fcapz_ejtagaxi",
         (
-            TB_COCOTB / "fcapz_ejtagaxi_tb_wrap.v",
             RTL / "fcapz_async_fifo.v",
             RTL / "fcapz_ejtagaxi.v",
-            TB / "axi4_test_slave.v",
         ),
         "fcapz_ejtagaxi_reset_regression",
         {"DEBUG_EN": 0, "FIFO_DEPTH": 16, "CMD_FIFO_DEPTH": 32,
          "RESP_FIFO_DEPTH": 32, "USE_BEHAV_ASYNC_FIFO": 1},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
     ),
     Target(
         "fcapz_ejtaguart",
@@ -180,6 +188,12 @@ TARGETS: tuple[Target, ...] = (
         "fcapz_ejtaguart_protocol",
         {"CLK_HZ": 10_000_000, "BAUD_RATE": 100_000,
          "TX_FIFO_DEPTH": 16, "RX_FIFO_DEPTH": 16, "PARITY": 0},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtaguart.vhd",
+        ),
     ),
 )
 
