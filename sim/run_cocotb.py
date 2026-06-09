@@ -239,7 +239,53 @@ TARGETS: tuple[Target, ...] = (
 
 TARGET_BY_NAME = {target.name: target for target in TARGETS}
 DEFAULT_TARGETS = tuple(target.name for target in TARGETS)
-EIO_COVERAGE_TARGETS = {"fcapz_eio", "fcapz_eio_wide"}
+COVERAGE_TARGETS = {
+    "fcapz_eio": ("eio", "EIO_COCOTB_COVERAGE_JSON", "EIO_COCOTB_RUN"),
+    "fcapz_eio_wide": ("eio", "EIO_COCOTB_COVERAGE_JSON", "EIO_COCOTB_RUN"),
+    "jtag_burst_read": (
+        "jtag_burst_read",
+        "JTAG_BURST_COCOTB_COVERAGE_JSON",
+        "JTAG_BURST_COCOTB_RUN",
+    ),
+    "jtag_pipe_iface": (
+        "jtag_pipe_iface",
+        "JTAG_PIPE_COCOTB_COVERAGE_JSON",
+        "JTAG_PIPE_COCOTB_RUN",
+    ),
+    "jtag_pipe_iface_segmented": (
+        "jtag_pipe_iface",
+        "JTAG_PIPE_COCOTB_COVERAGE_JSON",
+        "JTAG_PIPE_COCOTB_RUN",
+    ),
+    "fcapz_async_fifo_equiv": (
+        "fcapz_async_fifo_equiv",
+        "ASYNC_FIFO_COCOTB_COVERAGE_JSON",
+        "ASYNC_FIFO_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_reset_regression": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtaguart": (
+        "fcapz_ejtaguart",
+        "EJTAG_UART_COCOTB_COVERAGE_JSON",
+        "EJTAG_UART_COCOTB_RUN",
+    ),
+}
+COVERAGE_GROUP_LABELS = {
+    "eio": "EIO",
+    "jtag_burst_read": "JTAG burst reader",
+    "jtag_pipe_iface": "JTAG pipe interface",
+    "fcapz_async_fifo_equiv": "async FIFO equivalence",
+    "fcapz_ejtagaxi": "EJTAG-AXI",
+    "fcapz_ejtaguart": "EJTAG-UART",
+}
 
 
 def merge_coverage(paths: list[Path], out: Path) -> dict[str, object] | None:
@@ -286,18 +332,15 @@ def target_supports_hdl(target: Target, hdl: str) -> bool:
     return hdl == "verilog" or bool(target.vhdl_sources)
 
 
-def run_target(target: Target, args: argparse.Namespace, hdl: str) -> Path | None:
+def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str, Path] | None:
     from cocotb.runner import get_runner
 
     sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
     runner = get_runner(sim)
     build_dir = BUILD_ROOT / f"{hdl}_{sim}" / target.name
     results_xml = build_dir / "results.xml"
-    coverage_json = (
-        build_dir / "functional_coverage.json"
-        if target.name in EIO_COVERAGE_TARGETS
-        else None
-    )
+    coverage_info = COVERAGE_TARGETS.get(target.name)
+    coverage_json = build_dir / "functional_coverage.json" if coverage_info else None
     if str(TB_COCOTB) not in sys.path:
         sys.path.insert(0, str(TB_COCOTB))
 
@@ -322,9 +365,11 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> Path | Non
         "FCAPZ_COCOTB_HDL": hdl,
     }
     if coverage_json is not None:
+        assert coverage_info is not None
+        _, json_env_var, run_env_var = coverage_info
         extra_env.update({
-            "EIO_COCOTB_COVERAGE_JSON": str(coverage_json),
-            "EIO_COCOTB_RUN": target.name,
+            json_env_var: str(coverage_json),
+            run_env_var: target.name,
         })
 
     runner.test(
@@ -342,7 +387,9 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> Path | Non
     )
     check_results(results_xml)
     print(f"cocotb {hdl} target passed: {target.name}")
-    return coverage_json
+    if coverage_info is None or coverage_json is None:
+        return None
+    return coverage_info[0], coverage_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -358,8 +405,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--skip-ela", action="store_true",
                         help="run only non-ELA cocotb replacements")
+    parser.add_argument("--require-protocol-coverage", action="store_true",
+                        help="fail unless all protocol functional coverage bins are hit")
     parser.add_argument("--require-eio-coverage", action="store_true",
-                        help="fail unless all EIO functional coverage bins are hit")
+                        dest="require_protocol_coverage",
+                        help="legacy alias for --require-protocol-coverage")
     return parser.parse_args()
 
 
@@ -384,34 +434,62 @@ def main() -> None:
             run_ela(args, hdl)
 
         skipped: list[str] = []
-        eio_coverage_paths: list[Path] = []
+        coverage_paths: dict[str, list[Path]] = {}
+        expected_coverage_groups: set[str] = set()
         for name in requested:
             if name == ELA_TARGET:
                 continue
             target = TARGET_BY_NAME[name]
             if target_supports_hdl(target, hdl):
-                coverage_path = run_target(target, args, hdl)
-                if coverage_path is not None:
-                    eio_coverage_paths.append(coverage_path)
+                coverage_info = COVERAGE_TARGETS.get(name)
+                if coverage_info is not None:
+                    expected_coverage_groups.add(coverage_info[0])
+                coverage_result = run_target(target, args, hdl)
+                if coverage_result is not None:
+                    group, coverage_path = coverage_result
+                    coverage_paths.setdefault(group, []).append(coverage_path)
             elif explicit_targets:
                 raise SystemExit(f"Target {name!r} has no {hdl} implementation in this branch")
             else:
                 skipped.append(name)
-        if eio_coverage_paths:
-            sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
-            coverage_merged = BUILD_ROOT / f"{hdl}_{sim}" / "eio_functional_coverage_merged.json"
-            payload = merge_coverage(eio_coverage_paths, coverage_merged)
+        sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
+        for group in sorted(coverage_paths):
+            coverage_merged = (
+                BUILD_ROOT
+                / f"{hdl}_{sim}"
+                / f"{group}_functional_coverage_merged.json"
+            )
+            payload = merge_coverage(coverage_paths[group], coverage_merged)
+            label = COVERAGE_GROUP_LABELS.get(group, group)
             if payload is not None:
-                print(f"Merged EIO functional coverage: {coverage_merged.relative_to(ROOT)}")
-                if args.require_eio_coverage and payload["covered_bins"] != payload["total_bins"]:
+                print(
+                    f"Merged {label} functional coverage: "
+                    f"{coverage_merged.relative_to(ROOT)}"
+                )
+                if (
+                    args.require_protocol_coverage
+                    and payload["covered_bins"] != payload["total_bins"]
+                ):
                     raise SystemExit(
-                        "EIO functional coverage below 100%: "
+                        f"{label} functional coverage below 100%: "
                         f"{payload['covered_bins']}/{payload['total_bins']} bins"
                     )
-            elif args.require_eio_coverage:
-                raise SystemExit("EIO functional coverage was required, but no report was written")
-        elif args.require_eio_coverage:
-            raise SystemExit("EIO functional coverage was required, but no EIO targets ran")
+            elif args.require_protocol_coverage:
+                raise SystemExit(
+                    f"{label} functional coverage was required, "
+                    "but no report was written"
+                )
+        if args.require_protocol_coverage:
+            missing_groups = expected_coverage_groups - set(coverage_paths)
+            if missing_groups:
+                labels = [
+                    COVERAGE_GROUP_LABELS.get(group, group)
+                    for group in sorted(missing_groups)
+                ]
+                raise SystemExit(
+                    "Protocol functional coverage was required, but no reports "
+                    f"were written for: {', '.join(labels)}"
+                )
         if skipped and hdl == "vhdl":
             print(f"Skipped Verilog-only target(s) for VHDL run: {', '.join(skipped)}")
 

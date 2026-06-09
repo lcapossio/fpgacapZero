@@ -68,7 +68,91 @@ EIO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
     ),
 )
 
+JTAG_BURST_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="JTAG_BURST_COCOTB_COVERAGE_JSON",
+    run_env_var="JTAG_BURST_COCOTB_RUN",
+    bins=(
+        "data_burst_start",
+        "data_burst_contiguous_first",
+        "data_burst_contiguous_second",
+        "data_burst_wrap",
+        "timestamp_burst",
+    ),
+)
+
+JTAG_PIPE_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="JTAG_PIPE_COCOTB_COVERAGE_JSON",
+    run_env_var="JTAG_PIPE_COCOTB_RUN",
+    bins=(
+        "register_write_frame",
+        "register_read_frame",
+        "burst_pointer_command",
+        "burst_read_first",
+        "burst_read_second",
+        "segmented_burst_alignment",
+    ),
+)
+
+ASYNC_FIFO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="ASYNC_FIFO_COCOTB_COVERAGE_JSON",
+    run_env_var="ASYNC_FIFO_COCOTB_RUN",
+    bins=(
+        "reset_empty_flags_match",
+        "write_fill_flags_match",
+        "read_drain_data_match",
+        "mixed_read_write_match",
+        "post_idle_stable",
+    ),
+)
+
+EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="EJTAG_AXI_COCOTB_COVERAGE_JSON",
+    run_env_var="EJTAG_AXI_COCOTB_RUN",
+    bins=(
+        "single_write",
+        "single_read",
+        "partial_strobe_write",
+        "incrementing_write",
+        "incrementing_read",
+        "burst_write",
+        "burst_read",
+        "config_version",
+        "config_features",
+        "soft_reset",
+        "axi_protocol_trace",
+        "reset_post_read",
+        "reset_read_increment",
+        "reset_debug_outputs_idle",
+        "reset_axi_trace",
+    ),
+)
+
+EJTAG_UART_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="EJTAG_UART_COCOTB_COVERAGE_JSON",
+    run_env_var="EJTAG_UART_COCOTB_RUN",
+    bins=(
+        "config_registers",
+        "tx_push_serializes_byte",
+        "rx_pop_reads_byte",
+        "txrx_exchange",
+        "rx_ready_without_pop",
+        "tx_full_status",
+        "rx_overflow_status",
+        "frame_error_status",
+        "reset_clears_status",
+        "loopback_order",
+        "tx_free_accounting",
+        "rx_fifo_order",
+        "bridge_loopback_stress",
+    ),
+)
+
 atexit.register(EIO_FUNCTIONAL_COVERAGE.write)
+atexit.register(JTAG_BURST_FUNCTIONAL_COVERAGE.write)
+atexit.register(JTAG_PIPE_FUNCTIONAL_COVERAGE.write)
+atexit.register(ASYNC_FIFO_FUNCTIONAL_COVERAGE.write)
+atexit.register(EJTAG_AXI_FUNCTIONAL_COVERAGE.write)
+atexit.register(EJTAG_UART_FUNCTIONAL_COVERAGE.write)
 
 
 async def tick(signal) -> None:
@@ -300,24 +384,29 @@ async def jtag_burst_read_protocol(dut):
     await idle_tap(dut, 4)
 
     await start_burst(dut, 42, False)
+    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("data_burst_start")
     await idle_tap(dut, 80)
     await scan_burst(dut)
     scan = await scan_burst(dut)
     assert_sample_sequence(scan, 42)
+    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("data_burst_contiguous_first")
     scan = await scan_burst(dut)
     assert_sample_sequence(scan, 74)
+    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("data_burst_contiguous_second")
 
     await start_burst(dut, 250, False)
     await idle_tap(dut, 80)
     await scan_burst(dut)
     scan = await scan_burst(dut)
     assert_sample_sequence(scan, 250)
+    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("data_burst_wrap")
 
     await start_burst(dut, 64, True)
     await idle_tap(dut, 80)
     await scan_burst(dut)
     scan = await scan_burst(dut)
     assert_timestamp_sequence(scan, 64)
+    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("timestamp_burst")
 
 
 async def pipe_bus_monitor(dut) -> None:
@@ -354,19 +443,24 @@ async def jtag_pipe_iface_protocol(dut):
     await scan_reg(dut, make_frame(0x0024, 0xCAFE_BABE, True))
     assert int(dut.reg_addr.value) == 0x0024
     assert int(dut.reg_wdata.value) == 0xCAFE_BABE
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("register_write_frame")
 
     await scan_reg(dut, make_frame(0, 0, False))
     await idle_tap(dut, 4)
     captured = await scan_reg(dut, make_frame(0, 0, False))
     assert captured == 0x1234_5678
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("register_read_frame")
 
     await scan_reg(dut, make_frame(0x002C, 0, True))
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_pointer_command")
     await idle_tap(dut, 80)
     await scan_burst(dut)
     first = await scan_burst(dut)
     second = await scan_burst(dut)
     assert_sample_sequence(first, 42)
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_read_first")
     assert_sample_sequence(second, 74)
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_read_second")
 
 
 @cocotb.test()
@@ -395,6 +489,7 @@ async def jtag_pipe_iface_segmented_alignment(dut):
     dut.sel.value = 0
     await idle_tap(dut, 4)
     assert (int(dut.mem_addr.value) >> 8) == 1
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("segmented_burst_alignment")
 
 
 @cocotb.test()
@@ -774,6 +869,8 @@ async def fcapz_async_fifo_equiv(dut):
         await RisingEdge(dut.wr_clk)
     dut.rst.value = 0
     await RisingEdge(dut.wr_clk)
+    await check_stable()
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("reset_empty_flags_match")
 
     for i in range(16):
         await RisingEdge(dut.wr_clk)
@@ -784,6 +881,7 @@ async def fcapz_async_fifo_equiv(dut):
     dut.wr_en.value = 0
     for _ in range(4):
         await check_stable()
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("write_fill_flags_match")
 
     for _ in range(16):
         await RisingEdge(dut.rd_clk)
@@ -791,6 +889,7 @@ async def fcapz_async_fifo_equiv(dut):
         await check_stable()
     await RisingEdge(dut.rd_clk)
     dut.rd_en.value = 0
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("read_drain_data_match")
 
     for _ in range(4):
         await RisingEdge(dut.wr_clk)
@@ -801,12 +900,14 @@ async def fcapz_async_fifo_equiv(dut):
         await RisingEdge(dut.rd_clk)
         dut.rd_en.value = 1
         await check_stable()
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("mixed_read_write_match")
     await RisingEdge(dut.wr_clk)
     dut.wr_en.value = 0
     await RisingEdge(dut.rd_clk)
     dut.rd_en.value = 0
     for _ in range(8):
         await check_stable()
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("post_idle_stable")
 
 
 CMD_NOP = 0x0
@@ -1109,10 +1210,12 @@ async def fcapz_ejtagaxi_protocol(dut):
         dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0xDEAD_BEEF, 0xF), "S1 write")
     assert axi_resp(out) == 0
     assert axi_mem_read32(axi_ram, 0x0000_0000) == 0xDEAD_BEEF
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("single_write")
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "S2 read")
     assert axi_rdata(out) == 0xDEAD_BEEF
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("single_read")
     await axi_cdc_wait(dut)
 
     await issue_and_wait_valid(dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x1234_5678, 0xF), "S3 write")
@@ -1126,6 +1229,7 @@ async def fcapz_ejtagaxi_protocol(dut):
         dut, axi_cmd(CMD_WRITE, 0x0000_0008, 0xAABB_CCDD, 0x3), "S4 partial write")
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0008, 0, 0), "S4 read")
     assert axi_rdata(out) == 0xFFFF_CCDD
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("partial_strobe_write")
     await axi_cdc_wait(dut)
 
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
@@ -1138,6 +1242,7 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert axi_mem_read32(axi_ram, 0x0000_0014) == 0xA000_0001
     assert axi_mem_read32(axi_ram, 0x0000_0018) == 0xA000_0002
     assert axi_mem_read32(axi_ram, 0x0000_001C) == 0xA000_0003
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("incrementing_write")
 
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
     await axi_cdc_wait(dut)
@@ -1145,6 +1250,7 @@ async def fcapz_ejtagaxi_protocol(dut):
         out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ_INC, 0, 0, 0), f"S6 read_inc {i}")
         assert axi_rdata(out) == 0xA000_0000 + i
         await axi_cdc_wait(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("incrementing_read")
 
     burst_setup = (0b01 << 12) | (0b010 << 8) | 3
     await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x0000_0020, burst_setup, 0))
@@ -1158,6 +1264,7 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert axi_mem_read32(axi_ram, 0x0000_0024) == 0xB000_0001
     assert axi_mem_read32(axi_ram, 0x0000_0028) == 0xB000_0002
     assert axi_mem_read32(axi_ram, 0x0000_002C) == 0xB000_0003
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_write")
 
     await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x0000_0020, burst_setup, 0))
     await axi_cdc_wait(dut)
@@ -1170,9 +1277,11 @@ async def fcapz_ejtagaxi_protocol(dut):
         out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
         assert axi_rdata(out) == 0xB000_0000 + i
         await axi_cdc_wait(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_read")
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_0000, 0, 0), "S9 version")
     assert axi_rdata(out) == 0x0004_4A58
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_version")
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(
@@ -1182,6 +1291,7 @@ async def fcapz_ejtagaxi_protocol(dut):
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_002C, 0, 0), "S9 features")
     assert axi_rdata(out) == 0x000F_2020
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_features")
     await axi_cdc_wait(dut)
 
     await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
@@ -1189,7 +1299,9 @@ async def fcapz_ejtagaxi_protocol(dut):
     out = await drain_until_idle(dut)
     assert not (axi_status(out) & 0x4)
     assert not (axi_status(out) & 0x2)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("soft_reset")
     assert_axi_protocol_trace(axi_trace)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("axi_protocol_trace")
 
 
 @cocotb.test()
@@ -1221,6 +1333,7 @@ async def fcapz_ejtagaxi_reset_regression(dut):
         dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "first post-reset read")
     assert axi_resp(out) == 0
     assert axi_rdata(out) == 0x1234_5678
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_post_read")
 
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0004, 0, 0))
     await axi_cdc_wait(dut)
@@ -1228,10 +1341,12 @@ async def fcapz_ejtagaxi_reset_regression(dut):
         dut, axi_cmd(CMD_READ_INC, 0, 0, 0), "first post-reset read_inc")
     assert axi_resp(out) == 0
     assert axi_rdata(out) == 0x89AB_CDEF
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_read_increment")
     assert int(dut.debug_tck.value) == 0
     assert int(dut.debug_tck_edge.value) == 0
     assert int(dut.debug_axi.value) == 0
     assert int(dut.debug_axi_edge.value) == 0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_debug_outputs_idle")
     assert len(axi_trace.aw) == 2
     assert len(axi_trace.w) == 2
     assert len(axi_trace.ar) == 2
@@ -1240,6 +1355,7 @@ async def fcapz_ejtagaxi_reset_regression(dut):
     _assert_axi_write_beats(axi_trace.w, [0x1234_5678, 0x89AB_CDEF], burst=False)
     _assert_axi_addr(axi_trace.ar[0], 0x0000_0000)
     _assert_axi_addr(axi_trace.ar[1], 0x0000_0004)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_axi_trace")
 
 
 UART_CMD_NOP = 0x0
@@ -1391,6 +1507,7 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0x00))
     assert uart_rx_byte(out) == 0x55
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("config_registers")
     await uart_cdc_wait(dut)
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, 0xA5))
@@ -1398,6 +1515,7 @@ async def fcapz_ejtaguart_protocol(dut):
     valid, tx_byte = await uart_recv_byte_timeout(dut, UART_BIT_PERIOD_NS * 12)
     assert valid
     assert tx_byte == 0xA5
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("tx_push_serializes_byte")
     for _ in range(20):
         await RisingEdge(dut.uart_clk)
 
@@ -1408,6 +1526,7 @@ async def fcapz_ejtaguart_protocol(dut):
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_byte(out) == 0x3C
     assert uart_rx_valid(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("rx_pop_reads_byte")
     await uart_cdc_wait(dut)
 
     await uart_send_byte(dut, 0xBE)
@@ -1420,6 +1539,7 @@ async def fcapz_ejtaguart_protocol(dut):
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_byte(out) == 0xBE
     assert uart_rx_valid(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("txrx_exchange")
     for _ in range(UART_BAUD_DIV * 12):
         await RisingEdge(dut.uart_clk)
 
@@ -1436,12 +1556,14 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_byte(out) == 0xAA
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("rx_ready_without_pop")
     await uart_cdc_wait(dut)
 
     for i in range(UART_TX_FIFO_DEPTH + 8):
         await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, i))
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_tx_full(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("tx_full_status")
     for _ in range(UART_TX_FIFO_DEPTH * UART_BAUD_DIV * 12):
         await RisingEdge(dut.uart_clk)
     await uart_cdc_wait(dut)
@@ -1455,6 +1577,7 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut, 10)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_overflow(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("rx_overflow_status")
     await uart_cdc_wait(dut)
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
@@ -1463,6 +1586,7 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut, 50)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_frame_err(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("frame_error_status")
     await uart_cdc_wait(dut)
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
@@ -1472,6 +1596,7 @@ async def fcapz_ejtaguart_protocol(dut):
     assert not uart_frame_err(out)
     assert not uart_tx_full(out)
     assert not uart_rx_ready(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("reset_clears_status")
     await uart_cdc_wait(dut)
 
     for expected in (0x11, 0x22, 0x33, 0x44):
@@ -1483,6 +1608,7 @@ async def fcapz_ejtaguart_protocol(dut):
         await uart_cdc_wait(dut)
         out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
         assert uart_rx_byte(out) == expected
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("loopback_order")
     await uart_cdc_wait(dut)
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, 0xFF))
@@ -1504,6 +1630,7 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_tx_free(out) < UART_TX_FIFO_DEPTH
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("tx_free_accounting")
     for _ in range(100):
         await RisingEdge(dut.uart_clk)
     await uart_cdc_wait(dut)
@@ -1524,6 +1651,7 @@ async def fcapz_ejtaguart_protocol(dut):
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_byte(out) == 0xD3
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("rx_fifo_order")
     await uart_cdc_wait(dut)
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_RESET, 0))
@@ -1556,6 +1684,7 @@ async def fcapz_ejtaguart_protocol(dut):
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0))
     assert uart_rx_byte(out) == stress[-1]
     assert uart_rx_valid(out)
+    EJTAG_UART_FUNCTIONAL_COVERAGE.hit("bridge_loopback_stress")
     bridge_on = False
     bridge_task.kill()
     dut.uart_rxd.value = 1
