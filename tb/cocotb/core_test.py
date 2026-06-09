@@ -3,11 +3,72 @@
 
 from __future__ import annotations
 
+import atexit
+import json
+import os
+import random
+from pathlib import Path
+
 import cocotb
 from cocotb.binary import BinaryValue
 from cocotb.clock import Clock
 from cocotb.triggers import Edge, RisingEdge, FallingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
+
+
+class FunctionalCoverage:
+    def __init__(self, *, env_var: str, run_env_var: str, bins: tuple[str, ...]) -> None:
+        self.env_var = env_var
+        self.run_env_var = run_env_var
+        self.bins = dict.fromkeys(bins, 0)
+
+    def hit(self, name: str) -> None:
+        self.bins[name] += 1
+
+    def write(self) -> None:
+        path = os.environ.get(self.env_var)
+        if not path:
+            return
+        covered = sum(1 for count in self.bins.values() if count)
+        payload = {
+            "run": os.environ.get(self.run_env_var, "manual"),
+            "covered_bins": covered,
+            "total_bins": len(self.bins),
+            "percent": round((covered / len(self.bins)) * 100.0, 2),
+            "bins": self.bins,
+        }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+EIO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="EIO_COCOTB_COVERAGE_JSON",
+    run_env_var="EIO_COCOTB_RUN",
+    bins=(
+        "version",
+        "width_registers",
+        "output_write_low_word",
+        "output_readback_low_word",
+        "probe_out_low_word",
+        "output_clear",
+        "output_all_ones",
+        "reset_clears_output",
+        "input_sync_low_word",
+        "input_update",
+        "invalid_read_zero",
+        "bit_set_clear",
+        "input_high_word",
+        "input_high_padding_zero",
+        "output_high_word",
+        "probe_out_high_word",
+        "random_output_patterns",
+        "random_input_patterns",
+        "invalid_write_ignored",
+        "reset_during_stress",
+    ),
+)
+
+atexit.register(EIO_FUNCTIONAL_COVERAGE.write)
 
 
 async def tick(signal) -> None:
@@ -98,6 +159,19 @@ async def scan_burst(dut, *, shift_name: str = "shift_en", tdo=None, bits: int =
 
 def sample_at(bits: int, index: int, width: int = 8) -> int:
     return (bits >> (index * width)) & ((1 << width) - 1)
+
+
+def width_mask(width: int) -> int:
+    return (1 << width) - 1 if width > 0 else 0
+
+
+def word_mask(width: int, word: int) -> int:
+    bits = max(0, min(32, width - word * 32))
+    return width_mask(bits)
+
+
+def word_at(value: int, width: int, word: int) -> int:
+    return (value >> (word * 32)) & word_mask(width, word)
 
 
 async def jtag_write(dut, addr: int, data: int) -> None:
@@ -325,6 +399,10 @@ async def jtag_pipe_iface_segmented_alignment(dut):
 
 @cocotb.test()
 async def fcapz_eio_registers(dut):
+    in_w = len(dut.probe_in)
+    out_w = len(dut.probe_out)
+    out_low_mask = word_mask(out_w, 0)
+
     cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
     dut.jtag_rst.value = 1
     dut.probe_in.value = 0
@@ -339,17 +417,36 @@ async def fcapz_eio_registers(dut):
 
     version = await jtag_read(dut, 0x0000, settle=0)
     assert version & 0xFFFF == 0x494F
-    assert await jtag_read(dut, 0x0004, settle=0) == 16
-    assert await jtag_read(dut, 0x0008, settle=0) == 12
+    EIO_FUNCTIONAL_COVERAGE.hit("version")
+    assert await jtag_read(dut, 0x0004, settle=0) == in_w
+    assert await jtag_read(dut, 0x0008, settle=0) == out_w
+    EIO_FUNCTIONAL_COVERAGE.hit("width_registers")
+
     await jtag_write(dut, 0x0100, 0xABC)
     assert await jtag_read(dut, 0x0100, settle=0) == 0xABC
-    assert int(dut.probe_out.value) == 0xABC
+    EIO_FUNCTIONAL_COVERAGE.hit("output_write_low_word")
+    EIO_FUNCTIONAL_COVERAGE.hit("output_readback_low_word")
+    assert int(dut.probe_out.value) & out_low_mask == 0xABC & out_low_mask
+    EIO_FUNCTIONAL_COVERAGE.hit("probe_out_low_word")
+
     await jtag_write(dut, 0x0100, 0)
     assert await jtag_read(dut, 0x0100, settle=0) == 0
     assert int(dut.probe_out.value) == 0
-    await jtag_write(dut, 0x0100, 0xFFF)
-    assert await jtag_read(dut, 0x0100, settle=0) == 0xFFF
-    assert int(dut.probe_out.value) == 0xFFF
+    EIO_FUNCTIONAL_COVERAGE.hit("output_clear")
+
+    await jtag_write(dut, 0x0100, 0xFFFF_FFFF)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0xFFFF_FFFF
+    assert int(dut.probe_out.value) == out_low_mask
+    EIO_FUNCTIONAL_COVERAGE.hit("output_all_ones")
+
+    if out_w > 32:
+        high = 0xDEAD_BEEF
+        await jtag_write(dut, 0x0104, high)
+        assert await jtag_read(dut, 0x0104, settle=0) == high
+        expected_probe = out_low_mask | ((high & word_mask(out_w, 1)) << 32)
+        assert int(dut.probe_out.value) == expected_probe
+        EIO_FUNCTIONAL_COVERAGE.hit("output_high_word")
+        EIO_FUNCTIONAL_COVERAGE.hit("probe_out_high_word")
 
     dut.jtag_rst.value = 1
     for _ in range(2):
@@ -359,16 +456,35 @@ async def fcapz_eio_registers(dut):
         await RisingEdge(dut.jtag_clk)
     assert await jtag_read(dut, 0x0100, settle=0) == 0
     assert int(dut.probe_out.value) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("reset_clears_output")
 
-    dut.probe_in.value = 0xCAFE
+    input_value = 0xCAFE & width_mask(in_w)
+    dut.probe_in.value = input_value
     for _ in range(4):
         await RisingEdge(dut.jtag_clk)
-    assert await jtag_read(dut, 0x0010, settle=0) == 0xCAFE
-    dut.probe_in.value = 0x1234
+    assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+    EIO_FUNCTIONAL_COVERAGE.hit("input_sync_low_word")
+
+    input_value = 0x1234 & width_mask(in_w)
+    dut.probe_in.value = input_value
     for _ in range(4):
         await RisingEdge(dut.jtag_clk)
-    assert await jtag_read(dut, 0x0010, settle=0) == 0x1234
+    assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+    EIO_FUNCTIONAL_COVERAGE.hit("input_update")
+
+    if in_w > 32:
+        input_value = ((0xAB & word_mask(in_w, 1)) << 32) | 0xCAFE_BABE
+        dut.probe_in.value = input_value
+        for _ in range(4):
+            await RisingEdge(dut.jtag_clk)
+        assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+        assert await jtag_read(dut, 0x0014, settle=0) == word_at(input_value, in_w, 1)
+        assert await jtag_read(dut, 0x0014, settle=0) & ~word_mask(in_w, 1) == 0
+        EIO_FUNCTIONAL_COVERAGE.hit("input_high_word")
+        EIO_FUNCTIONAL_COVERAGE.hit("input_high_padding_zero")
+
     assert await jtag_read(dut, 0x0200, settle=0) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("invalid_read_zero")
 
     await jtag_write(dut, 0x0100, 0)
     data = await jtag_read(dut, 0x0100, settle=0)
@@ -378,6 +494,48 @@ async def fcapz_eio_registers(dut):
     assert data & 0xFFFF_FFF7 == 0
     await jtag_write(dut, 0x0100, data & ~0x8)
     assert not (await jtag_read(dut, 0x0100, settle=0) & 0x8)
+    EIO_FUNCTIONAL_COVERAGE.hit("bit_set_clear")
+
+    rng = random.Random((in_w << 16) | out_w)
+    out_words = (out_w + 31) // 32
+    for _ in range(8):
+        expected_probe = 0
+        written_words = []
+        for word in range(out_words):
+            value = rng.randrange(1 << 32)
+            written_words.append(value)
+            await jtag_write(dut, 0x0100 + word * 4, value)
+            expected_probe |= (value & word_mask(out_w, word)) << (word * 32)
+        for word, value in enumerate(written_words):
+            assert await jtag_read(dut, 0x0100 + word * 4, settle=0) == value
+        assert int(dut.probe_out.value) == expected_probe
+
+        await jtag_write(dut, 0x0100 + out_words * 4, rng.randrange(1 << 32))
+        assert int(dut.probe_out.value) == expected_probe
+        EIO_FUNCTIONAL_COVERAGE.hit("invalid_write_ignored")
+    EIO_FUNCTIONAL_COVERAGE.hit("random_output_patterns")
+
+    in_words = (in_w + 31) // 32
+    for _ in range(8):
+        input_value = rng.randrange(1 << in_w)
+        dut.probe_in.value = input_value
+        for _ in range(4):
+            await RisingEdge(dut.jtag_clk)
+        for word in range(in_words):
+            got = await jtag_read(dut, 0x0010 + word * 4, settle=0)
+            assert got == word_at(input_value, in_w, word)
+    EIO_FUNCTIONAL_COVERAGE.hit("random_input_patterns")
+
+    dut.jtag_rst.value = 1
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    assert int(dut.probe_out.value) == 0
+    for word in range(out_words):
+        assert await jtag_read(dut, 0x0100 + word * 4, settle=0) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("reset_during_stress")
 
 
 async def manager_write(dut, addr: int, data: int) -> None:

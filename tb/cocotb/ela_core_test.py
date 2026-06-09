@@ -6,6 +6,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import random
 from pathlib import Path
 
 import cocotb
@@ -101,6 +102,7 @@ class ElaFunctionalCoverage:
             "burst_start": 0,
             "rolling_prehistory": 0,
             "rolling_rearm_history": 0,
+            "randomized_value_capture": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -276,6 +278,34 @@ async def value_capture(dut):
     assert await ela.read(ADDR_CAPTURE_LEN) == 6
     assert (await ela.read(ADDR_DATA_BASE + 2 * 4)) & 0xFF == 8
     FUNCTIONAL_COVERAGE.hit("value_trigger")
+
+
+@cocotb.test()
+async def randomized_value_capture(dut):
+    ela = await setup(dut)
+    rng = random.Random((SAMPLE_W << 16) | DEPTH)
+    sample_mask = (1 << min(SAMPLE_W, 32)) - 1
+
+    for _ in range(6):
+        await ela.reset_core()
+        pre = rng.randint(0, min(4, DEPTH // 2))
+        post = rng.randint(0, min(4, DEPTH - pre - 1))
+        start = rng.randint(0, 9)
+        trigger_offset = rng.randint(pre + 1, pre + 8)
+        value = (start + trigger_offset) & sample_mask
+
+        await ela.configure_value_capture(pre=pre, post=post, value=value, mask=sample_mask)
+        await ela.arm()
+        await ela.drive_counter(trigger_offset + post + 8, start=start, mask=sample_mask)
+        assert await ela.wait_done(250) & 0x4
+
+        capture_len = pre + post + 1
+        assert await ela.read(ADDR_CAPTURE_LEN) == capture_len
+        expected = [((value - pre + i) & sample_mask) for i in range(capture_len)]
+        got = [(word & sample_mask) for word in await ela.read_samples(capture_len)]
+        assert got == expected
+
+    FUNCTIONAL_COVERAGE.hit("randomized_value_capture")
 
 
 @cocotb.test()

@@ -67,6 +67,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "features_registers",
             "register_roundtrip",
             "value_capture",
+            "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
             "decimation_and_external_trigger",

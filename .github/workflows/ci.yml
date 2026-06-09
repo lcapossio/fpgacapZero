@@ -169,7 +169,7 @@ jobs:
         run: pip install -e ".[hdl]"
       - name: Run cocotb RTL regression (protocol shard)
         if: matrix.shard == 'protocol'
-        run: python sim/run_cocotb.py --runner native --hdl ${{ matrix.hdl }} --clean --skip-ela
+        run: python sim/run_cocotb.py --runner native --hdl ${{ matrix.hdl }} --clean --skip-ela --require-eio-coverage
       - name: Run cocotb RTL regression (ELA shard)
         if: matrix.shard == 'ela'
         run: python sim/run_cocotb.py --runner native --hdl ${{ matrix.hdl }} --clean ela

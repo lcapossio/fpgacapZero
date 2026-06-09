@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -85,6 +86,14 @@ TARGETS: tuple[Target, ...] = (
         (RTL / "fcapz_eio.v",),
         "fcapz_eio_registers",
         {"IN_W": 16, "OUT_W": 12},
+        (*_VHDL_PKG, RTL / "vhdl" / "core" / "fcapz_eio.vhd"),
+    ),
+    Target(
+        "fcapz_eio_wide",
+        "fcapz_eio",
+        (RTL / "fcapz_eio.v",),
+        "fcapz_eio_registers",
+        {"IN_W": 40, "OUT_W": 36},
         (*_VHDL_PKG, RTL / "vhdl" / "core" / "fcapz_eio.vhd"),
     ),
     Target(
@@ -230,6 +239,31 @@ TARGETS: tuple[Target, ...] = (
 
 TARGET_BY_NAME = {target.name: target for target in TARGETS}
 DEFAULT_TARGETS = tuple(target.name for target in TARGETS)
+EIO_COVERAGE_TARGETS = {"fcapz_eio", "fcapz_eio_wide"}
+
+
+def merge_coverage(paths: list[Path], out: Path) -> dict[str, object] | None:
+    merged: dict[str, int] = {}
+    total_bins = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        payload = json.loads(path.read_text())
+        for name, count in payload["bins"].items():
+            merged[name] = merged.get(name, 0) + int(count)
+        total_bins = max(total_bins, int(payload["total_bins"]))
+
+    if not total_bins:
+        return None
+    covered = sum(1 for count in merged.values() if count)
+    payload = {
+        "covered_bins": covered,
+        "total_bins": total_bins,
+        "percent": round((covered / total_bins) * 100.0, 2),
+        "bins": merged,
+    }
+    out.write_text(json.dumps(payload, indent=2) + "\n")
+    return payload
 
 
 def run_ela(args: argparse.Namespace, hdl: str) -> None:
@@ -252,13 +286,18 @@ def target_supports_hdl(target: Target, hdl: str) -> bool:
     return hdl == "verilog" or bool(target.vhdl_sources)
 
 
-def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
+def run_target(target: Target, args: argparse.Namespace, hdl: str) -> Path | None:
     from cocotb.runner import get_runner
 
     sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
     runner = get_runner(sim)
     build_dir = BUILD_ROOT / f"{hdl}_{sim}" / target.name
     results_xml = build_dir / "results.xml"
+    coverage_json = (
+        build_dir / "functional_coverage.json"
+        if target.name in EIO_COVERAGE_TARGETS
+        else None
+    )
     if str(TB_COCOTB) not in sys.path:
         sys.path.insert(0, str(TB_COCOTB))
 
@@ -277,6 +316,17 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
         timescale=("1ns", "1ps"),
         build_args=["-Wall"] if hdl == "verilog" else ["--std=08"],
     )
+    extra_env = {
+        "COCOTB_RESOLVE_X": "ZEROS",
+        "FCAPZ_COCOTB_TARGET": target.name,
+        "FCAPZ_COCOTB_HDL": hdl,
+    }
+    if coverage_json is not None:
+        extra_env.update({
+            "EIO_COCOTB_COVERAGE_JSON": str(coverage_json),
+            "EIO_COCOTB_RUN": target.name,
+        })
+
     runner.test(
         test_module="core_test",
         hdl_toplevel=target.top if hdl == "verilog" else (target.vhdl_top or target.top),
@@ -288,14 +338,11 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> None:
         test_args=["--std=08"] if hdl == "vhdl" else [],
         waves=args.waves,
         verbose=args.verbose,
-        extra_env={
-            "COCOTB_RESOLVE_X": "ZEROS",
-            "FCAPZ_COCOTB_TARGET": target.name,
-            "FCAPZ_COCOTB_HDL": hdl,
-        },
+        extra_env=extra_env,
     )
     check_results(results_xml)
     print(f"cocotb {hdl} target passed: {target.name}")
+    return coverage_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -311,6 +358,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--skip-ela", action="store_true",
                         help="run only non-ELA cocotb replacements")
+    parser.add_argument("--require-eio-coverage", action="store_true",
+                        help="fail unless all EIO functional coverage bins are hit")
     return parser.parse_args()
 
 
@@ -335,16 +384,34 @@ def main() -> None:
             run_ela(args, hdl)
 
         skipped: list[str] = []
+        eio_coverage_paths: list[Path] = []
         for name in requested:
             if name == ELA_TARGET:
                 continue
             target = TARGET_BY_NAME[name]
             if target_supports_hdl(target, hdl):
-                run_target(target, args, hdl)
+                coverage_path = run_target(target, args, hdl)
+                if coverage_path is not None:
+                    eio_coverage_paths.append(coverage_path)
             elif explicit_targets:
                 raise SystemExit(f"Target {name!r} has no {hdl} implementation in this branch")
             else:
                 skipped.append(name)
+        if eio_coverage_paths:
+            sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
+            coverage_merged = BUILD_ROOT / f"{hdl}_{sim}" / "eio_functional_coverage_merged.json"
+            payload = merge_coverage(eio_coverage_paths, coverage_merged)
+            if payload is not None:
+                print(f"Merged EIO functional coverage: {coverage_merged.relative_to(ROOT)}")
+                if args.require_eio_coverage and payload["covered_bins"] != payload["total_bins"]:
+                    raise SystemExit(
+                        "EIO functional coverage below 100%: "
+                        f"{payload['covered_bins']}/{payload['total_bins']} bins"
+                    )
+            elif args.require_eio_coverage:
+                raise SystemExit("EIO functional coverage was required, but no report was written")
+        elif args.require_eio_coverage:
+            raise SystemExit("EIO functional coverage was required, but no EIO targets ran")
         if skipped and hdl == "vhdl":
             print(f"Skipped Verilog-only target(s) for VHDL run: {', '.join(skipped)}")
 

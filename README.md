@@ -855,6 +855,10 @@ unless `--skip-ela` is passed. With `--hdl vhdl`, it uses GHDL and the same
 Python tests for the translated VHDL EIO and ELA-derived channel-mux targets,
 plus the VHDL ELA suite; targets without VHDL implementations are skipped in a
 full run and rejected if requested explicitly.
+The EIO narrow and wide cocotb targets also write merged functional coverage to
+`build/cocotb/<hdl>_<sim>/eio_functional_coverage_merged.json`. CI runs the
+protocol shard with `--require-eio-coverage`, so EIO regressions fail unless
+all defined EIO functional bins are hit for both Verilog and VHDL.
 
 ### Tests
 
