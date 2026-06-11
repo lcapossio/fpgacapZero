@@ -6,6 +6,7 @@
 
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/github/sponsors/lcapossio?logo=githubsponsors&label=Sponsor)](https://github.com/sponsors/lcapossio)
 
 <a id="readme-top"></a>
 
@@ -53,6 +54,7 @@ specs.
 - [Project structure](#project-structure)
 - [Author](#author)
 - [Contributors](#contributors)
+- [Sponsoring](#sponsoring)
 - [License](#license)
 
 Jump within this page: [↑ Top](#readme-top)
@@ -987,6 +989,13 @@ Leonardo Capossio — [bard0 design](https://www.bard0.com) — <hello@bard0.com
 ## Contributors
 
 - [Brisbane Silicon](https://github.com/BrisbaneSilicon)
+
+[↑ Top](#readme-top)
+
+## Sponsoring
+
+If fpgacapZero helps your FPGA debug flow, you can support continued
+development through [GitHub Sponsors](https://github.com/sponsors/lcapossio).
 
 [↑ Top](#readme-top)
 
