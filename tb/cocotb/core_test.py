@@ -3,9 +3,72 @@
 
 from __future__ import annotations
 
+import atexit
+import json
+import os
+import random
+from pathlib import Path
+
 import cocotb
+from cocotb.binary import BinaryValue
 from cocotb.clock import Clock
 from cocotb.triggers import Edge, RisingEdge, FallingEdge, Timer
+from cocotbext.axi import AxiBus, AxiRam
+
+
+class FunctionalCoverage:
+    def __init__(self, *, env_var: str, run_env_var: str, bins: tuple[str, ...]) -> None:
+        self.env_var = env_var
+        self.run_env_var = run_env_var
+        self.bins = dict.fromkeys(bins, 0)
+
+    def hit(self, name: str) -> None:
+        self.bins[name] += 1
+
+    def write(self) -> None:
+        path = os.environ.get(self.env_var)
+        if not path:
+            return
+        covered = sum(1 for count in self.bins.values() if count)
+        payload = {
+            "run": os.environ.get(self.run_env_var, "manual"),
+            "covered_bins": covered,
+            "total_bins": len(self.bins),
+            "percent": round((covered / len(self.bins)) * 100.0, 2),
+            "bins": self.bins,
+        }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+EIO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
+    env_var="EIO_COCOTB_COVERAGE_JSON",
+    run_env_var="EIO_COCOTB_RUN",
+    bins=(
+        "version",
+        "width_registers",
+        "output_write_low_word",
+        "output_readback_low_word",
+        "probe_out_low_word",
+        "output_clear",
+        "output_all_ones",
+        "reset_clears_output",
+        "input_sync_low_word",
+        "input_update",
+        "invalid_read_zero",
+        "bit_set_clear",
+        "input_high_word",
+        "input_high_padding_zero",
+        "output_high_word",
+        "probe_out_high_word",
+        "random_output_patterns",
+        "random_input_patterns",
+        "invalid_write_ignored",
+        "reset_during_stress",
+    ),
+)
+
+atexit.register(EIO_FUNCTIONAL_COVERAGE.write)
 
 
 async def tick(signal) -> None:
@@ -96,6 +159,19 @@ async def scan_burst(dut, *, shift_name: str = "shift_en", tdo=None, bits: int =
 
 def sample_at(bits: int, index: int, width: int = 8) -> int:
     return (bits >> (index * width)) & ((1 << width) - 1)
+
+
+def width_mask(width: int) -> int:
+    return (1 << width) - 1 if width > 0 else 0
+
+
+def word_mask(width: int, word: int) -> int:
+    bits = max(0, min(32, width - word * 32))
+    return width_mask(bits)
+
+
+def word_at(value: int, width: int, word: int) -> int:
+    return (value >> (word * 32)) & word_mask(width, word)
 
 
 async def jtag_write(dut, addr: int, data: int) -> None:
@@ -323,6 +399,10 @@ async def jtag_pipe_iface_segmented_alignment(dut):
 
 @cocotb.test()
 async def fcapz_eio_registers(dut):
+    in_w = len(dut.probe_in)
+    out_w = len(dut.probe_out)
+    out_low_mask = word_mask(out_w, 0)
+
     cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
     dut.jtag_rst.value = 1
     dut.probe_in.value = 0
@@ -337,17 +417,36 @@ async def fcapz_eio_registers(dut):
 
     version = await jtag_read(dut, 0x0000, settle=0)
     assert version & 0xFFFF == 0x494F
-    assert await jtag_read(dut, 0x0004, settle=0) == 16
-    assert await jtag_read(dut, 0x0008, settle=0) == 12
+    EIO_FUNCTIONAL_COVERAGE.hit("version")
+    assert await jtag_read(dut, 0x0004, settle=0) == in_w
+    assert await jtag_read(dut, 0x0008, settle=0) == out_w
+    EIO_FUNCTIONAL_COVERAGE.hit("width_registers")
+
     await jtag_write(dut, 0x0100, 0xABC)
     assert await jtag_read(dut, 0x0100, settle=0) == 0xABC
-    assert int(dut.probe_out.value) == 0xABC
+    EIO_FUNCTIONAL_COVERAGE.hit("output_write_low_word")
+    EIO_FUNCTIONAL_COVERAGE.hit("output_readback_low_word")
+    assert int(dut.probe_out.value) & out_low_mask == 0xABC & out_low_mask
+    EIO_FUNCTIONAL_COVERAGE.hit("probe_out_low_word")
+
     await jtag_write(dut, 0x0100, 0)
     assert await jtag_read(dut, 0x0100, settle=0) == 0
     assert int(dut.probe_out.value) == 0
-    await jtag_write(dut, 0x0100, 0xFFF)
-    assert await jtag_read(dut, 0x0100, settle=0) == 0xFFF
-    assert int(dut.probe_out.value) == 0xFFF
+    EIO_FUNCTIONAL_COVERAGE.hit("output_clear")
+
+    await jtag_write(dut, 0x0100, 0xFFFF_FFFF)
+    assert await jtag_read(dut, 0x0100, settle=0) == 0xFFFF_FFFF
+    assert int(dut.probe_out.value) == out_low_mask
+    EIO_FUNCTIONAL_COVERAGE.hit("output_all_ones")
+
+    if out_w > 32:
+        high = 0xDEAD_BEEF
+        await jtag_write(dut, 0x0104, high)
+        assert await jtag_read(dut, 0x0104, settle=0) == high
+        expected_probe = out_low_mask | ((high & word_mask(out_w, 1)) << 32)
+        assert int(dut.probe_out.value) == expected_probe
+        EIO_FUNCTIONAL_COVERAGE.hit("output_high_word")
+        EIO_FUNCTIONAL_COVERAGE.hit("probe_out_high_word")
 
     dut.jtag_rst.value = 1
     for _ in range(2):
@@ -357,16 +456,35 @@ async def fcapz_eio_registers(dut):
         await RisingEdge(dut.jtag_clk)
     assert await jtag_read(dut, 0x0100, settle=0) == 0
     assert int(dut.probe_out.value) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("reset_clears_output")
 
-    dut.probe_in.value = 0xCAFE
+    input_value = 0xCAFE & width_mask(in_w)
+    dut.probe_in.value = input_value
     for _ in range(4):
         await RisingEdge(dut.jtag_clk)
-    assert await jtag_read(dut, 0x0010, settle=0) == 0xCAFE
-    dut.probe_in.value = 0x1234
+    assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+    EIO_FUNCTIONAL_COVERAGE.hit("input_sync_low_word")
+
+    input_value = 0x1234 & width_mask(in_w)
+    dut.probe_in.value = input_value
     for _ in range(4):
         await RisingEdge(dut.jtag_clk)
-    assert await jtag_read(dut, 0x0010, settle=0) == 0x1234
+    assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+    EIO_FUNCTIONAL_COVERAGE.hit("input_update")
+
+    if in_w > 32:
+        input_value = ((0xAB & word_mask(in_w, 1)) << 32) | 0xCAFE_BABE
+        dut.probe_in.value = input_value
+        for _ in range(4):
+            await RisingEdge(dut.jtag_clk)
+        assert await jtag_read(dut, 0x0010, settle=0) == word_at(input_value, in_w, 0)
+        assert await jtag_read(dut, 0x0014, settle=0) == word_at(input_value, in_w, 1)
+        assert await jtag_read(dut, 0x0014, settle=0) & ~word_mask(in_w, 1) == 0
+        EIO_FUNCTIONAL_COVERAGE.hit("input_high_word")
+        EIO_FUNCTIONAL_COVERAGE.hit("input_high_padding_zero")
+
     assert await jtag_read(dut, 0x0200, settle=0) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("invalid_read_zero")
 
     await jtag_write(dut, 0x0100, 0)
     data = await jtag_read(dut, 0x0100, settle=0)
@@ -376,6 +494,48 @@ async def fcapz_eio_registers(dut):
     assert data & 0xFFFF_FFF7 == 0
     await jtag_write(dut, 0x0100, data & ~0x8)
     assert not (await jtag_read(dut, 0x0100, settle=0) & 0x8)
+    EIO_FUNCTIONAL_COVERAGE.hit("bit_set_clear")
+
+    rng = random.Random((in_w << 16) | out_w)
+    out_words = (out_w + 31) // 32
+    for _ in range(8):
+        expected_probe = 0
+        written_words = []
+        for word in range(out_words):
+            value = rng.randrange(1 << 32)
+            written_words.append(value)
+            await jtag_write(dut, 0x0100 + word * 4, value)
+            expected_probe |= (value & word_mask(out_w, word)) << (word * 32)
+        for word, value in enumerate(written_words):
+            assert await jtag_read(dut, 0x0100 + word * 4, settle=0) == value
+        assert int(dut.probe_out.value) == expected_probe
+
+        await jtag_write(dut, 0x0100 + out_words * 4, rng.randrange(1 << 32))
+        assert int(dut.probe_out.value) == expected_probe
+        EIO_FUNCTIONAL_COVERAGE.hit("invalid_write_ignored")
+    EIO_FUNCTIONAL_COVERAGE.hit("random_output_patterns")
+
+    in_words = (in_w + 31) // 32
+    for _ in range(8):
+        input_value = rng.randrange(1 << in_w)
+        dut.probe_in.value = input_value
+        for _ in range(4):
+            await RisingEdge(dut.jtag_clk)
+        for word in range(in_words):
+            got = await jtag_read(dut, 0x0010 + word * 4, settle=0)
+            assert got == word_at(input_value, in_w, word)
+    EIO_FUNCTIONAL_COVERAGE.hit("random_input_patterns")
+
+    dut.jtag_rst.value = 1
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    assert int(dut.probe_out.value) == 0
+    for word in range(out_words):
+        assert await jtag_read(dut, 0x0100 + word * 4, settle=0) == 0
+    EIO_FUNCTIONAL_COVERAGE.hit("reset_during_stress")
 
 
 async def manager_write(dut, addr: int, data: int) -> None:
@@ -710,7 +870,116 @@ async def dr_scan_72(dut, din: int) -> int:
     return dout
 
 
-async def init_ejtagaxi(dut) -> None:
+class _AxiIdSignal:
+    def __init__(self, width: int = 1) -> None:
+        self._width = width
+        self._value = BinaryValue(0, n_bits=width, bigEndian=False)
+
+    @property
+    def value(self) -> BinaryValue:
+        return self._value
+
+    @value.setter
+    def value(self, value) -> None:
+        if isinstance(value, BinaryValue):
+            self._value = value
+        elif hasattr(value, "get_binstr"):
+            self._value = BinaryValue(value.get_binstr(), n_bits=self._width, bigEndian=False)
+        elif hasattr(value, "binstr"):
+            self._value = BinaryValue(value.binstr, n_bits=self._width, bigEndian=False)
+        else:
+            try:
+                self._value = BinaryValue(value, n_bits=self._width, bigEndian=False)
+            except TypeError:
+                self._value = BinaryValue("".join(str(bit) for bit in value),
+                                          n_bits=self._width, bigEndian=False)
+
+    def __len__(self) -> int:
+        return self._width
+
+    def setimmediatevalue(self, value) -> None:
+        self.value = value
+
+
+def _bind_axi_signal(bus, name: str, signal) -> None:
+    setattr(bus, name, signal)
+    bus._signals[name] = signal
+
+
+def _drop_absent_axi_signals(*buses) -> None:
+    for bus in buses:
+        for name, signal in list(bus._signals.items()):
+            if signal is None:
+                del bus._signals[name]
+                try:
+                    delattr(bus, name)
+                except AttributeError:
+                    pass
+
+
+def axi_no_id_bus(dut) -> AxiBus:
+    bus = AxiBus.from_prefix(dut, "m_axi")
+    _bind_axi_signal(bus.write.aw, "awid", _AxiIdSignal())
+    _bind_axi_signal(bus.write.b, "bid", _AxiIdSignal())
+    _bind_axi_signal(bus.read.ar, "arid", _AxiIdSignal())
+    _bind_axi_signal(bus.read.r, "rid", _AxiIdSignal())
+    _drop_absent_axi_signals(bus.write.aw, bus.write.w, bus.write.b, bus.read.ar, bus.read.r)
+    return bus
+
+
+def axi_mem_read32(axi_ram: AxiRam, addr: int) -> int:
+    return axi_ram.read_dword(addr)
+
+
+def _signal_int(signal) -> int:
+    value = signal.value
+    if hasattr(value, "is_resolvable") and not value.is_resolvable:
+        return 0
+    return int(value)
+
+
+def _signal_is_one(signal) -> bool:
+    return _signal_int(signal) == 1
+
+
+class AxiTrace:
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.aw: list[dict[str, int]] = []
+        self.w: list[dict[str, int]] = []
+        self.ar: list[dict[str, int]] = []
+
+    async def monitor(self) -> None:
+        while True:
+            await RisingEdge(self.dut.axi_clk)
+            if _signal_is_one(self.dut.axi_rst):
+                continue
+            if _signal_is_one(self.dut.m_axi_awvalid) and _signal_is_one(self.dut.m_axi_awready):
+                self.aw.append({
+                    "addr": _signal_int(self.dut.m_axi_awaddr),
+                    "len": _signal_int(self.dut.m_axi_awlen),
+                    "size": _signal_int(self.dut.m_axi_awsize),
+                    "burst": _signal_int(self.dut.m_axi_awburst),
+                })
+            if _signal_is_one(self.dut.m_axi_wvalid) and _signal_is_one(self.dut.m_axi_wready):
+                self.w.append({
+                    "data": _signal_int(self.dut.m_axi_wdata),
+                    "strb": _signal_int(self.dut.m_axi_wstrb),
+                    "last": _signal_int(self.dut.m_axi_wlast),
+                })
+            if _signal_is_one(self.dut.m_axi_arvalid) and _signal_is_one(self.dut.m_axi_arready):
+                self.ar.append({
+                    "addr": _signal_int(self.dut.m_axi_araddr),
+                    "len": _signal_int(self.dut.m_axi_arlen),
+                    "size": _signal_int(self.dut.m_axi_arsize),
+                    "burst": _signal_int(self.dut.m_axi_arburst),
+                })
+
+
+async def init_ejtagaxi(dut) -> tuple[AxiRam, AxiTrace]:
+    axi_ram = AxiRam(axi_no_id_bus(dut), dut.axi_clk, dut.axi_rst, size=4096)
+    axi_trace = AxiTrace(dut)
+    cocotb.start_soon(axi_trace.monitor())
     cocotb.start_soon(Clock(dut.tck, 100, units="ns").start())
     cocotb.start_soon(Clock(dut.axi_clk, 30, units="ns").start())
     dut.tdi.value = 0
@@ -723,6 +992,7 @@ async def init_ejtagaxi(dut) -> None:
         await RisingEdge(dut.axi_clk)
     dut.axi_rst.value = 0
     await axi_cdc_wait(dut, 10)
+    return axi_ram, axi_trace
 
 
 async def issue_and_wait_valid(dut, command: int, label: str) -> int:
@@ -751,14 +1021,94 @@ async def drain_until_idle(dut) -> int:
     raise AssertionError(f"reset drain timed out; last status=0x{axi_status(last):x}")
 
 
+def _assert_axi_addr(txn: dict[str, int], addr: int, length: int = 0) -> None:
+    assert txn["addr"] == addr
+    assert txn["len"] == length
+    assert txn["size"] == 2
+    assert txn["burst"] == 1
+
+
+def _assert_axi_write_beats(
+    beats: list[dict[str, int]],
+    values: list[int],
+    *,
+    burst: bool,
+    strobes: list[int] | None = None,
+) -> None:
+    assert len(beats) == len(values)
+    if strobes is None:
+        strobes = [0xF] * len(values)
+    assert len(strobes) == len(values)
+    for index, (beat, value, strobe) in enumerate(zip(beats, values, strobes, strict=True)):
+        assert beat["data"] == value
+        assert beat["strb"] == strobe
+        expected_last = index == len(values) - 1 if burst else True
+        assert beat["last"] == int(expected_last)
+
+
+def assert_axi_protocol_trace(trace: AxiTrace) -> None:
+    assert len(trace.aw) == 9
+    assert len(trace.w) == 12
+    assert len(trace.ar) == 8
+
+    expected_single_writes = [
+        0x0000_0000,
+        0x0000_0004,
+        0x0000_0008,
+        0x0000_0008,
+        0x0000_0010,
+        0x0000_0014,
+        0x0000_0018,
+        0x0000_001C,
+    ]
+    for txn, addr in zip(trace.aw[:8], expected_single_writes, strict=True):
+        _assert_axi_addr(txn, addr)
+    _assert_axi_addr(trace.aw[8], 0x0000_0020, 3)
+
+    expected_single_write_values = [
+        0xDEAD_BEEF,
+        0x1234_5678,
+        0xFFFF_FFFF,
+        0xAABB_CCDD,
+        0xA000_0000,
+        0xA000_0001,
+        0xA000_0002,
+        0xA000_0003,
+    ]
+    _assert_axi_write_beats(
+        trace.w[:8],
+        expected_single_write_values,
+        burst=False,
+        strobes=[0xF, 0xF, 0xF, 0x3, 0xF, 0xF, 0xF, 0xF],
+    )
+    _assert_axi_write_beats(
+        trace.w[8:12],
+        [0xB000_0000, 0xB000_0001, 0xB000_0002, 0xB000_0003],
+        burst=True,
+    )
+
+    expected_single_reads = [
+        0x0000_0000,
+        0x0000_0004,
+        0x0000_0008,
+        0x0000_0010,
+        0x0000_0014,
+        0x0000_0018,
+        0x0000_001C,
+    ]
+    for txn, addr in zip(trace.ar[:7], expected_single_reads, strict=True):
+        _assert_axi_addr(txn, addr)
+    _assert_axi_addr(trace.ar[7], 0x0000_0020, 3)
+
+
 @cocotb.test()
 async def fcapz_ejtagaxi_protocol(dut):
-    await init_ejtagaxi(dut)
+    axi_ram, axi_trace = await init_ejtagaxi(dut)
 
     out = await issue_and_wait_valid(
         dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0xDEAD_BEEF, 0xF), "S1 write")
     assert axi_resp(out) == 0
-    assert int(dut.mem0.value) == 0xDEAD_BEEF
+    assert axi_mem_read32(axi_ram, 0x0000_0000) == 0xDEAD_BEEF
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x0000_0000, 0, 0), "S2 read")
@@ -784,10 +1134,10 @@ async def fcapz_ejtagaxi_protocol(dut):
         await issue_and_wait_valid(
             dut, axi_cmd(CMD_WRITE_INC, 0, 0xA000_0000 + i, 0xF),
             f"S5 write_inc {i}")
-    assert int(dut.mem4.value) == 0xA000_0000
-    assert int(dut.mem5.value) == 0xA000_0001
-    assert int(dut.mem6.value) == 0xA000_0002
-    assert int(dut.mem7.value) == 0xA000_0003
+    assert axi_mem_read32(axi_ram, 0x0000_0010) == 0xA000_0000
+    assert axi_mem_read32(axi_ram, 0x0000_0014) == 0xA000_0001
+    assert axi_mem_read32(axi_ram, 0x0000_0018) == 0xA000_0002
+    assert axi_mem_read32(axi_ram, 0x0000_001C) == 0xA000_0003
 
     await dr_scan_72(dut, axi_cmd(CMD_SET_ADDR, 0x0000_0010, 0, 0))
     await axi_cdc_wait(dut)
@@ -804,10 +1154,10 @@ async def fcapz_ejtagaxi_protocol(dut):
         await axi_cdc_wait(dut)
         await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
         await axi_cdc_wait(dut)
-    assert int(dut.mem8.value) == 0xB000_0000
-    assert int(dut.mem9.value) == 0xB000_0001
-    assert int(dut.mem10.value) == 0xB000_0002
-    assert int(dut.mem11.value) == 0xB000_0003
+    assert axi_mem_read32(axi_ram, 0x0000_0020) == 0xB000_0000
+    assert axi_mem_read32(axi_ram, 0x0000_0024) == 0xB000_0001
+    assert axi_mem_read32(axi_ram, 0x0000_0028) == 0xB000_0002
+    assert axi_mem_read32(axi_ram, 0x0000_002C) == 0xB000_0003
 
     await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x0000_0020, burst_setup, 0))
     await axi_cdc_wait(dut)
@@ -839,11 +1189,12 @@ async def fcapz_ejtagaxi_protocol(dut):
     out = await drain_until_idle(dut)
     assert not (axi_status(out) & 0x4)
     assert not (axi_status(out) & 0x2)
+    assert_axi_protocol_trace(axi_trace)
 
 
 @cocotb.test()
 async def fcapz_ejtagaxi_reset_regression(dut):
-    await init_ejtagaxi(dut)
+    axi_ram, axi_trace = await init_ejtagaxi(dut)
 
     out = await issue_and_wait_valid(
         dut, axi_cmd(CMD_WRITE, 0x0000_0000, 0x1234_5678, 0xF), "write addr 0")
@@ -851,16 +1202,14 @@ async def fcapz_ejtagaxi_reset_regression(dut):
     out = await issue_and_wait_valid(
         dut, axi_cmd(CMD_WRITE, 0x0000_0004, 0x89AB_CDEF, 0xF), "write addr 4")
     assert axi_resp(out) == 0
-    assert int(dut.mem0.value) == 0x1234_5678
-    assert int(dut.mem1.value) == 0x89AB_CDEF
+    assert axi_mem_read32(axi_ram, 0x0000_0000) == 0x1234_5678
+    assert axi_mem_read32(axi_ram, 0x0000_0004) == 0x89AB_CDEF
 
     await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
     await axi_cdc_wait(dut)
     out = await drain_until_idle(dut)
     status = axi_status(out)
     assert not (status & 0x2)
-    assert int(dut.pending_count_probe.value) == 0
-    assert int(dut.last_cmd_probe.value) == CMD_NOP
 
     out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
     status = axi_status(out)
@@ -883,6 +1232,14 @@ async def fcapz_ejtagaxi_reset_regression(dut):
     assert int(dut.debug_tck_edge.value) == 0
     assert int(dut.debug_axi.value) == 0
     assert int(dut.debug_axi_edge.value) == 0
+    assert len(axi_trace.aw) == 2
+    assert len(axi_trace.w) == 2
+    assert len(axi_trace.ar) == 2
+    _assert_axi_addr(axi_trace.aw[0], 0x0000_0000)
+    _assert_axi_addr(axi_trace.aw[1], 0x0000_0004)
+    _assert_axi_write_beats(axi_trace.w, [0x1234_5678, 0x89AB_CDEF], burst=False)
+    _assert_axi_addr(axi_trace.ar[0], 0x0000_0000)
+    _assert_axi_addr(axi_trace.ar[1], 0x0000_0004)
 
 
 UART_CMD_NOP = 0x0

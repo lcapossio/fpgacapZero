@@ -373,7 +373,7 @@ def test_jtag_hierarchy_shows_managed_slots(qtbot: Any, tmp_path: Path) -> None:
                 rows.append(f"{child.text(0)} {child.text(1)}")
         assert "USER1" in rows
         assert any("slot 2" in r and "EIO" in r for r in rows)
-        assert any("slot 0" in r and "GUI ELA capture" in r for r in rows)
+        assert any("slot 0" in r and "Selectable ELA capture" in r for r in rows)
 
 
 @pytest.mark.gui

@@ -7,7 +7,9 @@
 The iverilog pass in sim/run_sim.py remains the broad elaboration and
 simulation gate. This script adds Verilator's stricter procedural-driver
 analysis across the project Verilog RTL surface, including MULTIDRIVEN
-warnings for one reg assigned by more than one always block.
+warnings for one reg assigned by more than one always block. It also runs a
+small source-level portability check for SystemVerilog-only increment and
+decrement operators in .v files.
 """
 
 from __future__ import annotations
@@ -422,6 +424,8 @@ COMMON_FLAGS = (
     "-Wno-SYNCASYNCNET",
 )
 
+SV_INCREMENT_RE = re.compile(r"(\+\+|--)")
+
 
 def verilator_version() -> tuple[int, int] | None:
     result = subprocess.run(
@@ -470,6 +474,61 @@ def run_cmd(cmd: list[str], label: str, *, expect_ok: bool = True) -> bool:
     return True
 
 
+def iter_linted_v_sources() -> tuple[Path, ...]:
+    sources: set[Path] = set()
+    for target in TARGETS:
+        for src in target.sources:
+            if src.suffix == ".v":
+                sources.add(src)
+    return tuple(sorted(sources))
+
+
+def strip_comments(line: str, in_block_comment: bool) -> tuple[str, bool]:
+    out = []
+    i = 0
+    while i < len(line):
+        if in_block_comment:
+            end = line.find("*/", i)
+            if end == -1:
+                return "".join(out), True
+            i = end + 2
+            in_block_comment = False
+            continue
+
+        line_comment = line.find("//", i)
+        block_comment = line.find("/*", i)
+        if line_comment == -1 and block_comment == -1:
+            out.append(line[i:])
+            break
+        if line_comment != -1 and (block_comment == -1 or line_comment < block_comment):
+            out.append(line[i:line_comment])
+            break
+
+        out.append(line[i:block_comment])
+        i = block_comment + 2
+        in_block_comment = True
+
+    return "".join(out), in_block_comment
+
+
+def check_verilog2001_loop_increments(sources: tuple[Path, ...] | None = None) -> bool:
+    ok = True
+    for src in sources if sources is not None else iter_linted_v_sources():
+        in_block_comment = False
+        for lineno, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+            code, in_block_comment = strip_comments(line, in_block_comment)
+            match = SV_INCREMENT_RE.search(code)
+            if match:
+                print(
+                    f"{src.relative_to(ROOT)}:{lineno}: "
+                    f"SystemVerilog '{match.group(1)}' is not allowed in .v files; "
+                    "use an explicit assignment such as i = i + 1",
+                    file=sys.stderr,
+                )
+                ok = False
+    return ok
+
+
 def command_for(target: LintTarget) -> list[str]:
     return [
         "verilator",
@@ -483,33 +542,48 @@ def command_for(target: LintTarget) -> list[str]:
 
 
 def run_lint() -> bool:
-    ok = True
+    ok = check_verilog2001_loop_increments()
     for target in TARGETS:
         if not run_cmd(command_for(target), f"lint {target.name}"):
             ok = False
     return ok
 
 
-def run_self_test() -> bool:
-    bad = LintTarget(
-        name="verilator_multidriven_bad",
-        top="verilator_multidriven_bad",
-        sources=(SIM / "verilator_multidriven_bad.v",),
-    )
-    cmd = command_for(bad)
-    print(f"[verilator] self-test: {' '.join(cmd)}", flush=True)
+def run_self_test_target(
+    target: LintTarget,
+    *,
+    expected_token: str,
+    failure_message: str,
+) -> bool:
+    cmd = command_for(target)
+    print(f"[verilator] self-test {target.name}: {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     output = result.stdout + result.stderr
     if output:
         print(output, end="" if output.endswith("\n") else "\n")
-    saw_driver_warning = (
-        "MULTIDRIVEN" in output
-        or ("%Warning-" in output and "multiple driving" in output and "'q'" in output)
-    )
-    if result.returncode == 0 or not saw_driver_warning:
-        print("[verilator] FAILED: self-test did not trip MULTIDRIVEN")
+
+    if result.returncode == 0 or expected_token not in output:
+        print(f"[verilator] FAILED: {failure_message}")
         return False
     return True
+
+
+def run_self_test() -> bool:
+    multidriven_bad = LintTarget(
+        name="verilator_multidriven_bad",
+        top="verilator_multidriven_bad",
+        sources=(SIM / "verilator_multidriven_bad.v",),
+    )
+    ok = run_self_test_target(
+        multidriven_bad,
+        expected_token="MULTIDRIVEN",
+        failure_message="self-test did not trip MULTIDRIVEN",
+    )
+    bad_portability = SIM / "verilator_sv_syntax_bad.v"
+    if check_verilog2001_loop_increments((bad_portability,)):
+        print("[verilator] FAILED: self-test did not reject ++ in .v")
+        ok = False
+    return ok
 
 
 def main() -> None:
@@ -517,7 +591,7 @@ def main() -> None:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="also prove Verilator fails an intentional MULTIDRIVEN fixture",
+        help="also prove Verilator fails intentional strict-lint fixtures",
     )
     args = parser.parse_args()
 
@@ -533,7 +607,7 @@ def main() -> None:
 
     if not ok:
         sys.exit(1)
-    suffix = " and MULTIDRIVEN self-test" if args.self_test else ""
+    suffix = " and strict-lint self-tests" if args.self_test else ""
     print(f"Verilator RTL lint passed for {len(TARGETS)} target(s){suffix}.")
 
 

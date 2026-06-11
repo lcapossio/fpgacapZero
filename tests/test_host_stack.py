@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 import uuid
 from dataclasses import replace
@@ -119,6 +120,58 @@ class FakeTransport(Transport):
         return [0] * words
 
 
+class _TrackedTransaction:
+    def __init__(self, transport):
+        self._transport = transport
+
+    def __enter__(self):
+        self._transport._lock_depth += 1
+        self._transport._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._transport._lock.release()
+        self._transport._lock_depth -= 1
+        return False
+
+
+class LockCheckingTransport(FakeTransport):
+    def __init__(self):
+        super().__init__()
+        self._lock = threading.RLock()
+        self._lock_depth = 0
+        self.unlocked_ops: list[tuple[str, int]] = []
+        self.manager_writes: list[int] = []
+
+    def transaction_lock(self):
+        return _TrackedTransaction(self)
+
+    def _record_if_unlocked(self, op: str, addr: int) -> None:
+        if self._lock_depth == 0:
+            self.unlocked_ops.append((op, addr))
+
+    def read_reg(self, addr: int) -> int:
+        self._record_if_unlocked("read", addr)
+        return super().read_reg(addr)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        if addr == 0xF008:
+            self._record_if_unlocked("write", addr)
+            self.manager_writes.append(int(value))
+        else:
+            self._record_if_unlocked("write", addr)
+        super().write_reg(addr, value)
+
+    def read_block(self, addr: int, words: int):
+        self._record_if_unlocked("read_block", addr)
+        return super().read_block(addr, words)
+
+    def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+        for addr in addrs:
+            self._record_if_unlocked("read_pipelined", addr)
+        return super().read_regs_pipelined_user1(addrs)
+
+
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(
@@ -218,6 +271,30 @@ class AnalyzerTests(unittest.TestCase):
         analyzer = Analyzer(transport, instance=1)
         self.assertEqual(analyzer.probe()["sample_width"], 16)
         self.assertEqual(transport._manager_regs[0xF008], 1)
+
+    def test_managed_analyzer_ops_hold_transaction_lock(self):
+        transport = LockCheckingTransport()
+        analyzer = Analyzer(transport, instance=1)
+        analyzer.connect()
+        cfg = self._make_cfg()
+
+        analyzer.configure(cfg)
+        analyzer.arm()
+        analyzer.capture(timeout=0.01)
+        analyzer.probe()
+
+        self.assertEqual(transport.unlocked_ops, [])
+
+    def test_managed_analyzer_skips_redundant_active_slot_writes(self):
+        transport = LockCheckingTransport()
+        analyzer = Analyzer(transport, instance=1)
+
+        analyzer.connect()
+        analyzer.reset()
+        analyzer.arm()
+        analyzer.probe()
+
+        self.assertEqual(transport.manager_writes, [1])
 
     def test_core_manager_describes_and_skips_non_ela_slots(self):
         class MixedCoreTransport(FakeTransport):
@@ -961,7 +1038,7 @@ class EioControllerTests(unittest.TestCase):
         eio.read_outputs()
 
         self.assertEqual(t.connect_chain, 1)
-        self.assertGreaterEqual(writes.count((0xF008, 2)), 4)
+        self.assertEqual(writes.count((0xF008, 2)), 1)
         self.assertEqual(t.regs[0x0100], 0x5A)
 
 

@@ -67,6 +67,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "features_registers",
             "register_roundtrip",
             "value_capture",
+            "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
             "decimation_and_external_trigger",
@@ -158,13 +159,18 @@ def resolve_sources(args: argparse.Namespace) -> tuple[list[Path], list[Path]]:
 
     vhdl_sources = args.vhdl_source
     if not vhdl_sources:
-        default_core = RTL / "vhdl" / "core" / "fcapz_ela.vhd"
-        if default_core.exists():
-            vhdl_sources = [default_core]
+        default_sources = [
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+        ]
+        if all(source.exists() for source in default_sources):
+            vhdl_sources = default_sources
         else:
             raise SystemExit(
-                "No VHDL core source was found. Pass --vhdl-source for the VHDL "
-                "implementation to run the same cocotb tests against VHDL."
+                "No complete VHDL ELA source set was found. Pass --vhdl-source for "
+                "each VHDL file needed to run the same cocotb tests against VHDL."
             )
     return [], vhdl_sources
 
@@ -228,6 +234,8 @@ def main() -> None:
     targets = selected_targets(args)
     build_dir = BUILD_ROOT / f"{args.hdl}_{sim}_{args.suite}"
     runner = get_runner(sim)
+    if str(TB_COCOTB) not in sys.path:
+        sys.path.insert(0, str(TB_COCOTB))
 
     for target in targets:
         target_dir = build_dir / target.name
@@ -247,7 +255,7 @@ def main() -> None:
             waves=args.waves,
             verbose=args.verbose,
             timescale=("1ns", "1ps"),
-            build_args=["-Wall"] if args.hdl == "verilog" else [],
+            build_args=["-Wall"] if args.hdl == "verilog" else ["--std=08"],
         )
         runner.test(
             test_module=args.test_module,
@@ -255,8 +263,9 @@ def main() -> None:
             hdl_toplevel_lang=args.hdl,
             testcase=target.testcases,
             build_dir=target_dir,
-            test_dir=TB_COCOTB,
+            test_dir=target_dir if args.hdl == "vhdl" else TB_COCOTB,
             results_xml=results_xml,
+            test_args=["--std=08"] if args.hdl == "vhdl" else [],
             waves=args.waves,
             verbose=args.verbose,
             extra_env={

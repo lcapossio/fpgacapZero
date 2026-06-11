@@ -431,7 +431,7 @@ module fcapz_ela #(
     reg  [PTR_W-1:0]     mem_wr_addr_q;
     reg  [SAMPLE_W-1:0]  mem_wr_data_q;
     reg  [TS_DATA_W-1:0] mem_wr_ts_q;
-    reg  [PTR_W-1:0]     mem_addr_a;
+    wire [PTR_W-1:0]     mem_addr_a;
     wire [SAMPLE_W-1:0]  mem_dout_a;
     wire [SAMPLE_W-1:0]  mem_dout_b;
     wire                 mem_we_a;
@@ -457,39 +457,33 @@ module fcapz_ela #(
     );
 
     // ---- Phase 3: Timestamp DPRAM ------------------------------------------
-    generate
-        if (TIMESTAMP_W > 0) begin : g_ts
-            reg [TIMESTAMP_W-1:0] ts_counter;
-            wire [TIMESTAMP_W-1:0] ts_dout_a;
-            wire [TIMESTAMP_W-1:0] ts_dout_b;
-            assign ts_counter_cur = ts_counter;
+    reg [TS_DATA_W-1:0] ts_counter;
+    wire [TS_DATA_W-1:0] ts_dout_a;
+    wire [TS_DATA_W-1:0] ts_dout_b;
+    assign ts_counter_cur = (TIMESTAMP_W > 0) ? ts_counter : {TS_DATA_W{1'b0}};
 
-            // Free-running counter in sample_clk
-            always @(posedge sample_clk or posedge sample_rst) begin
-                if (sample_rst)
-                    ts_counter <= {TIMESTAMP_W{1'b0}};
-                else
-                    ts_counter <= ts_counter + 1'b1;
-            end
+    // Free-running counter in sample_clk when timestamping is enabled.
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst)
+            ts_counter <= {TS_DATA_W{1'b0}};
+        else if (TIMESTAMP_W > 0)
+            ts_counter <= ts_counter + 1'b1;
+        else
+            ts_counter <= {TS_DATA_W{1'b0}};
+    end
 
-            dpram #(.WIDTH(TIMESTAMP_W), .DEPTH(DEPTH)) u_tsbuf (
-                .clk_a  (sample_clk),
-                .we_a   (mem_we_a_ram),
-                .addr_a (mem_addr_a),
-                .din_a  (mem_ts_din_a_ram[TIMESTAMP_W-1:0]),
-                .dout_a (ts_dout_a),
-                .clk_b  (jtag_clk),
-                .addr_b (burst_rd_addr),
-                .dout_b (ts_dout_b)
-            );
-            assign ts_dout_a_mux = ts_dout_a;
-            assign burst_rd_ts_data = ts_dout_b;
-        end else begin : g_no_ts
-            assign ts_counter_cur = {TS_DATA_W{1'b0}};
-            assign ts_dout_a_mux = 1'b0;
-            assign burst_rd_ts_data = 1'b0;
-        end
-    endgenerate
+    dpram #(.WIDTH(TS_DATA_W), .DEPTH(DEPTH)) g_ts_mem_u_tsbuf (
+        .clk_a  (sample_clk),
+        .we_a   ((TIMESTAMP_W > 0) ? mem_we_a_ram : 1'b0),
+        .addr_a (mem_addr_a),
+        .din_a  (mem_ts_din_a_ram[TS_DATA_W-1:0]),
+        .dout_a (ts_dout_a),
+        .clk_b  (jtag_clk),
+        .addr_b (burst_rd_addr),
+        .dout_b (ts_dout_b)
+    );
+    assign ts_dout_a_mux = (TIMESTAMP_W > 0) ? ts_dout_a : {TS_MUX_W{1'b0}};
+    assign burst_rd_ts_data = (TIMESTAMP_W > 0) ? ts_dout_b : {TS_DATA_W{1'b0}};
 
     // ---- Sequencer state (sample domain) -----------------------------------
     reg [SEQ_STATE_W-1:0] seq_state;
@@ -1047,14 +1041,9 @@ module fcapz_ela #(
     wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
-    always @(*) begin
-        if ((INPUT_PIPE >= 1) && mem_we_a_q)
-            mem_addr_a = mem_wr_addr_q;
-        else if (HAS_USER1_DATA && mem_rd_pending)
-            mem_addr_a = idx;
-        else
-            mem_addr_a = wr_ptr;
-    end
+    assign mem_addr_a = ((INPUT_PIPE >= 1) && mem_we_a_q) ? mem_wr_addr_q :
+                        (HAS_USER1_DATA && mem_rd_pending) ? idx :
+                        wr_ptr;
 
     // Register the RAM write command so address, data, and enable stay
     // aligned and the trigger/WEA path does not have to reach the BRAM in
@@ -1142,6 +1131,13 @@ module fcapz_ela #(
                     seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
             end
 
+            if (done) begin
+                armed              <= 1'b0;
+                post_count         <= {PTR_W{1'b0}};
+                trig_delay_pending <= 1'b0;
+                trig_delay_count   <= 16'h0;
+            end
+
             if (any_arm_pulse) begin
                 armed       <= 1'b1;
                 triggered   <= 1'b0;
@@ -1174,6 +1170,8 @@ module fcapz_ela #(
             // arm so a fast trigger can use real pre-arm history instead of
             // waiting for a post-arm prefill window.
             if (!armed && !done) begin
+                trig_delay_pending <= 1'b0;
+                trig_delay_count   <= 16'h0;
                 if (mem_we_a) begin
                     wr_ptr <= wr_ptr + 1'b1;
                     if (wr_ptr >= DEPTH_LAST)
@@ -1214,6 +1212,8 @@ module fcapz_ela #(
                     if (trig_holdoff_active) begin
                         // Ignore trigger / sequencer activity until the
                         // post-arm holdoff window expires.
+                        if (!trig_delay_pending)
+                            trig_delay_count <= 16'h0;
                     end else if (trig_delay_pending) begin
                         // Counting down sample-clock cycles between the
                         // trigger event and the committed trigger sample.
@@ -1245,12 +1245,18 @@ module fcapz_ela #(
                             trig_delay_count   <= trig_delay - 16'h1;
                         end
                     end else if (pretrigger_ready && seq_advance) begin
+                        trig_delay_count <= 16'h0;
                         seq_state   <= seq_next_state[seq_state];
                         seq_counter <= 16'h0;
                     end else if (pretrigger_ready && TRIG_STAGES > 1 && seq_stage_hit) begin
+                        trig_delay_count <= 16'h0;
                         seq_counter <= seq_counter + 1'b1;
+                    end else begin
+                        trig_delay_count <= 16'h0;
                     end
                 end else begin
+                    trig_delay_pending <= 1'b0;
+                    trig_delay_count   <= 16'h0;
                     // Post-trigger countdown (counts stored samples only)
                     if (post_count >= post_store_limit) begin
                         // Segment complete

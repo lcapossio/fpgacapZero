@@ -14,13 +14,15 @@ Open-source, vendor-agnostic FPGA debug cores: an **Embedded Logic Analyzer
 read/write of fabric signals, a **JTAG-to-AXI4 Bridge (EJTAG-AXI)** for
 memory-mapped bus access, and a **JTAG-to-UART Bridge (EJTAG-UART)** for
 console-style debug — all over JTAG. Drop them into any FPGA design and export
-captures to JSON, CSV, or VCD.
+captures to JSON, CSV, or VCD. The portable core RTL is available as native
+Verilog and native VHDL implementations, with shared cocotb regression coverage
+for both languages.
 
 Includes single-instantiation Verilog wrappers for **Xilinx 7-series**,
 **Xilinx UltraScale / UltraScale+**, **Lattice ECP5**, **Intel / Altera**,
-**Gowin**, and **Microchip PolarFire / SmartFusion2 / IGLOO2**. ELA and EIO
-also provide VHDL wrappers for Xilinx 7-series, Lattice ECP5, Intel / Altera,
-and Gowin. The core RTL and Python host stack are fully portable.
+**Gowin**, and **Microchip PolarFire / SmartFusion2 / IGLOO2**. VHDL vendor
+wrappers are provided where supported; the core RTL and Python host stack are
+fully portable.
 
 📖 **[User manual](docs/README.md)** — full walkthrough of the RTL cores,
 host stack, CLI, RPC server, and desktop GUI. **JTAG register / shift maps**
@@ -127,11 +129,25 @@ and readback behavior without switching cores.
 pip install -e ".[dev,hdl]"
 pytest tests/ -v
 python sim/run_cocotb.py --runner native --clean
+python sim/run_cocotb.py --runner wsl --hdl vhdl --clean
+python sim/run_hdl_parity.py
+python sim/run_formal_hdl_parity.py --interface-only
 ```
 
 `python sim/run_cocotb.py --runner native --clean` runs the default cocotb RTL
 simulation regression. Use `python sim/run_sim.py --lint-only` when you only
 want the shared RTL lint check (`iverilog -Wall`).
+`python sim/run_cocotb.py --runner wsl --hdl vhdl --clean` runs the same
+cocotb stimulus against every translated VHDL core target available in this
+branch.
+`python sim/run_hdl_parity.py` is the VHDL-port guardrail: it checks that
+translated core generics and register addresses still match the source Verilog.
+Behavioral simulation parity is covered by the shared cocotb regression, not by
+separate VHDL testbenches.
+`python sim/run_formal_hdl_parity.py` is the manifest-driven formal parity
+runner for the translated portable cores. It checks Verilog/VHDL interfaces and,
+with GHDL plus Yosys installed, attempts sequential equivalence proofs for the
+parameter sets in `sim/parity/*.yml`.
 Run `python sim/run_verilator_lint.py --self-test` when changing RTL; it runs
 the full Verilog RTL matrix through Verilator driver lint for issues such as
 one register assigned from two always blocks.
@@ -516,7 +532,24 @@ fcapz_ela_ecp5 #(
 );
 ```
 
-VHDL wrappers are also provided in `rtl/vhdl/`.
+VHDL sources are kept under `rtl/vhdl/`: shared packages in `pkg/`, translated
+cores in `core/`, and vendor wrappers in the wrapper files as they are added.
+The VHDL simulation flow uses the same cocotb tests as Verilog, with GHDL as the
+VHDL simulator:
+
+```bash
+python sim/run_cocotb.py --runner native --hdl vhdl --clean
+```
+
+The Arty A7 VHDL reference build is mixed-language: the ELA and EIO cores are
+VHDL, while the existing Xilinx TAP wrappers, EJTAG-AXI bridge, AXI test slave,
+and top-level glue remain Verilog. Vivado handles that flow directly:
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+This produces `examples/arty_a7/arty_a7_top_vhdl.bit`.
 
 ### LiteX integration
 
@@ -700,11 +733,15 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 |-----|----------------|
 | `lint-python` | `ruff` E/F/W rules on the whole repo |
 | `test-host` | `pytest tests/ -v --tb=short` with the default `not hw` marker filter, plus an explicit JTAG readback pipeline regression for burst and timestamp stabilization paths |
-| `lint-rtl` | `python sim/run_sim.py --lint-only` — shared `iverilog -Wall` elaboration for the core RTL, vendor wrappers, and simulation stubs |
-| `lint-rtl-verilator` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilog RTL driver lint plus an intentional `MULTIDRIVEN` fixture proving the gate catches one reg driven by multiple always blocks |
-| `sim` (matrix: `protocol`, `ela`) | sharded cocotb RTL regression on Icarus, with `iverilog -Wall` enabled per bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --clean --skip-ela` (trig compare, JTAG pipe/burst, EIO, core manager, channel mux, Xilinx7 single-chain wrapper, async-FIFO equivalence, EJTAG-AXI, EJTAG-AXI reset regression, EJTAG-UART). The `ela` shard runs `python sim/run_cocotb.py --runner native --clean ela` and exercises the 16-target cocotb ELA suite. |
+| `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches one reg driven by multiple always blocks |
+| `hdl-parity` | `python sim/run_hdl_parity.py` - static generic/register-map parity for translated cores |
+| `hdl-formal-parity` | Manual `workflow_dispatch` job running `python sim/run_formal_hdl_parity.py` with GHDL/Yosys for manifest-driven sequential equivalence |
+| `sim` (matrix: `protocol`, `ela` x `verilog`, `vhdl`) | sharded cocotb RTL regression on Icarus for Verilog and GHDL for VHDL, with `iverilog -Wall` enabled per Verilog bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean --skip-ela` (all Verilog protocol targets, and the translated VHDL protocol targets when `<hdl>` is `vhdl`). The `ela` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean ela` and exercises the cocotb ELA suite against both languages. |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
+The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
+VHDL reference bitstream, build `examples/arty_a7/arty_a7_top_vhdl.bit` and set
+`FPGACAP_BITFILE` plus `FPGACAP_BITSTREAM_VARIANT=vhdl`.
 Optional **GUI + hardware** checks in `tests/test_gui_hw_capture.py` are
 documented in [CONTRIBUTING.md](CONTRIBUTING.md) (`FPGACAP_GUI_HW=1`, not run in CI).
 Those board-level checks now require every adjacent Arty counter sample to
@@ -724,9 +761,21 @@ waveforms together.
 
 ```bash
 vivado -mode batch -source examples/arty_a7/build_arty.tcl
+# or use the Python wrapper
+python examples/arty_a7/build.py
 ```
 
 Produces `examples/arty_a7/arty_a7_top.bit`.
+
+### Mixed-language VHDL Arty build (Vivado)
+
+```bash
+python examples/arty_a7/build_vhdl.py
+```
+
+Produces `examples/arty_a7/arty_a7_top_vhdl.bit`. This build uses the translated
+VHDL ELA and EIO cores together with the existing Verilog wrappers and bridge
+cores.
 
 ### Simulation (Icarus Verilog)
 
@@ -735,6 +784,7 @@ python sim/run_sim.py
 python sim/run_sim.py --lint-only
 python sim/run_verilator_lint.py --self-test
 python sim/run_cocotb.py --runner wsl
+python sim/run_cocotb.py --runner wsl --hdl vhdl
 python sim/run_verilator_ela_coverage.py --runner wsl
 python sim/run_cocotb_ela.py --runner wsl --hdl verilog
 ```
@@ -745,9 +795,40 @@ shapes such as `DUAL_COMPARE=0`, `USER1_DATA_EN=0`, disabled feature
 registers, and `REL_COMPARE=1` with `INPUT_PIPE=1`. CI uses the same runner
 so local regressions and GitHub Actions exercise the same RTL lint target
 list. The Verilator lint command complements that broad elaboration pass with
-a full-project Verilog RTL matrix and stricter procedural-driver checks; its
-self-test must fail a deliberately bad multi-driver fixture before the job is
-considered valid.
+a full-project Verilog RTL matrix, a `.v` portability check for `++`/`--`, and
+stricter procedural-driver checks; its self-test must fail deliberately bad
+syntax and multi-driver fixtures before the job is considered valid.
+
+### Simulation (cocotb Verilog/VHDL)
+
+```bash
+python sim/run_cocotb.py --runner native --hdl both --clean
+```
+
+Runs the shared cocotb RTL regression against both Verilog and VHDL. The VHDL
+side uses GHDL and exercises the same Python stimulus as the Verilog side, so
+there are no separate VHDL testbench sources to maintain.
+
+When changing the source Verilog for a translated core, run:
+
+```bash
+python sim/run_hdl_parity.py
+```
+
+This is the CI parity gate for the VHDL port. It fails if EIO/ELA public
+generics or register address constants diverge between Verilog and VHDL. Use
+the cocotb regression for behavioral simulation parity.
+
+For the translateHDL-style formal layer, run:
+
+```bash
+python sim/run_formal_hdl_parity.py
+```
+
+The manifests in `sim/parity/` describe the source Verilog side, translated VHDL
+side, and representative parameter sets. Normal CI checks those manifests with
+`--interface-only`; the full GHDL/Yosys proof is available as the manual
+`hdl-formal-parity` workflow job.
 
 The Verilator ELA coverage command builds and runs `fcapz_ela`,
 `fcapz_ela_bug_probe`, and `fcapz_ela_config_matrix` as Verilator simulations.
@@ -770,7 +851,14 @@ The general cocotb command runs the non-ELA cocotb replacements for the RTL
 simulation benches (`trig_compare`, JTAG pipe/burst, EIO, core manager,
 channel mux, Xilinx7 single-chain wrapper, async FIFO equivalence, EJTAG-AXI,
 EJTAG-AXI reset regression, and EJTAG-UART), and then runs the ELA cocotb suite
-unless `--skip-ela` is passed.
+unless `--skip-ela` is passed. With `--hdl vhdl`, it uses GHDL and the same
+Python tests for the translated VHDL EIO and ELA-derived channel-mux targets,
+plus the VHDL ELA suite; targets without VHDL implementations are skipped in a
+full run and rejected if requested explicitly.
+The EIO narrow and wide cocotb targets also write merged functional coverage to
+`build/cocotb/<hdl>_<sim>/eio_functional_coverage_merged.json`. CI runs the
+protocol shard with `--require-eio-coverage`, so EIO regressions fail unless
+all defined EIO functional bins are hit for both Verilog and VHDL.
 
 ### Tests
 
@@ -780,6 +868,16 @@ python -m pytest tests/ -v
 
 # Hardware integration tests (requires Arty A7 + hw_server + built bitstream)
 python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# Same hardware integration suite against the mixed-language VHDL Arty bitstream
+FPGACAP_BITFILE=examples/arty_a7/arty_a7_top_vhdl.bit \
+FPGACAP_BITSTREAM_VARIANT=vhdl \
+python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+# PowerShell equivalent
+$env:FPGACAP_BITFILE='examples/arty_a7/arty_a7_top_vhdl.bit'
+$env:FPGACAP_BITSTREAM_VARIANT='vhdl'
+python -m pytest examples\arty_a7\test_hw_integration.py -v
 
 # Force-skip hardware integration tests (e.g. laptop without board)
 FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -817,10 +915,18 @@ fpgacapZero/
     jtag_tap/
       jtag_tap_*.v           Vendor TAP primitive adapters
     vhdl/
-      fcapz_ela_*.vhd        VHDL ELA wrappers
-      fcapz_eio_*.vhd        VHDL EIO wrappers
+      pkg/                   VHDL packages and shared helpers
+      core/
+        fcapz_dpram.vhd      VHDL block-RAM inference helper
+        fcapz_ela.vhd        VHDL ELA core
+        fcapz_eio.vhd        VHDL EIO core
+      fcapz_ela_*.vhd        VHDL ELA vendor wrappers
+      fcapz_eio_*.vhd        VHDL EIO vendor wrappers
   tb/
     *_tb.sv, *_tb.v          RTL simulations and focused regressions
+    vhdl/
+      fcapz_ela_tb.vhd       VHDL ELA regression
+      fcapz_eio_tb.vhd       VHDL EIO regression
     fcapz_ela_config_matrix_tb.sv
                              ELA parameter/configuration matrix
     fcapz_ela_xilinx7_single_chain_tb.sv
@@ -843,8 +949,12 @@ fpgacapZero/
   examples/arty_a7/
     README.md                Arty A7 reference design guide
     arty_a7_top.v            Reference design top-level
+    arty_a7_top.vhd          Mixed-language VHDL-core reference top-level
     arty_a7.xdc              Pin constraints
     build_arty.tcl           Vivado batch build
+    build_arty_vhdl.tcl      Vivado mixed-language VHDL-core batch build
+    build.py                 Python wrapper for Verilog reference build
+    build_vhdl.py            Python wrapper for VHDL reference build
     arty_a7*.cfg             OpenOCD configs
     test_hw_integration.py   Hardware integration tests
   examples/brs_100_gw1nr9/

@@ -15,9 +15,7 @@ dfx_runtime.txt
 # Build artifacts
 dist/
 packages/
-build/cocotb_ela/
-build/cocotb/
-build/verilator_ela_coverage/
+build/
 *.bit
 *.bin
 !host/fcapz/gui/assets/default_window_state_v6.bin
@@ -27,7 +25,7 @@ build/verilator_ela_coverage/
 sim/*.vvp
 sim/*.vcd
 sim/ghdl/
-work-obj*.cf
+*.cf
 
 # OS
 .DS_Store

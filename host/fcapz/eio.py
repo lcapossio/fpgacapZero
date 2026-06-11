@@ -25,6 +25,7 @@ on the ``EioController`` instance as ``version_major`` /
 
 from __future__ import annotations
 
+from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
 from .transport import Transport
 
 # ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
@@ -53,12 +54,12 @@ class EioController:
     def __init__(
         self,
         transport: Transport,
-        chain: int = 3,
+        chain: int | None = None,
         base_addr: int = 0,
         instance: int | None = None,
     ) -> None:
         self._t = transport
-        self._chain = chain
+        self._chain = (1 if instance is not None else 3) if chain is None else int(chain)
         self._base_addr = int(base_addr) & 0xFFFF
         self._instance = None if instance is None else int(instance)
         self.in_w: int = 0
@@ -88,7 +89,11 @@ class EioController:
     def _select_instance(self) -> None:
         self._select_chain()
         if self._instance is not None:
-            self._t.write_reg(0xF008, self._instance)
+            self._t.select_manager_instance_cached(
+                self._chain,
+                _ADDR_MGR_ACTIVE,
+                self._instance,
+            )
 
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
@@ -103,32 +108,11 @@ class EioController:
         """
         # XilinxHwServerTransport may run a 49-bit VERSION ready probe during
         # connect(), so select EIO's USER chain before opening the session.
-        self._select_chain()
-        self._t.connect()
-        self._select_instance()
-        version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
-        core_id = version & 0xFFFF
-        if core_id != EIO_CORE_ID:
-            raise RuntimeError(
-                f"EIO core identity check failed at VERSION[15:0]: "
-                f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
-            )
-        self.version_major = (version >> 24) & 0xFF
-        self.version_minor = (version >> 16) & 0xFF
-        self.core_id = core_id
-        self.in_w  = self._t.read_reg(self._abs(_ADDR_IN_W))
-        self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
-
-    def attach(self) -> None:
-        """Use an already-connected transport (e.g. shared with the ELA analyzer).
-
-        Selects the EIO USER chain, verifies identity, reads widths, then restores
-        chain 1 (ELA / USER1) before returning. Does not call :meth:`Transport.connect`
-        or :meth:`Transport.close`.
-        """
-        self._select_instance()
-        try:
+        with self._t.transaction_lock():
+            self._select_chain()
+            self._t.connect()
+            self._t.invalidate_manager_instance_cache()
+            self._select_instance()
             version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
             core_id = version & 0xFFFF
             if core_id != EIO_CORE_ID:
@@ -140,13 +124,37 @@ class EioController:
             self.version_major = (version >> 24) & 0xFF
             self.version_minor = (version >> 16) & 0xFF
             self.core_id = core_id
-            self.in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
+            self.in_w  = self._t.read_reg(self._abs(_ADDR_IN_W))
             self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
-        finally:
+
+    def attach(self) -> None:
+        """Use an already-connected transport (e.g. shared with the ELA analyzer).
+
+        Selects the EIO USER chain, verifies identity, reads widths, then restores
+        chain 1 (ELA / USER1) before returning. Does not call :meth:`Transport.connect`
+        or :meth:`Transport.close`.
+        """
+        with self._t.transaction_lock():
+            self._select_instance()
             try:
-                self._t.select_chain(1)
-            except NotImplementedError:
-                pass
+                version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
+                core_id = version & 0xFFFF
+                if core_id != EIO_CORE_ID:
+                    raise RuntimeError(
+                        f"EIO core identity check failed at VERSION[15:0]: "
+                        f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
+                        f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+                    )
+                self.version_major = (version >> 24) & 0xFF
+                self.version_minor = (version >> 16) & 0xFF
+                self.core_id = core_id
+                self.in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
+                self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
+            finally:
+                try:
+                    self._t.select_chain(1)
+                except NotImplementedError:
+                    pass
 
     def _abs(self, offset: int) -> int:
         """Prepend ``base_addr`` so the on-chip regbus mux routes to EIO."""
@@ -158,24 +166,26 @@ class EioController:
     # ------------------------------------------------------------------
     def read_inputs(self) -> int:
         """Return current probe_in value as a single integer (LSB = bit 0)."""
-        self._select_instance()
-        words = (self.in_w + 31) // 32
-        value = 0
-        for i in range(words):
-            word = self._t.read_reg(self._abs(_ADDR_IN_BASE + i * 4))
-            value |= word << (i * 32)
+        with self._t.transaction_lock():
+            self._select_instance()
+            words = (self.in_w + 31) // 32
+            value = 0
+            for i in range(words):
+                word = self._t.read_reg(self._abs(_ADDR_IN_BASE + i * 4))
+                value |= word << (i * 32)
         mask = (1 << self.in_w) - 1
         return value & mask
 
     def write_outputs(self, value: int) -> None:
         """Write probe_out as a single integer (LSB = bit 0)."""
-        self._select_instance()
-        mask = (1 << self.out_w) - 1
-        value = value & mask
-        words = (self.out_w + 31) // 32
-        for i in range(words):
-            word = (value >> (i * 32)) & 0xFFFF_FFFF
-            self._t.write_reg(self._abs(_ADDR_OUT_BASE + i * 4), word)
+        with self._t.transaction_lock():
+            self._select_instance()
+            mask = (1 << self.out_w) - 1
+            value = value & mask
+            words = (self.out_w + 31) // 32
+            for i in range(words):
+                word = (value >> (i * 32)) & 0xFFFF_FFFF
+                self._t.write_reg(self._abs(_ADDR_OUT_BASE + i * 4), word)
 
     def read_outputs(self) -> int:
         """Read back the currently programmed probe_out value.
@@ -189,12 +199,13 @@ class EioController:
             Current output register value as an unsigned integer, zero-padded
             to OUT_W bits (bits above OUT_W are masked off).
         """
-        self._select_instance()
-        words = (self.out_w + 31) // 32
-        value = 0
-        for i in range(words):
-            word = self._t.read_reg(self._abs(_ADDR_OUT_BASE + i * 4))
-            value |= word << (i * 32)
+        with self._t.transaction_lock():
+            self._select_instance()
+            words = (self.out_w + 31) // 32
+            value = 0
+            for i in range(words):
+                word = self._t.read_reg(self._abs(_ADDR_OUT_BASE + i * 4))
+                value |= word << (i * 32)
         mask = (1 << self.out_w) - 1
         return value & mask
 
@@ -215,12 +226,13 @@ class EioController:
         """
         if not (0 <= bit < self.out_w):
             raise ValueError(f"bit {bit} out of range (OUT_W={self.out_w})")
-        current = self.read_outputs()
-        if level:
-            current |= (1 << bit)
-        else:
-            current &= ~(1 << bit)
-        self.write_outputs(current)
+        with self._t.transaction_lock():
+            current = self.read_outputs()
+            if level:
+                current |= (1 << bit)
+            else:
+                current &= ~(1 << bit)
+            self.write_outputs(current)
 
     def get_bit(self, bit: int) -> int:
         """Read a single input bit from probe_in.
@@ -236,7 +248,8 @@ class EioController:
         """
         if not (0 <= bit < self.in_w):
             raise ValueError(f"bit {bit} out of range (IN_W={self.in_w})")
-        return (self.read_inputs() >> bit) & 1
+        with self._t.transaction_lock():
+            return (self.read_inputs() >> bit) & 1
 
     # ------------------------------------------------------------------
     def __repr__(self) -> str:

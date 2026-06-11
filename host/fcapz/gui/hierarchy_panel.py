@@ -76,7 +76,7 @@ class HierarchyPanel(QGroupBox):
                 idx = int(slot.get("instance", 0))
                 core_id = int(slot.get("core_id", 0)) & 0xFFFF
                 caps = int(slot.get("capabilities", 0))
-                role = "GUI ELA capture" if idx == 0 and core_id == ELA_CORE_ID else ""
+                role = "Selectable ELA capture" if core_id == ELA_CORE_ID else ""
                 if core_id == EIO_CORE_ID:
                     role = "Attach from EIO dock"
                 detail = f"{_core_name(core_id)}, caps=0x{caps:X}"
