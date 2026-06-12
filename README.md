@@ -738,7 +738,7 @@ GitHub Actions runs on every push and pull request to `main` or `master`:
 | `lint-rtl` | `python sim/run_verilator_lint.py --self-test` -- full-project Verilator RTL lint plus intentional fixtures proving the gate catches one reg driven by multiple always blocks |
 | `hdl-parity` | `python sim/run_hdl_parity.py` - static generic/register-map parity for translated cores |
 | `hdl-formal-parity` | Manual `workflow_dispatch` job running `python sim/run_formal_hdl_parity.py` with GHDL/Yosys for manifest-driven sequential equivalence |
-| `sim` (matrix: `protocol`, `ela` x `verilog`, `vhdl`) | sharded cocotb RTL regression on Icarus for Verilog and GHDL for VHDL, with `iverilog -Wall` enabled per Verilog bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean --skip-ela` (all Verilog protocol targets, and the translated VHDL protocol targets when `<hdl>` is `vhdl`). The `ela` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean ela` and exercises the cocotb ELA suite against both languages. |
+| `sim` (matrix: `protocol`, `ela` x `verilog`, `vhdl`) | sharded cocotb RTL regression on Icarus for Verilog and GHDL for VHDL, with `iverilog -Wall` enabled per Verilog bench and a `pyproject.toml`-keyed pip cache. The `protocol` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean --skip-ela --require-protocol-coverage` (all Verilog protocol targets, the translated VHDL protocol targets when `<hdl>` is `vhdl`, and enforced functional coverage for EIO, EJTAG-AXI, EJTAG-UART, JTAG burst/pipe, and async FIFO equivalence). The `ela` shard runs `python sim/run_cocotb.py --runner native --hdl <hdl> --clean ela` and exercises the cocotb ELA suite against both languages. |
 
 Hardware integration tests run manually (require physical Arty A7-100T + hw_server).
 The default run checks `examples/arty_a7/arty_a7_top.bit`; to check the mixed-language
@@ -857,10 +857,11 @@ unless `--skip-ela` is passed. With `--hdl vhdl`, it uses GHDL and the same
 Python tests for the translated VHDL EIO and ELA-derived channel-mux targets,
 plus the VHDL ELA suite; targets without VHDL implementations are skipped in a
 full run and rejected if requested explicitly.
-The EIO narrow and wide cocotb targets also write merged functional coverage to
-`build/cocotb/<hdl>_<sim>/eio_functional_coverage_merged.json`. CI runs the
-protocol shard with `--require-eio-coverage`, so EIO regressions fail unless
-all defined EIO functional bins are hit for both Verilog and VHDL.
+The cocotb protocol targets also write merged functional coverage to
+`build/cocotb/<hdl>_<sim>/*_functional_coverage_merged.json`. CI runs the
+protocol shard with `--require-protocol-coverage`, so regressions fail unless
+all defined EIO, EJTAG-AXI, EJTAG-UART, JTAG burst/pipe, and async FIFO
+equivalence functional bins are hit for both Verilog and VHDL.
 
 ### Tests
 
@@ -926,9 +927,7 @@ fpgacapZero/
       fcapz_eio_*.vhd        VHDL EIO vendor wrappers
   tb/
     *_tb.sv, *_tb.v          RTL simulations and focused regressions
-    vhdl/
-      fcapz_ela_tb.vhd       VHDL ELA regression
-      fcapz_eio_tb.vhd       VHDL EIO regression
+    cocotb/                  Shared Python RTL regressions for Verilog/VHDL
     fcapz_ela_config_matrix_tb.sv
                              ELA parameter/configuration matrix
     fcapz_ela_xilinx7_single_chain_tb.sv

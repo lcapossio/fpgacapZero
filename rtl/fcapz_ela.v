@@ -457,33 +457,40 @@ module fcapz_ela #(
     );
 
     // ---- Phase 3: Timestamp DPRAM ------------------------------------------
-    reg [TS_DATA_W-1:0] ts_counter;
     wire [TS_DATA_W-1:0] ts_dout_a;
     wire [TS_DATA_W-1:0] ts_dout_b;
-    assign ts_counter_cur = (TIMESTAMP_W > 0) ? ts_counter : {TS_DATA_W{1'b0}};
+    generate
+        if (TIMESTAMP_W > 0) begin : g_ts
+            reg [TS_DATA_W-1:0] ts_counter;
 
-    // Free-running counter in sample_clk when timestamping is enabled.
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst)
-            ts_counter <= {TS_DATA_W{1'b0}};
-        else if (TIMESTAMP_W > 0)
-            ts_counter <= ts_counter + 1'b1;
-        else
-            ts_counter <= {TS_DATA_W{1'b0}};
-    end
+            assign ts_counter_cur = ts_counter;
 
-    dpram #(.WIDTH(TS_DATA_W), .DEPTH(DEPTH)) g_ts_mem_u_tsbuf (
-        .clk_a  (sample_clk),
-        .we_a   ((TIMESTAMP_W > 0) ? mem_we_a_ram : 1'b0),
-        .addr_a (mem_addr_a),
-        .din_a  (mem_ts_din_a_ram[TS_DATA_W-1:0]),
-        .dout_a (ts_dout_a),
-        .clk_b  (jtag_clk),
-        .addr_b (burst_rd_addr),
-        .dout_b (ts_dout_b)
-    );
-    assign ts_dout_a_mux = (TIMESTAMP_W > 0) ? ts_dout_a : {TS_MUX_W{1'b0}};
-    assign burst_rd_ts_data = (TIMESTAMP_W > 0) ? ts_dout_b : {TS_DATA_W{1'b0}};
+            // Free-running counter in sample_clk when timestamping is enabled.
+            always @(posedge sample_clk or posedge sample_rst) begin
+                if (sample_rst)
+                    ts_counter <= {TS_DATA_W{1'b0}};
+                else
+                    ts_counter <= ts_counter + 1'b1;
+            end
+
+            dpram #(.WIDTH(TS_DATA_W), .DEPTH(DEPTH)) u_tsbuf (
+                .clk_a  (sample_clk),
+                .we_a   (mem_we_a_ram),
+                .addr_a (mem_addr_a),
+                .din_a  (mem_ts_din_a_ram[TS_DATA_W-1:0]),
+                .dout_a (ts_dout_a),
+                .clk_b  (jtag_clk),
+                .addr_b (burst_rd_addr),
+                .dout_b (ts_dout_b)
+            );
+        end else begin : g_no_ts
+            assign ts_counter_cur = {TS_DATA_W{1'b0}};
+            assign ts_dout_a = {TS_DATA_W{1'b0}};
+            assign ts_dout_b = {TS_DATA_W{1'b0}};
+        end
+    endgenerate
+    assign ts_dout_a_mux = ts_dout_a;
+    assign burst_rd_ts_data = ts_dout_b;
 
     // ---- Sequencer state (sample domain) -----------------------------------
     reg [SEQ_STATE_W-1:0] seq_state;
