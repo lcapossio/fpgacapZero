@@ -136,10 +136,9 @@ register file declarations.  The wrapper takes care of:
 Resource usage: ~912 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
 synthesis) for an 8b x 1024 single-comparator, single-chain fast-readout
 configuration.  Simple USER1 register-readout builds are ~596 LUTs.  See
-[`specs/architecture.md`](specs/architecture.md) and the
-[README resource table](../README.md#resource-usage) for sequencer,
-storage qualification, width/depth scaling, and the full `arty_a7_top`
-reference.
+[`specs/architecture.md`](specs/architecture.md) for the full table —
+sequencer, storage qualification, width/depth scaling, and the
+`arty_a7_top` reference build.
 
 ## LiteX integration
 
