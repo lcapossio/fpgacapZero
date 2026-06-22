@@ -73,7 +73,41 @@ class FakeTransport(Transport):
         return [0] * words
 
 
+class StaleFirstReadTransport(FakeTransport):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_addr: int | None = None
+        self._stale_value = 0
+
+    def read_reg(self, addr: int) -> int:
+        value = super().read_reg(addr)
+        if addr != self._last_addr:
+            stale = self._stale_value
+            self._last_addr = addr
+            self._stale_value = value
+            return stale
+        self._stale_value = value
+        return value
+
+    def read_reg_stable(self, addr: int) -> int:
+        self.read_reg(addr)
+        return self.read_reg(addr)
+
+
 class AnalyzerValidationTests(unittest.TestCase):
+    def test_probe_stabilizes_all_identity_register_reads(self):
+        analyzer = Analyzer(StaleFirstReadTransport(sample_w=8, depth=1024, num_chan=1))
+        analyzer.connect()
+
+        info = analyzer.probe()
+        expected_version = expected_ela_version_reg()
+
+        self.assertEqual(info["version_major"], (expected_version >> 24) & 0xFF)
+        self.assertEqual(info["version_minor"], (expected_version >> 16) & 0xFF)
+        self.assertEqual(info["sample_width"], 8)
+        self.assertEqual(info["depth"], 1024)
+        self.assertEqual(info["num_channels"], 1)
+
     def test_wide_samples_reassembled_from_words(self):
         transport = FakeTransport(
             sample_w=64,

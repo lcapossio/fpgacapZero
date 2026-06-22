@@ -156,6 +156,32 @@ class TransportAbcTests(unittest.TestCase):
         self.assertEqual(results, [0xAA, 0xBB])
         self.assertEqual(call_log, [(0xAA, 8), (0xBB, 16)])
 
+    def test_read_reg_stable_base_default_reads_once(self):
+        """The base stable-read hook is opt-in and does not add extra scans."""
+        calls: list[int] = []
+
+        class TracingTransport(ConcreteTransport):
+            def read_reg(self, addr: int) -> int:
+                calls.append(addr)
+                return 0x1234
+
+        t = TracingTransport()
+        self.assertEqual(t.read_reg_stable(0x000C), 0x1234)
+        self.assertEqual(calls, [0x000C])
+
+    def test_xsdb_read_reg_stable_discards_warmup_read(self):
+        """hw_server overrides stable reads to discard one stale pipeline value."""
+        calls: list[int] = []
+        t = XilinxHwServerTransport()
+
+        def fake_read_reg(addr: int) -> int:
+            calls.append(addr)
+            return 0x10 if len(calls) == 1 else 0x20
+
+        t.read_reg = fake_read_reg  # type: ignore[method-assign]
+        self.assertEqual(t.read_reg_stable(0x000C), 0x20)
+        self.assertEqual(calls, [0x000C, 0x000C])
+
 
 # ---------------------------------------------------------------------------
 # OpenOcdTransport failure modes
