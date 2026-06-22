@@ -85,4 +85,6 @@ run pnr
 
 puts "Deploying Bitstream"
 file mkdir $output_dir
-file copy -force ${project_dir}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs
+# Gowin create_project nests the project under ${project_dir}/${project_name},
+# so PnR writes the bitstream to ${project_dir}/${project_name}/impl/pnr/.
+file copy -force ${project_dir}/${project_name}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs
