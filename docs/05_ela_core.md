@@ -795,25 +795,21 @@ decoded form.
 
 ## Resource usage
 
-Vivado **synthesis**, **xc7a100t**, 2025.2 -- **Slice LUTs**. BRAM is
-Block RAM tiles (18K granularity counts as 0.5 where applicable).
-Rows that mention readout include the wrapper/TAP/register plumbing.
+A small `SAMPLE_W=8`, `DEPTH=1024` ELA fits in about **596 slice LUTs +
+0.5 BRAM** with simple USER1 readout, or **912 LUTs + 0.5 BRAM** with
+single-chain fast readout (`SINGLE_CHAIN_BURST=1`) on xc7a100t. Enabling
+dual comparators, storage qualification, the 4-stage sequencer, or wider
+samples grows LUTs/FFs and sometimes BRAM.
 
-| Configuration | Slice LUTs | FFs | BRAM | Notes |
-|---|---:|---:|---:|---|
-| `SAMPLE_W=8`, `DEPTH=1024`, A-only, slow USER1 readout | 596 | 779 | 0.5 | `DUAL_COMPARE=0`, optional features off |
-| `SAMPLE_W=8`, `DEPTH=1024`, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | `SINGLE_CHAIN_BURST=1` |
-| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | EQ/NEQ/edges/changed |
-| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | relational modes, registered compare hit |
-| Above + `STOR_QUAL=1` | 2,521 | 1,749 | 0.5 | storage qualification |
-| Above + `TRIG_STAGES=4` | 2,954 | 2,788 | 0.5 | 4-stage sequencer |
-| `SAMPLE_W=32`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | wider samples |
+The full per-configuration table — Slice LUTs, FFs, BRAM, and the
+`arty_a7_top` placed reference rows — is the canonical resource reference in
+[`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t).
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
 with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
 slice LUTs** and **1.5 BRAM tiles** after the EJTAG-AXI FIFO trim
-(see [README.md](../README.md#resource-usage)).
+(see [`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t)).
 Your tool and family will vary.
 
 ## What's next
