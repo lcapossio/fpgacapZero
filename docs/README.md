@@ -11,8 +11,8 @@ reviewable on its own.  Read them in order the first time, then come
 back to individual chapters as you need them.
 
 > **Tip**: this manual is in addition to the project README, which is
-> the elevator pitch and the quick-reference card.  When in doubt the
-> manual is more accurate; it is updated with every release.
+> a short overview and quick tour.  When in doubt the manual is more
+> accurate; it is updated with every release.
 
 ---
 
@@ -82,8 +82,8 @@ and should be corrected.
 
 ## Project resources
 
-- **README**: [`../README.md`](../README.md) — top-level pitch and
-  quick reference.
+- **README**: [`../README.md`](../README.md) — top-level overview and
+  quick tour.
 - **CHANGELOG**: [`../CHANGELOG.md`](../CHANGELOG.md) — every release
   with breaking changes called out.
 - **CONTRIBUTING**: [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — how
