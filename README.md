@@ -61,6 +61,8 @@ You need Python 3.10+, a JTAG-capable FPGA board, and either OpenOCD or Vivado
 hw_server. Full setup is in [Installation](docs/02_install.md).
 
 ```bash
+git clone https://github.com/lcapossio/fpgacapZero.git
+cd fpgacapZero
 pip install -e ".[gui]"     # core host stack + desktop GUI
 fcapz-gui                   # the easiest way to take your first capture
 ```
