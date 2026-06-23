@@ -67,6 +67,7 @@ class ConnectionPanel(QGroupBox):
         self._ir = QComboBox()
         self._ir.addItem("Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
+        self._ir.addItem("Gowin (OpenOCD)", "gowin")
 
         self._program_on_connect = QCheckBox("Program on connect")
         self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)

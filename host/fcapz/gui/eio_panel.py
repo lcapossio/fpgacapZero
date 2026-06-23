@@ -63,6 +63,17 @@ class EioPanel(QGroupBox):
         self._instance_spin.setValue(2)
         self._instance_spin.setToolTip("Core-manager slot index for this EIO.")
         self._instance_spin.valueChanged.connect(self._sync_core_combo_to_instance)
+        self._base_addr_spin = QSpinBox()
+        self._base_addr_spin.setRange(0, 0xFFFF)
+        self._base_addr_spin.setSingleStep(0x1000)
+        self._base_addr_spin.setDisplayIntegerBase(16)
+        self._base_addr_spin.setPrefix("0x")
+        self._base_addr_spin.setValue(0)
+        self._base_addr_spin.setToolTip(
+            "Register-bus mux offset for a shared-chain EIO. "
+            "Gowin (EIO_EN=1 on the ELA wrapper): 0x8000 on chain 1. "
+            "0 = standalone chain (e.g. Xilinx USER3).",
+        )
         self._attach_btn = QPushButton("Attach EIO")
         self._attach_btn.setToolTip(
             "Required before reads/writes. Legacy Arty: chain 3. "
@@ -130,6 +141,8 @@ class EioPanel(QGroupBox):
         manual_row.addWidget(self._managed_slot)
         manual_row.addWidget(QLabel("Slot"))
         manual_row.addWidget(self._instance_spin)
+        manual_row.addWidget(QLabel("Base"))
+        manual_row.addWidget(self._base_addr_spin)
         manual_row.addStretch(1)
         self._manual_row_widget = QWidget()
         self._manual_row_widget.setLayout(manual_row)
@@ -262,12 +275,17 @@ class EioPanel(QGroupBox):
             return None
         return int(self._instance_spin.value())
 
+    def base_addr(self) -> int:
+        """Register-bus mux offset for a shared-chain EIO (0 = standalone)."""
+        return int(self._base_addr_spin.value())
+
     def _apply_attach_ui_state(self, attached: bool) -> None:
         """Grey out probe UI until EIO is attached; keep chain + attach usable when connected."""
         has_transport = self._transport is not None
         managed_detected = bool(self._managed_eio_slots)
         self._manual_row_widget.setVisible(not managed_detected)
         self._chain_spin.setEnabled(has_transport and not attached)
+        self._base_addr_spin.setEnabled(has_transport and not attached)
         self._managed_slot.setEnabled(has_transport and not attached)
         self._core_combo.setEnabled(
             has_transport and managed_detected

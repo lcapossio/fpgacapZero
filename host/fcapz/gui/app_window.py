@@ -1233,6 +1233,7 @@ class MainWindow(QMainWindow):
                 t,
                 chain=self._eio_panel.chain(),
                 instance=self._eio_panel.instance(),
+                base_addr=self._eio_panel.base_addr(),
             )
             eio.attach()
         except (OSError, RuntimeError, ValueError) as exc:
