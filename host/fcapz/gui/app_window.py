@@ -43,10 +43,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
-from ..eio import EIO_CORE_ID, EioController
+from ..eio import EIO_CORE_ID, EioController, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
-from ..transport import OpenOcdTransport
 from .branding import GUI_DISPLAY_TITLE
 from .axi_panel import AxiPanel
 from .capture_panel import CapturePanel
@@ -545,14 +544,6 @@ class MainWindow(QMainWindow):
             ]
         self._capture.set_managed_ela_slots(ela_slots, current=0)
         self._eio_panel.set_managed_eio_slots(eio_slots)
-        if (
-            not eio_slots
-            and isinstance(analyzer.transport, OpenOcdTransport)
-            and analyzer.transport.ir_table == OpenOcdTransport.IR_TABLE_GOWIN
-        ):
-            # Gowin exposes one GW_JTAG primitive: when EIO_EN=1 the EIO core
-            # is muxed onto the ELA chain (chain 1) at register offset 0x8000.
-            self._eio_panel.apply_shared_chain_defaults(chain=1, base_addr=0x8000)
         self._dock_capture.setWindowTitle("ELA")
         self._dock_eio.setWindowTitle("EIO")
         self._axi_panel.set_transport_available(True)
@@ -573,8 +564,7 @@ class MainWindow(QMainWindow):
             msg = "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available)."
         self._conn.set_connected(True, msg)
         self.statusBar().showMessage(msg)
-        if eio_slots:
-            self._on_eio_attach()
+        self._auto_attach_eio(analyzer.transport, eio_slots)
 
         gui = load_gui_settings(self._config_path)
         gui.connection = conn
@@ -1233,29 +1223,59 @@ class MainWindow(QMainWindow):
         self._dock_capture.setWindowTitle("ELA capture")
         self._dock_eio.setWindowTitle("EIO")
 
+    def _discover_eio(self, transport, eio_slots) -> EioController | None:
+        """Probe known locations for the EIO core; never raise into the UI."""
+        try:
+            chains = sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+            return discover_eio(transport, chains=chains, instances=eio_slots or None)
+        except Exception:  # noqa: BLE001 - discovery must not break the UI
+            _log.exception("EIO discovery failed")
+            return None
+
+    def _auto_attach_eio(self, transport, eio_slots) -> None:
+        """Auto-attach EIO on connect so the user needn't pick a chain.
+
+        A core-manager slot is already known from topology, so attach it
+        directly; otherwise probe for a standalone / shared EIO.  Silent when
+        none is found.
+        """
+        if eio_slots:
+            try:
+                eio = EioController(transport, chain=1, instance=int(eio_slots[0]))
+                eio.attach()
+            except (OSError, RuntimeError, ValueError):
+                return
+        else:
+            eio = self._discover_eio(transport, None)
+            if eio is None:
+                return
+        self._eio = eio
+        self._eio_panel.bind_eio(transport, eio)
+        _log.info("EIO auto-attached (chain=%d)", eio.bscan_chain)
+
     def _on_eio_attach(self) -> None:
         if self._analyzer is None:
             return
         t = self._analyzer.transport
-        try:
-            eio = EioController(
-                t,
-                chain=self._eio_panel.chain(),
-                instance=self._eio_panel.instance(),
-                base_addr=self._eio_panel.base_addr(),
-            )
-            eio.attach()
-        except (OSError, RuntimeError, ValueError) as exc:
-            QMessageBox.warning(self, "EIO attach", str(exc))
-            return
+        # Auto-discover first so the user needn't pick a USER chain / offset.
+        eio = self._discover_eio(t, self._eio_panel.managed_slots())
+        if eio is None:
+            # Fall back to the panel's manual location (advanced override).
+            try:
+                eio = EioController(
+                    t,
+                    chain=self._eio_panel.chain(),
+                    instance=self._eio_panel.instance(),
+                    base_addr=self._eio_panel.base_addr(),
+                )
+                eio.attach()
+            except (OSError, RuntimeError, ValueError) as exc:
+                QMessageBox.warning(self, "EIO attach", str(exc))
+                return
         self._eio = eio
         self._eio_panel.bind_eio(t, eio)
         self.statusBar().showMessage("EIO attached")
-        _log.info(
-            "EIO attached (chain=%d, instance=%s)",
-            self._eio_panel.chain(),
-            self._eio_panel.instance(),
-        )
+        _log.info("EIO attached (chain=%d)", eio.bscan_chain)
 
     def _on_eio_detach(self) -> None:
         self._eio = None

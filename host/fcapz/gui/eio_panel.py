@@ -279,24 +279,9 @@ class EioPanel(QGroupBox):
         """Register-bus mux offset for a shared-chain EIO (0 = standalone)."""
         return int(self._base_addr_spin.value())
 
-    def apply_shared_chain_defaults(self, chain: int, base_addr: int) -> None:
-        """Pre-fill the manual EIO location for a shared-chain core.
-
-        Used for Gowin (EIO_EN=1 muxes EIO onto the ELA chain at 0x8000) so the
-        user only has to click Attach.  No-op once attached or when a
-        core-manager topology was detected.
-        """
-        if self._eio is not None or self._managed_eio_slots:
-            return
-        self._managed_slot.setChecked(False)
-        self._chain_spin.setValue(int(chain))
-        self._base_addr_spin.setValue(int(base_addr))
-        self._chain_value.setText(f"chain {int(chain)}")
-        self._slot_value.setText("slot direct")
-        self._info.setText(
-            f"Shared-chain EIO defaults set (chain {int(chain)}, "
-            f"base 0x{int(base_addr):04X}). Click Attach EIO."
-        )
+    def managed_slots(self) -> list[int]:
+        """Core-manager EIO slots detected from topology (empty if none)."""
+        return list(self._managed_eio_slots)
 
     def _apply_attach_ui_state(self, attached: bool) -> None:
         """Grey out probe UI until EIO is attached; keep chain + attach usable when connected."""

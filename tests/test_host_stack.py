@@ -22,7 +22,7 @@ from fcapz.analyzer import (
     TriggerConfig,
     expected_ela_version_reg,
 )
-from fcapz.eio import EIO_CORE_ID, EioController
+from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
 from fcapz.transport import Transport
 
 
@@ -893,6 +893,65 @@ class FakeVioTransport(Transport):
 
     def read_block(self, addr: int, words: int):
         return [0] * words
+
+
+class FakeDiscoveryTransport(Transport):
+    """EIO present only at one (chain, base); every other read is non-EIO."""
+
+    def __init__(self, *, eio_chain: int, eio_base: int, ir_table: dict[int, int]):
+        self._active_chain = 1
+        self.eio_chain = eio_chain
+        self.eio_base = eio_base
+        self.ir_table = dict(ir_table)
+
+    def connect(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def select_chain(self, chain: int) -> None:
+        if chain not in self.ir_table:
+            raise ValueError(f"chain {chain} not in ir_table")
+        self._active_chain = chain
+
+    def read_reg(self, addr: int) -> int:
+        if self._active_chain == self.eio_chain and addr == self.eio_base:
+            return _expected_eio_version_reg()  # VERSION with 'IO' magic
+        if addr == (self.eio_base | 0x0004):
+            return 2  # IN_W
+        if addr == (self.eio_base | 0x0008):
+            return 6  # OUT_W
+        return 0x00004C41  # ELA 'LA' magic elsewhere — not EIO
+
+    def write_reg(self, addr: int, value: int) -> None:
+        return None
+
+    def read_block(self, addr: int, words: int):
+        return [0] * words
+
+
+class DiscoverEioTests(unittest.TestCase):
+    def test_discovers_shared_chain_location(self):
+        """Finds EIO muxed at chain 1 / base 0x8000 (Gowin shape)."""
+        t = FakeDiscoveryTransport(eio_chain=1, eio_base=0x8000, ir_table={1: 0x42, 2: 0x43})
+        eio = discover_eio(t, chains=(1, 2))
+        self.assertIsNotNone(eio)
+        self.assertEqual(eio.bscan_chain, 1)
+        self.assertEqual(eio._base_addr, 0x8000)
+        self.assertEqual((eio.in_w, eio.out_w), (2, 6))
+
+    def test_discovers_standalone_chain(self):
+        """Finds a standalone EIO on a non-default chain at base 0."""
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0000, ir_table={1: 1, 2: 2, 3: 3, 4: 4})
+        eio = discover_eio(t, chains=(1, 2, 3, 4))
+        self.assertIsNotNone(eio)
+        self.assertEqual(eio.bscan_chain, 3)
+
+    def test_returns_none_when_no_eio(self):
+        """No EIO anywhere -> None (e.g. EIO_EN=0 bitstream)."""
+        t = FakeDiscoveryTransport(eio_chain=9, eio_base=0x0, ir_table={1: 1, 2: 2})
+        self.assertIsNone(discover_eio(t, chains=(1, 2)))
 
 
 class EioControllerTests(unittest.TestCase):
