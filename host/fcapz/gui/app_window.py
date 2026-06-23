@@ -46,6 +46,7 @@ from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
 from ..eio import EIO_CORE_ID, EioController
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
+from ..transport import OpenOcdTransport
 from .branding import GUI_DISPLAY_TITLE
 from .axi_panel import AxiPanel
 from .capture_panel import CapturePanel
@@ -544,6 +545,14 @@ class MainWindow(QMainWindow):
             ]
         self._capture.set_managed_ela_slots(ela_slots, current=0)
         self._eio_panel.set_managed_eio_slots(eio_slots)
+        if (
+            not eio_slots
+            and isinstance(analyzer.transport, OpenOcdTransport)
+            and analyzer.transport.ir_table == OpenOcdTransport.IR_TABLE_GOWIN
+        ):
+            # Gowin exposes one GW_JTAG primitive: when EIO_EN=1 the EIO core
+            # is muxed onto the ELA chain (chain 1) at register offset 0x8000.
+            self._eio_panel.apply_shared_chain_defaults(chain=1, base_addr=0x8000)
         self._dock_capture.setWindowTitle("ELA")
         self._dock_eio.setWindowTitle("EIO")
         self._axi_panel.set_transport_available(True)

@@ -301,6 +301,18 @@ def test_eio_attach_passes_shared_chain_base_addr(qtbot: Any, tmp_path: Path) ->
 
 
 @pytest.mark.gui
+def test_eio_panel_apply_shared_chain_defaults(qtbot: Any) -> None:
+    """Gowin pre-fill sets chain 1 + base 0x8000 with no managed slot."""
+    from fcapz.gui.eio_panel import EioPanel
+
+    p = EioPanel()
+    qtbot.addWidget(p)
+    p.apply_shared_chain_defaults(chain=1, base_addr=0x8000)
+    assert p.chain() == 1
+    assert p.base_addr() == 0x8000
+    assert p.instance() is None
+
+
 def test_eio_detach_reenables_managed_slot_choice(qtbot: Any, tmp_path: Path) -> None:
     gui_path = tmp_path / "gui.toml"
     with ExitStack() as ex:
