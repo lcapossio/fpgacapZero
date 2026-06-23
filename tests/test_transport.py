@@ -229,6 +229,42 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t = OpenOcdTransport()
         t.close()  # must not raise
 
+    def test_list_taps_parses_jtag_names(self):
+        """list_taps() splits OpenOCD 'jtag names' output."""
+        t = OpenOcdTransport()
+        with patch.object(t, "_cmd", return_value="GW1NR-9C.tap"):
+            self.assertEqual(t.list_taps(), ["GW1NR-9C.tap"])
+
+    def test_connect_resolves_auto_tap_to_first(self):
+        """tap='auto' is resolved to the first tap OpenOCD reports on connect."""
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        with patch("socket.create_connection", return_value=mock_sock), patch.object(
+            OpenOcdTransport, "list_taps", return_value=["GW1NR-9C.tap", "other.tap"]
+        ):
+            t = OpenOcdTransport(tap="auto")
+            t.connect()
+            self.assertEqual(t.tap, "GW1NR-9C.tap")
+
+    def test_connect_keeps_explicit_tap(self):
+        """A concrete tap name is left untouched (no auto-resolution)."""
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        with patch("socket.create_connection", return_value=mock_sock), patch.object(
+            OpenOcdTransport, "list_taps"
+        ) as list_taps:
+            t = OpenOcdTransport(tap="GW1NR-9C.tap")
+            t.connect()
+            self.assertEqual(t.tap, "GW1NR-9C.tap")
+            list_taps.assert_not_called()
+
+    def test_resolve_auto_tap_raises_when_no_taps(self):
+        """tap='auto' against an OpenOCD with no taps gives a clear error."""
+        t = OpenOcdTransport(tap="auto")
+        with patch.object(t, "list_taps", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "no JTAG taps"):
+                t._resolve_auto_tap()
+
     def test_select_chain_unknown_raises_value_error(self):
         """select_chain() with a chain not in ir_table raises ValueError."""
         t = OpenOcdTransport()

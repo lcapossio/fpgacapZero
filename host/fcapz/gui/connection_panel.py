@@ -53,9 +53,13 @@ class ConnectionPanel(QGroupBox):
         self._tap = QComboBox()
         self._tap.setEditable(True)
         self._tap.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._tap.lineEdit().setPlaceholderText("xc7a100t.tap or FPGA target name")
+        self._tap.lineEdit().setPlaceholderText(
+            "xc7a100t.tap, FPGA target, or 'auto' (OpenOCD picks the first tap)"
+        )
         self._scan_targets_btn = QPushButton("Scan")
-        self._scan_targets_btn.setToolTip("List JTAG targets from hw_server / XSDB.")
+        self._scan_targets_btn.setToolTip(
+            "List JTAG targets (hw_server/XSDB) or tap names (OpenOCD 'jtag names')."
+        )
         self._scan_targets_btn.clicked.connect(self._scan_targets)
 
         tap_row = QWidget()
@@ -169,34 +173,42 @@ class ConnectionPanel(QGroupBox):
         self._backend.currentIndexChanged.connect(self._on_backend_changed)
         self._on_backend_changed()
 
+    def _backend_supports_scan(self) -> bool:
+        return self._backend.currentData() in ("hw_server", "openocd")
+
     def _on_backend_changed(self) -> None:
         is_hw = self._backend.currentData() == "hw_server"
         self._program_on_connect.setEnabled(is_hw)
         self._program.setEnabled(is_hw)
-        self._scan_targets_btn.setEnabled(is_hw and not self._connected)
+        self._scan_targets_btn.setEnabled(
+            self._backend_supports_scan() and not self._connected
+        )
         self._refresh_timeout_row_state()
 
     def _scan_targets(self) -> None:
         if self._scan_thread is not None and self._scan_thread.isRunning():
             return
-        if self._backend.currentData() != "hw_server":
+        backend = self._backend.currentData()
+        if not self._backend_supports_scan():
             QMessageBox.information(
                 self,
                 "Scan targets",
-                "JTAG target scanning is currently available for hw_server only.",
+                "JTAG scanning is available for the hw_server and OpenOCD backends.",
             )
             return
         host = self._host.text().strip() or "127.0.0.1"
         port = int(self._port.value())
-        if port == 6666:
+        if backend == "hw_server" and port == 6666:
             port = 3121
-        self._status.setText(f"Scanning JTAG targets on {host}:{port}...")
+        kind = "targets" if backend == "hw_server" else "taps"
+        self._status.setText(f"Scanning JTAG {kind} on {host}:{port}...")
         self._scan_targets_btn.setEnabled(False)
         thread = QThread()
         worker = TargetScanWorker(
             host=host,
             port=port,
             timeout_sec=float(self._tcp_timeout.value()),
+            backend=backend,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -244,11 +256,11 @@ class ConnectionPanel(QGroupBox):
     def _on_scan_targets_finished(self, targets: object) -> None:
         target_list = [str(t) for t in targets] if isinstance(targets, list) else []
         if not target_list:
-            self._status.setText("Scan complete: no JTAG targets reported.")
+            self._status.setText("Scan complete: no JTAG taps/targets reported.")
             QMessageBox.information(
                 self,
                 "Scan targets",
-                "hw_server responded, but XSDB did not report any JTAG targets.",
+                "The backend responded but reported no JTAG taps/targets.",
             )
             return
         self._replace_scanned_targets(target_list)
@@ -263,7 +275,7 @@ class ConnectionPanel(QGroupBox):
         self._scan_worker = None
         self._scan_thread = None
         self._scan_targets_btn.setEnabled(
-            self._backend.currentData() == "hw_server" and not self._connected
+            self._backend_supports_scan() and not self._connected
         )
 
     def _will_program_bitfile(self) -> bool:
@@ -384,7 +396,7 @@ class ConnectionPanel(QGroupBox):
         self._tap.setEnabled(editable)
         self._ir.setEnabled(editable)
         is_hw = self._backend.currentData() == "hw_server"
-        self._scan_targets_btn.setEnabled(editable and is_hw)
+        self._scan_targets_btn.setEnabled(editable and self._backend_supports_scan())
         self._program_on_connect.setEnabled(editable and is_hw)
         self._program.setEnabled(editable and is_hw)
         self._tcp_timeout.setEnabled(editable)
