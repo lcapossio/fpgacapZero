@@ -5,9 +5,12 @@ BRS-100-GW1NR9 board. It targets the `GW1NR-LV9QN88PC7/I6` device and
 instantiates the fpgacapZero Gowin ELA wrapper through the `GW_JTAG`
 primitive.
 
-The design is deliberately small: it builds one ELA, drives the board LEDs
-from simple local status signals, and captures internal counters, buttons, and
-header I/O through a six-channel probe mux.
+The design is deliberately small but exercises two cores over the single
+`GW_JTAG` primitive: an **ELA** that captures internal counters, the user
+buttons, and header I/O through a six-channel probe mux, and an **EIO** that
+exposes the two user buttons (host-readable) and drives the six board LEDs
+(host-controlled over JTAG). The EIO shares the ELA's JTAG chain through the
+register-bus mux at offset `0x8000`.
 
 ## Files
 
@@ -29,7 +32,8 @@ header I/O through a six-channel probe mux.
 - ELA sample width: 8 bits
 - ELA depth: 64 samples
 - ELA channels: 6
-- EIO: disabled in this example
+- EIO: enabled — 2 inputs (user buttons), 6 outputs (board LEDs)
+- EIO location: shares the ELA chain (chain 1) at register-bus mux offset `0x8000`
 
 The ELA probe bus is split into six 8-bit channels:
 
@@ -44,20 +48,13 @@ The ELA probe bus is split into six 8-bit channels:
 
 ## Board I/O
 
-The LEDs are active-low at the pads and are driven from these internal status
-signals:
+The six LEDs are **driven by the EIO output register** — the host controls them
+over JTAG (`eio.write_outputs`). They are active-low at the pads; EIO
+`probe_out[5:0]` maps to LED[5:0].
 
-| LED | Meaning |
-| --- | --- |
-| 0 | 1 Hz heartbeat |
-| 1 | JTAG activity indicator |
-| 2 | User button 0 |
-| 3 | User button 1 |
-| 4 | `pad_io[1]` |
-| 5 | `pad_io[2]` |
-
-The two user buttons are active-low on the board and are sampled into the
-60 MHz domain before being exposed through ELA channel 1.
+The two user buttons are active-low on the board, sampled into the 60 MHz
+domain, and exposed two ways: through **EIO `probe_in[1:0]`** (host-readable via
+`eio.read_inputs`) and through **ELA channel 1** (captured into a waveform).
 
 ## Build
 
@@ -132,6 +129,44 @@ fcapz --backend openocd --host 127.0.0.1 --port 6666 \
 
 For VCD output, change `--format json` to `--format vcd` and use a `.vcd`
 output path.
+
+## Embedded I/O (EIO)
+
+The EIO core shares the ELA's JTAG chain (chain 1) at register-bus mux offset
+`0x8000`. Read the buttons via `probe_in`, drive the LEDs via `probe_out`.
+
+**Desktop GUI** (easiest): connect with backend **OpenOCD**, tap `GW1NR-9C.tap`
+(or `auto`), IR table **Gowin** — the GUI **auto-discovers and attaches** the
+EIO, so there is no chain or offset to enter. Toggle the six output bits to
+drive the LEDs, and enable *Poll inputs* to watch the buttons.
+
+**CLI** — pass the shared-chain location explicitly (`--chain 1 --base-addr
+0x8000`):
+
+```sh
+# Read the two buttons (probe_in)
+fcapz --backend openocd --host 127.0.0.1 --port 6666 \
+  --tap GW1NR-9C.tap eio-read --chain 1 --base-addr 0x8000
+
+# Drive the six LEDs (probe_out): light LED0/2/4
+fcapz --backend openocd --host 127.0.0.1 --port 6666 \
+  --tap GW1NR-9C.tap eio-write --chain 1 --base-addr 0x8000 0x15
+```
+
+**Python API:**
+
+```python
+from fcapz.transport import OpenOcdTransport
+from fcapz.eio import EioController
+
+t = OpenOcdTransport(port=6666, tap="GW1NR-9C.tap",
+                     ir_table=OpenOcdTransport.IR_TABLE_GOWIN)
+t.connect()
+eio = EioController(t, chain=1, base_addr=0x8000)
+eio.attach()
+print(eio.read_inputs())   # buttons (probe_in[1:0])
+eio.write_outputs(0x3F)    # all six LEDs on
+```
 
 ## Notes
 

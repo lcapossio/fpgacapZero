@@ -548,6 +548,15 @@ class RpcBooleanValidationTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_eio_parsers_accept_base_addr_for_shared_chain(self):
+        parser = build_parser()
+        for cmd, extra in (("eio-probe", []), ("eio-read", []), ("eio-write", ["0x3f"])):
+            args = parser.parse_args([cmd, "--chain", "1", "--base-addr", "0x8000", *extra])
+            self.assertEqual(args.chain, 1)
+            self.assertEqual(args.base_addr, 0x8000)
+        # Default is 0 (standalone chain, e.g. Xilinx USER3)
+        self.assertEqual(parser.parse_args(["eio-read"]).base_addr, 0)
+
     def test_capture_parser_accepts_channel_and_probes(self):
         parser = build_parser()
         args = parser.parse_args(

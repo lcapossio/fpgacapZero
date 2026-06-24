@@ -359,11 +359,17 @@ wrote 0x55
 All three EIO subcommands take `--chain N` (default 3) to override
 the BSCANE2 USER chain. For mixed-manager designs where EIO shares USER1,
 also pass `--instance N` to select the EIO slot before each register access.
+For a **shared-chain** EIO that is address-muxed onto another core's chain
+(e.g. Gowin `EIO_EN=1` at offset `0x8000`), pass `--base-addr` instead:
 
 ```bash
 fcapz --backend hw_server --tap xc7a100t eio-probe --chain 1 --instance 2
 fcapz --backend hw_server --tap xc7a100t eio-write --chain 1 --instance 2 0x11
 fcapz --backend hw_server --tap xc7a100t eio-read --chain 1 --instance 2
+
+# Gowin shared-chain EIO (chain 1, mux offset 0x8000):
+fcapz --backend openocd --tap GW1NR-9C.tap eio-read  --chain 1 --base-addr 0x8000
+fcapz --backend openocd --tap GW1NR-9C.tap eio-write --chain 1 --base-addr 0x8000 0x15
 ```
 
 ## AXI subcommands
