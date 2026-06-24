@@ -168,13 +168,29 @@ print(eio.read_inputs())   # buttons (probe_in[1:0])
 eio.write_outputs(0x3F)    # all six LEDs on
 ```
 
+## Hardware tests
+
+`test_hw_integration.py` is an opt-in regression that drives the board over
+OpenOCD. Build + load the bitstream, start OpenOCD, then:
+
+```sh
+openocd -f examples/brs_100_gw1nr9/brs_100_gw1nr9.cfg &
+python -m pytest examples/brs_100_gw1nr9/test_hw_integration.py -v
+```
+
+It covers the ELA (identity, a counter capture with `+1` per-sample checks,
+trigger match, register roundtrip, JSON/VCD export) and the shared-chain EIO
+(identity/widths, auto-discovery, LED output roundtrip, button reads). Without a
+board the tests **skip** (OpenOCD unreachable or no fcapz design loaded); set
+`FPGACAP_SKIP_HW=1` to skip unconditionally. Override the port/tap with
+`FPGACAP_OPENOCD_PORT` / `FPGACAP_OPENOCD_TAP`.
+
 ## Notes
 
 - This example uses Gowin register-path ELA readback, not Xilinx-style burst
   readback.
 - OpenOCD must already be running; the fpgacapZero OpenOCD transport does not
   program the FPGA.
-- The example does not include hardware regression tests yet.
 
 ## More Detail
 
