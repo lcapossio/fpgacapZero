@@ -1,12 +1,16 @@
 import { useState } from "react";
 import { parseIntFlexible, rpc } from "../api";
-import type { CaptureSample, Identity } from "../api";
-import { Waveform } from "./Waveform";
-import { SurferView } from "./SurferView";
+import type { Identity } from "../api";
 
-type Viewer = "canvas" | "surfer";
-
-export function ElaPanel({ identity }: { identity: Identity }) {
+/** ELA capture controls. The waveform itself renders in the Viewer (Surfer) tab;
+ *  a successful capture is pushed up via onCaptured as VCD text. */
+export function ElaPanel({
+  identity,
+  onCaptured,
+}: {
+  identity: Identity;
+  onCaptured: (vcd: string) => void;
+}) {
   const [channel, setChannel] = useState("0");
   const [pretrigger, setPre] = useState("8");
   const [posttrigger, setPost] = useState("16");
@@ -15,14 +19,13 @@ export function ElaPanel({ identity }: { identity: Identity }) {
   const [triggerMask, setTriggerMask] = useState("0xFF");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [samples, setSamples] = useState<number[]>([]);
-  const [vcd, setVcd] = useState("");
+  const [status, setStatus] = useState("");
   const [overflow, setOverflow] = useState(false);
-  const [viewer, setViewer] = useState<Viewer>("canvas");
 
   async function capture() {
     setBusy(true);
     setError("");
+    setStatus("");
     try {
       const r = await rpc("capture", {
         channel: Number(channel),
@@ -34,12 +37,11 @@ export function ElaPanel({ identity }: { identity: Identity }) {
         sample_width: identity.sample_width,
         depth: identity.depth,
         timeout: 10.0,
-        include_vcd: true, // so the Surfer viewer can load it without re-capture
+        include_vcd: true, // the Viewer tab loads this into Surfer
       });
-      const result = r.result as { samples: CaptureSample[] };
-      setSamples(result.samples.map((s) => s.value));
-      setVcd(typeof r.vcd === "string" ? r.vcd : "");
       setOverflow(Boolean(r.overflow));
+      setStatus(`captured ${r.sample_count ?? "?"} samples — see the Viewer tab`);
+      if (typeof r.vcd === "string") onCaptured(r.vcd);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -93,38 +95,8 @@ export function ElaPanel({ identity }: { identity: Identity }) {
         {busy ? "Capturing…" : "Capture"}
       </button>
       {overflow && <p className="warn">overflow</p>}
+      {status && <p className="muted">{status}</p>}
       {error && <p className="err">{error}</p>}
-      {samples.length > 0 && (
-        <>
-          <div className="btnrow">
-            <label className="inline">
-              <input
-                type="radio"
-                name="viewer"
-                checked={viewer === "canvas"}
-                onChange={() => setViewer("canvas")}
-              />{" "}
-              built-in
-            </label>
-            <label className="inline">
-              <input
-                type="radio"
-                name="viewer"
-                checked={viewer === "surfer"}
-                onChange={() => setViewer("surfer")}
-              />{" "}
-              Surfer
-            </label>
-          </div>
-          {viewer === "canvas" ? (
-            <Waveform samples={samples} sampleWidth={identity.sample_width} />
-          ) : vcd ? (
-            <SurferView vcd={vcd} />
-          ) : (
-            <p className="muted">no VCD for this capture</p>
-          )}
-        </>
-      )}
     </section>
   );
 }

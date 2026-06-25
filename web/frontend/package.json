@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dockview": "^7.0.2",
+    "dockview-react": "^7.0.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
