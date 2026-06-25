@@ -24,7 +24,7 @@ this bundle. The server mounts this dir separately at `/surfer`.
 | `surfer.js` | Surfer wasm-bindgen loader, verbatim (SRI `sha384-Kc5ZVkDQDk7t3Zkgls2HjZa6/RXuuuARTkkR5WyevFHvZQkaqAFVbdpXJTrePLUk`) |
 | `integration.js` | Surfer iframe `postMessage` bridge, verbatim |
 | `manifest.json` | Surfer PWA manifest, verbatim |
-| `index.html` | Surfer page — **only change:** the service-worker registration is removed (we serve offline, no PWA cache) |
+| `index.html` | Surfer page — **changes:** service-worker registration removed (offline, no PWA cache); a `SURFER_SETUP_HOOKS` line injects `{"SetSidePanelVisible": false}` so the scope/variable side panel is hidden at launch (signals are auto-added by the host) |
 | `LICENSE.EUPL-1.2.txt` | Canonical EUPL-1.2 text (SPDX) |
 
 ## How it's driven
@@ -42,4 +42,5 @@ CLI use.
 ## Updating
 
 Re-download the five upstream files from app.surfer-project.org, re-strip the
-service-worker `<script>` from `index.html`, and refresh the SRI hashes above.
+service-worker `<script>` from `index.html`, re-apply the `SURFER_SETUP_HOOKS`
+side-panel line, and refresh the SRI hashes above.
