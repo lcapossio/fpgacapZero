@@ -131,6 +131,26 @@ def test_eio_shared_chain_over_rpc(monkeypatch):
     assert rd["value"] == 0b01  # the EIO input register
 
 
+def test_scan_targets_openocd(monkeypatch):
+    monkeypatch.setattr("fcapz.rpc.list_openocd_taps", lambda **kw: ["GW1NR-9C.tap"])
+    c = _client(monkeypatch)
+    r = _rpc(c, "scan_targets", backend="openocd").json()
+    assert r["ok"] is True
+    assert r["targets"] == ["GW1NR-9C.tap"]
+    assert r["backend"] == "openocd"
+
+
+def test_eio_discover_finds_shared_chain(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "eio_discover", **_GOWIN).json()
+    assert r["ok"] is True, r
+    assert r["discovered"] is True
+    assert r["chain"] == 1
+    assert r["base_addr"] == 0x8000
+    assert (r["in_w"], r["out_w"]) == (2, 6)
+
+
 def test_ir_table_mapping():
     assert RpcServer._ir_table("xilinx7") is None
     assert RpcServer._ir_table("gowin") is not None

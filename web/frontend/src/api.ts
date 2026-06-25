@@ -45,20 +45,43 @@ export function setToken(token: string): void {
 export async function rpc(
   cmd: string,
   params: Record<string, unknown> = {},
+  timeoutMs = 8000,
 ): Promise<RpcResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch("/api/rpc", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ cmd, ...params }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch("/api/rpc", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ cmd, ...params }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`'${cmd}' timed out after ${timeoutMs / 1000}s`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (res.status === 401) throw new Error("unauthorized — set the API token");
   const data = (await res.json()) as RpcResponse;
   if (!data.ok) throw new Error(data.error || `command '${cmd}' failed`);
   return data;
+}
+
+/** Guess the IR table from a tap/target name. */
+export function inferIrTable(tap: string): string {
+  const t = tap.toLowerCase();
+  if (t.startsWith("gw")) return "gowin";
+  if (t.startsWith("xcku") || t.startsWith("xcvu") || t.startsWith("xcau"))
+    return "ultrascale";
+  return "xilinx7";
 }
 
 /** Parse a decimal or 0x-hex string into a number. */

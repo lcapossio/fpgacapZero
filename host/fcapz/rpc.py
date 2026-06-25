@@ -9,12 +9,18 @@ import traceback
 from typing import Any, Dict
 
 from .analyzer import Analyzer, CaptureConfig, ProbeSpec, TriggerConfig
-from .eio import EioController
+from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from .transport import (
+    OpenOcdTransport,
+    Transport,
+    XilinxHwServerTransport,
+    list_openocd_taps,
+    list_xilinx_hw_server_targets,
+)
 
 _SCHEMA_VERSION = "1.1"
 
@@ -248,6 +254,25 @@ class RpcServer:
                 self._analyzer = None
             return self._ok()
 
+        if cmd == "scan_targets":
+            backend = req.get("backend", "hw_server")
+            host = req.get("host", "127.0.0.1")
+            if backend == "openocd":
+                taps = list_openocd_taps(
+                    host=host,
+                    port=int(req.get("port", 6666)),
+                    timeout_sec=float(req.get("timeout", 5.0)),
+                )
+                return self._ok(backend="openocd", targets=taps)
+            if backend == "hw_server":
+                targets = list_xilinx_hw_server_targets(
+                    host=host,
+                    port=int(req.get("port", 3121)),
+                    timeout_sec=float(req.get("timeout", 10.0)),
+                )
+                return self._ok(backend="hw_server", targets=targets)
+            raise ValueError(f"unknown backend: {backend}")
+
         analyzer = self._ensure_analyzer()
 
         if cmd == "probe":
@@ -294,6 +319,37 @@ class RpcServer:
                 chain=chain,
                 base_addr=base_addr,
             )
+
+        if cmd == "eio_discover":
+            if self._eio is not None:
+                self._eio.close()
+                self._eio = None
+            transport = self._build_transport(req)
+            transport.connect()
+            try:
+                chains = req.get("chains")
+                chains = (
+                    [int(c) for c in chains]
+                    if chains
+                    else sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+                )
+                eio = discover_eio(transport, chains=chains)
+                if eio is None:
+                    raise RuntimeError("no EIO core found on the target")
+                self._eio = eio
+                return self._ok(
+                    discovered=True,
+                    in_w=eio.in_w,
+                    out_w=eio.out_w,
+                    chain=eio.bscan_chain,
+                    base_addr=eio._base_addr,  # noqa: SLF001 - report discovered offset
+                )
+            except Exception:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
 
         if cmd == "eio_close":
             if self._eio is not None:

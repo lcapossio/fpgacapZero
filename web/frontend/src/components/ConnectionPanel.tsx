@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { getToken, rpc, setToken } from "../api";
+import { getToken, inferIrTable, rpc, setToken } from "../api";
 import type { ConnectionParams, Identity } from "../api";
 
 const BACKENDS = ["openocd", "hw_server"];
-const IR_TABLES = ["xilinx7", "ultrascale", "gowin"];
+const CONNECT_TIMEOUT = 6000;
 
 export function ConnectionPanel({
   identity,
@@ -17,29 +17,56 @@ export function ConnectionPanel({
   const [backend, setBackend] = useState("openocd");
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("6666");
-  const [tap, setTap] = useState("GW1NR-9C.tap");
-  const [irTable, setIrTable] = useState("gowin");
-  const [chain, setChain] = useState("1");
   const [token, setTok] = useState(getToken());
+  const [manualTap, setManualTap] = useState("");
+  const [targets, setTargets] = useState<string[]>([]);
+  const [picked, setPicked] = useState("");
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
-  async function connect() {
-    setBusy(true);
-    setError("");
-    setToken(token);
+  async function connectTo(tap: string) {
+    setStatus(`connecting to ${tap}…`);
     const params: ConnectionParams = {
       backend,
       host,
       port: Number(port),
       tap,
-      ir_table: irTable,
-      chain: Number(chain),
+      ir_table: inferIrTable(tap),
+      chain: 1,
     };
+    await rpc("connect", params as unknown as Record<string, unknown>, CONNECT_TIMEOUT);
+    const r = await rpc("probe", {}, CONNECT_TIMEOUT);
+    onConnected(params, r.probe as Identity);
+  }
+
+  async function connect() {
+    setBusy(true);
+    setError("");
+    setStatus("");
+    setTargets([]);
+    setToken(token);
     try {
-      await rpc("connect", params as unknown as Record<string, unknown>);
-      const r = await rpc("probe");
-      onConnected(params, r.probe as Identity);
+      if (manualTap.trim()) {
+        await connectTo(manualTap.trim());
+        return;
+      }
+      setStatus("scanning for targets…");
+      const r = await rpc(
+        "scan_targets",
+        { backend, host, port: Number(port) },
+        CONNECT_TIMEOUT,
+      );
+      const found = (r.targets as string[]) ?? [];
+      if (found.length === 0) {
+        setError("no JTAG targets found — check the board / OpenOCD, or enter a tap manually.");
+      } else if (found.length === 1) {
+        await connectTo(found[0]);
+      } else {
+        setTargets(found);
+        setPicked(found[0]);
+        setStatus(`${found.length} targets found — pick one`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       onDisconnected();
@@ -48,13 +75,26 @@ export function ConnectionPanel({
     }
   }
 
+  async function connectPicked() {
+    setBusy(true);
+    setError("");
+    try {
+      await connectTo(picked);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     setBusy(true);
     try {
-      await rpc("close");
+      await rpc("close", {}, CONNECT_TIMEOUT);
     } catch {
       /* already gone */
     }
+    setTargets([]);
     onDisconnected();
     setBusy(false);
   }
@@ -97,33 +137,44 @@ export function ConnectionPanel({
           <input value={port} onChange={(e) => setPort(e.target.value)} />
         </label>
         <label>
-          TAP / target
-          <input value={tap} onChange={(e) => setTap(e.target.value)} />
-        </label>
-        <label>
-          IR table
-          <select value={irTable} onChange={(e) => setIrTable(e.target.value)}>
-            {IR_TABLES.map((t) => (
-              <option key={t}>{t}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Chain
-          <input value={chain} onChange={(e) => setChain(e.target.value)} />
-        </label>
-        <label>
           API token
           <input
             value={token}
             onChange={(e) => setTok(e.target.value)}
-            placeholder="(only if the server set one)"
+            placeholder="(if server set one)"
+          />
+        </label>
+        <label>
+          Tap (optional)
+          <input
+            value={manualTap}
+            onChange={(e) => setManualTap(e.target.value)}
+            placeholder="auto-detected if blank"
           />
         </label>
       </div>
-      <button onClick={connect} disabled={busy}>
-        {busy ? "Connecting…" : "Connect"}
-      </button>
+
+      {targets.length > 1 ? (
+        <div className="form">
+          <label>
+            Target
+            <select value={picked} onChange={(e) => setPicked(e.target.value)}>
+              {targets.map((t) => (
+                <option key={t}>{t}</option>
+              ))}
+            </select>
+          </label>
+          <button onClick={connectPicked} disabled={busy}>
+            Connect to {picked}
+          </button>
+        </div>
+      ) : (
+        <button onClick={connect} disabled={busy}>
+          {busy ? "Working…" : "Connect"}
+        </button>
+      )}
+
+      {status && <p className="muted">{status}</p>}
       {error && <p className="err">{error}</p>}
     </section>
   );

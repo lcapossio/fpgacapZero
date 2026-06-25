@@ -115,6 +115,24 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+def list_openocd_taps(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 6666,
+    timeout_sec: float = 5.0,
+) -> list[str]:
+    """Return JTAG tap names from a running OpenOCD instance (``jtag names``).
+
+    Requires OpenOCD to already be listening on its TCL RPC port (default 6666).
+    """
+    t = OpenOcdTransport(host=host, port=port, connect_timeout_sec=timeout_sec)
+    t.connect()
+    try:
+        return t.list_taps()
+    finally:
+        t.close()
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -333,6 +351,22 @@ class OpenOcdTransport(Transport):
         except OSError:
             pass
         self._sock.settimeout(5)
+        if self.tap.strip().lower() in ("", "auto"):
+            self.tap = self._resolve_auto_tap()
+
+    def list_taps(self) -> list[str]:
+        """Return the JTAG tap names OpenOCD has configured (``jtag names``)."""
+        return self._cmd("jtag names").split()
+
+    def _resolve_auto_tap(self) -> str:
+        """Resolve ``tap='auto'`` to the first name OpenOCD reports."""
+        taps = self.list_taps()
+        if not taps:
+            raise RuntimeError(
+                "tap='auto' but OpenOCD reports no JTAG taps. "
+                "Check your openocd.cfg ('jtag newtap ...')."
+            )
+        return taps[0]
 
     def close(self) -> None:
         if self._sock:
