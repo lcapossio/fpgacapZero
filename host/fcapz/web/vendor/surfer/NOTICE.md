@@ -24,7 +24,7 @@ this bundle. The server mounts this dir separately at `/surfer`.
 | `surfer.js` | Surfer wasm-bindgen loader, verbatim (SRI `sha384-Kc5ZVkDQDk7t3Zkgls2HjZa6/RXuuuARTkkR5WyevFHvZQkaqAFVbdpXJTrePLUk`) |
 | `integration.js` | Surfer iframe `postMessage` bridge, verbatim |
 | `manifest.json` | Surfer PWA manifest, verbatim |
-| `index.html` | Surfer page — **changes:** service-worker registration removed (offline, no PWA cache); a `SURFER_SETUP_HOOKS` line injects `{"SetSidePanelVisible": false}` so the scope/variable side panel is hidden at launch (signals are auto-added by the host) |
+| `index.html` | Surfer page — **changes:** service-worker registration removed (offline, no PWA cache); `SURFER_SETUP_HOOKS` injects `{"SetSidePanelVisible": false}`, `{"SetMenuVisible": false}` and `{"SetStatusbarVisible": false}` so the scope/variable side panel, menu bar and status bar are hidden at launch — the toolbar stays (signals are auto-added by the host) |
 | `LICENSE.EUPL-1.2.txt` | Canonical EUPL-1.2 text (SPDX) |
 
 ## How it's driven

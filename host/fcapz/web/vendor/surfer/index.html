@@ -2,7 +2,7 @@
 <!-- Vendored from https://app.surfer-project.org/ on 2026-06-25 for offline
      embedding by fpgacapZero. Surfer is (c) the Surfer project, EUPL-1.2.
      Changes vs upstream: service-worker registration removed; a startup hook
-     hides the scope/variable side panel. See NOTICE. -->
+     hides the scope/variable side panel, menu bar and status bar. See NOTICE. -->
 
 <html>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
@@ -23,8 +23,12 @@
         window.id_of_name = id_of_name;
         window.draw_text_arrow = draw_text_arrow;
         /* fpgacapZero: signals are auto-added by the host, so hide the
-           scope/variable side panel at launch for a clean waveform view. */
+           scope/variable side panel, the menu bar and the status bar at launch
+           for a clean waveform view (the toolbar stays; toggle the rest back
+           inside Surfer if needed). */
         inject_message(JSON.stringify({ SetSidePanelVisible: false }));
+        inject_message(JSON.stringify({ SetMenuVisible: false }));
+        inject_message(JSON.stringify({ SetStatusbarVisible: false }));
     </script>
     
     <!-- this is the base url relative to which other urls will be constructed. trunk will insert this from the public-url option -->
