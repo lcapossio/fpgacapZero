@@ -42,14 +42,17 @@ body {
   min-height: 0;
 }
 
-/* Dockview wraps each panel's content in .dv-react-part — make that the
-   bounded scroll container so tall panels scroll instead of clipping. */
-.dock .dv-react-part {
+/* Dockview wraps each panel's content in .dv-react-part (a definite-height
+   box). Make that the bounded scroll container so tall panels scroll instead
+   of clipping. Scoped to the dockview class, NOT to our .dock wrapper, because
+   with the "always" renderer panels live in an overlay container that may sit
+   outside .dock. */
+.dv-react-part {
   height: 100%;
   overflow: auto;
 }
 /* Panels inside a dock tab: flush, fill the tab body, grow with content. */
-.dock .panel {
+.dv-react-part > .panel {
   margin: 0;
   border: none;
   border-radius: 0;
