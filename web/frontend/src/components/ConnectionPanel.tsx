@@ -27,9 +27,17 @@ export function ConnectionPanel({
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
+  function resetScan() {
+    setTargets([]);
+    setPicked("");
+    setStatus("");
+    setError("");
+  }
+
   function changeBackend(b: string) {
     setBackend(b);
     setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
+    resetScan(); // drop a stale target picker from the previous backend
   }
 
   function handleError(e: unknown) {
@@ -179,9 +187,14 @@ export function ConnectionPanel({
               ))}
             </select>
           </label>
-          <button onClick={connectPicked} disabled={busy}>
-            Connect to {picked}
-          </button>
+          <div className="btnrow">
+            <button onClick={connectPicked} disabled={busy}>
+              Connect to {picked}
+            </button>
+            <button className="secondary" onClick={resetScan} disabled={busy}>
+              Cancel
+            </button>
+          </div>
         </div>
       ) : (
         <button onClick={connect} disabled={busy}>

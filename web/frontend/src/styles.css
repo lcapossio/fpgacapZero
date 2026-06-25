@@ -95,6 +95,16 @@ button:disabled {
   opacity: 0.5;
   cursor: default;
 }
+button.secondary {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.btnrow {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
 
 .ok {
   color: var(--ok);
