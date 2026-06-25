@@ -7,6 +7,7 @@ import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ElaPanel } from "./components/ElaPanel";
 import { RunPanel } from "./components/RunPanel";
 import { EioPanel } from "./components/EioPanel";
+import { AxiPanel } from "./components/AxiPanel";
 import { SurferView } from "./components/SurferView";
 
 function Empty({ text }: { text: string }) {
@@ -41,6 +42,10 @@ function EioDock(_: IDockviewPanelProps) {
   const s = useSession();
   return s.conn ? <EioPanel conn={s.conn} /> : <Empty text="Connect to a target first." />;
 }
+function AxiDock(_: IDockviewPanelProps) {
+  const s = useSession();
+  return s.conn ? <AxiPanel conn={s.conn} /> : <Empty text="Connect to a target first." />;
+}
 function ViewerDock(_: IDockviewPanelProps) {
   const s = useSession();
   return s.capture ? (
@@ -55,6 +60,7 @@ const components = {
   ela: ElaDock,
   run: RunDock,
   eio: EioDock,
+  axi: AxiDock,
   viewer: ViewerDock,
 };
 
@@ -77,6 +83,12 @@ function onReady(event: DockviewReadyEvent) {
     id: "eio",
     component: "eio",
     title: "EIO",
+    position: { referencePanel: "ela", direction: "within" },
+  });
+  api.addPanel({
+    id: "axi",
+    component: "axi",
+    title: "AXI",
     position: { referencePanel: "ela", direction: "within" },
   });
   // Run is a slim toolbar in its own short group beneath ELA/EIO.

@@ -236,3 +236,16 @@ body.dv-dragging-tabs iframe {
 .bit.btn {
   cursor: pointer;
 }
+
+/* JTAG-AXI operation log */
+.axi-log {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem;
+  font: 0.78rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre;
+}
