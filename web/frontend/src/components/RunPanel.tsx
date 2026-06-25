@@ -100,7 +100,7 @@ export function RunPanel({ identity }: { identity: Identity }) {
       <button onClick={() => start(true)} disabled={locked}>
         Trigger Immediate
       </button>
-      <button className="secondary" onClick={stop} disabled={!running}>
+      <button className="danger" onClick={stop} disabled={!running}>
         Stop
       </button>
       <label className="inline">

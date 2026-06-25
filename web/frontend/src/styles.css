@@ -162,6 +162,10 @@ button.secondary {
   color: var(--muted);
   border: 1px solid var(--border);
 }
+button.danger {
+  background: var(--err);
+  color: #2a0a0a;
+}
 .btnrow {
   display: flex;
   gap: 0.5rem;
