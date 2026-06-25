@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Placeholder served until the React frontend is built into this directory
+     (web/frontend `npm run build` copies its dist/ here). -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fpgacapZero web</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; }
+      code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
+      pre { background: #111; color: #eee; padding: 1rem; border-radius: 6px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>fpgacapZero web</h1>
+    <p>The backend is running. The browser UI has not been built into this server yet.</p>
+    <p>
+      Build the frontend (<code>web/frontend</code>) and serve its
+      <code>dist/</code>, or develop against this API directly. Live status:
+    </p>
+    <pre id="status">loading /api/status …</pre>
+    <script type="module">
+      const el = document.getElementById("status");
+      try {
+        const r = await fetch("/api/status");
+        el.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) {
+        el.textContent = "failed to reach /api/status: " + e;
+      }
+    </script>
+  </body>
+</html>

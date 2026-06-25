@@ -37,14 +37,36 @@ class RpcServer:
             raise RuntimeError("not connected")
         return self._analyzer
 
+    # ir_table preset name -> table (None = transport default, Xilinx 7-series).
+    _IR_TABLES = {
+        "": None,
+        "xilinx7": None,
+        "7series": None,
+        "series7": None,
+        "ultrascale": OpenOcdTransport.IR_TABLE_US,
+        "us": OpenOcdTransport.IR_TABLE_US,
+        "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+        "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+    }
+
+    @classmethod
+    def _ir_table(cls, name):
+        key = (name or "").strip().lower().replace("-", "_")
+        if key not in cls._IR_TABLES:
+            raise ValueError(f"unknown ir_table: {name!r}")
+        table = cls._IR_TABLES[key]
+        return dict(table) if table is not None else None
+
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
+        ir = self._ir_table(req.get("ir_table"))
         if backend == "openocd":
             return OpenOcdTransport(
                 host=host,
                 port=int(req.get("port", 6666)),
                 tap=req.get("tap", "xc7a100t.tap"),
+                ir_table=ir,
             )
         if backend == "hw_server":
             return XilinxHwServerTransport(
@@ -53,6 +75,7 @@ class RpcServer:
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
+                ir_table=ir,
             )
         raise ValueError(f"unknown backend: {backend}")
 
@@ -213,7 +236,9 @@ class RpcServer:
         if cmd == "connect":
             if self._analyzer is not None:
                 self._analyzer.close()
-            self._analyzer = Analyzer(self._build_transport(req))
+            self._analyzer = Analyzer(
+                self._build_transport(req), chain=int(req.get("chain", 1))
+            )
             self._analyzer.connect()
             return self._ok()
 
@@ -254,9 +279,21 @@ class RpcServer:
             if self._eio is not None:
                 self._eio.close()
             chain = int(req.get("chain", 3))
-            self._eio = EioController(self._build_transport(req), chain=chain)
+            base_addr = int(req.get("base_addr", 0))
+            instance = req.get("instance")
+            self._eio = EioController(
+                self._build_transport(req),
+                chain=chain,
+                base_addr=base_addr,
+                instance=None if instance is None else int(instance),
+            )
             self._eio.connect()
-            return self._ok(in_w=self._eio.in_w, out_w=self._eio.out_w, chain=chain)
+            return self._ok(
+                in_w=self._eio.in_w,
+                out_w=self._eio.out_w,
+                chain=chain,
+                base_addr=base_addr,
+            )
 
         if cmd == "eio_close":
             if self._eio is not None:
