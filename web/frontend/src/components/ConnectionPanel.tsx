@@ -3,6 +3,7 @@ import { getToken, inferIrTable, rpc, setToken } from "../api";
 import type { ConnectionParams, Identity } from "../api";
 
 const BACKENDS = ["openocd", "hw_server"];
+const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
 const CONNECT_TIMEOUT = 6000;
 
 export function ConnectionPanel({
@@ -18,12 +19,24 @@ export function ConnectionPanel({
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("6666");
   const [token, setTok] = useState(getToken());
+  const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
   const [targets, setTargets] = useState<string[]>([]);
   const [picked, setPicked] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+
+  function changeBackend(b: string) {
+    setBackend(b);
+    setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
+  }
+
+  function handleError(e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.toLowerCase().includes("unauthorized")) setNeedsToken(true);
+    setError(msg);
+  }
 
   async function connectTo(tap: string) {
     setStatus(`connecting to ${tap}…`);
@@ -54,7 +67,7 @@ export function ConnectionPanel({
       setStatus("scanning for targets…");
       const r = await rpc(
         "scan_targets",
-        { backend, host, port: Number(port) },
+        { backend, host, port: Number(port), timeout: 5 },
         CONNECT_TIMEOUT,
       );
       const found = (r.targets as string[]) ?? [];
@@ -68,7 +81,7 @@ export function ConnectionPanel({
         setStatus(`${found.length} targets found — pick one`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      handleError(e);
       onDisconnected();
     } finally {
       setBusy(false);
@@ -81,7 +94,7 @@ export function ConnectionPanel({
     try {
       await connectTo(picked);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      handleError(e);
     } finally {
       setBusy(false);
     }
@@ -122,7 +135,7 @@ export function ConnectionPanel({
       <div className="form">
         <label>
           Backend
-          <select value={backend} onChange={(e) => setBackend(e.target.value)}>
+          <select value={backend} onChange={(e) => changeBackend(e.target.value)}>
             {BACKENDS.map((b) => (
               <option key={b}>{b}</option>
             ))}
@@ -137,14 +150,6 @@ export function ConnectionPanel({
           <input value={port} onChange={(e) => setPort(e.target.value)} />
         </label>
         <label>
-          API token
-          <input
-            value={token}
-            onChange={(e) => setTok(e.target.value)}
-            placeholder="(if server set one)"
-          />
-        </label>
-        <label>
           Tap (optional)
           <input
             value={manualTap}
@@ -152,6 +157,16 @@ export function ConnectionPanel({
             placeholder="auto-detected if blank"
           />
         </label>
+        {needsToken && (
+          <label>
+            API token
+            <input
+              value={token}
+              onChange={(e) => setTok(e.target.value)}
+              placeholder="required by this server"
+            />
+          </label>
+        )}
       </div>
 
       {targets.length > 1 ? (

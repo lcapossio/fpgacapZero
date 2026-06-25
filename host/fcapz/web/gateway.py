@@ -22,6 +22,12 @@ from ..rpc import _SCHEMA_VERSION, RpcServer
 class RpcGateway:
     """Thread-safe wrapper around one :class:`RpcServer`."""
 
+    # Stateless commands that don't touch the shared session.  These run
+    # WITHOUT the lock so a slow/hung one (e.g. an XSDB target scan against a
+    # dead hw_server, which can hang past its timeout) can't starve connect /
+    # capture / eio on the live session.
+    _LOCK_FREE_CMDS = frozenset({"scan_targets"})
+
     def __init__(self, server: Optional[RpcServer] = None) -> None:
         self._server = server or RpcServer()
         self._lock = threading.RLock()
@@ -33,14 +39,19 @@ class RpcGateway:
         shape ``fcapz.rpc.main`` emits — not raised, so every transport sees the
         same protocol.
         """
+        if req.get("cmd") in self._LOCK_FREE_CMDS:
+            return self._dispatch(req)
         with self._lock:
-            try:
-                return self._server.handle(req)
-            except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
-                return {
-                    "ok": False,
-                    "schema_version": _SCHEMA_VERSION,
-                    "error": str(exc),
-                    "type": exc.__class__.__name__,
-                    "trace": traceback.format_exc(limit=1).strip(),
-                }
+            return self._dispatch(req)
+
+    def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return self._server.handle(req)
+        except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
+            return {
+                "ok": False,
+                "schema_version": _SCHEMA_VERSION,
+                "error": str(exc),
+                "type": exc.__class__.__name__,
+                "trace": traceback.format_exc(limit=1).strip(),
+            }
