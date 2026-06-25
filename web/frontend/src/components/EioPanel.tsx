@@ -6,6 +6,8 @@ function range(n: number): number[] {
   return Array.from({ length: n }, (_, i) => i);
 }
 
+const POLL_PRESETS = [25, 50, 100, 250, 500, 1000];
+
 export function EioPanel({ conn }: { conn: ConnectionParams }) {
   const gowin = conn.ir_table === "gowin";
   const [phase, setPhase] = useState<"discovering" | "attached" | "manual">(
@@ -18,6 +20,7 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   const [inputs, setInputs] = useState(0);
   const [outputs, setOutputs] = useState(0);
   const [poll, setPoll] = useState(true);
+  const [pollMs, setPollMs] = useState(250);
   const [error, setError] = useState("");
   const timer = useRef<number | null>(null);
 
@@ -87,12 +90,12 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
 
   useEffect(() => {
     if (phase !== "attached" || !poll) return;
-    timer.current = window.setInterval(readInputs, 300);
+    timer.current = window.setInterval(readInputs, pollMs);
     return () => {
       if (timer.current !== null) window.clearInterval(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, poll]);
+  }, [phase, poll, pollMs]);
 
   if (phase === "discovering") {
     return (
@@ -153,14 +156,28 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
         ))}
       </div>
 
-      <label className="inline">
-        <input
-          type="checkbox"
-          checked={poll}
-          onChange={(e) => setPoll(e.target.checked)}
-        />{" "}
-        poll inputs
-      </label>
+      <div className="btnrow">
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={poll}
+            onChange={(e) => setPoll(e.target.checked)}
+          />{" "}
+          poll inputs
+        </label>
+        <select
+          value={pollMs}
+          onChange={(e) => setPollMs(Number(e.target.value))}
+          disabled={!poll}
+          title="input poll interval"
+        >
+          {POLL_PRESETS.map((ms) => (
+            <option key={ms} value={ms}>
+              {ms} ms
+            </option>
+          ))}
+        </select>
+      </div>
       {error && <p className="err">{error}</p>}
     </section>
   );
