@@ -5,6 +5,7 @@ import "dockview-react/dist/styles/dockview.css";
 import { SessionProvider, useSession } from "./session";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ElaPanel } from "./components/ElaPanel";
+import { RunPanel } from "./components/RunPanel";
 import { EioPanel } from "./components/EioPanel";
 import { SurferView } from "./components/SurferView";
 
@@ -26,8 +27,12 @@ function ConnectionDock(_: IDockviewPanelProps) {
 }
 function ElaDock(_: IDockviewPanelProps) {
   const s = useSession();
+  return s.conn && s.identity ? <ElaPanel /> : <Empty text="Connect to a target first." />;
+}
+function RunDock(_: IDockviewPanelProps) {
+  const s = useSession();
   return s.conn && s.identity ? (
-    <ElaPanel identity={s.identity} onCaptured={s.pushCapture} />
+    <RunPanel identity={s.identity} />
   ) : (
     <Empty text="Connect to a target first." />
   );
@@ -48,6 +53,7 @@ function ViewerDock(_: IDockviewPanelProps) {
 const components = {
   connection: ConnectionDock,
   ela: ElaDock,
+  run: RunDock,
   eio: EioDock,
   viewer: ViewerDock,
 };
@@ -66,6 +72,12 @@ function onReady(event: DockviewReadyEvent) {
     component: "ela",
     title: "ELA",
     position: { referencePanel: "connection", direction: "below" },
+  });
+  api.addPanel({
+    id: "run",
+    component: "run",
+    title: "Run",
+    position: { referencePanel: "ela", direction: "within" },
   });
   api.addPanel({
     id: "eio",
