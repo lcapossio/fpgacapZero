@@ -1,8 +1,7 @@
 import { useEffect, useRef } from "react";
 
-// Vendored Surfer WASM build (mounted at /surfer). It loads a waveform when the
-// parent posts {command:"LoadUrl", url}; further actions go through InjectMessage
-// with a raw surfer::Message (an unstable API — kept to a tiny, known surface).
+// Vendored Surfer WASM build (mounted at /surfer). We drive it via InjectMessage
+// (a small, known surface of the otherwise-unstable surfer::Message API).
 const SURFER_SRC = "/surfer/index.html";
 
 // VCD scope name emitted by Analyzer.export_vcd_text ($scope module logic).
@@ -10,16 +9,15 @@ const VCD_SCOPE = "logic";
 // Add every variable under that scope. id "None" is ScopeId::default — Surfer
 // resolves the scope by its `strs` path (the same way it re-resolves saved
 // state), so we don't need a backend-specific id.
-const ADD_SCOPE = JSON.stringify({
-  AddScope: [{ strs: [VCD_SCOPE], id: "None" }, true],
-});
-const ZOOM_FIT = JSON.stringify("ZoomToFit");
+const ADD_SCOPE = { AddScope: [{ strs: [VCD_SCOPE], id: "None" }, true] };
 
-const SETTLE_MS = 450; // let the waveform parse before adding signals
+const SETTLE_MS = 450; // let the first waveform parse before adding signals
 
-/** Embed Surfer, load the capture as a VCD, and auto-add its signals. */
+/** Embed Surfer once and, per capture, swap the waveform in place — keeping the
+ *  same window, displayed signals and zoom (only the first capture sets them up). */
 export function SurferView({ vcd }: { vcd: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
+  const firstLoad = useRef(true);
 
   useEffect(() => {
     if (!vcd) return;
@@ -38,29 +36,36 @@ export function SurferView({ vcd }: { vcd: string }) {
         return false; // transient during iframe/WASM load
       }
     };
-    const post = (msg: unknown) => win()?.postMessage(msg, "*");
+    // InjectMessage carries a raw surfer::Message (object or unit-variant string).
+    const inject = (msg: unknown) =>
+      win()?.postMessage({ command: "InjectMessage", message: JSON.stringify(msg) }, "*");
 
-    let timers: number[] = [];
+    const timers: number[] = [];
     let tries = 0;
     const start = () => {
       if (!ready()) {
         if (tries++ < 75) timers.push(window.setTimeout(start, 200)); // ~15s for WASM init
         return;
       }
-      post({ command: "LoadUrl", url }); // load + Clear previous
-      // After the waveform has parsed, add its signals and frame them.
-      timers.push(
-        window.setTimeout(() => {
-          post({ command: "InjectMessage", message: ADD_SCOPE });
-          post({ command: "InjectMessage", message: ZOOM_FIT });
-        }, SETTLE_MS),
-      );
+      const first = firstLoad.current;
+      // First capture: clear and (after it parses) add the signals + fit.
+      // Later captures: KeepAvailable re-uses the displayed signals and view —
+      // the window doesn't relaunch, the data just updates.
+      inject({ LoadWaveformFileFromUrl: [url, first ? "Clear" : "KeepAvailable"] });
+      if (first) {
+        firstLoad.current = false;
+        timers.push(
+          window.setTimeout(() => {
+            inject(ADD_SCOPE);
+            inject("ZoomToFit");
+          }, SETTLE_MS),
+        );
+      }
     };
     start();
 
     return () => {
       timers.forEach((t) => window.clearTimeout(t));
-      timers = [];
       URL.revokeObjectURL(url);
     };
   }, [vcd]);
