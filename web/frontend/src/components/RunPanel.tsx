@@ -90,31 +90,37 @@ export function RunPanel({ identity }: { identity: Identity }) {
   const locked = busy || running;
 
   return (
-    <section className="panel">
-      <h2>Run</h2>
-      <div className="btnrow">
-        <button onClick={() => start(false)} disabled={locked}>
-          {busy ? "Arming…" : "Arm"}
-        </button>
-        <button onClick={() => start(true)} disabled={locked}>
-          Trigger Immediate
-        </button>
-        <button className="secondary" onClick={stop} disabled={!running}>
-          Stop
-        </button>
-        <label className="inline">
-          <input
-            type="checkbox"
-            checked={autoRearm}
-            onChange={(e) => setAutoRearm(e.target.checked)}
-            disabled={running}
-          />{" "}
-          Auto re-arm
-        </label>
-      </div>
-      {overflow && <p className="warn">overflow</p>}
-      {status && <p className="muted">{status}</p>}
-      {error && <p className="err">{error}</p>}
-    </section>
+    <div className="runbar">
+      <span className="runbar-grip" title="Run controls" aria-hidden>
+        ⠿
+      </span>
+      <button onClick={() => start(false)} disabled={locked}>
+        {busy ? "Arming…" : "Arm"}
+      </button>
+      <button onClick={() => start(true)} disabled={locked}>
+        Trigger Immediate
+      </button>
+      <button className="secondary" onClick={stop} disabled={!running}>
+        Stop
+      </button>
+      <label className="inline">
+        <input
+          type="checkbox"
+          checked={autoRearm}
+          onChange={(e) => setAutoRearm(e.target.checked)}
+          disabled={running}
+        />{" "}
+        Auto re-arm
+      </label>
+      <span className="runbar-status">
+        {error ? (
+          <span className="err">{error}</span>
+        ) : overflow ? (
+          <span className="warn">overflow</span>
+        ) : status ? (
+          <span className="muted">{status}</span>
+        ) : null}
+      </span>
+    </div>
   );
 }

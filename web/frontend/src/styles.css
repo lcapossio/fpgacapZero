@@ -55,6 +55,41 @@ body {
   padding: 1rem;
 }
 
+/* Run: a slim horizontal toolbar — left grip handle, controls to the right. */
+.runbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 100%;
+  padding: 0 0.6rem;
+  background: var(--panel);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.runbar > * {
+  flex: 0 0 auto;
+}
+.runbar-grip {
+  color: var(--muted);
+  cursor: grab;
+  font-size: 1rem;
+  line-height: 1;
+  user-select: none;
+}
+.runbar button {
+  padding: 0.3rem 0.6rem;
+}
+.runbar .inline {
+  margin-top: 0;
+}
+.runbar-status {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .topbar {
   display: flex;
   align-items: baseline;

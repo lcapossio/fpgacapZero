@@ -74,16 +74,18 @@ function onReady(event: DockviewReadyEvent) {
     position: { referencePanel: "connection", direction: "below" },
   });
   api.addPanel({
-    id: "run",
-    component: "run",
-    title: "Run",
-    position: { referencePanel: "ela", direction: "within" },
-  });
-  api.addPanel({
     id: "eio",
     component: "eio",
     title: "EIO",
     position: { referencePanel: "ela", direction: "within" },
+  });
+  // Run is a slim toolbar in its own short group beneath ELA/EIO.
+  api.addPanel({
+    id: "run",
+    component: "run",
+    title: "Run",
+    position: { referencePanel: "ela", direction: "below" },
+    initialHeight: 80,
   });
 }
 
