@@ -134,6 +134,7 @@ export function App() {
     <SessionProvider>
       <div className="app-shell">
         <header className="topbar">
+          <img className="logo" src="/fcapz_logo.png" alt="fcapz logo" />
           <h1>fpgacapZero</h1>
           <span className="muted">web</span>
         </header>

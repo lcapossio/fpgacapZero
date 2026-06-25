@@ -100,10 +100,14 @@ body {
 
 .topbar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5rem;
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.5rem;
+}
+.topbar .logo {
+  height: 26px;
+  width: auto;
 }
 .topbar h1 {
   font-size: 1.3rem;
