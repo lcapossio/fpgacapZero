@@ -101,6 +101,27 @@ def test_capture_returns_samples(monkeypatch):
     assert r["sample_count"] > 0
 
 
+def test_capture_include_vcd(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64, timeout=0.2, include_vcd=True,
+    ).json()
+    assert r["ok"] is True, r
+    vcd = r["vcd"]
+    # Valid-enough VCD for an embedded viewer (Surfer) to parse.
+    assert "$timescale" in vcd
+    assert "$enddefinitions $end" in vcd
+    assert "$dumpvars" in vcd
+    # Omitted by default so normal captures stay lean.
+    bare = _rpc(
+        c, "capture", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64, timeout=0.2,
+    ).json()
+    assert "vcd" not in bare
+
+
 def test_errors_are_in_band_http_200(monkeypatch):
     c = _client(monkeypatch)
     r = _rpc(c, "capture", pretrigger=2, posttrigger=4)  # not connected
@@ -157,6 +178,23 @@ def test_ir_table_mapping():
     assert RpcServer._ir_table("ultrascale") is not None
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")
+
+
+def test_surfer_viewer_is_mounted(monkeypatch):
+    import os
+
+    from fcapz.web.app import _default_surfer_dir
+
+    if not os.path.isdir(_default_surfer_dir()):
+        pytest.skip("vendored Surfer build not present")
+    c = _client(monkeypatch)
+    r = c.get("/surfer/index.html")
+    assert r.status_code == 200
+    assert "integration.js" in r.text  # the postMessage LoadUrl bridge
+    assert "serviceWorker" not in r.text  # SW registration stripped for offline embed
+    w = c.get("/surfer/surfer_bg.wasm")
+    assert w.status_code == 200
+    assert w.headers["content-type"] == "application/wasm"
 
 
 def test_token_auth(monkeypatch):

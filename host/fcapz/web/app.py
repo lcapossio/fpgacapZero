@@ -29,18 +29,26 @@ from starlette.concurrency import run_in_threadpool
 from .gateway import RpcGateway
 
 
+def _default_surfer_dir() -> str:
+    """Vendored Surfer WASM build shipped under ``fcapz/web/vendor/surfer``."""
+    return str(Path(__file__).resolve().parent / "vendor" / "surfer")
+
+
 def create_app(
     *,
     gateway: Optional[RpcGateway] = None,
     token: Optional[str] = None,
     static_dir: Optional[str] = None,
+    surfer_dir: Optional[str] = None,
     cors_origins: Iterable[str] = ("*",),
 ) -> FastAPI:
     """Build the fcapz web app.
 
     ``token`` (if set) is required as ``Authorization: Bearer <token>`` on
     ``/api/rpc`` and as ``?token=`` on the WebSocket.  ``static_dir`` is the
-    built frontend served at ``/`` (optional).
+    built frontend served at ``/`` (optional).  ``surfer_dir`` is the vendored
+    Surfer waveform viewer served at ``/surfer`` (defaults to the bundled copy);
+    it lives outside ``static_dir`` so a frontend rebuild can't wipe it.
     """
     gateway = gateway or RpcGateway()
     app = FastAPI(title="fpgacapZero web", version="1")
@@ -83,7 +91,13 @@ def create_app(
         except WebSocketDisconnect:
             return
 
-    # Serve the built frontend last so /api routes take precedence.
+    # Vendored Surfer waveform viewer (WASM) at /surfer — mounted before "/" so
+    # it isn't shadowed by the SPA catch-all.
+    surfer = surfer_dir or _default_surfer_dir()
+    if Path(surfer).is_dir():
+        app.mount("/surfer", StaticFiles(directory=surfer, html=True), name="surfer")
+
+    # Serve the built frontend last so /api and /surfer take precedence.
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
 

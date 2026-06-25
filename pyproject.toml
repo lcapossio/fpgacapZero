@@ -39,7 +39,7 @@ include = ["fcapz*"]
 
 [tool.setuptools.package-data]
 "fcapz.gui" = ["assets/*.png", "assets/*.bin"]
-"fcapz.web" = ["static/**/*"]
+"fcapz.web" = ["static/**/*", "vendor/**/*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]

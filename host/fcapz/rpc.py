@@ -298,6 +298,10 @@ class RpcServer:
                 fmt=str(req.get("format", "json")),
                 include_summary=bool(req.get("summarize", False)),
             )
+            # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
+            # produced by the same exporter the CLI/GUI use.
+            if req.get("include_vcd"):
+                payload["vcd"] = analyzer.export_vcd_text(result)
             return self._ok(**payload)
 
         if cmd == "eio_connect":

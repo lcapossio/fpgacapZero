@@ -2,6 +2,9 @@ import { useState } from "react";
 import { parseIntFlexible, rpc } from "../api";
 import type { CaptureSample, Identity } from "../api";
 import { Waveform } from "./Waveform";
+import { SurferView } from "./SurferView";
+
+type Viewer = "canvas" | "surfer";
 
 export function ElaPanel({ identity }: { identity: Identity }) {
   const [channel, setChannel] = useState("0");
@@ -13,7 +16,9 @@ export function ElaPanel({ identity }: { identity: Identity }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [samples, setSamples] = useState<number[]>([]);
+  const [vcd, setVcd] = useState("");
   const [overflow, setOverflow] = useState(false);
+  const [viewer, setViewer] = useState<Viewer>("canvas");
 
   async function capture() {
     setBusy(true);
@@ -29,9 +34,11 @@ export function ElaPanel({ identity }: { identity: Identity }) {
         sample_width: identity.sample_width,
         depth: identity.depth,
         timeout: 10.0,
+        include_vcd: true, // so the Surfer viewer can load it without re-capture
       });
       const result = r.result as { samples: CaptureSample[] };
       setSamples(result.samples.map((s) => s.value));
+      setVcd(typeof r.vcd === "string" ? r.vcd : "");
       setOverflow(Boolean(r.overflow));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -88,7 +95,35 @@ export function ElaPanel({ identity }: { identity: Identity }) {
       {overflow && <p className="warn">overflow</p>}
       {error && <p className="err">{error}</p>}
       {samples.length > 0 && (
-        <Waveform samples={samples} sampleWidth={identity.sample_width} />
+        <>
+          <div className="btnrow">
+            <label className="inline">
+              <input
+                type="radio"
+                name="viewer"
+                checked={viewer === "canvas"}
+                onChange={() => setViewer("canvas")}
+              />{" "}
+              built-in
+            </label>
+            <label className="inline">
+              <input
+                type="radio"
+                name="viewer"
+                checked={viewer === "surfer"}
+                onChange={() => setViewer("surfer")}
+              />{" "}
+              Surfer
+            </label>
+          </div>
+          {viewer === "canvas" ? (
+            <Waveform samples={samples} sampleWidth={identity.sample_width} />
+          ) : vcd ? (
+            <SurferView vcd={vcd} />
+          ) : (
+            <p className="muted">no VCD for this capture</p>
+          )}
+        </>
       )}
     </section>
   );
