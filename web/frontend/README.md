@@ -31,6 +31,10 @@ This emits the bundle straight into `host/fcapz/web/static/`, which `fcapz-web`
 serves at `/` (and which ships in the Python wheel). After building, just run
 `fcapz-web` and open <http://localhost:8000> — no separate dev server.
 
+The built bundle **is committed to git**, so `fcapz-web` works from a fresh
+checkout (and the wheel) without Node. When you change anything under `src/`,
+re-run `npm run build` and commit the updated `host/fcapz/web/static/`.
+
 ## Layout
 
 | File | |
