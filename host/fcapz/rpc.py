@@ -288,6 +288,10 @@ class RpcServer:
 
         if cmd == "capture":
             cfg = self._build_config(req)
+            # "Trigger Immediate": rewrite the config to an always-true trigger
+            # so the capture fires now instead of waiting (matches the GUI).
+            if req.get("immediate"):
+                cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
             result = analyzer.capture(timeout=float(req.get("timeout", 10.0)))

@@ -122,6 +122,18 @@ def test_capture_include_vcd(monkeypatch):
     assert "vcd" not in bare
 
 
+def test_capture_immediate(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    # "Trigger Immediate" rewrites the trigger to always-true; still returns samples.
+    r = _rpc(
+        c, "capture", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64, timeout=0.2, immediate=True,
+    ).json()
+    assert r["ok"] is True, r
+    assert r["sample_count"] > 0
+
+
 def test_errors_are_in_band_http_200(monkeypatch):
     c = _client(monkeypatch)
     r = _rpc(c, "capture", pretrigger=2, posttrigger=4)  # not connected
