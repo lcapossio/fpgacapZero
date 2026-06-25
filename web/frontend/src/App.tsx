@@ -96,6 +96,9 @@ function Dock() {
       className="dockview-theme-abyss dock"
       components={components}
       onReady={onReady}
+      // Keep hidden tabs mounted (just CSS-hidden) so the Surfer iframe — and
+      // every panel's state — survives switching to a stacked tab.
+      defaultRenderer="always"
     />
   );
 }
