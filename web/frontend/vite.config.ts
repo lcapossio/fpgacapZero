@@ -10,6 +10,16 @@ export default defineConfig({
   build: {
     outDir: fileURLToPath(new URL("../../host/fcapz/web/static", import.meta.url)),
     emptyOutDir: true,
+    // Stable, non-hashed filenames so a rebuild overwrites the same files
+    // (clean `M assets/index.js` in git instead of hash-rename churn). Served
+    // locally with ETag revalidation, so cache-busting hashes aren't needed.
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/[name].js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/[name][extname]",
+      },
+    },
   },
   server: {
     proxy: {
