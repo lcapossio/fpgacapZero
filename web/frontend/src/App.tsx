@@ -67,17 +67,20 @@ const components = {
 function onReady(event: DockviewReadyEvent) {
   const api = event.api;
   api.addPanel({ id: "connection", component: "connection", title: "Connection" });
+  // Viewer spans the full width across the bottom; controls live in the top row.
   api.addPanel({
     id: "viewer",
     component: "viewer",
     title: "Viewer",
-    position: { referencePanel: "connection", direction: "right" },
+    position: { referencePanel: "connection", direction: "below" },
+    initialHeight: 500,
   });
+  // Top row: Connection on the left, ELA/EIO/AXI tabs (+ slim Run) on the right.
   api.addPanel({
     id: "ela",
     component: "ela",
     title: "ELA",
-    position: { referencePanel: "connection", direction: "below" },
+    position: { referencePanel: "connection", direction: "right" },
   });
   api.addPanel({
     id: "eio",
@@ -91,13 +94,12 @@ function onReady(event: DockviewReadyEvent) {
     title: "AXI",
     position: { referencePanel: "ela", direction: "within" },
   });
-  // Run is a slim toolbar in its own short group beneath ELA/EIO.
   api.addPanel({
     id: "run",
     component: "run",
     title: "Run",
     position: { referencePanel: "ela", direction: "below" },
-    initialHeight: 80,
+    initialHeight: 64,
   });
 }
 
