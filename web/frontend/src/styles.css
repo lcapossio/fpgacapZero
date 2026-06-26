@@ -24,7 +24,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  font: 12px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
 
 /* Full-height app: fixed header, dock fills the rest. */
@@ -40,6 +40,10 @@ body {
 .dock {
   flex: 1 1 auto;
   min-height: 0;
+  /* Compact the dockview chrome (tab bar) to match the denser UI. */
+  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-tab-font-size: 12px;
 }
 
 /* Dockview wraps each panel's content in .dv-react-part (a definite-height
