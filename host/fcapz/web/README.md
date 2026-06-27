@@ -5,9 +5,10 @@ A browser-based front-end for fpgacapZero — an alternative to the desktop GUI
 the network**. It's a small **FastAPI** backend that wraps the fcapz host stack,
 plus a built browser UI it serves as static files.
 
-> Status: **backend complete and hardware-validated; browser UI (Vite + React)
-> is being built into `web/frontend/`.** Until that's built, the server serves a
-> placeholder page and the JSON API below.
+> Status: **complete and hardware-validated.** The browser UI (Vite + React,
+> built into `web/frontend/`) and the FastAPI backend both ship; `fcapz-web`
+> serves the built app at `/` alongside the JSON API below. User-facing docs
+> are in the manual's [Web interface chapter](../../../docs/18_web_interface.md).
 
 ## Install & run
 

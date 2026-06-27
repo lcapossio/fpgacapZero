@@ -37,6 +37,7 @@ back to individual chapters as you need them.
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |
 | 16 | [Versioning and release](16_versioning_and_release.md) | How the project version flows from the `VERSION` file through `tools/sync_version.py` into the RTL `fcapz_version.vh`, the per-core `core_id` magic registers, and the procedure for cutting a new release. |
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
+| 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
 
 ## Reference specs
 

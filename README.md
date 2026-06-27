@@ -31,8 +31,9 @@ Four small RTL cores, all driven over JTAG:
 - **EJTAG-UART** — a JTAG-to-UART console bridge.
 
 Plus a host stack: a **Python API**, the **`fcapz` command-line tool**, a
-**JSON-RPC server**, and an optional **PySide6 desktop GUI** (`fcapz-gui`) with
-a built-in waveform preview.
+**JSON-RPC server**, an optional **PySide6 desktop GUI** (`fcapz-gui`) with a
+built-in waveform preview, and a **browser-based web interface** (`fcapz-web`)
+you can reach from the local machine or across the network.
 
 ## Why fpgacapZero
 
@@ -70,6 +71,19 @@ fcapz-gui                   # the easiest way to take your first capture
 <p align="center">
   <img src="docs/assets/fcapz-gui-demo.png" alt="fcapz-gui desktop application showing connection, ELA capture controls, and log output" width="900">
 </p>
+
+Prefer a browser — or need to reach the board from another machine? Install the
+web extra and open the UI instead:
+
+```bash
+pip install -e ".[web]"     # core host stack + web interface
+fcapz-web                   # serves on http://127.0.0.1:8000
+```
+
+It mirrors the GUI — connect, ELA capture with run controls, EIO, JTAG-AXI, and
+an embedded **Surfer** waveform viewer — over the same JSON-RPC API, and can be
+exposed on the network with a bearer token. See
+**[Web interface](docs/18_web_interface.md)**.
 
 Prefer the command line? Build the Arty A7 reference bitstream (see
 [Build from source](#build-from-source) — or use your own), then capture:
