@@ -70,16 +70,27 @@ body {
 /* Run: a slim horizontal toolbar — left grip handle, controls to the right. */
 .runbar {
   display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.18rem;
+  height: 100%;
+  padding: 0.2rem 0.55rem;
+  background: var(--panel);
+  overflow: auto;
+}
+.runbar-row {
+  display: flex;
   align-items: center;
   gap: 0.5rem;
-  height: 100%;
-  padding: 0 0.6rem;
-  background: var(--panel);
-  overflow-x: auto;
+  width: 100%;
+  min-height: 1.45rem;
   white-space: nowrap;
 }
-.runbar > * {
+.runbar-row > * {
   flex: 0 0 auto;
+}
+.runbar-downloads {
+  padding-left: 1.45rem;
 }
 .runbar-grip {
   color: var(--muted);
@@ -89,7 +100,7 @@ body {
   user-select: none;
 }
 .runbar button {
-  padding: 0.3rem 0.6rem;
+  padding: 0.12rem 0.5rem;
 }
 .runbar .inline {
   margin-top: 0;
@@ -150,13 +161,27 @@ label.inline {
   margin-top: 0.5rem;
 }
 input,
-select {
+select,
+textarea {
   background: #0b0e14;
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0.35rem 0.5rem;
   font: inherit;
+}
+textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.panel h3 {
+  margin: 0.9rem 0 0.45rem;
+  color: var(--fg);
+  font-size: 0.85rem;
+}
+.filepick input {
+  max-width: 16rem;
 }
 
 button {

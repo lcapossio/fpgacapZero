@@ -8,7 +8,7 @@ import json
 import traceback
 from typing import Any, Dict
 
-from .analyzer import Analyzer, CaptureConfig, ProbeSpec, TriggerConfig
+from .analyzer import Analyzer, CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -86,6 +86,10 @@ class RpcServer:
         raise ValueError(f"unknown backend: {backend}")
 
     @staticmethod
+    def _parse_int(value: Any) -> int:
+        return int(value, 0) if isinstance(value, str) else int(value)
+
+    @staticmethod
     def _parse_probes(raw: Any) -> list[ProbeSpec]:
         if raw is None:
             return []
@@ -116,6 +120,36 @@ class RpcServer:
                 probes.append(ProbeSpec(name=name, width=width, lsb=lsb))
             return probes
         raise ValueError("probes must be a string or a list of objects")
+
+    @classmethod
+    def _parse_sequence(cls, raw: Any) -> list[SequencerStage] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if not isinstance(raw, list):
+            raise ValueError("sequence must be a JSON array")
+        stages = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("sequence entries must be objects")
+            stages.append(
+                SequencerStage(
+                    cmp_mode_a=int(item.get("cmp_mode_a", 0)),
+                    cmp_mode_b=int(item.get("cmp_mode_b", 0)),
+                    combine=int(item.get("combine", 0)),
+                    next_state=int(item.get("next_state", 0)),
+                    is_final=cls._validated_bool(
+                        item.get("is_final", False), field="is_final"
+                    ),
+                    count_target=int(item.get("count_target", 1)),
+                    value_a=cls._parse_int(item.get("value_a", 0)),
+                    mask_a=cls._parse_int(item.get("mask_a", 0xFFFFFFFF)),
+                    value_b=cls._parse_int(item.get("value_b", 0)),
+                    mask_b=cls._parse_int(item.get("mask_b", 0xFFFFFFFF)),
+                )
+            )
+        return stages
 
     @staticmethod
     def _validated_sq_mode(mode: int) -> int:
@@ -188,6 +222,9 @@ class RpcServer:
             channel=int(req.get("channel", 0)),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
+            sequence=cls._parse_sequence(
+                req.get("sequence", req.get("trigger_sequence"))
+            ),
             stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
             stor_qual_value=int(req.get("stor_qual_value", 0)),
             stor_qual_mask=int(req.get("stor_qual_mask", 0)),
@@ -294,7 +331,41 @@ class RpcServer:
                 cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
-            result = analyzer.capture(timeout=float(req.get("timeout", 10.0)))
+            timeout = float(req.get("timeout", 10.0))
+            if req.get("segments"):
+                if not analyzer.wait_all_segments_done(timeout=timeout):
+                    raise TimeoutError("segmented capture did not complete within timeout")
+                probe_info = analyzer.probe()
+                nseg = max(1, int(probe_info.get("num_segments", 1)))
+                results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
+                payload = self._ok(
+                    format="json",
+                    overflow=any(r.overflow for r in results),
+                    sample_count=sum(len(r.samples) for r in results),
+                    channel=cfg.channel,
+                    result={"segments": [analyzer.export_json(r) for r in results]},
+                    segments=[
+                        self._serialize_capture(
+                            analyzer,
+                            cfg,
+                            r,
+                            fmt=str(req.get("format", "json")),
+                            include_summary=bool(req.get("summarize", False)),
+                        )
+                        for r in results
+                    ],
+                )
+                if req.get("include_vcd") and results:
+                    payload["vcd"] = analyzer.export_vcd_text(results[0])
+                if req.get("include_csv"):
+                    lines = ["segment,index,value"]
+                    for r in results:
+                        for idx, value in enumerate(r.samples):
+                            lines.append(f"{r.segment},{idx},{value}")
+                    payload["csv"] = "\n".join(lines) + "\n"
+                return payload
+
+            result = analyzer.capture(timeout=timeout)
             payload = self._serialize_capture(
                 analyzer,
                 cfg,
@@ -306,6 +377,8 @@ class RpcServer:
             # produced by the same exporter the CLI/GUI use.
             if req.get("include_vcd"):
                 payload["vcd"] = analyzer.export_vcd_text(result)
+            if req.get("include_csv"):
+                payload["csv"] = analyzer.export_csv_text(result)
             return self._ok(**payload)
 
         if cmd == "eio_connect":

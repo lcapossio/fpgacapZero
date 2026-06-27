@@ -94,12 +94,17 @@ function onReady(event: DockviewReadyEvent) {
     title: "AXI",
     position: { referencePanel: "ela", direction: "within" },
   });
+  const runGroup = api.addGroup({
+    id: "run-group",
+    referencePanel: "ela",
+    direction: "below",
+    hideHeader: true,
+    initialHeight: 58,
+  });
   api.addPanel({
     id: "run",
     component: "run",
-    title: "Run",
-    position: { referencePanel: "ela", direction: "below" },
-    initialHeight: 64,
+    position: { referenceGroup: runGroup, direction: "within" },
   });
 }
 

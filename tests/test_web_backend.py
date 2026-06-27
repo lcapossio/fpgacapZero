@@ -64,6 +64,25 @@ class FakeTransport(Transport):
         return [0] * words
 
 
+class FakeSegmentTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.regs[0x00B8] = 2
+        self.regs[0x0010] = 8
+        self.segment = 0
+
+    def write_reg(self, addr: int, value: int) -> None:
+        super().write_reg(addr, value)
+        if addr == 0x00BC:
+            self.segment = int(value)
+
+    def read_block(self, addr: int, words: int):
+        if addr == 0x0100:
+            base = 0x10 if self.segment == 0 else 0x20
+            return [base + i for i in range(words)]
+        return [0] * words
+
+
 def _client(monkeypatch, **app_kwargs) -> TestClient:
     monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
     return TestClient(create_app(**app_kwargs))
@@ -120,6 +139,58 @@ def test_capture_include_vcd(monkeypatch):
         sample_width=8, depth=64, timeout=0.2,
     ).json()
     assert "vcd" not in bare
+
+
+def test_capture_accepts_web_probe_defs_and_include_csv(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64, timeout=0.2, include_vcd=True, include_csv=True,
+        probes=[{"name": "lo", "width": 4, "lsb": 0}, {"name": "hi", "width": 4, "lsb": 4}],
+    ).json()
+    assert r["ok"] is True, r
+    assert " lo " in r["vcd"]
+    assert " hi " in r["vcd"]
+    assert "index,value" in r["csv"]
+
+
+def test_capture_accepts_trigger_sequence(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64, timeout=0.2,
+        sequence=[
+            {
+                "cmp_mode_a": 0,
+                "value_a": "0x00",
+                "mask_a": "0xFF",
+                "is_final": True,
+            }
+        ],
+    ).json()
+    assert r["ok"] is False
+    assert "trigger sequencer not present" in r["error"]
+
+
+def test_segmented_capture_bundle(monkeypatch):
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=0, posttrigger=0, channel=0,
+        sample_width=8, depth=8, timeout=0.2, segments=True,
+        include_vcd=True, include_csv=True,
+    ).json()
+    assert r["ok"] is True, r
+    assert r["sample_count"] == 2
+    assert len(r["result"]["segments"]) == 2
+    assert len(r["segments"]) == 2
+    assert "segment,index,value" in r["csv"]
+    assert "$timescale" in r["vcd"]
 
 
 def test_capture_immediate(monkeypatch):

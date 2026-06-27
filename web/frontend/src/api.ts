@@ -24,11 +24,18 @@ export interface Identity {
   sample_width: number;
   depth: number;
   num_channels: number;
+  num_segments?: number;
 }
 
 export interface CaptureSample {
   index: number;
   value: number;
+}
+
+export interface ProbeSpec {
+  name: string;
+  width: number;
+  lsb: number;
 }
 
 const TOKEN_KEY = "fcapz_web_token";
@@ -88,4 +95,38 @@ export function inferIrTable(tap: string): string {
 export function parseIntFlexible(text: string): number {
   const t = text.trim();
   return t.toLowerCase().startsWith("0x") ? parseInt(t, 16) : parseInt(t, 10);
+}
+
+export function parseProbesText(text: string): ProbeSpec[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("{")) {
+    const data = JSON.parse(trimmed) as { probes?: ProbeSpec[] };
+    if (!Array.isArray(data.probes)) throw new Error(".prob JSON must contain a probes array");
+    return data.probes.map((p) => ({
+      name: String(p.name),
+      width: Number(p.width),
+      lsb: Number(p.lsb ?? 0),
+    }));
+  }
+  return trimmed
+    .split(/\r?\n|,/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, width, lsb = "0"] = line.split(":");
+      if (!name || !width) throw new Error(`invalid probe '${line}', expected name:width:lsb`);
+      return { name, width: Number(width), lsb: Number(lsb) };
+    });
+}
+
+export function downloadText(filename: string, text: string, type = "text/plain"): void {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }

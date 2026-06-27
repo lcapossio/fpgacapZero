@@ -1,25 +1,25 @@
 import { useRef, useState } from "react";
-import { parseIntFlexible, rpc } from "../api";
+import { downloadText, parseIntFlexible, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { useSession } from "../session";
 
 const SINGLE_TIMEOUT = 10; // hardware wait (s) for a single capture
 const CONT_TIMEOUT = 5; // shorter per-capture wait in auto re-arm so Stop is responsive
 
-/** ELA run controls — Arm / Trigger Immediate / Auto re-arm / Stop, mirroring
- *  the desktop GUI. Reads the trigger config from the ELA tab and pushes each
- *  capture (as VCD) to the Viewer tab. */
+/** ELA run controls. Reads trigger config from the ELA tab and pushes captures
+ *  to the Viewer tab. */
 export function RunPanel({ identity }: { identity: Identity }) {
-  const { ela, pushCapture } = useSession();
+  const { ela, capture, pushCapture } = useSession();
   const [autoRearm, setAutoRearm] = useState(false);
-  const [busy, setBusy] = useState(false); // a single capture in flight
-  const [running, setRunning] = useState(false); // continuous loop active
+  const [busy, setBusy] = useState(false);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [overflow, setOverflow] = useState(false);
-  const runRef = useRef(false); // synchronous stop flag for the loop
+  const runRef = useRef(false);
 
   function params(immediate: boolean, timeout: number) {
+    const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
     return {
       channel: Number(ela.channel),
       pretrigger: Number(ela.pretrigger),
@@ -27,20 +27,31 @@ export function RunPanel({ identity }: { identity: Identity }) {
       trigger_mode: ela.triggerMode,
       trigger_value: parseIntFlexible(ela.triggerValue),
       trigger_mask: parseIntFlexible(ela.triggerMask),
+      ext_trigger_mode: Number(ela.extTriggerMode),
+      sequence,
+      segments: ela.segmented,
+      probes: parseProbesText(ela.probesText),
       sample_width: identity.sample_width,
       depth: identity.depth,
       timeout,
-      immediate, // Trigger Immediate -> always-true trigger
-      include_vcd: true, // the Viewer tab loads this into Surfer
+      immediate,
+      format: "json",
+      include_vcd: true,
+      include_csv: true,
     };
   }
 
-  // One capture. The fetch timeout must exceed the hardware wait or it would
-  // abort before a slow trigger fires.
   async function once(immediate: boolean, timeout: number) {
     const r = await rpc("capture", params(immediate, timeout), timeout * 1000 + 4000);
     setOverflow(Boolean(r.overflow));
-    if (typeof r.vcd === "string") pushCapture(r.vcd);
+    if (typeof r.vcd === "string") {
+      pushCapture({
+        vcd: r.vcd,
+        csv: typeof r.csv === "string" ? r.csv : undefined,
+        json: r.result,
+        sampleCount: r.sample_count as number | string | undefined,
+      });
+    }
     return r.sample_count ?? "?";
   }
 
@@ -50,7 +61,7 @@ export function RunPanel({ identity }: { identity: Identity }) {
     setStatus("");
     try {
       const n = await once(immediate, SINGLE_TIMEOUT);
-      setStatus(`captured ${n} samples — see the Viewer tab`);
+      setStatus(`captured ${n} samples - see the Viewer tab`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -83,44 +94,73 @@ export function RunPanel({ identity }: { identity: Identity }) {
   }
 
   function stop() {
-    runRef.current = false; // loop exits after the in-flight capture returns
-    setStatus("stopping…");
+    runRef.current = false;
+    setStatus("stopping...");
+  }
+
+  function download(format: "vcd" | "csv" | "json") {
+    if (!capture) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (format === "vcd") {
+      downloadText(`fcapz-capture-${stamp}.vcd`, capture.vcd, "text/plain");
+    } else if (format === "csv" && capture.csv) {
+      downloadText(`fcapz-capture-${stamp}.csv`, capture.csv, "text/csv");
+    } else if (format === "json") {
+      downloadText(
+        `fcapz-capture-${stamp}.json`,
+        JSON.stringify(capture.json ?? {}, null, 2),
+        "application/json",
+      );
+    }
   }
 
   const locked = busy || running;
 
   return (
     <div className="runbar">
-      <span className="runbar-grip" title="Run controls" aria-hidden>
-        ⠿
-      </span>
-      <button onClick={() => start(false)} disabled={locked}>
-        {busy ? "Arming…" : "Arm"}
-      </button>
-      <button onClick={() => start(true)} disabled={locked}>
-        Trigger Immediate
-      </button>
-      <button className="danger" onClick={stop} disabled={!running}>
-        Stop
-      </button>
-      <label className="inline">
-        <input
-          type="checkbox"
-          checked={autoRearm}
-          onChange={(e) => setAutoRearm(e.target.checked)}
-          disabled={running}
-        />{" "}
-        Auto re-arm
-      </label>
-      <span className="runbar-status">
-        {error ? (
-          <span className="err">{error}</span>
-        ) : overflow ? (
-          <span className="warn">overflow</span>
-        ) : status ? (
-          <span className="muted">{status}</span>
-        ) : null}
-      </span>
+      <div className="runbar-row">
+        <span className="runbar-grip" title="Run controls" aria-hidden>
+          ::
+        </span>
+        <button onClick={() => start(false)} disabled={locked}>
+          {busy ? "Arming..." : "Arm"}
+        </button>
+        <button onClick={() => start(true)} disabled={locked}>
+          Trigger Immediate
+        </button>
+        <button className="danger" onClick={stop} disabled={!running}>
+          Stop
+        </button>
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={autoRearm}
+            onChange={(e) => setAutoRearm(e.target.checked)}
+            disabled={running}
+          />{" "}
+          Auto re-arm
+        </label>
+        <span className="runbar-status">
+          {error ? (
+            <span className="err">{error}</span>
+          ) : overflow ? (
+            <span className="warn">overflow</span>
+          ) : status ? (
+            <span className="muted">{status}</span>
+          ) : null}
+        </span>
+      </div>
+      <div className="runbar-row runbar-downloads">
+        <button className="secondary" onClick={() => download("vcd")} disabled={!capture?.vcd}>
+          Download VCD
+        </button>
+        <button className="secondary" onClick={() => download("csv")} disabled={!capture?.csv}>
+          Download CSV
+        </button>
+        <button className="secondary" onClick={() => download("json")} disabled={!capture}>
+          Download JSON
+        </button>
+      </div>
     </div>
   );
 }

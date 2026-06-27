@@ -3,7 +3,12 @@ import { useSession } from "../session";
 /** ELA trigger/capture configuration. Run controls (Arm / Trigger Immediate /
  *  Auto re-arm / Stop) live in the Run tab and read this shared config. */
 export function ElaPanel() {
-  const { ela, setEla } = useSession();
+  const { ela, setEla, identity } = useSession();
+
+  async function loadProbeFile(file: File | undefined) {
+    if (!file) return;
+    setEla({ probesText: await file.text() });
+  }
 
   return (
     <section className="panel">
@@ -56,6 +61,75 @@ export function ElaPanel() {
           />
         </label>
       </div>
+
+      <h3>Probe definitions</h3>
+      <div className="btnrow">
+        <label className="filepick">
+          Load .prob
+          <input
+            type="file"
+            accept=".prob,.json,text/plain"
+            onChange={(e) => loadProbeFile(e.target.files?.[0])}
+          />
+        </label>
+        <button className="secondary" onClick={() => setEla({ probesText: "" })}>
+          Clear probes
+        </button>
+      </div>
+      <label>
+        Named signals
+        <textarea
+          value={ela.probesText}
+          onChange={(e) => setEla({ probesText: e.target.value })}
+          placeholder="valid:1:0&#10;state:7:1"
+          spellCheck={false}
+        />
+      </label>
+
+      <h3>Advanced triggering</h3>
+      <div className="form">
+        <label>
+          External trigger
+          <select
+            value={ela.extTriggerMode}
+            onChange={(e) => setEla({ extTriggerMode: e.target.value })}
+          >
+            <option value="0">disabled</option>
+            <option value="1">OR</option>
+            <option value="2">AND</option>
+          </select>
+        </label>
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={ela.segmented}
+            onChange={(e) => setEla({ segmented: e.target.checked })}
+          />
+          Read all segments
+        </label>
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={ela.useSequencer}
+            onChange={(e) => setEla({ useSequencer: e.target.checked })}
+          />
+          Use trigger sequencer
+        </label>
+      </div>
+      {identity?.num_segments ? (
+        <p className="muted">Hardware segments: {identity.num_segments}</p>
+      ) : null}
+      {ela.useSequencer ? (
+        <label>
+          Trigger sequence JSON
+          <textarea
+            value={ela.sequenceJson}
+            onChange={(e) => setEla({ sequenceJson: e.target.value })}
+            placeholder='[{"cmp_mode_a":0,"value_a":0,"mask_a":255,"is_final":true}]'
+            spellCheck={false}
+          />
+        </label>
+      ) : null}
       <p className="muted">Run captures from the Run tab.</p>
     </section>
   );

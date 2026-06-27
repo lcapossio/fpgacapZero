@@ -5,6 +5,9 @@ import type { ConnectionParams, Identity } from "./api";
 /** The latest ELA capture, shared from the Run panel to the Viewer panel. */
 export interface CaptureState {
   vcd: string;
+  csv?: string;
+  json?: unknown;
+  sampleCount?: number | string;
   seq: number; // bumps each capture so the viewer reloads even if panels are detached
 }
 
@@ -16,6 +19,11 @@ export interface ElaConfig {
   triggerMode: string;
   triggerValue: string;
   triggerMask: string;
+  extTriggerMode: string;
+  useSequencer: boolean;
+  sequenceJson: string;
+  segmented: boolean;
+  probesText: string;
 }
 
 const DEFAULT_ELA: ElaConfig = {
@@ -25,6 +33,11 @@ const DEFAULT_ELA: ElaConfig = {
   triggerMode: "value_match",
   triggerValue: "0x00",
   triggerMask: "0xFF",
+  extTriggerMode: "0",
+  useSequencer: false,
+  sequenceJson: "",
+  segmented: false,
+  probesText: "",
 };
 
 interface Session {
@@ -35,7 +48,7 @@ interface Session {
   setEla: (patch: Partial<ElaConfig>) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
-  pushCapture: (vcd: string) => void;
+  pushCapture: (capture: Omit<CaptureState, "seq">) => void;
 }
 
 const SessionCtx = createContext<Session | null>(null);
@@ -70,8 +83,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setIdentity(null);
         setCapture(null);
       },
-      pushCapture: (vcd) =>
-        setCapture((prev) => ({ vcd, seq: (prev?.seq ?? 0) + 1 })),
+      pushCapture: (next) =>
+        setCapture((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 })),
     }),
     [identity, conn, capture, ela],
   );
