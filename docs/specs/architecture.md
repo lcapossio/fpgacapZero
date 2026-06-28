@@ -64,21 +64,35 @@ EIO core parameters (separate module, `fcapz_eio.v`):
 
 ## Resource Usage (xc7a100t)
 
-Slice LUTs and BRAM tiles from Vivado **synthesis** (2025.2). See [README.md](../../README.md#resource-usage)
-for FFs and the full `arty_a7_top` reference row.
+Canonical resource reference for the project. **Slice LUTs** and **FFs** are
+from Vivado **synthesis** (2025.2); the `arty_a7_top` rows are **post–place &
+route** totals from the shipped reference build (Apr 2026). The small rows are
+wrapper-inclusive — they include the JTAG TAP / register / readout plumbing,
+not only `fcapz_ela.v`. The sample buffer uses dual-port BRAM, so scaling
+wider or deeper adds BRAM, not LUTs.
 
-| Config | Slice LUTs | BRAM |
-|--------|-----:|-----:|
-| 8b x 1024, A-only, slow USER1 readout | 596 | 0.5 |
-| 8b x 1024, A-only, single-chain fast readout | 912 | 0.5 |
-| 8b x 1024, dual compare, `REL_COMPARE=0` | 2,021 | 0.5 |
-| 8b x 1024, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 0.5 |
-| 8b x 1024, 4-stage sequencer | 2,954 | 0.5 |
-| 32b x 1024, dual compare, `REL_COMPARE=0` | 2,472 | 1.0 |
+| Config | Slice LUTs | FFs | BRAM | Notes |
+|--------|-----:|----:|-----:|-------|
+| 8b x 1024, A-only, slow USER1 readout | 596 | 779 | 0.5 | Smallest practical 1024-sample ELA; `DUAL_COMPARE=0`, optional features off |
+| 8b x 1024, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | One BSCANE2; 256-bit USER1 burst via `SINGLE_CHAIN_BURST=1` |
+| 8b x 1024, dual comparator, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | Compatibility trigger shape; EQ/NEQ/edges/changed |
+| 8b x 1024, dual comparator, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | Adds `<`, `>`, `<=`, `>=`; compare hit registered for timing |
+| 8b x 1024, +storage qualification | 2,521 | 1,749 | 0.5 | Same compatibility harness with `STOR_QUAL=1` |
+| 8b x 1024, 4-stage sequencer | 2,954 | 2,788 | 0.5 | `TRIG_STAGES=4`, `STOR_QUAL=0` |
+| 32b x 1024, dual comparator, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | Wider samples mainly add BRAM/FFs |
+| `arty_a7_top` (placed, pre-`DEBUG_EN` always-on debug) | 3,244 | 4,562 | 3.5 | Historical baseline for the same validation reference |
+| `arty_a7_top` (placed, `DEBUG_EN=0`) | 2,318 | 3,168 | 3.5 | Bridge debug telemetry disabled; previous reference before the EJTAG-AXI FIFO trim |
+| **`arty_a7_top` (placed, trimmed EJTAG-AXI FIFOs, `DEBUG_EN=0`)** | **2,371** | **3,356** | **1.5** | Current reference: USER1 debug manager with 2x ELA (`INPUT_PIPE=1`, `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, `NUM_SEGMENTS=4`) + 2x EIO 8/8 + EJTAG-AXI + `axi4_test_slave`; bridge debug telemetry disabled; EJTAG-AXI command/response queues set to 16 entries |
 
-Enabling timestamp, segmentation, decimation, external trigger, or wide
-probe mux builds adds logic and usually **extra BRAM** (see synthesis
-for your exact mix).
+Enabling timestamp, segmentation, decimation, external trigger, or a wide
+probe mux adds registers, comparators, and usually **extra BRAM** (e.g.
+timestamp storage); the reference row above is the authoritative full-feature
+footprint. Per-core deltas are not additive in synthesis because Vivado
+optimises across hierarchy.
+
+**Fmax (reference build):** `sys_clk` @ 100 MHz with positive WNS after route
+on `arty_a7_top` (xc7a100t, 2025.2). JTAG `tck_bscan` is constrained at 10 MHz
+(adapter-dependent in practice, often higher).
 
 ## Clocking
 - `sample_clk` is the capture clock.
