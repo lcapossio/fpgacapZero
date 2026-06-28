@@ -238,10 +238,13 @@ result = a.capture(timeout=10.0)
 print(f"got {len(result.samples)} samples, overflow={result.overflow}")
 ```
 
-### `capture_continuous(count=0, timeout_per=10.0)`
+### `capture_continuous(count=0, timeout_per=10.0, force_idle=False)`
 
 Generator that arms, waits, captures, re-arms, repeats.  `count=0`
-means "forever".
+means "forever".  Pass `force_idle=True` to establish a known-idle state
+once before the first arm (see `force_idle()` below) — this matters on a
+bitstream that boots with `STARTUP_ARM=1`, where the first iteration would
+otherwise inherit the power-up capture window.
 
 ```python
 for i, result in enumerate(a.capture_continuous(count=10)):
@@ -254,6 +257,7 @@ For `NUM_SEGMENTS > 1`:
 
 ```python
 a.configure(cfg)
+a.force_idle()      # on a STARTUP_ARM=1 bitstream; start from known idle
 a.arm()
 a.wait_all_segments_done(timeout=10.0)
 
@@ -285,6 +289,31 @@ Asserts the RESET bit, clearing armed/triggered/done.  Use it to
 abort an in-progress capture or recover from a stuck state.  If
 `CaptureConfig.startup_arm` is enabled, a later RESET leaves the
 core armed again instead of idle.
+
+### `force_idle(timeout=1.0, poll_interval=0.01, max_resets=3) -> None`
+
+Drives the core to a *verified* idle state: soft-resets, then polls
+`STATUS` until `armed`/`triggered`/`done` are all clear, re-resetting if a
+startup-armed core re-armed before the cleared `STARTUP_ARM` register
+crossed the sample-clock domain.  Raises `RuntimeError` if it cannot reach
+idle within `max_resets` resets.
+
+Use it between `configure()` and `arm()` on a bitstream built with the
+`STARTUP_ARM=1` RTL parameter: such a core boots already armed and may even
+be triggered/done before the host runs, so a bare `configure(); arm()` can
+read back a valid-but-unexpected window.  It is intentionally lossy (it
+discards any in-flight or boot capture) — skip it when you *want* the
+from-boot window.
+
+```python
+a.configure(cfg)
+a.force_idle()      # discard the boot window; start from known idle
+a.arm()
+result = a.capture()
+```
+
+See [chapter 5](05_ela_core.md#startup-arm-and-trigger-holdoff) for the
+full startup-arm discussion.
 
 ## `CaptureConfig` and friends
 

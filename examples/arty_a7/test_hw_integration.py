@@ -250,6 +250,8 @@ class TestMultiElaManager(unittest.TestCase):
                 sample_clock_hz=ELA0_SAMPLE_CLOCK_HZ,
             )
             a.configure(cfg)
+            # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+            a.force_idle()
             a.arm()
             result = a.capture(timeout=5.0)
             samples = [s & 0xFF for s in result.samples]
@@ -289,6 +291,8 @@ class TestMultiElaManager(unittest.TestCase):
                 sample_clock_hz=ELA1_SAMPLE_CLOCK_HZ,
             )
             a.configure(cfg)
+            # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+            a.force_idle()
             a.arm()
             result = a.capture(timeout=5.0)
             samples = [s & 0xFF for s in result.samples]
@@ -404,6 +408,8 @@ class TestCapture(unittest.TestCase):
             depth=1024,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         return self.a.capture(timeout=5.0)
 
@@ -429,6 +435,8 @@ class TestCapture(unittest.TestCase):
             trigger_delay=4,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 6)
@@ -454,6 +462,8 @@ class TestCapture(unittest.TestCase):
             trigger_delay=0,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 6)
@@ -702,6 +712,8 @@ class TestExportFormats(unittest.TestCase):
             sample_width=8, depth=1024,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         return self.a.capture(timeout=5.0)
 
@@ -771,6 +783,8 @@ class TestDecimation(unittest.TestCase):
             decimation=0,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 6)
@@ -791,6 +805,8 @@ class TestDecimation(unittest.TestCase):
             decimation=3,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 8)
@@ -842,6 +858,8 @@ class TestTimestamps(unittest.TestCase):
             trigger=self.TriggerConfig(mode="value_match", value=0x30, mask=0xFF),
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertGreater(len(result.timestamps), 0, "No timestamps returned")
@@ -861,6 +879,8 @@ class TestTimestamps(unittest.TestCase):
             decimation=3,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertGreater(len(result.timestamps), 1)
@@ -912,6 +932,8 @@ class TestSegmentedCapture(unittest.TestCase):
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         # Wait for all 4 segments to complete
         done = self.a.wait_all_segments_done(timeout=10.0)
@@ -934,6 +956,8 @@ class TestSegmentedCapture(unittest.TestCase):
             trigger=self.TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         done = self.a.wait_all_segments_done(timeout=10.0)
         self.assertTrue(done)
@@ -982,6 +1006,8 @@ class TestExtTrigger(unittest.TestCase):
             ext_trigger_mode=0,
         )
         self.a.configure(cfg)
+        # bitstream boots STARTUP_ARM=1 — establish known idle before arming
+        self.a.force_idle()
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 6)
