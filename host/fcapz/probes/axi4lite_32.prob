@@ -1,0 +1,26 @@
+{
+  "format": "fpgacapzero.probes.v1",
+  "core": "axi_mon",
+  "sample_width": 152,
+  "probes": [
+    {"name": "awaddr",  "width": 32, "lsb": 0},
+    {"name": "awprot",  "width": 3,  "lsb": 32},
+    {"name": "awvalid", "width": 1,  "lsb": 35},
+    {"name": "awready", "width": 1,  "lsb": 36},
+    {"name": "wdata",   "width": 32, "lsb": 37},
+    {"name": "wstrb",   "width": 4,  "lsb": 69},
+    {"name": "wvalid",  "width": 1,  "lsb": 73},
+    {"name": "wready",  "width": 1,  "lsb": 74},
+    {"name": "bresp",   "width": 2,  "lsb": 75},
+    {"name": "bvalid",  "width": 1,  "lsb": 77},
+    {"name": "bready",  "width": 1,  "lsb": 78},
+    {"name": "araddr",  "width": 32, "lsb": 79},
+    {"name": "arprot",  "width": 3,  "lsb": 111},
+    {"name": "arvalid", "width": 1,  "lsb": 114},
+    {"name": "arready", "width": 1,  "lsb": 115},
+    {"name": "rdata",   "width": 32, "lsb": 116},
+    {"name": "rresp",   "width": 2,  "lsb": 148},
+    {"name": "rvalid",  "width": 1,  "lsb": 150},
+    {"name": "rready",  "width": 1,  "lsb": 151}
+  ]
+}

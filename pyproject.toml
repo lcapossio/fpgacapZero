@@ -37,6 +37,7 @@ where = ["host"]
 include = ["fcapz*"]
 
 [tool.setuptools.package-data]
+"fcapz" = ["probes/*.prob"]
 "fcapz.gui" = ["assets/*.png", "assets/*.bin"]
 
 [project.optional-dependencies]

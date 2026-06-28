@@ -18,9 +18,11 @@ package fcapz_pkg is
     constant FCAPZ_EIO_CORE_ID : std_logic_vector(15 downto 0) := x"494F"; -- "IO" - Embedded I/O
     constant FCAPZ_EJTAGAXI_CORE_ID : std_logic_vector(15 downto 0) := x"4A58"; -- "JX" - EJTAG-AXI bridge
     constant FCAPZ_EJTAGUART_CORE_ID : std_logic_vector(15 downto 0) := x"4A55"; -- "JU" - EJTAG-UART bridge
+    constant FCAPZ_AXIMON_CORE_ID : std_logic_vector(15 downto 0) := x"414D"; -- "AM" - AXI Monitor
 
     constant FCAPZ_ELA_VERSION_REG : std_logic_vector(31 downto 0) := FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & FCAPZ_ELA_CORE_ID;
     constant FCAPZ_EIO_VERSION_REG : std_logic_vector(31 downto 0) := FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & FCAPZ_EIO_CORE_ID;
     constant FCAPZ_EJTAGAXI_VERSION_REG : std_logic_vector(31 downto 0) := FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & FCAPZ_EJTAGAXI_CORE_ID;
     constant FCAPZ_EJTAGUART_VERSION_REG : std_logic_vector(31 downto 0) := FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & FCAPZ_EJTAGUART_CORE_ID;
+    constant FCAPZ_AXIMON_VERSION_REG : std_logic_vector(31 downto 0) := FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & FCAPZ_AXIMON_CORE_ID;
 end package fcapz_pkg;

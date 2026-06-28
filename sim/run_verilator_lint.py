@@ -151,6 +151,23 @@ TARGETS = (
         sources=EIO_CORE,
     ),
     LintTarget(
+        name="fcapz_axi_mon",
+        top="fcapz_axi_mon",
+        sources=(*ELA_CORE, RTL / "fcapz_axi_mon.v"),
+    ),
+    LintTarget(
+        name="fcapz_axi_mon_xilinx7",
+        top="fcapz_axi_mon_xilinx7",
+        sources=(
+            SIM / "bscane2_stub.v",
+            *ELA_CORE,
+            RTL / "jtag_pipe_iface.v",
+            RTL / "fcapz_axi_mon.v",
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "fcapz_axi_mon_xilinx7.v",
+        ),
+    ),
+    LintTarget(
         name="fcapz_ejtagaxi",
         top="fcapz_ejtagaxi",
         sources=EJTAG_AXI_CORE,
