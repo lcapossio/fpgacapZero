@@ -51,6 +51,7 @@ and should be corrected.
 | [`specs/register_map.md`](specs/register_map.md) | Full register map for ELA, EIO, EJTAG-AXI, EJTAG-UART. Opens with an **Index** (anchor links); each major section ends with **↑ Top**. |
 | [`specs/transport_api.md`](specs/transport_api.md) | The `Transport` ABC contract — required to implement when adding a new backend. |
 | [`specs/waveform_schema.md`](specs/waveform_schema.md) | JSON / CSV / VCD export formats, field-by-field. |
+| [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Proposed/draft.** Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
 
 ## Conventions used in this manual
 
