@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { DockviewReact } from "dockview-react";
 import type { DockviewReadyEvent, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
@@ -137,13 +137,21 @@ function Dock() {
 }
 
 export function App() {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => r.json())
+      .then((d) => setVersion(typeof d.version === "string" ? d.version : ""))
+      .catch(() => {});
+  }, []);
+
   return (
     <SessionProvider>
       <div className="app-shell">
         <header className="topbar">
           <img className="logo" src="/fcapz_logo.png" alt="fcapz logo" />
           <h1>fpgacapZero</h1>
-          <span className="muted">web</span>
+          <span className="muted">web{version ? ` · v${version}` : ""}</span>
         </header>
         <Dock />
       </div>

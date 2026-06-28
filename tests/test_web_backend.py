@@ -263,6 +263,15 @@ def test_ir_table_mapping():
         RpcServer._ir_table("bogus")
 
 
+def test_version_endpoint(monkeypatch):
+    from fcapz import __version__
+
+    c = _client(monkeypatch)
+    r = c.get("/api/version")  # public metadata, no token required
+    assert r.status_code == 200
+    assert r.json()["version"] == __version__
+
+
 def test_surfer_viewer_is_mounted(monkeypatch):
     import os
 

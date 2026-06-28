@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+from .._version import __version__
 from .gateway import RpcGateway
 
 
@@ -65,6 +66,11 @@ def create_app(
             return
         if authorization != f"Bearer {token}":
             raise HTTPException(status_code=401, detail="invalid or missing token")
+
+    @app.get("/api/version")
+    async def version() -> dict:
+        # Public metadata (no auth) so the UI can show the version pre-connect.
+        return {"version": __version__}
 
     @app.post("/api/rpc")
     async def rpc(req: dict, _: None = Depends(auth)):
