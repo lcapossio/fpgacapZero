@@ -9,7 +9,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **Version:** Bumped project/RTL identity version to `0.4.0`.
+- **Version:** Bumped project/RTL identity version to `0.4.5`.
 - **EJTAG bridges:** EJTAG-AXI and EJTAG-UART now expose ELA/EIO-style
   packed `VERSION` identities through their native `CMD_CONFIG` paths:
   `JX` (`0x4A58`) for AXI and `JU` (`0x4A55`) for UART, with major/minor
