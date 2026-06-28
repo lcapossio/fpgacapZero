@@ -172,6 +172,53 @@ class LockCheckingTransport(FakeTransport):
         return super().read_regs_pipelined_user1(addrs)
 
 
+class ResetIdleTransport(LockCheckingTransport):
+    """Models a startup-armed core for :meth:`Analyzer.force_idle`.
+
+    STATUS (0x0008) reports busy until a soft reset (CTRL 0x0004 bit 1) settles
+    it. ``resets_to_idle`` emulates the startup-arm CDC race where the first
+    reset(s) come back still armed and only a later reset lands idle. Inherits
+    :class:`LockCheckingTransport` so tests can also assert lock discipline.
+    """
+
+    def __init__(self, resets_to_idle: int = 1, busy_status: int = 0x1):
+        super().__init__()
+        self.reset_writes = 0
+        self._resets_to_idle = resets_to_idle
+        self._busy_status = busy_status
+        self.regs[0x0008] = busy_status  # STATUS: start busy (e.g. armed/done)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        super().write_reg(addr, value)
+        if addr == 0x0004 and (value & 0x2):  # CTRL soft reset
+            self.reset_writes += 1
+            idle = self.reset_writes >= self._resets_to_idle
+            self.regs[0x0008] = 0 if idle else self._busy_status
+
+
+class ContinuousTransport(FakeTransport):
+    """Models CTRL ARM -> STATUS done so capture_continuous() completes, and
+    records the order of CTRL ops so a test can assert whether force_idle ran
+    before the first arm."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset_writes = 0
+        self.events: list[str] = []  # ordered CTRL ops: "reset" / "arm"
+        self.regs[0x0008] = 0  # start idle
+
+    def write_reg(self, addr: int, value: int) -> None:
+        super().write_reg(addr, value)
+        if addr == 0x0004:  # CTRL
+            if value & 0x2:  # reset
+                self.reset_writes += 1
+                self.events.append("reset")
+                self.regs[0x0008] = 0  # idle
+            elif value & 0x1:  # arm
+                self.events.append("arm")
+                self.regs[0x0008] = 0x4  # immediately "done" so capture() returns
+
+
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(
@@ -1303,6 +1350,86 @@ class ChainSelectionTests(unittest.TestCase):
         # Analyzer reads registers on chain 1 by default
         info = analyzer.probe()
         self.assertIn("version_major", info)
+
+
+class ForceIdleTests(unittest.TestCase):
+    def test_single_reset_reaches_idle(self):
+        t = ResetIdleTransport(resets_to_idle=1, busy_status=0x1)  # armed
+        a = Analyzer(t)
+        a.connect()
+        t.unlocked_ops.clear()  # isolate force_idle's lock discipline
+        a.force_idle()
+        self.assertEqual(t.reset_writes, 1)
+        self.assertEqual(t.regs.get(0x0008, 0) & 0x7, 0)  # idle
+        self.assertEqual(t.unlocked_ops, [])  # every access held the lock
+
+    def test_done_state_counts_as_busy(self):
+        # Reproduces the observed pre-arm STATUS=0x6 (triggered+done): a "clean"
+        # but stale window must still be reset away, not treated as idle.
+        t = ResetIdleTransport(resets_to_idle=1, busy_status=0x6)
+        a = Analyzer(t)
+        a.connect()
+        a.force_idle()
+        self.assertEqual(t.reset_writes, 1)
+        self.assertEqual(t.regs.get(0x0008, 0) & 0x7, 0)
+
+    def test_retries_through_startup_arm_cdc_race(self):
+        # First reset comes back still armed (STARTUP_ARM=0 hadn't crossed the
+        # CDC yet); the second reset lands idle.
+        t = ResetIdleTransport(resets_to_idle=2, busy_status=0x1)
+        a = Analyzer(t)
+        a.connect()
+        a.force_idle(poll_interval=0.001)
+        self.assertEqual(t.reset_writes, 2)
+        self.assertEqual(t.regs.get(0x0008, 0) & 0x7, 0)
+
+    def test_raises_when_core_never_idle(self):
+        # Runtime STARTUP_ARM register still reads 1 (configure() not called):
+        # every reset re-arms, so force_idle must give up loudly after max_resets.
+        t = ResetIdleTransport(resets_to_idle=999, busy_status=0x1)
+        a = Analyzer(t)
+        a.connect()
+        with self.assertRaises(RuntimeError) as ctx:
+            a.force_idle(timeout=1.0, max_resets=3)
+        self.assertEqual(t.reset_writes, 3)
+        msg = str(ctx.exception)
+        self.assertIn("still busy", msg)
+        self.assertIn("armed=True", msg)
+        self.assertIn("0x00000001", msg)
+
+
+class ContinuousCaptureTests(unittest.TestCase):
+    def _cfg(self) -> CaptureConfig:
+        return CaptureConfig(
+            pretrigger=1,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=7, mask=0xFF),
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=100_000_000,
+        )
+
+    def test_force_idle_resets_before_first_arm(self):
+        t = ContinuousTransport()
+        a = Analyzer(t)
+        a.connect()
+        a.configure(self._cfg())
+        results = list(a.capture_continuous(count=2, force_idle=True))
+        self.assertEqual(len(results), 2)
+        # A reset (from force_idle) precedes the first arm.
+        self.assertEqual(t.events, ["reset", "arm", "arm"])
+        self.assertEqual(t.reset_writes, 1)
+
+    def test_default_does_not_force_idle(self):
+        t = ContinuousTransport()
+        a = Analyzer(t)
+        a.connect()
+        a.configure(self._cfg())
+        results = list(a.capture_continuous(count=2))
+        self.assertEqual(len(results), 2)
+        # Back-compat: no reset issued; behavior unchanged.
+        self.assertEqual(t.events, ["arm", "arm"])
+        self.assertEqual(t.reset_writes, 0)
 
 
 if __name__ == "__main__":

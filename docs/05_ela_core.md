@@ -648,6 +648,28 @@ cfg = CaptureConfig(
 )
 ```
 
+> **Host-initiated captures on a startup-armed bitstream.** Because
+> `STARTUP_ARM=1` makes the core boot armed, it may already be armed — or even
+> triggered/done — before your host code runs. A bare `configure(cfg); arm()`
+> then races that power-up window and can read back a valid-but-unexpected
+> capture (clean data, wrong window). Call `Analyzer.force_idle()` between
+> `configure()` and `arm()` to reset the core and poll `STATUS` until it is
+> verifiably idle:
+>
+> ```python
+> a.configure(cfg)   # cfg.startup_arm defaults False -> clears STARTUP_ARM reg
+> a.force_idle()     # discard the boot window; start from known idle
+> a.arm()
+> result = a.capture()
+> ```
+>
+> `force_idle()` issues a soft reset and re-resets if the cleared `STARTUP_ARM`
+> register has not yet crossed the clock domain, so a single call is enough. It
+> is intentionally lossy — skip it when you *want* the from-boot capture (e.g.
+> the `STARTUP_ARM` validation tests, which deliberately use raw
+> `reset()`/`arm()`). For streaming, `capture_continuous(force_idle=True)`
+> establishes idle once before the first arm.
+
 What happens at runtime:
 
 1. The core arms (explicit `ARM`, segmented auto-rearm, or RESET with
