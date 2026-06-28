@@ -48,11 +48,9 @@ function AxiDock(_: IDockviewPanelProps) {
 }
 function ViewerDock(_: IDockviewPanelProps) {
   const s = useSession();
-  return s.capture ? (
-    <SurferView vcd={s.capture.vcd} />
-  ) : (
-    <Empty text="Run an ELA capture to see the waveform here." />
-  );
+  // Mount Surfer right away so its WASM loads up front; the waveform drops in
+  // when the first capture arrives (empty vcd just shows an idle Surfer).
+  return <SurferView vcd={s.capture?.vcd ?? ""} />;
 }
 
 const components = {
