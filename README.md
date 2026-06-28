@@ -374,6 +374,8 @@ config = CaptureConfig(
     channel=0,
 )
 analyzer.configure(config)
+# On a bitstream that boots with STARTUP_ARM=1, establish a known-idle state
+# before arming (see docs/05_ela_core.md):  analyzer.force_idle()
 analyzer.arm()
 result = analyzer.capture(timeout=5.0)
 
