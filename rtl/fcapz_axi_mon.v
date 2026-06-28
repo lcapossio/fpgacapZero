@@ -120,11 +120,18 @@ module fcapz_axi_mon #(
         AWREADY, AWVALID, AWPROT, AWADDR
     };
 
-    // ---- AXI-monitor identity / geometry registers (0x0100+) ---------------
-    // Registered on jtag_clk so read timing matches the ELA's registered
-    // jtag_rdata; the ELA owns 0x0000-0x00FF, we answer 0x0100/0x0104.
-    localparam [7:0] PROTO_CODE = 8'd1;  // 1 = AXI4-Lite
-    localparam [7:0] CAP_FLAGS  = 8'd0;  // bit0 DECODE_EN, bit1 PROTO_CHECK_EN (P2+)
+    // ---- AXI-monitor identity registers ------------------------------------
+    // The embedded ELA owns config space 0x0000-0x00FF and exposes captured
+    // samples in a register window at 0x0100+ (jtag_addr >= ADDR_DATA_BASE), so
+    // the AM identity must NOT sit at 0x0100.  It lives in the free gap above
+    // the ELA's last config register (0x00E0, COMPARE_CAPS) and below the data
+    // window.  Registered on jtag_clk so the read timing matches the ELA's
+    // registered jtag_rdata.  (The fuller AM register block -- decoder, address
+    // filters, violation -- gets its own window via a regbus split in P2.)
+    localparam [15:0] ADDR_AXI_MON_ID = 16'h00E8;
+    localparam [15:0] ADDR_AXI_GEOM   = 16'h00EC;
+    localparam [7:0]  PROTO_CODE = 8'd1;  // 1 = AXI4-Lite
+    localparam [7:0]  CAP_FLAGS  = 8'd0;  // bit0 DECODE_EN, bit1 PROTO_CHECK_EN (P2+)
     wire [31:0] axi_mon_id = {`FCAPZ_AXIMON_CORE_ID, PROTO_CODE, CAP_FLAGS}; // "AM"
     wire [31:0] axi_geom   = {7'd0, 5'h1F, 4'd0, DATA_W[7:0], ADDR_W[7:0]};
 
@@ -136,8 +143,8 @@ module fcapz_axi_mon #(
             am_hit   <= 1'b0;
             am_rdata <= 32'h0;
         end else begin
-            am_hit   <= (jtag_addr == 16'h0100) || (jtag_addr == 16'h0104);
-            am_rdata <= (jtag_addr == 16'h0104) ? axi_geom : axi_mon_id;
+            am_hit   <= (jtag_addr == ADDR_AXI_MON_ID) || (jtag_addr == ADDR_AXI_GEOM);
+            am_rdata <= (jtag_addr == ADDR_AXI_GEOM) ? axi_geom : axi_mon_id;
         end
     end
     assign jtag_rdata = am_hit ? am_rdata : ela_rdata;

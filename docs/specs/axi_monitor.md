@@ -150,23 +150,26 @@ aw_hs` → stage B `is_slverr & b_hs`, `is_final`.
 ## Register map
 
 The monitor **keeps the ELA register map verbatim** so the host `Analyzer` and
-all existing tooling drive capture/trigger unchanged. AXI-monitor specifics live
-in a reserved extension block and an identity register:
+all existing tooling drive capture/trigger unchanged. The ELA owns config space
+`0x0000–0x00FF` and exposes **captured samples in a register window at `0x0100+`**
+(`jtag_addr >= ADDR_DATA_BASE`), so AM registers must **not** sit at `0x0100`.
+
+**P1** needs only the identity, which fits the free gap between the ELA's last
+config register (`0x00E0`, COMPARE_CAPS) and the data window:
 
 | Address | Reg | Notes |
 |---------|-----|-------|
-| `0x0000` | VERSION | ELA-compatible. `[15:0]` ASCII core ID. The monitor reports **`"AM"` = `0x414D`**; tooling that only checks for an ELA accepts a `FEATURES` "is-ELA" contract, while AXI-aware tooling keys off `"AM"`. (Final choice — dual-ID vs. FEATURES bit — is an open question below.) |
+| `0x0000` | VERSION | The embedded ELA's identity — reports `"LA"`. (P1 detects an AXI monitor via the AM identity register below, not via `0x0000`.) |
 | `0x0004`–`0x00E0` | *(ELA register map)* | CTRL/STATUS/TRIG_*/SEQ_*/SQ_*/FEATURES/… exactly as [`register_map.md`](register_map.md). |
-| `0x0100` | AXI_MON_ID | `[31:16]` = `"AM"`, `[15:8]` = `PROTO` code, `[7:0]` = capability flags (DECODE_EN, PROTO_CHECK_EN). |
-| `0x0104` | AXI_GEOM | `[7:0]` ADDR_W, `[15:8]` DATA_W, `[19:16]` ID_W, `[24:20]` CAP_CHANNELS. |
-| `0x0108` | DEC_CTRL | decoder/checker enables, ID-match register select. |
-| `0x010C` | ID_MATCH | runtime `*ID` value to match. |
-| `0x0110 + i*8` | ADDR_FILTER_i_BASE | per-filter base address. |
-| `0x0114 + i*8` | ADDR_FILTER_i_LIMIT | per-filter limit address. |
-| `0x0180` | VIOLATION | P3: sticky violation flags + code; write-1-clear. |
+| `0x00E8` | AXI_MON_ID | `[31:16]` = `"AM"` (`0x414D`), `[15:8]` = `PROTO` code (1 = AXI4-Lite), `[7:0]` = capability flags (DECODE_EN, PROTO_CHECK_EN). |
+| `0x00EC` | AXI_GEOM | `[7:0]` ADDR_W, `[15:8]` DATA_W, `[19:16]` ID_W, `[24:20]` CAP_CHANNELS. |
+| `0x0100+` | *(ELA sample-data window)* | captured sample words — do not place AM registers here. |
 
-Allocate the AXI block at `0x0100+` to stay clear of the ELA's `0x0000–0x00E0`
-window and its sequencer stages.
+**P2+** adds the decoder/filter/violation registers, which need more than the
+`0x00E4–0x00FC` gap allows. Those get their own window via a `fcapz_regbus_mux`
+split (the same pattern the ELA-wrapper uses to host EIO at `0x8000`), e.g. the
+AM block at `0x8000+`: `DEC_CTRL`, `ID_MATCH`, `ADDR_FILTER_i_BASE/LIMIT`,
+`VIOLATION`.
 
 ## Host & viewer integration
 
