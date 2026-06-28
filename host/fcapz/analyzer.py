@@ -102,11 +102,20 @@ _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
 _ADDR_DATA_BASE = 0x0100
 
+_STATUS_ARMED = 1 << 0
+_STATUS_TRIGGERED = 1 << 1
 _STATUS_DONE = 1 << 2
 _STATUS_OVERFLOW = 1 << 3
+# Capture FSM is "busy" (i.e. not idle) if any of armed/triggered/done is set.
+_STATUS_BUSY = _STATUS_ARMED | _STATUS_TRIGGERED | _STATUS_DONE
 
 _CTRL_ARM = 1 << 0
 _CTRL_RESET = 1 << 1
+
+# force_idle(): per-reset settle window. A re-armed core (startup-arm CDC race)
+# reveals itself within a couple of sample clocks of reset deassert, so a short
+# bounded wait suffices before spending another reset.
+_FORCE_IDLE_SETTLE_S = 0.05
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -197,7 +206,10 @@ class CaptureConfig:
     stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
     stor_qual_value: int = 0   # storage qualification comparison value
     stor_qual_mask: int = 0    # storage qualification mask
-    startup_arm: bool = False  # if True, reset leaves the core armed
+    startup_arm: bool = False  # runtime STARTUP_ARM register (0xD8): if True a
+                               # soft reset re-arms the core. Distinct from the
+                               # compile-time STARTUP_ARM RTL parameter, which
+                               # sets the power-up (boot-armed) value.
     trigger_holdoff: int = 0   # sample-clock cycles to ignore triggers after arm/re-arm
     trigger_delay: int = 0     # post-trigger delay in sample-clock cycles
                                # (0..65535) — shifts the committed trigger
@@ -328,6 +340,101 @@ class Analyzer:
     def reset(self) -> None:
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+
+    def force_idle(
+        self,
+        timeout: float = 1.0,
+        poll_interval: float = 0.01,
+        max_resets: int = 3,
+    ) -> None:
+        """Drive the core to a *verified* idle state before arming.
+
+        A bitstream built with ``STARTUP_ARM=1`` (e.g. the Arty example) comes
+        up already armed -- it may even be triggered/done -- before the host
+        issues a single command. Arming and capturing on top of that yields a
+        valid but *unexpected* window. ``force_idle`` issues a soft reset and
+        confirms the core actually settled to idle (armed=0, triggered=0,
+        done=0) so the next capture is deterministic.
+
+        This is a *soft* reset only: it clears the sample-domain capture FSM
+        (armed/triggered/done and the buffer pointers). It does **not** touch
+        configuration registers, so the canonical sequence is::
+
+            a.configure(cfg)   # cfg.startup_arm defaults False, clearing the
+                               # runtime STARTUP_ARM register (addr 0xD8)
+            a.force_idle()
+            a.arm()
+            result = a.capture()
+
+        Note the boot-armed behavior comes from the *compile-time* ``STARTUP_ARM``
+        RTL parameter, which seeds the auto-arm flag at configuration time and
+        cannot be changed from the host. :meth:`configure` instead clears the
+        *runtime* STARTUP_ARM register (addr 0xD8), which overrides that flag for
+        subsequent resets.
+
+        A startup-armed core re-loads its auto-arm flag from that register on
+        every soft reset, so a single reset can race the configuration
+        clock-domain crossing and come back still armed. ``force_idle`` polls
+        STATUS after the reset and, if the core re-armed, resets again -- by which
+        point the runtime STARTUP_ARM register cleared by :meth:`configure` has
+        crossed into the sample domain -- up to ``max_resets`` times.
+
+        Timing assumption: a STATUS read round-trips over JTAG far slower than
+        the core's reset-to-re-arm latency (a couple of sample clocks), so the
+        first post-reset STATUS read reliably observes the settled state. This
+        holds for any practical sample clock; only a sample clock so slow that a
+        full JTAG access spans fewer than ~2 sample cycles could read a
+        transient idle before a pending re-arm propagates.
+
+        Note this is intentionally lossy: it discards any in-flight or
+        startup-armed capture. Workflows that *want* the from-boot capture
+        (including tests that validate ``STARTUP_ARM`` behavior) should not call
+        it and should use :meth:`reset`/:meth:`arm` directly.
+
+        Args:
+            timeout: overall budget, in seconds, to reach idle across all resets.
+            poll_interval: STATUS poll spacing in seconds.
+            max_resets: maximum soft resets to attempt.
+
+        Raises:
+            RuntimeError: if the core is still busy after ``max_resets`` resets
+                (e.g. ``STARTUP_ARM`` is still enabled because :meth:`configure`
+                was not called first).
+        """
+        read_status = getattr(
+            self.transport, "read_reg_verified", self.transport.read_reg
+        )
+        deadline = time.monotonic() + timeout
+        last_status = -1
+        attempt = 0
+        for attempt in range(max(1, max_resets)):
+            with self.transport.transaction_lock():
+                self._select_instance()
+                self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+            # A re-armed core (startup-arm CDC race) will not clear on its own,
+            # so cap each attempt's wait and fall through to another reset.
+            attempt_deadline = time.monotonic() + _FORCE_IDLE_SETTLE_S
+            while True:
+                with self.transport.transaction_lock():
+                    self._select_instance()
+                    last_status = read_status(_ADDR_STATUS)
+                if (last_status & _STATUS_BUSY) == 0:
+                    return
+                now = time.monotonic()
+                if now >= attempt_deadline or now >= deadline:
+                    break
+                time.sleep(poll_interval)
+            if time.monotonic() >= deadline:
+                break
+        raise RuntimeError(
+            f"force_idle: core still busy after {attempt + 1} reset(s); "
+            f"last STATUS=0x{last_status & 0xFFFFFFFF:08x} "
+            f"(armed={bool(last_status & _STATUS_ARMED)}, "
+            f"triggered={bool(last_status & _STATUS_TRIGGERED)}, "
+            f"done={bool(last_status & _STATUS_DONE)}). "
+            f"If the core keeps re-arming, the runtime STARTUP_ARM register is "
+            f"still set -- call configure() (startup_arm=False) before force_idle()."
+        )
 
     @staticmethod
     def _validate_probes(probes: List[ProbeSpec], sample_width: int) -> None:
@@ -758,6 +865,7 @@ class Analyzer:
         self,
         count: int = 0,
         timeout_per: float = 10.0,
+        force_idle: bool = False,
     ):
         """Generator that yields successive ``CaptureResult`` objects.
 
@@ -766,9 +874,18 @@ class Analyzer:
         iteration calls :meth:`arm`, then :meth:`capture` to wait for the next
         trigger and read back. Yields *count* results, or runs indefinitely if
         *count* is 0.
+
+        On a bitstream that boots with ``STARTUP_ARM=1`` the first iteration
+        would otherwise inherit the power-up capture window. Pass
+        ``force_idle=True`` to call :meth:`force_idle` once before the first
+        arm so the stream starts from a known-idle state. Defaults to ``False``
+        to preserve the original behavior (and leave the from-boot window
+        observable for callers that want it).
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture_continuous()")
+        if force_idle:
+            self.force_idle()
         yielded = 0
         while count == 0 or yielded < count:
             self.arm()

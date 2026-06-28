@@ -183,6 +183,27 @@ trigger sample is at `samples[pretrigger]`.
 
 **Fix**: `result.samples[result.config.pretrigger]`.
 
+### Capture returns valid data but not the window you armed (intermittent, passes on rerun)
+
+**Cause**: the bitstream was built with the `STARTUP_ARM=1` RTL parameter,
+so the core boots already armed — it may be armed, or even triggered/done,
+before your host code runs.  A bare `configure(); arm()` then races that
+power-up window and reads back a clean-but-unexpected capture.
+Reprogramming or rerunning often "fixes" it because the timing shifts.
+
+**Fix**: call `force_idle()` between `configure()` and `arm()` to reset the
+core and poll `STATUS` until it is verifiably idle:
+
+```python
+a.configure(cfg)
+a.force_idle()
+a.arm()
+result = a.capture()
+```
+
+For streaming, use `capture_continuous(force_idle=True)`.  See
+[chapter 5](05_ela_core.md#startup-arm-and-trigger-holdoff).
+
 ## GUI
 
 ### `qt.qpa.plugin: Could not load the Qt platform plugin "xcb"`
