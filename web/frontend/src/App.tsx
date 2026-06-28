@@ -73,7 +73,7 @@ function onReady(event: DockviewReadyEvent) {
     component: "viewer",
     title: "Viewer",
     position: { referencePanel: "connection", direction: "below" },
-    initialHeight: 500,
+    initialHeight: 400,
   });
   // Top row: Connection on the left, ELA/EIO/AXI tabs (+ slim Run) on the right.
   api.addPanel({
@@ -106,6 +106,8 @@ function onReady(event: DockviewReadyEvent) {
     component: "run",
     position: { referenceGroup: runGroup, direction: "within" },
   });
+  // Select ELA at startup (EIO/AXI were added after it and would otherwise win).
+  api.getPanel("ela")?.api.setActive();
 }
 
 function Dock() {
