@@ -362,6 +362,35 @@ module arty_a7_top (
         .s_axi_rlast(bridge_rlast)
     );
 
+    // ---- AXI monitor (USER2): passively tap the bridge AXI bus ----
+    // Captures and triggers on the EJTAG-AXI bridge's transactions to the test
+    // slave -- the host generates traffic via USER4 and observes it here.
+    // DECODE_EN=1 adds the transaction-events word so a hardware test can trigger
+    // on an error response (the slave's ERROR_ADDR=0xFFFF_FFFC returns SLVERR).
+    fcapz_axi_mon_xilinx7 #(
+        .ADDR_W(32), .DATA_W(32),
+        .DEPTH(256),
+        .TRIG_STAGES(1),
+        .STOR_QUAL(0),
+        .TIMESTAMP_W(0),
+        .INPUT_PIPE(1),
+        .REL_COMPARE(0),
+        .DECODE_EN(1),
+        .CTRL_CHAIN(2)
+    ) u_axi_mon (
+        .ACLK(clk_150), .ARESETN(~rst_150),
+        .AWADDR(bridge_awaddr), .AWPROT(bridge_awprot),
+        .AWVALID(bridge_awvalid), .AWREADY(bridge_awready),
+        .WDATA(bridge_wdata), .WSTRB(bridge_wstrb),
+        .WVALID(bridge_wvalid), .WREADY(bridge_wready),
+        .BRESP(bridge_bresp), .BVALID(bridge_bvalid), .BREADY(bridge_bready),
+        .ARADDR(bridge_araddr), .ARPROT(bridge_arprot),
+        .ARVALID(bridge_arvalid), .ARREADY(bridge_arready),
+        .RDATA(bridge_rdata), .RRESP(bridge_rresp),
+        .RVALID(bridge_rvalid), .RREADY(bridge_rready),
+        .trigger_in(1'b0), .trigger_out(), .armed_out()
+    );
+
     // ---- EIO LED output resync ----
     // Reads buttons plus the slow counter as probe_in, and drives the four
     // constrained green LEDs via probe_out.  The upper EIO output bits

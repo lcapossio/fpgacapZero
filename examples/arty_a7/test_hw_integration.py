@@ -79,6 +79,8 @@ _BITSTREAM_SOURCES_VERILOG = [
     _ROOT / "rtl" / "fcapz_async_fifo.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon.v",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
     _ROOT / "rtl" / "fcapz_eio.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "tb" / "axi4_test_slave.v",
@@ -1214,6 +1216,97 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
+
+
+# ── AXI monitor tests (USER2) ────────────────────────────
+# The monitor passively taps the EJTAG-AXI bridge's AXI bus. Each test arms
+# the monitor on USER2, then drives traffic via the bridge on USER4 and
+# confirms the monitor captured/triggered on it. The bitstream builds the
+# monitor with DECODE_EN=1, so triggers fire on transaction events.
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitor(unittest.TestCase):
+    """AXI monitor on USER2, observing the USER4 bridge bus.
+
+    The monitor passively taps the EJTAG-AXI bridge's AXI4-Lite bus. These
+    tests arm the monitor on the decode layer's transaction-event bits, then
+    drive traffic via the bridge on USER4 and confirm the monitor triggers
+    (or doesn't) by reading STATUS. Selective event triggering on real silicon
+    is the AXI monitor's headline.
+
+    Note: bulk readback of the 160-bit samples is *not* asserted here — that
+    path is timing-marginal at 150 MHz for this wide SAMPLE_W (a separate,
+    characterized issue; the capture/trigger logic itself is cocotb-verified
+    and confirmed on hardware via the STATUS checks below).
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream once
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()  # transport already open; don't re-program
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+
+    def tearDown(self):
+        self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _arm(self, *events):
+        cfg = self.mon.event_capture_config(*events, pretrigger=2, posttrigger=12, depth=256)
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_detect_and_geometry(self):
+        """The monitor identity/geometry is reachable on USER2."""
+        self.assertTrue(self.mon.present, "AXI monitor not detected on USER2")
+        geo = self.mon.geometry()
+        self.assertEqual((geo.addr_w, geo.data_w), (32, 32))
+        self.assertTrue(geo.decode, "expected a DECODE_EN=1 build")
+        self.assertEqual(geo.sample_width, 160)
+
+    def test_triggers_on_write_handshake(self):
+        """Arm on aw_hs; a host AXI write makes the monitor trigger + complete."""
+        self._arm("aw_hs")
+        self.bridge.axi_write(0x00000010, 0x12345678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the AW handshake (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_triggers_on_slverr(self):
+        """Arm on any_err; a write to the slave's ERROR_ADDR triggers the monitor.
+
+        The test slave returns SLVERR for 0xFFFFFFFC; the bridge surfaces that as
+        AXIError, but the error response still appears on the bus, where the
+        monitor's any_err event fires. This is the P2 decode-layer headline.
+        """
+        from fcapz.ejtagaxi import AXIError
+
+        self._arm("any_err")
+        with self.assertRaises(AXIError):
+            self.bridge.axi_write(0xFFFFFFFC, 0xDEADBEEF)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the error response (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_no_trigger_on_clean_write(self):
+        """Arm on any_err; a *clean* write must NOT trigger (selective events)."""
+        self._arm("any_err")
+        self.bridge.axi_write(0x00000010, 0x12345678)  # OKAY response, no error
+        status = self._status()
+        self.assertFalse(status & 0x2, f"false trigger on a clean write (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
 
 # ── EJTAG-UART bridge tests (require UART loopback bitstream) ─────────

@@ -80,8 +80,16 @@ class AxiMonitor:
         self._an = analyzer
 
     def _read(self, addr: int) -> int:
-        with self._an.transport.transaction_lock():
-            return self._an.transport.read_reg(addr)
+        # Select the monitor's BSCAN chain first -- another core (e.g. the AXI
+        # bridge on a different USER chain) may have left the transport selected
+        # elsewhere.
+        t = self._an.transport
+        with t.transaction_lock():
+            try:
+                t.select_chain(self._an.bscan_chain)
+            except NotImplementedError:
+                pass
+            return t.read_reg(addr)
 
     # ---- detection / geometry ------------------------------------------
     def identity(self) -> int | None:

@@ -60,6 +60,16 @@ def test_detects_axi_monitor():
     assert m.identity() == AM_ID
 
 
+def test_reads_select_the_monitor_chain():
+    # Another core (e.g. an AXI bridge on a different USER chain) may have left
+    # the transport selected elsewhere; the monitor must reselect its chain.
+    fm = FakeMon({0x00E8: AM_ID, 0x00EC: GEOM})
+    fm.select_chain(4)
+    mon = AxiMonitor(Analyzer(fm, chain=2))
+    assert mon.present
+    assert fm.active_chain == 2
+
+
 def test_absent_when_magic_missing():
     m = AxiMonitor(Analyzer(FakeMon({0x00E8: 0x4C41, 0x00EC: 0})))  # plain ELA "LA"
     assert not m.present
