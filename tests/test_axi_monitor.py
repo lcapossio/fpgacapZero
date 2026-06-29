@@ -40,11 +40,18 @@ class FakeMon(Transport):
         return [0] * words
 
 
+AM_ID_DECODE = (0x414D << 16) | (1 << 8) | 0x01  # CAP_FLAGS bit0 = DECODE_EN
+
+
 def _mon(extra: dict[int, int] | None = None) -> AxiMonitor:
     regs = {0x00E8: AM_ID, 0x00EC: GEOM}
     if extra:
         regs.update(extra)
     return AxiMonitor(Analyzer(FakeMon(regs)))
+
+
+def _mon_decode() -> AxiMonitor:
+    return AxiMonitor(Analyzer(FakeMon({0x00E8: AM_ID_DECODE, 0x00EC: GEOM})))
 
 
 def test_detects_axi_monitor():
@@ -95,3 +102,29 @@ def test_write_addr_capture_config():
     assert cfg.sample_width == 152
     assert cfg.pretrigger == 4 and cfg.posttrigger == 10
     assert any(p.name == "awaddr" for p in cfg.probes)
+
+
+def test_decode_geometry_and_probe_map():
+    g = _mon_decode().geometry()
+    assert g.decode is True
+    assert g.sample_width == 160  # +8 events word
+    fields = {p.name: (p.lsb, p.width) for p in _mon_decode().probe_map().probes}
+    assert fields["any_err"] == (7, 1)
+    assert fields["awaddr"] == (8, 32)  # shifted up by the events word
+
+
+def test_event_capture_config_triggers_on_event():
+    cfg = _mon_decode().event_capture_config("any_err")
+    assert cfg.trigger.mode == "value_match"
+    assert cfg.trigger.value == 0x80 and cfg.trigger.mask == 0x80  # events bit 7
+    assert cfg.sample_width == 160
+    assert any(p.name == "any_err" for p in cfg.probes)
+
+
+def test_mode_guards():
+    with pytest.raises(AxiMonitorError):
+        _mon_decode().write_addr_capture_config(0x1000)  # awaddr not low-32 here
+    with pytest.raises(AxiMonitorError):
+        _mon().event_capture_config("any_err")  # needs a decode build
+    with pytest.raises(AxiMonitorError):
+        _mon_decode().event_capture_config("bogus_event")

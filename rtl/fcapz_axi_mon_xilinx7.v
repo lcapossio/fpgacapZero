@@ -37,11 +37,12 @@ module fcapz_axi_mon_xilinx7 #(
     parameter REL_COMPARE  = 1,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    parameter DECODE_EN    = 0,    // P2 transaction-events word at the LSB
     parameter BURST_W      = 256,
     parameter CTRL_CHAIN   = 1,    // BSCANE2 USER chain for control + burst
     // derived (must match fcapz_axi_mon)
     localparam STRB_W      = DATA_W / 8,
-    localparam SAMPLE_W    = 2*ADDR_W + 2*DATA_W + STRB_W + 20,
+    localparam SAMPLE_W    = 2*ADDR_W + 2*DATA_W + STRB_W + 20 + ((DECODE_EN != 0) ? 8 : 0),
     localparam PTR_W       = $clog2(DEPTH),
     localparam TS_W        = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1,
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS
@@ -129,7 +130,8 @@ module fcapz_axi_mon_xilinx7 #(
         .NUM_SEGMENTS(NUM_SEGMENTS), .TIMESTAMP_W(TIMESTAMP_W),
         .INPUT_PIPE(INPUT_PIPE), .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .STARTUP_ARM(STARTUP_ARM), .REL_COMPARE(REL_COMPARE),
-        .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+        .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN),
+        .DECODE_EN(DECODE_EN)
     ) u_mon (
         .ACLK(ACLK), .ARESETN(ARESETN),
         .AWADDR(AWADDR), .AWPROT(AWPROT), .AWVALID(AWVALID), .AWREADY(AWREADY),

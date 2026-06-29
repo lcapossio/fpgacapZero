@@ -43,6 +43,10 @@ module fcapz_axi_mon #(
     parameter REL_COMPARE  = 1,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    // Decode layer (P2): prepend an 8-bit transaction-events word at the LSB so
+    // events (handshakes, response errors) are reachable by the ELA's low-32-bit
+    // trigger comparator. DECODE_EN=0 keeps the P1 layout (awaddr at [31:0]).
+    parameter DECODE_EN    = 0,
     // derived
     localparam STRB_W      = DATA_W / 8,
     localparam AW_W        = ADDR_W + 5,            // awaddr + awprot[3] + awvalid + awready
@@ -50,7 +54,9 @@ module fcapz_axi_mon #(
     localparam B_W         = 4,                     // bresp[2] + bvalid + bready
     localparam AR_W        = ADDR_W + 5,            // araddr + arprot[3] + arvalid + arready
     localparam R_W         = DATA_W + 4,            // rdata + rresp[2] + rvalid + rready
-    localparam SAMPLE_W    = AW_W + W_W + B_W + AR_W + R_W,
+    localparam EVENTS_W    = (DECODE_EN != 0) ? 8 : 0,
+    localparam CHANNELS_W  = AW_W + W_W + B_W + AR_W + R_W,
+    localparam SAMPLE_W    = CHANNELS_W + EVENTS_W,
     localparam PTR_W       = $clog2(DEPTH),
     localparam TS_W        = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1
 ) (
@@ -106,8 +112,7 @@ module fcapz_axi_mon #(
 );
 
     // ---- Flatten the AXI channels into the capture vector (LSB-first) -------
-    wire [SAMPLE_W-1:0] probe_vec;
-    assign probe_vec = {
+    wire [CHANNELS_W-1:0] channels = {
         // R channel  (MSB end)
         RREADY, RVALID, RRESP, RDATA,
         // AR channel
@@ -116,9 +121,35 @@ module fcapz_axi_mon #(
         BREADY, BVALID, BRESP,
         // W channel
         WREADY, WVALID, WSTRB, WDATA,
-        // AW channel (LSB end -- awaddr occupies bits [ADDR_W-1:0])
+        // AW channel (awaddr occupies bits [ADDR_W-1:0] of the channel block)
         AWREADY, AWVALID, AWPROT, AWADDR
     };
+
+    // Derived transaction events (combinational; P2 decode layer). Bit order:
+    //   [0] aw_hs [1] w_hs [2] b_hs [3] ar_hs [4] r_hs [5] b_err [6] r_err [7] any_err
+    wire        b_err = BVALID & BRESP[1];   // SLVERR(2)/DECERR(3) -> RESP[1]=1
+    wire        r_err = RVALID & RRESP[1];
+    wire [7:0]  events = {
+        b_err | r_err,        // any_err
+        r_err,                // r_err
+        b_err,                // b_err
+        RVALID & RREADY,      // r_hs
+        ARVALID & ARREADY,    // ar_hs
+        BVALID & BREADY,      // b_hs
+        WVALID & WREADY,      // w_hs
+        AWVALID & AWREADY     // aw_hs
+    };
+
+    // Events sit at the LSB (when enabled) so the low-32-bit trigger can match
+    // them; otherwise the raw channels start at bit 0 (P1 layout).
+    wire [SAMPLE_W-1:0] probe_vec;
+    generate
+        if (DECODE_EN != 0) begin : g_decode
+            assign probe_vec = {channels, events};
+        end else begin : g_raw
+            assign probe_vec = channels;
+        end
+    endgenerate
 
     // ---- AXI-monitor identity registers ------------------------------------
     // The embedded ELA owns config space 0x0000-0x00FF and exposes captured
@@ -131,7 +162,7 @@ module fcapz_axi_mon #(
     localparam [15:0] ADDR_AXI_MON_ID = 16'h00E8;
     localparam [15:0] ADDR_AXI_GEOM   = 16'h00EC;
     localparam [7:0]  PROTO_CODE = 8'd1;  // 1 = AXI4-Lite
-    localparam [7:0]  CAP_FLAGS  = 8'd0;  // bit0 DECODE_EN, bit1 PROTO_CHECK_EN (P2+)
+    localparam [7:0]  CAP_FLAGS  = (DECODE_EN != 0) ? 8'h01 : 8'h00;  // bit0 DECODE_EN
     wire [31:0] axi_mon_id = {`FCAPZ_AXIMON_CORE_ID, PROTO_CODE, CAP_FLAGS}; // "AM"
     wire [31:0] axi_geom   = {7'd0, 5'h1F, 4'd0, DATA_W[7:0], ADDR_W[7:0]};
 

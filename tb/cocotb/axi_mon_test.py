@@ -12,9 +12,14 @@ ela_core_test.py.
 
 from __future__ import annotations
 
+import os
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
+
+# Set by the runner per target: 0 = P1 raw layout, 1 = P2 decode (events at LSB).
+DECODE = int(os.environ.get("AXIMON_DECODE", "0"))
 
 ADDR_VERSION = 0x0000
 ADDR_CTRL = 0x0004
@@ -126,6 +131,29 @@ class MonDriver:
         self.dut.BVALID.value = 0
         self.dut.BREADY.value = 0
 
+    async def axi_write_error(self, addr: int, data: int) -> None:
+        """Like axi_write but the write response is SLVERR (BRESP=2'b10)."""
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWADDR.value = addr
+        self.dut.AWVALID.value = 1
+        self.dut.AWREADY.value = 1
+        self.dut.WDATA.value = data
+        self.dut.WSTRB.value = 0xF
+        self.dut.WVALID.value = 1
+        self.dut.WREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 0
+        self.dut.AWREADY.value = 0
+        self.dut.WVALID.value = 0
+        self.dut.WREADY.value = 0
+        self.dut.BRESP.value = 0b10  # SLVERR -> b_err / any_err
+        self.dut.BVALID.value = 1
+        self.dut.BREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.BVALID.value = 0
+        self.dut.BREADY.value = 0
+        self.dut.BRESP.value = 0
+
 
 async def setup(dut) -> MonDriver:
     d = MonDriver(dut)
@@ -138,15 +166,42 @@ async def identity_and_geometry(dut):
     d = await setup(dut)
     # The embedded ELA reports "LA"; the AM identity is at 0x00E8.
     assert (await d.read(ADDR_VERSION)) & 0xFFFF == 0x4C41
-    assert (await d.read(ADDR_SAMPLE_W)) == 152  # AXI4-Lite 32/32 flatten width
+    # Flatten width: 152 raw, +8 events word when the decode layer is enabled.
+    assert (await d.read(ADDR_SAMPLE_W)) == (160 if DECODE else 152)
 
     amid = await d.read(ADDR_AXI_MON_ID)
     assert (amid >> 16) == 0x414D, f"AM id 0x{amid:08x}"   # "AM"
     assert ((amid >> 8) & 0xFF) == 1                        # PROTO = AXI4-Lite
+    assert (amid & 0x1) == DECODE                           # CAP_FLAGS bit0 = DECODE_EN
 
     geom = await d.read(ADDR_AXI_GEOM)
     assert (geom & 0xFF) == 32                              # ADDR_W
     assert ((geom >> 8) & 0xFF) == 32                       # DATA_W
+
+
+@cocotb.test()
+async def captures_error_event(dut):
+    """Decode layer: trigger on the any_err event bit and capture an SLVERR."""
+    d = await setup(dut)
+    pre, post = 2, 3
+    await d.write(ADDR_PRETRIG, pre)
+    await d.write(ADDR_POSTTRIG, post)
+    await d.write(ADDR_TRIG_MODE, 1)            # value match
+    await d.write(ADDR_TRIG_VALUE, 0x80)        # any_err = events bit 7 (low byte)
+    await d.write(ADDR_TRIG_MASK, 0x80)
+    await d.arm()
+
+    await d.wait_aclk(3)
+    await d.axi_write_error(0x4000_0000, 0xDEAD_BEEF)
+    await d.wait_aclk(8)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    # Trigger sample sits at buffer index `pre`; its low byte is the events word.
+    events = (await d.read(ADDR_DATA_BASE + (pre * words) * 4)) & 0xFF
+    assert (events >> 7) & 1 == 1, f"any_err not set: events=0x{events:02x}"
+    assert (events >> 5) & 1 == 1, f"b_err not set: events=0x{events:02x}"
+    assert (events >> 2) & 1 == 1, f"b_hs not set: events=0x{events:02x}"
 
 
 @cocotb.test()

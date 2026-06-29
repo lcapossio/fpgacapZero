@@ -34,12 +34,19 @@ ADDR_AXI_MON_ID = 0x00E8
 ADDR_AXI_GEOM = 0x00EC
 AXI_MON_MAGIC = 0x414D  # "AM"
 
-# (addr_w, data_w) -> bundled probe-map resource name under fcapz/probes/.
+# (addr_w, data_w, decode) -> bundled probe-map resource name under fcapz/probes/.
 _PROBE_MAPS = {
-    (32, 32): "axi4lite_32.prob",
+    (32, 32, False): "axi4lite_32.prob",
+    (32, 32, True): "axi4lite_32_decode.prob",
 }
 
 _PROTO_NAMES = {1: "AXI4LITE"}
+
+# Decode-layer event bits (low byte of the capture vector when DECODE_EN=1).
+EVENT_BITS = {
+    "aw_hs": 0, "w_hs": 1, "b_hs": 2, "ar_hs": 3, "r_hs": 4,
+    "b_err": 5, "r_err": 6, "any_err": 7,
+}
 
 
 class AxiMonitorError(RuntimeError):
@@ -53,6 +60,7 @@ class AxiGeometry:
     id_w: int
     cap_channels: int
     proto_code: int
+    decode: bool = False  # DECODE_EN: 8-bit events word prepended at the LSB
 
     @property
     def proto(self) -> str:
@@ -61,7 +69,8 @@ class AxiGeometry:
     @property
     def sample_width(self) -> int:
         """Flatten width — must match fcapz_axi_mon's SAMPLE_W localparam."""
-        return 2 * self.addr_w + 2 * self.data_w + self.data_w // 8 + 20
+        base = 2 * self.addr_w + 2 * self.data_w + self.data_w // 8 + 20
+        return base + (8 if self.decode else 0)
 
 
 class AxiMonitor:
@@ -95,17 +104,18 @@ class AxiMonitor:
             id_w=(geom >> 16) & 0xF,
             cap_channels=(geom >> 20) & 0x1F,
             proto_code=(ident >> 8) & 0xFF,
+            decode=bool(ident & 0x01),  # CAP_FLAGS bit0
         )
 
     # ---- probe map / field decode --------------------------------------
     def probe_map(self, geometry: AxiGeometry | None = None) -> ProbeFile:
         """Load the bundled probe map matching the monitor's geometry."""
         geo = geometry or self.geometry()
-        name = _PROBE_MAPS.get((geo.addr_w, geo.data_w))
+        name = _PROBE_MAPS.get((geo.addr_w, geo.data_w, geo.decode))
         if name is None:
             raise AxiMonitorError(
-                f"no bundled probe map for AXI {geo.addr_w}/{geo.data_w}; "
-                "supported: " + ", ".join(f"{a}/{d}" for a, d in _PROBE_MAPS)
+                f"no bundled probe map for AXI {geo.addr_w}/{geo.data_w} "
+                f"(decode={geo.decode})"
             )
         path = resources.files("fcapz").joinpath("probes", name)
         with resources.as_file(path) as real_path:
@@ -132,12 +142,62 @@ class AxiMonitor:
         ``awaddr`` occupies the capture vector's low 32 bits, so the ELA's
         32-bit value-match comparator triggers on it directly.  The bundled
         probe map is attached so the result decodes to named AXI fields.
+
+        Only valid on **DECODE_EN=0** builds; with the decode layer the low 32
+        bits hold the events word + ``awaddr[23:0]`` instead — use
+        :meth:`event_capture_config` (or a future address-range filter).
         """
         geo = self.geometry()
+        if geo.decode:
+            raise AxiMonitorError(
+                "write-address triggering needs a DECODE_EN=0 build (awaddr is not "
+                "in the low 32 bits when the decode layer is enabled); use "
+                "event_capture_config() instead"
+            )
         return CaptureConfig(
             pretrigger=pretrigger,
             posttrigger=posttrigger,
             trigger=TriggerConfig(mode="value_match", value=addr & addr_mask, mask=addr_mask),
+            sample_width=geo.sample_width,
+            depth=depth,
+            sample_clock_hz=sample_clock_hz,
+            probes=list(self.probe_map(geo).probes),
+        )
+
+    def event_capture_config(
+        self,
+        *events: str,
+        pretrigger: int = 8,
+        posttrigger: int = 24,
+        depth: int = 1024,
+        sample_clock_hz: int = 100_000_000,
+    ) -> CaptureConfig:
+        """A capture that triggers on AXI transaction events (DECODE_EN=1 builds).
+
+        ``events`` are names from :data:`EVENT_BITS` (e.g. ``"any_err"``,
+        ``"b_hs"``).  The trigger fires when **all** named bits are asserted in
+        the same cycle (use the pre-ORed ``"any_err"`` for "any error
+        response").  The decode layer places these bits in the low byte so the
+        ELA's value-match comparator reaches them.
+        """
+        geo = self.geometry()
+        if not geo.decode:
+            raise AxiMonitorError(
+                "event triggers require a DECODE_EN=1 monitor build"
+            )
+        if not events:
+            raise AxiMonitorError("name at least one event (e.g. 'any_err')")
+        mask = 0
+        for name in events:
+            if name not in EVENT_BITS:
+                raise AxiMonitorError(
+                    f"unknown AXI event {name!r}; known: {sorted(EVENT_BITS)}"
+                )
+            mask |= 1 << EVENT_BITS[name]
+        return CaptureConfig(
+            pretrigger=pretrigger,
+            posttrigger=posttrigger,
+            trigger=TriggerConfig(mode="value_match", value=mask, mask=mask),
             sample_width=geo.sample_width,
             depth=depth,
             sample_clock_hz=sample_clock_hz,
