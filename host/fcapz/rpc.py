@@ -9,6 +9,7 @@ import traceback
 from typing import Any, Dict
 
 from .analyzer import Analyzer, CaptureConfig, ProbeSpec, TriggerConfig
+from .axi_monitor import AxiMonitor
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -227,6 +228,25 @@ class RpcServer:
 
         if cmd == "probe":
             return self._ok(probe=analyzer.probe())
+
+        if cmd == "axi_mon_probe":
+            # Detect an AXI monitor and return its geometry +
+            # the bundled probe map so the client can capture with named AXI
+            # fields. The monitor captures like an ELA; this just adds the
+            # AXI-aware glue. Absent -> {present: False} (not an error).
+            mon = AxiMonitor(analyzer)
+            geo = mon.geometry() if mon.present else None
+            if geo is None:
+                return self._ok(present=False)
+            probes = mon.probe_map(geo).probes
+            return self._ok(
+                present=True,
+                proto=geo.proto,
+                addr_w=geo.addr_w,
+                data_w=geo.data_w,
+                sample_width=geo.sample_width,
+                probes=[{"name": p.name, "width": p.width, "lsb": p.lsb} for p in probes],
+            )
 
         if cmd == "configure":
             analyzer.configure(self._build_config(req))
