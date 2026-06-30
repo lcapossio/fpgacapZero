@@ -21,6 +21,20 @@ build/
 !host/fcapz/gui/assets/default_window_state_v6.bin
 !host/fcapz/gui/assets/default_window_state_v7.bin
 
+# FPGA example build output (vendor toolchains) -- keep example *source* tracked
+# Gowin: build dir + stale snapshots
+examples/*/out/
+examples/*/out_stale_*/
+# Intel/Altera Quartus: generated databases, checkpoints, outputs
+examples/**/qdb/
+examples/**/dni/
+examples/**/incremental_db/
+examples/**/output_files/
+examples/**/tmp-clearbox/
+examples/**/*.qws
+# Local capture output
+examples/*/captures/
+
 # Simulation artifacts
 sim/*.vvp
 sim/*.vcd
