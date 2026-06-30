@@ -263,7 +263,40 @@ def test_eio_attach_passes_managed_instance(qtbot: Any, tmp_path: Path) -> None:
         w._eio_panel._instance_spin.setValue(3)
         qtbot.mouseClick(_button_with_text(w._eio_panel, "Attach EIO"), Qt.MouseButton.LeftButton)
 
-        eio_cls.assert_called_with(w._analyzer.transport, chain=1, instance=3)
+        eio_cls.assert_called_with(
+            w._analyzer.transport, chain=1, instance=3, base_addr=0
+        )
+        eio.attach.assert_called_once()
+
+
+def test_eio_attach_passes_shared_chain_base_addr(qtbot: Any, tmp_path: Path) -> None:
+    """Gowin shared-chain EIO: chain 1, no managed slot, mux offset 0x8000."""
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+        eio_cls = ex.enter_context(patch("fcapz.gui.app_window.EioController"))
+        eio = eio_cls.return_value
+        eio.in_w = 2
+        eio.out_w = 6
+        eio.version_major = 0
+        eio.version_minor = 4
+        eio.bscan_chain = 1
+        eio.instance = None
+        eio.read_outputs.return_value = 0
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        w._eio_panel._chain_spin.setValue(1)
+        w._eio_panel._base_addr_spin.setValue(0x8000)
+        qtbot.mouseClick(_button_with_text(w._eio_panel, "Attach EIO"), Qt.MouseButton.LeftButton)
+
+        eio_cls.assert_called_with(
+            w._analyzer.transport, chain=1, instance=None, base_addr=0x8000
+        )
         eio.attach.assert_called_once()
 
 

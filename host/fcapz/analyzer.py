@@ -478,7 +478,7 @@ class Analyzer:
 
         # Validate host config against the synthesized core to avoid silent
         # mismatch between CLI defaults and FPGA bitstream parameters.
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        _read = self.transport.read_reg_stable
         hw_sample_w = int(_read(_ADDR_SAMPLE_W))
         hw_depth = int(_read(_ADDR_DEPTH))
         hw_num_chan = max(1, int(_read(_ADDR_NUM_CHAN)))
@@ -568,7 +568,7 @@ class Analyzer:
         cannot block an immediate run.
         """
         self._select_instance()
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        _read = self.transport.read_reg_stable
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
         trig = TriggerConfig(mode="value_match", value=0, mask=0)
@@ -595,7 +595,7 @@ class Analyzer:
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
         deadline = time.monotonic() + timeout
-        read_status = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
             with self.transport.transaction_lock():
                 self._select_instance()
@@ -658,7 +658,7 @@ class Analyzer:
     def _read_data_words(self, total_words: int) -> list[int]:
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
-        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
@@ -669,7 +669,7 @@ class Analyzer:
 
         with self.transport.transaction_lock():
             self._select_instance()
-            read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            read_reg = self.transport.read_reg_stable
             status = read_reg(_ADDR_STATUS)
             fallback_total = self._config.pretrigger + self._config.posttrigger + 1
             reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
@@ -718,7 +718,7 @@ class Analyzer:
         # directly by the burst engine (stable after all_seg_done).
         self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
 
-        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        read_reg = self.transport.read_reg_stable
         status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
         reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
@@ -912,16 +912,16 @@ class Analyzer:
             probe_mux_w = int(vals[7])
             compare_caps = int(vals[8])
         else:
-            _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            _vread = self.transport.read_reg_stable
             version = int(_vread(_ADDR_VERSION))
-            sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
-            depth = int(self.transport.read_reg(_ADDR_DEPTH))
-            num_chan = int(self.transport.read_reg(_ADDR_NUM_CHAN))
-            features = int(self.transport.read_reg(_ADDR_FEATURES))
-            timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
-            num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
-            probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
-            compare_caps = int(self.transport.read_reg(_ADDR_COMPARE_CAPS))
+            sample_w = int(_vread(_ADDR_SAMPLE_W))
+            depth = int(_vread(_ADDR_DEPTH))
+            num_chan = int(_vread(_ADDR_NUM_CHAN))
+            features = int(_vread(_ADDR_FEATURES))
+            timestamp_w = int(_vread(_ADDR_TIMESTAMP_W))
+            num_segments = max(1, int(_vread(_ADDR_NUM_SEGMENTS)))
+            probe_mux_w = int(_vread(_ADDR_PROBE_MUX_W))
+            compare_caps = int(_vread(_ADDR_COMPARE_CAPS))
         if compare_caps == 0:
             compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
@@ -995,8 +995,8 @@ class Analyzer:
         :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
         (hw_server), all probe registers share **one** XSDB ``_send`` plus
         a pipeline flush read.
-        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
-        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+        Otherwise uses :meth:`~fcapz.transport.Transport.read_reg_stable`
+        for VERSION, identity, and feature registers.
 
         Returns a dict with `version_major`, `version_minor`, `core_id`
         (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
@@ -1038,7 +1038,7 @@ class CoreManager:
         """Read manager identity and slot count."""
         with self.transport.transaction_lock():
             self._select_chain()
-            read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            read = self.transport.read_reg_stable
             version = int(read(_ADDR_MGR_VERSION))
             core_id = version & 0xFFFF
             if core_id != _CORE_MANAGER_CORE_ID:

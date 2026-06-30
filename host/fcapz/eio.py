@@ -25,6 +25,8 @@ on the ``EioController`` instance as ``version_major`` /
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
 from .transport import Transport
 
@@ -254,3 +256,43 @@ class EioController:
     # ------------------------------------------------------------------
     def __repr__(self) -> str:
         return f"EioController(in_w={self.in_w}, out_w={self.out_w})"
+
+
+def discover_eio(
+    transport: Transport,
+    *,
+    chains: Iterable[int] = (1,),
+    bases: Iterable[int] = (0x0000, 0x8000),
+    instances: Iterable[int] | None = None,
+) -> EioController | None:
+    """Find and attach the EIO core by probing candidate JTAG locations.
+
+    The host should not need to know which USER chain or mux offset a core
+    sits behind.  This tries, in order: core-manager slots (``instances`` on
+    chain 1), then every ``chains`` x ``bases`` combination, attaching the
+    first location whose identity register reads the EIO magic (``0x494F``).
+
+    ``EioController.attach`` only reads and restores chain 1, so probing a
+    wrong location is harmless — non-matches (wrong chain, ELA magic,
+    unprogrammed FPGA) raise and are skipped.  Returns the attached
+    controller, or ``None`` if no EIO core responds anywhere.
+    """
+    candidates: list[dict[str, int]] = []
+    if instances:
+        candidates.extend({"chain": 1, "instance": int(i)} for i in instances)
+    candidates.extend(
+        {"chain": int(c), "base_addr": int(b)} for c in chains for b in bases
+    )
+    seen: set[tuple] = set()
+    for kw in candidates:
+        key = tuple(sorted(kw.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        eio = EioController(transport, **kw)
+        try:
+            eio.attach()
+        except (OSError, RuntimeError, ValueError, NotImplementedError):
+            continue
+        return eio
+    return None

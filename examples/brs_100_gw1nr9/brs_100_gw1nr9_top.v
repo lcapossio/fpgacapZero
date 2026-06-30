@@ -28,7 +28,7 @@ localparam int DEPTH                = 64;
     //  Internal signals
     // ----------------------------------------------
 
-    reg [5:0]                       i_leds;
+    wire [5:0]                      i_eio_leds;     // host-driven LEDs (EIO out)
     reg [1:0]                       i_buttons;
     reg [32-1:0]                    i_pad;
 
@@ -85,7 +85,12 @@ localparam int DEPTH                = 64;
         .SAMPLE_W       (SAMPLE_W),
         .DEPTH          (DEPTH),
         .NUM_CHANNELS   (CHANNELS),
-        .EIO_EN         (0)
+        .EIO_EN         (1),
+            // NOTE: EIO shares the single GW_JTAG primitive with the ELA
+            // (mux offset 0x8000).  Host: EioController(t, chain=1,
+            // base_addr=0x8000).
+        .EIO_IN_W       (2),    // read the 2 user buttons
+        .EIO_OUT_W      (6)     // drive the 6 LEDs
     ) u_ela (
         .clk            (i_jtagclk),
             // NOTE: this is a separate clock
@@ -98,10 +103,8 @@ localparam int DEPTH                = 64;
         .sample_rst     (i_sysclk_reset),
         .probe_in       (i_probe),
 
-        .eio_probe_in   (0),
-        .eio_probe_out  (),
-            // NOTE: external trigger ports
-            // tie off if not used
+        .eio_probe_in   (i_buttons),   // host reads button state
+        .eio_probe_out  (i_eio_leds),  // host drives LED state
 
         .tms_pad_i      (tms_pad_i),
         .tck_pad_i      (tck_pad_i),
@@ -219,37 +222,12 @@ localparam int DEPTH                = 64;
 
     // NOTE: Leds
     // ------------
+    //
+    // EIO demo: all 6 LEDs are driven by the EIO output register, so the
+    // host controls them directly over JTAG (eio.write_outputs).  LEDs are
+    // active-low on this board.
 
-    always @(posedge i_sysclk) begin
-        if (i_second_tick == 1'b1) begin
-            i_leds[0] <= ~i_leds[0];
-        end
-
-        if (i_jtag_activity_jtagclk == 1'b1) begin
-            // NOTE: this isn't proper CDC...
-            // fit for demonstration only.
-
-            i_leds[1] <= 1'b1;
-        end
-        if (|i_millisecond_counter[6:0] == 1'b0) begin
-            i_leds[1] <= 0;
-        end
-
-        i_leds[3:2] <= i_buttons[1:0];
-        i_leds[4]   <= i_pad[0];
-        i_leds[5]   <= i_pad[1];
-
-        if (i_sysclk_resetn == 1'b0) begin
-            i_leds <= 0;
-        end
-    end
-    assign pad_leds_n = ~i_leds;
-        // NOTE:
-        //          led[5]: i_pad[1]
-        //          led[4]: i_pad[0]
-        //          led[3]: i_buttons[1]
-        //          led[2]: i_buttons[0]
-        //          led[1]: JTAG Activity
-        //          led[0]: Heartbeat
+    assign pad_leds_n = ~i_eio_leds;
+        // NOTE: led[5:0] = EIO probe_out[5:0] (host-driven)
 
 endmodule
