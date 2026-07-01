@@ -85,4 +85,4 @@ run pnr
 
 puts "Deploying Bitstream"
 file mkdir $output_dir
-file copy -force ${project_dir}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs
+file copy -force ${project_dir}/${project_name}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs
