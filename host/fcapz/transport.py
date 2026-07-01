@@ -468,6 +468,7 @@ class XilinxHwServerTransport(Transport):
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
     RAW_DR_IDLE_CYCLES = 8
+    USER1_DATA_SETTLE_READS = 5
     _SENTINEL = "<<XSDB_DONE>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
@@ -1028,14 +1029,30 @@ class XilinxHwServerTransport(Transport):
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
-        """Fallback: single-sequence pipelined reads via USER1 49-bit DR."""
+        """Fallback DATA-window reads via USER1 49-bit DR.
+
+        DATA/timestamp windows are read-only after capture completion.  Read
+        each word repeatedly and return the final settled value; this avoids
+        accepting a stale first response from the 49-bit register pipeline.
+        """
+        if addr >= 0x0100:
+            results: list[int] = []
+            for i in range(words):
+                value = 0
+                word_addr = addr + i * 4
+                for _ in range(self.USER1_DATA_SETTLE_READS):
+                    value = self.read_reg(word_addr)
+                results.append(value)
+            self.read_reg(0x0000)
+            return results
+
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)
             chunk_size = end - start
             tcl = self._burst_read_tcl(addr, start, chunk_size)
             out = self._send(tcl)
-            results.extend(self._parse_block_bits(out, chunk_size, skip_words=1))
+            results.extend(self._parse_block_bits(out, chunk_size, skip_words=3))
         # Flush JTAG pipeline
         self.read_reg(0x0000)
         return results
@@ -1059,6 +1076,7 @@ class XilinxHwServerTransport(Transport):
                     self._frame_bits(addr=base_addr + (offset + i) * 4, data=0, write=False)
                 )
             )
+        flush_frame = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
 
         parts: list[str] = [
             "set _q [jtag sequence]",
@@ -1066,8 +1084,15 @@ class XilinxHwServerTransport(Transport):
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
             f"$_q delay {idle}",
-            # Prime capture: discard this word.  Hardware/XSDB can leave the
-            # first captured USER1 word stale after a previous pipelined read.
+            # Prime captures: discard the stale register-pipeline word plus
+            # the DATA-window Port-B/jtag_rdata fill latency before counting
+            # returned DATA words.
+            f"{ir_cmd}; "
+            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
+            f"$_q delay {idle}",
+            f"{ir_cmd}; "
+            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
+            f"$_q delay {idle}",
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
             f"$_q delay {idle}",
@@ -1083,7 +1108,7 @@ class XilinxHwServerTransport(Transport):
         # Final scan: capture last result
         parts.append(
             f"{ir_cmd}; "
-            f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
+            f"$_q drshift -state DRUPDATE -capture -bits {n} {flush_frame}"
         )
         parts.append("puts [$_q run -bits]; $_q delete")
         return "; ".join(parts)

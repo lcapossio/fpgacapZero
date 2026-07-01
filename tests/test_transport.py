@@ -581,11 +581,11 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
         tcl = t._burst_read_tcl(0x0100, 0, 4)
 
-        self.assertEqual(tcl.count(f"delay {t.READ_IDLE_CYCLES}"), 5)
+        self.assertEqual(tcl.count(f"delay {t.READ_IDLE_CYCLES}"), 7)
         # xsdb 2025.2 requires `delay` to follow IDLE/PAUSE/RESET, so every
         # capture-and-delay pair parks the TAP in IDLE. The final scan has no
         # trailing delay and stays in DRUPDATE.
-        self.assertEqual(tcl.count("drshift -state IDLE -capture"), 4)
+        self.assertEqual(tcl.count("drshift -state IDLE -capture"), 6)
         self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 1)
 
     def test_default_chain_shape_emits_6bit_ir_and_49bit_dr(self):
