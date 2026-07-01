@@ -143,6 +143,8 @@ class ElaDriver:
         self.dut.jtag_rd_en.value = 0
         self.dut.jtag_addr.value = 0
         self.dut.jtag_wdata.value = 0
+        if hasattr(self.dut, "burst_rd_active"):
+            self.dut.burst_rd_active.value = 0
         self.dut.burst_rd_addr.value = 0
         await self.wait_sample(4)
         self.dut.sample_rst.value = 0

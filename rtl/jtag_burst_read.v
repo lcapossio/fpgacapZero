@@ -40,6 +40,7 @@ module jtag_burst_read #(
 
     // Dual-port memory read (tck domain)
     output wire [$clog2(DEPTH)-1:0] mem_addr,
+    output wire                      mem_active,
     input  wire [SAMPLE_W-1:0]      sample_data,
     input  wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] timestamp_data,
 
@@ -94,6 +95,7 @@ module jtag_burst_read #(
     endgenerate
 
     assign tdo      = sr[0];
+    assign mem_active = loading | (sel && capture);
     generate
         if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat
             assign mem_addr = rd_off;

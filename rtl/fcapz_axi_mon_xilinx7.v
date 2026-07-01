@@ -86,6 +86,7 @@ module fcapz_axi_mon_xilinx7 #(
     wire [31:0] jtag_wdata, jtag_rdata;
 
     wire [PTR_W-1:0]    burst_rd_addr;
+    wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
     wire [TS_W-1:0]     burst_rd_ts_data;
     wire                burst_start;
@@ -119,6 +120,7 @@ module fcapz_axi_mon_xilinx7 #(
         .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
         .reg_rdata(jtag_rdata),
         .mem_addr(burst_rd_addr),
+        .mem_active(burst_rd_active),
         .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),
         .burst_ptr_in(burst_start_ptr)
@@ -143,6 +145,7 @@ module fcapz_axi_mon_xilinx7 #(
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
         .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata), .jtag_rdata(jtag_rdata),
+        .burst_rd_active(burst_rd_active),
         .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),

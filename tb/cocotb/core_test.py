@@ -666,6 +666,8 @@ async def fcapz_core_manager_mux(dut):
     dut.slot_rdata.value = (0x2222_0000 << 64) | (0x1111_0000 << 32)
     dut.slot_burst_rd_data.value = (0xC2 << 16) | (0xB1 << 8) | 0xA0
     dut.slot_burst_rd_ts_data.value = (0x2 << 8) | (0x1 << 4)
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
     dut.slot_burst_start.value = 0b111
     dut.slot_burst_timestamp.value = 0b101
     dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
@@ -719,6 +721,8 @@ async def fcapz_ela_channel_mux(dut):
     dut.jtag_rd_en.value = 0
     dut.jtag_addr.value = 0
     dut.jtag_wdata.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
     dut.burst_rd_addr.value = 0
     for _ in range(4):
         await RisingEdge(dut.sample_clk)

@@ -54,6 +54,7 @@ module chan_mux_tb;
         .jtag_addr       (jtag_addr),
         .jtag_wdata      (jtag_wdata),
         .jtag_rdata      (jtag_rdata),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr),
         .burst_rd_data   (burst_rd_data),
         .burst_start     (burst_start),

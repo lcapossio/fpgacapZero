@@ -63,6 +63,7 @@ module fcapz_ela #(
     output reg  [31:0]          jtag_rdata,
 
     // Burst read port (jtag_clk domain, active when done=1)
+    input  wire                      burst_rd_active,
     input  wire [$clog2(DEPTH)-1:0] burst_rd_addr,
     output wire [SAMPLE_W-1:0]      burst_rd_data,
     output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data,
@@ -174,6 +175,7 @@ module fcapz_ela #(
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
     localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam SEG_IDX_W = (NUM_SEGMENTS > 1) ? $clog2(NUM_SEGMENTS) : 1;
+    localparam [PTR_W-1:0] SEG_DEPTH_MASK = SEG_DEPTH - 1;
 
     // Static assert: SEG_DEPTH must be a power-of-two (bitmask wrap arithmetic)
     generate
@@ -186,6 +188,7 @@ module fcapz_ela #(
     localparam ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
     // Timestamp words per entry
     localparam TS_WORDS = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 0;
+    localparam TS_WORDS_SAFE = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 1;
 
     // Probe mux derived params
     localparam PROBE_MUX_SLICES = (PROBE_MUX_W > 0) ? (PROBE_MUX_W / SAMPLE_W) : 0;
@@ -425,6 +428,23 @@ module fcapz_ela #(
     reg [PTR_W-1:0] seg_start_ptr_jtag_sync1 [0:NUM_SEGMENTS-1];
     reg [PTR_W-1:0] seg_start_ptr_jtag_sync2 [0:NUM_SEGMENTS-1];
 
+    // Readback metadata snapshot. The sample clock domain captures these once
+    // the capture is complete, then toggles a settled-before-toggle handshake
+    // so DATA-window decode in jtag_clk never depends on live sample state.
+    reg                rb_done_d;
+    reg [SEG_IDX_W-1:0] rb_seg_count_d;
+    reg                rb_meta_toggle_sample;
+    reg [LEN_W-1:0]    rb_capture_len_sample;
+    reg [PTR_W-1:0]    rb_start_ptr_sample;
+    reg [PTR_W-1:0]    rb_seg_start_ptr_sample [0:NUM_SEGMENTS-1];
+    reg                rb_meta_toggle_sync1;
+    reg                rb_meta_toggle_sync2;
+    reg                rb_meta_toggle_sync3;
+    reg [LEN_W-1:0]    rb_capture_len_jtag;
+    reg [PTR_W-1:0]    rb_start_ptr_jtag;
+    reg [PTR_W-1:0]    rb_seg_start_ptr_jtag [0:NUM_SEGMENTS-1];
+    reg                rb_done_jtag;
+
     // ---- Sample buffer (dual-port RAM) -------------------------------------
     localparam TS_DATA_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     reg                  mem_we_a_q;
@@ -432,6 +452,7 @@ module fcapz_ela #(
     reg  [SAMPLE_W-1:0]  mem_wr_data_q;
     reg  [TS_DATA_W-1:0] mem_wr_ts_q;
     wire [PTR_W-1:0]     mem_addr_a;
+    wire [PTR_W-1:0]     mem_addr_b;
     wire [SAMPLE_W-1:0]  mem_dout_a;
     wire [SAMPLE_W-1:0]  mem_dout_b;
     wire                 mem_we_a;
@@ -452,7 +473,7 @@ module fcapz_ela #(
         .din_a  (mem_din_a_ram),
         .dout_a (mem_dout_a),
         .clk_b  (jtag_clk),
-        .addr_b (burst_rd_addr),
+        .addr_b (mem_addr_b),
         .dout_b (mem_dout_b)
     );
 
@@ -480,7 +501,7 @@ module fcapz_ela #(
                 .din_a  (mem_ts_din_a_ram[TS_DATA_W-1:0]),
                 .dout_a (ts_dout_a),
                 .clk_b  (jtag_clk),
-                .addr_b (burst_rd_addr),
+                .addr_b (mem_addr_b),
                 .dout_b (ts_dout_b)
             );
         end else begin : g_no_ts
@@ -522,6 +543,21 @@ module fcapz_ela #(
     reg [SAMPLE_W-1:0] rd_data_jtag;
     reg [PTR_W-1:0] idx, rd_start_ptr_req;
     integer word_index, sample_index;
+
+    // DATA-window Port-B readback (jtag_clk domain)
+    wire datawin_req_now;
+    reg                 datawin_is_ts_comb;
+    reg                 datawin_oob_comb;
+    reg [PTR_W-1:0]     datawin_mem_addr_comb;
+    reg [31:0]          datawin_chunk_comb;
+    reg [31:0]          datawin_word_index_comb;
+    reg [31:0]          datawin_sample_index_comb;
+    reg [PTR_W-1:0]     datawin_start_ptr_comb;
+    reg [PTR_W-1:0]     datawin_seg_base_comb;
+    reg                 datawin_reply_q;
+    reg                 datawin_oob_q;
+    reg                 datawin_is_ts_q;
+    reg [31:0]          datawin_chunk_q;
 
     // Phase 3: timestamp readback CDC registers
     reg [TS_DATA_W-1:0] ts_rd_data_sample, ts_rd_data_sync1, ts_rd_data_sync2;
@@ -678,8 +714,57 @@ module fcapz_ela #(
     wire rd_addr_data_window = HAS_USER1_DATA && (
         (rd_addr_jtag >= ADDR_DATA_BASE) ||
         (TIMESTAMP_W > 0 && rd_addr_jtag >= ADDR_TS_DATA_BASE[15:0]));
+    assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
+
+    wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
+        (HAS_SEGMENTS && jtag_seg_sel < NUM_SEGMENTS) ? jtag_seg_sel : {SEG_IDX_W{1'b0}};
+    wire [PTR_W-1:0] jtag_seg_start_ptr = rb_seg_start_ptr_jtag[jtag_seg_sel_clamped];
+    wire [PTR_W-1:0] datawin_start_ptr_w = HAS_SEGMENTS ? jtag_seg_start_ptr : rb_start_ptr_jtag;
+    wire [PTR_W-1:0] datawin_seg_base_w;
+    generate
+        if (NUM_SEGMENTS > 1) begin : g_datawin_seg_base
+            assign datawin_seg_base_w = {datawin_start_ptr_w[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+        end else begin : g_datawin_no_seg_base
+            assign datawin_seg_base_w = {PTR_W{1'b0}};
+        end
+    endgenerate
+
+    always @(*) begin
+        datawin_is_ts_comb = (TIMESTAMP_W > 0) && (jtag_addr >= ADDR_TS_DATA_BASE[15:0]);
+        datawin_oob_comb = 1'b0;
+        datawin_mem_addr_comb = {PTR_W{1'b0}};
+        datawin_chunk_comb = 32'h0;
+        datawin_word_index_comb = 32'h0;
+        datawin_sample_index_comb = 32'h0;
+        datawin_start_ptr_comb = datawin_start_ptr_w;
+        datawin_seg_base_comb = datawin_seg_base_w;
+
+        if (datawin_is_ts_comb) begin
+            datawin_word_index_comb = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;
+            datawin_sample_index_comb = datawin_word_index_comb / TS_WORDS_SAFE;
+            datawin_chunk_comb = datawin_word_index_comb % TS_WORDS_SAFE;
+        end else begin
+            datawin_word_index_comb = (jtag_addr - ADDR_DATA_BASE) >> 2;
+            datawin_sample_index_comb = datawin_word_index_comb / WORDS_PER_SAMPLE;
+            datawin_chunk_comb = datawin_word_index_comb % WORDS_PER_SAMPLE;
+        end
+
+        if (datawin_sample_index_comb >= rb_capture_len_jtag) begin
+            datawin_oob_comb = 1'b1;
+        end else begin
+            datawin_mem_addr_comb = datawin_seg_base_comb
+                + ((datawin_start_ptr_comb - datawin_seg_base_comb
+                    + datawin_sample_index_comb[PTR_W-1:0]) & SEG_DEPTH_MASK);
+        end
+    end
+
+    assign mem_addr_b = burst_rd_active ? burst_rd_addr :
+                        (datawin_req_now && !datawin_oob_comb) ? datawin_mem_addr_comb :
+                        {PTR_W{1'b0}};
 
     integer s;
+    integer rb_sample_i;
+    integer rb_jtag_i;
     reg [31:0] jtag_rdata_mux;
 
     always @(posedge jtag_clk or posedge jtag_rst) begin
@@ -749,11 +834,12 @@ module fcapz_ela #(
                     ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
                     ADDR_SEG_SEL:    if (HAS_SEGMENTS) jtag_seg_sel <= jtag_wdata[SEG_IDX_W-1:0];
                     ADDR_BURST_PTR: begin
-                        // Use the JTAG-domain copy; seg_start_ptr is written
-                        // in sample_clk and must not feed USER2 directly.
+                        // Use the completed-capture snapshot; start pointers
+                        // are written in sample_clk and must not feed USER2
+                        // directly.
                         burst_start_ptr <= HAS_SEGMENTS
-                            ? seg_start_ptr_jtag_sync2[jtag_seg_sel]
-                            : start_ptr;
+                            ? jtag_seg_start_ptr
+                            : rb_start_ptr_jtag;
                         burst_timestamp <= jtag_wdata[31];
                         burst_start     <= ~burst_start;
                     end
@@ -780,8 +866,56 @@ module fcapz_ela #(
 
             if (jtag_rd_en) begin
                 rd_addr_jtag <= jtag_addr;
-                if (jtag_rd_data_window)
-                    rd_req_toggle_jtag <= ~rd_req_toggle_jtag;
+            end
+        end
+    end
+
+    // ---- CDC: completed-capture metadata snapshot -------------------------
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            rb_done_d <= 1'b0;
+            rb_seg_count_d <= {SEG_IDX_W{1'b0}};
+            rb_meta_toggle_sample <= 1'b0;
+            rb_capture_len_sample <= {LEN_W{1'b0}};
+            rb_start_ptr_sample <= {PTR_W{1'b0}};
+            for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
+                rb_seg_start_ptr_sample[rb_sample_i] <= {PTR_W{1'b0}};
+        end else begin
+            rb_done_d <= done;
+            rb_seg_count_d <= seg_count;
+            if ((done && !rb_done_d) ||
+                (HAS_SEGMENTS && (seg_count != rb_seg_count_d))) begin
+                rb_capture_len_sample <= capture_len;
+                rb_start_ptr_sample <= start_ptr;
+                for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
+                    rb_seg_start_ptr_sample[rb_sample_i] <= seg_start_ptr[rb_sample_i];
+                rb_meta_toggle_sample <= ~rb_meta_toggle_sample;
+            end
+        end
+    end
+
+    always @(posedge jtag_clk or posedge jtag_rst) begin
+        if (jtag_rst) begin
+            rb_meta_toggle_sync1 <= 1'b0;
+            rb_meta_toggle_sync2 <= 1'b0;
+            rb_meta_toggle_sync3 <= 1'b0;
+            rb_capture_len_jtag <= {LEN_W{1'b0}};
+            rb_start_ptr_jtag <= {PTR_W{1'b0}};
+            rb_done_jtag <= 1'b0;
+            for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
+                rb_seg_start_ptr_jtag[rb_jtag_i] <= {PTR_W{1'b0}};
+        end else begin
+            rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
+            rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
+            rb_meta_toggle_sync3 <= rb_meta_toggle_sync2;
+            if (jtag_wr_en && jtag_addr == ADDR_CTRL && (jtag_wdata[0] || jtag_wdata[1])) begin
+                rb_done_jtag <= 1'b0;
+            end else if (rb_meta_toggle_sync2 ^ rb_meta_toggle_sync3) begin
+                rb_capture_len_jtag <= rb_capture_len_sample;
+                rb_start_ptr_jtag <= rb_start_ptr_sample;
+                for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
+                    rb_seg_start_ptr_jtag[rb_jtag_i] <= rb_seg_start_ptr_sample[rb_jtag_i];
+                rb_done_jtag <= 1'b1;
             end
         end
     end
@@ -1467,6 +1601,10 @@ module fcapz_ela #(
             ts_rd_data_sync2 <= 32'h0;
             ts_rd_data_jtag  <= 32'h0;
             jtag_rdata       <= 32'h0;
+            datawin_reply_q  <= 1'b0;
+            datawin_oob_q    <= 1'b0;
+            datawin_is_ts_q  <= 1'b0;
+            datawin_chunk_q  <= 32'h0;
         end else begin
             rd_ack_sync1  <= rd_ack_toggle_sample;
             rd_ack_sync2  <= rd_ack_sync1;
@@ -1474,38 +1612,27 @@ module fcapz_ela #(
             rd_data_sync2 <= rd_data_sync1;
             ts_rd_data_sync1 <= ts_rd_data_sample;
             ts_rd_data_sync2 <= ts_rd_data_sync1;
+
+            datawin_reply_q <= datawin_req_now;
+            datawin_oob_q   <= datawin_oob_comb | burst_rd_active;
+            datawin_is_ts_q <= datawin_is_ts_comb;
+            datawin_chunk_q <= datawin_chunk_comb;
+
             if (jtag_rd_en && !jtag_rd_data_window)
                 jtag_rdata <= jtag_rdata_mux;
-            if (rd_ack_sync1 ^ rd_ack_sync2) begin
-                rd_data_jtag <= rd_data_sync1;
-                ts_rd_data_jtag <= ts_rd_data_sync1;
-                if (rd_addr_data_window) begin
-                    if (TIMESTAMP_W > 0 && rd_addr_jtag >= ADDR_TS_DATA_BASE[15:0]) begin
-                        jtag_rdata <= ts_rd_data_sync1 >> (
-                            ((rd_addr_jtag - ADDR_TS_DATA_BASE[15:0]) >> 2) % TS_WORDS
-                        ) * 32;
-                    end else if (WORDS_PER_SAMPLE == 1) begin
-                        // Use sample_chunk_word so SAMPLE_W==32 does not
-                        // emit the {0{1'b0}} zero-replication concat that
-                        // Some lint and synthesis flows reject.
-                        jtag_rdata <= sample_chunk_word(rd_data_sync1, 0);
-                    end else begin
-                        jtag_rdata <= sample_chunk_word(
-                            rd_data_sync1,
-                            ((rd_addr_jtag - ADDR_DATA_BASE) >> 2) % WORDS_PER_SAMPLE
-                        );
-                    end
-                end
+            if (datawin_reply_q) begin
+                if (datawin_oob_q)
+                    jtag_rdata <= 32'h0;
+                else if (datawin_is_ts_q)
+                    jtag_rdata <= ts_chunk_word(ts_dout_b, datawin_chunk_q);
+                else
+                    jtag_rdata <= sample_chunk_word(mem_dout_b, datawin_chunk_q);
             end
         end
     end
 
     // ---- Register read mux -------------------------------------------------
     integer seq_rd_stage, seq_rd_off;
-
-    wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
-        (HAS_SEGMENTS && jtag_seg_sel < NUM_SEGMENTS) ? jtag_seg_sel : {SEG_IDX_W{1'b0}};
-    wire [PTR_W-1:0] jtag_seg_start_ptr = seg_start_ptr_jtag_sync2[jtag_seg_sel_clamped];
 
     wire seq_addr_hit = HAS_SEQUENCER && (jtag_addr >= ADDR_SEQ_BASE) &&
                         (jtag_addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE);
@@ -1533,6 +1660,21 @@ module fcapz_ela #(
         end
     endfunction
 
+    function [31:0] ts_chunk_word;
+        input [TS_DATA_W-1:0] sample;
+        input integer chunk;
+        integer bit_i;
+        integer bit_base;
+        begin
+            ts_chunk_word = 32'h0;
+            bit_base = chunk * 32;
+            for (bit_i = 0; bit_i < 32; bit_i = bit_i + 1) begin
+                if (bit_base + bit_i < TS_DATA_W)
+                    ts_chunk_word[bit_i] = sample[bit_base + bit_i];
+            end
+        end
+    endfunction
+
     always @(*) begin
         // defaults
         jtag_rdata_mux = 0;
@@ -1549,12 +1691,12 @@ module fcapz_ela #(
             // trusting any other ELA register on this chain.
             ADDR_VERSION:     jtag_rdata_mux = `FCAPZ_ELA_VERSION_REG;
             ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
-            ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, done, triggered, armed};
+            ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, rb_done_jtag, triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata_mux = SAMPLE_W;
             ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
             ADDR_PRETRIG:     jtag_rdata_mux = jtag_pretrig_len;
             ADDR_POSTTRIG:    jtag_rdata_mux = jtag_posttrig_len;
-            ADDR_CAPTURE_LEN: jtag_rdata_mux = capture_len;
+            ADDR_CAPTURE_LEN: jtag_rdata_mux = rb_capture_len_jtag;
             ADDR_TRIG_MODE:   jtag_rdata_mux = jtag_trig_mode;
             ADDR_TRIG_VALUE:  jtag_rdata_mux = jtag_trig_value;
             ADDR_TRIG_MASK:   jtag_rdata_mux = jtag_trig_mask;
@@ -1577,7 +1719,7 @@ module fcapz_ela #(
             // as all_seg_done/seg_count on ADDR_SEG_STATUS above)
             ADDR_SEG_START:   jtag_rdata_mux = HAS_SEGMENTS
                                 ? {{(32-PTR_W){1'b0}}, jtag_seg_start_ptr}
-                                : {{(32-PTR_W){1'b0}}, start_ptr};
+                                : {{(32-PTR_W){1'b0}}, rb_start_ptr_jtag};
             ADDR_PROBE_SEL:   jtag_rdata_mux = HAS_PROBE_MUX ? {24'h0, jtag_probe_sel} : 32'h0;
             ADDR_PROBE_MUX_W: jtag_rdata_mux = PROBE_MUX_W;
             ADDR_STARTUP_ARM: jtag_rdata_mux = {31'h0, jtag_startup_arm};

@@ -94,6 +94,7 @@ module fcapz_ela_gowin #(
     // instantiated. Keep the core burst interface tied off; USER1 readback
     // remains available for samples and timestamps.
     wire [PTR_W-1:0] burst_rd_addr_dummy = {PTR_W{1'b0}};
+    wire burst_rd_active_dummy = 1'b0;
     wire [SAMPLE_W-1:0] burst_rd_data_unused;
     wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data_unused;
     wire burst_start_unused;
@@ -188,6 +189,7 @@ module fcapz_ela_gowin #(
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
                 .jtag_rdata(ela_rdata),
+                .burst_rd_active(burst_rd_active_dummy),
                 .burst_rd_addr(burst_rd_addr_dummy),
                 .burst_rd_data(burst_rd_data_unused),
                 .burst_rd_ts_data(burst_rd_ts_data_unused),
@@ -222,6 +224,7 @@ module fcapz_ela_gowin #(
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
                 .jtag_rdata(jtag_rdata),
+                .burst_rd_active(burst_rd_active_dummy),
                 .burst_rd_addr(burst_rd_addr_dummy),
                 .burst_rd_data(burst_rd_data_unused),
                 .burst_rd_ts_data(burst_rd_ts_data_unused),

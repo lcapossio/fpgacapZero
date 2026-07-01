@@ -32,7 +32,9 @@ module fcapz_core_manager_case #(
     reg  [NUM_SLOTS*32-1:0] slot_rdata;
 
     reg [PTR_W-1:0] burst_rd_addr = 4'h0;
+    reg burst_rd_active = 1'b0;
     wire [NUM_SLOTS*PTR_W-1:0] slot_burst_rd_addr;
+    wire [NUM_SLOTS-1:0] slot_burst_rd_active;
     reg [NUM_SLOTS*SAMPLE_W-1:0] slot_burst_rd_data;
     reg [NUM_SLOTS*TS_W-1:0] slot_burst_rd_ts_data;
     reg [NUM_SLOTS-1:0] slot_burst_start;
@@ -75,7 +77,9 @@ module fcapz_core_manager_case #(
         .slot_wdata(slot_wdata),
         .slot_rdata(slot_rdata),
         .burst_rd_addr(burst_rd_addr),
+        .burst_rd_active(burst_rd_active),
         .slot_burst_rd_addr(slot_burst_rd_addr),
+        .slot_burst_rd_active(slot_burst_rd_active),
         .slot_burst_rd_data(slot_burst_rd_data),
         .slot_burst_rd_ts_data(slot_burst_rd_ts_data),
         .slot_burst_start(slot_burst_start),

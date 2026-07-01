@@ -103,6 +103,7 @@ module fcapz_axi_mon #(
     output wire [31:0]          jtag_rdata,
 
     // ---- Burst read port (jtag_clk domain, active when done=1) ----
+    input  wire                 burst_rd_active,
     input  wire [PTR_W-1:0]     burst_rd_addr,
     output wire [SAMPLE_W-1:0]  burst_rd_data,
     output wire [TS_W-1:0]      burst_rd_ts_data,
@@ -211,6 +212,7 @@ module fcapz_axi_mon #(
         .jtag_addr(jtag_addr),
         .jtag_wdata(jtag_wdata),
         .jtag_rdata(ela_rdata),
+        .burst_rd_active(burst_rd_active),
         .burst_rd_addr(burst_rd_addr),
         .burst_rd_data(burst_rd_data),
         .burst_rd_ts_data(burst_rd_ts_data),

@@ -51,6 +51,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_full), .jtag_rd_en(rd_full),
         .jtag_addr(addr_full), .jtag_wdata(wdata_full), .jtag_rdata(rdata_full),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_full), .burst_rd_data(burst_data_full),
         .burst_start(burst_start_full), .burst_start_ptr(burst_start_ptr_full)
     );
@@ -91,6 +92,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_dec), .jtag_rd_en(rd_dec),
         .jtag_addr(addr_dec), .jtag_wdata(wdata_dec), .jtag_rdata(rdata_dec),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_dec), .burst_rd_data(burst_data_dec),
         .burst_start(burst_start_dec), .burst_start_ptr(burst_start_ptr_dec)
     );
@@ -130,6 +132,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_seq), .jtag_rd_en(rd_seq),
         .jtag_addr(addr_seq), .jtag_wdata(wdata_seq), .jtag_rdata(rdata_seq),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_seq), .burst_rd_data(burst_data_seq),
         .burst_start(burst_start_seq), .burst_start_ptr(burst_start_ptr_seq)
     );
@@ -169,6 +172,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_ts), .jtag_rd_en(rd_ts),
         .jtag_addr(addr_ts), .jtag_wdata(wdata_ts), .jtag_rdata(rdata_ts),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_ts), .burst_rd_data(burst_data_ts),
         .burst_start(burst_start_ts), .burst_start_ptr(burst_start_ptr_ts)
     );
@@ -208,6 +212,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_w48), .jtag_rd_en(rd_w48),
         .jtag_addr(addr_w48), .jtag_wdata(wdata_w48), .jtag_rdata(rdata_w48),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_w48), .burst_rd_data(burst_data_w48),
         .burst_start(burst_start_w48), .burst_start_ptr(burst_start_ptr_w48)
     );
@@ -256,6 +261,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_segtrig), .jtag_rd_en(rd_segtrig),
         .jtag_addr(addr_segtrig), .jtag_wdata(wdata_segtrig), .jtag_rdata(rdata_segtrig),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_segtrig), .burst_rd_data(burst_data_segtrig),
         .burst_start(burst_start_segtrig), .burst_start_ptr(burst_start_ptr_segtrig)
     );
@@ -302,6 +308,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_roll), .jtag_rd_en(rd_roll),
         .jtag_addr(addr_roll), .jtag_wdata(wdata_roll), .jtag_rdata(rdata_roll),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_roll), .burst_rd_data(burst_data_roll),
         .burst_start(burst_start_roll), .burst_start_ptr(burst_start_ptr_roll)
     );

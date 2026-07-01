@@ -34,7 +34,9 @@ module fcapz_core_manager #(
     input  wire [NUM_SLOTS*32-1:0]    slot_rdata,
 
     input  wire [$clog2(DEPTH)-1:0]   burst_rd_addr,
+    input  wire                       burst_rd_active,
     output wire [NUM_SLOTS*$clog2(DEPTH)-1:0] slot_burst_rd_addr,
+    output wire [NUM_SLOTS-1:0]       slot_burst_rd_active,
     input  wire [NUM_SLOTS*SAMPLE_W-1:0] slot_burst_rd_data,
     input  wire [NUM_SLOTS*((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] slot_burst_rd_ts_data,
     input  wire [NUM_SLOTS-1:0]       slot_burst_start,
@@ -62,26 +64,40 @@ module fcapz_core_manager #(
     localparam ADDR_MGR_DESC_INDEX = 16'hF014;
     localparam ADDR_MGR_DESC_CORE  = 16'hF018;
     localparam ADDR_MGR_DESC_CAPS  = 16'hF01C;
+    localparam ADDR_BURST_PTR   = 16'h002C;
 
     reg [IDX_W-1:0] active_idx;
     reg [IDX_W-1:0] desc_idx;
+    reg [IDX_W-1:0] burst_owner_idx;
+    reg             burst_rd_active_d;
 
     wire manager_hit = (jtag_addr[15:8] == 8'hF0);
     wire requested_idx_valid = (jtag_wdata < NUM_SLOTS);
     wire [NUM_SLOTS-1:0] active_onehot = {{(NUM_SLOTS-1){1'b0}}, 1'b1} << active_idx;
+    wire [IDX_W-1:0] burst_mux_idx = burst_rd_active ? burst_owner_idx : active_idx;
 
     integer i;
     always @(posedge jtag_clk or posedge jtag_rst) begin
         if (jtag_rst) begin
             active_idx <= {IDX_W{1'b0}};
             desc_idx <= {IDX_W{1'b0}};
-        end else if (jtag_wr_en) begin
+            burst_owner_idx <= {IDX_W{1'b0}};
+            burst_rd_active_d <= 1'b0;
+        end else begin
+            burst_rd_active_d <= burst_rd_active;
+            if (jtag_wr_en && !manager_hit && jtag_addr == ADDR_BURST_PTR && SLOT_HAS_BURST[active_idx])
+                burst_owner_idx <= active_idx;
+            else if (burst_rd_active && !burst_rd_active_d)
+                burst_owner_idx <= active_idx;
+
+            if (jtag_wr_en) begin
             if (jtag_addr == ADDR_MGR_ACTIVE) begin
-                if (requested_idx_valid)
+                if (requested_idx_valid && !burst_rd_active)
                     active_idx <= jtag_wdata[IDX_W-1:0];
             end else if (jtag_addr == ADDR_MGR_DESC_INDEX) begin
                 if (requested_idx_valid)
                     desc_idx <= jtag_wdata[IDX_W-1:0];
+            end
             end
         end
     end
@@ -94,6 +110,9 @@ module fcapz_core_manager #(
             assign slot_addr[g*16 +: 16] = jtag_addr;
             assign slot_wdata[g*32 +: 32] = jtag_wdata;
             assign slot_burst_rd_addr[g*PTR_W +: PTR_W] = burst_rd_addr;
+            assign slot_burst_rd_active[g] = burst_rd_active
+                                             & (burst_owner_idx == g[IDX_W-1:0])
+                                             & SLOT_HAS_BURST[g];
         end
     endgenerate
 
@@ -114,9 +133,15 @@ module fcapz_core_manager #(
         for (i = 0; i < NUM_SLOTS; i = i + 1) begin
             if (active_idx == i[IDX_W-1:0]) begin
                 active_rdata = slot_rdata[i*32 +: 32];
+            end
+            if (burst_mux_idx == i[IDX_W-1:0]) begin
                 if (SLOT_HAS_BURST[i]) begin
                     active_burst_data = slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W];
                     active_burst_ts_data = slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE];
+                end
+            end
+            if (active_idx == i[IDX_W-1:0]) begin
+                if (SLOT_HAS_BURST[i]) begin
                     active_burst_start = slot_burst_start[i];
                     active_burst_timestamp = slot_burst_timestamp[i];
                     active_burst_start_ptr = slot_burst_start_ptr[i*PTR_W +: PTR_W];

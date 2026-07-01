@@ -92,6 +92,7 @@ module fcapz_ela_xilinx7 #(
 
     // Burst interface
     wire [PTR_W-1:0]    burst_rd_addr;
+    wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
     wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
@@ -130,6 +131,7 @@ module fcapz_ela_xilinx7 #(
                 .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
                 .reg_rdata(jtag_rdata),
                 .mem_addr(burst_rd_addr),
+                .mem_active(burst_rd_active),
                 .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
                 .burst_ptr_in(burst_start_ptr)
@@ -185,6 +187,7 @@ module fcapz_ela_xilinx7 #(
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
                 .jtag_rdata(ela_rdata),
+                .burst_rd_active(burst_rd_active),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
                 .burst_rd_ts_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
@@ -217,6 +220,7 @@ module fcapz_ela_xilinx7 #(
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
                 .jtag_rdata(jtag_rdata),
+                .burst_rd_active(burst_rd_active),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
                 .burst_rd_ts_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
@@ -251,12 +255,14 @@ module fcapz_ela_xilinx7 #(
                 .capture(tap2_capture), .shift_en(tap2_shift),
                 .update(tap2_update), .sel(tap2_sel),
                 .mem_addr(burst_rd_addr),
+                .mem_active(burst_rd_active),
                 .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
                 .burst_ptr_in(burst_start_ptr)
             );
         end else if (SINGLE_CHAIN_BURST == 0) begin : g_no_burst
             assign burst_rd_addr = {PTR_W{1'b0}};
+            assign burst_rd_active = 1'b0;
         end else begin : g_single_chain_burst
             // The single-chain pipe owns the burst memory read address.
         end

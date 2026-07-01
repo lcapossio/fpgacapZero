@@ -59,6 +59,8 @@ class MonDriver:
         self.dut.jtag_rd_en.value = 0
         self.dut.jtag_addr.value = 0
         self.dut.jtag_wdata.value = 0
+        if hasattr(self.dut, "burst_rd_active"):
+            self.dut.burst_rd_active.value = 0
         self.dut.burst_rd_addr.value = 0
         await self.wait_aclk(4)
         self.dut.ARESETN.value = 1
