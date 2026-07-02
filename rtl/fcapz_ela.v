@@ -440,6 +440,11 @@ module fcapz_ela #(
     reg                rb_meta_toggle_sync1;
     reg                rb_meta_toggle_sync2;
     reg                rb_meta_toggle_sync3;
+    reg                rb_meta_ack_toggle_jtag;
+    reg                rb_meta_ack_sync1;
+    reg                rb_meta_ack_sync2;
+    reg                rb_meta_pending_sample;
+    reg                rb_done_sample;
     reg [LEN_W-1:0]    rb_capture_len_jtag;
     reg [PTR_W-1:0]    rb_start_ptr_jtag;
     reg [PTR_W-1:0]    rb_seg_start_ptr_jtag [0:NUM_SEGMENTS-1];
@@ -453,14 +458,12 @@ module fcapz_ela #(
     reg  [TS_DATA_W-1:0] mem_wr_ts_q;
     wire [PTR_W-1:0]     mem_addr_a;
     wire [PTR_W-1:0]     mem_addr_b;
-    wire [SAMPLE_W-1:0]  mem_dout_a;
     wire [SAMPLE_W-1:0]  mem_dout_b;
     wire                 mem_we_a;
     wire                 mem_we_a_ram;
     wire [SAMPLE_W-1:0]  mem_din_a_ram;
     wire [TS_DATA_W-1:0] mem_ts_din_a_ram;
     wire [TS_DATA_W-1:0] ts_counter_cur;
-    wire [TS_MUX_W-1:0] ts_dout_a_mux;
 
     assign mem_we_a_ram   = (INPUT_PIPE >= 1) ? mem_we_a_q : mem_we_a;
     assign mem_din_a_ram  = (INPUT_PIPE >= 1) ? mem_wr_data_q : active_probe;
@@ -471,14 +474,13 @@ module fcapz_ela #(
         .we_a   (mem_we_a_ram),
         .addr_a (mem_addr_a),
         .din_a  (mem_din_a_ram),
-        .dout_a (mem_dout_a),
+        .dout_a (),
         .clk_b  (jtag_clk),
         .addr_b (mem_addr_b),
         .dout_b (mem_dout_b)
     );
 
     // ---- Phase 3: Timestamp DPRAM ------------------------------------------
-    wire [TS_DATA_W-1:0] ts_dout_a;
     wire [TS_DATA_W-1:0] ts_dout_b;
     generate
         if (TIMESTAMP_W > 0) begin : g_ts
@@ -499,18 +501,16 @@ module fcapz_ela #(
                 .we_a   (mem_we_a_ram),
                 .addr_a (mem_addr_a),
                 .din_a  (mem_ts_din_a_ram[TS_DATA_W-1:0]),
-                .dout_a (ts_dout_a),
+                .dout_a (),
                 .clk_b  (jtag_clk),
                 .addr_b (mem_addr_b),
                 .dout_b (ts_dout_b)
             );
         end else begin : g_no_ts
             assign ts_counter_cur = {TS_DATA_W{1'b0}};
-            assign ts_dout_a = {TS_DATA_W{1'b0}};
             assign ts_dout_b = {TS_DATA_W{1'b0}};
         end
     endgenerate
-    assign ts_dout_a_mux = ts_dout_a;
     assign burst_rd_ts_data = ts_dout_b;
 
     // ---- Sequencer state (sample domain) -----------------------------------
@@ -535,15 +535,6 @@ module fcapz_ela #(
     // ---- Burst read port (via dpram port B) --------------------------------
     assign burst_rd_data = mem_dout_b;
 
-    // ---- CDC read path registers -------------------------------------------
-    reg rd_req_toggle_jtag, rd_req_sync1, rd_req_sync2, rd_req_sync3;
-    reg rd_ack_toggle_sample, rd_ack_sync1, rd_ack_sync2;
-    reg [15:0] rd_addr_jtag, rd_addr_sync1, rd_addr_sync2, rd_addr_req;
-    reg [SAMPLE_W-1:0] rd_data_sample, rd_data_sync1, rd_data_sync2;
-    reg [SAMPLE_W-1:0] rd_data_jtag;
-    reg [PTR_W-1:0] idx, rd_start_ptr_req;
-    integer word_index, sample_index;
-
     // DATA-window Port-B readback (jtag_clk domain)
     wire datawin_req_now;
     reg                 datawin_is_ts_comb;
@@ -558,10 +549,6 @@ module fcapz_ela #(
     reg                 datawin_oob_q;
     reg                 datawin_is_ts_q;
     reg [31:0]          datawin_chunk_q;
-
-    // Phase 3: timestamp readback CDC registers
-    reg [TS_DATA_W-1:0] ts_rd_data_sample, ts_rd_data_sync1, ts_rd_data_sync2;
-    reg [TS_DATA_W-1:0] ts_rd_data_jtag;
 
     // ---- Trigger logic (combinational) -------------------------------------
     wire arm_pulse   = arm_toggle_sync1 ^ arm_toggle_sync2;
@@ -711,9 +698,6 @@ module fcapz_ela #(
     wire jtag_rd_data_window = HAS_USER1_DATA && (
         (jtag_addr >= ADDR_DATA_BASE) ||
         (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]));
-    wire rd_addr_data_window = HAS_USER1_DATA && (
-        (rd_addr_jtag >= ADDR_DATA_BASE) ||
-        (TIMESTAMP_W > 0 && rd_addr_jtag >= ADDR_TS_DATA_BASE[15:0]));
     assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
@@ -788,8 +772,6 @@ module fcapz_ela #(
             jtag_trig_delay    <= 16'h0;
             arm_toggle_jtag    <= 1'b0;
             reset_toggle_jtag  <= 1'b0;
-            rd_req_toggle_jtag <= 1'b0;
-            rd_addr_jtag       <= 16'h0;
             burst_start        <= 1'b0;
             burst_timestamp    <= 1'b0;
             burst_start_ptr    <= {PTR_W{1'b0}};
@@ -864,18 +846,23 @@ module fcapz_ela #(
                 endcase
             end
 
-            if (jtag_rd_en) begin
-                rd_addr_jtag <= jtag_addr;
-            end
         end
     end
 
     // ---- CDC: completed-capture metadata snapshot -------------------------
+    wire rb_meta_sample_busy = rb_meta_toggle_sample ^ rb_meta_ack_sync2;
+    wire rb_meta_event_sample = (done && !rb_done_d) ||
+                                (HAS_SEGMENTS && (seg_count != rb_seg_count_d));
+
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             rb_done_d <= 1'b0;
             rb_seg_count_d <= {SEG_IDX_W{1'b0}};
             rb_meta_toggle_sample <= 1'b0;
+            rb_meta_ack_sync1 <= 1'b0;
+            rb_meta_ack_sync2 <= 1'b0;
+            rb_meta_pending_sample <= 1'b0;
+            rb_done_sample <= 1'b0;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
             for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
@@ -883,13 +870,23 @@ module fcapz_ela #(
         end else begin
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
-            if ((done && !rb_done_d) ||
-                (HAS_SEGMENTS && (seg_count != rb_seg_count_d))) begin
+            rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
+            rb_meta_ack_sync2 <= rb_meta_ack_sync1;
+
+            if (rb_meta_event_sample)
+                rb_meta_pending_sample <= 1'b1;
+
+            // Hold the multi-bit snapshot stable until jtag_clk has copied it.
+            // Fast segment updates can otherwise overwrite the source while the
+            // three-flop toggle synchronizer is still in flight.
+            if (!rb_meta_sample_busy && (rb_meta_pending_sample || rb_meta_event_sample)) begin
+                rb_done_sample <= done;
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
                     rb_seg_start_ptr_sample[rb_sample_i] <= seg_start_ptr[rb_sample_i];
                 rb_meta_toggle_sample <= ~rb_meta_toggle_sample;
+                rb_meta_pending_sample <= 1'b0;
             end
         end
     end
@@ -899,6 +896,7 @@ module fcapz_ela #(
             rb_meta_toggle_sync1 <= 1'b0;
             rb_meta_toggle_sync2 <= 1'b0;
             rb_meta_toggle_sync3 <= 1'b0;
+            rb_meta_ack_toggle_jtag <= 1'b0;
             rb_capture_len_jtag <= {LEN_W{1'b0}};
             rb_start_ptr_jtag <= {PTR_W{1'b0}};
             rb_done_jtag <= 1'b0;
@@ -915,7 +913,8 @@ module fcapz_ela #(
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
                     rb_seg_start_ptr_jtag[rb_jtag_i] <= rb_seg_start_ptr_sample[rb_jtag_i];
-                rb_done_jtag <= 1'b1;
+                rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
+                rb_done_jtag <= rb_done_sample;
             end
         end
     end
@@ -1163,7 +1162,6 @@ module fcapz_ela #(
     end
 
     // ---- Capture state machine ---------------------------------------------
-    reg mem_rd_pending;
     wire [LEN_W-1:0] post_store_limit = posttrig_len;
     wire [LEN_W:0] config_capture_len =
         {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
@@ -1182,9 +1180,7 @@ module fcapz_ela #(
     wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
-    assign mem_addr_a = ((INPUT_PIPE >= 1) && mem_we_a_q) ? mem_wr_addr_q :
-                        (HAS_USER1_DATA && mem_rd_pending) ? idx :
-                        wr_ptr;
+    assign mem_addr_a = ((INPUT_PIPE >= 1) && mem_we_a_q) ? mem_wr_addr_q : wr_ptr;
 
     // Register the RAM write command so address, data, and enable stay
     // aligned and the trigger/WEA path does not have to reach the BRAM in
@@ -1483,136 +1479,14 @@ module fcapz_ela #(
         end
     end
 
-    // ---- CDC: segment select sync (jtag -> sample_clk) ----------------------
-    reg [SEG_IDX_W-1:0] seg_sel_sync1, seg_sel_sync2;
-    // Registered lookup of seg_start_ptr to avoid combinational CDC path
-    reg [PTR_W-1:0] seg_start_ptr_rd;
-    wire [PTR_W-1:0] seg_rd_base_req;
-    generate
-        if (NUM_SEGMENTS > 1) begin : g_seg_rd_base
-            assign seg_rd_base_req = {rd_start_ptr_req[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
-        end else begin : g_no_seg_rd_base
-            assign seg_rd_base_req = {PTR_W{1'b0}};
-        end
-    endgenerate
-
-    // ---- CDC: data readback (via dpram port A read) -------------------------
-    localparam [2:0] RD_IDLE      = 3'd0;
-    localparam [2:0] RD_DECODE    = 3'd1;
-    localparam [2:0] RD_WAIT_ADDR = 3'd2;
-    localparam [2:0] RD_WAIT_DATA = 3'd3;
-    localparam [2:0] RD_CAPTURE   = 3'd4;
-    localparam [2:0] RD_ACK       = 3'd5;
-    reg [2:0] rd_phase;
-    // Track whether current read targets timestamp vs sample memory
-    reg rd_is_ts;
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
-            rd_req_sync1         <= 1'b0;
-            rd_req_sync2         <= 1'b0;
-            rd_req_sync3         <= 1'b0;
-            rd_addr_sync1        <= 16'h0;
-            rd_addr_sync2        <= 16'h0;
-            rd_addr_req          <= 16'h0;
-            seg_sel_sync1        <= {SEG_IDX_W{1'b0}};
-            seg_sel_sync2        <= {SEG_IDX_W{1'b0}};
-            seg_start_ptr_rd     <= {PTR_W{1'b0}};
-            rd_data_sample       <= {SAMPLE_W{1'b0}};
-            ts_rd_data_sample    <= 32'h0;
-            rd_ack_toggle_sample <= 1'b0;
-            mem_rd_pending       <= 1'b0;
-            rd_phase             <= RD_IDLE;
-            idx                  <= {PTR_W{1'b0}};
-            rd_start_ptr_req     <= {PTR_W{1'b0}};
-            rd_is_ts             <= 1'b0;
-        end else begin
-            rd_req_sync1  <= rd_req_toggle_jtag;
-            rd_req_sync2  <= rd_req_sync1;
-            rd_req_sync3  <= rd_req_sync2;
-            rd_addr_sync1 <= rd_addr_jtag;
-            rd_addr_sync2 <= rd_addr_sync1;
-            seg_sel_sync1 <= jtag_seg_sel;
-            seg_sel_sync2 <= seg_sel_sync1;
-            seg_start_ptr_rd <= seg_start_ptr[seg_sel_sync2];
-
-            if (rd_phase == RD_CAPTURE) begin
-                rd_data_sample <= mem_dout_a;
-                if (TIMESTAMP_W > 0 && rd_is_ts)
-                    ts_rd_data_sample <= ts_dout_a_mux;
-                mem_rd_pending <= 1'b0;
-                rd_phase <= RD_ACK;
-            end else if (rd_phase == RD_ACK) begin
-                rd_ack_toggle_sample <= ~rd_ack_toggle_sample;
-                rd_phase <= RD_IDLE;
-                rd_is_ts <= 1'b0;
-            end else if (rd_phase == RD_WAIT_DATA) begin
-                rd_phase <= RD_CAPTURE;
-            end else if (rd_phase == RD_WAIT_ADDR) begin
-                rd_phase <= RD_WAIT_DATA;
-            end else if (rd_phase == RD_DECODE) begin
-                // Decode from payload latched on request edge, not from live sync buses.
-                if (TIMESTAMP_W > 0 && rd_addr_req >= ADDR_TS_DATA_BASE[15:0]) begin
-                    word_index   = (rd_addr_req - ADDR_TS_DATA_BASE[15:0]) >> 2;
-                    sample_index = word_index / TS_WORDS;
-                    if (sample_index < capture_len) begin
-                        idx <= seg_rd_base_req
-                            + ((rd_start_ptr_req - seg_rd_base_req + sample_index) & (SEG_DEPTH - 1));
-                        mem_rd_pending <= 1'b1;
-                        rd_phase <= RD_WAIT_ADDR;
-                        rd_is_ts <= 1'b1;
-                    end else begin
-                        ts_rd_data_sample <= 32'h0;
-                        rd_phase <= RD_ACK;
-                    end
-                end else if (rd_addr_req >= ADDR_DATA_BASE) begin
-                    word_index   = (rd_addr_req - ADDR_DATA_BASE) >> 2;
-                    sample_index = word_index / WORDS_PER_SAMPLE;
-                    if (sample_index < capture_len) begin
-                        idx <= seg_rd_base_req
-                            + ((rd_start_ptr_req - seg_rd_base_req + sample_index) & (SEG_DEPTH - 1));
-                        mem_rd_pending <= 1'b1;
-                        rd_phase <= RD_WAIT_ADDR;
-                        rd_is_ts <= 1'b0;
-                    end else begin
-                        rd_data_sample <= {SAMPLE_W{1'b0}};
-                        rd_phase <= RD_ACK;
-                    end
-                end else begin
-                    rd_data_sample <= {SAMPLE_W{1'b0}};
-                    rd_phase <= RD_ACK;
-                end
-            end else if (rd_req_sync2 ^ rd_req_sync3) begin
-                // Request edge delayed to sync2^sync3 so rd_addr_sync2 is fully settled.
-                rd_addr_req      <= rd_addr_sync2;
-                rd_start_ptr_req <= (NUM_SEGMENTS > 1) ? seg_start_ptr_rd : start_ptr;
-                rd_phase         <= RD_DECODE;
-            end
-        end
-    end
-
     always @(posedge jtag_clk or posedge jtag_rst) begin
         if (jtag_rst) begin
-            rd_ack_sync1  <= 1'b0;
-            rd_ack_sync2  <= 1'b0;
-            rd_data_sync1 <= {SAMPLE_W{1'b0}};
-            rd_data_sync2 <= {SAMPLE_W{1'b0}};
-            rd_data_jtag  <= {SAMPLE_W{1'b0}};
-            ts_rd_data_sync1 <= 32'h0;
-            ts_rd_data_sync2 <= 32'h0;
-            ts_rd_data_jtag  <= 32'h0;
             jtag_rdata       <= 32'h0;
             datawin_reply_q  <= 1'b0;
             datawin_oob_q    <= 1'b0;
             datawin_is_ts_q  <= 1'b0;
             datawin_chunk_q  <= 32'h0;
         end else begin
-            rd_ack_sync1  <= rd_ack_toggle_sample;
-            rd_ack_sync2  <= rd_ack_sync1;
-            rd_data_sync1 <= rd_data_sample;
-            rd_data_sync2 <= rd_data_sync1;
-            ts_rd_data_sync1 <= ts_rd_data_sample;
-            ts_rd_data_sync2 <= ts_rd_data_sync1;
-
             datawin_reply_q <= datawin_req_now;
             datawin_oob_q   <= datawin_oob_comb | burst_rd_active;
             datawin_is_ts_q <= datawin_is_ts_comb;
