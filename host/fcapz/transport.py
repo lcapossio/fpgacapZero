@@ -469,6 +469,7 @@ class XilinxHwServerTransport(Transport):
     READ_IDLE_CYCLES = 20
     RAW_DR_IDLE_CYCLES = 8
     USER1_DATA_SETTLE_READS = 5
+    USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
@@ -1052,7 +1053,13 @@ class XilinxHwServerTransport(Transport):
             chunk_size = end - start
             tcl = self._burst_read_tcl(addr, start, chunk_size)
             out = self._send(tcl)
-            results.extend(self._parse_block_bits(out, chunk_size, skip_words=3))
+            results.extend(
+                self._parse_block_bits(
+                    out,
+                    chunk_size,
+                    skip_words=self.USER1_PIPE_PRIME_READS,
+                )
+            )
         # Flush JTAG pipeline
         self.read_reg(0x0000)
         return results
@@ -1060,8 +1067,9 @@ class XilinxHwServerTransport(Transport):
     def _burst_read_tcl(self, base_addr: int, offset: int, count: int) -> str:
         """Generate TCL for burst block read using a single jtag sequence.
 
-        All scans go into one sequence object: one address setup, one
-        discarded priming capture, then N returned captures.  A short idle
+        All scans go into one sequence object: one address setup,
+        USER1_PIPE_PRIME_READS discarded priming captures, then N returned
+        captures.  A short idle
         follows each address update before the next capture so the
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
@@ -1084,19 +1092,17 @@ class XilinxHwServerTransport(Transport):
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
             f"$_q delay {idle}",
-            # Prime captures: discard the stale register-pipeline word plus
-            # the DATA-window Port-B/jtag_rdata fill latency before counting
-            # returned DATA words.
-            f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
-            f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
-            f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
         ]
+        # Prime captures: discard the stale register-pipeline word plus the
+        # RTL jtag_rdata fill latency before counting returned words. If the
+        # RTL adds another registered readback stage, this constant must grow
+        # with that latency.
+        for _ in range(self.USER1_PIPE_PRIME_READS):
+            parts.append(
+                f"{ir_cmd}; "
+                f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
+            )
+            parts.append(f"$_q delay {idle}")
         # Scans 1..N-1: capture previous AND set next address.
         # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
