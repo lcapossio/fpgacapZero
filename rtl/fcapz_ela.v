@@ -425,8 +425,6 @@ module fcapz_ela #(
     wire                 segment_auto_rearm_now;
     // Per-segment start_ptr storage
     reg [PTR_W-1:0] seg_start_ptr [0:NUM_SEGMENTS-1];
-    reg [PTR_W-1:0] seg_start_ptr_jtag_sync1 [0:NUM_SEGMENTS-1];
-    reg [PTR_W-1:0] seg_start_ptr_jtag_sync2 [0:NUM_SEGMENTS-1];
 
     // Readback metadata snapshot. The sample clock domain captures these once
     // the capture is complete, then toggles a settled-before-toggle handshake
@@ -775,10 +773,6 @@ module fcapz_ela #(
             burst_start        <= 1'b0;
             burst_timestamp    <= 1'b0;
             burst_start_ptr    <= {PTR_W{1'b0}};
-            for (s = 0; s < NUM_SEGMENTS; s = s + 1) begin
-                seg_start_ptr_jtag_sync1[s] <= {PTR_W{1'b0}};
-                seg_start_ptr_jtag_sync2[s] <= {PTR_W{1'b0}};
-            end
             for (s = 0; s < TRIG_STAGES; s = s + 1) begin
                 jtag_seq_cfg[s]     <= (s == 0) ? 32'h0000_1000 : 32'h0;
                 jtag_seq_value_a[s] <= 32'h0;
@@ -787,11 +781,6 @@ module fcapz_ela #(
                 jtag_seq_mask_b[s]  <= 32'hFFFF_FFFF;
             end
         end else begin
-            for (s = 0; s < NUM_SEGMENTS; s = s + 1) begin
-                seg_start_ptr_jtag_sync1[s] <= seg_start_ptr[s];
-                seg_start_ptr_jtag_sync2[s] <= seg_start_ptr_jtag_sync1[s];
-            end
-
             if (jtag_wr_en) begin
                 case (jtag_addr)
                     ADDR_CTRL: begin
