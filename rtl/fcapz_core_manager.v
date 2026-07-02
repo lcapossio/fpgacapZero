@@ -75,8 +75,7 @@ module fcapz_core_manager #(
     wire manager_hit = (jtag_addr[15:8] == 8'hF0);
     wire requested_idx_valid = (jtag_wdata < NUM_SLOTS);
     wire [NUM_SLOTS-1:0] active_onehot = {{(NUM_SLOTS-1){1'b0}}, 1'b1} << active_idx;
-    wire [IDX_W-1:0] burst_mux_idx =
-        (burst_owner_valid || burst_rd_active) ? burst_owner_idx : active_idx;
+    wire [IDX_W-1:0] burst_mux_idx = burst_owner_valid ? burst_owner_idx : active_idx;
 
     integer i;
     always @(posedge jtag_clk or posedge jtag_rst) begin
@@ -117,7 +116,7 @@ module fcapz_core_manager #(
             assign slot_wdata[g*32 +: 32] = jtag_wdata;
             assign slot_burst_rd_addr[g*PTR_W +: PTR_W] = burst_rd_addr;
             assign slot_burst_rd_active[g] = burst_rd_active
-                                             & (burst_owner_idx == g[IDX_W-1:0])
+                                             & (burst_mux_idx == g[IDX_W-1:0])
                                              & SLOT_HAS_BURST[g];
         end
     endgenerate
