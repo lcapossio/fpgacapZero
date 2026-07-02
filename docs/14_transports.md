@@ -586,12 +586,11 @@ will differ.
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
 | `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
-**OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
-hardware-validated on Arty A7 (pending a first run with FT2232; see
-[`specs/transport_api.md`](specs/transport_api.md)).  Expect it to be
-slower than `hw_server` per scan because OpenOCD's TCL listener has
-limited batched-scan support, but the delta is not documented until
-somebody benchmarks it.
+**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9, but not yet
+benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
+to be slower than `hw_server` per scan because OpenOCD's TCL listener has
+limited batched-scan support, but the delta is not documented until somebody
+benchmarks it.
 
 The bottleneck on the measured path is JTAG round-trip latency through
 the tooling, not the RTL.  The fastest path today is hw_server with

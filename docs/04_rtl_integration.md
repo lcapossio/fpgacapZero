@@ -31,7 +31,7 @@ features they expose.
 | Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
-| Gowin GW1N / GW2A | `_gowin` | ❌ |
+| Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
@@ -48,10 +48,10 @@ includes the ELA configuration matrix for small/scalable builds:
 
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
-Arty A7 hardware test validates the Xilinx 7-series reference bitstream.
-ECP5, Intel, Gowin, PolarFire, and UltraScale wrappers should be treated as
-RTL-implemented and lint-clean until a board-level smoke test is added for
-that family.
+Arty A7 hardware test validates the Xilinx 7-series reference bitstream and
+the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
+PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
+lint-clean until a board-level smoke test is added for that family.
 
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
 > primitive is byte-identical between 7-series, UltraScale, and

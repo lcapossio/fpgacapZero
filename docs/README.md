@@ -73,11 +73,12 @@ and should be corrected.
 
 ## What's not in this manual
 
-- Hardware bring-up for vendor wrappers other than Xilinx 7-series.
-  The shared core RTL is covered by simulation, and the vendor wrappers
-  are lint-elaborated, but ECP5, Intel, Gowin, PolarFire, and UltraScale
-  board-level smoke tests are still future work. See chapter 04 for the
-  support matrix and validation levels.
+- Hardware bring-up for vendor wrappers other than Xilinx 7-series and
+  the Gowin BRS-100 path. The shared core RTL is covered by simulation,
+  and the remaining vendor wrappers are lint-elaborated, but ECP5,
+  Intel, PolarFire, and UltraScale board-level smoke tests are still
+  future work. See chapter 04 for the support matrix and validation
+  levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.

@@ -159,7 +159,7 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 |---------|------|--------|-------------|
 | `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` manager core ID `"CM"` (`0x434D`). |
 | `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
-| `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this slot. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. Burst readback latches the active slot when `BURST_PTR` is written, then routes burst control/data through that owner instead of the live `MGR_ACTIVE` value. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
 | `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported. |
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
@@ -184,6 +184,10 @@ mixed manager returns idle/zero burst controls.
 - Write to `BURST_PTR` (0x002C) via the active ELA control chain to start a burst from `start_ptr`.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
+- In managed multi-core designs, this `BURST_PTR` write captures the current
+  active slot as the burst owner. Later `MGR_ACTIVE` writes do not redirect an
+  in-flight burst; address, data, timestamp, and burst-active control stay
+  routed to the captured owner until another burst owner is selected or reset.
 - Legacy two-chain Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples

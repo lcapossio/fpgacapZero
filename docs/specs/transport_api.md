@@ -29,9 +29,11 @@ path for timestamp data.
 - Uses `-bits` format for `drshift` (standard JTAG bit ordering).
 - **Do not use `-hex` format** — XSDB applies a non-standard byte/nibble
   transformation that scrambles bit positions.
-- Burst `read_block` via USER2 256-bit DR: `floor(256/SAMPLE_W)` samples per
-  scan.  How fast samples stream depends on the adapter and how much
-  per-scan overhead the transport adds (batched vs single DR).
+- Burst `read_block` via the configured 256-bit burst path: `floor(256/SAMPLE_W)`
+  samples per scan.  Default single-chain builds keep the burst scans on the
+  selected ELA control chain; legacy two-chain Xilinx builds use USER2.
+  How fast samples stream depends on the adapter and how much per-scan overhead
+  the transport adds (batched vs single DR).
 - `read_timestamp_block(addr, words, timestamp_width)` — timestamp burst via the
   same configured burst path.  Sets `BURST_PTR` bit[31]=1 to select the timestamp BRAM.
   No priming scan required; the first 256-bit capture already holds valid data.
@@ -69,13 +71,16 @@ selected ELA control chain instead of switching to USER2.
 1. IR shift to the ELA control chain, DR shift to write `BURST_PTR` (0x002C) — triggers
    staging buffer fill from `start_ptr`.
 2. Idle 40 TCK cycles (staging buffer needs ~33 cycles to load).
-3. IR shift to USER2, then N × 256-bit DR scans with capture.
+3. Perform N × 256-bit DR scans with capture. Legacy two-chain builds switch
+   IR to USER2 first; default single-chain builds stay on the selected ELA
+   control chain.
 4. Parse: each captured 256-bit token contains packed samples LSB-first.
 
 ### `OpenOcdTransport`
 - Connects to OpenOCD TCL socket (default port 6666).
 - Uses `irscan`/`drscan`/`runtest` commands.
-- Not yet hardware-validated (pending test with FT2232).
+- Hardware-validated on Gowin BRS-100-GW1NR9. The Xilinx/OpenOCD path is still
+  less exercised than the `hw_server` backend.
 
 ### `VendorStubTransport`
 - Placeholder for future non-Xilinx backends.

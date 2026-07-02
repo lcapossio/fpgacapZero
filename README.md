@@ -112,9 +112,10 @@ The canonical register / shift maps live in
 | Area | Status |
 |------|--------|
 | Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 |
-| OpenOCD backend | Implemented; needs more hardware validation |
+| OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100; Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
-| UltraScale / ECP5 / Intel / Gowin / PolarFire wrappers | RTL complete; host / hardware validation still limited |
+| Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
+| UltraScale / ECP5 / Intel / PolarFire wrappers | RTL complete; host / hardware validation still limited |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 (details in the manual) |
 
 The full, always-current matrix is in [Overview](docs/01_overview.md) and
