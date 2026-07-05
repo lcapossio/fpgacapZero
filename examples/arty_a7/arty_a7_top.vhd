@@ -4,10 +4,10 @@
 -- Arty A7-100T mixed-language VHDL-core hardware-validation top-level.
 --
 -- Topology intentionally mirrors arty_a7_top.v: two managed ELAs plus two
--- managed EIOs share USER1 through fcapz_debug_multi_xilinx7, while EJTAG-AXI
--- remains on USER4. The VHDL build omits rtl/fcapz_ela.v and rtl/fcapz_eio.v,
--- so the Verilog manager binds those core instances to the translated VHDL
--- entities in rtl/vhdl/core.
+-- managed EIOs share USER1 through fcapz_debug_multi_xilinx7, the AXI monitor
+-- observes the bridge on USER2, and EJTAG-AXI remains on USER4. The VHDL build
+-- omits rtl/fcapz_ela.v and rtl/fcapz_eio.v, so the Verilog wrappers bind those
+-- core instances to the translated VHDL entities in rtl/vhdl/core.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -139,6 +139,55 @@ architecture rtl of arty_a7_top is
             m_axi_rvalid  : in  std_logic;
             m_axi_rready  : out std_logic;
             m_axi_rlast   : in  std_logic
+        );
+    end component;
+
+    component fcapz_axi_mon_xilinx7 is
+        generic (
+            PROTO          : string := "AXI4LITE";
+            ADDR_W         : integer := 32;
+            DATA_W         : integer := 32;
+            DEPTH          : integer := 1024;
+            TRIG_STAGES    : integer := 4;
+            STOR_QUAL      : integer := 1;
+            NUM_SEGMENTS   : integer := 1;
+            TIMESTAMP_W    : integer := 32;
+            INPUT_PIPE     : integer := 1;
+            DECIM_EN       : integer := 0;
+            EXT_TRIG_EN    : integer := 0;
+            STARTUP_ARM    : integer := 0;
+            REL_COMPARE    : integer := 1;
+            DUAL_COMPARE   : integer := 1;
+            USER1_DATA_EN  : integer := 1;
+            DECODE_EN      : integer := 0;
+            BURST_W        : integer := 256;
+            CTRL_CHAIN     : integer := 1
+        );
+        port (
+            ACLK        : in  std_logic;
+            ARESETN     : in  std_logic;
+            AWADDR      : in  std_logic_vector(ADDR_W - 1 downto 0);
+            AWPROT      : in  std_logic_vector(2 downto 0);
+            AWVALID     : in  std_logic;
+            AWREADY     : in  std_logic;
+            WDATA       : in  std_logic_vector(DATA_W - 1 downto 0);
+            WSTRB       : in  std_logic_vector((DATA_W / 8) - 1 downto 0);
+            WVALID      : in  std_logic;
+            WREADY      : in  std_logic;
+            BRESP       : in  std_logic_vector(1 downto 0);
+            BVALID      : in  std_logic;
+            BREADY      : in  std_logic;
+            ARADDR      : in  std_logic_vector(ADDR_W - 1 downto 0);
+            ARPROT      : in  std_logic_vector(2 downto 0);
+            ARVALID     : in  std_logic;
+            ARREADY     : in  std_logic;
+            RDATA       : in  std_logic_vector(DATA_W - 1 downto 0);
+            RRESP       : in  std_logic_vector(1 downto 0);
+            RVALID      : in  std_logic;
+            RREADY      : in  std_logic;
+            trigger_in  : in  std_logic;
+            trigger_out : out std_logic;
+            armed_out   : out std_logic
         );
     end component;
 
@@ -539,6 +588,46 @@ begin
             s_axi_rvalid => bridge_rvalid,
             s_axi_rready => bridge_rready,
             s_axi_rlast => bridge_rlast
+        );
+
+    u_axi_mon : fcapz_axi_mon_xilinx7
+        generic map (
+            ADDR_W => 32,
+            DATA_W => 32,
+            DEPTH => 256,
+            TRIG_STAGES => 1,
+            STOR_QUAL => 0,
+            TIMESTAMP_W => 0,
+            INPUT_PIPE => 1,
+            REL_COMPARE => 0,
+            DECODE_EN => 1,
+            CTRL_CHAIN => 2
+        )
+        port map (
+            ACLK => clk_150,
+            ARESETN => not rst_150,
+            AWADDR => bridge_awaddr,
+            AWPROT => bridge_awprot,
+            AWVALID => bridge_awvalid,
+            AWREADY => bridge_awready,
+            WDATA => bridge_wdata,
+            WSTRB => bridge_wstrb,
+            WVALID => bridge_wvalid,
+            WREADY => bridge_wready,
+            BRESP => bridge_bresp,
+            BVALID => bridge_bvalid,
+            BREADY => bridge_bready,
+            ARADDR => bridge_araddr,
+            ARPROT => bridge_arprot,
+            ARVALID => bridge_arvalid,
+            ARREADY => bridge_arready,
+            RDATA => bridge_rdata,
+            RRESP => bridge_rresp,
+            RVALID => bridge_rvalid,
+            RREADY => bridge_rready,
+            trigger_in => '0',
+            trigger_out => open,
+            armed_out => open
         );
 
     p_led_sync : process(clk_150)

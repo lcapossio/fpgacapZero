@@ -59,6 +59,8 @@ set verilog_sources [list \
     $root/rtl/fcapz_async_fifo.v \
     $root/rtl/fcapz_ejtagaxi.v \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
+    $root/rtl/fcapz_axi_mon.v \
+    $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
     $root/tb/axi4_test_slave.v \
 ]

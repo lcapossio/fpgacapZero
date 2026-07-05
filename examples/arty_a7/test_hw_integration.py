@@ -105,6 +105,8 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "fcapz_async_fifo.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon.v",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.vhd",
