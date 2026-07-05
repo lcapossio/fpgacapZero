@@ -161,6 +161,18 @@ EIO wrapper with a non-default `CHAIN` parameter (see
 [chapter 04](04_rtl_integration.md)).  The host's `chain` argument
 must match the RTL `CHAIN` parameter.
 
+**Shared-chain EIO.** When EIO is address-muxed onto another core's chain
+instead of having its own, pass `base_addr` (the mux offset) so every register
+access is routed to the EIO window.  The common case is Gowin `EIO_EN=1`, which
+muxes EIO onto the ELA chain at offset `0x8000`:
+
+```python
+eio = EioController(transport, chain=1, base_addr=0x8000)
+```
+
+The CLI equivalent is `--base-addr 0x8000`, and the desktop GUI discovers this
+location automatically on connect.
+
 After `connect()`, the controller has cached `IN_W` and `OUT_W` from
 the bitstream's identity registers, so subsequent reads/writes know
 exactly how many words to scan.

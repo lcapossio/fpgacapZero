@@ -267,12 +267,15 @@ def discover_eio(
 ) -> EioController | None:
     """Find and attach the EIO core by probing candidate JTAG locations.
 
-    Tries, in order: core-manager slots (``instances`` on chain 1), then every
-    ``chains`` x ``bases`` combination, attaching the first whose identity reads
-    the EIO magic (``0x494F``).  ``EioController.attach`` only reads and restores
-    chain 1, so probing a wrong location is harmless.  The transport must already
-    be connected.  Returns the attached controller, or ``None`` if no EIO
-    responds anywhere.
+    The host should not need to know which USER chain or mux offset a core
+    sits behind.  This tries, in order: core-manager slots (``instances`` on
+    chain 1), then every ``chains`` x ``bases`` combination, attaching the
+    first location whose identity register reads the EIO magic (``0x494F``).
+
+    ``EioController.attach`` only reads and restores chain 1, so probing a
+    wrong location is harmless — non-matches (wrong chain, ELA magic,
+    unprogrammed FPGA) raise and are skipped.  Returns the attached
+    controller, or ``None`` if no EIO core responds anywhere.
     """
     candidates: list[dict[str, int]] = []
     if instances:
