@@ -100,6 +100,7 @@ class ElaFunctionalCoverage:
             "rel_compare": 0,
             "storage_qualifier": 0,
             "burst_start": 0,
+            "burst_blocks_user1": 0,
             "rolling_prehistory": 0,
             "rolling_rearm_history": 0,
             "randomized_value_capture": 0,
@@ -280,6 +281,28 @@ async def value_capture(dut):
     assert await ela.read(ADDR_CAPTURE_LEN) == 6
     assert (await ela.read(ADDR_DATA_BASE + 2 * 4)) & 0xFF == 8
     FUNCTIONAL_COVERAGE.hit("value_trigger")
+
+
+@cocotb.test()
+async def burst_active_blocks_user1_data_window(dut):
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=0, post=1, value=9)
+    await ela.arm()
+    await ela.drive_counter(16)
+    assert await ela.wait_done() & 0x4
+
+    normal = await ela.read(ADDR_DATA_BASE)
+    assert (normal & 0xFF) == 9
+
+    ela.dut.burst_rd_active.value = 1
+    ela.dut.burst_rd_addr.value = 0
+    blocked = await ela.read(ADDR_DATA_BASE)
+    assert blocked == 0
+
+    ela.dut.burst_rd_active.value = 0
+    unblocked = await ela.read(ADDR_DATA_BASE)
+    assert (unblocked & 0xFF) == 9
+    FUNCTIONAL_COVERAGE.hit("burst_blocks_user1")
 
 
 @cocotb.test()

@@ -68,6 +68,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "features_registers",
             "register_roundtrip",
             "value_capture",
+            "burst_active_blocks_user1_data_window",
             "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
