@@ -27,6 +27,8 @@ entity fcapz_core_manager_cocotb_wrap is
         slot_burst_start      : in  std_logic_vector(2 downto 0);
         slot_burst_timestamp  : in  std_logic_vector(2 downto 0);
         slot_burst_start_ptr  : in  std_logic_vector(11 downto 0);
+        burst_rd_active       : in  std_logic;
+        slot_burst_rd_active  : out std_logic_vector(2 downto 0);
         burst_rd_data         : out std_logic_vector(7 downto 0);
         burst_rd_ts_data      : out std_logic_vector(3 downto 0);
         burst_start           : out std_logic;
@@ -66,6 +68,8 @@ begin
             slot_burst_start => slot_burst_start,
             slot_burst_timestamp => slot_burst_timestamp,
             slot_burst_start_ptr => slot_burst_start_ptr,
+            burst_rd_active => burst_rd_active,
+            slot_burst_rd_active => slot_burst_rd_active,
             burst_rd_data => burst_rd_data,
             burst_rd_ts_data => burst_rd_ts_data,
             burst_start => burst_start,

@@ -46,6 +46,7 @@ entity fcapz_ela is
         jtag_rdata       : out std_logic_vector(31 downto 0);
 
         burst_rd_addr    : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_rd_active  : in  std_logic;
         burst_rd_data    : out std_logic_vector(SAMPLE_W - 1 downto 0);
         burst_rd_ts_data : out std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
         burst_start      : out std_logic;
