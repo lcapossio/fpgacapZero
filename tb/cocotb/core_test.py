@@ -10,10 +10,19 @@ import random
 from pathlib import Path
 
 import cocotb
-from cocotb.binary import BinaryValue
 from cocotb.clock import Clock
-from cocotb.triggers import Edge, RisingEdge, FallingEdge, Timer
+from cocotb.triggers import RisingEdge, FallingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
+
+try:
+    from cocotb.binary import BinaryValue
+except ModuleNotFoundError:
+    BinaryValue = None
+
+try:
+    from cocotb.types import LogicArray
+except ModuleNotFoundError:
+    LogicArray = None
 
 
 class FunctionalCoverage:
@@ -157,7 +166,7 @@ atexit.register(EJTAG_UART_FUNCTIONAL_COVERAGE.write)
 
 async def tick(signal) -> None:
     await RisingEdge(signal)
-    await Timer(1, units="ns")
+    await Timer(1, unit="ns")
 
 
 async def _tap_idle(tap, tick_fn, n: int, *,
@@ -309,7 +318,7 @@ async def trig_compare_light(dut):
         dut.value.value = value
         dut.mask.value = mask
         dut.mode.value = mode
-        await Timer(1, units="ns")
+        await Timer(1, unit="ns")
         assert int(dut.hit.value) == expected
 
 
@@ -332,7 +341,7 @@ async def trig_compare_full(dut):
         dut.value.value = value
         dut.mask.value = mask
         dut.mode.value = mode
-        await Timer(1, units="ns")
+        await Timer(1, unit="ns")
         assert int(dut.hit.value) == expected
 
 
@@ -366,7 +375,7 @@ def assert_timestamp_sequence(bits: int, start: int, count: int = 8) -> None:
 
 @cocotb.test()
 async def jtag_burst_read_protocol(dut):
-    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
     cocotb.start_soon(burst_mem_driver(dut))
     dut.arst.value = 1
     dut.tdi.value = 0
@@ -422,7 +431,7 @@ async def pipe_bus_monitor(dut) -> None:
 
 @cocotb.test()
 async def jtag_pipe_iface_protocol(dut):
-    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
     cocotb.start_soon(pipe_bus_monitor(dut))
     dut.arst.value = 1
     dut.tdi.value = 0
@@ -465,7 +474,7 @@ async def jtag_pipe_iface_protocol(dut):
 
 @cocotb.test()
 async def jtag_pipe_iface_segmented_alignment(dut):
-    cocotb.start_soon(Clock(dut.tck, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
     dut.arst.value = 1
     dut.tdi.value = 0
     dut.capture.value = 0
@@ -498,7 +507,7 @@ async def fcapz_eio_registers(dut):
     out_w = len(dut.probe_out)
     out_low_mask = word_mask(out_w, 0)
 
-    cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
     dut.jtag_rst.value = 1
     dut.probe_in.value = 0
     dut.jtag_wr_en.value = 0
@@ -648,7 +657,7 @@ async def manager_read(dut, addr: int) -> int:
     dut.jtag_addr.value = addr
     dut.jtag_rd_en.value = 1
     dut.jtag_wr_en.value = 0
-    await Timer(1, units="ns")
+    await Timer(1, unit="ns")
     data = int(dut.jtag_rdata.value)
     await FallingEdge(dut.jtag_clk)
     dut.jtag_rd_en.value = 0
@@ -657,7 +666,7 @@ async def manager_read(dut, addr: int) -> int:
 
 @cocotb.test()
 async def fcapz_core_manager_mux(dut):
-    cocotb.start_soon(Clock(dut.jtag_clk, 10, units="ns").start())
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
     dut.jtag_rst.value = 1
     dut.jtag_wr_en.value = 0
     dut.jtag_rd_en.value = 0
@@ -699,7 +708,7 @@ async def fcapz_core_manager_mux(dut):
     assert int(dut.burst_timestamp.value) == 0
     assert int(dut.burst_start_ptr.value) == 0
     await manager_write(dut, 0xF008, 1)
-    await Timer(1, units="ns")
+    await Timer(1, unit="ns")
     assert int(dut.burst_rd_data.value) == 0xB1
     assert int(dut.burst_rd_ts_data.value) == 1
     assert int(dut.burst_start.value) == 1
@@ -711,8 +720,8 @@ async def fcapz_core_manager_mux(dut):
 
 @cocotb.test()
 async def fcapz_ela_channel_mux(dut):
-    cocotb.start_soon(Clock(dut.sample_clk, 10, units="ns").start())
-    cocotb.start_soon(Clock(dut.jtag_clk, 14, units="ns").start())
+    cocotb.start_soon(Clock(dut.sample_clk, 10, unit="ns").start())
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
     dut.sample_rst.value = 1
     dut.jtag_rst.value = 1
     dut.probe_in.value = (0xCC << 16) | (0xBB << 8) | 0xAA
@@ -763,7 +772,7 @@ async def fcapz_ela_channel_mux(dut):
 
 @cocotb.test()
 async def fcapz_ela_xilinx7_single_chain(dut):
-    cocotb.start_soon(Clock(dut.sample_clk, 6, units="ns").start())
+    cocotb.start_soon(Clock(dut.sample_clk, 6, unit="ns").start())
     tap = dut.u_tap_ctrl.u_bscan
     dut.sample_rst.value = 1
     dut.probe_in.value = 0
@@ -778,11 +787,11 @@ async def fcapz_ela_xilinx7_single_chain(dut):
 
     async def tck_tick() -> None:
         tap.TCK.value = 0
-        await Timer(5, units="ns")
+        await Timer(5, unit="ns")
         tap.TCK.value = 1
-        await Timer(1, units="ns")
+        await Timer(1, unit="ns")
         tap.TCK.value = 0
-        await Timer(4, units="ns")
+        await Timer(4, unit="ns")
 
     bscane_names = dict(sel="SEL", capture="CAPTURE", shift="SHIFT", update="UPDATE", tdi="TDI")
 
@@ -853,8 +862,8 @@ async def fcapz_ela_xilinx7_single_chain(dut):
 
 @cocotb.test()
 async def fcapz_async_fifo_equiv(dut):
-    cocotb.start_soon(Clock(dut.wr_clk, 10, units="ns").start())
-    cocotb.start_soon(Clock(dut.rd_clk, 14, units="ns").start())
+    cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
+    cocotb.start_soon(Clock(dut.rd_clk, 14, unit="ns").start())
     dut.rst.value = 1
     dut.wr_en.value = 0
     dut.rd_en.value = 0
@@ -978,26 +987,41 @@ async def dr_scan_72(dut, din: int) -> int:
 class _AxiIdSignal:
     def __init__(self, width: int = 1) -> None:
         self._width = width
-        self._value = BinaryValue(0, n_bits=width, bigEndian=False)
+        self._value = self._coerce_value(0)
 
     @property
-    def value(self) -> BinaryValue:
+    def value(self):
         return self._value
 
     @value.setter
     def value(self, value) -> None:
-        if isinstance(value, BinaryValue):
-            self._value = value
-        elif hasattr(value, "get_binstr"):
-            self._value = BinaryValue(value.get_binstr(), n_bits=self._width, bigEndian=False)
-        elif hasattr(value, "binstr"):
-            self._value = BinaryValue(value.binstr, n_bits=self._width, bigEndian=False)
-        else:
+        self._value = self._coerce_value(value)
+
+    def _coerce_value(self, value):
+        if BinaryValue is None:
+            if LogicArray is None:
+                return int(value) & ((1 << self._width) - 1)
+            if isinstance(value, LogicArray):
+                return value
+            if hasattr(value, "get_binstr"):
+                return LogicArray(str(value.get_binstr()))
+            if hasattr(value, "binstr"):
+                return LogicArray(str(value.binstr))
             try:
-                self._value = BinaryValue(value, n_bits=self._width, bigEndian=False)
+                return LogicArray.from_unsigned(int(value), self._width)
             except TypeError:
-                self._value = BinaryValue("".join(str(bit) for bit in value),
-                                          n_bits=self._width, bigEndian=False)
+                return LogicArray("".join(str(bit) for bit in value))
+        if isinstance(value, BinaryValue):
+            return value
+        if hasattr(value, "get_binstr"):
+            return BinaryValue(value.get_binstr(), n_bits=self._width, bigEndian=False)
+        if hasattr(value, "binstr"):
+            return BinaryValue(value.binstr, n_bits=self._width, bigEndian=False)
+        try:
+            return BinaryValue(value, n_bits=self._width, bigEndian=False)
+        except TypeError:
+            return BinaryValue("".join(str(bit) for bit in value),
+                               n_bits=self._width, bigEndian=False)
 
     def __len__(self) -> int:
         return self._width
@@ -1085,8 +1109,8 @@ async def init_ejtagaxi(dut) -> tuple[AxiRam, AxiTrace]:
     axi_ram = AxiRam(axi_no_id_bus(dut), dut.axi_clk, dut.axi_rst, size=4096)
     axi_trace = AxiTrace(dut)
     cocotb.start_soon(axi_trace.monitor())
-    cocotb.start_soon(Clock(dut.tck, 100, units="ns").start())
-    cocotb.start_soon(Clock(dut.axi_clk, 30, units="ns").start())
+    cocotb.start_soon(Clock(dut.tck, 100, unit="ns").start())
+    cocotb.start_soon(Clock(dut.axi_clk, 30, unit="ns").start())
     dut.tdi.value = 0
     dut.capture.value = 0
     dut.shift_en.value = 0
@@ -1436,46 +1460,46 @@ async def dr_scan_32(dut, din: int) -> int:
 
 async def uart_send_byte(dut, data: int, stop_high: bool = True) -> None:
     dut.uart_rxd.value = 0
-    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    await Timer(UART_BIT_PERIOD_NS, unit="ns")
     for i in range(8):
         dut.uart_rxd.value = (data >> i) & 1
-        await Timer(UART_BIT_PERIOD_NS, units="ns")
+        await Timer(UART_BIT_PERIOD_NS, unit="ns")
     dut.uart_rxd.value = 1 if stop_high else 0
-    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    await Timer(UART_BIT_PERIOD_NS, unit="ns")
     dut.uart_rxd.value = 1
 
 
 async def uart_recv_byte_timeout(dut, timeout_ns: int) -> tuple[bool, int]:
     waited = 0
     while int(dut.uart_txd.value) == 1 and waited < timeout_ns:
-        await Timer(100, units="ns")
+        await Timer(100, unit="ns")
         waited += 100
     if int(dut.uart_txd.value) != 0:
         return False, 0
-    await Timer(UART_BIT_PERIOD_NS // 2, units="ns")
+    await Timer(UART_BIT_PERIOD_NS // 2, unit="ns")
     data = 0
     for i in range(8):
-        await Timer(UART_BIT_PERIOD_NS, units="ns")
+        await Timer(UART_BIT_PERIOD_NS, unit="ns")
         data |= int(dut.uart_txd.value) << i
-    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    await Timer(UART_BIT_PERIOD_NS, unit="ns")
     return True, data
 
 
 async def uart_recv_byte(dut) -> int:
     while int(dut.uart_txd.value) == 1:
-        await Edge(dut.uart_txd)
-    await Timer(UART_BIT_PERIOD_NS // 2, units="ns")
+        await dut.uart_txd.value_change
+    await Timer(UART_BIT_PERIOD_NS // 2, unit="ns")
     data = 0
     for i in range(8):
-        await Timer(UART_BIT_PERIOD_NS, units="ns")
+        await Timer(UART_BIT_PERIOD_NS, unit="ns")
         data |= int(dut.uart_txd.value) << i
-    await Timer(UART_BIT_PERIOD_NS, units="ns")
+    await Timer(UART_BIT_PERIOD_NS, unit="ns")
     return data
 
 
 async def init_ejtaguart(dut) -> None:
-    cocotb.start_soon(Clock(dut.tck, 100, units="ns").start())
-    cocotb.start_soon(Clock(dut.uart_clk, 100, units="ns").start())
+    cocotb.start_soon(Clock(dut.tck, 100, unit="ns").start())
+    cocotb.start_soon(Clock(dut.uart_clk, 100, unit="ns").start())
     dut.tdi.value = 0
     dut.capture.value = 0
     dut.shift.value = 0
@@ -1617,8 +1641,8 @@ async def fcapz_ejtaguart_protocol(dut):
 
     await dr_scan_32(dut, uart_cmd(UART_CMD_TX_PUSH, 0xFF))
     while int(dut.uart_txd.value) == 1:
-        await Edge(dut.uart_txd)
-    await Timer(UART_BIT_PERIOD_NS * 10, units="ns")
+        await dut.uart_txd.value_change
+    await Timer(UART_BIT_PERIOD_NS * 10, unit="ns")
     for _ in range(20):
         await RisingEdge(dut.uart_clk)
     await uart_cdc_wait(dut)
@@ -1668,7 +1692,7 @@ async def fcapz_ejtaguart_protocol(dut):
     async def bridge_txd_to_rxd() -> None:
         dut.uart_rxd.value = int(dut.uart_txd.value)
         while bridge_on:
-            await Edge(dut.uart_txd)
+            await dut.uart_txd.value_change
             dut.uart_rxd.value = int(dut.uart_txd.value)
 
     bridge_task = cocotb.start_soon(bridge_txd_to_rxd())
@@ -1690,5 +1714,5 @@ async def fcapz_ejtaguart_protocol(dut):
     assert uart_rx_valid(out)
     EJTAG_UART_FUNCTIONAL_COVERAGE.hit("bridge_loopback_stress")
     bridge_on = False
-    bridge_task.kill()
+    bridge_task.cancel()
     dut.uart_rxd.value = 1

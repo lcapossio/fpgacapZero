@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,7 +94,7 @@ def main() -> None:
         build_dir = BUILD_ROOT / f"{args.sim}_{target.name}"
         results_xml = build_dir / "results.xml"
         runner.build(
-            verilog_sources=VERILOG_SOURCES,
+            sources=VERILOG_SOURCES,
             includes=[RTL],
             parameters={**BASE_PARAMETERS, "DECODE_EN": target.decode},
             hdl_toplevel="fcapz_axi_mon",
@@ -109,7 +110,7 @@ def main() -> None:
             test_module="axi_mon_test",
             hdl_toplevel="fcapz_axi_mon",
             hdl_toplevel_lang="verilog",
-            testcase=target.testcases,
+            test_filter="|".join(rf".*\.{re.escape(case)}$" for case in target.testcases),
             build_dir=build_dir,
             test_dir=TB_COCOTB,
             results_xml=results_xml,

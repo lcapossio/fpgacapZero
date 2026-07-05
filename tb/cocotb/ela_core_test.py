@@ -133,8 +133,8 @@ class ElaDriver:
         self.dut = dut
 
     async def start(self) -> None:
-        cocotb.start_soon(Clock(self.dut.sample_clk, 10, units="ns").start())
-        cocotb.start_soon(Clock(self.dut.jtag_clk, 14, units="ns").start())
+        cocotb.start_soon(Clock(self.dut.sample_clk, 10, unit="ns").start())
+        cocotb.start_soon(Clock(self.dut.jtag_clk, 14, unit="ns").start())
         self.dut.sample_rst.value = 1
         self.dut.jtag_rst.value = 1
         self.dut.probe_in.value = 0

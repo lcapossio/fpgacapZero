@@ -48,8 +48,8 @@ class MonDriver:
         self.dut = dut
 
     async def start(self) -> None:
-        cocotb.start_soon(Clock(self.dut.ACLK, 10, units="ns").start())
-        cocotb.start_soon(Clock(self.dut.jtag_clk, 14, units="ns").start())
+        cocotb.start_soon(Clock(self.dut.ACLK, 10, unit="ns").start())
+        cocotb.start_soon(Clock(self.dut.jtag_clk, 14, unit="ns").start())
         for sig in AXI_SIGNALS:
             getattr(self.dut, sig).value = 0
         self.dut.ARESETN.value = 0

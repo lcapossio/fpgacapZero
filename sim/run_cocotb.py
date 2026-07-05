@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -332,11 +333,23 @@ def target_supports_hdl(target: Target, hdl: str) -> bool:
     return hdl == "verilog" or bool(target.vhdl_sources)
 
 
-def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str, Path] | None:
-    from cocotb.runner import get_runner
+def get_cocotb_runner(sim: str):
+    try:
+        from cocotb_tools.runner import get_runner
+    except ModuleNotFoundError:
+        from cocotb.runner import get_runner
 
+    return get_runner(sim)
+
+
+def cocotb_test_filter(testcases: str | tuple[str, ...]) -> str:
+    cases = (testcases,) if isinstance(testcases, str) else testcases
+    return "|".join(rf".*\.{re.escape(case)}$" for case in cases)
+
+
+def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str, Path] | None:
     sim = args.sim or ("icarus" if hdl == "verilog" else "ghdl")
-    runner = get_runner(sim)
+    runner = get_cocotb_runner(sim)
     build_dir = BUILD_ROOT / f"{hdl}_{sim}" / target.name
     results_xml = build_dir / "results.xml"
     coverage_info = COVERAGE_TARGETS.get(target.name)
@@ -345,8 +358,7 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str,
         sys.path.insert(0, str(TB_COCOTB))
 
     runner.build(
-        verilog_sources=list(target.sources) if hdl == "verilog" else [],
-        vhdl_sources=list(target.vhdl_sources) if hdl == "vhdl" else [],
+        sources=list(target.sources) if hdl == "verilog" else list(target.vhdl_sources),
         includes=[RTL],
         parameters=target.parameters if hdl == "verilog"
         else (target.vhdl_parameters if target.vhdl_parameters is not None else target.parameters),
@@ -376,7 +388,7 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str,
         test_module="core_test",
         hdl_toplevel=target.top if hdl == "verilog" else (target.vhdl_top or target.top),
         hdl_toplevel_lang=hdl,
-        testcase=(target.testcase,),
+        test_filter=cocotb_test_filter(target.testcase),
         build_dir=build_dir,
         test_dir=build_dir if hdl == "vhdl" else TB_COCOTB,
         results_xml=results_xml,
