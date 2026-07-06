@@ -154,6 +154,40 @@ readiness wait.
 
 Response: `{"ok": true, "schema_version": "1.1"}`
 
+#### `discover_boards`
+
+Find fpgacapZero-compatible boards across running OpenOCD instances (OpenOCD
+only). Lists each TCL port's taps (`jtag names`) and probes each for the ELA
+identity, returning **only compatible** boards — so a caller fails only when
+none are found. Requires no active connection.
+
+```json
+{
+  "cmd": "discover_boards",
+  "host": "127.0.0.1",
+  "port": 6666,        // sweep base; each board is one OpenOCD instance
+  "port_span": 4,      // scan port .. port+span-1 (or pass "ports": [6666, 6667])
+  "timeout": 5
+}
+```
+
+Response (empty `boards` means nothing compatible was reachable):
+```json
+{
+  "ok": true,
+  "schema_version": "1.1",
+  "backend": "openocd",
+  "boards": [
+    {
+      "host": "127.0.0.1", "port": 6666,
+      "tap": "GW1NR-9C.tap", "ir_table": "gowin",
+      "identity": {"core_id": 19521, "sample_width": 8, "depth": 64, "num_channels": 6},
+      "label": "GW1NR-9C.tap @ :6666 - 8-bitx64x6ch v0.4"
+    }
+  ]
+}
+```
+
 #### `close`
 
 Releases the transport.

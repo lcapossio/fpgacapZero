@@ -48,9 +48,11 @@ The UI is a **dockable tab layout** — drag any tab to reorder, split, stack, o
 float it; the layout is yours to arrange. The panels:
 
 - **Connection** — pick the backend (OpenOCD or Xilinx hw_server), host and
-  port. Connect scans for JTAG targets and, if more than one is found, lets you
-  pick; a single target connects automatically. EIO is auto-discovered on
-  connect.
+  port. For OpenOCD, Connect **discovers fpgacapZero-compatible boards** — it
+  probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
+  instance per board) — and fails only if none are found; one board connects
+  automatically, several show a picker. hw_server lists JTAG targets the same
+  way. EIO is auto-discovered on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
   mode/value/mask, **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform), and **advanced
