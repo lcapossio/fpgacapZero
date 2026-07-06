@@ -1,10 +1,15 @@
 import { useState } from "react";
 import { getToken, inferIrTable, rpc, setToken } from "../api";
-import type { ConnectionParams, Identity } from "../api";
+import type { Board, ConnectionParams, Identity } from "../api";
 
 const BACKENDS = ["openocd", "hw_server"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
 const CONNECT_TIMEOUT = 6000;
+// Discovery probes every tap on a small sweep of TCL ports, so give it more
+// room than a single connect. Each physical board is one OpenOCD instance on
+// its own port (port .. port+PORT_SWEEP-1).
+const PORT_SWEEP = 4;
+const DISCOVER_TIMEOUT = 30000;
 
 export function ConnectionPanel({
   identity,
@@ -21,8 +26,11 @@ export function ConnectionPanel({
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
+  // hw_server: XSDB target names (strings). openocd: probed compatible boards.
   const [targets, setTargets] = useState<string[]>([]);
   const [picked, setPicked] = useState("");
+  const [boards, setBoards] = useState<Board[]>([]);
+  const [pickedIdx, setPickedIdx] = useState(0);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -30,6 +38,8 @@ export function ConnectionPanel({
   function resetScan() {
     setTargets([]);
     setPicked("");
+    setBoards([]);
+    setPickedIdx(0);
     setStatus("");
     setError("");
   }
@@ -37,7 +47,7 @@ export function ConnectionPanel({
   function changeBackend(b: string) {
     setBackend(b);
     setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
-    resetScan(); // drop a stale target picker from the previous backend
+    resetScan(); // drop a stale picker from the previous backend
   }
 
   function handleError(e: unknown) {
@@ -46,6 +56,7 @@ export function ConnectionPanel({
     setError(msg);
   }
 
+  /** Connect using an explicit tap (manual entry or an hw_server target). */
   async function connectTo(tap: string) {
     setStatus(`connecting to ${tap}…`);
     const params: ConnectionParams = {
@@ -61,17 +72,55 @@ export function ConnectionPanel({
     onConnected(params, r.probe as Identity);
   }
 
+  /** Connect to a discovered board (carries its own port/tap/ir_table). */
+  async function connectToBoard(b: Board) {
+    setStatus(`connecting to ${b.tap} @ :${b.port}…`);
+    const params: ConnectionParams = {
+      backend: b.backend,
+      host: b.host,
+      port: b.port,
+      tap: b.tap,
+      ir_table: b.ir_table,
+      chain: 1,
+    };
+    await rpc("connect", params as unknown as Record<string, unknown>, CONNECT_TIMEOUT);
+    const r = await rpc("probe", {}, CONNECT_TIMEOUT);
+    onConnected(params, r.probe as Identity);
+  }
+
   async function connect() {
     setBusy(true);
-    setError("");
-    setStatus("");
-    setTargets([]);
+    resetScan();
     setToken(token);
     try {
       if (manualTap.trim()) {
         await connectTo(manualTap.trim());
         return;
       }
+      if (backend === "openocd") {
+        // Find fcapz-compatible boards; only fail if there are none.
+        setStatus("searching for compatible boards…");
+        const r = await rpc(
+          "discover_boards",
+          { backend, host, port: Number(port), port_span: PORT_SWEEP, timeout: 5 },
+          DISCOVER_TIMEOUT,
+        );
+        const found = (r.boards as Board[]) ?? [];
+        if (found.length === 0) {
+          setError(
+            "no compatible fpgacapZero boards found — check the board is programmed and " +
+              "OpenOCD is running, or enter a tap manually.",
+          );
+        } else if (found.length === 1) {
+          await connectToBoard(found[0]);
+        } else {
+          setBoards(found);
+          setPickedIdx(0);
+          setStatus(`${found.length} compatible boards found — pick one`);
+        }
+        return;
+      }
+      // hw_server: list XSDB targets (no ELA probe), then connect.
       setStatus("scanning for targets…");
       const r = await rpc(
         "scan_targets",
@@ -80,7 +129,7 @@ export function ConnectionPanel({
       );
       const found = (r.targets as string[]) ?? [];
       if (found.length === 0) {
-        setError("no JTAG targets found — check the board / OpenOCD, or enter a tap manually.");
+        setError("no JTAG targets found — check the board / hw_server, or enter a tap manually.");
       } else if (found.length === 1) {
         await connectTo(found[0]);
       } else {
@@ -96,11 +145,23 @@ export function ConnectionPanel({
     }
   }
 
-  async function connectPicked() {
+  async function connectPickedTarget() {
     setBusy(true);
     setError("");
     try {
       await connectTo(picked);
+    } catch (e) {
+      handleError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connectPickedBoard() {
+    setBusy(true);
+    setError("");
+    try {
+      await connectToBoard(boards[pickedIdx]);
     } catch (e) {
       handleError(e);
     } finally {
@@ -115,7 +176,7 @@ export function ConnectionPanel({
     } catch {
       /* already gone */
     }
-    setTargets([]);
+    resetScan();
     onDisconnected();
     setBusy(false);
   }
@@ -177,7 +238,31 @@ export function ConnectionPanel({
         )}
       </div>
 
-      {targets.length > 1 ? (
+      {boards.length > 1 ? (
+        <div className="form">
+          <label>
+            Board
+            <select
+              value={pickedIdx}
+              onChange={(e) => setPickedIdx(Number(e.target.value))}
+            >
+              {boards.map((b, i) => (
+                <option key={`${b.host}:${b.port}:${b.tap}`} value={i}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="btnrow">
+            <button onClick={connectPickedBoard} disabled={busy}>
+              Connect to {boards[pickedIdx]?.tap}
+            </button>
+            <button className="secondary" onClick={resetScan} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : targets.length > 1 ? (
         <div className="form">
           <label>
             Target
@@ -188,7 +273,7 @@ export function ConnectionPanel({
             </select>
           </label>
           <div className="btnrow">
-            <button onClick={connectPicked} disabled={busy}>
+            <button onClick={connectPickedTarget} disabled={busy}>
               Connect to {picked}
             </button>
             <button className="secondary" onClick={resetScan} disabled={busy}>

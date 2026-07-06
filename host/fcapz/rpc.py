@@ -8,7 +8,14 @@ import json
 import traceback
 from typing import Any, Dict
 
-from .analyzer import Analyzer, CaptureConfig, ProbeSpec, SequencerStage, TriggerConfig
+from .analyzer import (
+    Analyzer,
+    CaptureConfig,
+    ProbeSpec,
+    SequencerStage,
+    TriggerConfig,
+    discover_boards,
+)
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -337,6 +344,23 @@ class RpcServer:
                 )
                 return self._ok(backend="hw_server", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
+
+        if cmd == "discover_boards":
+            # Find fpgacapZero-compatible boards across running OpenOCD
+            # instances. Probes each tap for the ELA identity and returns only
+            # compatible boards, so the GUI fails only when none are found.
+            host = req.get("host", "127.0.0.1")
+            raw_ports = req.get("ports")
+            if raw_ports:
+                ports = [int(p) for p in raw_ports]
+            else:
+                base = int(req.get("port", 6666))
+                span = max(1, int(req.get("port_span", 1)))
+                ports = [base + i for i in range(span)]
+            boards = discover_boards(
+                host=host, ports=ports, timeout_sec=float(req.get("timeout", 5.0))
+            )
+            return self._ok(backend="openocd", boards=boards)
 
         analyzer = self._ensure_analyzer()
 

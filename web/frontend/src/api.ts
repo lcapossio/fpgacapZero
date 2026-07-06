@@ -27,6 +27,17 @@ export interface Identity {
   num_segments?: number;
 }
 
+/** A discovered fpgacapZero-compatible board (one OpenOCD tap that probed as an ELA). */
+export interface Board {
+  backend: string;
+  host: string;
+  port: number;
+  tap: string;
+  ir_table: string;
+  identity: Identity;
+  label: string;
+}
+
 export interface CaptureSample {
   index: number;
   value: number;

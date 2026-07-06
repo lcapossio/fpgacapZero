@@ -244,6 +244,67 @@ def test_scan_targets_openocd(monkeypatch):
     assert r["backend"] == "openocd"
 
 
+def test_discover_boards_only_returns_compatible(monkeypatch):
+    """Aggregate compatible taps across ports; skip unreachable ports/incompatible taps."""
+    import fcapz.analyzer as az
+
+    taps_by_port = {6666: ["GW1NR-9C.tap", "dummy.tap"], 6668: ["xc7a100t.tap"]}
+
+    def fake_list_taps(*, host, port, timeout_sec):
+        if port not in taps_by_port:
+            raise OSError("nothing listening")  # e.g. port 6667 has no OpenOCD
+        return taps_by_port[port]
+
+    def fake_probe(*, host, port, tap, chain, timeout_sec):
+        if tap == "dummy.tap":
+            return None  # present tap, but not an fcapz ELA
+        return {
+            "backend": "openocd", "host": host, "port": port, "tap": tap,
+            "ir_table": "gowin" if tap.startswith("GW") else "xilinx7",
+            "identity": {"sample_width": 8, "depth": 64, "num_channels": 6,
+                         "version_major": 0, "version_minor": 4},
+            "label": f"{tap} @ :{port}",
+        }
+
+    monkeypatch.setattr(az, "list_openocd_taps", fake_list_taps)
+    monkeypatch.setattr(az, "_probe_openocd_board", fake_probe)
+
+    boards = az.discover_boards(ports=[6666, 6667, 6668])
+    assert [b["tap"] for b in boards] == ["GW1NR-9C.tap", "xc7a100t.tap"]
+    assert {b["port"] for b in boards} == {6666, 6668}
+
+
+def test_discover_boards_rpc_expands_port_span(monkeypatch):
+    calls = {}
+
+    def fake_discover(*, host, ports, timeout_sec):
+        calls["ports"] = ports
+        return [{
+            "backend": "openocd", "host": host, "port": ports[0],
+            "tap": "GW1NR-9C.tap", "ir_table": "gowin",
+            "identity": {"sample_width": 8, "depth": 64, "num_channels": 6,
+                         "version_major": 0, "version_minor": 4},
+            "label": "GW1NR-9C.tap @ :6666",
+        }]
+
+    monkeypatch.setattr("fcapz.rpc.discover_boards", fake_discover)
+    c = _client(monkeypatch)
+    r = _rpc(c, "discover_boards", backend="openocd", port=6666, port_span=3).json()
+    assert r["ok"] is True
+    assert r["backend"] == "openocd"
+    assert [b["tap"] for b in r["boards"]] == ["GW1NR-9C.tap"]
+    assert calls["ports"] == [6666, 6667, 6668]  # port_span -> sweep
+
+
+def test_discover_boards_rpc_empty_when_none(monkeypatch):
+    """No compatible boards -> ok with an empty list (caller fails only then)."""
+    monkeypatch.setattr("fcapz.rpc.discover_boards", lambda **kw: [])
+    c = _client(monkeypatch)
+    r = _rpc(c, "discover_boards", backend="openocd").json()
+    assert r["ok"] is True
+    assert r["boards"] == []
+
+
 def test_eio_discover_finds_shared_chain(monkeypatch):
     c = _client(monkeypatch)
     _rpc(c, "connect", **_GOWIN)

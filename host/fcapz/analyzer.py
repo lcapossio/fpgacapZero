@@ -8,11 +8,11 @@ import time
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
-from .transport import Transport
+from .transport import OpenOcdTransport, Transport, list_openocd_taps
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
@@ -1014,6 +1014,127 @@ class Analyzer:
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
         return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+
+
+def _infer_ir_table_name(tap: str) -> str:
+    """Guess the IR-table preset from a tap name (mirrors the web inferIrTable)."""
+    t = tap.strip().lower()
+    if t.startswith("gw"):
+        return "gowin"
+    if t.startswith(("xcku", "xcvu", "xcau")):
+        return "ultrascale"
+    return "xilinx7"
+
+
+# IR-table presets discover_boards probes with, keyed by preset name.  The
+# preset inferred from the tap name is tried first, then the rest as a fallback
+# so an oddly-named tap is still matched.  ``None`` = the OpenOcdTransport
+# default (Xilinx 7-series).
+_DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
+    "xilinx7": None,
+    "ultrascale": OpenOcdTransport.IR_TABLE_US,
+    "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+}
+
+
+def _board_label(tap: str, port: int, identity: Dict) -> str:
+    # ASCII only: this string flows through JSON, logs, and possibly a CLI, so
+    # avoid non-ASCII typography that some consoles mangle.
+    return (
+        f"{tap} @ :{port} - {identity['sample_width']}-bit"
+        f"x{identity['depth']}x{identity['num_channels']}ch "
+        f"v{identity['version_major']}.{identity['version_minor']}"
+    )
+
+
+def _probe_openocd_board(
+    *, host: str, port: int, tap: str, chain: int, timeout_sec: float
+) -> Optional[Dict]:
+    """Probe one OpenOCD tap for an fcapz ELA, trying each IR-table preset.
+
+    Opens a single transport and re-probes under each candidate IR table
+    (inferred preset first).  Returns the board entry on the first match, or
+    ``None`` if the tap presents no fcapz ELA under any preset — a wrong IR
+    table simply yields no identity magic, so mismatches are harmless.
+    """
+    order = [_infer_ir_table_name(tap)]
+    order += [name for name in _DISCOVERY_IR_TABLES if name not in order]
+
+    transport = OpenOcdTransport(
+        host=host, port=port, tap=tap, connect_timeout_sec=timeout_sec
+    )
+    try:
+        transport.connect()
+    except OSError:
+        return None
+    try:
+        for ir_name in order:
+            table = _DISCOVERY_IR_TABLES[ir_name]
+            transport.ir_table = (
+                dict(table)
+                if table is not None
+                else dict(OpenOcdTransport.DEFAULT_IR_TABLE)
+            )
+            transport.invalidate_manager_instance_cache()
+            try:
+                identity = Analyzer(transport, chain=chain).probe_optional()
+            except (OSError, RuntimeError, KeyError, ValueError):
+                identity = None
+            if identity:
+                return {
+                    "backend": "openocd",
+                    "host": host,
+                    "port": port,
+                    "tap": tap,
+                    "ir_table": ir_name,
+                    "identity": identity,
+                    "label": _board_label(tap, port, identity),
+                }
+        return None
+    finally:
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+
+def discover_boards(
+    *,
+    host: str = "127.0.0.1",
+    ports: Sequence[int] = (6666,),
+    chain: int = 1,
+    timeout_sec: float = 5.0,
+) -> List[Dict]:
+    """Find fpgacapZero-compatible boards across running OpenOCD instances.
+
+    For every TCL *port* that has an OpenOCD listening, enumerate its taps
+    (``jtag names``) and probe each for the ELA identity magic
+    (:data:`ELA_CORE_ID`).  Returns one entry per **compatible** ``(port, tap)``
+    with its identity; ports with no OpenOCD and taps with no fcapz ELA are
+    silently skipped, so the result is exactly the compatible set — empty only
+    when nothing compatible is reachable.  Never raises for an unreachable
+    port, so a caller can treat an empty list as "nothing to connect to" and
+    fail only then.
+
+    Each entry is ``{backend, host, port, tap, ir_table, identity, label}``
+    where ``ir_table`` is the preset name that matched and ``identity`` is the
+    :meth:`Analyzer.probe` dict.  A single physical board is one OpenOCD
+    instance on its own port; sweep several ports to find several boards.
+    """
+    boards: List[Dict] = []
+    for port in ports:
+        port = int(port)
+        try:
+            taps = list_openocd_taps(host=host, port=port, timeout_sec=timeout_sec)
+        except OSError:
+            continue  # nothing listening on this port — skip, don't fail
+        for tap in taps:
+            entry = _probe_openocd_board(
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=timeout_sec
+            )
+            if entry is not None:
+                boards.append(entry)
+    return boards
 
 
 class CoreManager:
