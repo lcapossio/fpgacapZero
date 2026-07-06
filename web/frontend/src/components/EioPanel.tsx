@@ -17,8 +17,9 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   const [base, setBase] = useState(gowin ? "0x8000" : "0x0");
   const [inW, setInW] = useState(0);
   const [outW, setOutW] = useState(0);
-  const [inputs, setInputs] = useState(0);
-  const [outputs, setOutputs] = useState(0);
+  // JS bitwise operators are 32-bit; EIO can be multiword, so track bits as BigInt.
+  const [inputs, setInputs] = useState(0n);
+  const [outputs, setOutputs] = useState(0n);
   const [poll, setPoll] = useState(true);
   const [pollMs, setPollMs] = useState(250);
   const [error, setError] = useState("");
@@ -27,7 +28,8 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   async function readInputs() {
     try {
       const r = await rpc("eio_read");
-      setInputs(r.value as number);
+      // Prefer value_hex (full width) over the JS-lossy numeric value.
+      setInputs(BigInt(((r.value_hex ?? r.value) as string | number)));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -79,9 +81,10 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
     }
   }
 
-  async function writeOutputs(value: number) {
+  async function writeOutputs(value: bigint) {
     try {
-      await rpc("eio_write", { value });
+      // Hex string so wide (>53-bit) output words survive JSON transport.
+      await rpc("eio_write", { value: "0x" + value.toString(16) });
       setOutputs(value);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -137,7 +140,10 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
       <div className="bits">
         <span className="bitlabel">inputs</span>
         {range(inW).map((i) => (
-          <span key={i} className={"bit" + (((inputs >> i) & 1) === 1 ? " on" : "")}>
+          <span
+            key={i}
+            className={"bit" + (((inputs >> BigInt(i)) & 1n) === 1n ? " on" : "")}
+          >
             {i}
           </span>
         ))}
@@ -148,8 +154,8 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
         {range(outW).map((i) => (
           <button
             key={i}
-            className={"bit btn" + (((outputs >> i) & 1) === 1 ? " on" : "")}
-            onClick={() => writeOutputs(outputs ^ (1 << i))}
+            className={"bit btn" + (((outputs >> BigInt(i)) & 1n) === 1n ? " on" : "")}
+            onClick={() => writeOutputs(outputs ^ (1n << BigInt(i)))}
           >
             {i}
           </button>

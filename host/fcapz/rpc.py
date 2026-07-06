@@ -469,12 +469,16 @@ class RpcServer:
         if cmd == "eio_read":
             if self._eio is None:
                 raise RuntimeError("eio not connected")
-            return self._ok(value=self._eio.read_inputs())
+            v = self._eio.read_inputs()
+            # value stays a JSON number for back-compat; value_hex carries the
+            # full width so wide (multiword) EIO survives a 53-bit JS client.
+            return self._ok(value=v, value_hex=hex(v))
 
         if cmd == "eio_write":
             if self._eio is None:
                 raise RuntimeError("eio not connected")
-            self._eio.write_outputs(int(req["value"]))
+            # Accept a base-prefixed string so wide output words don't round.
+            self._eio.write_outputs(self._parse_int(req["value"]))
             return self._ok()
 
         if cmd == "axi_connect":

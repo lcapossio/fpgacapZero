@@ -377,3 +377,40 @@ def test_close_releases_bare_transport_from_partial_connect():
 
     assert axi_t.closed and uart_t.closed
     assert srv._axi_transport is None and srv._uart_transport is None
+
+
+class _FakeEio:
+    def __init__(self, value: int = 0) -> None:
+        self.value = value
+        self.written: int | None = None
+
+    def read_inputs(self) -> int:
+        return self.value
+
+    def write_outputs(self, v: int) -> None:
+        self.written = v
+
+
+def test_eio_wide_value_round_trips_via_value_hex_and_hex_string_write():
+    """Multiword EIO (>53 bits) survives JSON via value_hex / hex-string write."""
+    wide = (1 << 80) | (1 << 40) | 1  # bits set above 53 and above 31
+    assert wide > 2**53
+
+    srv = RpcServer()
+    srv._analyzer = object()  # eio_* runs after the connected-analyzer guard
+    srv._eio = _FakeEio(wide)
+
+    rd = srv.handle({"cmd": "eio_read"})
+    assert int(rd["value_hex"], 16) == wide  # full width preserved
+    assert rd["value"] == wide  # numeric field kept for back-compat
+
+    srv.handle({"cmd": "eio_write", "value": hex(wide)})
+    assert srv._eio.written == wide  # hex string parsed exactly
+
+
+def test_eio_write_accepts_plain_int_backward_compatible():
+    srv = RpcServer()
+    srv._analyzer = object()
+    srv._eio = _FakeEio()
+    srv.handle({"cmd": "eio_write", "value": 0x15})
+    assert srv._eio.written == 0x15
