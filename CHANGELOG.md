@@ -48,6 +48,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web interface (`fcapz-web`):** New browser front-end over the unified
+  JSON-RPC API — a FastAPI gateway (`python -m fcapz.web`) plus a React/Vite UI
+  with dockable panels (Connection, ELA, Run, EIO, JTAG-AXI) and an embedded,
+  self-hosted Surfer waveform viewer that reloads captures in place. Local or
+  token-gated network access; auto-scans JTAG targets and auto-discovers EIO on
+  connect. Install with `pip install -e ".[web]"`, then run `fcapz-web`. See
+  [`docs/18_web_interface.md`](docs/18_web_interface.md).
 - **EJTAG-AXI RTL:** Vendor wrappers now expose `CMD_FIFO_DEPTH` and
   `RESP_FIFO_DEPTH` independently from burst `FIFO_DEPTH`; the Arty
   reference sets both command/response queues to 16 and forces the small
