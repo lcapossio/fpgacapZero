@@ -43,6 +43,34 @@ class RpcServer:
             raise RuntimeError("not connected")
         return self._analyzer
 
+    def _close_all(self) -> None:
+        """Full session teardown: analyzer plus any EIO/AXI/UART transports.
+
+        The ``close`` command (web/GUI "Disconnect") must release every
+        hardware session, not just the analyzer, so no transport is left open
+        on the board/hw_server. A controller owns and closes its own transport;
+        a bare transport from a partial connect is closed directly. Each close
+        is guarded so one failure cannot leak the others.
+        """
+
+        def _shut(obj: Any) -> None:
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+
+        _shut(self._analyzer)
+        _shut(self._eio)
+        _shut(self._axi if self._axi is not None else self._axi_transport)
+        _shut(self._uart if self._uart is not None else self._uart_transport)
+        self._analyzer = None
+        self._eio = None
+        self._axi = None
+        self._axi_transport = None
+        self._uart = None
+        self._uart_transport = None
+
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
     _IR_TABLES = {
         "": None,
@@ -288,9 +316,7 @@ class RpcServer:
             return self._ok()
 
         if cmd == "close":
-            if self._analyzer is not None:
-                self._analyzer.close()
-                self._analyzer = None
+            self._close_all()
             return self._ok()
 
         if cmd == "scan_targets":

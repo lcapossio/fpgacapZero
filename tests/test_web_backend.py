@@ -329,3 +329,51 @@ def test_build_config_trigger_value_backward_compatible():
     assert RpcServer._build_config({"trigger_value": 255}).trigger.value == 255
     assert RpcServer._build_config({"trigger_value": "255"}).trigger.value == 255
     assert RpcServer._build_config({"trigger_value": "0x1F"}).trigger.value == 0x1F
+
+
+def test_close_tears_down_all_hardware_sessions():
+    """`close` (web/GUI Disconnect) must release EIO/AXI/UART, not just the ELA."""
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    srv = RpcServer()
+    srv._analyzer = _Sess()
+    srv._eio = _Sess()
+    srv._axi = _Sess()
+    srv._axi_transport = _Sess()
+    srv._uart = _Sess()
+    srv._uart_transport = _Sess()
+    analyzer, eio, axi, uart = srv._analyzer, srv._eio, srv._axi, srv._uart
+
+    assert srv.handle({"cmd": "close"})["ok"] is True
+
+    assert analyzer.closed and eio.closed and axi.closed and uart.closed
+    assert srv._analyzer is None and srv._eio is None
+    assert srv._axi is None and srv._axi_transport is None
+    assert srv._uart is None and srv._uart_transport is None
+
+
+def test_close_releases_bare_transport_from_partial_connect():
+    """A transport opened without its controller (partial connect) is closed too."""
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    srv = RpcServer()
+    srv._axi_transport = _Sess()
+    srv._uart_transport = _Sess()
+    axi_t, uart_t = srv._axi_transport, srv._uart_transport
+
+    srv.handle({"cmd": "close"})
+
+    assert axi_t.closed and uart_t.closed
+    assert srv._axi_transport is None and srv._uart_transport is None
