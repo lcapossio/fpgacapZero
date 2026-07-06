@@ -296,3 +296,36 @@ def test_token_auth(monkeypatch):
         "/api/rpc", json={"cmd": "probe"}, headers={"Authorization": "Bearer secret"}
     )
     assert ok.status_code == 200
+
+
+def test_build_config_parses_wide_bit_vectors_without_rounding():
+    """Wide trigger/stor-qual values must survive as base-prefixed strings.
+
+    A JS ``Number`` is exact only to 53 bits, so the web path sends bit vectors
+    as strings; the backend must parse them without rounding (regression for
+    160-bit AXI-sample triggers).
+    """
+    big = (0xDEAD_BEEF_CAFE_F00D << 96) | 0x1234_5678_9ABC_DEF0_1122_3344
+    mask = (1 << 160) - 1
+    assert big > 2**53  # beyond JS-safe integer range
+    cfg = RpcServer._build_config(
+        {
+            "trigger_mode": "value_match",
+            "trigger_value": hex(big),
+            "trigger_mask": hex(mask),
+            "sample_width": 160,
+            "stor_qual_value": hex(big),
+            "stor_qual_mask": hex(mask),
+        }
+    )
+    assert cfg.trigger.value == big
+    assert cfg.trigger.mask == mask
+    assert cfg.stor_qual_value == big
+    assert cfg.stor_qual_mask == mask
+
+
+def test_build_config_trigger_value_backward_compatible():
+    """Plain ints and decimal strings still parse (older clients unaffected)."""
+    assert RpcServer._build_config({"trigger_value": 255}).trigger.value == 255
+    assert RpcServer._build_config({"trigger_value": "255"}).trigger.value == 255
+    assert RpcServer._build_config({"trigger_value": "0x1F"}).trigger.value == 0x1F

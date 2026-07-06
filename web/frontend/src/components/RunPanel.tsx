@@ -1,10 +1,14 @@
 import { useRef, useState } from "react";
-import { downloadText, parseIntFlexible, parseProbesText, rpc } from "../api";
+import { downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { useSession } from "../session";
 
 const SINGLE_TIMEOUT = 10; // hardware wait (s) for a single capture
 const CONT_TIMEOUT = 5; // shorter per-capture wait in auto re-arm so Stop is responsive
+// JS numbers are exact only to 53 bits. Bit vectors (trigger value/mask) go over
+// the wire as strings so wide values (e.g. 160-bit AXI samples) don't round; wide
+// sample data uses the string-based VCD/CSV exports, not the JSON-number result.
+const SAFE_SAMPLE_BITS = 53;
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
  *  to the Viewer tab. */
@@ -25,8 +29,9 @@ export function RunPanel({ identity }: { identity: Identity }) {
       pretrigger: Number(ela.pretrigger),
       posttrigger: Number(ela.posttrigger),
       trigger_mode: ela.triggerMode,
-      trigger_value: parseIntFlexible(ela.triggerValue),
-      trigger_mask: parseIntFlexible(ela.triggerMask),
+      // Send as strings (hex or decimal); the backend parses with full precision.
+      trigger_value: ela.triggerValue.trim() || "0",
+      trigger_mask: ela.triggerMask.trim() || "0",
       ext_trigger_mode: Number(ela.extTriggerMode),
       sequence,
       segments: ela.segmented,
@@ -35,7 +40,9 @@ export function RunPanel({ identity }: { identity: Identity }) {
       depth: identity.depth,
       timeout,
       immediate,
-      format: "json",
+      // Wide captures can't round-trip through JSON numbers safely — request the
+      // lossless VCD as the primary result and skip the JSON-number samples.
+      format: identity.sample_width > SAFE_SAMPLE_BITS ? "vcd" : "json",
       include_vcd: true,
       include_csv: true,
     };
@@ -157,7 +164,16 @@ export function RunPanel({ identity }: { identity: Identity }) {
         <button className="secondary" onClick={() => download("csv")} disabled={!capture?.csv}>
           Download CSV
         </button>
-        <button className="secondary" onClick={() => download("json")} disabled={!capture}>
+        <button
+          className="secondary"
+          onClick={() => download("json")}
+          disabled={!capture?.json}
+          title={
+            capture && !capture.json
+              ? "JSON export is off for wide captures (>53-bit) to avoid number rounding — use VCD or CSV."
+              : undefined
+          }
+        >
           Download JSON
         </button>
       </div>

@@ -212,8 +212,10 @@ class RpcServer:
             posttrigger=int(req.get("posttrigger", 16)),
             trigger=TriggerConfig(
                 mode=req.get("trigger_mode", "value_match"),
-                value=int(req.get("trigger_value", 0)),
-                mask=int(req.get("trigger_mask", 0xFF)),
+                # Bit vectors: accept base-prefixed strings so values wider than
+                # a JS-safe integer (53 bits) survive JSON transport unrounded.
+                value=cls._parse_int(req.get("trigger_value", 0)),
+                mask=cls._parse_int(req.get("trigger_mask", 0xFF)),
             ),
             sample_width=int(req.get("sample_width", file_sample_width)),
             depth=int(req.get("depth", 1024)),
@@ -226,8 +228,8 @@ class RpcServer:
                 req.get("sequence", req.get("trigger_sequence"))
             ),
             stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
-            stor_qual_value=int(req.get("stor_qual_value", 0)),
-            stor_qual_mask=int(req.get("stor_qual_mask", 0)),
+            stor_qual_value=cls._parse_int(req.get("stor_qual_value", 0)),
+            stor_qual_mask=cls._parse_int(req.get("stor_qual_mask", 0)),
             startup_arm=cls._validated_bool(
                 req.get("startup_arm", False), field="startup_arm"
             ),
