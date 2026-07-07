@@ -18,6 +18,39 @@ const START_TIMEOUT = 15000; // server spawns OpenOCD and waits for its TCL port
 const HW_CONNECT_TIMEOUT = 15000;
 const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s client cap
 
+// Friendly names for the identity readout, so the user sees "Logic Analyzer",
+// not the raw ASCII-packed magic (0x4C41 = "LA").
+const CORE_NAMES: Record<number, string> = {
+  0x4c41: "Embedded Logic Analyzer (ELA)",
+  0x494f: "Embedded I/O (EIO)",
+};
+const VENDOR_NAMES: Record<string, string> = {
+  gowin: "Gowin",
+  xilinx7: "Xilinx 7-series",
+  ultrascale: "Xilinx UltraScale+",
+};
+
+function coreName(id: number): string {
+  return CORE_NAMES[id] ?? `core 0x${id.toString(16).toUpperCase()}`;
+}
+
+function vendorName(ir: string): string {
+  return VENDOR_NAMES[ir] ?? ir;
+}
+
+/** Human-readable list of the ELA's optional capabilities. */
+function elaFeatures(id: Identity): string[] {
+  const f: string[] = [];
+  if (id.trig_stages && id.trig_stages > 1) f.push(`${id.trig_stages} trigger stages`);
+  if (id.has_ext_trigger) f.push("external trigger");
+  if (id.has_storage_qualification) f.push("storage qualification");
+  if (id.has_decimation) f.push("decimation");
+  if (id.has_timestamp)
+    f.push(`timestamps${id.timestamp_width ? ` (${id.timestamp_width}-bit)` : ""}`);
+  if (id.has_dual_compare) f.push("dual compare");
+  return f;
+}
+
 export function ConnectionPanel({
   identity,
   onConnected,
@@ -46,6 +79,14 @@ export function ConnectionPanel({
   const [ooEnabled, setOoEnabled] = useState(false);
   const [ooConfigs, setOoConfigs] = useState<string[]>([]);
   const [ooName, setOoName] = useState("");
+  // What we actually connected to (may differ from the form when auto-discovered).
+  const [connTarget, setConnTarget] = useState<{
+    backend: string;
+    host: string;
+    port: number;
+    tap: string;
+    ir_table: string;
+  } | null>(null);
 
   function resetScan() {
     setTargets([]);
@@ -84,6 +125,7 @@ export function ConnectionPanel({
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
     await rpc("connect", params as unknown as Record<string, unknown>, t);
     const r = await rpc("probe", {}, t);
+    setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
   }
 
@@ -100,6 +142,13 @@ export function ConnectionPanel({
     };
     await rpc("connect", params as unknown as Record<string, unknown>, CONNECT_TIMEOUT);
     const r = await rpc("probe", {}, CONNECT_TIMEOUT);
+    setConnTarget({
+      backend: b.backend,
+      host: b.host,
+      port: b.port,
+      tap: b.tap,
+      ir_table: b.ir_table,
+    });
     onConnected(params, r.probe as Identity);
   }
 
@@ -264,15 +313,50 @@ export function ConnectionPanel({
   }
 
   if (identity) {
+    const feats = elaFeatures(identity);
     return (
       <section className="panel">
         <h2>Connection</h2>
-        <p className="ok">
-          Connected — core 0x{identity.core_id.toString(16).toUpperCase()},{" "}
-          {identity.sample_width}-bit × {identity.depth} ×{" "}
-          {identity.num_channels}ch (v{identity.version_major}.
-          {identity.version_minor})
-        </p>
+        <p className="ok">✓ Connected</p>
+        <dl className="idinfo">
+          <dt>Core</dt>
+          <dd>
+            {coreName(identity.core_id)}{" "}
+            <span className="muted">
+              v{identity.version_major}.{identity.version_minor}
+            </span>
+          </dd>
+          {connTarget && (
+            <>
+              <dt>Target</dt>
+              <dd>
+                {connTarget.tap}{" "}
+                <span className="muted">
+                  · {vendorName(connTarget.ir_table)} · {connTarget.backend}{" "}
+                  {connTarget.host}:{connTarget.port}
+                </span>
+              </dd>
+            </>
+          )}
+          <dt>Sample width</dt>
+          <dd>{identity.sample_width} bits</dd>
+          <dt>Depth</dt>
+          <dd>{identity.depth.toLocaleString()} samples</dd>
+          <dt>Channels</dt>
+          <dd>{identity.num_channels}</dd>
+          {identity.num_segments && identity.num_segments > 1 ? (
+            <>
+              <dt>Segments</dt>
+              <dd>{identity.num_segments}</dd>
+            </>
+          ) : null}
+          {feats.length > 0 && (
+            <>
+              <dt>Features</dt>
+              <dd>{feats.join(", ")}</dd>
+            </>
+          )}
+        </dl>
         <button onClick={disconnect} disabled={busy}>
           Disconnect
         </button>

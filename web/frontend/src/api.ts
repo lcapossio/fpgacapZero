@@ -25,6 +25,14 @@ export interface Identity {
   depth: number;
   num_channels: number;
   num_segments?: number;
+  // Optional ELA capability flags (present on current servers).
+  trig_stages?: number;
+  has_storage_qualification?: boolean;
+  has_decimation?: boolean;
+  has_ext_trigger?: boolean;
+  has_timestamp?: boolean;
+  timestamp_width?: number;
+  has_dual_compare?: boolean;
 }
 
 /** A discovered fpgacapZero-compatible board (one OpenOCD tap that probed as an ELA). */

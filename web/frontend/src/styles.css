@@ -216,6 +216,22 @@ button.danger {
 .ok {
   color: var(--ok);
 }
+
+/* Connected identity readout: a compact label / value grid. */
+.idinfo {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.3rem 0 0.85rem;
+  font-size: 0.85rem;
+}
+.idinfo dt {
+  color: var(--muted);
+}
+.idinfo dd {
+  margin: 0;
+  color: var(--fg);
+}
 .err {
   color: var(--err);
 }
