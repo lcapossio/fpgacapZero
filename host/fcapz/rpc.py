@@ -20,6 +20,7 @@ from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
+from .openocd_launcher import OpenOcdLauncher
 from .probes import load_probe_file
 from .transport import (
     OpenOcdTransport,
@@ -33,13 +34,16 @@ _SCHEMA_VERSION = "1.1"
 
 
 class RpcServer:
-    def __init__(self):
+    def __init__(self, openocd_launcher: OpenOcdLauncher | None = None):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
+        # Optional server-managed OpenOCD (None = the openocd_* commands are
+        # disabled and report so). Configured only by the web server launch.
+        self._openocd_launcher = openocd_launcher
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
@@ -361,6 +365,30 @@ class RpcServer:
                 host=host, ports=ports, timeout_sec=float(req.get("timeout", 5.0))
             )
             return self._ok(backend="openocd", boards=boards)
+
+        if cmd in ("openocd_start", "openocd_stop", "openocd_status"):
+            # Server-managed OpenOCD (web only, loopback-gated by the web layer).
+            # Disabled unless fcapz-web was launched with --openocd/--openocd-cfg.
+            if self._openocd_launcher is None:
+                if cmd == "openocd_status":
+                    return self._ok(enabled=False, configs=[], running=[])
+                raise RuntimeError(
+                    "OpenOCD launching is not enabled on this server; start "
+                    "fcapz-web with --openocd <exe> and --openocd-cfg <cfg>"
+                )
+            if cmd == "openocd_status":
+                return self._ok(**self._openocd_launcher.status())
+            if cmd == "openocd_start":
+                return self._ok(
+                    **self._openocd_launcher.start(
+                        name=req.get("name"),
+                        port=int(req.get("port", 6666)),
+                        wait_sec=float(req.get("wait", 10.0)),
+                    )
+                )
+            return self._ok(
+                **self._openocd_launcher.stop(port=int(req.get("port", 6666)))
+            )
 
         analyzer = self._ensure_analyzer()
 

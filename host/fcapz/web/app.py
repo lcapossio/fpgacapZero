@@ -21,18 +21,50 @@ import json
 from pathlib import Path
 from typing import Iterable, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .._version import __version__
+from ..openocd_launcher import OpenOcdLauncher
+from ..rpc import _SCHEMA_VERSION, RpcServer
 from .gateway import RpcGateway
 
 
 def _default_surfer_dir() -> str:
     """Vendored Surfer WASM build shipped under ``fcapz/web/vendor/surfer``."""
     return str(Path(__file__).resolve().parent / "vendor" / "surfer")
+
+
+def _is_loopback(host: Optional[str]) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
+    """Restrict ``openocd_*`` (process spawning) to loopback clients.
+
+    Returns an in-band error envelope to send back, or ``None`` to allow.
+    A remote client must not be able to launch processes on the server host,
+    even with a valid token.
+    """
+    cmd = req.get("cmd", "")
+    if isinstance(cmd, str) and cmd.startswith("openocd_") and not _is_loopback(client_host):
+        return {
+            "ok": False,
+            "schema_version": _SCHEMA_VERSION,
+            "error": "OpenOCD control is restricted to localhost clients.",
+            "type": "PermissionError",
+        }
+    return None
 
 
 def create_app(
@@ -42,6 +74,7 @@ def create_app(
     static_dir: Optional[str] = None,
     surfer_dir: Optional[str] = None,
     cors_origins: Iterable[str] = ("*",),
+    openocd_launcher: Optional[OpenOcdLauncher] = None,
 ) -> FastAPI:
     """Build the fcapz web app.
 
@@ -51,9 +84,13 @@ def create_app(
     Surfer waveform viewer served at ``/surfer`` (defaults to the bundled copy);
     it lives outside ``static_dir`` so a frontend rebuild can't wipe it.
     """
-    gateway = gateway or RpcGateway()
+    if gateway is None:
+        gateway = RpcGateway(RpcServer(openocd_launcher=openocd_launcher))
     app = FastAPI(title="fpgacapZero web", version="1")
     app.state.gateway = gateway
+    # OpenOCD instances this server starts are torn down on interpreter exit via
+    # OpenOcdLauncher's atexit hook (uvicorn returns cleanly on SIGINT/SIGTERM),
+    # so no FastAPI shutdown hook is needed here.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
@@ -73,7 +110,10 @@ def create_app(
         return {"version": __version__}
 
     @app.post("/api/rpc")
-    async def rpc(req: dict, _: None = Depends(auth)):
+    async def rpc(req: dict, request: Request, _: None = Depends(auth)):
+        blocked = _openocd_guard(req, request.client.host if request.client else None)
+        if blocked is not None:
+            return blocked
         return await run_in_threadpool(gateway.call, req)
 
     @app.websocket("/api/ws")
@@ -91,6 +131,12 @@ def create_app(
                     await websocket.send_json(
                         {"ok": False, "error": f"invalid JSON: {exc}", "type": "JSONDecodeError"}
                     )
+                    continue
+                blocked = _openocd_guard(
+                    req, websocket.client.host if websocket.client else None
+                )
+                if blocked is not None:
+                    await websocket.send_json(blocked)
                     continue
                 resp = await run_in_threadpool(gateway.call, req)
                 await websocket.send_json(resp)

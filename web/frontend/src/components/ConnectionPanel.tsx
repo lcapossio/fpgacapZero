@@ -9,7 +9,14 @@ const CONNECT_TIMEOUT = 6000;
 // room than a single connect. Each physical board is one OpenOCD instance on
 // its own port (port .. port+PORT_SWEEP-1).
 const PORT_SWEEP = 4;
-const DISCOVER_TIMEOUT = 30000;
+// 15s is the cap for every connect-path wait, so a stuck operation fails fast.
+const DISCOVER_TIMEOUT = 15000;
+const START_TIMEOUT = 15000; // server spawns OpenOCD and waits for its TCL port
+// hw_server goes through XSDB (slow cold start). Capped at 15s: if XSDB's first
+// start exceeds this the connect aborts, but it leaves hw_server warm so a
+// retry is much faster.
+const HW_CONNECT_TIMEOUT = 15000;
+const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s client cap
 
 export function ConnectionPanel({
   identity,
@@ -34,12 +41,18 @@ export function ConnectionPanel({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  // Server-managed OpenOCD ("Start OpenOCD" button), offered only when the
+  // server enables it and OpenOCD discovery came up empty.
+  const [ooEnabled, setOoEnabled] = useState(false);
+  const [ooConfigs, setOoConfigs] = useState<string[]>([]);
+  const [ooName, setOoName] = useState("");
 
   function resetScan() {
     setTargets([]);
     setPicked("");
     setBoards([]);
     setPickedIdx(0);
+    setOoEnabled(false);
     setStatus("");
     setError("");
   }
@@ -67,8 +80,10 @@ export function ConnectionPanel({
       ir_table: inferIrTable(tap),
       chain: 1,
     };
-    await rpc("connect", params as unknown as Record<string, unknown>, CONNECT_TIMEOUT);
-    const r = await rpc("probe", {}, CONNECT_TIMEOUT);
+    // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
+    const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
+    await rpc("connect", params as unknown as Record<string, unknown>, t);
+    const r = await rpc("probe", {}, t);
     onConnected(params, r.probe as Identity);
   }
 
@@ -98,19 +113,25 @@ export function ConnectionPanel({
         return;
       }
       if (backend === "openocd") {
-        // Find fcapz-compatible boards; only fail if there are none.
+        // Just connect: find compatible boards and, if none are reachable,
+        // transparently start OpenOCD (when the server allows it) and retry.
         setStatus("searching for compatible boards…");
-        const r = await rpc(
-          "discover_boards",
-          { backend, host, port: Number(port), port_span: PORT_SWEEP, timeout: 5 },
-          DISCOVER_TIMEOUT,
-        );
-        const found = (r.boards as Board[]) ?? [];
+        let found = await discoverOpenocdBoards();
+        let oo: "started" | "picker" | "no" = "no";
         if (found.length === 0) {
-          setError(
-            "no compatible fpgacapZero boards found — check the board is programmed and " +
-              "OpenOCD is running, or enter a tap manually.",
-          );
+          oo = await ensureOpenocdRunning();
+          if (oo === "started") {
+            setStatus("searching for compatible boards…");
+            found = await discoverOpenocdBoards();
+          }
+        }
+        if (found.length === 0) {
+          if (oo !== "picker") {
+            setError(
+              "no compatible fpgacapZero boards found — check the board is " +
+                "programmed and cabled, or enter a tap manually.",
+            );
+          }
         } else if (found.length === 1) {
           await connectToBoard(found[0]);
         } else {
@@ -120,16 +141,21 @@ export function ConnectionPanel({
         }
         return;
       }
-      // hw_server: list XSDB targets (no ELA probe), then connect.
-      setStatus("scanning for targets…");
+      // hw_server: XSDB starts a local hw_server as needed, so just scan + connect.
+      // XSDB is slow to start, so both the server-side (timeout) and client-side
+      // budgets are much larger than the OpenOCD path's.
+      setStatus("scanning for targets… (starting XSDB can take a while)");
       const r = await rpc(
         "scan_targets",
-        { backend, host, port: Number(port), timeout: 5 },
-        CONNECT_TIMEOUT,
+        { backend, host, port: Number(port), timeout: HW_SCAN_TIMEOUT },
+        HW_CONNECT_TIMEOUT,
       );
       const found = (r.targets as string[]) ?? [];
       if (found.length === 0) {
-        setError("no JTAG targets found — check the board / hw_server, or enter a tap manually.");
+        setError(
+          "no JTAG targets found — check the board is programmed and cabled " +
+            "(Vivado / hw_server), or enter a tap manually.",
+        );
       } else if (found.length === 1) {
         await connectTo(found[0]);
       } else {
@@ -143,6 +169,62 @@ export function ConnectionPanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Run OpenOCD discovery once and return the compatible boards. */
+  async function discoverOpenocdBoards(): Promise<Board[]> {
+    const r = await rpc(
+      "discover_boards",
+      { backend, host, port: Number(port), port_span: PORT_SWEEP, timeout: 5 },
+      DISCOVER_TIMEOUT,
+    );
+    return (r.boards as Board[]) ?? [];
+  }
+
+  /** When discovery finds nothing, transparently bring OpenOCD up if the server
+   *  allows it. Returns "started" (retry discovery), "picker" (server has >1
+   *  config so the user must choose — a small picker is shown), or "no"
+   *  (feature off / remote client). */
+  async function ensureOpenocdRunning(): Promise<"started" | "picker" | "no"> {
+    let st;
+    try {
+      st = await rpc("openocd_status", {}, CONNECT_TIMEOUT);
+    } catch {
+      return "no"; // feature off / not a loopback client
+    }
+    const configs = (st.configs as string[]) ?? [];
+    if (!st.enabled || configs.length === 0) return "no";
+    if (configs.length > 1) {
+      setOoConfigs(configs);
+      setOoName(configs[0]);
+      setOoEnabled(true); // ambiguous which board — let the user pick
+      setStatus("no board found — pick an OpenOCD config to start");
+      return "picker";
+    }
+    setStatus(`starting OpenOCD (${configs[0]})…`);
+    await rpc("openocd_start", { name: configs[0], port: Number(port) }, START_TIMEOUT);
+    return "started";
+  }
+
+  /** Ask the server to launch OpenOCD, then re-run discovery. */
+  async function startOpenocd() {
+    setError("");
+    setBusy(true);
+    setStatus(`starting OpenOCD (${ooName})…`);
+    try {
+      await rpc(
+        "openocd_start",
+        { name: ooName, port: Number(port) },
+        START_TIMEOUT,
+      );
+    } catch (e) {
+      handleError(e);
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    setOoEnabled(false);
+    await connect(); // OpenOCD is up now — discover + connect
   }
 
   async function connectPickedTarget() {
@@ -285,6 +367,21 @@ export function ConnectionPanel({
         <button onClick={connect} disabled={busy}>
           {busy ? "Working…" : "Connect"}
         </button>
+      )}
+
+      {ooEnabled && (
+        <div className="btnrow">
+          {ooConfigs.length > 1 && (
+            <select value={ooName} onChange={(e) => setOoName(e.target.value)}>
+              {ooConfigs.map((n) => (
+                <option key={n}>{n}</option>
+              ))}
+            </select>
+          )}
+          <button onClick={startOpenocd} disabled={busy}>
+            Start OpenOCD
+          </button>
+        </div>
       )}
 
       {status && <p className="muted">{status}</p>}

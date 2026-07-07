@@ -24,9 +24,12 @@ class RpcGateway:
 
     # Stateless commands that don't touch the shared session.  These run
     # WITHOUT the lock so a slow/hung one (e.g. an XSDB target scan against a
-    # dead hw_server, which can hang past its timeout) can't starve connect /
-    # capture / eio on the live session.
-    _LOCK_FREE_CMDS = frozenset({"scan_targets"})
+    # dead hw_server, which can hang past its timeout, or an OpenOCD start that
+    # waits up to ~10s for the TCL port) can't starve connect / capture / eio
+    # on the live session.
+    _LOCK_FREE_CMDS = frozenset(
+        {"scan_targets", "openocd_start", "openocd_stop", "openocd_status"}
+    )
 
     def __init__(self, server: Optional[RpcServer] = None) -> None:
         self._server = server or RpcServer()

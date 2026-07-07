@@ -18,6 +18,38 @@ def _default_static_dir() -> Optional[str]:
     return str(d) if d.is_dir() else None
 
 
+def _build_openocd_launcher(openocd, cfgs):
+    """Build the OpenOcdLauncher from CLI flags, or None if not fully configured.
+
+    Both an ``openocd`` binary and at least one existing ``--openocd-cfg`` are
+    required; otherwise the UI's "Start OpenOCD" feature stays disabled. Configs
+    are registered by filename stem (the name the UI starts them by).
+    """
+    if not openocd and not cfgs:
+        return None
+    if not openocd or not cfgs:
+        print(
+            "WARNING: --openocd and --openocd-cfg must both be set to enable the "
+            "UI 'Start OpenOCD' feature; it stays disabled.",
+            file=sys.stderr,
+        )
+        return None
+
+    from ..openocd_launcher import OpenOcdLauncher
+
+    configs: dict[str, str] = {}
+    for raw in cfgs:
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            print(f"WARNING: --openocd-cfg not found, skipping: {path}", file=sys.stderr)
+            continue
+        configs[path.stem] = str(path.resolve())
+    if not configs:
+        print("WARNING: no valid --openocd-cfg files; 'Start OpenOCD' disabled.", file=sys.stderr)
+        return None
+    return OpenOcdLauncher(openocd=openocd, configs=configs)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fcapz-web",
@@ -40,6 +72,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Directory of built frontend assets to serve (default: bundled, if built)",
     )
+    parser.add_argument(
+        "--openocd",
+        default=os.environ.get("FCAPZ_OPENOCD"),
+        help="Path to the openocd executable, to let the UI start OpenOCD "
+        "(default: $FCAPZ_OPENOCD). Requires at least one --openocd-cfg.",
+    )
+    parser.add_argument(
+        "--openocd-cfg",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="An OpenOCD config the UI may launch (repeatable). Registered by "
+        "its filename stem; only these configs can be started.",
+    )
     args = parser.parse_args(argv)
 
     import uvicorn
@@ -53,7 +99,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "reachable by anyone who can reach this port.",
             file=sys.stderr,
         )
-    app = create_app(token=args.token, static_dir=static_dir)
+    launcher = _build_openocd_launcher(args.openocd, args.openocd_cfg)
+    app = create_app(token=args.token, static_dir=static_dir, openocd_launcher=launcher)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

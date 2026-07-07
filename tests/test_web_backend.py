@@ -305,6 +305,64 @@ def test_discover_boards_rpc_empty_when_none(monkeypatch):
     assert r["boards"] == []
 
 
+def _local_client(monkeypatch, **app_kwargs) -> TestClient:
+    """A TestClient whose peer looks like loopback, so openocd_* isn't guarded."""
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    return TestClient(create_app(**app_kwargs), client=("127.0.0.1", 50000))
+
+
+class _FakeLauncher:
+    def status(self):
+        return {"enabled": True, "configs": ["brd"], "running": []}
+
+    def start(self, *, name=None, port=6666, wait_sec=10.0):
+        return {"started": True, "already_running": False, "port": port,
+                "pid": 999, "config": name or "brd"}
+
+    def stop(self, *, port=6666):
+        return {"stopped": True, "port": port}
+
+    def shutdown(self):
+        pass
+
+
+def test_openocd_guard_localhost_only():
+    from fcapz.web.app import _openocd_guard
+
+    assert _openocd_guard({"cmd": "openocd_start"}, "10.0.0.5")["type"] == "PermissionError"
+    assert _openocd_guard({"cmd": "openocd_start"}, "127.0.0.1") is None
+    assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
+
+
+def test_openocd_status_disabled_without_launcher(monkeypatch):
+    c = _local_client(monkeypatch)
+    r = _rpc(c, "openocd_status").json()
+    assert r["ok"] is True and r["enabled"] is False and r["configs"] == []
+
+
+def test_openocd_start_disabled_errors(monkeypatch):
+    c = _local_client(monkeypatch)
+    r = _rpc(c, "openocd_start").json()
+    assert r["ok"] is False and "not enabled" in r["error"]
+
+
+def test_openocd_start_blocked_for_remote_client(monkeypatch):
+    # Default TestClient host is "testclient" (non-loopback) -> guarded off.
+    c = _client(monkeypatch)
+    r = _rpc(c, "openocd_start").json()
+    assert r["ok"] is False and r["type"] == "PermissionError"
+
+
+def test_openocd_start_stop_via_launcher(monkeypatch):
+    c = _local_client(monkeypatch, openocd_launcher=_FakeLauncher())
+    s = _rpc(c, "openocd_status").json()
+    assert s["enabled"] is True and s["configs"] == ["brd"]
+    st = _rpc(c, "openocd_start", name="brd", port=6666).json()
+    assert st["ok"] is True and st["started"] is True and st["port"] == 6666
+    sp = _rpc(c, "openocd_stop", port=6666).json()
+    assert sp["ok"] is True and sp["stopped"] is True
+
+
 def test_eio_discover_finds_shared_chain(monkeypatch):
     c = _client(monkeypatch)
     _rpc(c, "connect", **_GOWIN)
