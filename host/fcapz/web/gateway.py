@@ -27,8 +27,15 @@ class RpcGateway:
     # dead hw_server, which can hang past its timeout, or an OpenOCD start that
     # waits up to ~10s for the TCL port) can't starve connect / capture / eio
     # on the live session.
+    #
+    # ``openocd_stop`` is deliberately NOT here: it kills the OpenOCD process,
+    # which may be the transport the active analyzer/EIO session is using, so it
+    # must run UNDER the lock to avoid pulling JTAG out from under an in-flight
+    # capture/connect. ``openocd_start`` spawns a new process (idempotent, never
+    # touches the live transport) and ``openocd_status`` only reads launcher
+    # state, so both stay lock-free.
     _LOCK_FREE_CMDS = frozenset(
-        {"scan_targets", "openocd_start", "openocd_stop", "openocd_status"}
+        {"scan_targets", "openocd_start", "openocd_status"}
     )
 
     def __init__(self, server: Optional[RpcServer] = None) -> None:

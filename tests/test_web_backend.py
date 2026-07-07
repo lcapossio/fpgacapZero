@@ -342,6 +342,36 @@ class _FakeLauncher:
         pass
 
 
+def test_openocd_stop_runs_under_session_lock():
+    """openocd_stop kills the process the session may be using, so it must not
+    run lock-free; start/status don't touch the live transport, so they may."""
+    from fcapz.web.gateway import RpcGateway
+
+    assert "openocd_stop" not in RpcGateway._LOCK_FREE_CMDS
+    assert "openocd_start" in RpcGateway._LOCK_FREE_CMDS
+    assert "openocd_status" in RpcGateway._LOCK_FREE_CMDS
+
+
+def test_discover_boards_caps_port_span(monkeypatch):
+    captured = {}
+
+    def fake_discover(*, host, ports, timeout_sec):
+        captured["ports"] = ports
+        return []
+
+    monkeypatch.setattr("fcapz.rpc.discover_boards", fake_discover)
+    c = _client(monkeypatch)
+    r = _rpc(c, "discover_boards", backend="openocd", port=6666, port_span=1000).json()
+    assert r["ok"] is True
+    assert len(captured["ports"]) == 64  # _MAX_DISCOVERY_PORTS
+
+
+def test_discover_boards_rejects_invalid_port(monkeypatch):
+    c = _client(monkeypatch)
+    r = _rpc(c, "discover_boards", backend="openocd", port=99999).json()
+    assert r["ok"] is False and "port out of range" in r["error"]
+
+
 def test_host_header_rebinding_guard(monkeypatch):
     monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
     c = TestClient(create_app(bind_host="127.0.0.1"))

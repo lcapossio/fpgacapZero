@@ -32,6 +32,18 @@ from .transport import (
 
 _SCHEMA_VERSION = "1.1"
 
+# Upper bound on how many TCL ports discover_boards will sweep in one request,
+# so an over-large port_span / ports list can't trigger a huge scan.
+_MAX_DISCOVERY_PORTS = 64
+
+
+def _valid_port(value: Any) -> int:
+    p = int(value)
+    if not (1 <= p <= 65535):
+        raise ValueError(f"port out of range (1-65535): {p}")
+    return p
+
+
 # fcapz debug-core magic (VERSION[15:0], ASCII) -> friendly name, for list_cores.
 _CORE_NAMES = {
     0x4C41: "Embedded Logic Analyzer",
@@ -417,11 +429,11 @@ class RpcServer:
             host = req.get("host", "127.0.0.1")
             raw_ports = req.get("ports")
             if raw_ports:
-                ports = [int(p) for p in raw_ports]
+                ports = [_valid_port(p) for p in raw_ports][:_MAX_DISCOVERY_PORTS]
             else:
-                base = int(req.get("port", 6666))
-                span = max(1, int(req.get("port_span", 1)))
-                ports = [base + i for i in range(span)]
+                base = _valid_port(req.get("port", 6666))
+                span = min(max(1, int(req.get("port_span", 1))), _MAX_DISCOVERY_PORTS)
+                ports = [base + i for i in range(span) if base + i <= 65535]
             boards = discover_boards(
                 host=host, ports=ports, timeout_sec=float(req.get("timeout", 5.0))
             )
