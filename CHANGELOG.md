@@ -20,6 +20,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Web:** the default HTTP port is now `7373` (was `8000`), to avoid clashes
+  with the many tools that default to 8000. Override with `--port`.
 - **Version:** Bumped project/RTL identity version to `0.4.5`.
 - **EJTAG bridges:** EJTAG-AXI and EJTAG-UART now expose ELA/EIO-style
   packed `VERSION` identities through their native `CMD_CONFIG` paths:

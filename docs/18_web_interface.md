@@ -14,17 +14,17 @@ There is no bespoke web protocol.
 
 ```bash
 pip install -e ".[web]"     # adds fastapi + uvicorn to the host stack
-fcapz-web                    # serves on http://127.0.0.1:8000
+fcapz-web                    # serves on http://127.0.0.1:7373
 ```
 
-Open <http://127.0.0.1:8000>. You enter the connection parameters (backend, tap,
+Open <http://127.0.0.1:7373>. You enter the connection parameters (backend, tap,
 IR table, …) in the UI, not on the command line — one server can drive whatever
 board you point it at.
 
 ### Reaching it from another machine
 
 ```bash
-fcapz-web --host 0.0.0.0 --port 8000 --token "$(openssl rand -hex 16)"
+fcapz-web --host 0.0.0.0 --port 7373 --token "$(openssl rand -hex 16)"
 ```
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or the
@@ -44,7 +44,7 @@ requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--host` | `127.0.0.1` | Bind address; `0.0.0.0` to reach it from other machines. |
-| `--port` | `8000` | HTTP port. |
+| `--port` | `7373` | HTTP port. |
 | `--token` | `$FCAPZ_WEB_TOKEN` | Bearer token required on the API (unset = open). |
 | `--static-dir` | bundled | Directory of built frontend assets to serve. |
 | `--openocd` | `$FCAPZ_OPENOCD` | Path to the `openocd` executable, to let the UI start OpenOCD. |
@@ -109,8 +109,8 @@ can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:
 
 ```bash
-curl -s localhost:8000/api/rpc -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap","ir_table":"gowin","chain":1}'
-curl -s localhost:8000/api/rpc -d '{"cmd":"probe"}'
+curl -s localhost:7373/api/rpc -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap","ir_table":"gowin","chain":1}'
+curl -s localhost:7373/api/rpc -d '{"cmd":"probe"}'
 ```
 
 One physical board is one serialized session: a re-entrant lock guards the single
@@ -126,7 +126,7 @@ development run the Vite dev server and proxy `/api` to the backend:
 
 ```bash
 cd web/frontend && npm install && npm run dev   # http://localhost:5173
-fcapz-web                                        # backend on :8000
+fcapz-web                                        # backend on :7373
 ```
 
 For a release build, `npm run build` outputs to `host/fcapz/web/static/` (which

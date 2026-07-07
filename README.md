@@ -77,7 +77,7 @@ web extra and open the UI instead:
 
 ```bash
 pip install -e ".[web]"     # core host stack + web interface
-fcapz-web                   # serves on http://127.0.0.1:8000
+fcapz-web                   # serves on http://127.0.0.1:7373
 ```
 
 It mirrors the GUI — connect, ELA capture with run controls, EIO, JTAG-AXI, and

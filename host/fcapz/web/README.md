@@ -14,17 +14,17 @@ plus a built browser UI it serves as static files.
 
 ```bash
 pip install -e ".[web]"     # adds fastapi + uvicorn
-fcapz-web                    # serves on http://127.0.0.1:8000
+fcapz-web                    # serves on http://127.0.0.1:7373
 ```
 
-Then open <http://127.0.0.1:8000>. Connection parameters (backend, tap, IR
+Then open <http://127.0.0.1:7373>. Connection parameters (backend, tap, IR
 table, …) are entered in the UI, not on the command line — one server can point
 at whatever board you connect to.
 
 ### Reaching it from another machine
 
 ```bash
-fcapz-web --host 0.0.0.0 --port 8000 --token "$(openssl rand -hex 16)"
+fcapz-web --host 0.0.0.0 --port 7373 --token "$(openssl rand -hex 16)"
 ```
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or
@@ -51,8 +51,8 @@ line-protocol semantics.
 
 ```bash
 # probe over HTTP (same JSON you'd pipe to `python -m fcapz.rpc`)
-curl -s localhost:8000/api/rpc -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap","ir_table":"gowin","chain":1}'
-curl -s localhost:8000/api/rpc -d '{"cmd":"probe"}'
+curl -s localhost:7373/api/rpc -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap","ir_table":"gowin","chain":1}'
+curl -s localhost:7373/api/rpc -d '{"cmd":"probe"}'
 ```
 
 Gowin example: `connect` with `ir_table:"gowin"`, `tap:"GW1NR-9C.tap"`,
@@ -79,7 +79,7 @@ development run the Vite dev server and proxy `/api` to the backend:
 
 ```bash
 cd web/frontend && npm install && npm run dev   # http://localhost:5173
-fcapz-web                                        # backend on :8000
+fcapz-web                                        # backend on :7373
 ```
 
 For a release build, `npm run build` outputs to `host/fcapz/web/static/`, which

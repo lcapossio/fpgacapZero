@@ -75,7 +75,7 @@ def _host_name(host_header: Optional[str]) -> Optional[str]:
     if not host_header:
         return None
     h = host_header.strip()
-    if h.startswith("["):  # [::1]:8000
+    if h.startswith("["):  # [::1]:7373
         end = h.find("]")
         return h[1:end] if end != -1 else h
     return h.rsplit(":", 1)[0] if ":" in h else h

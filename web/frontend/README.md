@@ -8,10 +8,10 @@ and [JSON-RPC chapter](../../docs/11_rpc_server.md)).
 ## Develop
 
 ```bash
-# 1) backend (serves /api on :8000)
+# 1) backend (serves /api on :7373)
 pip install -e ".[web]" && fcapz-web
 
-# 2) this app (Vite dev server on :5173, proxies /api -> :8000)
+# 2) this app (Vite dev server on :5173, proxies /api -> :7373)
 cd web/frontend
 npm install
 npm run dev
@@ -29,7 +29,7 @@ npm run build
 
 This emits the bundle straight into `host/fcapz/web/static/`, which `fcapz-web`
 serves at `/` (and which ships in the Python wheel). After building, just run
-`fcapz-web` and open <http://localhost:8000> — no separate dev server.
+`fcapz-web` and open <http://localhost:7373> — no separate dev server.
 
 The built bundle **is committed to git**, so `fcapz-web` works from a fresh
 checkout (and the wheel) without Node. When you change anything under `src/`,

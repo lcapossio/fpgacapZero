@@ -61,7 +61,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Bind address. Use 0.0.0.0 to reach it from other machines "
         "(set --token when you do).",
     )
-    parser.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
+    parser.add_argument("--port", type=int, default=7373, help="HTTP port (default 7373)")
     parser.add_argument(
         "--token",
         default=os.environ.get("FCAPZ_WEB_TOKEN"),

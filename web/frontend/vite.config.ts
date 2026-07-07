@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // `npm run build` emits straight into the Python package's static dir, so
 // `fcapz-web` serves the built app (and it ships in the wheel as package data).
-// `npm run dev` proxies /api (REST + WebSocket) to the backend on :8000.
+// `npm run dev` proxies /api (REST + WebSocket) to the backend on :7373.
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -24,7 +24,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: "http://127.0.0.1:7373",
         changeOrigin: true,
         ws: true,
       },
