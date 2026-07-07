@@ -7,6 +7,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Web — OpenOCD tap injection:** the OpenOCD tap name is now validated
+  (`[A-Za-z0-9._:-]+`) before it is interpolated into OpenOCD TCL, closing a
+  command-injection / RCE path from an attacker-controlled `tap`.
+- **Web — cross-origin & DNS rebinding:** cross-origin API sharing is now OFF
+  by default (the bundled UI is same-origin; opt in with `--cors-origin`), and
+  when bound to loopback the server rejects requests whose `Host` header is not
+  a loopback name. Together these stop a malicious website from driving the
+  board (or starting OpenOCD) via the local API.
+
 ### Changed
 
 - **Version:** Bumped project/RTL identity version to `0.4.5`.

@@ -342,6 +342,26 @@ class _FakeLauncher:
         pass
 
 
+def test_host_header_rebinding_guard(monkeypatch):
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    c = TestClient(create_app(bind_host="127.0.0.1"))
+    # A loopback Host is accepted.
+    ok = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers={"Host": "127.0.0.1:8000"})
+    assert ok.json()["ok"] is True
+    # A foreign Host (DNS-rebinding shape) is rejected.
+    bad = c.post("/api/rpc", json={"cmd": "probe"}, headers={"Host": "evil.example"})
+    assert bad.json()["ok"] is False and bad.json()["type"] == "PermissionError"
+
+
+def test_host_header_guard_disabled_for_non_loopback_bind(monkeypatch):
+    # Bound to 0.0.0.0 we can't allow-list external names, so any Host passes
+    # (those deployments rely on --token instead).
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    c = TestClient(create_app(bind_host="0.0.0.0"))
+    r = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers={"Host": "anything.example"})
+    assert r.json()["ok"] is True
+
+
 def test_openocd_guard_localhost_only():
     from fcapz.web.app import _openocd_guard
 

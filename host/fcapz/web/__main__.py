@@ -86,6 +86,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="An OpenOCD config the UI may launch (repeatable). Registered by "
         "its filename stem; only these configs can be started.",
     )
+    parser.add_argument(
+        "--cors-origin",
+        action="append",
+        default=None,
+        metavar="ORIGIN",
+        help="Allow cross-origin API access from this origin (repeatable). Not "
+        "needed for the bundled UI (same-origin, and dev proxies /api); use only "
+        "if you serve the frontend from a different origin. Off by default.",
+    )
     args = parser.parse_args(argv)
 
     import uvicorn
@@ -100,7 +109,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
     launcher = _build_openocd_launcher(args.openocd, args.openocd_cfg)
-    app = create_app(token=args.token, static_dir=static_dir, openocd_launcher=launcher)
+    app = create_app(
+        token=args.token,
+        static_dir=static_dir,
+        openocd_launcher=launcher,
+        bind_host=args.host,
+        cors_origins=tuple(args.cors_origin or ()),
+    )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

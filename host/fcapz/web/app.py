@@ -67,14 +67,44 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
     return None
 
 
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _host_name(host_header: Optional[str]) -> Optional[str]:
+    """Hostname part of a ``Host`` header, stripping the port and IPv6 brackets."""
+    if not host_header:
+        return None
+    h = host_header.strip()
+    if h.startswith("["):  # [::1]:8000
+        end = h.find("]")
+        return h[1:end] if end != -1 else h
+    return h.rsplit(":", 1)[0] if ":" in h else h
+
+
+def _host_header_ok(host_header: Optional[str], bind_host: Optional[str]) -> bool:
+    """Anti-DNS-rebinding gate.
+
+    When the server is bound to loopback, only accept requests whose ``Host``
+    header is a loopback name — a rebinding page reaches the API from its own
+    (non-loopback) name. For non-loopback binds we cannot allow-list arbitrary
+    external hostnames, so this is a no-op there and those deployments rely on
+    ``--token`` (a rebinding origin cannot read the token). ``bind_host=None``
+    (e.g. tests) also disables the check.
+    """
+    if not _is_loopback(bind_host):
+        return True
+    return _host_name(host_header) in _LOOPBACK_HOST_NAMES
+
+
 def create_app(
     *,
     gateway: Optional[RpcGateway] = None,
     token: Optional[str] = None,
     static_dir: Optional[str] = None,
     surfer_dir: Optional[str] = None,
-    cors_origins: Iterable[str] = ("*",),
+    cors_origins: Iterable[str] = (),
     openocd_launcher: Optional[OpenOcdLauncher] = None,
+    bind_host: Optional[str] = None,
 ) -> FastAPI:
     """Build the fcapz web app.
 
@@ -91,12 +121,17 @@ def create_app(
     # OpenOCD instances this server starts are torn down on interpreter exit via
     # OpenOcdLauncher's atexit hook (uvicorn returns cleanly on SIGINT/SIGTERM),
     # so no FastAPI shutdown hook is needed here.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(cors_origins),
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Cross-origin sharing is OFF by default: the bundled UI is same-origin (dev
+    # proxies /api too), so no browser workflow needs it. Enable it only when a
+    # frontend is served from a different origin — a wildcard here would let any
+    # website drive the board via the API.
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(cors_origins),
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     def auth(authorization: Optional[str] = Header(default=None)) -> None:
         if token is None:
@@ -111,6 +146,13 @@ def create_app(
 
     @app.post("/api/rpc")
     async def rpc(req: dict, request: Request, _: None = Depends(auth)):
+        if not _host_header_ok(request.headers.get("host"), bind_host):
+            return {
+                "ok": False,
+                "schema_version": _SCHEMA_VERSION,
+                "error": "Host not allowed (possible DNS rebinding).",
+                "type": "PermissionError",
+            }
         blocked = _openocd_guard(req, request.client.host if request.client else None)
         if blocked is not None:
             return blocked
@@ -118,6 +160,9 @@ def create_app(
 
     @app.websocket("/api/ws")
     async def ws(websocket: WebSocket):
+        if not _host_header_ok(websocket.headers.get("host"), bind_host):
+            await websocket.close(code=1008)
+            return
         if token is not None and websocket.query_params.get("token") != token:
             await websocket.close(code=1008)
             return

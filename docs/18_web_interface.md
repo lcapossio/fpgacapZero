@@ -35,6 +35,12 @@ WebSocket, and the UI hides the token field until a server asks for it. There is
 trusted network. `fcapz-web` prints a warning if you bind a non-localhost host
 without a token.
 
+Cross-origin API access is **off by default** (the bundled UI is same-origin,
+and `npm run dev` proxies `/api`), so a random website cannot drive the board;
+enable it only if you serve the frontend from a different origin, with
+`--cors-origin`. When bound to a loopback address the server also rejects
+requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--host` | `127.0.0.1` | Bind address; `0.0.0.0` to reach it from other machines. |
@@ -43,6 +49,7 @@ without a token.
 | `--static-dir` | bundled | Directory of built frontend assets to serve. |
 | `--openocd` | `$FCAPZ_OPENOCD` | Path to the `openocd` executable, to let the UI start OpenOCD. |
 | `--openocd-cfg` | — | An OpenOCD config the UI may launch (repeatable; registered by filename stem). |
+| `--cors-origin` | — | Allow cross-origin API access from this origin (repeatable). Off by default. |
 
 Set both `--openocd` and at least one `--openocd-cfg` so the UI can start OpenOCD
 itself — **Connect brings it up automatically** when no board is reachable, so
