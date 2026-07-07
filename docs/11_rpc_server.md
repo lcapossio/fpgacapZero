@@ -196,6 +196,44 @@ Releases the transport.
 {"cmd": "close"}
 ```
 
+### OpenOCD control (web, localhost only)
+
+Start/stop OpenOCD **on the server host** so the browser UI can bring the board
+online without a shell. Available only when `fcapz-web` was launched with
+`--openocd <exe>` and one or more `--openocd-cfg <cfg>`, and restricted to
+loopback clients (a remote browser cannot spawn processes, even with a valid
+token). The server only stops OpenOCD instances it started itself.
+
+#### `openocd_status`
+
+```json
+{"cmd": "openocd_status"}
+```
+
+Response: `{"ok": true, "enabled": true, "configs": ["brs_100_gw1nr9_local"], "running": [...]}`.
+`enabled` is `false` (and `configs` empty) when the feature was not configured.
+
+#### `openocd_start`
+
+Spawn `openocd -f <cfg>` on `port` (default 6666) and wait for its TCL port.
+Idempotent — if the port is already open, nothing is spawned.
+
+```json
+{"cmd": "openocd_start", "name": "brs_100_gw1nr9_local", "port": 6666, "wait": 10}
+```
+
+`name` selects one of the configured configs (optional if only one). Response
+includes `{"started": true, "port": 6666, "pid": ...}`, or an in-band error
+(with the OpenOCD log tail) if it exits early or never opens the port.
+
+#### `openocd_stop`
+
+```json
+{"cmd": "openocd_stop", "port": 6666}
+```
+
+Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
+
 ### ELA (Analyzer)
 
 #### `probe`

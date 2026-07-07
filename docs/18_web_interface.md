@@ -41,6 +41,14 @@ without a token.
 | `--port` | `8000` | HTTP port. |
 | `--token` | `$FCAPZ_WEB_TOKEN` | Bearer token required on the API (unset = open). |
 | `--static-dir` | bundled | Directory of built frontend assets to serve. |
+| `--openocd` | `$FCAPZ_OPENOCD` | Path to the `openocd` executable, to let the UI start OpenOCD. |
+| `--openocd-cfg` | — | An OpenOCD config the UI may launch (repeatable; registered by filename stem). |
+
+Set both `--openocd` and at least one `--openocd-cfg` so the UI can start OpenOCD
+itself — **Connect brings it up automatically** when no board is reachable, so
+the user never manages the JTAG server (see below). Only those configs can be
+launched, and only from a **localhost** browser — a remote client cannot spawn
+processes, even with a valid token.
 
 ## The workspace
 
@@ -51,8 +59,12 @@ float it; the layout is yours to arrange. The panels:
   port. For OpenOCD, Connect **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects
-  automatically, several show a picker. hw_server lists JTAG targets the same
-  way. EIO is auto-discovered on connect.
+  automatically, several show a picker. If discovery comes up empty **and** the
+  server was launched with `--openocd`/`--openocd-cfg`, Connect **starts OpenOCD
+  automatically** and retries — the user never touches the JTAG server (with
+  several configured configs it shows a small picker to choose which). hw_server
+  needs no such step: XSDB starts a local hw_server itself. EIO is auto-discovered
+  on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
   mode/value/mask, **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform), and **advanced
