@@ -45,6 +45,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `CMD_CONFIG` identities instead. `EioController.connect()` selects its
   USER chain before the transport-level ready probe, so USER3 EIO connects
   no longer depend on USER1/ELA responding first.
+- **Web — wide bit vectors:** ELA trigger value/mask and EIO values now cross
+  JSON as hex/decimal strings (parsed with full precision) and the frontend
+  uses BigInt, so values wider than 53/31 bits no longer round or truncate.
+  `eio_read` adds a full-width `value_hex`; `eio_write` accepts hex strings.
+- **Web — Disconnect:** `close` is now a full session teardown, releasing the
+  EIO / AXI / UART transports (and any bare transport from a partial connect),
+  not just the analyzer.
+- **Web — hw_server connect:** the XSDB-backed connect path uses a larger
+  budget than OpenOCD's fast TCL (capped at 15 s), so a slow XSDB cold start no
+  longer aborts the connect prematurely.
 
 ### Added
 
@@ -55,6 +65,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   token-gated network access; auto-scans JTAG targets and auto-discovers EIO on
   connect. Install with `pip install -e ".[web]"`, then run `fcapz-web`. See
   [`docs/18_web_interface.md`](docs/18_web_interface.md).
+- **Web — board discovery:** browser Connect discovers fpgacapZero-compatible
+  boards over OpenOCD (probes each tap for the ELA identity, sweeps TCL ports),
+  connects automatically to a single board, offers a picker for several, and
+  fails only when none are compatible. New `discover_boards` RPC.
+- **Web — server-managed OpenOCD:** `fcapz-web --openocd <exe> --openocd-cfg
+  <cfg>` lets the UI start OpenOCD itself; Connect brings it up automatically
+  when no board is reachable (localhost-only, allow-listed configs). New
+  `openocd_start` / `openocd_stop` / `openocd_status` RPC.
+- **Web — cores listing:** the Connection panel lists the cores present (the
+  ELA and any EIO) as labeled cards with their parameters and JTAG location,
+  and names the core instead of showing the raw magic. New `list_cores` RPC.
 - **EJTAG-AXI RTL:** Vendor wrappers now expose `CMD_FIFO_DEPTH` and
   `RESP_FIFO_DEPTH` independently from burst `FIFO_DEPTH`; the Arty
   reference sets both command/response queues to 16 and forces the small

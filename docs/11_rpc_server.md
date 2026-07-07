@@ -196,6 +196,19 @@ Releases the transport.
 {"cmd": "close"}
 ```
 
+#### `scan_targets`
+
+List JTAG targets before connecting (no active session needed). For
+`backend: "hw_server"` it returns the XSDB `jtag targets` names; for
+`backend: "openocd"` it returns the tap names (`jtag names`). `discover_boards`
+is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
+
+```json
+{"cmd": "scan_targets", "backend": "openocd", "host": "127.0.0.1", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
+
 ### OpenOCD control (web, localhost only)
 
 Start/stop OpenOCD **on the server host** so the browser UI can bring the board
@@ -325,6 +338,10 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 Use `probe_file` with a `.prob` sidecar path to load the same information
 from disk; `probes` and `probe_file` are mutually exclusive.
 
+`trigger_value`, `trigger_mask`, `stor_qual_value`, and `stor_qual_mask` accept
+a base-prefixed string (`"0x..."` or decimal) as well as an int, so bit vectors
+wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
+
 #### `arm`
 
 ```json
@@ -394,13 +411,18 @@ Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain":
 {"cmd": "eio_read"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "value": 167}`
+Response: `{"ok": true, "schema_version": "1.1", "value": 167, "value_hex": "0xa7"}`.
+`value_hex` carries the full width losslessly for EIO wider than a JS-safe
+integer (53 bits); `value` is the same value as a JSON number.
 
 #### `eio_write`
 
 ```json
 {"cmd": "eio_write", "value": 85}
 ```
+
+`value` accepts a base-prefixed string (`"0x2a"`) as well as an int, so outputs
+wider than 53 bits survive JSON transport unrounded.
 
 ### EJTAG-AXI
 
