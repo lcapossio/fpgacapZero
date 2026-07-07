@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { getToken, inferIrTable, rpc, setToken } from "../api";
-import type { Board, ConnectionParams, Identity } from "../api";
+import type { Board, ConnectionParams, Core, Identity } from "../api";
 
 const BACKENDS = ["openocd", "hw_server"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
@@ -51,6 +51,76 @@ function elaFeatures(id: Identity): string[] {
   return f;
 }
 
+/** Synthesize the ELA core entry from the probe identity, for the brief window
+ *  before list_cores returns (or if it fails). */
+function elaCoreFromIdentity(id: Identity): Core {
+  return {
+    type: "ela",
+    name: coreName(id.core_id),
+    core_id: id.core_id,
+    chain: 1,
+    base_addr: 0,
+    version_major: id.version_major,
+    version_minor: id.version_minor,
+    info: id as unknown as Record<string, unknown>,
+  };
+}
+
+/** One core rendered as a labeled card with type-specific detail. */
+function CoreCard({ core }: { core: Core }) {
+  // Display component: info is a type-specific bag, read loosely.
+  const info = core.info as any;
+  const feats = core.type === "ela" ? elaFeatures(core.info as unknown as Identity) : [];
+  return (
+    <div className="core">
+      <div className="core-title">
+        {core.type === "ela" || core.type === "eio" ? core.name : coreName(core.core_id)}{" "}
+        <span className="muted">
+          v{core.version_major}.{core.version_minor} · 0x
+          {core.core_id.toString(16).toUpperCase()}
+        </span>
+      </div>
+      <dl className="idinfo">
+        {core.type === "ela" && (
+          <>
+            <dt>Sample width</dt>
+            <dd>{Number(info.sample_width)} bits</dd>
+            <dt>Depth</dt>
+            <dd>{Number(info.depth).toLocaleString()} samples</dd>
+            <dt>Channels</dt>
+            <dd>{Number(info.num_channels)}</dd>
+            {Number(info.num_segments) > 1 ? (
+              <>
+                <dt>Segments</dt>
+                <dd>{Number(info.num_segments)}</dd>
+              </>
+            ) : null}
+            {feats.length > 0 && (
+              <>
+                <dt>Features</dt>
+                <dd>{feats.join(", ")}</dd>
+              </>
+            )}
+          </>
+        )}
+        {core.type === "eio" && (
+          <>
+            <dt>Inputs</dt>
+            <dd>{Number(info.in_w)}</dd>
+            <dt>Outputs</dt>
+            <dd>{Number(info.out_w)}</dd>
+          </>
+        )}
+        <dt>Location</dt>
+        <dd>
+          chain {core.chain}
+          {core.base_addr ? ` @ 0x${core.base_addr.toString(16)}` : ""}
+        </dd>
+      </dl>
+    </div>
+  );
+}
+
 export function ConnectionPanel({
   identity,
   onConnected,
@@ -87,6 +157,7 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
   } | null>(null);
+  const [cores, setCores] = useState<Core[]>([]);
 
   function resetScan() {
     setTargets([]);
@@ -94,8 +165,19 @@ export function ConnectionPanel({
     setBoards([]);
     setPickedIdx(0);
     setOoEnabled(false);
+    setCores([]);
     setStatus("");
     setError("");
+  }
+
+  /** Populate the "Cores" section (ELA + EIO + any others) after connect. */
+  async function loadCores() {
+    try {
+      const r = await rpc("list_cores", {}, CONNECT_TIMEOUT);
+      setCores((r.cores as Core[]) ?? []);
+    } catch {
+      setCores([]); // fall back to the ELA synthesized from probe
+    }
   }
 
   function changeBackend(b: string) {
@@ -127,6 +209,7 @@ export function ConnectionPanel({
     const r = await rpc("probe", {}, t);
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
+    loadCores();
   }
 
   /** Connect to a discovered board (carries its own port/tap/ir_table). */
@@ -150,6 +233,7 @@ export function ConnectionPanel({
       ir_table: b.ir_table,
     });
     onConnected(params, r.probe as Identity);
+    loadCores();
   }
 
   async function connect() {
@@ -313,50 +397,21 @@ export function ConnectionPanel({
   }
 
   if (identity) {
-    const feats = elaFeatures(identity);
+    const shown = cores.length ? cores : [elaCoreFromIdentity(identity)];
     return (
       <section className="panel">
         <h2>Connection</h2>
         <p className="ok">✓ Connected</p>
-        <dl className="idinfo">
-          <dt>Core</dt>
-          <dd>
-            {coreName(identity.core_id)}{" "}
-            <span className="muted">
-              v{identity.version_major}.{identity.version_minor}
-            </span>
-          </dd>
-          {connTarget && (
-            <>
-              <dt>Target</dt>
-              <dd>
-                {connTarget.tap}{" "}
-                <span className="muted">
-                  · {vendorName(connTarget.ir_table)} · {connTarget.backend}{" "}
-                  {connTarget.host}:{connTarget.port}
-                </span>
-              </dd>
-            </>
-          )}
-          <dt>Sample width</dt>
-          <dd>{identity.sample_width} bits</dd>
-          <dt>Depth</dt>
-          <dd>{identity.depth.toLocaleString()} samples</dd>
-          <dt>Channels</dt>
-          <dd>{identity.num_channels}</dd>
-          {identity.num_segments && identity.num_segments > 1 ? (
-            <>
-              <dt>Segments</dt>
-              <dd>{identity.num_segments}</dd>
-            </>
-          ) : null}
-          {feats.length > 0 && (
-            <>
-              <dt>Features</dt>
-              <dd>{feats.join(", ")}</dd>
-            </>
-          )}
-        </dl>
+        {connTarget && (
+          <p className="muted">
+            {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
+            {connTarget.backend} {connTarget.host}:{connTarget.port}
+          </p>
+        )}
+        <h3>Cores ({shown.length})</h3>
+        {shown.map((core, i) => (
+          <CoreCard key={`${core.type}-${core.chain}-${core.base_addr}-${i}`} core={core} />
+        ))}
         <button onClick={disconnect} disabled={busy}>
           Disconnect
         </button>

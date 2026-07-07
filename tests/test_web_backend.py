@@ -244,6 +244,22 @@ def test_scan_targets_openocd(monkeypatch):
     assert r["backend"] == "openocd"
 
 
+def test_list_cores_reports_ela_and_eio(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "list_cores").json()
+    assert r["ok"] is True
+    cores = r["cores"]
+    assert [x["type"] for x in cores] == ["ela", "eio"]
+    ela = cores[0]
+    assert ela["name"] == "Embedded Logic Analyzer" and ela["chain"] == 1
+    assert ela["info"]["sample_width"] == 8 and ela["info"]["depth"] == 64
+    eio = cores[1]
+    assert eio["name"] == "Embedded I/O"
+    assert eio["chain"] == 1 and eio["base_addr"] == 0x8000
+    assert (eio["info"]["in_w"], eio["info"]["out_w"]) == (2, 6)
+
+
 def test_discover_boards_only_returns_compatible(monkeypatch):
     """Aggregate compatible taps across ports; skip unreachable ports/incompatible taps."""
     import fcapz.analyzer as az

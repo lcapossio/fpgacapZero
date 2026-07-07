@@ -232,6 +232,22 @@ button.danger {
   margin: 0;
   color: var(--fg);
 }
+
+/* One debug core in the "Cores" list. */
+.core {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.4rem 0;
+  background: #0b0e14;
+}
+.core-title {
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.core .idinfo {
+  margin: 0;
+}
 .err {
   color: var(--err);
 }

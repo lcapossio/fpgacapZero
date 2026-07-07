@@ -32,6 +32,15 @@ from .transport import (
 
 _SCHEMA_VERSION = "1.1"
 
+# fcapz debug-core magic (VERSION[15:0], ASCII) -> friendly name, for list_cores.
+_CORE_NAMES = {
+    0x4C41: "Embedded Logic Analyzer",
+    0x494F: "Embedded I/O",
+    0x434D: "Core Manager",
+    0x4A58: "EJTAG-AXI bridge",
+    0x4A55: "EJTAG-UART",
+}
+
 
 class RpcServer:
     def __init__(self, openocd_launcher: OpenOcdLauncher | None = None):
@@ -81,6 +90,56 @@ class RpcServer:
         self._axi_transport = None
         self._uart = None
         self._uart_transport = None
+
+    def _list_cores(self, analyzer: Analyzer) -> list[Dict[str, Any]]:
+        """Enumerate the fcapz cores reachable on the connected session.
+
+        Always reports the connected ELA; adds the EIO if one is discoverable
+        (reusing an already-attached controller, else a read-only probe that
+        restores chain 1). Other core types (AXI/UART/core-manager) are not yet
+        auto-scanned here. Each entry: ``{type, name, core_id, chain, base_addr,
+        version_major, version_minor, info}``.
+        """
+        cores: list[Dict[str, Any]] = []
+        try:
+            ela = analyzer.probe()
+        except RuntimeError:
+            ela = None
+        if ela is not None:
+            cores.append({
+                "type": "ela",
+                "name": _CORE_NAMES.get(ela["core_id"], "Logic Analyzer"),
+                "core_id": ela["core_id"],
+                "chain": analyzer.bscan_chain,
+                "base_addr": 0,
+                "version_major": ela["version_major"],
+                "version_minor": ela["version_minor"],
+                "info": ela,
+            })
+
+        eio = self._eio
+        if eio is None:
+            transport = analyzer.transport
+            try:
+                eio = discover_eio(transport, chains=(1, 2))
+            except Exception:
+                eio = None
+            try:
+                transport.invalidate_manager_instance_cache()
+            except Exception:
+                pass
+        if eio is not None:
+            cores.append({
+                "type": "eio",
+                "name": _CORE_NAMES.get(eio.core_id, "Embedded I/O"),
+                "core_id": eio.core_id,
+                "chain": eio.bscan_chain,
+                "base_addr": eio._base_addr,  # noqa: SLF001 - report discovered offset
+                "version_major": eio.version_major,
+                "version_minor": eio.version_minor,
+                "info": {"in_w": eio.in_w, "out_w": eio.out_w},
+            })
+        return cores
 
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
     _IR_TABLES = {
@@ -394,6 +453,9 @@ class RpcServer:
 
         if cmd == "probe":
             return self._ok(probe=analyzer.probe())
+
+        if cmd == "list_cores":
+            return self._ok(cores=self._list_cores(analyzer))
 
         if cmd == "configure":
             analyzer.configure(self._build_config(req))

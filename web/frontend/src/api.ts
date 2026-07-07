@@ -35,6 +35,18 @@ export interface Identity {
   has_dual_compare?: boolean;
 }
 
+/** One fcapz debug core present on the connected target (from list_cores). */
+export interface Core {
+  type: string; // "ela" | "eio" | ...
+  name: string;
+  core_id: number;
+  chain: number;
+  base_addr: number;
+  version_major: number;
+  version_minor: number;
+  info: Record<string, unknown>; // type-specific: ELA probe dict, or EIO {in_w,out_w}
+}
+
 /** A discovered fpgacapZero-compatible board (one OpenOCD tap that probed as an ELA). */
 export interface Board {
   backend: string;
