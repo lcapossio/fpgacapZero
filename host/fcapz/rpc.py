@@ -377,8 +377,10 @@ class RpcServer:
         cmd = req.get("cmd")
 
         if cmd == "connect":
-            if self._analyzer is not None:
-                self._analyzer.close()
+            # Reconnecting must start from a clean slate: release any prior
+            # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
+            # stale side sessions can't survive still pointing at the old board.
+            self._close_all()
             self._analyzer = Analyzer(
                 self._build_transport(req), chain=int(req.get("chain", 1))
             )

@@ -466,6 +466,32 @@ def test_build_config_trigger_value_backward_compatible():
     assert RpcServer._build_config({"trigger_value": "0x1F"}).trigger.value == 0x1F
 
 
+def test_connect_tears_down_stale_side_sessions(monkeypatch):
+    """Reconnect without `close` must release stale EIO/AXI/UART, not just the ELA."""
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    srv = RpcServer()
+    old_analyzer = _Sess()
+    srv._analyzer = old_analyzer
+    srv._eio = _Sess()
+    srv._axi = _Sess()
+    srv._uart = _Sess()
+    stale = [srv._eio, srv._axi, srv._uart]
+
+    srv.handle({**_GOWIN, "cmd": "connect"})
+
+    assert old_analyzer.closed and all(s.closed for s in stale)
+    assert srv._eio is None and srv._axi is None and srv._uart is None
+    assert srv._analyzer is not None  # a fresh session replaced them
+
+
 def test_close_tears_down_all_hardware_sessions():
     """`close` (web/GUI Disconnect) must release EIO/AXI/UART, not just the ELA."""
 
