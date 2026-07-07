@@ -821,5 +821,18 @@ class TclInjectionTests(unittest.TestCase):
         self.assertEqual(t2.bitfile, "path/with spaces/file.bit")
 
 
+class TestOpenOcdTapValidation(unittest.TestCase):
+    """The OpenOCD tap is interpolated into TCL, so unsafe names are rejected."""
+
+    def test_rejects_injection_chars(self):
+        for bad in ("foo; exec calc", "foo\nshutdown", "a b", "x$y", "a[b]"):
+            with self.assertRaises(ValueError):
+                OpenOcdTransport(tap=bad)
+
+    def test_accepts_real_taps_and_sentinels(self):
+        for good in ("GW1NR-9C.tap", "xc7a100t.tap", "auto", ""):
+            OpenOcdTransport(tap=good)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
