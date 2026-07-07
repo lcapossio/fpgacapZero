@@ -63,8 +63,9 @@ float it; the layout is yours to arrange. The panels:
   server was launched with `--openocd`/`--openocd-cfg`, Connect **starts OpenOCD
   automatically** and retries — the user never touches the JTAG server (with
   several configured configs it shows a small picker to choose which). hw_server
-  needs no such step: XSDB starts a local hw_server itself. EIO is auto-discovered
-  on connect.
+  needs no such step: XSDB starts a local hw_server itself. Once connected, the
+  panel lists the **cores present** (the ELA and any EIO) with their
+  parameters; EIO is also auto-discovered into its own panel on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
   mode/value/mask, **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform), and **advanced

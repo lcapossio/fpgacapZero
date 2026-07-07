@@ -266,6 +266,32 @@ Response:
 }
 ```
 
+#### `list_cores`
+
+Enumerate the fcapz cores present on the connected target. Always reports the
+connected ELA and adds the EIO if one is discoverable. Each entry has `type`,
+`name`, `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+type-specific `info` (the ELA probe dict, or `{in_w, out_w}` for the EIO).
+
+```json
+{"cmd": "list_cores"}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "cores": [
+    {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
+     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 4,
+     "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
+    {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
+     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 4,
+     "info": {"in_w": 2, "out_w": 6}}
+  ]
+}
+```
+
 #### `configure`
 
 Write the trigger / pre-post / decimation / etc. registers.  All
