@@ -24,14 +24,23 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   const [pollMs, setPollMs] = useState(250);
   const [error, setError] = useState("");
   const timer = useRef<number | null>(null);
+  // At most one eio_read outstanding: the server serializes commands behind a
+  // lock, so unguarded ticks pile up (and time out) whenever a capture holds
+  // the lock for seconds. Skipped ticks just wait for the next interval.
+  const reading = useRef(false);
 
   async function readInputs() {
+    if (reading.current) return;
+    reading.current = true;
     try {
       const r = await rpc("eio_read");
       // Prefer value_hex (full width) over the JS-lossy numeric value.
       setInputs(BigInt(((r.value_hex ?? r.value) as string | number)));
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      reading.current = false;
     }
   }
 

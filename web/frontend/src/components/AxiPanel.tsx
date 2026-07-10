@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { parseIntFlexible, rpc } from "../api";
+import { rpc, toHexParam } from "../api";
 import type { ConnectionParams } from "../api";
 
 const ATTACH_TIMEOUT = 12000;
@@ -75,8 +75,9 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
     setBusy(true);
     setError("");
     try {
-      const r = await rpc("axi_read", { addr });
-      push([`READ  ${addr} -> ${r.value}`]);
+      const a = toHexParam(addr, "address");
+      const r = await rpc("axi_read", { addr: a });
+      push([`READ  ${a} -> ${r.value}`]);
     } catch (e) {
       setError(msg(e));
     } finally {
@@ -88,8 +89,11 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
     setBusy(true);
     setError("");
     try {
-      await rpc("axi_write", { addr, data, wstrb });
-      push([`WRITE ${addr} <- ${data} (wstrb ${wstrb})`]);
+      const a = toHexParam(addr, "address");
+      const d = toHexParam(data, "write data");
+      const w = toHexParam(wstrb, "wstrb");
+      await rpc("axi_write", { addr: a, data: d, wstrb: w });
+      push([`WRITE ${a} <- ${d} (wstrb ${w})`]);
     } catch (e) {
       setError(msg(e));
     } finally {
@@ -101,18 +105,19 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
     setBusy(true);
     setError("");
     try {
+      const a = toHexParam(dumpAddr, "dump address");
       const r = await rpc(
         "axi_dump",
-        { addr: dumpAddr, count: Number(dumpCount), burst },
+        { addr: a, count: Number(dumpCount), burst },
         DUMP_TIMEOUT,
       );
       const words = (r.words as string[]) ?? [];
-      const base = parseIntFlexible(dumpAddr);
+      const base = BigInt(a);
       const lines = words.map(
         (w, i) =>
-          `0x${(base + i * 4).toString(16).toUpperCase().padStart(8, "0")}: ${w}`,
+          `0x${(base + BigInt(i) * 4n).toString(16).toUpperCase().padStart(8, "0")}: ${w}`,
       );
-      push([`DUMP ${dumpAddr} x${words.length}${burst ? " (burst)" : ""}`, ...lines]);
+      push([`DUMP ${a} x${words.length}${burst ? " (burst)" : ""}`, ...lines]);
     } catch (e) {
       setError(msg(e));
     } finally {

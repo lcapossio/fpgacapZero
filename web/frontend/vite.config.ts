@@ -28,6 +28,12 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      // The Surfer viewer iframe (/surfer/index.html) is mounted by the
+      // backend, not built by Vite — without this the Viewer tab is blank in dev.
+      "/surfer": {
+        target: "http://127.0.0.1:7373",
+        changeOrigin: true,
+      },
     },
   },
 });

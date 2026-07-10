@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { downloadText, parseProbesText, rpc } from "../api";
+import { RpcError, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { useSession } from "../session";
 
@@ -83,9 +83,19 @@ export function RunPanel({ identity }: { identity: Identity }) {
     let count = 0;
     try {
       while (runRef.current) {
-        const n = await once(immediate, CONT_TIMEOUT);
-        count += 1;
-        setStatus(`auto re-arm: ${count} captures (${n} samples)`);
+        try {
+          const n = await once(immediate, CONT_TIMEOUT);
+          count += 1;
+          setStatus(`auto re-arm: ${count} captures (${n} samples)`);
+        } catch (e) {
+          // The short per-capture timeout only exists to keep Stop responsive;
+          // a trigger that didn't fire inside one window just means re-arm.
+          if (e instanceof RpcError && e.type === "TimeoutError") {
+            setStatus(`auto re-arm: ${count} captures - waiting for trigger`);
+            continue;
+          }
+          throw e;
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

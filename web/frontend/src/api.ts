@@ -69,6 +69,17 @@ export interface ProbeSpec {
   lsb: number;
 }
 
+/** In-band RPC failure ({ok:false}); `type` is the server-side exception
+ *  class name (e.g. "TimeoutError") so callers can branch on it. */
+export class RpcError extends Error {
+  type?: string;
+  constructor(message: string, type?: string) {
+    super(message);
+    this.name = "RpcError";
+    this.type = type;
+  }
+}
+
 const TOKEN_KEY = "fcapz_web_token";
 
 export function getToken(): string {
@@ -109,23 +120,32 @@ export async function rpc(
   }
   if (res.status === 401) throw new Error("unauthorized — set the API token");
   const data = (await res.json()) as RpcResponse;
-  if (!data.ok) throw new Error(data.error || `command '${cmd}' failed`);
+  if (!data.ok) throw new RpcError(data.error || `command '${cmd}' failed`, data.type);
   return data;
-}
-
-/** Guess the IR table from a tap/target name. */
-export function inferIrTable(tap: string): string {
-  const t = tap.toLowerCase();
-  if (t.startsWith("gw")) return "gowin";
-  if (t.startsWith("xcku") || t.startsWith("xcvu") || t.startsWith("xcau"))
-    return "ultrascale";
-  return "xilinx7";
 }
 
 /** Parse a decimal or 0x-hex string into a number. */
 export function parseIntFlexible(text: string): number {
   const t = text.trim();
   return t.toLowerCase().startsWith("0x") ? parseInt(t, 16) : parseInt(t, 10);
+}
+
+/** Parse a decimal or 0x-hex string into a canonical "0x…" hex string.
+ *  The RPC server parses string numeric fields as base-16, so bare decimal
+ *  input must be converted before it crosses the wire — otherwise "100"
+ *  targets 0x100 while the UI displays 100. BigInt keeps >53-bit values
+ *  exact; malformed input throws instead of silently misparsing. */
+export function toHexParam(text: string, label: string): string {
+  const t = text.trim();
+  let v: bigint;
+  try {
+    if (!t) throw new Error("empty");
+    v = BigInt(t);
+  } catch {
+    throw new Error(`invalid ${label} '${t}' — use decimal or 0x-hex`);
+  }
+  if (v < 0n) throw new Error(`${label} must be non-negative`);
+  return "0x" + v.toString(16).toUpperCase();
 }
 
 export function parseProbesText(text: string): ProbeSpec[] {

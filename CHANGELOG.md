@@ -68,6 +68,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — hw_server connect:** the XSDB-backed connect path uses a larger
   budget than OpenOCD's fast TCL (capped at 15 s), so a slow XSDB cold start no
   longer aborts the connect prematurely.
+- **Web — segmented wide captures:** segmented `capture` now honors the
+  requested `format`; wide (>53-bit) segmented captures no longer attach
+  JSON-number samples, so the UI's Download JSON can't export rounded data.
+- **Web — AXI addressing:** the AXI panel normalizes addresses/data to
+  canonical `0x…` hex before sending (bare decimal input previously targeted a
+  different register than the one displayed) and rejects malformed input.
+- **Web — auto re-arm:** a per-window trigger timeout re-arms instead of
+  stopping with an error, so sparse triggers are captured as intended.
+- **Web — EIO polling:** the input poller keeps at most one `eio_read` in
+  flight, so armed captures no longer stack timed-out polls behind the
+  server's command lock.
+- **Web — board discovery:** `discover_boards` accepts a `budget` (overall
+  wall-clock cap); the UI sends 12 s so discovery always answers before the
+  client aborts and cannot keep the command lock busy afterwards.
+- **Web — loopback checks:** loopback detection now uses `ipaddress`
+  (127.0.0.0/8, `::1`, IPv4-mapped `::ffff:127.0.0.1`), fixing OpenOCD control
+  being denied to local browsers on dual-stack binds; the `--token` warning
+  uses the same logic.
+- **Web — WebSocket:** valid-JSON non-object frames (e.g. `42`) get an in-band
+  `{ok:false}` reply instead of crashing the connection.
+- **Web — viewer:** the Vite dev server proxies `/surfer` to the backend (the
+  Viewer tab was blank under `npm run dev`), and Surfer's first-load signal
+  setup is no longer lost when a second capture arrives within ~450 ms.
+- **Web — IR table:** `connect` infers `ir_table` from the tap name server-side
+  and echoes the resolved preset; the frontend's duplicate mapping is gone.
 
 ### Added
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { getToken, inferIrTable, rpc, setToken } from "../api";
+import { getToken, rpc, setToken } from "../api";
 import type { Board, ConnectionParams, Core, Identity } from "../api";
 
 const BACKENDS = ["openocd", "hw_server"];
@@ -11,6 +11,10 @@ const CONNECT_TIMEOUT = 6000;
 const PORT_SWEEP = 4;
 // 15s is the cap for every connect-path wait, so a stuck operation fails fast.
 const DISCOVER_TIMEOUT = 15000;
+// Server-side wall-clock budget for the whole sweep. Kept below the client
+// abort so discovery always returns in-band (and releases the server's
+// command lock) instead of outliving an aborted request.
+const DISCOVER_BUDGET_S = 12;
 const START_TIMEOUT = 15000; // server spawns OpenOCD and waits for its TCL port
 // hw_server goes through XSDB (slow cold start). Capped at 15s: if XSDB's first
 // start exceeds this the connect aborts, but it leaves hw_server warm so a
@@ -200,12 +204,15 @@ export function ConnectionPanel({
       host,
       port: Number(port),
       tap,
-      ir_table: inferIrTable(tap),
+      // Left empty: the server infers the preset from the tap name (the one
+      // authoritative copy of that mapping) and echoes it back.
+      ir_table: "",
       chain: 1,
     };
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
-    await rpc("connect", params as unknown as Record<string, unknown>, t);
+    const c = await rpc("connect", params as unknown as Record<string, unknown>, t);
+    params.ir_table = typeof c.ir_table === "string" ? c.ir_table : "";
     const r = await rpc("probe", {}, t);
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
@@ -308,7 +315,14 @@ export function ConnectionPanel({
   async function discoverOpenocdBoards(): Promise<Board[]> {
     const r = await rpc(
       "discover_boards",
-      { backend, host, port: Number(port), port_span: PORT_SWEEP, timeout: 5 },
+      {
+        backend,
+        host,
+        port: Number(port),
+        port_span: PORT_SWEEP,
+        timeout: 5,
+        budget: DISCOVER_BUDGET_S,
+      },
       DISCOVER_TIMEOUT,
     );
     return (r.boards as Board[]) ?? [];

@@ -53,11 +53,14 @@ export function SurferView({ vcd }: { vcd: string }) {
       // the window doesn't relaunch, the data just updates.
       inject({ LoadWaveformFileFromUrl: [url, first ? "Clear" : "KeepAvailable"] });
       if (first) {
-        firstLoad.current = false;
         timers.push(
           window.setTimeout(() => {
             inject(ADD_SCOPE);
             inject("ZoomToFit");
+            // Only now is the view set up. Flipping this before the timer
+            // fires would let a quick second capture cancel the setup and
+            // leave every later load with no displayed signals.
+            firstLoad.current = false;
           }, SETTLE_MS),
         );
       }
