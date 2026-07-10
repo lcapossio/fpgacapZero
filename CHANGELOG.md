@@ -93,6 +93,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   setup is no longer lost when a second capture arrives within ~450 ms.
 - **Web — IR table:** `connect` infers `ir_table` from the tap name server-side
   and echoes the resolved preset; the frontend's duplicate mapping is gone.
+- **RPC — segmented VCD:** `capture` with `segments: true` and `include_vcd`
+  now returns **all** segments concatenated on the time axis (with a `segment`
+  marker wire), not just segment 0's waveform.
+- **RPC — timeout clamping:** caller-supplied waits (capture/scan/uart_recv
+  `timeout`, `openocd_start` `wait`, discovery `budget`) are clamped to 300 s
+  so a handful of huge timeouts can't pin every web threadpool worker.
+- **Web — OpenOCD double-spawn:** a second `openocd_start` on the same port
+  during OpenOCD's bind window now waits on the pending spawn instead of
+  launching a second process that orphaned the first (both fighting for the
+  JTAG adapter).
 
 ### Added
 

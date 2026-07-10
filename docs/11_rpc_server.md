@@ -394,6 +394,16 @@ Response (format = "json"):
 For `format=csv` or `format=vcd`, the response has `"content": "..."`
 with the file body as a string instead of `result`.
 
+With `"segments": true` the response carries one entry per segment under
+`segments` (each shaped like a single-capture response in the requested
+format); `include_vcd` returns **all** segments concatenated on the time axis
+in one VCD, with a `segment` wire marking the boundaries.
+
+All caller-supplied waits (`timeout` on `capture`/`scan_targets`/`uart_recv`,
+`wait` on `openocd_start`, discovery `timeout`/`budget`) are clamped to 300 s:
+on the web server each request holds a threadpool worker for its full wait, so
+unbounded timeouts could starve all clients.
+
 ### EIO
 
 #### `eio_connect`

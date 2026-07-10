@@ -73,7 +73,7 @@ class FakeSegmentTransport(FakeTransport):
 
     def write_reg(self, addr: int, value: int) -> None:
         super().write_reg(addr, value)
-        if addr == 0x00BC:
+        if addr == 0x00C0:  # _ADDR_SEG_SEL
             self.segment = int(value)
 
     def read_block(self, addr: int, words: int):
@@ -208,6 +208,26 @@ def test_segmented_capture_bundle(monkeypatch):
     assert "$timescale" in r["vcd"]
 
 
+def test_segmented_capture_vcd_contains_all_segments(monkeypatch):
+    """include_vcd must return every segment's samples (concatenated, with a
+    segment marker wire), not just segment 0's waveform."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=0, posttrigger=0, channel=0,
+        sample_width=8, depth=8, timeout=0.2, segments=True, include_vcd=True,
+    ).json()
+    assert r["ok"] is True, r
+    vcd = r["vcd"]
+    # FakeSegmentTransport: segment 0 samples start at 0x10, segment 1 at 0x20.
+    assert f"b{0x10:08b} s" in vcd
+    assert f"b{0x20:08b} s" in vcd
+    assert " segment " in vcd  # boundary marker wire
+
+
 def test_segmented_capture_honors_wide_format(monkeypatch):
     """format='vcd' (the client's >53-bit guard) must not attach JSON-number
     samples — a wide segmented capture downloaded as JSON would round."""
@@ -323,6 +343,28 @@ def test_discover_boards_only_returns_compatible(monkeypatch):
     boards = az.discover_boards(ports=[6666, 6667, 6668])
     assert [b["tap"] for b in boards] == ["GW1NR-9C.tap", "xc7a100t.tap"]
     assert {b["port"] for b in boards} == {6666, 6668}
+
+
+def test_caller_waits_are_clamped(monkeypatch):
+    """Huge caller-supplied timeouts must be clamped: in the web gateway each
+    request holds a threadpool worker for its full wait."""
+    from fcapz.rpc import _MAX_WAIT_SEC, _wait_sec
+
+    assert _wait_sec({"timeout": 999999}, "timeout", 5.0) == _MAX_WAIT_SEC
+    assert _wait_sec({"timeout": -3}, "timeout", 5.0) == 0.0
+    assert _wait_sec({}, "timeout", 5.0) == 5.0
+
+    captured = {}
+
+    def fake_list_taps(*, host, port, timeout_sec):
+        captured["timeout"] = timeout_sec
+        return []
+
+    monkeypatch.setattr("fcapz.rpc.list_openocd_taps", fake_list_taps)
+    c = _client(monkeypatch)
+    r = _rpc(c, "scan_targets", backend="openocd", timeout=999999).json()
+    assert r["ok"] is True
+    assert captured["timeout"] == _MAX_WAIT_SEC
 
 
 def test_discover_boards_budget_caps_sweep(monkeypatch):

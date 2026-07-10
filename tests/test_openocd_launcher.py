@@ -106,6 +106,36 @@ def test_start_early_exit_raises_with_log(tmp_path, monkeypatch):
     assert "ftdi" in str(ei.value)  # log tail surfaced
 
 
+def test_start_waits_on_pending_spawn_instead_of_double_spawn(tmp_path, monkeypatch):
+    """A second start on the same port during OpenOCD's bind window (spawned,
+    TCL port not open yet) must not spawn again — that would orphan the first
+    process — but wait on the pending one."""
+    from fcapz.openocd_launcher import _Managed
+
+    launcher = _launcher(tmp_path)
+    pending = _FakeProc(pid=1111)
+    log = tmp_path / "pending.log"
+    log.write_text("")
+    launcher._managed[6666] = _Managed(proc=pending, log_path=str(log), config="brd")
+
+    calls = {"n": 0}
+
+    def port_open(port, timeout=0.3):
+        calls["n"] += 1
+        return calls["n"] >= 2  # port opens while we wait
+
+    monkeypatch.setattr(launcher, "_port_open", port_open)
+    spawned = {"popen": False}
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *a, **k: spawned.__setitem__("popen", True)
+    )
+
+    r = launcher.start(port=6666, wait_sec=2.0)
+    assert spawned["popen"] is False  # no second OpenOCD
+    assert r["started"] is False and r["already_running"] is True
+    assert r["mine"] is True and r["pid"] == 1111
+
+
 def test_stop_foreign_port_is_noop(tmp_path):
     launcher = _launcher(tmp_path)
     r = launcher.stop(port=6666)

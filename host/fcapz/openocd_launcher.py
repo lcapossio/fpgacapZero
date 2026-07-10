@@ -125,34 +125,46 @@ class OpenOcdLauncher:
         (with the OpenOCD log tail), and ``ValueError`` for an unknown config.
         """
         cfg_name, cfg_path = self._resolve_config(name)
+        spawned = False
         with self._lock:
             self._reap_dead()
-            if self._port_open(port):
+            existing = self._managed.get(port)
+            if existing is not None:
+                # A concurrent start already spawned OpenOCD for this port and
+                # is still inside its bind window (the TCL port opens seconds
+                # after fork). Spawning again would orphan that process, so
+                # wait on it instead.
+                proc, log_path, cfg_name = existing.proc, existing.log_path, existing.config
+            elif self._port_open(port):
                 # Something already serves this TCL port — discovery/connect can
                 # proceed as-is. Report whether it was one of ours.
                 return {
                     "started": False,
                     "already_running": True,
-                    "mine": port in self._managed,
+                    "mine": False,
                     "port": port,
                 }
-            log = tempfile.NamedTemporaryFile(
-                prefix=f"fcapz-openocd-{port}-", suffix=".log", delete=False
-            )
-            log_path = log.name
-            proc = subprocess.Popen(
-                [
-                    self._openocd,
-                    "-c", f"tcl_port {port}",
-                    "-c", "gdb_port disabled",
-                    "-c", "telnet_port disabled",
-                    "-f", cfg_path,
-                ],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-            log.close()  # the child holds its own handle; we read the file by path
-            self._managed[port] = _Managed(proc=proc, log_path=log_path, config=cfg_name)
+            else:
+                log = tempfile.NamedTemporaryFile(
+                    prefix=f"fcapz-openocd-{port}-", suffix=".log", delete=False
+                )
+                log_path = log.name
+                proc = subprocess.Popen(
+                    [
+                        self._openocd,
+                        "-c", f"tcl_port {port}",
+                        "-c", "gdb_port disabled",
+                        "-c", "telnet_port disabled",
+                        "-f", cfg_path,
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+                log.close()  # the child holds its own handle; we read the file by path
+                self._managed[port] = _Managed(
+                    proc=proc, log_path=log_path, config=cfg_name
+                )
+                spawned = True
 
         deadline = time.monotonic() + wait_sec
         while time.monotonic() < deadline:
@@ -165,8 +177,9 @@ class OpenOcdLauncher:
                 )
             if self._port_open(port):
                 return {
-                    "started": True,
-                    "already_running": False,
+                    "started": spawned,
+                    "already_running": not spawned,
+                    "mine": True,
                     "port": port,
                     "pid": proc.pid,
                     "config": cfg_name,

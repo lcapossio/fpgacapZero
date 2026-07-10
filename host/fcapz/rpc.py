@@ -37,6 +37,16 @@ _SCHEMA_VERSION = "1.1"
 # so an over-large port_span / ports list can't trigger a huge scan.
 _MAX_DISCOVERY_PORTS = 64
 
+# Hard ceiling on caller-supplied waits (capture timeouts, scans, OpenOCD
+# start). In the web gateway each request holds a threadpool worker for its
+# full wait, so a handful of huge timeouts would pin every worker and hang the
+# server for all clients. 300 s is far above any legitimate interactive wait.
+_MAX_WAIT_SEC = 300.0
+
+
+def _wait_sec(req: Dict[str, Any], key: str, default: float) -> float:
+    return min(max(0.0, float(req.get(key, default))), _MAX_WAIT_SEC)
+
 
 def _valid_port(value: Any) -> int:
     p = int(value)
@@ -422,14 +432,14 @@ class RpcServer:
                 taps = list_openocd_taps(
                     host=host,
                     port=int(req.get("port", 6666)),
-                    timeout_sec=float(req.get("timeout", 5.0)),
+                    timeout_sec=_wait_sec(req, "timeout", 5.0),
                 )
                 return self._ok(backend="openocd", targets=taps)
             if backend == "hw_server":
                 targets = list_xilinx_hw_server_targets(
                     host=host,
                     port=int(req.get("port", 3121)),
-                    timeout_sec=float(req.get("timeout", 10.0)),
+                    timeout_sec=_wait_sec(req, "timeout", 10.0),
                 )
                 return self._ok(backend="hw_server", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
@@ -446,12 +456,11 @@ class RpcServer:
                 base = _valid_port(req.get("port", 6666))
                 span = min(max(1, int(req.get("port_span", 1))), _MAX_DISCOVERY_PORTS)
                 ports = [base + i for i in range(span) if base + i <= 65535]
-            budget = req.get("budget")
             boards = discover_boards(
                 host=host,
                 ports=ports,
-                timeout_sec=float(req.get("timeout", 5.0)),
-                budget_sec=None if budget is None else float(budget),
+                timeout_sec=_wait_sec(req, "timeout", 5.0),
+                budget_sec=None if req.get("budget") is None else _wait_sec(req, "budget", 0.0),
             )
             return self._ok(backend="openocd", boards=boards)
 
@@ -472,7 +481,7 @@ class RpcServer:
                     **self._openocd_launcher.start(
                         name=req.get("name"),
                         port=int(req.get("port", 6666)),
-                        wait_sec=float(req.get("wait", 10.0)),
+                        wait_sec=_wait_sec(req, "wait", 10.0),
                     )
                 )
             return self._ok(
@@ -503,7 +512,7 @@ class RpcServer:
                 cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
-            timeout = float(req.get("timeout", 10.0))
+            timeout = _wait_sec(req, "timeout", 10.0)
             if req.get("segments"):
                 if not analyzer.wait_all_segments_done(timeout=timeout):
                     raise TimeoutError("segmented capture did not complete within timeout")
@@ -535,7 +544,8 @@ class RpcServer:
                         "segments": [analyzer.export_json(r) for r in results]
                     }
                 if req.get("include_vcd") and results:
-                    payload["vcd"] = analyzer.export_vcd_text(results[0])
+                    # All segments in one waveform — not just segment 0.
+                    payload["vcd"] = analyzer.export_vcd_text_segments(results)
                 if req.get("include_csv"):
                     lines = ["segment,index,value"]
                     for r in results:
@@ -765,7 +775,7 @@ class RpcServer:
             if self._uart is None:
                 raise RuntimeError("uart not connected")
             count = int(req.get("count", 0))
-            timeout = float(req.get("timeout", 1.0))
+            timeout = _wait_sec(req, "timeout", 1.0)
             data = self._uart.recv(count=count, timeout=timeout)
             return self._ok(data=base64.b64encode(data).decode("ascii"),
                             bytes_received=len(data))
