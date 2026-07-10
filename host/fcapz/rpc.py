@@ -14,6 +14,7 @@ from .analyzer import (
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
+    _infer_ir_table_name,
     discover_boards,
 )
 from .eio import EioController, discover_eio
@@ -173,10 +174,19 @@ class RpcServer:
         table = cls._IR_TABLES[key]
         return dict(table) if table is not None else None
 
+    @staticmethod
+    def _resolved_ir_name(req: Dict[str, Any]) -> str:
+        # No explicit ir_table: infer the preset from the tap name so every
+        # client (CLI, GUI, web) gets the same default from one place.
+        name = req.get("ir_table")
+        if name is None or not str(name).strip():
+            return _infer_ir_table_name(str(req.get("tap", "")))
+        return str(name)
+
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
-        ir = self._ir_table(req.get("ir_table"))
+        ir = self._ir_table(self._resolved_ir_name(req))
         if backend == "openocd":
             return OpenOcdTransport(
                 host=host,
@@ -397,7 +407,9 @@ class RpcServer:
                 self._build_transport(req), chain=int(req.get("chain", 1))
             )
             self._analyzer.connect()
-            return self._ok()
+            # Echo the resolved preset so a client that omitted ir_table can
+            # label the session and reuse it for eio/axi side connects.
+            return self._ok(ir_table=self._resolved_ir_name(req))
 
         if cmd == "close":
             self._close_all()
@@ -434,8 +446,12 @@ class RpcServer:
                 base = _valid_port(req.get("port", 6666))
                 span = min(max(1, int(req.get("port_span", 1))), _MAX_DISCOVERY_PORTS)
                 ports = [base + i for i in range(span) if base + i <= 65535]
+            budget = req.get("budget")
             boards = discover_boards(
-                host=host, ports=ports, timeout_sec=float(req.get("timeout", 5.0))
+                host=host,
+                ports=ports,
+                timeout_sec=float(req.get("timeout", 5.0)),
+                budget_sec=None if budget is None else float(budget),
             )
             return self._ok(backend="openocd", boards=boards)
 
@@ -494,23 +510,30 @@ class RpcServer:
                 probe_info = analyzer.probe()
                 nseg = max(1, int(probe_info.get("num_segments", 1)))
                 results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
+                fmt = str(req.get("format", "json"))
                 payload = self._ok(
-                    format="json",
+                    format=fmt,
                     overflow=any(r.overflow for r in results),
                     sample_count=sum(len(r.samples) for r in results),
                     channel=cfg.channel,
-                    result={"segments": [analyzer.export_json(r) for r in results]},
                     segments=[
                         self._serialize_capture(
                             analyzer,
                             cfg,
                             r,
-                            fmt=str(req.get("format", "json")),
+                            fmt=fmt,
                             include_summary=bool(req.get("summarize", False)),
                         )
                         for r in results
                     ],
                 )
+                # Wide captures request a non-json format precisely because JSON
+                # numbers round above 53 bits — only attach the JSON-number
+                # result when the caller asked for it (mirrors _serialize_capture).
+                if fmt == "json":
+                    payload["result"] = {
+                        "segments": [analyzer.export_json(r) for r in results]
+                    }
                 if req.get("include_vcd") and results:
                     payload["vcd"] = analyzer.export_vcd_text(results[0])
                 if req.get("include_csv"):

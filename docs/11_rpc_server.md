@@ -152,7 +152,12 @@ readiness wait.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1"}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7"}`
+
+`ir_table` echoes the resolved IR-table preset. When the request omits it, the
+server infers the preset from the tap name (`gw*` → `gowin`,
+`xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
+their own copy of that mapping.
 
 #### `discover_boards`
 
@@ -167,9 +172,15 @@ none are found. Requires no active connection.
   "host": "127.0.0.1",
   "port": 6666,        // sweep base; each board is one OpenOCD instance
   "port_span": 4,      // scan port .. port+span-1 (or pass "ports": [6666, 6667])
-  "timeout": 5
+  "timeout": 5,        // per-step timeout (per port connect / per tap probe)
+  "budget": 12         // optional: overall wall-clock cap for the whole sweep
 }
 ```
+
+`budget` bounds the total sweep time (per-step timeouts are clamped to the
+remaining budget and unswept ports are skipped once it is spent). Set it below
+your own request deadline: a client that aborts the HTTP request cannot cancel
+the server-side sweep, which would otherwise keep the command lock busy.
 
 Response (empty `boards` means nothing compatible was reachable):
 ```json

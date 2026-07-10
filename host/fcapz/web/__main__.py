@@ -99,10 +99,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     import uvicorn
 
-    from .app import create_app
+    from .app import _is_loopback, create_app
 
     static_dir = args.static_dir or _default_static_dir()
-    if args.host not in ("127.0.0.1", "localhost") and not args.token:
+    if not _is_loopback(args.host) and not args.token:
         print(
             f"WARNING: binding {args.host} without --token — the connected board is "
             "reachable by anyone who can reach this port.",

@@ -1104,6 +1104,7 @@ def discover_boards(
     ports: Sequence[int] = (6666,),
     chain: int = 1,
     timeout_sec: float = 5.0,
+    budget_sec: Optional[float] = None,
 ) -> List[Dict]:
     """Find fpgacapZero-compatible boards across running OpenOCD instances.
 
@@ -1120,17 +1121,36 @@ def discover_boards(
     where ``ir_table`` is the preset name that matched and ``identity`` is the
     :meth:`Analyzer.probe` dict.  A single physical board is one OpenOCD
     instance on its own port; sweep several ports to find several boards.
+
+    *budget_sec* caps the **overall** wall-clock time: per-step timeouts are
+    clamped to the remaining budget and the sweep stops once it is spent.
+    Without it a multi-port sweep against filtered ports can take
+    ``len(ports) * timeout_sec`` and outlive the caller's own deadline (the web
+    client aborts its request, but that cannot cancel this work server-side).
     """
+    deadline = None if budget_sec is None else time.monotonic() + float(budget_sec)
+
+    def _step_timeout() -> float:
+        if deadline is None:
+            return timeout_sec
+        return min(timeout_sec, deadline - time.monotonic())
+
     boards: List[Dict] = []
     for port in ports:
         port = int(port)
+        step = _step_timeout()
+        if step <= 0:
+            break  # budget spent — return what we have
         try:
-            taps = list_openocd_taps(host=host, port=port, timeout_sec=timeout_sec)
+            taps = list_openocd_taps(host=host, port=port, timeout_sec=step)
         except OSError:
             continue  # nothing listening on this port — skip, don't fail
         for tap in taps:
+            step = _step_timeout()
+            if step <= 0:
+                break
             entry = _probe_openocd_board(
-                host=host, port=port, tap=tap, chain=chain, timeout_sec=timeout_sec
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=step
             )
             if entry is not None:
                 boards.append(entry)

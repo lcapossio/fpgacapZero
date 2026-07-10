@@ -106,6 +106,21 @@ def test_connect_then_probe(monkeypatch):
     assert p["probe"]["depth"] == 64
 
 
+def test_connect_echoes_resolved_ir_table(monkeypatch):
+    c = _client(monkeypatch)
+    # Explicit preset is echoed verbatim.
+    r = _rpc(c, "connect", **_GOWIN).json()
+    assert r["ok"] is True and r["ir_table"] == "gowin"
+    # Omitted preset: the server infers it from the tap name — the one
+    # authoritative copy of that mapping (clients no longer duplicate it).
+    r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap", chain=1).json()
+    assert r["ok"] is True and r["ir_table"] == "gowin"
+    r = _rpc(c, "connect", backend="openocd", tap="xcku040.tap", chain=1).json()
+    assert r["ok"] is True and r["ir_table"] == "ultrascale"
+    r = _rpc(c, "connect", backend="openocd", tap="xc7a100t.tap", chain=1).json()
+    assert r["ok"] is True and r["ir_table"] == "xilinx7"
+
+
 def test_capture_returns_samples(monkeypatch):
     c = _client(monkeypatch)
     _rpc(c, "connect", **_GOWIN)
@@ -190,6 +205,26 @@ def test_segmented_capture_bundle(monkeypatch):
     assert len(r["result"]["segments"]) == 2
     assert len(r["segments"]) == 2
     assert "segment,index,value" in r["csv"]
+    assert "$timescale" in r["vcd"]
+
+
+def test_segmented_capture_honors_wide_format(monkeypatch):
+    """format='vcd' (the client's >53-bit guard) must not attach JSON-number
+    samples — a wide segmented capture downloaded as JSON would round."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(
+        c, "capture", pretrigger=0, posttrigger=0, channel=0,
+        sample_width=8, depth=8, timeout=0.2, segments=True,
+        format="vcd", include_vcd=True,
+    ).json()
+    assert r["ok"] is True, r
+    assert r["format"] == "vcd"
+    assert "result" not in r  # no JSON-number samples to mis-download
+    assert all(s["format"] == "vcd" and "content" in s for s in r["segments"])
     assert "$timescale" in r["vcd"]
 
 
@@ -290,10 +325,50 @@ def test_discover_boards_only_returns_compatible(monkeypatch):
     assert {b["port"] for b in boards} == {6666, 6668}
 
 
+def test_discover_boards_budget_caps_sweep(monkeypatch):
+    """budget_sec bounds the whole sweep so the server can't outlive the web
+    client's abort while holding the gateway lock."""
+    import fcapz.analyzer as az
+
+    clock = {"t": 0.0}
+
+    class _FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return clock["t"]
+
+    def fake_list_taps(*, host, port, timeout_sec):
+        assert timeout_sec <= 5.0  # per-step timeout clamped to what's left
+        clock["t"] += 5.0  # this port costs the full per-step timeout
+        return []
+
+    monkeypatch.setattr(az, "time", _FakeTime())
+    monkeypatch.setattr(az, "list_openocd_taps", fake_list_taps)
+    boards = az.discover_boards(
+        ports=[6666, 6667, 6668, 6669], timeout_sec=5.0, budget_sec=6.0
+    )
+    assert boards == []
+    assert clock["t"] == 10.0  # ports 3 and 4 were never probed
+
+
+def test_discover_boards_rpc_forwards_budget(monkeypatch):
+    captured = {}
+
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
+        captured["budget"] = budget_sec
+        return []
+
+    monkeypatch.setattr("fcapz.rpc.discover_boards", fake_discover)
+    c = _client(monkeypatch)
+    r = _rpc(c, "discover_boards", backend="openocd", port=6666, budget=12).json()
+    assert r["ok"] is True
+    assert captured["budget"] == 12.0
+
+
 def test_discover_boards_rpc_expands_port_span(monkeypatch):
     calls = {}
 
-    def fake_discover(*, host, ports, timeout_sec):
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
         calls["ports"] = ports
         return [{
             "backend": "openocd", "host": host, "port": ports[0],
@@ -355,7 +430,7 @@ def test_openocd_stop_runs_under_session_lock():
 def test_discover_boards_caps_port_span(monkeypatch):
     captured = {}
 
-    def fake_discover(*, host, ports, timeout_sec):
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
         captured["ports"] = ports
         return []
 
@@ -398,6 +473,37 @@ def test_openocd_guard_localhost_only():
     assert _openocd_guard({"cmd": "openocd_start"}, "10.0.0.5")["type"] == "PermissionError"
     assert _openocd_guard({"cmd": "openocd_start"}, "127.0.0.1") is None
     assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
+
+
+def test_is_loopback_forms():
+    from fcapz.web.app import _is_loopback
+
+    assert _is_loopback("127.0.0.1")
+    assert _is_loopback("127.0.0.2")  # whole 127/8 block
+    assert _is_loopback("::1")
+    assert _is_loopback("localhost")
+    # Dual-stack binds report local IPv4 clients as IPv4-mapped IPv6.
+    assert _is_loopback("::ffff:127.0.0.1")
+    assert not _is_loopback("192.168.1.10")
+    assert not _is_loopback("::ffff:192.168.1.10")
+    assert not _is_loopback("evil.example")
+    assert not _is_loopback(None)
+
+
+def test_ws_non_object_json_answers_in_band(monkeypatch):
+    """Valid-JSON non-object payloads must get an in-band error, not kill the
+    socket (the protocol promises errors arrive as {ok:false} envelopes)."""
+    import json as _json
+
+    c = _client(monkeypatch)
+    with c.websocket_connect("/api/ws") as ws:
+        for bad in ("42", '"probe"', "[1]"):
+            ws.send_text(bad)
+            r = ws.receive_json()
+            assert r["ok"] is False and r["type"] == "TypeError"
+        # The connection survives and still serves real requests.
+        ws.send_text(_json.dumps({"cmd": "connect", **_GOWIN}))
+        assert ws.receive_json()["ok"] is True
 
 
 def test_openocd_status_disabled_without_launcher(monkeypatch):

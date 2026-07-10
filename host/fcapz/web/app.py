@@ -17,6 +17,7 @@ capture waits for its trigger.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from pathlib import Path
 from typing import Iterable, Optional
@@ -46,7 +47,20 @@ def _default_surfer_dir() -> str:
 
 
 def _is_loopback(host: Optional[str]) -> bool:
-    return host in ("127.0.0.1", "::1", "localhost")
+    """True for any loopback form: 127.0.0.0/8, ::1, localhost, and the
+    IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) that dual-stack binds report
+    for local IPv4 clients."""
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
 
 
 def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
@@ -65,9 +79,6 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
             "type": "PermissionError",
         }
     return None
-
-
-_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _host_name(host_header: Optional[str]) -> Optional[str]:
@@ -93,7 +104,7 @@ def _host_header_ok(host_header: Optional[str], bind_host: Optional[str]) -> boo
     """
     if not _is_loopback(bind_host):
         return True
-    return _host_name(host_header) in _LOOPBACK_HOST_NAMES
+    return _is_loopback(_host_name(host_header))
 
 
 def create_app(
@@ -175,6 +186,17 @@ def create_app(
                 except json.JSONDecodeError as exc:
                     await websocket.send_json(
                         {"ok": False, "error": f"invalid JSON: {exc}", "type": "JSONDecodeError"}
+                    )
+                    continue
+                if not isinstance(req, dict):
+                    # Valid JSON but not a request object (e.g. 42, "probe",
+                    # [1]) — answer in-band instead of crashing the connection.
+                    await websocket.send_json(
+                        {
+                            "ok": False,
+                            "error": "request must be a JSON object {\"cmd\": ...}",
+                            "type": "TypeError",
+                        }
                     )
                     continue
                 blocked = _openocd_guard(
