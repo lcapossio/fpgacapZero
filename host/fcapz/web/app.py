@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import secrets
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -44,6 +45,18 @@ from .gateway import RpcGateway
 def _default_surfer_dir() -> str:
     """Vendored Surfer WASM build shipped under ``fcapz/web/vendor/surfer``."""
     return str(Path(__file__).resolve().parent / "vendor" / "surfer")
+
+
+def _token_ok(supplied: Optional[str], expected: str) -> bool:
+    """Constant-time token check that tolerates a missing value.
+
+    Compares with ``secrets.compare_digest`` so the match position can't be
+    recovered by timing, and encodes to bytes first so header/query values
+    Starlette decoded as latin-1 can't raise ``TypeError`` on non-ASCII input.
+    """
+    if supplied is None:
+        return False
+    return secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
 def _is_loopback(host: Optional[str]) -> bool:
@@ -147,7 +160,7 @@ def create_app(
     def auth(authorization: Optional[str] = Header(default=None)) -> None:
         if token is None:
             return
-        if authorization != f"Bearer {token}":
+        if not _token_ok(authorization, f"Bearer {token}"):
             raise HTTPException(status_code=401, detail="invalid or missing token")
 
     @app.get("/api/version")
@@ -174,7 +187,7 @@ def create_app(
         if not _host_header_ok(websocket.headers.get("host"), bind_host):
             await websocket.close(code=1008)
             return
-        if token is not None and websocket.query_params.get("token") != token:
+        if token is not None and not _token_ok(websocket.query_params.get("token"), token):
             await websocket.close(code=1008)
             return
         await websocket.accept()

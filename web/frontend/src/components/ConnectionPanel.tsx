@@ -305,6 +305,15 @@ export function ConnectionPanel({
       }
     } catch (e) {
       handleError(e);
+      // A failure after the backend `connect` succeeded (e.g. `probe` threw)
+      // leaves a hardware session open server-side. Tear it down so the UI's
+      // disconnected state matches the backend instead of relying on the next
+      // connect's implicit cleanup.
+      try {
+        await rpc("close", {}, CONNECT_TIMEOUT);
+      } catch {
+        /* nothing to close */
+      }
       onDisconnected();
     } finally {
       setBusy(false);

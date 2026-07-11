@@ -90,8 +90,11 @@ class OpenOcdLauncher:
         return name, self._configs[name]
 
     def _reap_dead(self) -> None:
-        for port in [p for p, m in self._managed.items() if m.proc.poll() is not None]:
-            self._managed.pop(port, None)
+        dead = [p for p, m in self._managed.items() if m.proc.poll() is not None]
+        for port in dead:
+            managed = self._managed.pop(port, None)
+            if managed is not None:
+                self._cleanup_log(managed.log_path)
 
     @staticmethod
     def _terminate(proc: subprocess.Popen) -> None:
@@ -112,6 +115,14 @@ class OpenOcdLauncher:
             return Path(path).read_text(errors="replace").strip()[-limit:]
         except OSError:
             return ""
+
+    @staticmethod
+    def _cleanup_log(path: str) -> None:
+        """Best-effort removal of a per-process temp logfile (delete=False)."""
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
 
     # -- API -------------------------------------------------------------
 
@@ -171,9 +182,11 @@ class OpenOcdLauncher:
             if proc.poll() is not None:
                 with self._lock:
                     self._managed.pop(port, None)
+                tail = self._log_tail(log_path)
+                self._cleanup_log(log_path)
                 raise RuntimeError(
                     f"openocd exited early (code {proc.returncode}). "
-                    f"Output:\n{self._log_tail(log_path)}"
+                    f"Output:\n{tail}"
                 )
             if self._port_open(port):
                 return {
@@ -189,9 +202,11 @@ class OpenOcdLauncher:
         self._terminate(proc)
         with self._lock:
             self._managed.pop(port, None)
+        tail = self._log_tail(log_path)
+        self._cleanup_log(log_path)
         raise RuntimeError(
             f"openocd did not open TCL port {port} within {wait_sec:.0f}s. "
-            f"Output:\n{self._log_tail(log_path)}"
+            f"Output:\n{tail}"
         )
 
     def stop(self, *, port: int = 6666) -> Dict:
@@ -205,6 +220,7 @@ class OpenOcdLauncher:
                 "port": port,
             }
         self._terminate(managed.proc)
+        self._cleanup_log(managed.log_path)
         return {"stopped": True, "port": port}
 
     def status(self) -> Dict:
@@ -220,7 +236,8 @@ class OpenOcdLauncher:
     def shutdown(self) -> None:
         """Terminate every OpenOCD we started (registered with ``atexit``)."""
         with self._lock:
-            procs = [m.proc for m in self._managed.values()]
+            managed = list(self._managed.values())
             self._managed.clear()
-        for proc in procs:
-            self._terminate(proc)
+        for m in managed:
+            self._terminate(m.proc)
+            self._cleanup_log(m.log_path)

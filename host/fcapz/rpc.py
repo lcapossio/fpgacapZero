@@ -217,7 +217,22 @@ class RpcServer:
 
     @staticmethod
     def _parse_int(value: Any) -> int:
-        return int(value, 0) if isinstance(value, str) else int(value)
+        if not isinstance(value, str):
+            return int(value)
+        s = value.strip()
+        # ``int(s, 0)`` honours the 0x/0o/0b/plain-decimal convention but rejects
+        # two forms users type by hand: decimals with a leading zero ("08") and
+        # bare hex without the 0x prefix ("FF"). Fall back to each explicitly so
+        # a capture doesn't fail with a cryptic ValueError.
+        for base in (0, 10, 16):
+            try:
+                return int(s, base)
+            except ValueError:
+                continue
+        raise ValueError(
+            f"could not parse integer from {value!r}; use decimal (e.g. 255) "
+            f"or 0x-prefixed hex (e.g. 0xFF)"
+        )
 
     @staticmethod
     def _parse_probes(raw: Any) -> list[ProbeSpec]:
