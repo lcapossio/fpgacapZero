@@ -11,15 +11,15 @@ and [JSON-RPC chapter](../../docs/11_rpc_server.md)).
 # 1) backend (serves /api on :7373)
 pip install -e ".[web]" && fcapz-web
 
-# 2) this app (Vite dev server on :5173, proxies /api -> :7373)
+# 2) this app (Vite dev server on :5173, proxies /api and /surfer -> :7373)
 cd web/frontend
 npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. Enter your board's connection params (for the
-Gowin BRS board: backend `openocd`, port `6666`, TAP `GW1NR-9C.tap`, IR table
-`gowin`, chain `1`).
+Open <http://localhost:5173> and press **Connect** — compatible boards are
+discovered automatically (the IR table is inferred server-side from the tap
+name). Host/port/tap can be overridden in the Connection panel when needed.
 
 ## Build (production)
 
@@ -40,11 +40,11 @@ re-run `npm run build` and commit the updated `host/fcapz/web/static/`.
 | File | |
 |---|---|
 | `src/api.ts` | the `rpc(cmd, params)` client + shared types |
-| `src/App.tsx` | layout; holds the active connection params + identity |
-| `src/components/ConnectionPanel.tsx` | connect / probe / disconnect |
-| `src/components/ElaPanel.tsx` | capture form |
-| `src/components/Waveform.tsx` | canvas trace of a capture |
+| `src/App.tsx` | dockable tab layout; holds the active connection params + identity |
+| `src/session.tsx` | shared session state (ELA config, last capture) |
+| `src/components/ConnectionPanel.tsx` | discover / connect / cores list / disconnect |
+| `src/components/ElaPanel.tsx` | capture configuration (trigger, probes, advanced) |
+| `src/components/RunPanel.tsx` | Arm / Trigger Immediate / Auto re-arm / downloads |
+| `src/components/SurferView.tsx` | embedded Surfer waveform viewer (iframe at `/surfer`) |
 | `src/components/EioPanel.tsx` | attach EIO, poll inputs, toggle outputs |
-
-v1 covers the core debug loop (connection + ELA capture + waveform + EIO);
-AXI/UART panels reuse the same `axi_*` / `uart_*` commands when added.
+| `src/components/AxiPanel.tsx` | JTAG-AXI bridge: read/write/dump |

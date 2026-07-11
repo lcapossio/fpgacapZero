@@ -17,9 +17,10 @@ pip install -e ".[web]"     # adds fastapi + uvicorn
 fcapz-web                    # serves on http://127.0.0.1:7373
 ```
 
-Then open <http://127.0.0.1:7373>. Connection parameters (backend, tap, IR
-table, …) are entered in the UI, not on the command line — one server can point
-at whatever board you connect to.
+Then open <http://127.0.0.1:7373>. Connection parameters (backend, host/port,
+an optional tap — the IR table is inferred from the tap name) live in the UI,
+not on the command line — one server can point at whatever board you connect
+to.
 
 ### Reaching it from another machine
 
@@ -40,7 +41,7 @@ The web server speaks the **same JSON-RPC `cmd` protocol** as
 | Transport | Endpoint | Shape |
 |---|---|---|
 | HTTP | `POST /api/rpc` | body is one request `{"cmd": ...}`; returns the response envelope |
-| WebSocket | `/api/ws` | send request objects, receive response objects (lower latency; used for live polling) |
+| WebSocket | `/api/ws` | send request objects, receive response objects (lower latency; suited to scripted live polling — the bundled UI uses `POST /api/rpc`) |
 
 Every command, request field, and response field is exactly the JSON-RPC
 contract documented in [chapter 11](../../../docs/11_rpc_server.md): `connect`,
@@ -75,7 +76,8 @@ Gowin example: `connect` with `ir_table:"gowin"`, `tap:"GW1NR-9C.tap"`,
 ## Frontend dev workflow (Vite + React)
 
 The browser UI source lives in `web/frontend/` (repo-relative). During
-development run the Vite dev server and proxy `/api` to the backend:
+development run the Vite dev server, which proxies `/api` and `/surfer` to the
+backend:
 
 ```bash
 cd web/frontend && npm install && npm run dev   # http://localhost:5173

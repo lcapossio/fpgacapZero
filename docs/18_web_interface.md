@@ -17,9 +17,9 @@ pip install -e ".[web]"     # adds fastapi + uvicorn to the host stack
 fcapz-web                    # serves on http://127.0.0.1:7373
 ```
 
-Open <http://127.0.0.1:7373>. You enter the connection parameters (backend, tap,
-IR table, …) in the UI, not on the command line — one server can drive whatever
-board you point it at.
+Open <http://127.0.0.1:7373>. Connection parameters (backend, host/port, an
+optional tap — the IR table is inferred from the tap name) live in the UI, not
+on the command line — one server can drive whatever board you point it at.
 
 ### Reaching it from another machine
 
@@ -99,7 +99,7 @@ expose the **same** command set:
 | Transport | Endpoint | Shape |
 |-----------|----------|-------|
 | HTTP | `POST /api/rpc` | body is one request `{"cmd": ...}`; returns the response envelope |
-| WebSocket | `/api/ws` | send request objects, receive response objects (lower latency; used for live polling like `eio_read`) |
+| WebSocket | `/api/ws` | send request objects, receive response objects (lower latency; suited to scripted live polling — the bundled UI itself uses `POST /api/rpc`) |
 
 Every command and field is exactly the contract in
 [chapter 11](11_rpc_server.md): `connect`, `probe`, `capture`, `eio_*`,
@@ -122,7 +122,8 @@ waits for its trigger.
 
 Running `fcapz-web` never needs Node — the built bundle ships in the package. You
 only need Node to **change** the UI. The source lives in `web/frontend/`; during
-development run the Vite dev server and proxy `/api` to the backend:
+development run the Vite dev server, which proxies `/api` and `/surfer` (the
+Viewer's waveform iframe) to the backend:
 
 ```bash
 cd web/frontend && npm install && npm run dev   # http://localhost:5173
