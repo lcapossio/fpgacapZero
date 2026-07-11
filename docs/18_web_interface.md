@@ -60,7 +60,10 @@ processes, even with a valid token.
 ## The workspace
 
 The UI is a **dockable tab layout** — drag any tab to reorder, split, stack, or
-float it; the layout is yours to arrange. The panels:
+float it; the layout is yours to arrange. Closed a tab? The **Tabs** menu in
+the top bar reopens it (or click an open one to focus it), and **Reset layout**
+rebuilds the default arrangement without reloading — the session stays
+connected. The panels:
 
 - **Connection** — pick the backend (OpenOCD or Xilinx hw_server), host and
   port. For OpenOCD, Connect **discovers fpgacapZero-compatible boards** — it

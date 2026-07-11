@@ -106,6 +106,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — Tabs menu:** a top-bar dropdown that reopens closed dock tabs
+  (click an open one to focus it) and a **Reset layout** action that rebuilds
+  the default arrangement in place — previously a closed tab could only be
+  recovered by reloading the page, which also dropped the UI session.
 - **Web interface (`fcapz-web`):** New browser front-end over the unified
   JSON-RPC API — a FastAPI gateway (`python -m fcapz.web`) plus a React/Vite UI
   with dockable panels (Connection, ELA, Run, EIO, JTAG-AXI) and an embedded,

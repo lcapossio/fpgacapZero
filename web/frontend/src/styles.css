@@ -129,6 +129,54 @@ body {
   margin: 0;
 }
 
+/* "Tabs" dropdown: reopen closed dock tabs / reset the layout. */
+.tabs-menu {
+  position: relative;
+  margin-left: auto;
+}
+.tabs-menu > button {
+  padding: 0.2rem 0.6rem;
+}
+.tabs-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1000;
+  min-width: 9rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.tabs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-weight: 400;
+  text-align: left;
+}
+.tabs-menu-item:hover {
+  background: #0b0e14;
+}
+.tabs-menu-check {
+  display: inline-block;
+  width: 1rem;
+  color: var(--accent);
+}
+.tabs-menu-sep {
+  height: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--border);
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
