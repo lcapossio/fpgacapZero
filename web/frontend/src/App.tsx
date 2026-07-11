@@ -182,8 +182,9 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   });
 }
 
-/** Topbar dropdown: reopen closed tabs (click an open one to focus it) or
- *  rebuild the default layout — no page reload, so the session survives. */
+/** Topbar dropdown: toggle tabs (checked = open, click to close; unchecked =
+ *  closed, click to reopen) or rebuild the default layout — no page reload,
+ *  so the session survives. */
 function TabsMenu({ api }: { api: DockviewApi }) {
   const [open, setOpen] = useState(false);
   const [openIds, setOpenIds] = useState<string[]>(() => api.panels.map((p) => p.id));
@@ -222,9 +223,9 @@ function TabsMenu({ api }: { api: DockviewApi }) {
                 key={p.id}
                 className="tabs-menu-item"
                 onClick={() => {
-                  if (isOpen) api.getPanel(p.id)?.api.setActive();
+                  const panel = api.getPanel(p.id);
+                  if (panel) panel.api.close();
                   else restorePanel(api, p.id);
-                  setOpen(false);
                 }}
               >
                 <span className="tabs-menu-check">{isOpen ? "✓" : ""}</span>

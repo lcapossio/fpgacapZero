@@ -60,8 +60,8 @@ processes, even with a valid token.
 ## The workspace
 
 The UI is a **dockable tab layout** — drag any tab to reorder, split, stack, or
-float it; the layout is yours to arrange. Closed a tab? The **Tabs** menu in
-the top bar reopens it (or click an open one to focus it), and **Reset layout**
+float it; the layout is yours to arrange. The **Tabs** menu in the top bar
+toggles panels (checked = open; click to close or reopen), and **Reset layout**
 rebuilds the default arrangement without reloading — the session stays
 connected. The panels:
 
