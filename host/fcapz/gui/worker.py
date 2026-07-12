@@ -11,7 +11,11 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..analyzer import Analyzer, CaptureConfig, ElaManager
-from ..transport import connect_timing_logs_enabled, list_xilinx_hw_server_targets
+from ..transport import (
+    connect_timing_logs_enabled,
+    list_openocd_taps,
+    list_xilinx_hw_server_targets,
+)
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
 from .transport_from_settings import transport_from_connection
@@ -239,7 +243,11 @@ class ConnectWorker(QObject):
 
 
 class TargetScanWorker(QObject):
-    """Background XSDB target scan so the connection panel stays responsive."""
+    """Background JTAG scan so the connection panel stays responsive.
+
+    ``hw_server`` lists XSDB JTAG targets; ``openocd`` lists tap names from a
+    running OpenOCD instance (``jtag names``).
+    """
 
     finished = Signal(object)
     failed = Signal(str)
@@ -250,20 +258,29 @@ class TargetScanWorker(QObject):
         host: str,
         port: int,
         timeout_sec: float,
+        backend: str = "hw_server",
     ) -> None:
         super().__init__()
         self._host = host
         self._port = int(port)
         self._timeout_sec = float(timeout_sec)
+        self._backend = backend
 
     @Slot()
     def run(self) -> None:
         try:
-            targets = list_xilinx_hw_server_targets(
-                host=self._host,
-                port=self._port,
-                timeout_sec=self._timeout_sec,
-            )
+            if self._backend == "openocd":
+                targets = list_openocd_taps(
+                    host=self._host,
+                    port=self._port,
+                    timeout_sec=self._timeout_sec,
+                )
+            else:
+                targets = list_xilinx_hw_server_targets(
+                    host=self._host,
+                    port=self._port,
+                    timeout_sec=self._timeout_sec,
+                )
         except Exception as exc:  # noqa: BLE001 - surfaced via GUI
             self.failed.emit(str(exc))
             return

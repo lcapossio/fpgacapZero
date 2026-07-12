@@ -152,7 +152,52 @@ readiness wait.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1"}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7"}`
+
+`ir_table` echoes the resolved IR-table preset. When the request omits it, the
+server infers the preset from the tap name (`gw*` → `gowin`,
+`xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
+their own copy of that mapping.
+
+#### `discover_boards`
+
+Find fpgacapZero-compatible boards across running OpenOCD instances (OpenOCD
+only). Lists each TCL port's taps (`jtag names`) and probes each for the ELA
+identity, returning **only compatible** boards — so a caller fails only when
+none are found. Requires no active connection.
+
+```json
+{
+  "cmd": "discover_boards",
+  "host": "127.0.0.1",
+  "port": 6666,        // sweep base; each board is one OpenOCD instance
+  "port_span": 4,      // scan port .. port+span-1 (or pass "ports": [6666, 6667])
+  "timeout": 5,        // per-step timeout (per port connect / per tap probe)
+  "budget": 12         // optional: overall wall-clock cap for the whole sweep
+}
+```
+
+`budget` bounds the total sweep time (per-step timeouts are clamped to the
+remaining budget and unswept ports are skipped once it is spent). Set it below
+your own request deadline: a client that aborts the HTTP request cannot cancel
+the server-side sweep, which would otherwise keep the command lock busy.
+
+Response (empty `boards` means nothing compatible was reachable):
+```json
+{
+  "ok": true,
+  "schema_version": "1.1",
+  "backend": "openocd",
+  "boards": [
+    {
+      "host": "127.0.0.1", "port": 6666,
+      "tap": "GW1NR-9C.tap", "ir_table": "gowin",
+      "identity": {"core_id": 19521, "sample_width": 8, "depth": 64, "num_channels": 6},
+      "label": "GW1NR-9C.tap @ :6666 - 8-bitx64x6ch v0.4"
+    }
+  ]
+}
+```
 
 #### `close`
 
@@ -161,6 +206,57 @@ Releases the transport.
 ```json
 {"cmd": "close"}
 ```
+
+#### `scan_targets`
+
+List JTAG targets before connecting (no active session needed). For
+`backend: "hw_server"` it returns the XSDB `jtag targets` names; for
+`backend: "openocd"` it returns the tap names (`jtag names`). `discover_boards`
+is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
+
+```json
+{"cmd": "scan_targets", "backend": "openocd", "host": "127.0.0.1", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
+
+### OpenOCD control (web, localhost only)
+
+Start/stop OpenOCD **on the server host** so the browser UI can bring the board
+online without a shell. Available only when `fcapz-web` was launched with
+`--openocd <exe>` and one or more `--openocd-cfg <cfg>`, and restricted to
+loopback clients (a remote browser cannot spawn processes, even with a valid
+token). The server only stops OpenOCD instances it started itself.
+
+#### `openocd_status`
+
+```json
+{"cmd": "openocd_status"}
+```
+
+Response: `{"ok": true, "enabled": true, "configs": ["brs_100_gw1nr9_local"], "running": [...]}`.
+`enabled` is `false` (and `configs` empty) when the feature was not configured.
+
+#### `openocd_start`
+
+Spawn `openocd -f <cfg>` on `port` (default 6666) and wait for its TCL port.
+Idempotent — if the port is already open, nothing is spawned.
+
+```json
+{"cmd": "openocd_start", "name": "brs_100_gw1nr9_local", "port": 6666, "wait": 10}
+```
+
+`name` selects one of the configured configs (optional if only one). Response
+includes `{"started": true, "port": 6666, "pid": ...}`, or an in-band error
+(with the OpenOCD log tail) if it exits early or never opens the port.
+
+#### `openocd_stop`
+
+```json
+{"cmd": "openocd_stop", "port": 6666}
+```
+
+Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
 
 ### ELA (Analyzer)
 
@@ -191,6 +287,32 @@ Response:
     "num_segments": 4,
     "probe_mux_w": 0
   }
+}
+```
+
+#### `list_cores`
+
+Enumerate the fcapz cores present on the connected target. Always reports the
+connected ELA and adds the EIO if one is discoverable. Each entry has `type`,
+`name`, `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+type-specific `info` (the ELA probe dict, or `{in_w, out_w}` for the EIO).
+
+```json
+{"cmd": "list_cores"}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "cores": [
+    {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
+     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 4,
+     "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
+    {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
+     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 4,
+     "info": {"in_w": 2, "out_w": 6}}
+  ]
 }
 ```
 
@@ -226,6 +348,10 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 `probes` can also be a string in the CLI `name:width:lsb,...` form.
 Use `probe_file` with a `.prob` sidecar path to load the same information
 from disk; `probes` and `probe_file` are mutually exclusive.
+
+`trigger_value`, `trigger_mask`, `stor_qual_value`, and `stor_qual_mask` accept
+a base-prefixed string (`"0x..."` or decimal) as well as an int, so bit vectors
+wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 
 #### `arm`
 
@@ -268,6 +394,16 @@ Response (format = "json"):
 For `format=csv` or `format=vcd`, the response has `"content": "..."`
 with the file body as a string instead of `result`.
 
+With `"segments": true` the response carries one entry per segment under
+`segments` (each shaped like a single-capture response in the requested
+format); `include_vcd` returns **all** segments concatenated on the time axis
+in one VCD, with a `segment` wire marking the boundaries.
+
+All caller-supplied waits (`timeout` on `capture`/`scan_targets`/`uart_recv`,
+`wait` on `openocd_start`, discovery `timeout`/`budget`) are clamped to 300 s:
+on the web server each request holds a threadpool worker for its full wait, so
+unbounded timeouts could starve all clients.
+
 ### EIO
 
 #### `eio_connect`
@@ -296,13 +432,18 @@ Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain":
 {"cmd": "eio_read"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "value": 167}`
+Response: `{"ok": true, "schema_version": "1.1", "value": 167, "value_hex": "0xa7"}`.
+`value_hex` carries the full width losslessly for EIO wider than a JS-safe
+integer (53 bits); `value` is the same value as a JSON number.
 
 #### `eio_write`
 
 ```json
 {"cmd": "eio_write", "value": 85}
 ```
+
+`value` accepts a base-prefixed string (`"0x2a"`) as well as an int, so outputs
+wider than 53 bits survive JSON transport unrounded.
 
 ### EJTAG-AXI
 

@@ -182,6 +182,24 @@ OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
 
+#### Tap auto-detect
+
+The tap name must match a tap defined in the running OpenOCD config.  Pass
+`tap="auto"` (or leave it empty) and `connect()` resolves it to the first name
+OpenOCD reports from `jtag names` — handy for single-FPGA chains where you don't
+want to hard-code the name.  The helper `fcapz.transport.list_openocd_taps()`
+returns that list; the GUI's **Scan** button uses it to populate the TAP field
+for the OpenOCD backend.
+
+#### Gowin over OpenOCD
+
+Gowin boards use this transport with `ir_table=OpenOcdTransport.IR_TABLE_GOWIN`
+(ER1/ER2 → chains 1/2).  The CLI auto-selects it for `--tap GW...`; in code,
+pass it explicitly.  The ELA sits on chain 1; a shared-chain EIO (`EIO_EN=1`) is
+reached on chain 1 at base offset `0x8000`
+(`EioController(t, chain=1, base_addr=0x8000)`).  See the
+[BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
+
 ## IR table presets
 
 Different Xilinx families use different IR opcodes for the BSCANE2

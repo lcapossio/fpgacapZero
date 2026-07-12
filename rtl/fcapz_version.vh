@@ -11,8 +11,8 @@
 
 `define FCAPZ_VERSION_MAJOR  8'h00
 `define FCAPZ_VERSION_MINOR  8'h04
-`define FCAPZ_VERSION_PATCH  8'h00
-`define FCAPZ_VERSION_STRING "0.4.0"
+`define FCAPZ_VERSION_PATCH  8'h05
+`define FCAPZ_VERSION_STRING "0.4.5"
 
 // Per-core 16-bit ASCII identifiers, packed into VERSION[15:0] of
 // each core's identity register.  Constant per-core; never zero.

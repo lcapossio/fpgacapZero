@@ -8,26 +8,75 @@ import json
 import traceback
 from typing import Any, Dict
 
-from .analyzer import Analyzer, CaptureConfig, ProbeSpec, TriggerConfig
+from .analyzer import (
+    Analyzer,
+    CaptureConfig,
+    ProbeSpec,
+    SequencerStage,
+    TriggerConfig,
+    _infer_ir_table_name,
+    discover_boards,
+)
 from .axi_monitor import AxiMonitor
-from .eio import EioController
+from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
+from .openocd_launcher import OpenOcdLauncher
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from .transport import (
+    OpenOcdTransport,
+    Transport,
+    XilinxHwServerTransport,
+    list_openocd_taps,
+    list_xilinx_hw_server_targets,
+)
 
 _SCHEMA_VERSION = "1.1"
 
+# Upper bound on how many TCL ports discover_boards will sweep in one request,
+# so an over-large port_span / ports list can't trigger a huge scan.
+_MAX_DISCOVERY_PORTS = 64
+
+# Hard ceiling on caller-supplied waits (capture timeouts, scans, OpenOCD
+# start). In the web gateway each request holds a threadpool worker for its
+# full wait, so a handful of huge timeouts would pin every worker and hang the
+# server for all clients. 300 s is far above any legitimate interactive wait.
+_MAX_WAIT_SEC = 300.0
+
+
+def _wait_sec(req: Dict[str, Any], key: str, default: float) -> float:
+    return min(max(0.0, float(req.get(key, default))), _MAX_WAIT_SEC)
+
+
+def _valid_port(value: Any) -> int:
+    p = int(value)
+    if not (1 <= p <= 65535):
+        raise ValueError(f"port out of range (1-65535): {p}")
+    return p
+
+
+# fcapz debug-core magic (VERSION[15:0], ASCII) -> friendly name, for list_cores.
+_CORE_NAMES = {
+    0x4C41: "Embedded Logic Analyzer",
+    0x494F: "Embedded I/O",
+    0x434D: "Core Manager",
+    0x4A58: "EJTAG-AXI bridge",
+    0x4A55: "EJTAG-UART",
+}
+
 
 class RpcServer:
-    def __init__(self):
+    def __init__(self, openocd_launcher: OpenOcdLauncher | None = None):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
+        # Optional server-managed OpenOCD (None = the openocd_* commands are
+        # disabled and report so). Configured only by the web server launch.
+        self._openocd_launcher = openocd_launcher
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
@@ -38,14 +87,123 @@ class RpcServer:
             raise RuntimeError("not connected")
         return self._analyzer
 
+    def _close_all(self) -> None:
+        """Full session teardown: analyzer plus any EIO/AXI/UART transports.
+
+        The ``close`` command (web/GUI "Disconnect") must release every
+        hardware session, not just the analyzer, so no transport is left open
+        on the board/hw_server. A controller owns and closes its own transport;
+        a bare transport from a partial connect is closed directly. Each close
+        is guarded so one failure cannot leak the others.
+        """
+
+        def _shut(obj: Any) -> None:
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+
+        _shut(self._analyzer)
+        _shut(self._eio)
+        _shut(self._axi if self._axi is not None else self._axi_transport)
+        _shut(self._uart if self._uart is not None else self._uart_transport)
+        self._analyzer = None
+        self._eio = None
+        self._axi = None
+        self._axi_transport = None
+        self._uart = None
+        self._uart_transport = None
+
+    def _list_cores(self, analyzer: Analyzer) -> list[Dict[str, Any]]:
+        """Enumerate the fcapz cores reachable on the connected session.
+
+        Always reports the connected ELA; adds the EIO if one is discoverable
+        (reusing an already-attached controller, else a read-only probe that
+        restores chain 1). Other core types (AXI/UART/core-manager) are not yet
+        auto-scanned here. Each entry: ``{type, name, core_id, chain, base_addr,
+        version_major, version_minor, info}``.
+        """
+        cores: list[Dict[str, Any]] = []
+        try:
+            ela = analyzer.probe()
+        except RuntimeError:
+            ela = None
+        if ela is not None:
+            cores.append({
+                "type": "ela",
+                "name": _CORE_NAMES.get(ela["core_id"], "Logic Analyzer"),
+                "core_id": ela["core_id"],
+                "chain": analyzer.bscan_chain,
+                "base_addr": 0,
+                "version_major": ela["version_major"],
+                "version_minor": ela["version_minor"],
+                "info": ela,
+            })
+
+        eio = self._eio
+        if eio is None:
+            transport = analyzer.transport
+            try:
+                eio = discover_eio(transport, chains=(1, 2))
+            except Exception:
+                eio = None
+            try:
+                transport.invalidate_manager_instance_cache()
+            except Exception:
+                pass
+        if eio is not None:
+            cores.append({
+                "type": "eio",
+                "name": _CORE_NAMES.get(eio.core_id, "Embedded I/O"),
+                "core_id": eio.core_id,
+                "chain": eio.bscan_chain,
+                "base_addr": eio._base_addr,  # noqa: SLF001 - report discovered offset
+                "version_major": eio.version_major,
+                "version_minor": eio.version_minor,
+                "info": {"in_w": eio.in_w, "out_w": eio.out_w},
+            })
+        return cores
+
+    # ir_table preset name -> table (None = transport default, Xilinx 7-series).
+    _IR_TABLES = {
+        "": None,
+        "xilinx7": None,
+        "7series": None,
+        "series7": None,
+        "ultrascale": OpenOcdTransport.IR_TABLE_US,
+        "us": OpenOcdTransport.IR_TABLE_US,
+        "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+        "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+    }
+
+    @classmethod
+    def _ir_table(cls, name):
+        key = (name or "").strip().lower().replace("-", "_")
+        if key not in cls._IR_TABLES:
+            raise ValueError(f"unknown ir_table: {name!r}")
+        table = cls._IR_TABLES[key]
+        return dict(table) if table is not None else None
+
+    @staticmethod
+    def _resolved_ir_name(req: Dict[str, Any]) -> str:
+        # No explicit ir_table: infer the preset from the tap name so every
+        # client (CLI, GUI, web) gets the same default from one place.
+        name = req.get("ir_table")
+        if name is None or not str(name).strip():
+            return _infer_ir_table_name(str(req.get("tap", "")))
+        return str(name)
+
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
+        ir = self._ir_table(self._resolved_ir_name(req))
         if backend == "openocd":
             return OpenOcdTransport(
                 host=host,
                 port=int(req.get("port", 6666)),
                 tap=req.get("tap", "xc7a100t.tap"),
+                ir_table=ir,
             )
         if backend == "hw_server":
             return XilinxHwServerTransport(
@@ -54,8 +212,28 @@ class RpcServer:
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
+                ir_table=ir,
             )
         raise ValueError(f"unknown backend: {backend}")
+
+    @staticmethod
+    def _parse_int(value: Any) -> int:
+        if not isinstance(value, str):
+            return int(value)
+        s = value.strip()
+        # ``int(s, 0)`` honours the 0x/0o/0b/plain-decimal convention but rejects
+        # two forms users type by hand: decimals with a leading zero ("08") and
+        # bare hex without the 0x prefix ("FF"). Fall back to each explicitly so
+        # a capture doesn't fail with a cryptic ValueError.
+        for base in (0, 10, 16):
+            try:
+                return int(s, base)
+            except ValueError:
+                continue
+        raise ValueError(
+            f"could not parse integer from {value!r}; use decimal (e.g. 255) "
+            f"or 0x-prefixed hex (e.g. 0xFF)"
+        )
 
     @staticmethod
     def _parse_probes(raw: Any) -> list[ProbeSpec]:
@@ -88,6 +266,36 @@ class RpcServer:
                 probes.append(ProbeSpec(name=name, width=width, lsb=lsb))
             return probes
         raise ValueError("probes must be a string or a list of objects")
+
+    @classmethod
+    def _parse_sequence(cls, raw: Any) -> list[SequencerStage] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if not isinstance(raw, list):
+            raise ValueError("sequence must be a JSON array")
+        stages = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("sequence entries must be objects")
+            stages.append(
+                SequencerStage(
+                    cmp_mode_a=int(item.get("cmp_mode_a", 0)),
+                    cmp_mode_b=int(item.get("cmp_mode_b", 0)),
+                    combine=int(item.get("combine", 0)),
+                    next_state=int(item.get("next_state", 0)),
+                    is_final=cls._validated_bool(
+                        item.get("is_final", False), field="is_final"
+                    ),
+                    count_target=int(item.get("count_target", 1)),
+                    value_a=cls._parse_int(item.get("value_a", 0)),
+                    mask_a=cls._parse_int(item.get("mask_a", 0xFFFFFFFF)),
+                    value_b=cls._parse_int(item.get("value_b", 0)),
+                    mask_b=cls._parse_int(item.get("mask_b", 0xFFFFFFFF)),
+                )
+            )
+        return stages
 
     @staticmethod
     def _validated_sq_mode(mode: int) -> int:
@@ -150,8 +358,10 @@ class RpcServer:
             posttrigger=int(req.get("posttrigger", 16)),
             trigger=TriggerConfig(
                 mode=req.get("trigger_mode", "value_match"),
-                value=int(req.get("trigger_value", 0)),
-                mask=int(req.get("trigger_mask", 0xFF)),
+                # Bit vectors: accept base-prefixed strings so values wider than
+                # a JS-safe integer (53 bits) survive JSON transport unrounded.
+                value=cls._parse_int(req.get("trigger_value", 0)),
+                mask=cls._parse_int(req.get("trigger_mask", 0xFF)),
             ),
             sample_width=int(req.get("sample_width", file_sample_width)),
             depth=int(req.get("depth", 1024)),
@@ -160,9 +370,12 @@ class RpcServer:
             channel=int(req.get("channel", 0)),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
+            sequence=cls._parse_sequence(
+                req.get("sequence", req.get("trigger_sequence"))
+            ),
             stor_qual_mode=cls._validated_sq_mode(int(req.get("stor_qual_mode", 0))),
-            stor_qual_value=int(req.get("stor_qual_value", 0)),
-            stor_qual_mask=int(req.get("stor_qual_mask", 0)),
+            stor_qual_value=cls._parse_int(req.get("stor_qual_value", 0)),
+            stor_qual_mask=cls._parse_int(req.get("stor_qual_mask", 0)),
             startup_arm=cls._validated_bool(
                 req.get("startup_arm", False), field="startup_arm"
             ),
@@ -212,22 +425,92 @@ class RpcServer:
         cmd = req.get("cmd")
 
         if cmd == "connect":
-            if self._analyzer is not None:
-                self._analyzer.close()
-            self._analyzer = Analyzer(self._build_transport(req))
+            # Reconnecting must start from a clean slate: release any prior
+            # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
+            # stale side sessions can't survive still pointing at the old board.
+            self._close_all()
+            self._analyzer = Analyzer(
+                self._build_transport(req), chain=int(req.get("chain", 1))
+            )
             self._analyzer.connect()
-            return self._ok()
+            # Echo the resolved preset so a client that omitted ir_table can
+            # label the session and reuse it for eio/axi side connects.
+            return self._ok(ir_table=self._resolved_ir_name(req))
 
         if cmd == "close":
-            if self._analyzer is not None:
-                self._analyzer.close()
-                self._analyzer = None
+            self._close_all()
             return self._ok()
+
+        if cmd == "scan_targets":
+            backend = req.get("backend", "hw_server")
+            host = req.get("host", "127.0.0.1")
+            if backend == "openocd":
+                taps = list_openocd_taps(
+                    host=host,
+                    port=int(req.get("port", 6666)),
+                    timeout_sec=_wait_sec(req, "timeout", 5.0),
+                )
+                return self._ok(backend="openocd", targets=taps)
+            if backend == "hw_server":
+                targets = list_xilinx_hw_server_targets(
+                    host=host,
+                    port=int(req.get("port", 3121)),
+                    timeout_sec=_wait_sec(req, "timeout", 10.0),
+                )
+                return self._ok(backend="hw_server", targets=targets)
+            raise ValueError(f"unknown backend: {backend}")
+
+        if cmd == "discover_boards":
+            # Find fpgacapZero-compatible boards across running OpenOCD
+            # instances. Probes each tap for the ELA identity and returns only
+            # compatible boards, so the GUI fails only when none are found.
+            host = req.get("host", "127.0.0.1")
+            raw_ports = req.get("ports")
+            if raw_ports:
+                ports = [_valid_port(p) for p in raw_ports][:_MAX_DISCOVERY_PORTS]
+            else:
+                base = _valid_port(req.get("port", 6666))
+                span = min(max(1, int(req.get("port_span", 1))), _MAX_DISCOVERY_PORTS)
+                ports = [base + i for i in range(span) if base + i <= 65535]
+            boards = discover_boards(
+                host=host,
+                ports=ports,
+                timeout_sec=_wait_sec(req, "timeout", 5.0),
+                budget_sec=None if req.get("budget") is None else _wait_sec(req, "budget", 0.0),
+            )
+            return self._ok(backend="openocd", boards=boards)
+
+        if cmd in ("openocd_start", "openocd_stop", "openocd_status"):
+            # Server-managed OpenOCD (web only, loopback-gated by the web layer).
+            # Disabled unless fcapz-web was launched with --openocd/--openocd-cfg.
+            if self._openocd_launcher is None:
+                if cmd == "openocd_status":
+                    return self._ok(enabled=False, configs=[], running=[])
+                raise RuntimeError(
+                    "OpenOCD launching is not enabled on this server; start "
+                    "fcapz-web with --openocd <exe> and --openocd-cfg <cfg>"
+                )
+            if cmd == "openocd_status":
+                return self._ok(**self._openocd_launcher.status())
+            if cmd == "openocd_start":
+                return self._ok(
+                    **self._openocd_launcher.start(
+                        name=req.get("name"),
+                        port=int(req.get("port", 6666)),
+                        wait_sec=_wait_sec(req, "wait", 10.0),
+                    )
+                )
+            return self._ok(
+                **self._openocd_launcher.stop(port=int(req.get("port", 6666)))
+            )
 
         analyzer = self._ensure_analyzer()
 
         if cmd == "probe":
             return self._ok(probe=analyzer.probe())
+
+        if cmd == "list_cores":
+            return self._ok(cores=self._list_cores(analyzer))
 
         if cmd == "axi_mon_probe":
             # Detect an AXI monitor and return its geometry +
@@ -258,9 +541,55 @@ class RpcServer:
 
         if cmd == "capture":
             cfg = self._build_config(req)
+            # "Trigger Immediate": rewrite the config to an always-true trigger
+            # so the capture fires now instead of waiting (matches the GUI).
+            if req.get("immediate"):
+                cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
-            result = analyzer.capture(timeout=float(req.get("timeout", 10.0)))
+            timeout = _wait_sec(req, "timeout", 10.0)
+            if req.get("segments"):
+                if not analyzer.wait_all_segments_done(timeout=timeout):
+                    raise TimeoutError("segmented capture did not complete within timeout")
+                probe_info = analyzer.probe()
+                nseg = max(1, int(probe_info.get("num_segments", 1)))
+                results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
+                fmt = str(req.get("format", "json"))
+                payload = self._ok(
+                    format=fmt,
+                    overflow=any(r.overflow for r in results),
+                    sample_count=sum(len(r.samples) for r in results),
+                    channel=cfg.channel,
+                    segments=[
+                        self._serialize_capture(
+                            analyzer,
+                            cfg,
+                            r,
+                            fmt=fmt,
+                            include_summary=bool(req.get("summarize", False)),
+                        )
+                        for r in results
+                    ],
+                )
+                # Wide captures request a non-json format precisely because JSON
+                # numbers round above 53 bits — only attach the JSON-number
+                # result when the caller asked for it (mirrors _serialize_capture).
+                if fmt == "json":
+                    payload["result"] = {
+                        "segments": [analyzer.export_json(r) for r in results]
+                    }
+                if req.get("include_vcd") and results:
+                    # All segments in one waveform — not just segment 0.
+                    payload["vcd"] = analyzer.export_vcd_text_segments(results)
+                if req.get("include_csv"):
+                    lines = ["segment,index,value"]
+                    for r in results:
+                        for idx, value in enumerate(r.samples):
+                            lines.append(f"{r.segment},{idx},{value}")
+                    payload["csv"] = "\n".join(lines) + "\n"
+                return payload
+
+            result = analyzer.capture(timeout=timeout)
             payload = self._serialize_capture(
                 analyzer,
                 cfg,
@@ -268,15 +597,64 @@ class RpcServer:
                 fmt=str(req.get("format", "json")),
                 include_summary=bool(req.get("summarize", False)),
             )
+            # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
+            # produced by the same exporter the CLI/GUI use.
+            if req.get("include_vcd"):
+                payload["vcd"] = analyzer.export_vcd_text(result)
+            if req.get("include_csv"):
+                payload["csv"] = analyzer.export_csv_text(result)
             return self._ok(**payload)
 
         if cmd == "eio_connect":
             if self._eio is not None:
                 self._eio.close()
             chain = int(req.get("chain", 3))
-            self._eio = EioController(self._build_transport(req), chain=chain)
+            base_addr = int(req.get("base_addr", 0))
+            instance = req.get("instance")
+            self._eio = EioController(
+                self._build_transport(req),
+                chain=chain,
+                base_addr=base_addr,
+                instance=None if instance is None else int(instance),
+            )
             self._eio.connect()
-            return self._ok(in_w=self._eio.in_w, out_w=self._eio.out_w, chain=chain)
+            return self._ok(
+                in_w=self._eio.in_w,
+                out_w=self._eio.out_w,
+                chain=chain,
+                base_addr=base_addr,
+            )
+
+        if cmd == "eio_discover":
+            if self._eio is not None:
+                self._eio.close()
+                self._eio = None
+            transport = self._build_transport(req)
+            transport.connect()
+            try:
+                chains = req.get("chains")
+                chains = (
+                    [int(c) for c in chains]
+                    if chains
+                    else sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+                )
+                eio = discover_eio(transport, chains=chains)
+                if eio is None:
+                    raise RuntimeError("no EIO core found on the target")
+                self._eio = eio
+                return self._ok(
+                    discovered=True,
+                    in_w=eio.in_w,
+                    out_w=eio.out_w,
+                    chain=eio.bscan_chain,
+                    base_addr=eio._base_addr,  # noqa: SLF001 - report discovered offset
+                )
+            except Exception:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
 
         if cmd == "eio_close":
             if self._eio is not None:
@@ -287,12 +665,16 @@ class RpcServer:
         if cmd == "eio_read":
             if self._eio is None:
                 raise RuntimeError("eio not connected")
-            return self._ok(value=self._eio.read_inputs())
+            v = self._eio.read_inputs()
+            # value stays a JSON number for back-compat; value_hex carries the
+            # full width so wide (multiword) EIO survives a 53-bit JS client.
+            return self._ok(value=v, value_hex=hex(v))
 
         if cmd == "eio_write":
             if self._eio is None:
                 raise RuntimeError("eio not connected")
-            self._eio.write_outputs(int(req["value"]))
+            # Accept a base-prefixed string so wide output words don't round.
+            self._eio.write_outputs(self._parse_int(req["value"]))
             return self._ok()
 
         if cmd == "axi_connect":
@@ -428,7 +810,7 @@ class RpcServer:
             if self._uart is None:
                 raise RuntimeError("uart not connected")
             count = int(req.get("count", 0))
-            timeout = float(req.get("timeout", 1.0))
+            timeout = _wait_sec(req, "timeout", 1.0)
             data = self._uart.recv(count=count, timeout=timeout)
             return self._ok(data=base64.b64encode(data).decode("ascii"),
                             bytes_received=len(data))

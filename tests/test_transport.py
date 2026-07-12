@@ -156,6 +156,32 @@ class TransportAbcTests(unittest.TestCase):
         self.assertEqual(results, [0xAA, 0xBB])
         self.assertEqual(call_log, [(0xAA, 8), (0xBB, 16)])
 
+    def test_read_reg_stable_base_default_reads_once(self):
+        """The base stable-read hook is opt-in and does not add extra scans."""
+        calls: list[int] = []
+
+        class TracingTransport(ConcreteTransport):
+            def read_reg(self, addr: int) -> int:
+                calls.append(addr)
+                return 0x1234
+
+        t = TracingTransport()
+        self.assertEqual(t.read_reg_stable(0x000C), 0x1234)
+        self.assertEqual(calls, [0x000C])
+
+    def test_xsdb_read_reg_stable_discards_warmup_read(self):
+        """hw_server overrides stable reads to discard one stale pipeline value."""
+        calls: list[int] = []
+        t = XilinxHwServerTransport()
+
+        def fake_read_reg(addr: int) -> int:
+            calls.append(addr)
+            return 0x10 if len(calls) == 1 else 0x20
+
+        t.read_reg = fake_read_reg  # type: ignore[method-assign]
+        self.assertEqual(t.read_reg_stable(0x000C), 0x20)
+        self.assertEqual(calls, [0x000C, 0x000C])
+
 
 # ---------------------------------------------------------------------------
 # OpenOcdTransport failure modes
@@ -202,6 +228,42 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         """close() is idempotent when called before connect()."""
         t = OpenOcdTransport()
         t.close()  # must not raise
+
+    def test_list_taps_parses_jtag_names(self):
+        """list_taps() splits OpenOCD 'jtag names' output."""
+        t = OpenOcdTransport()
+        with patch.object(t, "_cmd", return_value="GW1NR-9C.tap"):
+            self.assertEqual(t.list_taps(), ["GW1NR-9C.tap"])
+
+    def test_connect_resolves_auto_tap_to_first(self):
+        """tap='auto' is resolved to the first tap OpenOCD reports on connect."""
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        with patch("socket.create_connection", return_value=mock_sock), patch.object(
+            OpenOcdTransport, "list_taps", return_value=["GW1NR-9C.tap", "other.tap"]
+        ):
+            t = OpenOcdTransport(tap="auto")
+            t.connect()
+            self.assertEqual(t.tap, "GW1NR-9C.tap")
+
+    def test_connect_keeps_explicit_tap(self):
+        """A concrete tap name is left untouched (no auto-resolution)."""
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        with patch("socket.create_connection", return_value=mock_sock), patch.object(
+            OpenOcdTransport, "list_taps"
+        ) as list_taps:
+            t = OpenOcdTransport(tap="GW1NR-9C.tap")
+            t.connect()
+            self.assertEqual(t.tap, "GW1NR-9C.tap")
+            list_taps.assert_not_called()
+
+    def test_resolve_auto_tap_raises_when_no_taps(self):
+        """tap='auto' against an OpenOCD with no taps gives a clear error."""
+        t = OpenOcdTransport(tap="auto")
+        with patch.object(t, "list_taps", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "no JTAG taps"):
+                t._resolve_auto_tap()
 
     def test_select_chain_unknown_raises_value_error(self):
         """select_chain() with a chain not in ir_table raises ValueError."""
@@ -763,6 +825,19 @@ class TclInjectionTests(unittest.TestCase):
             bitfile="path/with spaces/file.bit",
         )
         self.assertEqual(t2.bitfile, "path/with spaces/file.bit")
+
+
+class TestOpenOcdTapValidation(unittest.TestCase):
+    """The OpenOCD tap is interpolated into TCL, so unsafe names are rejected."""
+
+    def test_rejects_injection_chars(self):
+        for bad in ("foo; exec calc", "foo\nshutdown", "a b", "x$y", "a[b]"):
+            with self.assertRaises(ValueError):
+                OpenOcdTransport(tap=bad)
+
+    def test_accepts_real_taps_and_sentinels(self):
+        for good in ("GW1NR-9C.tap", "xc7a100t.tap", "auto", ""):
+            OpenOcdTransport(tap=good)  # must not raise
 
 
 if __name__ == "__main__":

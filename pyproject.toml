@@ -28,6 +28,7 @@ classifiers = [
 [project.scripts]
 fcapz = "fcapz.cli:main"
 fcapz-gui = "fcapz.gui.main:main"
+fcapz-web = "fcapz.web.__main__:main"
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
@@ -39,6 +40,7 @@ include = ["fcapz*"]
 [tool.setuptools.package-data]
 "fcapz" = ["probes/*.prob"]
 "fcapz.gui" = ["assets/*.png", "assets/*.bin"]
+"fcapz.web" = ["static/**/*", "vendor/**/*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
@@ -46,6 +48,7 @@ gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 hdl = ["cocotb>=2", "cocotb-tools>=0.1.0", "cocotbext-axi>=0.1.26"]
 litex = ["litex"]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

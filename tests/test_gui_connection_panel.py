@@ -78,7 +78,7 @@ class TestConnectionPanel(unittest.TestCase):
 
         p._on_scan_targets_finished([])
 
-        self.assertIn("no JTAG targets", p._status.text())
+        self.assertIn("no JTAG taps/targets", p._status.text())
         info_box.assert_called_once()
 
     @patch("fcapz.gui.connection_panel.QMessageBox.warning")

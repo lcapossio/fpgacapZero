@@ -29,6 +29,13 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
+# Character whitelist for OpenOCD tap names. Unlike the XSDB filter/path (which
+# are quoted/braced), the tap is interpolated UNQUOTED into `irscan <tap> ...`
+# and `drscan <tap> ...`, which OpenOCD evaluates as TCL. A space, ';',
+# newline, '$', '[', '{', etc. could split the command or inject TCL (which
+# has `exec`). Restrict to the characters real tap names actually use.
+_OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
+
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
 
@@ -115,6 +122,25 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+def list_openocd_taps(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 6666,
+    timeout_sec: float = 5.0,
+) -> list[str]:
+    """Return JTAG tap names from a running OpenOCD instance (``jtag names``).
+
+    Requires OpenOCD to already be listening on its TCL RPC port (default
+    6666).  Used by the GUI's "Scan" button for the OpenOCD backend.
+    """
+    t = OpenOcdTransport(host=host, port=port, connect_timeout_sec=timeout_sec)
+    t.connect()
+    try:
+        return t.list_taps()
+    finally:
+        t.close()
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -196,6 +222,16 @@ class Transport(ABC):
         fails.  Returns the raw 32-bit value (unsigned).
         """
         raise NotImplementedError
+
+    def read_reg_stable(self, addr: int) -> int:
+        """Read a register, applying any transport-specific stale-read workaround.
+
+        The base implementation is a single ``read_reg`` call.  Transports
+        with a known JTAG pipeline hazard may override this to discard a
+        warmup read before returning data.  This is not data-integrity
+        verification: it does not compare reads or detect corruption.
+        """
+        return self.read_reg(addr)
 
     @abstractmethod
     def write_reg(self, addr: int, value: int) -> None:
@@ -315,6 +351,14 @@ class OpenOcdTransport(Transport):
     ):
         self.host = host
         self.port = port
+        # 'auto'/'' are resolved later from OpenOCD's own `jtag names`; any other
+        # value is user-supplied and is interpolated into OpenOCD TCL, so reject
+        # anything outside the safe tap-name set to prevent TCL injection.
+        if tap.strip().lower() not in ("", "auto") and not _OPENOCD_TAP_RE.match(tap):
+            raise ValueError(
+                f"unsafe OpenOCD tap name {tap!r}: only letters, digits, and "
+                "'. _ : -' are allowed (it is interpolated into OpenOCD TCL)."
+            )
         self.tap = tap
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
         self._connect_timeout_sec = float(connect_timeout_sec)
@@ -333,6 +377,26 @@ class OpenOcdTransport(Transport):
         except OSError:
             pass
         self._sock.settimeout(5)
+        if self.tap.strip().lower() in ("", "auto"):
+            self.tap = self._resolve_auto_tap()
+
+    def list_taps(self) -> list[str]:
+        """Return the JTAG tap names OpenOCD has configured (``jtag names``)."""
+        return self._cmd("jtag names").split()
+
+    def _resolve_auto_tap(self) -> str:
+        """Resolve ``tap='auto'`` to a concrete name via OpenOCD ``jtag names``.
+
+        Picks the first tap OpenOCD reports — single-FPGA chains have exactly
+        one.  Raises ``RuntimeError`` if OpenOCD has no taps configured.
+        """
+        taps = self.list_taps()
+        if not taps:
+            raise RuntimeError(
+                "tap='auto' but OpenOCD reports no JTAG taps. "
+                "Check your openocd.cfg ('jtag newtap ...')."
+            )
+        return taps[0]
 
     def close(self) -> None:
         if self._sock:
@@ -789,11 +853,12 @@ class XilinxHwServerTransport(Transport):
         raw = self._send(tcl)
         return self._parse_bits_u32(raw)
 
-    def read_reg_verified(self, addr: int) -> int:
-        """Read a register twice and return the second value.
+    def read_reg_stable(self, addr: int) -> int:
+        """Read through the hw_server register pipeline and return settled data.
 
-        Works around a JTAG pipeline stale-data issue where the first read
-        after a session change may return data from the previous address.
+        XSDB JTAG sequences can return data from the previous register window
+        on the first read after changing addresses or session state.  Discard
+        one warmup read and return the second scan.
         """
         self.read_reg(addr)
         return self.read_reg(addr)
@@ -844,7 +909,7 @@ class XilinxHwServerTransport(Transport):
     def _burst_samples_per_scan(self) -> int:
         """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
         if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_verified(0x000C)  # ADDR_SAMPLE_W
+            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
             if sw < 1:
                 sw = 8
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)

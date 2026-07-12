@@ -1,0 +1,362 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --panel: #131722;
+  --border: #232b3a;
+  --fg: #d6dae3;
+  --muted: #8a93a6;
+  --accent: #4ad0ff;
+  --ok: #46d369;
+  --err: #ff6b6b;
+  --warn: #ffd166;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+/* Full-height app: fixed header, dock fills the rest. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.app-shell .topbar {
+  flex: 0 0 auto;
+  padding: 0.5rem 1rem;
+}
+.dock {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Compact the dockview chrome (tab bar) to match the denser UI. */
+  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-tab-font-size: 12px;
+}
+
+/* Dockview wraps each panel's content in .dv-react-part (a definite-height
+   box). Make that the bounded scroll container so tall panels scroll instead
+   of clipping. Scoped to the dockview class, NOT to our .dock wrapper, because
+   with the "always" renderer panels live in an overlay container that may sit
+   outside .dock. */
+.dv-react-part {
+  height: 100%;
+  overflow: auto;
+}
+/* Panels inside a dock tab: flush, fill the tab body, grow with content. */
+.dv-react-part > .panel {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  min-height: 100%;
+  background: var(--panel);
+}
+.dock-empty {
+  padding: 1rem;
+}
+
+/* Run: a slim horizontal toolbar (its dock tab is the drag handle). */
+.runbar {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.18rem;
+  height: 100%;
+  padding: 0.2rem 0.55rem;
+  background: var(--panel);
+  overflow: auto;
+}
+.runbar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 1.45rem;
+  white-space: nowrap;
+}
+.runbar-row > * {
+  flex: 0 0 auto;
+}
+.runbar button {
+  padding: 0.12rem 0.5rem;
+}
+.runbar .inline {
+  margin-top: 0;
+}
+.runbar-status {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+.topbar .logo {
+  height: 26px;
+  width: auto;
+}
+.topbar h1 {
+  font-size: 1.3rem;
+  margin: 0;
+}
+
+/* "Tabs" dropdown: reopen closed dock tabs / reset the layout. */
+.tabs-menu {
+  position: relative;
+  margin-left: auto;
+}
+.tabs-menu > button {
+  padding: 0.2rem 0.6rem;
+}
+.tabs-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1000;
+  min-width: 9rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.tabs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-weight: 400;
+  text-align: left;
+}
+.tabs-menu-item:hover {
+  background: #0b0e14;
+}
+.tabs-menu-check {
+  display: inline-block;
+  width: 1rem;
+  color: var(--accent);
+}
+.tabs-menu-sep {
+  height: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--border);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.6rem;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+label.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+input,
+select,
+textarea {
+  background: #0b0e14;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.panel h3 {
+  margin: 0.9rem 0 0.45rem;
+  color: var(--fg);
+  font-size: 0.85rem;
+}
+.filepick input {
+  max-width: 16rem;
+}
+
+button {
+  background: var(--accent);
+  color: #04202b;
+  border: none;
+  border-radius: 5px;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.secondary {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+button.danger {
+  background: var(--err);
+  color: #2a0a0a;
+}
+.btnrow {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ok {
+  color: var(--ok);
+}
+
+/* Connected identity readout: a compact label / value grid. */
+.idinfo {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.3rem 0 0.85rem;
+  font-size: 0.85rem;
+}
+.idinfo dt {
+  color: var(--muted);
+}
+.idinfo dd {
+  margin: 0;
+  color: var(--fg);
+}
+
+/* One debug core in the "Cores" list. */
+.core {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.4rem 0;
+  background: #0b0e14;
+}
+.core-title {
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.core .idinfo {
+  margin: 0;
+}
+.err {
+  color: var(--err);
+}
+.warn {
+  color: var(--warn);
+}
+.muted {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Surfer viewer fills its dock panel. */
+.surfer-fill {
+  width: 100%;
+  height: 100%;
+}
+.surfer-fill iframe.surfer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #404040;
+}
+/* While dragging tabs, keep the Surfer iframe from swallowing the pointer so
+   drops register on the dock. */
+body.dv-dragging-tabs iframe {
+  pointer-events: none;
+}
+
+.bits {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.4rem 0;
+  flex-wrap: wrap;
+}
+.bitlabel {
+  width: 4rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.bit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: #0b0e14;
+}
+.bit.on {
+  background: var(--accent);
+  color: #04202b;
+  border-color: var(--accent);
+}
+.bit.btn {
+  cursor: pointer;
+}
+
+/* JTAG-AXI operation log */
+.axi-log {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem;
+  font: 0.78rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre;
+}

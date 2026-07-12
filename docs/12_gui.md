@@ -9,7 +9,9 @@
 > **Audience**: anyone who would rather click than type.  All the
 > same operations are also available via the CLI
 > ([chapter 10](10_cli_reference.md)) and the Python API
-> ([chapter 09](09_python_api.md)).
+> ([chapter 09](09_python_api.md)).  Prefer a browser, or need to
+> reach the board from another machine? See the web interface
+> ([chapter 18](18_web_interface.md)).
 
 ## What it is
 
@@ -81,10 +83,17 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **Backend** | Dropdown: `hw_server` (default) or `openocd` |
 | **Host** | TCP host of the transport, default `127.0.0.1` |
 | **Port** | TCP port, default `3121` for hw_server / `6666` for openocd |
-| **FPGA target** | hw_server target name (e.g. `xc7a100t`) or openocd TAP name |
+| **FPGA target / TAP** | hw_server target name (e.g. `xc7a100t`) or OpenOCD TAP name. For OpenOCD you can enter `auto` to use the first tap OpenOCD reports |
+| **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
 | **Bitfile** | Optional path to a `.bit` file; if set, the GUI runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected" |
-| **IR table** | Dropdown: `Xilinx 7-series` (default) or `Xilinx UltraScale / UltraScale+`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
+| **IR table** | Dropdown: `Xilinx 7-series` (default), `Xilinx UltraScale / UltraScale+`, or `Gowin (OpenOCD)`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
+
+> **Gowin boards** connect over the **OpenOCD** backend (the FTDI/Gowin cable
+> driven by an already-running `openocd`): set Backend = `openocd`, Port `6666`,
+> TAP = your tap name or `auto`, IR table = **Gowin (OpenOCD)**. The ELA tab
+> works immediately, and **EIO is auto-discovered and attached** on connect (see
+> the EIO panel below) — no USER chain or mux offset to enter.
 
 When you click **Connect**:
 
@@ -266,15 +275,22 @@ adjacent identical values render as a flat line, not a sawtooth.
 
 ### EIO panel
 
+On connect the GUI **auto-discovers and attaches** the EIO core: it probes the
+known locations — core-manager slots, then each USER chain at register offsets
+`0x0000` and `0x8000` — and attaches the first that reports the EIO identity
+(`'IO'`). You normally do not touch the controls below; they are a manual
+override.
+
 For managed designs, the **Core** selector lists detected EIO cores as
 `core 2`, `core 3`, and so on, with the selected USER chain and manager
 slot shown beside it.  Choosing a core attaches it immediately and shows
 the EIO identity / bus widths.  The Arty multi-core reference uses chain
 **1**, slots **2** and **3**.
 
-For legacy standalone EIO designs with no detected manager slot, the panel
-falls back to manual **JTAG chain**, optional **Managed slot**, and
-**Attach EIO** controls.
+For standalone or shared-chain EIO designs, the panel exposes manual
+**JTAG chain**, optional **Managed slot**, and a **Base** offset.  A
+**shared-chain** EIO — e.g. Gowin `EIO_EN=1`, which muxes EIO onto the ELA
+chain — lives at chain **1**, Base **0x8000** (discovery fills that in for you).
 
 For each input bit, **read-only checkboxes** update from
 `EioController.read_inputs()` while **Poll inputs** is checked.

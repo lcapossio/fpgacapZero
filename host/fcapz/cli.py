@@ -427,6 +427,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_probe.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
     eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -436,6 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_read.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
     eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -444,6 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Managed core slot on the selected chain",
+    )
+    eio_write.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
     eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
 
@@ -552,7 +570,9 @@ def main() -> int:
 
     # -- EIO commands ------------------------------------------------------
     if args.cmd in ("eio-probe", "eio-read", "eio-write"):
-        eio = EioController(transport, chain=args.chain, instance=args.instance)
+        eio = EioController(
+            transport, chain=args.chain, instance=args.instance, base_addr=args.base_addr
+        )
         try:
             eio.connect()
             if args.cmd == "eio-probe":
