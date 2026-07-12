@@ -154,8 +154,9 @@ fcapz capture --probe-file axi.prob ...    # capture with named AXI fields
 
 ## From the web UI
 
-Connect as usual — the web UI calls `axi_mon_probe` after every connect. When a
-monitor is found:
+Connect with the monitor's BSCAN chain in the Connection panel's **Chain**
+field (the Arty reference design taps the bridge bus on USER2, so Chain = 2) —
+the web UI calls `axi_mon_probe` after every connect. When a monitor is found:
 
 - the **Connection** panel's cores list shows an **AXI Monitor** card
   (protocol, address/data widths, decode layer, sample width);

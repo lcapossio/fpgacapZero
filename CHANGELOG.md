@@ -109,6 +109,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — Chain field:** the Connection panel exposes the BSCAN USER chain
+  (default 1), needed to reach cores on non-default chains — e.g. the Arty
+  reference design's AXI monitor on USER2. Hardware-validated on Arty A7:
+  detection, probe map, and decode-layer event triggers (aw_hs, any_err on a
+  SLVERR) all confirmed over the web RPC.
 - **Web — AXI monitor support:** the UI detects an AXI monitor on connect
   (`axi_mon_probe`), lists it in the Connection panel's cores, auto-applies its
   probe map so captures decode to named AXI fields, and adds an **AXI Mon** tab

@@ -159,6 +159,9 @@ export function ConnectionPanel({
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
+  // BSCAN USER chain of the ELA to drive (an AXI monitor is often on its own
+  // chain — e.g. the Arty reference design taps the bridge bus on USER2).
+  const [chain, setChain] = useState("1");
   // hw_server: XSDB target names (strings). openocd: probed compatible boards.
   const [targets, setTargets] = useState<string[]>([]);
   const [picked, setPicked] = useState("");
@@ -254,7 +257,7 @@ export function ConnectionPanel({
       // Left empty: the server infers the preset from the tap name (the one
       // authoritative copy of that mapping) and echoes it back.
       ir_table: "",
-      chain: 1,
+      chain: Number(chain) || 1,
     };
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
@@ -517,6 +520,14 @@ export function ConnectionPanel({
             value={manualTap}
             onChange={(e) => setManualTap(e.target.value)}
             placeholder="auto-detected if blank"
+          />
+        </label>
+        <label>
+          Chain
+          <input
+            value={chain}
+            onChange={(e) => setChain(e.target.value)}
+            title="BSCAN USER chain (1-4); AXI monitors often sit on their own chain"
           />
         </label>
         {needsToken && (
