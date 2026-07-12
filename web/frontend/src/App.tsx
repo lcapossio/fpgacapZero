@@ -8,6 +8,7 @@ import { ElaPanel } from "./components/ElaPanel";
 import { RunPanel } from "./components/RunPanel";
 import { EioPanel } from "./components/EioPanel";
 import { AxiPanel } from "./components/AxiPanel";
+import { AxiMonPanel } from "./components/AxiMonPanel";
 import { SurferView } from "./components/SurferView";
 
 function Empty({ text }: { text: string }) {
@@ -46,6 +47,9 @@ function AxiDock(_: IDockviewPanelProps) {
   const s = useSession();
   return s.conn ? <AxiPanel conn={s.conn} /> : <Empty text="Connect to a target first." />;
 }
+function AxiMonDock(_: IDockviewPanelProps) {
+  return <AxiMonPanel />;
+}
 function ViewerDock(_: IDockviewPanelProps) {
   const s = useSession();
   // Mount Surfer right away so its WASM loads up front; the waveform drops in
@@ -59,6 +63,7 @@ const components = {
   run: RunDock,
   eio: EioDock,
   axi: AxiDock,
+  axi_mon: AxiMonDock,
   viewer: ViewerDock,
 };
 
@@ -68,6 +73,7 @@ const PANELS: { id: keyof typeof components; title: string }[] = [
   { id: "ela", title: "ELA" },
   { id: "eio", title: "EIO" },
   { id: "axi", title: "AXI" },
+  { id: "axi_mon", title: "AXI Mon" },
   { id: "run", title: "Run" },
   { id: "viewer", title: "Viewer" },
 ];
@@ -101,6 +107,12 @@ function buildDefaultLayout(api: DockviewApi) {
     title: "AXI",
     position: { referencePanel: "ela", direction: "within" },
   });
+  api.addPanel({
+    id: "axi_mon",
+    component: "axi_mon",
+    title: "AXI Mon",
+    position: { referencePanel: "ela", direction: "within" },
+  });
   // Run gets its own slim group with a real tab — the tab is the drag handle
   // (dockview can only drag via tab/title bars, so a custom grip can't work).
   api.addPanel({
@@ -126,7 +138,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   const title = PANELS.find((p) => p.id === id)?.title;
   if (id === "run") {
     // Run lives in its own slim group under the config tabs.
-    const anchor = firstOpen(api, ["ela", "eio", "axi", "connection", "viewer"]);
+    const anchor = firstOpen(api, ["ela", "eio", "axi", "axi_mon", "connection", "viewer"]);
     api.addPanel({
       id,
       component: id,
@@ -137,7 +149,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     return;
   }
   if (id === "viewer") {
-    const anchor = firstOpen(api, ["connection", "ela", "eio", "axi", "run"]);
+    const anchor = firstOpen(api, ["connection", "ela", "eio", "axi", "axi_mon", "run"]);
     api.addPanel({
       id,
       component: id,
@@ -148,7 +160,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     return;
   }
   if (id === "connection") {
-    const anchor = firstOpen(api, ["ela", "eio", "axi", "viewer", "run"]);
+    const anchor = firstOpen(api, ["ela", "eio", "axi", "axi_mon", "viewer", "run"]);
     api.addPanel({
       id,
       component: id,
@@ -157,8 +169,8 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     });
     return;
   }
-  // ELA / EIO / AXI: stack with their sibling config tabs when any survive.
-  const sibling = firstOpen(api, ["ela", "eio", "axi"]);
+  // ELA / EIO / AXI / AXI Mon: stack with their sibling config tabs when any survive.
+  const sibling = firstOpen(api, ["ela", "eio", "axi", "axi_mon"]);
   const anchor = sibling ?? firstOpen(api, ["connection", "viewer", "run"]);
   api.addPanel({
     id,

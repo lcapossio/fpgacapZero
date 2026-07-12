@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { ConnectionParams, Identity } from "./api";
+import type { AxiMonInfo } from "./axiMon";
 
 /** The latest ELA capture, shared from the Run panel to the Viewer panel. */
 export interface CaptureState {
@@ -45,7 +46,10 @@ interface Session {
   conn: ConnectionParams | null;
   capture: CaptureState | null;
   ela: ElaConfig;
+  /** AXI monitor detected on the connected ELA (axi_mon_probe), or null. */
+  axiMon: AxiMonInfo | null;
   setEla: (patch: Partial<ElaConfig>) => void;
+  setAxiMon: (info: AxiMonInfo | null) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
   pushCapture: (capture: Omit<CaptureState, "seq">) => void;
@@ -66,6 +70,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [conn, setConn] = useState<ConnectionParams | null>(null);
   const [capture, setCapture] = useState<CaptureState | null>(null);
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
+  const [axiMon, setAxiMon] = useState<AxiMonInfo | null>(null);
 
   const value = useMemo<Session>(
     () => ({
@@ -73,7 +78,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       conn,
       capture,
       ela,
+      axiMon,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
+      setAxiMon,
       onConnected: (params, id) => {
         setConn(params);
         setIdentity(id);
@@ -82,11 +89,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setConn(null);
         setIdentity(null);
         setCapture(null);
+        setAxiMon(null);
       },
       pushCapture: (next) =>
         setCapture((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 })),
     }),
-    [identity, conn, capture, ela],
+    [identity, conn, capture, ela, axiMon],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

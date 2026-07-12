@@ -93,6 +93,11 @@ connected. The panels:
   live.
 - **AXI** — attach the JTAG-to-AXI4 bridge on a chain, then single 32-bit
   read/write (with `WSTRB`) and block dump, with an operation log.
+- **AXI Mon** — when the connected ELA is an [AXI monitor](19_axi_monitor.md),
+  this tab shows its geometry and builds AXI-aware triggers: transaction-event
+  checkboxes on decode builds (`any_err`, handshakes, …) or a write-address
+  match otherwise. The monitor's probe map is auto-applied on connect so
+  captures decode to named AXI fields.
 
 ## The API behind it
 

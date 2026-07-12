@@ -83,6 +83,16 @@ class FakeSegmentTransport(FakeTransport):
         return [0] * words
 
 
+class FakeAxiMonTransport(FakeTransport):
+    """FakeTransport plus the AXI monitor identity/geometry registers."""
+
+    def __init__(self, decode: bool = True) -> None:
+        super().__init__()
+        # AXI_MON_ID: "AM" magic | proto=1 (AXI4-Lite) | CAP_FLAGS bit0=DECODE_EN
+        self.regs[0x00E8] = (0x414D << 16) | (1 << 8) | (1 if decode else 0)
+        self.regs[0x00EC] = 32 | (32 << 8)  # AXI_GEOM: addr_w=32, data_w=32
+
+
 def _client(monkeypatch, **app_kwargs) -> TestClient:
     monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
     return TestClient(create_app(**app_kwargs))
@@ -586,6 +596,45 @@ def test_eio_discover_finds_shared_chain(monkeypatch):
     assert r["chain"] == 1
     assert r["base_addr"] == 0x8000
     assert (r["in_w"], r["out_w"]) == (2, 6)
+
+
+def test_axi_mon_probe_reports_geometry_and_probes(monkeypatch):
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=True)
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is True
+    assert r["proto"] == "AXI4LITE"
+    assert r["decode"] is True
+    assert (r["addr_w"], r["data_w"]) == (32, 32)
+    assert r["sample_width"] == 160  # 152 + 8-bit events word
+    names = [p["name"] for p in r["probes"]]
+    assert "awaddr" in names and "any_err" in names  # fields + decode events
+
+
+def test_axi_mon_probe_absent_on_plain_ela(monkeypatch):
+    """A plain ELA (no AXI_MON_ID magic) reports present=False, not an error."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is False
+
+
+def test_list_cores_reports_axi_mon(monkeypatch):
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=False)
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    cores = _rpc(c, "list_cores").json()["cores"]
+    mon = [x for x in cores if x["type"] == "axi_mon"]
+    assert len(mon) == 1
+    assert mon[0]["name"] == "AXI Monitor"
+    assert mon[0]["info"]["proto"] == "AXI4LITE"
+    assert mon[0]["info"]["decode"] is False
+    assert mon[0]["info"]["sample_width"] == 152
 
 
 def test_ir_table_mapping():

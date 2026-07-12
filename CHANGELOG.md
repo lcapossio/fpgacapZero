@@ -109,6 +109,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — AXI monitor support:** the UI detects an AXI monitor on connect
+  (`axi_mon_probe`), lists it in the Connection panel's cores, auto-applies its
+  probe map so captures decode to named AXI fields, and adds an **AXI Mon** tab
+  with an AXI-aware trigger builder — transaction-event checkboxes on
+  `DECODE_EN=1` builds, write-address match otherwise. Server side,
+  `axi_mon_probe` now reports `decode` and `list_cores` includes the monitor.
 - **Web — Tabs menu:** a top-bar dropdown that toggles dock tabs (checked =
   open; click to close or reopen) and a **Reset layout** action that rebuilds
   the default arrangement in place — previously a closed tab could only be

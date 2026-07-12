@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { getToken, rpc, setToken } from "../api";
-import type { Board, ConnectionParams, Core, Identity } from "../api";
+import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
+import { probesToText } from "../axiMon";
+import type { AxiMonInfo } from "../axiMon";
+import { useSession } from "../session";
 
 const BACKENDS = ["openocd", "hw_server"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
@@ -78,7 +81,9 @@ function CoreCard({ core }: { core: Core }) {
   return (
     <div className="core">
       <div className="core-title">
-        {core.type === "ela" || core.type === "eio" ? core.name : coreName(core.core_id)}{" "}
+        {core.type === "ela" || core.type === "eio" || core.type === "axi_mon"
+          ? core.name
+          : coreName(core.core_id)}{" "}
         <span className="muted">
           v{core.version_major}.{core.version_minor} · 0x
           {core.core_id.toString(16).toUpperCase()}
@@ -113,6 +118,20 @@ function CoreCard({ core }: { core: Core }) {
             <dd>{Number(info.in_w)}</dd>
             <dt>Outputs</dt>
             <dd>{Number(info.out_w)}</dd>
+          </>
+        )}
+        {core.type === "axi_mon" && (
+          <>
+            <dt>Protocol</dt>
+            <dd>{String(info.proto)}</dd>
+            <dt>Bus</dt>
+            <dd>
+              addr {Number(info.addr_w)} · data {Number(info.data_w)}
+            </dd>
+            <dt>Decode layer</dt>
+            <dd>{info.decode ? "on (event triggers)" : "off"}</dd>
+            <dt>Sample width</dt>
+            <dd>{Number(info.sample_width)} bits</dd>
           </>
         )}
         <dt>Location</dt>
@@ -162,6 +181,7 @@ export function ConnectionPanel({
     ir_table: string;
   } | null>(null);
   const [cores, setCores] = useState<Core[]>([]);
+  const { ela, setEla, setAxiMon } = useSession();
 
   function resetScan() {
     setTargets([]);
@@ -182,6 +202,33 @@ export function ConnectionPanel({
     } catch {
       setCores([]); // fall back to the ELA synthesized from probe
     }
+  }
+
+  /** Detect an AXI monitor on the connected ELA and share it with the AXI Mon
+   *  tab. When one is found and no probes are configured yet, apply its probe
+   *  map so the first capture already shows named AXI fields. */
+  async function detectAxiMon() {
+    try {
+      const r = await rpc("axi_mon_probe", {}, CONNECT_TIMEOUT);
+      if (r.present) {
+        const info: AxiMonInfo = {
+          proto: String(r.proto),
+          addr_w: Number(r.addr_w),
+          data_w: Number(r.data_w),
+          decode: Boolean(r.decode),
+          sample_width: Number(r.sample_width),
+          probes: (r.probes as ProbeSpec[]) ?? [],
+        };
+        setAxiMon(info);
+        if (!ela.probesText.trim() && info.probes.length) {
+          setEla({ probesText: probesToText(info.probes) });
+        }
+        return;
+      }
+    } catch {
+      /* older server or transient error — treat as no monitor */
+    }
+    setAxiMon(null);
   }
 
   function changeBackend(b: string) {
@@ -217,6 +264,7 @@ export function ConnectionPanel({
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
     loadCores();
+    detectAxiMon();
   }
 
   /** Connect to a discovered board (carries its own port/tap/ir_table). */
@@ -241,6 +289,7 @@ export function ConnectionPanel({
     });
     onConnected(params, r.probe as Identity);
     loadCores();
+    detectAxiMon();
   }
 
   async function connect() {

@@ -17,7 +17,7 @@ from .analyzer import (
     _infer_ir_table_name,
     discover_boards,
 )
-from .axi_monitor import AxiMonitor
+from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -63,6 +63,7 @@ _CORE_NAMES = {
     0x434D: "Core Manager",
     0x4A58: "EJTAG-AXI bridge",
     0x4A55: "EJTAG-UART",
+    0x414D: "AXI Monitor",
 }
 
 
@@ -162,6 +163,31 @@ class RpcServer:
                 "version_major": eio.version_major,
                 "version_minor": eio.version_minor,
                 "info": {"in_w": eio.in_w, "out_w": eio.out_w},
+            })
+
+        # The AXI monitor is the connected ELA plus an identity/geometry pair —
+        # report it so clients can label the session as a bus monitor.
+        try:
+            mon = AxiMonitor(analyzer)
+            geo = mon.geometry() if mon.present else None
+        except Exception:
+            geo = None
+        if geo is not None and ela is not None:
+            cores.append({
+                "type": "axi_mon",
+                "name": _CORE_NAMES[AXI_MON_MAGIC],
+                "core_id": AXI_MON_MAGIC,
+                "chain": analyzer.bscan_chain,
+                "base_addr": 0,
+                "version_major": ela["version_major"],
+                "version_minor": ela["version_minor"],
+                "info": {
+                    "proto": geo.proto,
+                    "addr_w": geo.addr_w,
+                    "data_w": geo.data_w,
+                    "decode": geo.decode,
+                    "sample_width": geo.sample_width,
+                },
             })
         return cores
 
@@ -527,6 +553,7 @@ class RpcServer:
                 proto=geo.proto,
                 addr_w=geo.addr_w,
                 data_w=geo.data_w,
+                decode=geo.decode,
                 sample_width=geo.sample_width,
                 probes=[{"name": p.name, "width": p.width, "lsb": p.lsb} for p in probes],
             )

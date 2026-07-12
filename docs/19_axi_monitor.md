@@ -154,11 +154,24 @@ fcapz capture --probe-file axi.prob ...    # capture with named AXI fields
 
 ## From the web UI
 
-Connect as usual. The ELA tab calls `axi_mon_probe`, and if a monitor is found
-it shows an **"AXI monitor detected"** banner and auto-loads the probe map, so
-captures render named AXI fields in the embedded Surfer viewer. To trigger on an
-event on a decode build, set the ELA trigger value/mask to the events byte (e.g.
-`0x80`/`0x80` for `any_err`).
+Connect as usual — the web UI calls `axi_mon_probe` after every connect. When a
+monitor is found:
+
+- the **Connection** panel's cores list shows an **AXI Monitor** card
+  (protocol, address/data widths, decode layer, sample width);
+- the probe map is **auto-applied** to the ELA tab's named signals (only if you
+  hadn't configured probes yourself), so the first capture already renders
+  `awaddr`, `wdata`, `bresp`, … in the embedded Surfer viewer;
+- the **AXI Mon** tab becomes a trigger builder. On `DECODE_EN=1` builds, tick
+  the transaction events to trigger on (`any_err`, `b_hs`, …) and **Apply event
+  trigger** — the trigger fires when all selected events assert in the same
+  cycle. On `DECODE_EN=0` builds it offers a **write-address trigger**
+  (`awaddr` match) instead. Either way the builder just fills the shared ELA
+  trigger value/mask — field positions come from the probe map the server
+  returned, and arming stays in the **Run** tab.
+
+Captures behave like any wide ELA capture: above 53 bits the UI automatically
+uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).
 
 ## Limitations and roadmap
 
