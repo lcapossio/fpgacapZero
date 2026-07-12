@@ -40,7 +40,7 @@ re-run `npm run build` and commit the updated `host/fcapz/web/static/`.
 | File | |
 |---|---|
 | `src/api.ts` | the `rpc(cmd, params)` client + shared types |
-| `src/App.tsx` | dockable tab layout; holds the active connection params + identity |
+| `src/App.tsx` | dockable tab layout + Tabs menu (toggle panels, reset layout) |
 | `src/session.tsx` | shared session state (ELA config, last capture) |
 | `src/components/ConnectionPanel.tsx` | discover / connect / cores list / disconnect |
 | `src/components/ElaPanel.tsx` | capture configuration (trigger, probes, advanced) |
