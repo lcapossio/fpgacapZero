@@ -98,6 +98,32 @@ jobs:
             tests/test_host_stack.py::AnalyzerTests::test_capture_reads_32_bit_timestamps_via_burst_block \
             -v --tb=short
 
+  # ── 3b. Frontend build + static bundle drift guard ────────────────
+  # Rebuilds the web UI and fails if the committed bundle under
+  # host/fcapz/web/static is stale relative to web/frontend/src (Vite writes
+  # straight into the package's static dir, and both are committed).
+  frontend-build:
+    name: Frontend build + static drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web/frontend
+        run: npm ci
+      - name: Run frontend unit tests (vitest)
+        working-directory: web/frontend
+        run: npm test
+      - name: Build the web bundle (writes into host/fcapz/web/static)
+        working-directory: web/frontend
+        run: npm run build
+      - name: Fail if the committed static bundle is stale
+        run: git diff --exit-code -- host/fcapz/web/static
+
   # ── 4. Strict RTL lint (Verilator) ───────────────────────────────
   lint-rtl:
     name: Strict RTL lint (Verilator)

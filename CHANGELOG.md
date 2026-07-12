@@ -7,9 +7,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Web — OpenOCD tap injection:** the OpenOCD tap name is now validated
+  (`[A-Za-z0-9._:-]+`) before it is interpolated into OpenOCD TCL, closing a
+  command-injection / RCE path from an attacker-controlled `tap`.
+- **Web — cross-origin & DNS rebinding:** cross-origin API sharing is now OFF
+  by default (the bundled UI is same-origin; opt in with `--cors-origin`), and
+  when bound to loopback the server rejects requests whose `Host` header is not
+  a loopback name. Together these stop a malicious website from driving the
+  board (or starting OpenOCD) via the local API.
+
 ### Changed
 
-- **Version:** Bumped project/RTL identity version to `0.4.0`.
+- **Web:** the default HTTP port is now `7373` (was `8000`), to avoid clashes
+  with the many tools that default to 8000. Override with `--port`.
+- **Version:** Bumped project/RTL identity version to `0.4.5`.
 - **EJTAG bridges:** EJTAG-AXI and EJTAG-UART now expose ELA/EIO-style
   packed `VERSION` identities through their native `CMD_CONFIG` paths:
   `JX` (`0x4A58`) for AXI and `JU` (`0x4A55`) for UART, with major/minor
@@ -45,9 +58,79 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `CMD_CONFIG` identities instead. `EioController.connect()` selects its
   USER chain before the transport-level ready probe, so USER3 EIO connects
   no longer depend on USER1/ELA responding first.
+- **Web — wide bit vectors:** ELA trigger value/mask and EIO values now cross
+  JSON as hex/decimal strings (parsed with full precision) and the frontend
+  uses BigInt, so values wider than 53/31 bits no longer round or truncate.
+  `eio_read` adds a full-width `value_hex`; `eio_write` accepts hex strings.
+- **Web — Disconnect:** `close` is now a full session teardown, releasing the
+  EIO / AXI / UART transports (and any bare transport from a partial connect),
+  not just the analyzer.
+- **Web — hw_server connect:** the XSDB-backed connect path uses a larger
+  budget than OpenOCD's fast TCL (capped at 15 s), so a slow XSDB cold start no
+  longer aborts the connect prematurely.
+- **Web — segmented wide captures:** segmented `capture` now honors the
+  requested `format`; wide (>53-bit) segmented captures no longer attach
+  JSON-number samples, so the UI's Download JSON can't export rounded data.
+- **Web — AXI addressing:** the AXI panel normalizes addresses/data to
+  canonical `0x…` hex before sending (bare decimal input previously targeted a
+  different register than the one displayed) and rejects malformed input.
+- **Web — auto re-arm:** a per-window trigger timeout re-arms instead of
+  stopping with an error, so sparse triggers are captured as intended.
+- **Web — EIO polling:** the input poller keeps at most one `eio_read` in
+  flight, so armed captures no longer stack timed-out polls behind the
+  server's command lock.
+- **Web — board discovery:** `discover_boards` accepts a `budget` (overall
+  wall-clock cap); the UI sends 12 s so discovery always answers before the
+  client aborts and cannot keep the command lock busy afterwards.
+- **Web — loopback checks:** loopback detection now uses `ipaddress`
+  (127.0.0.0/8, `::1`, IPv4-mapped `::ffff:127.0.0.1`), fixing OpenOCD control
+  being denied to local browsers on dual-stack binds; the `--token` warning
+  uses the same logic.
+- **Web — WebSocket:** valid-JSON non-object frames (e.g. `42`) get an in-band
+  `{ok:false}` reply instead of crashing the connection.
+- **Web — viewer:** the Vite dev server proxies `/surfer` to the backend (the
+  Viewer tab was blank under `npm run dev`), and Surfer's first-load signal
+  setup is no longer lost when a second capture arrives within ~450 ms.
+- **Web — IR table:** `connect` infers `ir_table` from the tap name server-side
+  and echoes the resolved preset; the frontend's duplicate mapping is gone.
+- **Web — Run toolbar drag:** the Run bar's `::` grip was decorative (dockview
+  only drags via tab/title bars) — the Run panel now has a real "Run" tab that
+  drags, stacks, and closes like every other panel; the grip is gone.
+- **RPC — segmented VCD:** `capture` with `segments: true` and `include_vcd`
+  now returns **all** segments concatenated on the time axis (with a `segment`
+  marker wire), not just segment 0's waveform.
+- **RPC — timeout clamping:** caller-supplied waits (capture/scan/uart_recv
+  `timeout`, `openocd_start` `wait`, discovery `budget`) are clamped to 300 s
+  so a handful of huge timeouts can't pin every web threadpool worker.
+- **Web — OpenOCD double-spawn:** a second `openocd_start` on the same port
+  during OpenOCD's bind window now waits on the pending spawn instead of
+  launching a second process that orphaned the first (both fighting for the
+  JTAG adapter).
 
 ### Added
 
+- **Web — Tabs menu:** a top-bar dropdown that toggles dock tabs (checked =
+  open; click to close or reopen) and a **Reset layout** action that rebuilds
+  the default arrangement in place — previously a closed tab could only be
+  recovered by reloading the page, which also dropped the UI session.
+- **Web interface (`fcapz-web`):** New browser front-end over the unified
+  JSON-RPC API — a FastAPI gateway (`python -m fcapz.web`) plus a React/Vite UI
+  with dockable panels (Connection, ELA, Run, EIO, JTAG-AXI) and an embedded,
+  self-hosted Surfer waveform viewer that reloads captures in place. Local or
+  token-gated network access; auto-scans JTAG targets and auto-discovers EIO on
+  connect. Install with `pip install -e ".[web]"`, then run `fcapz-web`. See
+  [`docs/18_web_interface.md`](docs/18_web_interface.md).
+- **Web — board discovery:** browser Connect discovers fpgacapZero-compatible
+  boards over OpenOCD (probes each tap for the ELA identity, sweeps TCL ports),
+  connects automatically to a single board, offers a picker for several, and
+  fails only when none are compatible. New `discover_boards` RPC.
+- **Web — server-managed OpenOCD:** `fcapz-web --openocd <exe> --openocd-cfg
+  <cfg>` lets the UI start OpenOCD itself; Connect brings it up automatically
+  when no board is reachable (localhost-only, allow-listed configs). New
+  `openocd_start` / `openocd_stop` / `openocd_status` RPC.
+- **Web — cores listing:** the Connection panel lists the cores present (the
+  ELA and any EIO) as labeled cards with their parameters and JTAG location,
+  and names the core instead of showing the raw magic. New `list_cores` RPC.
 - **EJTAG-AXI RTL:** Vendor wrappers now expose `CMD_FIFO_DEPTH` and
   `RESP_FIFO_DEPTH` independently from burst `FIFO_DEPTH`; the Arty
   reference sets both command/response queues to 16 and forces the small
@@ -145,6 +228,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Tests
 
+- **Web frontend:** vitest unit tests for the frontend's pure logic
+  (`toHexParam` hex/decimal normalization, probe-text parsing, and the
+  `rpc()`/`RpcError` envelope contract that auto re-arm depends on), run via
+  `npm test` and wired into the CI `frontend-build` job before the bundle
+  build.
 - Added `tb/fcapz_ela_bug_probe_tb.sv` as a normal regression testbench for
   the ELA capture-window, decimated-trigger, sequencer-count, timestamp, and
   wide-sample readback cases.

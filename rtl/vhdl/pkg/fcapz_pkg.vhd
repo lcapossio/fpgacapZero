@@ -12,7 +12,7 @@ use ieee.std_logic_1164.all;
 package fcapz_pkg is
     constant FCAPZ_VERSION_MAJOR : std_logic_vector(7 downto 0) := x"00";
     constant FCAPZ_VERSION_MINOR : std_logic_vector(7 downto 0) := x"04";
-    constant FCAPZ_VERSION_PATCH : std_logic_vector(7 downto 0) := x"00";
+    constant FCAPZ_VERSION_PATCH : std_logic_vector(7 downto 0) := x"05";
 
     constant FCAPZ_ELA_CORE_ID : std_logic_vector(15 downto 0) := x"4C41"; -- "LA" - Logic Analyzer
     constant FCAPZ_EIO_CORE_ID : std_logic_vector(15 downto 0) := x"494F"; -- "IO" - Embedded I/O

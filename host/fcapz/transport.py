@@ -29,6 +29,13 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
 
+# Character whitelist for OpenOCD tap names. Unlike the XSDB filter/path (which
+# are quoted/braced), the tap is interpolated UNQUOTED into `irscan <tap> ...`
+# and `drscan <tap> ...`, which OpenOCD evaluates as TCL. A space, ';',
+# newline, '$', '[', '{', etc. could split the command or inject TCL (which
+# has `exec`). Restrict to the characters real tap names actually use.
+_OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
+
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
 
@@ -344,6 +351,14 @@ class OpenOcdTransport(Transport):
     ):
         self.host = host
         self.port = port
+        # 'auto'/'' are resolved later from OpenOCD's own `jtag names`; any other
+        # value is user-supplied and is interpolated into OpenOCD TCL, so reject
+        # anything outside the safe tap-name set to prevent TCL injection.
+        if tap.strip().lower() not in ("", "auto") and not _OPENOCD_TAP_RE.match(tap):
+            raise ValueError(
+                f"unsafe OpenOCD tap name {tap!r}: only letters, digits, and "
+                "'. _ : -' are allowed (it is interpolated into OpenOCD TCL)."
+            )
         self.tap = tap
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
         self._connect_timeout_sec = float(connect_timeout_sec)
