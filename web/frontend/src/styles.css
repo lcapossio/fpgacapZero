@@ -67,7 +67,7 @@ body {
   padding: 1rem;
 }
 
-/* Run: a slim horizontal toolbar — left grip handle, controls to the right. */
+/* Run: a slim horizontal toolbar (its dock tab is the drag handle). */
 .runbar {
   display: flex;
   flex-direction: column;
@@ -88,16 +88,6 @@ body {
 }
 .runbar-row > * {
   flex: 0 0 auto;
-}
-.runbar-downloads {
-  padding-left: 1.45rem;
-}
-.runbar-grip {
-  color: var(--muted);
-  cursor: grab;
-  font-size: 1rem;
-  line-height: 1;
-  user-select: none;
 }
 .runbar button {
   padding: 0.12rem 0.5rem;

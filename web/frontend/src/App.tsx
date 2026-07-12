@@ -101,17 +101,14 @@ function buildDefaultLayout(api: DockviewApi) {
     title: "AXI",
     position: { referencePanel: "ela", direction: "within" },
   });
-  const runGroup = api.addGroup({
-    id: "run-group",
-    referencePanel: "ela",
-    direction: "below",
-    hideHeader: true,
-    initialHeight: 58,
-  });
+  // Run gets its own slim group with a real tab — the tab is the drag handle
+  // (dockview can only drag via tab/title bars, so a custom grip can't work).
   api.addPanel({
     id: "run",
     component: "run",
-    position: { referenceGroup: runGroup, direction: "within" },
+    title: "Run",
+    position: { referencePanel: "ela", direction: "below" },
+    initialHeight: 88,
   });
   // Select ELA at startup (EIO/AXI were added after it and would otherwise win).
   api.getPanel("ela")?.api.setActive();
@@ -128,19 +125,15 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (api.getPanel(id)) return;
   const title = PANELS.find((p) => p.id === id)?.title;
   if (id === "run") {
-    // Run lives in its own slim header-less group under the config tabs.
+    // Run lives in its own slim group under the config tabs.
     const anchor = firstOpen(api, ["ela", "eio", "axi", "connection", "viewer"]);
-    if (!anchor) {
-      api.addPanel({ id, component: id, title }); // empty layout: plain tab
-      return;
-    }
-    const group = api.addGroup({
-      referencePanel: anchor,
-      direction: "below",
-      hideHeader: true,
-      initialHeight: 58,
+    api.addPanel({
+      id,
+      component: id,
+      title,
+      ...(anchor ? { position: { referencePanel: anchor, direction: "below" as const } } : {}),
+      initialHeight: 88,
     });
-    api.addPanel({ id, component: id, position: { referenceGroup: group, direction: "within" } });
     return;
   }
   if (id === "viewer") {

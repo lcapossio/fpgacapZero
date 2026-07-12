@@ -93,6 +93,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   setup is no longer lost when a second capture arrives within ~450 ms.
 - **Web — IR table:** `connect` infers `ir_table` from the tap name server-side
   and echoes the resolved preset; the frontend's duplicate mapping is gone.
+- **Web — Run toolbar drag:** the Run bar's `::` grip was decorative (dockview
+  only drags via tab/title bars) — the Run panel now has a real "Run" tab that
+  drags, stacks, and closes like every other panel; the grip is gone.
 - **RPC — segmented VCD:** `capture` with `segments: true` and `include_vcd`
   now returns **all** segments concatenated on the time axis (with a `segment`
   marker wire), not just segment 0's waveform.

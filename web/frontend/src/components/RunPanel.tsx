@@ -136,9 +136,6 @@ export function RunPanel({ identity }: { identity: Identity }) {
   return (
     <div className="runbar">
       <div className="runbar-row">
-        <span className="runbar-grip" title="Run controls" aria-hidden>
-          ::
-        </span>
         <button onClick={() => start(false)} disabled={locked}>
           {busy ? "Arming..." : "Arm"}
         </button>
