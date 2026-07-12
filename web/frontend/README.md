@@ -21,6 +21,14 @@ Open <http://localhost:5173> and press **Connect** — compatible boards are
 discovered automatically (the IR table is inferred server-side from the tap
 name). Host/port/tap can be overridden in the Connection panel when needed.
 
+## Test
+
+```bash
+npm test          # vitest unit tests (api.ts parsing + rpc error contract)
+```
+
+CI runs these in the `frontend-build` job before rebuilding the bundle.
+
 ## Build (production)
 
 ```bash

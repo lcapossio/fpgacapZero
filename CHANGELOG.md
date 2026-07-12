@@ -225,6 +225,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Tests
 
+- **Web frontend:** vitest unit tests for the frontend's pure logic
+  (`toHexParam` hex/decimal normalization, probe-text parsing, and the
+  `rpc()`/`RpcError` envelope contract that auto re-arm depends on), run via
+  `npm test` and wired into the CI `frontend-build` job before the bundle
+  build.
 - Added `tb/fcapz_ela_bug_probe_tb.sv` as a normal regression testbench for
   the ELA capture-window, decimated-trigger, sequencer-count, timestamp, and
   wide-sample readback cases.

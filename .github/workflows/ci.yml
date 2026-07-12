@@ -115,6 +115,9 @@ jobs:
       - name: Install frontend dependencies
         working-directory: web/frontend
         run: npm ci
+      - name: Run frontend unit tests (vitest)
+        working-directory: web/frontend
+        run: npm test
       - name: Build the web bundle (writes into host/fcapz/web/static)
         working-directory: web/frontend
         run: npm run build
