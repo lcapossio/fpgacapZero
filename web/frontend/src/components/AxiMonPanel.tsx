@@ -6,7 +6,7 @@ import { useSession } from "../session";
  *  trigger builder. The monitor *is* the connected ELA, so applying anything
  *  here just fills the shared ELA config — arming stays in the Run tab. */
 export function AxiMonPanel() {
-  const { axiMon, ela, setEla, conn } = useSession();
+  const { axiMon, axiMonChains, ela, setEla, conn } = useSession();
   const [selected, setSelected] = useState<string[]>(["any_err"]);
   const [addr, setAddr] = useState("0x0");
   const [applied, setApplied] = useState("");
@@ -24,11 +24,19 @@ export function AxiMonPanel() {
     return (
       <section className="panel">
         <h2>AXI Monitor</h2>
-        <p className="muted">
-          No AXI monitor on this target — the connected ELA reports no
-          AXI_MON identity. See the manual&apos;s AXI monitor chapter for how
-          to instantiate one.
-        </p>
+        {axiMonChains.length > 0 ? (
+          <p className="warn">
+            No AXI monitor on chain {conn.chain}, but one answered on chain{" "}
+            {axiMonChains.join(" and ")} — set <b>Chain</b> to{" "}
+            {axiMonChains[0]} in the Connection panel and reconnect.
+          </p>
+        ) : (
+          <p className="muted">
+            No AXI monitor on this target — the connected ELA reports no
+            AXI_MON identity. See the manual&apos;s AXI monitor chapter for how
+            to instantiate one.
+          </p>
+        )}
       </section>
     );
   }

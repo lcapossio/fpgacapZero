@@ -228,6 +228,12 @@ export function ConnectionPanel({
         }
         return;
       }
+      // Not on this chain — surface where a monitor *was* seen, if anywhere.
+      const hint = Array.isArray(r.found_on_chains)
+        ? (r.found_on_chains as number[])
+        : [];
+      setAxiMon(null, hint);
+      return;
     } catch {
       /* older server or transient error — treat as no monitor */
     }

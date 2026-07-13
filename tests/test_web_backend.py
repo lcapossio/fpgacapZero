@@ -622,6 +622,33 @@ def test_axi_mon_probe_absent_on_plain_ela(monkeypatch):
     assert r["ok"] is True and r["present"] is False
 
 
+class FakeChainedAxiMonTransport(FakeTransport):
+    """AXI monitor registers answer only on USER chain 2 (like the Arty design)."""
+
+    _AXI_REGS = {
+        0x00E8: (0x414D << 16) | (1 << 8) | 1,
+        0x00EC: 32 | (32 << 8),
+    }
+
+    def read_reg(self, addr: int) -> int:
+        if addr in self._AXI_REGS:
+            return self._AXI_REGS[addr] if self.active_chain == 2 else 0
+        return super().read_reg(addr)
+
+
+def test_axi_mon_probe_hints_other_chain(monkeypatch):
+    """Connected to chain 1 while the monitor lives on chain 2: absent, but the
+    response points at the chain where a monitor identity answered."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # chain 1
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is False
+    assert r["found_on_chains"] == [2]
+
+
 def test_list_cores_reports_axi_mon(monkeypatch):
     monkeypatch.setattr(
         RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=False)

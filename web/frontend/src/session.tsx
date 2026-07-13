@@ -48,8 +48,10 @@ interface Session {
   ela: ElaConfig;
   /** AXI monitor detected on the connected ELA (axi_mon_probe), or null. */
   axiMon: AxiMonInfo | null;
+  /** Other USER chains where a monitor answered (hint when axiMon is null). */
+  axiMonChains: number[];
   setEla: (patch: Partial<ElaConfig>) => void;
-  setAxiMon: (info: AxiMonInfo | null) => void;
+  setAxiMon: (info: AxiMonInfo | null, foundOnChains?: number[]) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
   pushCapture: (capture: Omit<CaptureState, "seq">) => void;
@@ -70,7 +72,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [conn, setConn] = useState<ConnectionParams | null>(null);
   const [capture, setCapture] = useState<CaptureState | null>(null);
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
-  const [axiMon, setAxiMon] = useState<AxiMonInfo | null>(null);
+  const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
+  const [axiMonChains, setAxiMonChains] = useState<number[]>([]);
 
   const value = useMemo<Session>(
     () => ({
@@ -79,8 +82,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       capture,
       ela,
       axiMon,
+      axiMonChains,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
-      setAxiMon,
+      setAxiMon: (info, foundOnChains = []) => {
+        setAxiMonState(info);
+        setAxiMonChains(info ? [] : foundOnChains);
+      },
       onConnected: (params, id) => {
         setConn(params);
         setIdentity(id);
@@ -89,12 +96,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setConn(null);
         setIdentity(null);
         setCapture(null);
-        setAxiMon(null);
+        setAxiMonState(null);
+        setAxiMonChains([]);
       },
       pushCapture: (next) =>
         setCapture((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 })),
     }),
-    [identity, conn, capture, ela, axiMon],
+    [identity, conn, capture, ela, axiMon, axiMonChains],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;
