@@ -7,6 +7,7 @@ import type { AxiMonInfo } from "./axiMon";
 
 // Mirrors the bundled axi4lite_32_decode.prob layout (events in the low byte).
 const DECODE_INFO: AxiMonInfo = {
+  chain: 2,
   proto: "AXI4LITE",
   addr_w: 32,
   data_w: 32,
@@ -23,6 +24,7 @@ const DECODE_INFO: AxiMonInfo = {
 
 // Mirrors axi4lite_32.prob (no decode layer; awaddr in the low 32 bits).
 const PLAIN_INFO: AxiMonInfo = {
+  chain: 2,
   proto: "AXI4LITE",
   addr_w: 32,
   data_w: 32,

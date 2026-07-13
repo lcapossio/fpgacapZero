@@ -111,12 +111,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Web — chain autodetection:** `connect` without a `chain` scans the BSCAN
   USER chains and binds to the first debug core it finds (echoing the resolved
-  chain); `list_cores` reports cores on other chains too. The UI drops the
-  Chain field entirely — core cards get a **Use this core** button and the AXI
-  Mon tab a one-click **Switch to AXI monitor** when the monitor lives on
-  another chain (e.g. the Arty reference design's USER2). Hardware-validated
-  on Arty A7: detection, probe map, and decode-layer event triggers (aw_hs,
-  any_err on a SLVERR) all confirmed over the web RPC.
+  chain); `list_cores` reports cores on other chains too, and `axi_mon_probe`
+  returns the monitor's full identity (with its `chain`) from any core. The UI
+  drops the Chain field entirely — core cards get a **Use this core** button,
+  and the AXI Mon tab works regardless of the active core: applying a trigger
+  or probe map re-binds the session to the monitor automatically, with each
+  core keeping its own ELA config across switches (e.g. the Arty reference
+  design's monitor on USER2). Hardware-validated on Arty A7: detection, probe
+  map, and decode-layer event triggers (aw_hs, any_err on a SLVERR) all
+  confirmed over the web RPC.
 - **Web — AXI monitor support:** the UI detects an AXI monitor on connect
   (`axi_mon_probe`), lists it in the Connection panel's cores, auto-applies its
   probe map so captures decode to named AXI fields, and adds an **AXI Mon** tab

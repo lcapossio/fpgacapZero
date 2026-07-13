@@ -613,6 +613,7 @@ def test_axi_mon_probe_reports_geometry_and_probes(monkeypatch):
     _rpc(c, "connect", **_GOWIN)
     r = _rpc(c, "axi_mon_probe").json()
     assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 1  # the monitor is the connected core
     assert r["proto"] == "AXI4LITE"
     assert r["decode"] is True
     assert (r["addr_w"], r["data_w"]) == (32, 32)
@@ -651,17 +652,23 @@ class FakeMonitorOnlyTransport(FakeChainedAxiMonTransport):
     CORE_CHAINS = (2,)
 
 
-def test_axi_mon_probe_hints_other_chain(monkeypatch):
-    """Connected to chain 1 while the monitor lives on chain 2: absent, but the
-    response points at the chain where a monitor identity answered."""
+def test_axi_mon_probe_finds_monitor_on_other_chain(monkeypatch):
+    """Connected to chain 1 while the monitor lives on chain 2: the probe
+    still returns the monitor's full identity, with `chain` saying where it
+    is, and leaves the session on its own chain."""
     monkeypatch.setattr(
         RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)  # explicit chain 1
     r = _rpc(c, "axi_mon_probe").json()
-    assert r["ok"] is True and r["present"] is False
-    assert r["found_on_chains"] == [2]
+    assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 2
+    assert r["proto"] == "AXI4LITE"
+    assert "awaddr" in [p["name"] for p in r["probes"]]
+    # the session's own core is untouched by the scan
+    probe = _rpc(c, "probe").json()
+    assert probe["ok"] is True
 
 
 def test_connect_autodetects_chain_when_omitted(monkeypatch):
@@ -676,6 +683,7 @@ def test_connect_autodetects_chain_when_omitted(monkeypatch):
     assert r["chain"] == 2  # autodetected
     mon = _rpc(c, "axi_mon_probe").json()
     assert mon["present"] is True and mon["decode"] is True
+    assert mon["chain"] == 2
 
 
 def test_connect_explicit_chain_is_honored(monkeypatch):

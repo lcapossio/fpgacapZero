@@ -154,25 +154,26 @@ fcapz capture --probe-file axi.prob ...    # capture with named AXI fields
 
 ## From the web UI
 
-Just **Connect** — no chain to configure. The server autodetects which BSCAN
-chain hosts a debug core, the cores list shows every core it finds across
-chains, and the UI calls `axi_mon_probe` after every connect. If the monitor
-sits on a different chain than the session (the Arty reference design taps the
-bridge bus on USER2), the AXI Mon tab offers a one-click **Switch to AXI
-monitor** button, and each core card has a **Use this core** button. When the
-monitor is the active core:
+Just **Connect** — chains are invisible plumbing. The server autodetects
+which BSCAN chain hosts a debug core and scans the others, so `axi_mon_probe`
+returns the monitor's full identity no matter which core the session landed
+on. If a monitor exists anywhere on the target:
 
 - the **Connection** panel's cores list shows an **AXI Monitor** card
-  (protocol, address/data widths, decode layer, sample width);
-- the probe map is **auto-applied** to the ELA tab's named signals (only if you
-  hadn't configured probes yourself), so the first capture already renders
-  `awaddr`, `wdata`, `bresp`, … in the embedded Surfer viewer;
-- the **AXI Mon** tab becomes a trigger builder. On `DECODE_EN=1` builds, tick
-  the transaction events to trigger on (`any_err`, `b_hs`, …) and **Apply event
-  trigger** — the trigger fires when all selected events assert in the same
-  cycle. On `DECODE_EN=0` builds it offers a **write-address trigger**
-  (`awaddr` match) instead. Either way the builder just fills the shared ELA
-  trigger value/mask — field positions come from the probe map the server
+  (protocol, address/data widths, decode layer, sample width) with a
+  **Use this core** button when it isn't the session's core;
+- the **AXI Mon** tab is fully functional immediately. On `DECODE_EN=1`
+  builds, tick the transaction events to trigger on (`any_err`, `b_hs`, …)
+  and **Apply event trigger** — the trigger fires when all selected events
+  assert in the same cycle. On `DECODE_EN=0` builds it offers a
+  **write-address trigger** (`awaddr` match) instead. Applying anything
+  **switches the session to the monitor automatically** if it wasn't there
+  already — each core remembers its own trigger/probe setup, so hopping
+  between the monitor and a plain ELA doesn't clobber either;
+- once the monitor is the session's core, its probe map is **auto-applied**
+  to the ELA tab's named signals, so captures render `awaddr`, `wdata`,
+  `bresp`, … in the embedded Surfer viewer. The builder just fills the shared
+  ELA trigger value/mask — field positions come from the probe map the server
   returned, and arming stays in the **Run** tab.
 
 Captures behave like any wide ELA capture: above 53 bits the UI automatically

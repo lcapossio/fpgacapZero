@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getToken, rpc, setToken } from "../api";
 import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
-import { useSession } from "../session";
+import { DEFAULT_ELA, useSession } from "../session";
+import type { ElaConfig } from "../session";
 
 const BACKENDS = ["openocd", "hw_server"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
@@ -202,6 +203,9 @@ export function ConnectionPanel({
   } | null>(null);
   const [cores, setCores] = useState<Core[]>([]);
   const { ela, setEla, setAxiMon, conn, chainSwitch } = useSession();
+  // Per-core ELA config, so switching cores doesn't clobber trigger/probe
+  // setups — keyed by BSCAN chain, reset with the connection.
+  const elaByChain = useRef<Record<number, ElaConfig>>({});
 
   function resetScan() {
     setTargets([]);
@@ -212,6 +216,7 @@ export function ConnectionPanel({
     setCores([]);
     setStatus("");
     setError("");
+    elaByChain.current = {};
   }
 
   /** Populate the "Cores" section (ELA + EIO + any others) after connect. */
@@ -224,14 +229,17 @@ export function ConnectionPanel({
     }
   }
 
-  /** Detect an AXI monitor on the connected ELA and share it with the AXI Mon
-   *  tab. When one is found and no probes are configured yet, apply its probe
-   *  map so the first capture already shows named AXI fields. */
-  async function detectAxiMon() {
+  /** Detect an AXI monitor anywhere on the target and share it with the AXI
+   *  Mon tab (the server scans the other chains too and reports where the
+   *  monitor lives). When the monitor is the core the session is bound to,
+   *  apply its probe map so captures already show named AXI fields —
+   *  `force` overrides existing probe text (used right after switching). */
+  async function detectAxiMon(sessionChain: number, force = false) {
     try {
       const r = await rpc("axi_mon_probe", {}, CONNECT_TIMEOUT);
       if (r.present) {
         const info: AxiMonInfo = {
+          chain: typeof r.chain === "number" ? r.chain : sessionChain,
           proto: String(r.proto),
           addr_w: Number(r.addr_w),
           data_w: Number(r.data_w),
@@ -240,17 +248,12 @@ export function ConnectionPanel({
           probes: (r.probes as ProbeSpec[]) ?? [],
         };
         setAxiMon(info);
-        if (!ela.probesText.trim() && info.probes.length) {
+        const bound = info.chain === sessionChain;
+        if (bound && (force || !ela.probesText.trim()) && info.probes.length) {
           setEla({ probesText: probesToText(info.probes) });
         }
         return;
       }
-      // Not on this chain — surface where a monitor *was* seen, if anywhere.
-      const hint = Array.isArray(r.found_on_chains)
-        ? (r.found_on_chains as number[])
-        : [];
-      setAxiMon(null, hint);
-      return;
     } catch {
       /* older server or transient error — treat as no monitor */
     }
@@ -288,7 +291,7 @@ export function ConnectionPanel({
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
     loadCores();
-    detectAxiMon();
+    detectAxiMon(params.chain);
   }
 
   /** Connect to a discovered board (carries its own port/tap/ir_table). */
@@ -316,25 +319,33 @@ export function ConnectionPanel({
     });
     onConnected(params, r.probe as Identity);
     loadCores();
-    detectAxiMon();
+    detectAxiMon(params.chain);
   }
 
   /** Re-bind the connected session to a core on another BSCAN chain (e.g.
-   *  the AXI monitor) — same target, different core, no user-visible chains. */
+   *  the AXI monitor) — same target, different core, no user-visible chains.
+   *  Each core keeps its own ELA config: the current one is stashed before
+   *  the switch and restored when the user comes back; a first visit gets
+   *  defaults (plus the monitor's probe map, force-applied). */
   async function switchToChain(newChain: number) {
     if (!connTarget) return;
+    if (conn && newChain === conn.chain) return; // already on that core
     setBusy(true);
     setError("");
     try {
+      if (conn) elaByChain.current[conn.chain] = ela;
       const params: ConnectionParams = { ...connTarget, chain: newChain };
       const t = connTarget.backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
       await rpc("connect", params as unknown as Record<string, unknown>, t);
       const r = await rpc("probe", {}, t);
       onConnected(params, r.probe as Identity);
+      const saved = elaByChain.current[newChain];
+      setEla(saved ?? DEFAULT_ELA);
       loadCores();
-      detectAxiMon();
+      await detectAxiMon(newChain, !saved);
     } catch (e) {
       handleError(e);
+      throw e; // let callers (AXI Mon tab) know the switch failed
     } finally {
       setBusy(false);
     }
@@ -548,7 +559,14 @@ export function ConnectionPanel({
               core={core}
               active={core.chain === activeChain && core.type !== "eio"}
               busy={busy}
-              onUse={switchable ? () => switchToChain(core.chain) : undefined}
+              onUse={
+                switchable
+                  ? () => {
+                      // errors surface via handleError inside switchToChain
+                      switchToChain(core.chain).catch(() => {});
+                    }
+                  : undefined
+              }
             />
           );
         })}

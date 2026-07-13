@@ -27,7 +27,7 @@ export interface ElaConfig {
   probesText: string;
 }
 
-const DEFAULT_ELA: ElaConfig = {
+export const DEFAULT_ELA: ElaConfig = {
   channel: "0",
   pretrigger: "8",
   posttrigger: "16",
@@ -46,15 +46,14 @@ interface Session {
   conn: ConnectionParams | null;
   capture: CaptureState | null;
   ela: ElaConfig;
-  /** AXI monitor detected on the connected ELA (axi_mon_probe), or null. */
+  /** AXI monitor found anywhere on the target (axi_mon_probe), or null.
+   *  Its `chain` may differ from the session's — switching is transparent. */
   axiMon: AxiMonInfo | null;
-  /** Other USER chains where a monitor answered (hint when axiMon is null). */
-  axiMonChains: number[];
   /** Registered by the Connection panel: re-bind the session to another core
-   *  (its BSCAN chain) so other panels can offer one-click switches. */
+   *  (its BSCAN chain) so other panels can switch seamlessly. */
   chainSwitch: MutableRefObject<((chain: number) => Promise<void>) | null>;
   setEla: (patch: Partial<ElaConfig>) => void;
-  setAxiMon: (info: AxiMonInfo | null, foundOnChains?: number[]) => void;
+  setAxiMon: (info: AxiMonInfo | null) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
   pushCapture: (capture: Omit<CaptureState, "seq">) => void;
@@ -76,7 +75,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [capture, setCapture] = useState<CaptureState | null>(null);
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
   const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
-  const [axiMonChains, setAxiMonChains] = useState<number[]>([]);
   const chainSwitch = useRef<((chain: number) => Promise<void>) | null>(null);
 
   const value = useMemo<Session>(
@@ -86,13 +84,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       capture,
       ela,
       axiMon,
-      axiMonChains,
       chainSwitch,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
-      setAxiMon: (info, foundOnChains = []) => {
-        setAxiMonState(info);
-        setAxiMonChains(info ? [] : foundOnChains);
-      },
+      setAxiMon: setAxiMonState,
       onConnected: (params, id) => {
         setConn(params);
         setIdentity(id);
@@ -102,12 +96,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setIdentity(null);
         setCapture(null);
         setAxiMonState(null);
-        setAxiMonChains([]);
       },
       pushCapture: (next) =>
         setCapture((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 })),
     }),
-    [identity, conn, capture, ela, axiMon, axiMonChains],
+    [identity, conn, capture, ela, axiMon],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

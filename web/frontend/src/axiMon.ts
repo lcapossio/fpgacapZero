@@ -8,6 +8,9 @@ import type { ProbeSpec } from "./api";
 
 /** Detection result of `axi_mon_probe` when a monitor is present. */
 export interface AxiMonInfo {
+  /** BSCAN chain the monitor lives on — may differ from the session's;
+   *  clients switch to it transparently before using the monitor. */
+  chain: number;
   proto: string;
   addr_w: number;
   data_w: number;

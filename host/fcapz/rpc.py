@@ -17,7 +17,7 @@ from .analyzer import (
     _infer_ir_table_name,
     discover_boards,
 )
-from .axi_monitor import ADDR_AXI_MON_ID, AXI_MON_MAGIC, AxiMonitor
+from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -266,35 +266,40 @@ class RpcServer:
         return str(name)
 
     @staticmethod
-    def _scan_axi_mon_chains(analyzer: Analyzer) -> list[int]:
-        """USER chains (other than the connected one) with an AXI monitor.
+    def _probe_axi_mon(analyzer: Analyzer):
+        """``(chain, geometry, probes)`` of the AXI monitor, or None.
 
-        Conservative sweep of chains 1-2 only — the same set discover_eio
-        probes — so cores speaking a different DR protocol (EJTAG bridges on
-        3/4) never see stray shifts. Restores the analyzer's chain afterwards.
+        The connected chain is answered directly; otherwise a conservative
+        sweep of USER chains 1-2 only — the same set discover_eio probes — so
+        cores speaking a different DR protocol (EJTAG bridges on 3/4) never
+        see stray shifts. Restores the analyzer's chain afterwards, so the
+        caller's session is untouched wherever the monitor was found.
         """
-        found: list[int] = []
-        t = analyzer.transport
-        with t.transaction_lock():
-            for chain in (1, 2):
-                if chain == analyzer.bscan_chain:
-                    continue
-                try:
-                    t.select_chain(chain)
-                    raw = t.read_reg(ADDR_AXI_MON_ID)
-                except (NotImplementedError, OSError, RuntimeError):
-                    continue
-                if (raw >> 16) == AXI_MON_MAGIC:
-                    found.append(chain)
+        mon = AxiMonitor(analyzer)
+        geo = mon.geometry() if mon.present else None
+        if geo is not None:
+            return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
+        result = None
+        for chain in (1, 2):
+            if chain == analyzer.bscan_chain:
+                continue
             try:
-                t.select_chain(analyzer.bscan_chain)
-            except NotImplementedError:
-                pass
+                alt = AxiMonitor(Analyzer(analyzer.transport, chain=chain))
+                alt_geo = alt.geometry() if alt.present else None
+            except Exception:
+                alt_geo = None
+            if alt_geo is not None:
+                result = (chain, alt_geo, alt.probe_map(alt_geo).probes)
+                break
         try:
-            t.invalidate_manager_instance_cache()
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
         except Exception:
             pass
-        return found
+        return result
 
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
@@ -629,22 +634,21 @@ class RpcServer:
             return self._ok(cores=self._list_cores(analyzer))
 
         if cmd == "axi_mon_probe":
-            # Detect an AXI monitor and return its geometry +
-            # the bundled probe map so the client can capture with named AXI
-            # fields. The monitor captures like an ELA; this just adds the
-            # AXI-aware glue. Absent -> {present: False} (not an error), with
-            # a scan of the other USER chains so a client connected to the
-            # wrong chain learns where the monitor actually lives.
-            mon = AxiMonitor(analyzer)
-            geo = mon.geometry() if mon.present else None
-            if geo is None:
-                return self._ok(
-                    present=False,
-                    found_on_chains=self._scan_axi_mon_chains(analyzer),
-                )
-            probes = mon.probe_map(geo).probes
+            # Detect an AXI monitor and return its geometry + the bundled
+            # probe map so the client can capture with named AXI fields. The
+            # monitor captures like an ELA; this just adds the AXI-aware glue.
+            # The scan covers the other conservative USER chains too, so a
+            # session bound to a plain ELA still gets the monitor's full
+            # identity — `chain` says where it lives (== the session's chain
+            # when the monitor is the connected core), letting clients offer
+            # a seamless switch. Absent everywhere -> {present: False}.
+            found = self._probe_axi_mon(analyzer)
+            if found is None:
+                return self._ok(present=False)
+            chain, geo, probes = found
             return self._ok(
                 present=True,
+                chain=chain,
                 proto=geo.proto,
                 addr_w=geo.addr_w,
                 data_w=geo.data_w,
