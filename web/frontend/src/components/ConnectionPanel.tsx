@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getToken, rpc, setToken } from "../api";
 import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
 import { probesToText } from "../axiMon";
@@ -60,12 +60,12 @@ function elaFeatures(id: Identity): string[] {
 
 /** Synthesize the ELA core entry from the probe identity, for the brief window
  *  before list_cores returns (or if it fails). */
-function elaCoreFromIdentity(id: Identity): Core {
+function elaCoreFromIdentity(id: Identity, chain: number): Core {
   return {
     type: "ela",
     name: coreName(id.core_id),
     core_id: id.core_id,
-    chain: 1,
+    chain,
     base_addr: 0,
     version_major: id.version_major,
     version_minor: id.version_minor,
@@ -73,8 +73,19 @@ function elaCoreFromIdentity(id: Identity): Core {
   };
 }
 
-/** One core rendered as a labeled card with type-specific detail. */
-function CoreCard({ core }: { core: Core }) {
+/** One core rendered as a labeled card with type-specific detail. The core the
+ *  session is bound to is marked "in use"; others get a one-click switch. */
+function CoreCard({
+  core,
+  active,
+  onUse,
+  busy,
+}: {
+  core: Core;
+  active?: boolean;
+  onUse?: () => void;
+  busy?: boolean;
+}) {
   // Display component: info is a type-specific bag, read loosely.
   const info = core.info as any;
   const feats = core.type === "ela" ? elaFeatures(core.info as unknown as Identity) : [];
@@ -88,6 +99,7 @@ function CoreCard({ core }: { core: Core }) {
           v{core.version_major}.{core.version_minor} · 0x
           {core.core_id.toString(16).toUpperCase()}
         </span>
+        {active && <span className="ok"> · in use</span>}
       </div>
       <dl className="idinfo">
         {core.type === "ela" && (
@@ -134,12 +146,20 @@ function CoreCard({ core }: { core: Core }) {
             <dd>{Number(info.sample_width)} bits</dd>
           </>
         )}
-        <dt>Location</dt>
-        <dd>
-          chain {core.chain}
-          {core.base_addr ? ` @ 0x${core.base_addr.toString(16)}` : ""}
-        </dd>
+        {core.base_addr ? (
+          <>
+            <dt>Address</dt>
+            <dd>0x{core.base_addr.toString(16)}</dd>
+          </>
+        ) : null}
       </dl>
+      {onUse && (
+        <div className="btnrow">
+          <button onClick={onUse} disabled={busy}>
+            Use this core
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -159,9 +179,6 @@ export function ConnectionPanel({
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
-  // BSCAN USER chain of the ELA to drive (an AXI monitor is often on its own
-  // chain — e.g. the Arty reference design taps the bridge bus on USER2).
-  const [chain, setChain] = useState("1");
   // hw_server: XSDB target names (strings). openocd: probed compatible boards.
   const [targets, setTargets] = useState<string[]>([]);
   const [picked, setPicked] = useState("");
@@ -184,7 +201,7 @@ export function ConnectionPanel({
     ir_table: string;
   } | null>(null);
   const [cores, setCores] = useState<Core[]>([]);
-  const { ela, setEla, setAxiMon } = useSession();
+  const { ela, setEla, setAxiMon, conn, chainSwitch } = useSession();
 
   function resetScan() {
     setTargets([]);
@@ -255,20 +272,18 @@ export function ConnectionPanel({
   /** Connect using an explicit tap (manual entry or an hw_server target). */
   async function connectTo(tap: string) {
     setStatus(`connecting to ${tap}…`);
-    const params: ConnectionParams = {
-      backend,
-      host,
-      port: Number(port),
-      tap,
-      // Left empty: the server infers the preset from the tap name (the one
-      // authoritative copy of that mapping) and echoes it back.
-      ir_table: "",
-      chain: Number(chain) || 1,
-    };
+    // ir_table and chain are omitted: the server infers the IR preset from
+    // the tap name and autodetects the ELA's BSCAN chain, echoing both back —
+    // chains are an implementation detail the user never types.
+    const reqParams = { backend, host, port: Number(port), tap };
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
-    const c = await rpc("connect", params as unknown as Record<string, unknown>, t);
-    params.ir_table = typeof c.ir_table === "string" ? c.ir_table : "";
+    const c = await rpc("connect", reqParams, t);
+    const params: ConnectionParams = {
+      ...reqParams,
+      ir_table: typeof c.ir_table === "string" ? c.ir_table : "",
+      chain: typeof c.chain === "number" ? c.chain : 1,
+    };
     const r = await rpc("probe", {}, t);
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
@@ -279,15 +294,18 @@ export function ConnectionPanel({
   /** Connect to a discovered board (carries its own port/tap/ir_table). */
   async function connectToBoard(b: Board) {
     setStatus(`connecting to ${b.tap} @ :${b.port}…`);
-    const params: ConnectionParams = {
+    const reqParams = {
       backend: b.backend,
       host: b.host,
       port: b.port,
       tap: b.tap,
       ir_table: b.ir_table,
-      chain: 1,
     };
-    await rpc("connect", params as unknown as Record<string, unknown>, CONNECT_TIMEOUT);
+    const c = await rpc("connect", reqParams, CONNECT_TIMEOUT);
+    const params: ConnectionParams = {
+      ...reqParams,
+      chain: typeof c.chain === "number" ? c.chain : 1,
+    };
     const r = await rpc("probe", {}, CONNECT_TIMEOUT);
     setConnTarget({
       backend: b.backend,
@@ -300,6 +318,35 @@ export function ConnectionPanel({
     loadCores();
     detectAxiMon();
   }
+
+  /** Re-bind the connected session to a core on another BSCAN chain (e.g.
+   *  the AXI monitor) — same target, different core, no user-visible chains. */
+  async function switchToChain(newChain: number) {
+    if (!connTarget) return;
+    setBusy(true);
+    setError("");
+    try {
+      const params: ConnectionParams = { ...connTarget, chain: newChain };
+      const t = connTarget.backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
+      await rpc("connect", params as unknown as Record<string, unknown>, t);
+      const r = await rpc("probe", {}, t);
+      onConnected(params, r.probe as Identity);
+      loadCores();
+      detectAxiMon();
+    } catch (e) {
+      handleError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Expose the switch to other panels (the AXI Mon tab offers it one-click).
+  useEffect(() => {
+    chainSwitch.current = switchToChain;
+    return () => {
+      chainSwitch.current = null;
+    };
+  });
 
   async function connect() {
     setBusy(true);
@@ -478,7 +525,8 @@ export function ConnectionPanel({
   }
 
   if (identity) {
-    const shown = cores.length ? cores : [elaCoreFromIdentity(identity)];
+    const activeChain = conn?.chain ?? 1;
+    const shown = cores.length ? cores : [elaCoreFromIdentity(identity, activeChain)];
     return (
       <section className="panel">
         <h2>Connection</h2>
@@ -490,12 +538,24 @@ export function ConnectionPanel({
           </p>
         )}
         <h3>Cores ({shown.length})</h3>
-        {shown.map((core, i) => (
-          <CoreCard key={`${core.type}-${core.chain}-${core.base_addr}-${i}`} core={core} />
-        ))}
+        {shown.map((core, i) => {
+          const switchable =
+            (core.type === "ela" || core.type === "axi_mon") &&
+            core.chain !== activeChain;
+          return (
+            <CoreCard
+              key={`${core.type}-${core.chain}-${core.base_addr}-${i}`}
+              core={core}
+              active={core.chain === activeChain && core.type !== "eio"}
+              busy={busy}
+              onUse={switchable ? () => switchToChain(core.chain) : undefined}
+            />
+          );
+        })}
         <button onClick={disconnect} disabled={busy}>
           Disconnect
         </button>
+        {error && <p className="err">{error}</p>}
       </section>
     );
   }
@@ -526,14 +586,6 @@ export function ConnectionPanel({
             value={manualTap}
             onChange={(e) => setManualTap(e.target.value)}
             placeholder="auto-detected if blank"
-          />
-        </label>
-        <label>
-          Chain
-          <input
-            value={chain}
-            onChange={(e) => setChain(e.target.value)}
-            title="BSCAN USER chain (1-4); AXI monitors often sit on their own chain"
           />
         </label>
         {needsToken && (

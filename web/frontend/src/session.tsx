@@ -1,5 +1,5 @@
-import { createContext, useContext, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, useState } from "react";
+import type { MutableRefObject, ReactNode } from "react";
 import type { ConnectionParams, Identity } from "./api";
 import type { AxiMonInfo } from "./axiMon";
 
@@ -50,6 +50,9 @@ interface Session {
   axiMon: AxiMonInfo | null;
   /** Other USER chains where a monitor answered (hint when axiMon is null). */
   axiMonChains: number[];
+  /** Registered by the Connection panel: re-bind the session to another core
+   *  (its BSCAN chain) so other panels can offer one-click switches. */
+  chainSwitch: MutableRefObject<((chain: number) => Promise<void>) | null>;
   setEla: (patch: Partial<ElaConfig>) => void;
   setAxiMon: (info: AxiMonInfo | null, foundOnChains?: number[]) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
@@ -74,6 +77,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
   const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
   const [axiMonChains, setAxiMonChains] = useState<number[]>([]);
+  const chainSwitch = useRef<((chain: number) => Promise<void>) | null>(null);
 
   const value = useMemo<Session>(
     () => ({
@@ -83,6 +87,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       ela,
       axiMon,
       axiMonChains,
+      chainSwitch,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
       setAxiMon: (info, foundOnChains = []) => {
         setAxiMonState(info);

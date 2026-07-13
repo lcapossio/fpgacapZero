@@ -52,7 +52,14 @@ class FakeTransport(Transport):
     def select_chain(self, chain: int) -> None:
         self.active_chain = chain
 
+    # Chains carrying the debug cores' register windows. Real cores answer
+    # only on their own USER chain; a chain-agnostic fake would make every
+    # chain look populated once list_cores/connect scan across chains.
+    CORE_CHAINS = (1,)
+
     def read_reg(self, addr: int) -> int:
+        if addr < 0x8000 and self.active_chain not in self.CORE_CHAINS:
+            return 0
         return self.regs.get(addr, 0)
 
     def write_reg(self, addr: int, value: int) -> None:
@@ -623,7 +630,9 @@ def test_axi_mon_probe_absent_on_plain_ela(monkeypatch):
 
 
 class FakeChainedAxiMonTransport(FakeTransport):
-    """AXI monitor registers answer only on USER chain 2 (like the Arty design)."""
+    """ELA on USER1 and USER2, AXI monitor identity only on USER2 (Arty shape)."""
+
+    CORE_CHAINS = (1, 2)
 
     _AXI_REGS = {
         0x00E8: (0x414D << 16) | (1 << 8) | 1,
@@ -636,6 +645,12 @@ class FakeChainedAxiMonTransport(FakeTransport):
         return super().read_reg(addr)
 
 
+class FakeMonitorOnlyTransport(FakeChainedAxiMonTransport):
+    """A monitor-only design: the sole ELA (an AXI monitor) lives on USER2."""
+
+    CORE_CHAINS = (2,)
+
+
 def test_axi_mon_probe_hints_other_chain(monkeypatch):
     """Connected to chain 1 while the monitor lives on chain 2: absent, but the
     response points at the chain where a monitor identity answered."""
@@ -643,10 +658,48 @@ def test_axi_mon_probe_hints_other_chain(monkeypatch):
         RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
     )
     c = TestClient(create_app())
-    _rpc(c, "connect", **_GOWIN)  # chain 1
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
     r = _rpc(c, "axi_mon_probe").json()
     assert r["ok"] is True and r["present"] is False
     assert r["found_on_chains"] == [2]
+
+
+def test_connect_autodetects_chain_when_omitted(monkeypatch):
+    """No chain in the request: connect binds the first chain with an ELA and
+    echoes it — a monitor-only design lands on USER2 with zero user input."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+    )
+    c = TestClient(create_app())
+    r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap").json()
+    assert r["ok"] is True
+    assert r["chain"] == 2  # autodetected
+    mon = _rpc(c, "axi_mon_probe").json()
+    assert mon["present"] is True and mon["decode"] is True
+
+
+def test_connect_explicit_chain_is_honored(monkeypatch):
+    """An explicit chain must never be second-guessed, even with no ELA on it."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+    )
+    c = TestClient(create_app())
+    r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap", chain=1).json()
+    assert r["ok"] is True and r["chain"] == 1
+
+
+def test_list_cores_reports_other_chain_monitor(monkeypatch):
+    """Connected to the USER1 ELA, list_cores still reports the USER2 monitor
+    so the UI can offer a one-click switch."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
+    cores = _rpc(c, "list_cores").json()["cores"]
+    mon = [x for x in cores if x["type"] == "axi_mon"]
+    assert len(mon) == 1 and mon[0]["chain"] == 2
+    assert mon[0]["info"]["decode"] is True
 
 
 def test_list_cores_reports_axi_mon(monkeypatch):

@@ -154,9 +154,13 @@ fcapz capture --probe-file axi.prob ...    # capture with named AXI fields
 
 ## From the web UI
 
-Connect with the monitor's BSCAN chain in the Connection panel's **Chain**
-field (the Arty reference design taps the bridge bus on USER2, so Chain = 2) —
-the web UI calls `axi_mon_probe` after every connect. When a monitor is found:
+Just **Connect** — no chain to configure. The server autodetects which BSCAN
+chain hosts a debug core, the cores list shows every core it finds across
+chains, and the UI calls `axi_mon_probe` after every connect. If the monitor
+sits on a different chain than the session (the Arty reference design taps the
+bridge bus on USER2), the AXI Mon tab offers a one-click **Switch to AXI
+monitor** button, and each core card has a **Use this core** button. When the
+monitor is the active core:
 
 - the **Connection** panel's cores list shows an **AXI Monitor** card
   (protocol, address/data widths, decode layer, sample width);

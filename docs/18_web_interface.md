@@ -73,9 +73,12 @@ connected. The panels:
   server was launched with `--openocd`/`--openocd-cfg`, Connect **starts OpenOCD
   automatically** and retries — the user never touches the JTAG server (with
   several configured configs it shows a small picker to choose which). hw_server
-  needs no such step: XSDB starts a local hw_server itself. Once connected, the
-  panel lists the **cores present** (the ELA and any EIO) with their
-  parameters; EIO is also auto-discovered into its own panel on connect.
+  needs no such step: XSDB starts a local hw_server itself. The BSCAN chain is
+  **autodetected server-side** — the user never picks one. Once connected, the
+  panel lists the **cores present** (the ELA, any EIO, and cores on other
+  chains such as an AXI monitor) with their parameters; a core the session
+  isn't bound to gets a **Use this core** button that switches to it in one
+  click. EIO is also auto-discovered into its own panel on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
   mode/value/mask, **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform), and **advanced
@@ -97,7 +100,8 @@ connected. The panels:
   this tab shows its geometry and builds AXI-aware triggers: transaction-event
   checkboxes on decode builds (`any_err`, handshakes, …) or a write-address
   match otherwise. The monitor's probe map is auto-applied on connect so
-  captures decode to named AXI fields.
+  captures decode to named AXI fields. If the monitor lives elsewhere on the
+  target, the tab offers a one-click **Switch to AXI monitor** instead.
 
 ## The API behind it
 
@@ -117,8 +121,9 @@ can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:
 
 ```bash
-curl -s localhost:7373/api/rpc -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap","ir_table":"gowin","chain":1}'
-curl -s localhost:7373/api/rpc -d '{"cmd":"probe"}'
+curl -s localhost:7373/api/rpc -H 'Content-Type: application/json' \
+  -d '{"cmd":"connect","backend":"openocd","tap":"GW1NR-9C.tap"}'   # ir_table and chain are inferred
+curl -s localhost:7373/api/rpc -H 'Content-Type: application/json' -d '{"cmd":"probe"}'
 ```
 
 One physical board is one serialized session: a re-entrant lock guards the single

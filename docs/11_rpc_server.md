@@ -152,12 +152,19 @@ readiness wait.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7"}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
 server infers the preset from the tap name (`gw*` → `gowin`,
 `xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
 their own copy of that mapping.
+
+`chain` echoes the BSCAN USER chain the session bound to. When the request
+omits it, the server **autodetects**: it connects on chain 1 and, if no debug
+core answers there, scans chain 2 and binds to the first core found (chains
+3/4 are never scanned — bridges there speak a different DR protocol and must
+not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
+session, e.g. to reach an AXI monitor directly.
 
 #### `discover_boards`
 
@@ -293,9 +300,13 @@ Response:
 #### `list_cores`
 
 Enumerate the fcapz cores present on the connected target. Always reports the
-connected ELA and adds the EIO if one is discoverable. Each entry has `type`,
-`name`, `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
-type-specific `info` (the ELA probe dict, or `{in_w, out_w}` for the EIO).
+connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
+USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. Each entry has `type`, `name`,
+`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
+monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
+`axi_mon`).
 
 ```json
 {"cmd": "list_cores"}

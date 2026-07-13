@@ -165,31 +165,76 @@ class RpcServer:
                 "info": {"in_w": eio.in_w, "out_w": eio.out_w},
             })
 
-        # The AXI monitor is the connected ELA plus an identity/geometry pair —
-        # report it so clients can label the session as a bus monitor.
+        # The AXI monitor is an ELA plus an identity/geometry pair — report it
+        # so clients can label the session as a bus monitor.
+        mon_entry = self._axi_mon_entry(analyzer, ela)
+        if mon_entry is not None:
+            cores.append(mon_entry)
+
+        # Other conservative chains (USER1/2): a plain or monitor ELA the
+        # client can switch the session to — chains are an implementation
+        # detail the UI resolves with a "use this core" action.
+        for chain in (1, 2):
+            if chain == analyzer.bscan_chain:
+                continue
+            try:
+                other = Analyzer(analyzer.transport, chain=chain)
+                ident = other.probe_optional()
+            except Exception:
+                ident = None
+            if ident is None:
+                continue
+            entry = self._axi_mon_entry(other, ident)
+            if entry is None:
+                entry = {
+                    "type": "ela",
+                    "name": _CORE_NAMES.get(ident["core_id"], "Logic Analyzer"),
+                    "core_id": ident["core_id"],
+                    "chain": chain,
+                    "base_addr": 0,
+                    "version_major": ident["version_major"],
+                    "version_minor": ident["version_minor"],
+                    "info": ident,
+                }
+            cores.append(entry)
+        try:
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
+        except Exception:
+            pass
+        return cores
+
+    @staticmethod
+    def _axi_mon_entry(analyzer: Analyzer, ela_ident) -> Dict[str, Any] | None:
+        """Core-list entry for the AXI monitor on ``analyzer``'s chain, or None."""
+        if ela_ident is None:
+            return None
         try:
             mon = AxiMonitor(analyzer)
             geo = mon.geometry() if mon.present else None
         except Exception:
             geo = None
-        if geo is not None and ela is not None:
-            cores.append({
-                "type": "axi_mon",
-                "name": _CORE_NAMES[AXI_MON_MAGIC],
-                "core_id": AXI_MON_MAGIC,
-                "chain": analyzer.bscan_chain,
-                "base_addr": 0,
-                "version_major": ela["version_major"],
-                "version_minor": ela["version_minor"],
-                "info": {
-                    "proto": geo.proto,
-                    "addr_w": geo.addr_w,
-                    "data_w": geo.data_w,
-                    "decode": geo.decode,
-                    "sample_width": geo.sample_width,
-                },
-            })
-        return cores
+        if geo is None:
+            return None
+        return {
+            "type": "axi_mon",
+            "name": _CORE_NAMES[AXI_MON_MAGIC],
+            "core_id": AXI_MON_MAGIC,
+            "chain": analyzer.bscan_chain,
+            "base_addr": 0,
+            "version_major": ela_ident["version_major"],
+            "version_minor": ela_ident["version_minor"],
+            "info": {
+                "proto": geo.proto,
+                "addr_w": geo.addr_w,
+                "data_w": geo.data_w,
+                "decode": geo.decode,
+                "sample_width": geo.sample_width,
+            },
+        }
 
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
     _IR_TABLES = {
@@ -486,13 +531,27 @@ class RpcServer:
             # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
-            self._analyzer = Analyzer(
-                self._build_transport(req), chain=int(req.get("chain", 1))
+            requested = req.get("chain")
+            analyzer = Analyzer(
+                self._build_transport(req),
+                chain=int(requested) if requested is not None else 1,
             )
-            self._analyzer.connect()
-            # Echo the resolved preset so a client that omitted ir_table can
-            # label the session and reuse it for eio/axi side connects.
-            return self._ok(ir_table=self._resolved_ir_name(req))
+            analyzer.connect()
+            if requested is None and analyzer.probe_optional() is None:
+                # No chain given and no ELA on the default chain: autodetect on
+                # the conservative scan set (USER1/2 — bridges on 3/4 speak a
+                # different DR protocol and must not see stray shifts).
+                for chain in (2,):
+                    alt = Analyzer(analyzer.transport, chain=chain)
+                    if alt.probe_optional() is not None:
+                        analyzer = alt
+                        break
+            self._analyzer = analyzer
+            # Echo the resolved preset/chain so a client that omitted them can
+            # label the session and reuse them for eio/axi side connects.
+            return self._ok(
+                ir_table=self._resolved_ir_name(req), chain=analyzer.bscan_chain
+            )
 
         if cmd == "close":
             self._close_all()
