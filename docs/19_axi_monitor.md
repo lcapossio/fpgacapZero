@@ -172,9 +172,11 @@ on. If a monitor exists anywhere on the target:
   between the monitor and a plain ELA doesn't clobber either;
 - once the monitor is the session's core, its probe map is **auto-applied**
   to the ELA tab's named signals, so captures render `awaddr`, `wdata`,
-  `bresp`, … in the embedded Surfer viewer. The builder just fills the shared
-  ELA trigger value/mask — field positions come from the probe map the server
-  returned, and arming stays in the **Run** tab.
+  `bresp`, … in the monitor's **own viewer tab** ("Viewer: AXI Mon") — every
+  capture core gets one, so bus captures never overwrite the plain ELA's
+  waveform. The builder just fills the shared ELA trigger value/mask — field
+  positions come from the probe map the server returned, and arming stays in
+  the **Run** tab.
 
 Captures behave like any wide ELA capture: above 53 bits the UI automatically
 uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).

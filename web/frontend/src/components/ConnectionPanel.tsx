@@ -201,8 +201,7 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
   } | null>(null);
-  const [cores, setCores] = useState<Core[]>([]);
-  const { ela, setEla, setAxiMon, conn, chainSwitch } = useSession();
+  const { ela, setEla, setAxiMon, cores, setCores, conn, chainSwitch } = useSession();
   // Per-core ELA config, so switching cores doesn't clobber trigger/probe
   // setups — keyed by BSCAN chain, reset with the connection.
   const elaByChain = useRef<Record<number, ElaConfig>>({});

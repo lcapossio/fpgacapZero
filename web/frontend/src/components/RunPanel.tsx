@@ -11,9 +11,10 @@ const CONT_TIMEOUT = 5; // shorter per-capture wait in auto re-arm so Stop is re
 const SAFE_SAMPLE_BITS = 53;
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
- *  to the Viewer tab. */
+ *  to the active core's Viewer tab. */
 export function RunPanel({ identity }: { identity: Identity }) {
-  const { ela, capture, pushCapture } = useSession();
+  const { ela, captures, pushCapture, conn } = useSession();
+  const capture = conn ? captures[conn.chain] : undefined;
   const [autoRearm, setAutoRearm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);

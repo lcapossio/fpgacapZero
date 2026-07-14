@@ -89,9 +89,11 @@ connected. The panels:
   (continuous re-arming loop), and **Stop**. It also offers **Download
   VCD / CSV / JSON** of the last capture.
 - **Viewer** — an embedded **[Surfer](https://surfer-project.org/)** waveform
-  viewer (runs entirely in the browser via WebAssembly). Each capture's signals
-  are added automatically; subsequent captures reload the data in place, so the
-  same view and zoom are preserved.
+  viewer (runs entirely in the browser via WebAssembly). **Every capture core
+  gets its own viewer tab** ("Viewer: ELA", "Viewer: AXI Mon", …), each holding
+  that core's last capture — switching cores never overwrites another core's
+  waveform. Each capture's signals are added automatically; subsequent captures
+  reload the data in place, so the same view and zoom are preserved.
 - **EIO** — read fabric inputs (with a selectable poll rate) and drive outputs
   live.
 - **AXI** — attach the JTAG-to-AXI4 bridge on a chain, then single 32-bit

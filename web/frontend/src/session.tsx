@@ -1,9 +1,9 @@
 import { createContext, useContext, useMemo, useRef, useState } from "react";
 import type { MutableRefObject, ReactNode } from "react";
-import type { ConnectionParams, Identity } from "./api";
+import type { ConnectionParams, Core, Identity } from "./api";
 import type { AxiMonInfo } from "./axiMon";
 
-/** The latest ELA capture, shared from the Run panel to the Viewer panel. */
+/** The latest ELA capture, shared from the Run panel to the Viewer panels. */
 export interface CaptureState {
   vcd: string;
   csv?: string;
@@ -44,7 +44,11 @@ export const DEFAULT_ELA: ElaConfig = {
 interface Session {
   identity: Identity | null;
   conn: ConnectionParams | null;
-  capture: CaptureState | null;
+  /** Cores discovered on the connected target (list_cores). */
+  cores: Core[];
+  /** Last capture per core, keyed by the core's BSCAN chain — every capture
+   *  core gets its own Viewer tab showing its own waveform. */
+  captures: Record<number, CaptureState>;
   ela: ElaConfig;
   /** AXI monitor found anywhere on the target (axi_mon_probe), or null.
    *  Its `chain` may differ from the session's — switching is transparent. */
@@ -54,8 +58,10 @@ interface Session {
   chainSwitch: MutableRefObject<((chain: number) => Promise<void>) | null>;
   setEla: (patch: Partial<ElaConfig>) => void;
   setAxiMon: (info: AxiMonInfo | null) => void;
+  setCores: (cores: Core[]) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
+  /** Store a capture under the core the session is bound to. */
   pushCapture: (capture: Omit<CaptureState, "seq">) => void;
 }
 
@@ -72,7 +78,8 @@ export function useSession(): Session {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [conn, setConn] = useState<ConnectionParams | null>(null);
-  const [capture, setCapture] = useState<CaptureState | null>(null);
+  const [cores, setCores] = useState<Core[]>([]);
+  const [captures, setCaptures] = useState<Record<number, CaptureState>>({});
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
   const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
   const chainSwitch = useRef<((chain: number) => Promise<void>) | null>(null);
@@ -81,12 +88,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     () => ({
       identity,
       conn,
-      capture,
+      cores,
+      captures,
       ela,
       axiMon,
       chainSwitch,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
       setAxiMon: setAxiMonState,
+      setCores,
       onConnected: (params, id) => {
         setConn(params);
         setIdentity(id);
@@ -94,13 +103,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       onDisconnected: () => {
         setConn(null);
         setIdentity(null);
-        setCapture(null);
+        setCores([]);
+        setCaptures({});
         setAxiMonState(null);
       },
-      pushCapture: (next) =>
-        setCapture((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 })),
+      pushCapture: (next) => {
+        const chain = conn?.chain;
+        if (chain == null) return;
+        setCaptures((prev) => ({
+          ...prev,
+          [chain]: { ...next, seq: (prev[chain]?.seq ?? 0) + 1 },
+        }));
+      },
     }),
-    [identity, conn, capture, ela, axiMon],
+    [identity, conn, cores, captures, ela, axiMon],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

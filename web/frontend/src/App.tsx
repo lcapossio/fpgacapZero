@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DockviewReact } from "dockview-react";
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
+import type { Core } from "./api";
 import { SessionProvider, useSession } from "./session";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ElaPanel } from "./components/ElaPanel";
@@ -50,11 +51,83 @@ function AxiDock(_: IDockviewPanelProps) {
 function AxiMonDock(_: IDockviewPanelProps) {
   return <AxiMonPanel />;
 }
-function ViewerDock(_: IDockviewPanelProps) {
+/** Capture cores (plain ELAs and AXI monitors) in stable tab order. */
+function captureCores(cores: Core[]): Core[] {
+  return cores
+    .filter((c) => c.type === "ela" || c.type === "axi_mon")
+    .sort((a, b) => a.chain - b.chain);
+}
+
+function viewerTitle(core: Core): string {
+  return core.type === "axi_mon" ? "Viewer: AXI Mon" : "Viewer: ELA";
+}
+
+function ViewerDock(props: IDockviewPanelProps) {
   const s = useSession();
+  // Every capture core gets its own viewer tab pinned to its waveforms: the
+  // default "viewer" panel shows the first core, "viewer-<chain>" the others
+  // (the id — not params — carries the mapping, so it survives tab restore).
   // Mount Surfer right away so its WASM loads up front; the waveform drops in
-  // when the first capture arrives (empty vcd just shows an idle Surfer).
-  return <SurferView vcd={s.capture?.vcd ?? ""} />;
+  // when that core's first capture arrives.
+  const m = /^viewer-(\d+)$/.exec(props.api.id);
+  const chain = m ? Number(m[1]) : (captureCores(s.cores)[0]?.chain ?? s.conn?.chain);
+  const cap = chain != null ? s.captures[chain] : undefined;
+  return <SurferView vcd={cap?.vcd ?? ""} />;
+}
+
+/** Keeps the dock's viewer tabs matched to the discovered capture cores:
+ *  retitles the default viewer after the first core and adds/removes a
+ *  "viewer-<chain>" tab per additional core (stacked with the default one). */
+function ViewerTabsSync({ api }: { api: DockviewApi }) {
+  const { cores } = useSession();
+  useEffect(() => {
+    const sync = () => {
+      const cc = captureCores(cores);
+      const base = api.getPanel("viewer");
+      base?.api.setTitle(cc.length ? viewerTitle(cc[0]) : "Viewer");
+      const wanted = new Set(cc.slice(1).map((c) => `viewer-${c.chain}`));
+      for (const p of [...api.panels]) {
+        if (/^viewer-\d+$/.test(p.id) && !wanted.has(p.id)) p.api.close();
+      }
+      let added = false;
+      for (const c of cc.slice(1)) {
+        const id = `viewer-${c.chain}`;
+        const existing = api.getPanel(id);
+        if (existing) existing.api.setTitle(viewerTitle(c));
+        else {
+          addExtraViewer(api, id, viewerTitle(c));
+          added = true;
+        }
+      }
+      // Keep the first core's viewer frontmost — a freshly added tab would win.
+      if (added) api.getPanel("viewer")?.api.setActive();
+    };
+    sync();
+    // Re-sync when a tab is restored from the Tabs menu or Reset layout.
+    const d = api.onDidAddPanel(sync);
+    return () => d.dispose();
+  }, [api, cores]);
+  return null;
+}
+
+/** Add a per-core viewer tab, stacked with the default viewer when it exists. */
+function addExtraViewer(api: DockviewApi, id: string, title: string) {
+  if (api.getPanel(id)) return;
+  const anchor = firstOpen(api, ["viewer", "connection", "ela", "eio", "axi", "axi_mon", "run"]);
+  api.addPanel({
+    id,
+    component: "viewer",
+    title,
+    ...(anchor
+      ? {
+          position: {
+            referencePanel: anchor,
+            direction: anchor === "viewer" ? ("within" as const) : ("below" as const),
+          },
+        }
+      : {}),
+    ...(anchor !== "viewer" ? { initialHeight: 400 } : {}),
+  });
 }
 
 const components = {
@@ -194,6 +267,9 @@ function TabsMenu({ api }: { api: DockviewApi }) {
   const [open, setOpen] = useState(false);
   const [openIds, setOpenIds] = useState<string[]>(() => api.panels.map((p) => p.id));
   const ref = useRef<HTMLDivElement>(null);
+  // Per-core viewer tabs come and go with the connection's core list.
+  const { cores } = useSession();
+  const extraViewers = captureCores(cores).slice(1);
 
   useEffect(() => {
     const sync = () => setOpenIds(api.panels.map((p) => p.id));
@@ -235,6 +311,24 @@ function TabsMenu({ api }: { api: DockviewApi }) {
               >
                 <span className="tabs-menu-check">{isOpen ? "✓" : ""}</span>
                 {p.title}
+              </button>
+            );
+          })}
+          {extraViewers.map((c) => {
+            const id = `viewer-${c.chain}`;
+            const isOpen = openIds.includes(id);
+            return (
+              <button
+                key={id}
+                className="tabs-menu-item"
+                onClick={() => {
+                  const panel = api.getPanel(id);
+                  if (panel) panel.api.close();
+                  else addExtraViewer(api, id, viewerTitle(c));
+                }}
+              >
+                <span className="tabs-menu-check">{isOpen ? "✓" : ""}</span>
+                {viewerTitle(c)}
               </button>
             );
           })}
@@ -306,6 +400,7 @@ export function App() {
           <span className="muted">web{version ? ` · v${version}` : ""}</span>
           {dockApi && <TabsMenu api={dockApi} />}
         </header>
+        {dockApi && <ViewerTabsSync api={dockApi} />}
         <Dock onApi={setDockApi} />
       </div>
     </SessionProvider>
