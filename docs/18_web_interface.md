@@ -86,10 +86,10 @@ connected. The panels:
   `name:width:lsb` lines to get named signals in the waveform), and **advanced
   triggering** (external trigger AND/OR, multi-stage trigger sequencer,
   segmented capture).
-- **Run** — a slim toolbar with the run controls: **Arm** (trigger-gated
-  capture), **Trigger Immediate** (force a capture now), **Auto re-arm**
-  (continuous re-arming loop), and **Stop**. It also offers **Download
-  VCD / CSV / JSON** of the last capture.
+- **Run** — a slim one-row toolbar with the run controls: **Arm**
+  (trigger-gated capture), **Trigger Immediate** (force a capture now),
+  **Auto re-arm** (continuous re-arming loop), **Stop**, and a single
+  **Download…** picker exporting the last capture as VCD, CSV or JSON.
 - **Viewer** — an embedded **[Surfer](https://surfer-project.org/)** waveform
   viewer (runs entirely in the browser via WebAssembly). **Every capture core
   gets its own viewer tab** ("Viewer: ELA", "Viewer: AXI Mon", …), each holding

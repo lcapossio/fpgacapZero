@@ -95,6 +95,10 @@ body {
 .runbar .inline {
   margin-top: 0;
 }
+.runbar-download {
+  padding: 0.12rem 0.3rem;
+  font-size: 0.85rem;
+}
 .runbar-status {
   margin-left: auto;
   padding-left: 0.5rem;

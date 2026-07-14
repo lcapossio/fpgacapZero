@@ -165,6 +165,36 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
           />{" "}
           Auto re-arm
         </label>
+        {/* One compact control for all export formats — a native select so
+            the popup can't be clipped by the slim panel. Always shows the
+            placeholder; picking a format downloads and resets. */}
+        <select
+          className="runbar-download"
+          value=""
+          disabled={!capture}
+          title={
+            capture && !capture.json
+              ? "JSON export is off for wide captures (>53-bit) to avoid number rounding — use VCD or CSV."
+              : undefined
+          }
+          onChange={(e) => {
+            const f = e.target.value as "vcd" | "csv" | "json" | "";
+            if (f) download(f);
+          }}
+        >
+          <option value="" disabled hidden>
+            Download…
+          </option>
+          <option value="vcd" disabled={!capture?.vcd}>
+            VCD
+          </option>
+          <option value="csv" disabled={!capture?.csv}>
+            CSV
+          </option>
+          <option value="json" disabled={!capture?.json}>
+            JSON
+          </option>
+        </select>
         <span className="runbar-status">
           {error ? (
             <span className="err">{error}</span>
@@ -174,26 +204,6 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
             <span className="muted">{status}</span>
           ) : null}
         </span>
-      </div>
-      <div className="runbar-row runbar-downloads">
-        <button className="secondary" onClick={() => download("vcd")} disabled={!capture?.vcd}>
-          Download VCD
-        </button>
-        <button className="secondary" onClick={() => download("csv")} disabled={!capture?.csv}>
-          Download CSV
-        </button>
-        <button
-          className="secondary"
-          onClick={() => download("json")}
-          disabled={!capture?.json}
-          title={
-            capture && !capture.json
-              ? "JSON export is off for wide captures (>53-bit) to avoid number rounding — use VCD or CSV."
-              : undefined
-          }
-        >
-          Download JSON
-        </button>
       </div>
     </div>
   );

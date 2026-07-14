@@ -228,7 +228,7 @@ function buildDefaultLayout(api: DockviewApi) {
     component: "run",
     title: "Run",
     position: { referencePanel: "ela", direction: "below" },
-    initialHeight: 88,
+    initialHeight: 60,
   });
   // Select ELA at startup (EIO/AXI were added after it and would otherwise win).
   api.getPanel("ela")?.api.setActive();
@@ -252,7 +252,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
       component: id,
       title,
       ...(anchor ? { position: { referencePanel: anchor, direction: "below" as const } } : {}),
-      initialHeight: 88,
+      initialHeight: 60,
     });
     return;
   }
