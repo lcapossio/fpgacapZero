@@ -56,6 +56,10 @@ interface Session {
   /** Registered by the Connection panel: re-bind the session to another core
    *  (its BSCAN chain) so other panels can switch seamlessly. */
   chainSwitch: MutableRefObject<((chain: number) => Promise<void>) | null>;
+  /** True while a core switch is in flight — capture controls must hold off
+   *  (an arm built for one core would hit the other's geometry). */
+  switching: boolean;
+  setSwitching: (b: boolean) => void;
   setEla: (patch: Partial<ElaConfig>) => void;
   setAxiMon: (info: AxiMonInfo | null) => void;
   setCores: (cores: Core[]) => void;
@@ -82,6 +86,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [captures, setCaptures] = useState<Record<number, CaptureState>>({});
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
   const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
+  const [switching, setSwitching] = useState(false);
   const chainSwitch = useRef<((chain: number) => Promise<void>) | null>(null);
 
   const value = useMemo<Session>(
@@ -93,6 +98,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       ela,
       axiMon,
       chainSwitch,
+      switching,
+      setSwitching,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
       setAxiMon: setAxiMonState,
       setCores,
@@ -116,7 +123,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }));
       },
     }),
-    [identity, conn, cores, captures, ela, axiMon],
+    [identity, conn, cores, captures, ela, axiMon, switching],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

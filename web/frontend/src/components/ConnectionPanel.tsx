@@ -201,7 +201,8 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
   } | null>(null);
-  const { ela, setEla, setAxiMon, cores, setCores, conn, chainSwitch } = useSession();
+  const { ela, setEla, setAxiMon, cores, setCores, conn, chainSwitch, setSwitching } =
+    useSession();
   // Per-core ELA config, so switching cores doesn't clobber trigger/probe
   // setups — keyed by BSCAN chain, reset with the connection.
   const elaByChain = useRef<Record<number, ElaConfig>>({});
@@ -348,6 +349,9 @@ export function ConnectionPanel({
     if (!connTarget) return;
     if (conn && newChain === conn.chain) return; // already on that core
     setBusy(true);
+    // Freeze Run controls for the duration — an arm built for the old core
+    // would hit the new core's geometry mid-switch.
+    setSwitching(true);
     setError("");
     try {
       if (conn) elaByChain.current[conn.chain] = ela;
@@ -364,6 +368,7 @@ export function ConnectionPanel({
       handleError(e);
       throw e; // let callers (AXI Mon tab) know the switch failed
     } finally {
+      setSwitching(false);
       setBusy(false);
     }
   }

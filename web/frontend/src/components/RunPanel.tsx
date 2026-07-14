@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RpcError, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { useSession } from "../session";
@@ -12,8 +12,8 @@ const SAFE_SAMPLE_BITS = 53;
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
  *  to the active core's Viewer tab. */
-export function RunPanel({ identity }: { identity: Identity }) {
-  const { ela, captures, pushCapture, conn } = useSession();
+export function RunPanel({ identity: identityProp }: { identity: Identity }) {
+  const { ela, captures, pushCapture, conn, switching } = useSession();
   const capture = conn ? captures[conn.chain] : undefined;
   const [autoRearm, setAutoRearm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -22,8 +22,18 @@ export function RunPanel({ identity }: { identity: Identity }) {
   const [status, setStatus] = useState("");
   const [overflow, setOverflow] = useState(false);
   const runRef = useRef(false);
+  // The auto re-arm loop is a long-lived closure; read the identity through a
+  // ref so a core switch mid-loop can't send another core's geometry.
+  const identityRef = useRef(identityProp);
+  identityRef.current = identityProp;
+
+  // A core switch invalidates the armed config — stop the re-arm loop.
+  useEffect(() => {
+    if (switching) runRef.current = false;
+  }, [switching]);
 
   function params(immediate: boolean, timeout: number) {
+    const identity = identityRef.current;
     const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
     return {
       channel: Number(ela.channel),
@@ -132,7 +142,7 @@ export function RunPanel({ identity }: { identity: Identity }) {
     }
   }
 
-  const locked = busy || running;
+  const locked = busy || running || switching;
 
   return (
     <div className="runbar">
