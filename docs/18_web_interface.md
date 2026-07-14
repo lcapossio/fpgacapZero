@@ -76,11 +76,13 @@ connected. The panels:
   automatically** and retries — the user never touches the JTAG server (with
   several configured configs it shows a small picker to choose which). hw_server
   needs no such step: XSDB starts a local hw_server itself. The BSCAN chain is
-  **autodetected server-side** — the user never picks one. Once connected, the
-  panel lists the **cores present** (the ELA, any EIO, and cores on other
-  chains such as an AXI monitor) with their parameters; a core the session
-  isn't bound to gets a **Use this core** button that switches to it in one
-  click. EIO is also auto-discovered into its own panel on connect.
+  **autodetected server-side** — the user never picks one.
+- **Cores** — stacked with Connection; the dock **jumps to it once a connect
+  lands**. Lists every core discovered on the target (the ELA, any EIO, and
+  cores on other chains such as an AXI monitor) with their parameters; the
+  core the session is bound to is marked **in use**, and any other capture
+  core gets a **Use this core** button that switches to it in one click. EIO
+  is also auto-discovered into its own panel on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
   mode/value/mask, **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform), and **advanced

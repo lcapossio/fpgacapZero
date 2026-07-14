@@ -5,6 +5,7 @@ import "dockview-react/dist/styles/dockview.css";
 import type { Core } from "./api";
 import { SessionProvider, useSession } from "./session";
 import { ConnectionPanel } from "./components/ConnectionPanel";
+import { CoresPanel } from "./components/CoresPanel";
 import { ElaPanel } from "./components/ElaPanel";
 import { RunPanel } from "./components/RunPanel";
 import { EioPanel } from "./components/EioPanel";
@@ -27,6 +28,9 @@ function ConnectionDock(_: IDockviewPanelProps) {
       onDisconnected={s.onDisconnected}
     />
   );
+}
+function CoresDock(_: IDockviewPanelProps) {
+  return <CoresPanel />;
 }
 function ElaDock(_: IDockviewPanelProps) {
   const s = useSession();
@@ -145,6 +149,18 @@ function ViewerTabsSync({ api }: { api: DockviewApi }) {
   return null;
 }
 
+/** Bring the Cores tab forward once a connection lands, so the discovered
+ *  cores are the first thing the user sees. */
+function FocusCoresOnConnect({ api }: { api: DockviewApi }) {
+  const { conn } = useSession();
+  const hadConn = useRef(false);
+  useEffect(() => {
+    if (conn && !hadConn.current) api.getPanel("cores")?.api.setActive();
+    hadConn.current = conn !== null;
+  }, [api, conn]);
+  return null;
+}
+
 /** Add a per-core viewer tab, stacked with the default viewer when it exists. */
 function addExtraViewer(api: DockviewApi, id: string, title: string) {
   if (api.getPanel(id)) return;
@@ -167,6 +183,7 @@ function addExtraViewer(api: DockviewApi, id: string, title: string) {
 
 const components = {
   connection: ConnectionDock,
+  cores: CoresDock,
   ela: ElaDock,
   run: RunDock,
   eio: EioDock,
@@ -178,6 +195,7 @@ const components = {
 // Every panel the Tabs menu can restore (component key == panel id).
 const PANELS: { id: keyof typeof components; title: string }[] = [
   { id: "connection", title: "Connection" },
+  { id: "cores", title: "Cores" },
   { id: "ela", title: "ELA" },
   { id: "eio", title: "EIO" },
   { id: "axi", title: "AXI" },
@@ -188,6 +206,13 @@ const PANELS: { id: keyof typeof components; title: string }[] = [
 
 function buildDefaultLayout(api: DockviewApi) {
   api.addPanel({ id: "connection", component: "connection", title: "Connection" });
+  // Cores stacks with Connection; the dock jumps to it once a connect lands.
+  api.addPanel({
+    id: "cores",
+    component: "cores",
+    title: "Cores",
+    position: { referencePanel: "connection", direction: "within" },
+  });
   // Viewer spans the full width across the bottom; controls live in the top row.
   api.addPanel({
     id: "viewer",
@@ -230,7 +255,9 @@ function buildDefaultLayout(api: DockviewApi) {
     position: { referencePanel: "ela", direction: "below" },
     initialHeight: 60,
   });
-  // Select ELA at startup (EIO/AXI were added after it and would otherwise win).
+  // Show Connection (not Cores) in its group, and select ELA at startup
+  // (panels added later in a group would otherwise win).
+  api.getPanel("connection")?.api.setActive();
   api.getPanel("ela")?.api.setActive();
 }
 
@@ -267,13 +294,22 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     });
     return;
   }
-  if (id === "connection") {
-    const anchor = firstOpen(api, ["ela", "eio", "axi", "axi_mon", "viewer", "run"]);
+  if (id === "connection" || id === "cores") {
+    // Connection and Cores stack together when either survives.
+    const sibling = firstOpen(api, id === "connection" ? ["cores"] : ["connection"]);
+    const anchor = sibling ?? firstOpen(api, ["ela", "eio", "axi", "axi_mon", "viewer", "run"]);
     api.addPanel({
       id,
       component: id,
       title,
-      ...(anchor ? { position: { referencePanel: anchor, direction: "left" as const } } : {}),
+      ...(anchor
+        ? {
+            position: {
+              referencePanel: anchor,
+              direction: sibling ? ("within" as const) : ("left" as const),
+            },
+          }
+        : {}),
     });
     return;
   }
@@ -436,6 +472,7 @@ export function App() {
           {dockApi && <TabsMenu api={dockApi} />}
         </header>
         {dockApi && <ViewerTabsSync api={dockApi} />}
+        {dockApi && <FocusCoresOnConnect api={dockApi} />}
         <Dock onApi={setDockApi} />
       </div>
     </SessionProvider>
