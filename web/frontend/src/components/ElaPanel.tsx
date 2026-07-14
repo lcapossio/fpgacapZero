@@ -1,13 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { parseProbesText } from "../api";
 import type { Identity, ProbeSpec } from "../api";
 import {
-  describeCondition,
+  composeTrigger,
+  describeTerm,
+  describeTerms,
   hasDirectionalEdges,
-  signalTrigger,
   triggerable,
 } from "../signalTrigger";
-import type { SignalCondition } from "../signalTrigger";
+import type { Combine, SignalCondition, TriggerTerm } from "../signalTrigger";
 import { useSession } from "../session";
 
 /** One named signal with its click-to-trigger conditions. */
@@ -85,6 +86,8 @@ function SignalRow({
  *  Auto re-arm / Stop) live in the Run tab and read this shared config. */
 export function ElaPanel() {
   const { ela, setEla, identity } = useSession();
+  const [terms, setTerms] = useState<TriggerTerm[]>([]);
+  const [combine, setCombine] = useState<Combine>("and");
   const [applied, setApplied] = useState("");
   const [trigError, setTrigError] = useState("");
 
@@ -98,15 +101,47 @@ export function ElaPanel() {
     }
   }, [ela.probesText]);
 
-  function applySignalTrigger(p: ProbeSpec, cond: SignalCondition, equalsText?: string) {
+  // Clicking a condition upserts that signal's term (one term per signal);
+  // the composed trigger is re-applied on every change below.
+  function addTerm(p: ProbeSpec, cond: SignalCondition, value?: string) {
+    setTerms((ts) => [
+      ...ts.filter((x) => x.probe.name !== p.name),
+      { probe: p, cond, value },
+    ]);
+  }
+
+  function removeTerm(name: string) {
+    setTerms((ts) => ts.filter((x) => x.probe.name !== name));
+  }
+
+  // Terms referring to signals that were edited away drop out silently.
+  useEffect(() => {
+    setTerms((ts) =>
+      ts.filter((x) =>
+        probes.some(
+          (p) => p.name === x.probe.name && p.lsb === x.probe.lsb && p.width === x.probe.width,
+        ),
+      ),
+    );
+  }, [probes]);
+
+  // Re-compose the trigger whenever the terms or the combine rule change.
+  useEffect(() => {
+    if (terms.length === 0) {
+      setApplied("");
+      setTrigError("");
+      return;
+    }
     try {
-      setEla(signalTrigger(p, cond, equalsText));
-      setApplied(`trigger: ${describeCondition(p, cond, equalsText)}`);
+      setEla(composeTrigger(terms, combine, identity));
+      setApplied(`trigger: ${describeTerms(terms, combine)}`);
       setTrigError("");
     } catch (e) {
       setTrigError(e instanceof Error ? e.message : String(e));
     }
-  }
+    // setEla is stable; identity only changes with the connection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terms, combine, identity]);
 
   async function loadProbeFile(file: File | undefined) {
     if (!file) return;
@@ -193,8 +228,9 @@ export function ElaPanel() {
         <>
           <h3>Signal triggers</h3>
           <p className="muted">
-            Click a condition to trigger on that signal: ↑ rising, ↓ falling,
-            1/0 level, ⇅ any change, = value.
+            Click a condition to add a signal to the trigger: ↑ rising, ↓
+            falling, 1/0 level, ⇅ any change, = value. Multiple signals
+            combine with AND/OR.
           </p>
           <div className="sigtrig">
             {probes.map((p) => (
@@ -202,10 +238,39 @@ export function ElaPanel() {
                 key={`${p.name}-${p.lsb}`}
                 probe={p}
                 identity={identity}
-                onApply={(cond, v) => applySignalTrigger(p, cond, v)}
+                onApply={(cond, v) => addTerm(p, cond, v)}
               />
             ))}
           </div>
+          {terms.length > 0 && (
+            <div className="trigterms">
+              {terms.length > 1 && (
+                <select
+                  value={combine}
+                  onChange={(e) => setCombine(e.target.value as Combine)}
+                  title="How the conditions combine"
+                >
+                  <option value="and">ALL of (AND)</option>
+                  <option value="or">ANY of (OR)</option>
+                </select>
+              )}
+              {terms.map((t) => (
+                <span className="trigterm" key={t.probe.name}>
+                  {describeTerm(t)}
+                  <button
+                    className="trigterm-x"
+                    title="Remove from trigger"
+                    onClick={() => removeTerm(t.probe.name)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button className="secondary" onClick={() => setTerms([])}>
+                Clear
+              </button>
+            </div>
+          )}
           {applied && !trigError && <p className="ok">{applied} — arm from the Run tab.</p>}
           {trigError && <p className="err">{trigError}</p>}
         </>

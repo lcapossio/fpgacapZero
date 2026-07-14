@@ -120,10 +120,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (not just auto re-arm); it aborts the in-flight capture request and a new
   `disarm` RPC (`force_idle`) soft-resets the core to verified idle.
 - **Web — click-to-trigger on signals:** the ELA tab lists the defined
-  probes under Signal triggers; clicking ↑/↓/1/0/⇅/= sets the trigger to
-  that signal's rising or falling edge (TRIG_STAGES ≥ 2 builds, via a
-  one-stage sequence), level, any-change, or field value — the regular
-  trigger fields are filled in, staying visible and editable.
+  probes under Signal triggers; clicking ↑/↓/1/0/⇅/= adds that signal's
+  condition — rising/falling edge (TRIG_STAGES ≥ 2 builds), level,
+  any-change, or field value — as a removable chip, and multiple signals
+  combine with AND/OR. Compositions map onto the comparators (merged
+  patterns, dual-compare stage for a second pattern or an edge); impossible
+  ones are refused with the reason. The regular trigger fields are filled
+  in, staying visible and editable.
 - **Web — per-core viewer tabs:** every capture core (plain ELA, AXI monitor)
   gets its own Surfer viewer tab holding its own last capture, so switching
   cores never clobbers another core's waveform; the tabs appear on connect,

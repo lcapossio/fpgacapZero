@@ -88,11 +88,16 @@ connected. The panels:
   `name:width:lsb` lines to get named signals in the waveform), and **advanced
   triggering** (external trigger AND/OR, multi-stage trigger sequencer,
   segmented capture). Defined signals appear under **Signal triggers** —
-  click a condition next to a signal to trigger on it: **↑ rising / ↓
-  falling** (needs a `TRIG_STAGES ≥ 2` build; greyed out otherwise), **1/0**
-  level, **⇅ any change**, or **= value** for multi-bit fields. The click
-  just fills the trigger fields (and, for edges, a one-stage sequence), so
-  everything stays visible and editable.
+  click a condition next to a signal to add it to the trigger: **↑ rising /
+  ↓ falling** (needs a `TRIG_STAGES ≥ 2` build; greyed out otherwise),
+  **1/0** level, **⇅ any change**, or **= value** for multi-bit fields.
+  Added signals show as removable chips and combine with **AND/OR**; the
+  composition maps onto the hardware (levels/values merge into one
+  comparator pattern; a second pattern or an edge uses the sequencer stage's
+  dual compare), and combinations the comparators can't express are refused
+  with a message saying why. The result just fills the regular trigger
+  fields (and, for edges, a one-stage sequence), so everything stays visible
+  and editable.
 - **Run** — a slim one-row toolbar with the run controls: **Arm**
   (trigger-gated capture), **Trigger Immediate** (force a capture now),
   **Auto re-arm** (continuous re-arming loop), **Stop**, and a single
