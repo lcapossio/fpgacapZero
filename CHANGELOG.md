@@ -115,7 +115,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — per-core viewer tabs:** every capture core (plain ELA, AXI monitor)
   gets its own Surfer viewer tab holding its own last capture, so switching
   cores never clobbers another core's waveform; the tabs appear on connect,
-  are listed in the Tabs menu, and follow the discovered core list.
+  are listed in the Tabs menu, and follow the discovered core list. Clicking
+  a viewer tab re-binds the session to that core, so the ELA/Run controls
+  always drive the waveform you're looking at.
 - **Web — chain autodetection:** `connect` without a `chain` scans the BSCAN
   USER chains and binds to the first debug core it finds (echoing the resolved
   chain); `list_cores` reports cores on other chains too, and `axi_mon_probe`

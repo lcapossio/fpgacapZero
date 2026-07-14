@@ -77,9 +77,16 @@ function ViewerDock(props: IDockviewPanelProps) {
 
 /** Keeps the dock's viewer tabs matched to the discovered capture cores:
  *  retitles the default viewer after the first core and adds/removes a
- *  "viewer-<chain>" tab per additional core (stacked with the default one). */
+ *  "viewer-<chain>" tab per additional core (stacked with the default one).
+ *  Activating a viewer tab also re-binds the session to that tab's core, so
+ *  clicking "Viewer: AXI Mon" makes the ELA/Run tabs drive the monitor. */
 function ViewerTabsSync({ api }: { api: DockviewApi }) {
-  const { cores } = useSession();
+  const { cores, conn, chainSwitch } = useSession();
+  // Latest session state for the (long-lived) dockview event handler.
+  const stateRef = useRef({ cores, conn });
+  stateRef.current = { cores, conn };
+  const switching = useRef(false);
+
   useEffect(() => {
     const sync = () => {
       const cc = captureCores(cores);
@@ -107,6 +114,34 @@ function ViewerTabsSync({ api }: { api: DockviewApi }) {
     const d = api.onDidAddPanel(sync);
     return () => d.dispose();
   }, [api, cores]);
+
+  useEffect(() => {
+    // origin "user" filters out our own setActive/addPanel activations.
+    const d = api.onDidActivePanelChange((e) => {
+      if (e.origin !== "user" || switching.current) return;
+      const id = e.panel?.id;
+      if (!id) return;
+      const { cores, conn } = stateRef.current;
+      if (!conn) return;
+      let chain: number | undefined;
+      if (id === "viewer") chain = captureCores(cores)[0]?.chain;
+      else {
+        const m = /^viewer-(\d+)$/.exec(id);
+        if (m) chain = Number(m[1]);
+      }
+      if (chain == null || chain === conn.chain) return;
+      const sw = chainSwitch.current;
+      if (!sw) return;
+      switching.current = true;
+      // Errors surface in the Connection panel via the switch itself.
+      sw(chain)
+        .catch(() => {})
+        .finally(() => {
+          switching.current = false;
+        });
+    });
+    return () => d.dispose();
+  }, [api, chainSwitch]);
   return null;
 }
 

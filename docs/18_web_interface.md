@@ -94,8 +94,10 @@ connected. The panels:
   viewer (runs entirely in the browser via WebAssembly). **Every capture core
   gets its own viewer tab** ("Viewer: ELA", "Viewer: AXI Mon", …), each holding
   that core's last capture — switching cores never overwrites another core's
-  waveform. Each capture's signals are added automatically; subsequent captures
-  reload the data in place, so the same view and zoom are preserved.
+  waveform, and **clicking a viewer tab re-binds the session to its core**, so
+  the ELA/Run tabs immediately drive what you're looking at. Each capture's
+  signals are added automatically; subsequent captures reload the data in
+  place, so the same view and zoom are preserved.
 - **EIO** — read fabric inputs (with a selectable poll rate) and drive outputs
   live.
 - **AXI** — attach the JTAG-to-AXI4 bridge on a chain, then single 32-bit
