@@ -3,8 +3,11 @@ import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../a
 import type { Identity } from "../api";
 import { useSession } from "../session";
 
-const SINGLE_TIMEOUT = 10; // hardware wait (s) for a single capture
-const CONT_TIMEOUT = 5; // shorter per-capture wait in auto re-arm so Stop is responsive
+const IMMEDIATE_TIMEOUT = 10; // hardware wait (s) — Trigger Immediate fires at once
+// Armed waits have NO deadline: the core is armed once and polled with short
+// capture_wait calls until the trigger fires or the user stops. The short poll
+// only bounds how long a single RPC blocks the server, keeping Stop responsive.
+const POLL_TIMEOUT = 4;
 // JS numbers are exact only to 53 bits. Bit vectors (trigger value/mask) go over
 // the wire as strings so wide values (e.g. 160-bit AXI samples) don't round; wide
 // sample data uses the string-based VCD/CSV exports, not the JSON-number result.
@@ -31,9 +34,12 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
   const identityRef = useRef(identityProp);
   identityRef.current = identityProp;
 
-  // A core switch invalidates the armed config — stop the re-arm loop.
+  // A core switch invalidates the armed config — stop any armed wait.
   useEffect(() => {
-    if (switching) runRef.current = false;
+    if (switching) {
+      runRef.current = false;
+      stopCtl.current?.abort();
+    }
   }, [switching]);
 
   function params(immediate: boolean, timeout: number) {
@@ -63,13 +69,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     };
   }
 
-  async function once(immediate: boolean, timeout: number) {
-    const r = await rpc(
-      "capture",
-      params(immediate, timeout),
-      timeout * 1000 + 4000,
-      stopCtl.current?.signal,
-    );
+  function submitCapture(r: Record<string, unknown>) {
     setOverflow(Boolean(r.overflow));
     if (typeof r.vcd === "string") {
       pushCapture({
@@ -79,7 +79,47 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
         sampleCount: r.sample_count as number | string | undefined,
       });
     }
-    return r.sample_count ?? "?";
+    return (r.sample_count as number | string | undefined) ?? "?";
+  }
+
+  /** Trigger Immediate: one bundled capture call — it fires right away. */
+  async function immediateOnce() {
+    const r = await rpc(
+      "capture",
+      params(true, IMMEDIATE_TIMEOUT),
+      IMMEDIATE_TIMEOUT * 1000 + 4000,
+      stopCtl.current?.signal,
+    );
+    return submitCapture(r);
+  }
+
+  /** Arm once, then poll until the trigger fires — no deadline. The hardware
+   *  stays armed across polls (capture_wait never re-arms), so nothing is
+   *  missed between them; a poll timeout just means "still waiting". */
+  async function armAndWait() {
+    const p = params(false, POLL_TIMEOUT);
+    await rpc("configure", p, 15000, stopCtl.current?.signal);
+    await rpc("arm", {}, 15000, stopCtl.current?.signal);
+    for (;;) {
+      try {
+        const r = await rpc(
+          "capture_wait",
+          {
+            timeout: POLL_TIMEOUT,
+            segments: p.segments,
+            format: p.format,
+            include_vcd: true,
+            include_csv: true,
+          },
+          POLL_TIMEOUT * 1000 + 6000,
+          stopCtl.current?.signal,
+        );
+        return submitCapture(r);
+      } catch (e) {
+        if (e instanceof RpcError && e.type === "TimeoutError") continue;
+        throw e;
+      }
+    }
   }
 
   /** Disarm the core after a stopped wait (queues behind the in-flight
@@ -98,7 +138,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
         setWaiting(true);
         setStatus("armed - waiting for trigger");
       }
-      const n = await once(immediate, SINGLE_TIMEOUT);
+      const n = immediate ? await immediateOnce() : await armAndWait();
       setStatus(`captured ${n} samples - see the Viewer tab`);
     } catch (e) {
       if (e instanceof RpcCancelled) {
@@ -131,16 +171,11 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
                 : "auto re-arm: armed - waiting for trigger",
             );
           }
-          const n = await once(immediate, CONT_TIMEOUT);
+          const n = immediate ? await immediateOnce() : await armAndWait();
           setWaiting(false);
           count += 1;
           setStatus(`auto re-arm: ${count} captures (${n} samples)`);
         } catch (e) {
-          // The short per-capture timeout only exists to keep Stop responsive;
-          // a trigger that didn't fire inside one window just means re-arm.
-          if (e instanceof RpcError && e.type === "TimeoutError") {
-            continue;
-          }
           if (e instanceof RpcCancelled) {
             setStatus(`stopped after ${count} captures - disarmed`);
             disarm();

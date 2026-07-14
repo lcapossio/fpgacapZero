@@ -119,6 +119,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — armed indicator:** while a capture is armed and the trigger hasn't
   fired, the Run bar shows a pulsing "armed - waiting for trigger" status
   (single-shot and auto re-arm both).
+- **Web — armed waits never time out:** Arm holds one hardware arm and polls
+  the new `capture_wait` RPC (wait + read-out on the existing arm, no
+  re-configure/re-arm) until the trigger fires or Stop disarms — a trigger
+  can arrive arbitrarily late with no blind gaps and no 10 s deadline.
 - **Web — Stop works while armed:** Stop is enabled during any armed wait
   (not just auto re-arm); it aborts the in-flight capture request and a new
   `disarm` RPC (`force_idle`) soft-resets the core to verified idle.

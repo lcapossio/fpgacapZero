@@ -157,6 +157,30 @@ def test_capture_returns_samples(monkeypatch):
     assert r["sample_count"] > 0
 
 
+def test_capture_wait_reads_armed_capture(monkeypatch):
+    """configure + arm + capture_wait: the poll returns the capture without
+    re-arming, so clients can hold one hardware arm across many short polls."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    assert _rpc(
+        c, "configure", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64,
+    ).json()["ok"] is True
+    assert _rpc(c, "arm").json()["ok"] is True
+    r = _rpc(c, "capture_wait", timeout=0.2, include_vcd=True).json()
+    assert r["ok"] is True, r
+    assert r["sample_count"] > 0
+    assert "$enddefinitions $end" in r["vcd"]
+
+
+def test_capture_wait_requires_configure(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "capture_wait", timeout=0.1).json()
+    assert r["ok"] is False
+    assert "configure" in r["error"]
+
+
 def test_disarm_soft_resets_to_idle(monkeypatch):
     """Stop-while-armed: disarm force-idles the core and reports ok."""
     c = _client(monkeypatch)

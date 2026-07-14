@@ -370,6 +370,18 @@ wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 {"cmd": "arm"}
 ```
 
+#### `capture_wait`
+
+Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
+the same result shape and options as `capture`, but without re-configuring or
+re-arming. A `TimeoutError` here just means "still waiting" and leaves the
+core armed, so clients can hold one hardware arm across many short polls
+(this is how the web UI waits for a trigger with no deadline).
+
+```json
+{"cmd": "capture_wait", "timeout": 4.0, "include_vcd": true}
+```
+
 #### `disarm`
 
 Soft-reset the capture FSM to a verified idle (`force_idle`), discarding any

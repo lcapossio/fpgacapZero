@@ -236,6 +236,68 @@ class RpcServer:
             },
         }
 
+    def _capture_readout(self, analyzer: Analyzer, cfg, req: Dict[str, Any]):
+        """Wait for the armed capture to complete and serialize it as requested
+        (shared by `capture`, which arms first, and `capture_wait`, which polls
+        an existing arm)."""
+        timeout = _wait_sec(req, "timeout", 10.0)
+        if req.get("segments"):
+            if not analyzer.wait_all_segments_done(timeout=timeout):
+                raise TimeoutError("segmented capture did not complete within timeout")
+            probe_info = analyzer.probe()
+            nseg = max(1, int(probe_info.get("num_segments", 1)))
+            results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
+            fmt = str(req.get("format", "json"))
+            payload = self._ok(
+                format=fmt,
+                overflow=any(r.overflow for r in results),
+                sample_count=sum(len(r.samples) for r in results),
+                channel=cfg.channel,
+                segments=[
+                    self._serialize_capture(
+                        analyzer,
+                        cfg,
+                        r,
+                        fmt=fmt,
+                        include_summary=bool(req.get("summarize", False)),
+                    )
+                    for r in results
+                ],
+            )
+            # Wide captures request a non-json format precisely because JSON
+            # numbers round above 53 bits — only attach the JSON-number
+            # result when the caller asked for it (mirrors _serialize_capture).
+            if fmt == "json":
+                payload["result"] = {
+                    "segments": [analyzer.export_json(r) for r in results]
+                }
+            if req.get("include_vcd") and results:
+                # All segments in one waveform — not just segment 0.
+                payload["vcd"] = analyzer.export_vcd_text_segments(results)
+            if req.get("include_csv"):
+                lines = ["segment,index,value"]
+                for r in results:
+                    for idx, value in enumerate(r.samples):
+                        lines.append(f"{r.segment},{idx},{value}")
+                payload["csv"] = "\n".join(lines) + "\n"
+            return payload
+
+        result = analyzer.capture(timeout=timeout)
+        payload = self._serialize_capture(
+            analyzer,
+            cfg,
+            result,
+            fmt=str(req.get("format", "json")),
+            include_summary=bool(req.get("summarize", False)),
+        )
+        # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
+        # produced by the same exporter the CLI/GUI use.
+        if req.get("include_vcd"):
+            payload["vcd"] = analyzer.export_vcd_text(result)
+        if req.get("include_csv"):
+            payload["csv"] = analyzer.export_csv_text(result)
+        return self._ok(**payload)
+
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
     _IR_TABLES = {
         "": None,
@@ -679,63 +741,17 @@ class RpcServer:
                 cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
-            timeout = _wait_sec(req, "timeout", 10.0)
-            if req.get("segments"):
-                if not analyzer.wait_all_segments_done(timeout=timeout):
-                    raise TimeoutError("segmented capture did not complete within timeout")
-                probe_info = analyzer.probe()
-                nseg = max(1, int(probe_info.get("num_segments", 1)))
-                results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
-                fmt = str(req.get("format", "json"))
-                payload = self._ok(
-                    format=fmt,
-                    overflow=any(r.overflow for r in results),
-                    sample_count=sum(len(r.samples) for r in results),
-                    channel=cfg.channel,
-                    segments=[
-                        self._serialize_capture(
-                            analyzer,
-                            cfg,
-                            r,
-                            fmt=fmt,
-                            include_summary=bool(req.get("summarize", False)),
-                        )
-                        for r in results
-                    ],
-                )
-                # Wide captures request a non-json format precisely because JSON
-                # numbers round above 53 bits — only attach the JSON-number
-                # result when the caller asked for it (mirrors _serialize_capture).
-                if fmt == "json":
-                    payload["result"] = {
-                        "segments": [analyzer.export_json(r) for r in results]
-                    }
-                if req.get("include_vcd") and results:
-                    # All segments in one waveform — not just segment 0.
-                    payload["vcd"] = analyzer.export_vcd_text_segments(results)
-                if req.get("include_csv"):
-                    lines = ["segment,index,value"]
-                    for r in results:
-                        for idx, value in enumerate(r.samples):
-                            lines.append(f"{r.segment},{idx},{value}")
-                    payload["csv"] = "\n".join(lines) + "\n"
-                return payload
+            return self._capture_readout(analyzer, cfg, req)
 
-            result = analyzer.capture(timeout=timeout)
-            payload = self._serialize_capture(
-                analyzer,
-                cfg,
-                result,
-                fmt=str(req.get("format", "json")),
-                include_summary=bool(req.get("summarize", False)),
-            )
-            # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
-            # produced by the same exporter the CLI/GUI use.
-            if req.get("include_vcd"):
-                payload["vcd"] = analyzer.export_vcd_text(result)
-            if req.get("include_csv"):
-                payload["csv"] = analyzer.export_csv_text(result)
-            return self._ok(**payload)
+        if cmd == "capture_wait":
+            # Wait on the already-armed capture (`configure` + `arm`) and read
+            # it out. Clients hold one hardware arm across many short polls, so
+            # an armed wait has no deadline and no re-arm blind gaps; a timeout
+            # here just means "still waiting" and leaves the core armed.
+            cfg = analyzer._config  # noqa: SLF001 - the session's active config
+            if cfg is None:
+                raise RuntimeError("not configured - send `configure` and `arm` first")
+            return self._capture_readout(analyzer, cfg, req)
 
         if cmd == "eio_connect":
             if self._eio is not None:
