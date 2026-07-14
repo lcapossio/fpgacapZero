@@ -20,6 +20,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [waiting, setWaiting] = useState(false); // armed, trigger not fired yet
   const [overflow, setOverflow] = useState(false);
   const runRef = useRef(false);
   // Stop aborts the in-flight capture request so an armed wait ends now, not
@@ -93,6 +94,10 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     setStatus("");
     stopCtl.current = new AbortController();
     try {
+      if (!immediate) {
+        setWaiting(true);
+        setStatus("armed - waiting for trigger");
+      }
       const n = await once(immediate, SINGLE_TIMEOUT);
       setStatus(`captured ${n} samples - see the Viewer tab`);
     } catch (e) {
@@ -104,6 +109,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
       }
     } finally {
       stopCtl.current = null;
+      setWaiting(false);
       setBusy(false);
     }
   }
@@ -117,14 +123,22 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     try {
       while (runRef.current) {
         try {
+          if (!immediate) {
+            setWaiting(true);
+            setStatus(
+              count
+                ? `auto re-arm: armed - waiting for trigger (${count} captures)`
+                : "auto re-arm: armed - waiting for trigger",
+            );
+          }
           const n = await once(immediate, CONT_TIMEOUT);
+          setWaiting(false);
           count += 1;
           setStatus(`auto re-arm: ${count} captures (${n} samples)`);
         } catch (e) {
           // The short per-capture timeout only exists to keep Stop responsive;
           // a trigger that didn't fire inside one window just means re-arm.
           if (e instanceof RpcError && e.type === "TimeoutError") {
-            setStatus(`auto re-arm: ${count} captures - waiting for trigger`);
             continue;
           }
           if (e instanceof RpcCancelled) {
@@ -142,6 +156,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     } finally {
       runRef.current = false;
       stopCtl.current = null;
+      setWaiting(false);
       setRunning(false);
     }
   }
@@ -232,7 +247,10 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
           ) : overflow ? (
             <span className="warn">overflow</span>
           ) : status ? (
-            <span className="muted">{status}</span>
+            <span className={waiting ? "armed" : "muted"}>
+              {waiting && <span className="armdot" />}
+              {status}
+            </span>
           ) : null}
         </span>
       </div>

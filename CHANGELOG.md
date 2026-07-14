@@ -116,6 +116,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   panel into its own Cores tab (stacked with Connection); the dock jumps to
   it once a connection is established. The Run tab is a single row with the
   Download VCD/CSV/JSON buttons folded into one **Download…** picker.
+- **Web — armed indicator:** while a capture is armed and the trigger hasn't
+  fired, the Run bar shows a pulsing "armed - waiting for trigger" status
+  (single-shot and auto re-arm both).
 - **Web — Stop works while armed:** Stop is enabled during any armed wait
   (not just auto re-arm); it aborts the in-flight capture request and a new
   `disarm` RPC (`force_idle`) soft-resets the core to verified idle.

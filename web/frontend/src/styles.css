@@ -147,6 +147,29 @@ body {
   color: var(--accent);
 }
 
+/* Armed-and-waiting indicator: pulsing dot + highlighted status text. */
+.armed {
+  color: var(--accent);
+}
+.armdot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: armpulse 1.2s ease-in-out infinite;
+}
+@keyframes armpulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
 .runbar-download {
   padding: 0.12rem 0.3rem;
   font-size: 0.85rem;

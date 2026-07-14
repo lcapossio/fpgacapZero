@@ -103,6 +103,8 @@ connected. The panels:
   (trigger-gated capture), **Trigger Immediate** (force a capture now),
   **Auto re-arm** (continuous re-arming loop), **Stop**, and a single
   **Download…** picker exporting the last capture as VCD, CSV or JSON.
+  While armed, the status shows a pulsing **armed - waiting for trigger**
+  indicator until the condition fires (or Stop disarms).
 - **Viewer** — an embedded **[Surfer](https://surfer-project.org/)** waveform
   viewer (runs entirely in the browser via WebAssembly). **Every capture core
   gets its own viewer tab** ("Viewer: ELA", "Viewer: AXI Mon", …), each holding
