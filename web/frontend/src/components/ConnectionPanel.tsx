@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getToken, rpc, setToken } from "../api";
+import { RpcCancelled, getToken, rpc, setToken } from "../api";
 import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
@@ -205,6 +205,19 @@ export function ConnectionPanel({
   // Per-core ELA config, so switching cores doesn't clobber trigger/probe
   // setups — keyed by BSCAN chain, reset with the connection.
   const elaByChain = useRef<Record<number, ElaConfig>>({});
+  // Cancels the in-flight connect flow (scan/discover/connect/probe).
+  const abortRef = useRef<AbortController | null>(null);
+
+  /** Arm a fresh cancel scope for a connect flow; returns its signal. */
+  function beginCancellable(): AbortSignal {
+    const ac = new AbortController();
+    abortRef.current = ac;
+    return ac.signal;
+  }
+
+  function sig(): AbortSignal | undefined {
+    return abortRef.current?.signal;
+  }
 
   function resetScan() {
     setTargets([]);
@@ -266,6 +279,11 @@ export function ConnectionPanel({
   }
 
   function handleError(e: unknown) {
+    if (e instanceof RpcCancelled) {
+      setStatus("cancelled");
+      setError("");
+      return;
+    }
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.toLowerCase().includes("unauthorized")) setNeedsToken(true);
     setError(msg);
@@ -280,13 +298,13 @@ export function ConnectionPanel({
     const reqParams = { backend, host, port: Number(port), tap };
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
-    const c = await rpc("connect", reqParams, t);
+    const c = await rpc("connect", reqParams, t, sig());
     const params: ConnectionParams = {
       ...reqParams,
       ir_table: typeof c.ir_table === "string" ? c.ir_table : "",
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
-    const r = await rpc("probe", {}, t);
+    const r = await rpc("probe", {}, t, sig());
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
     onConnected(params, r.probe as Identity);
     loadCores();
@@ -303,12 +321,12 @@ export function ConnectionPanel({
       tap: b.tap,
       ir_table: b.ir_table,
     };
-    const c = await rpc("connect", reqParams, CONNECT_TIMEOUT);
+    const c = await rpc("connect", reqParams, CONNECT_TIMEOUT, sig());
     const params: ConnectionParams = {
       ...reqParams,
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
-    const r = await rpc("probe", {}, CONNECT_TIMEOUT);
+    const r = await rpc("probe", {}, CONNECT_TIMEOUT, sig());
     setConnTarget({
       backend: b.backend,
       host: b.host,
@@ -362,6 +380,7 @@ export function ConnectionPanel({
     setBusy(true);
     resetScan();
     setToken(token);
+    beginCancellable();
     try {
       if (manualTap.trim()) {
         await connectTo(manualTap.trim());
@@ -404,6 +423,7 @@ export function ConnectionPanel({
         "scan_targets",
         { backend, host, port: Number(port), timeout: HW_SCAN_TIMEOUT },
         HW_CONNECT_TIMEOUT,
+        sig(),
       );
       const found = (r.targets as string[]) ?? [];
       if (found.length === 0) {
@@ -431,6 +451,7 @@ export function ConnectionPanel({
       }
       onDisconnected();
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }
@@ -448,6 +469,7 @@ export function ConnectionPanel({
         budget: DISCOVER_BUDGET_S,
       },
       DISCOVER_TIMEOUT,
+      sig(),
     );
     return (r.boards as Board[]) ?? [];
   }
@@ -459,8 +481,9 @@ export function ConnectionPanel({
   async function ensureOpenocdRunning(): Promise<"started" | "picker" | "no"> {
     let st;
     try {
-      st = await rpc("openocd_status", {}, CONNECT_TIMEOUT);
-    } catch {
+      st = await rpc("openocd_status", {}, CONNECT_TIMEOUT, sig());
+    } catch (e) {
+      if (e instanceof RpcCancelled) throw e;
       return "no"; // feature off / not a loopback client
     }
     const configs = (st.configs as string[]) ?? [];
@@ -473,7 +496,7 @@ export function ConnectionPanel({
       return "picker";
     }
     setStatus(`starting OpenOCD (${configs[0]})…`);
-    await rpc("openocd_start", { name: configs[0], port: Number(port) }, START_TIMEOUT);
+    await rpc("openocd_start", { name: configs[0], port: Number(port) }, START_TIMEOUT, sig());
     return "started";
   }
 
@@ -501,11 +524,13 @@ export function ConnectionPanel({
   async function connectPickedTarget() {
     setBusy(true);
     setError("");
+    beginCancellable();
     try {
       await connectTo(picked);
     } catch (e) {
       handleError(e);
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }
@@ -513,11 +538,13 @@ export function ConnectionPanel({
   async function connectPickedBoard() {
     setBusy(true);
     setError("");
+    beginCancellable();
     try {
       await connectToBoard(boards[pickedIdx]);
     } catch (e) {
       handleError(e);
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }
@@ -540,7 +567,13 @@ export function ConnectionPanel({
     return (
       <section className="panel">
         <h2>Connection</h2>
-        <p className="ok">✓ Connected</p>
+        <div className="btnrow">
+          <span className="ok">✓ Connected</span>
+          <button onClick={disconnect} disabled={busy}>
+            Disconnect
+          </button>
+        </div>
+        {error && <p className="err">{error}</p>}
         {connTarget && (
           <p className="muted">
             {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
@@ -569,10 +602,6 @@ export function ConnectionPanel({
             />
           );
         })}
-        <button onClick={disconnect} disabled={busy}>
-          Disconnect
-        </button>
-        {error && <p className="err">{error}</p>}
       </section>
     );
   }
@@ -580,6 +609,18 @@ export function ConnectionPanel({
   return (
     <section className="panel">
       <h2>Connection</h2>
+      <div className="btnrow">
+        <button onClick={connect} disabled={busy}>
+          {busy ? "Working…" : "Connect"}
+        </button>
+        {busy && (
+          <button className="danger" onClick={() => abortRef.current?.abort()}>
+            Cancel
+          </button>
+        )}
+      </div>
+      {status && <p className="muted">{status}</p>}
+      {error && <p className="err">{error}</p>}
       <div className="form">
         <label>
           Backend
@@ -637,7 +678,7 @@ export function ConnectionPanel({
               Connect to {boards[pickedIdx]?.tap}
             </button>
             <button className="secondary" onClick={resetScan} disabled={busy}>
-              Cancel
+              Dismiss
             </button>
           </div>
         </div>
@@ -656,15 +697,11 @@ export function ConnectionPanel({
               Connect to {picked}
             </button>
             <button className="secondary" onClick={resetScan} disabled={busy}>
-              Cancel
+              Dismiss
             </button>
           </div>
         </div>
-      ) : (
-        <button onClick={connect} disabled={busy}>
-          {busy ? "Working…" : "Connect"}
-        </button>
-      )}
+      ) : null}
 
       {ooEnabled && (
         <div className="btnrow">
@@ -680,9 +717,6 @@ export function ConnectionPanel({
           </button>
         </div>
       )}
-
-      {status && <p className="muted">{status}</p>}
-      {error && <p className="err">{error}</p>}
     </section>
   );
 }

@@ -65,7 +65,9 @@ toggles panels (checked = open; click to close or reopen), and **Reset layout**
 rebuilds the default arrangement without reloading — the session stays
 connected. The panels:
 
-- **Connection** — pick the backend (OpenOCD or Xilinx hw_server), host and
+- **Connection** — Connect/Disconnect sit at the top of the panel, with a
+  **Cancel** button while a connect or scan is in flight. Pick the backend
+  (OpenOCD or Xilinx hw_server), host and
   port. For OpenOCD, Connect **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects

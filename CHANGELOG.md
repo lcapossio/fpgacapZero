@@ -109,6 +109,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — connect UX:** Connect/Disconnect moved to the top of the Connection
+  panel, and a **Cancel** button aborts an in-flight connect/scan (the slow
+  XSDB cold start no longer locks the panel until timeout).
 - **Web — per-core viewer tabs:** every capture core (plain ELA, AXI monitor)
   gets its own Surfer viewer tab holding its own last capture, so switching
   cores never clobbers another core's waveform; the tabs appear on connect,
