@@ -64,6 +64,11 @@ class FakeTransport(Transport):
 
     def write_reg(self, addr: int, value: int) -> None:
         self.regs[addr] = value
+        if addr == 0x0004:  # CTRL: mirror the capture FSM in STATUS
+            if value & 0x2:  # RESET -> verified idle (disarm)
+                self.regs[0x0008] = 0
+            elif value & 0x1:  # ARM -> "completes" immediately (DONE)
+                self.regs[0x0008] = 0x4
 
     def read_block(self, addr: int, words: int):
         if addr == 0x0100:
@@ -150,6 +155,16 @@ def test_capture_returns_samples(monkeypatch):
     assert r["ok"] is True, r
     assert r["sample_count"] == len(r["result"]["samples"])
     assert r["sample_count"] > 0
+
+
+def test_disarm_soft_resets_to_idle(monkeypatch):
+    """Stop-while-armed: disarm force-idles the core and reports ok."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "disarm").json()
+    assert r["ok"] is True, r
+    # The session stays usable afterwards.
+    assert _rpc(c, "probe").json()["ok"] is True
 
 
 def test_capture_include_vcd(monkeypatch):

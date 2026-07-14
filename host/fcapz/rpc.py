@@ -665,6 +665,12 @@ class RpcServer:
             analyzer.arm()
             return self._ok()
 
+        if cmd == "disarm":
+            # Soft-reset the capture FSM to a verified idle (discards any
+            # in-flight capture) — the web UI's Stop while armed.
+            analyzer.force_idle()
+            return self._ok()
+
         if cmd == "capture":
             cfg = self._build_config(req)
             # "Trigger Immediate": rewrite the config to an always-true trigger

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { RpcError, downloadText, parseProbesText, rpc } from "../api";
+import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { useSession } from "../session";
 
@@ -22,6 +22,9 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
   const [status, setStatus] = useState("");
   const [overflow, setOverflow] = useState(false);
   const runRef = useRef(false);
+  // Stop aborts the in-flight capture request so an armed wait ends now, not
+  // at its timeout; the core itself is then disarmed server-side.
+  const stopCtl = useRef<AbortController | null>(null);
   // The auto re-arm loop is a long-lived closure; read the identity through a
   // ref so a core switch mid-loop can't send another core's geometry.
   const identityRef = useRef(identityProp);
@@ -60,7 +63,12 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
   }
 
   async function once(immediate: boolean, timeout: number) {
-    const r = await rpc("capture", params(immediate, timeout), timeout * 1000 + 4000);
+    const r = await rpc(
+      "capture",
+      params(immediate, timeout),
+      timeout * 1000 + 4000,
+      stopCtl.current?.signal,
+    );
     setOverflow(Boolean(r.overflow));
     if (typeof r.vcd === "string") {
       pushCapture({
@@ -73,16 +81,29 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     return r.sample_count ?? "?";
   }
 
+  /** Disarm the core after a stopped wait (queues behind the in-flight
+   *  capture command server-side; best-effort). */
+  function disarm() {
+    rpc("disarm", {}, 20000).catch(() => {});
+  }
+
   async function single(immediate: boolean) {
     setBusy(true);
     setError("");
     setStatus("");
+    stopCtl.current = new AbortController();
     try {
       const n = await once(immediate, SINGLE_TIMEOUT);
       setStatus(`captured ${n} samples - see the Viewer tab`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof RpcCancelled) {
+        setStatus("stopped - disarmed");
+        disarm();
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      stopCtl.current = null;
       setBusy(false);
     }
   }
@@ -91,6 +112,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
     setError("");
     setRunning(true);
     runRef.current = true;
+    stopCtl.current = new AbortController();
     let count = 0;
     try {
       while (runRef.current) {
@@ -105,13 +127,21 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
             setStatus(`auto re-arm: ${count} captures - waiting for trigger`);
             continue;
           }
+          if (e instanceof RpcCancelled) {
+            setStatus(`stopped after ${count} captures - disarmed`);
+            disarm();
+            return;
+          }
           throw e;
         }
       }
+      setStatus(`stopped after ${count} captures - disarmed`);
+      disarm();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       runRef.current = false;
+      stopCtl.current = null;
       setRunning(false);
     }
   }
@@ -123,6 +153,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
 
   function stop() {
     runRef.current = false;
+    stopCtl.current?.abort(); // ends the armed wait now, not at its timeout
     setStatus("stopping...");
   }
 
@@ -153,7 +184,7 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
         <button onClick={() => start(true)} disabled={locked}>
           Trigger Immediate
         </button>
-        <button className="danger" onClick={stop} disabled={!running}>
+        <button className="danger" onClick={stop} disabled={!running && !busy}>
           Stop
         </button>
         <label className="inline">

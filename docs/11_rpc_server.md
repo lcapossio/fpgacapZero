@@ -370,6 +370,15 @@ wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 {"cmd": "arm"}
 ```
 
+#### `disarm`
+
+Soft-reset the capture FSM to a verified idle (`force_idle`), discarding any
+in-flight capture — how a client's Stop button cancels an armed wait.
+
+```json
+{"cmd": "disarm"}
+```
+
 #### `capture`
 
 Configure + arm + capture in one call, returning the result.
