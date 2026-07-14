@@ -95,6 +95,31 @@ body {
 .runbar .inline {
   margin-top: 0;
 }
+.sigtrig {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.sigrow {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.sigrow button {
+  padding: 0.05rem 0.45rem;
+  min-width: 1.8rem;
+}
+.signame {
+  min-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sigval {
+  width: 7rem;
+  padding: 0.1rem 0.3rem;
+}
+
 .runbar-download {
   padding: 0.12rem 0.3rem;
   font-size: 0.85rem;

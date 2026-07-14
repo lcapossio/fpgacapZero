@@ -33,6 +33,8 @@ export interface Identity {
   has_timestamp?: boolean;
   timestamp_width?: number;
   has_dual_compare?: boolean;
+  /** Comparator modes the bitstream supports (0=EQ .. 8=CHANGED). */
+  compare_modes?: number[];
 }
 
 /** One fcapz debug core present on the connected target (from list_cores). */

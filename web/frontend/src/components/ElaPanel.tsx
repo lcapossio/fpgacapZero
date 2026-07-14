@@ -1,9 +1,112 @@
+import { useMemo, useState } from "react";
+import { parseProbesText } from "../api";
+import type { Identity, ProbeSpec } from "../api";
+import {
+  describeCondition,
+  hasDirectionalEdges,
+  signalTrigger,
+  triggerable,
+} from "../signalTrigger";
+import type { SignalCondition } from "../signalTrigger";
 import { useSession } from "../session";
+
+/** One named signal with its click-to-trigger conditions. */
+function SignalRow({
+  probe,
+  identity,
+  onApply,
+}: {
+  probe: ProbeSpec;
+  identity: Identity | null;
+  onApply: (cond: SignalCondition, equalsText?: string) => void;
+}) {
+  const [value, setValue] = useState("0x0");
+  const usable = triggerable(probe);
+  const edges = hasDirectionalEdges(identity);
+  const edgeTitle = edges
+    ? undefined
+    : `directional edges need a TRIG_STAGES ≥ 2 bitstream (this build: ${identity?.trig_stages ?? "?"})`;
+  return (
+    <div className="sigrow">
+      <span
+        className="signame"
+        title={`bits [${probe.lsb + probe.width - 1}:${probe.lsb}]`}
+      >
+        {probe.name}
+        {probe.width > 1 && <span className="muted"> [{probe.width}]</span>}
+      </span>
+      {!usable ? (
+        <span className="muted" title="the trigger comparator reaches bits 31:0 only">
+          above bit 31
+        </span>
+      ) : probe.width === 1 ? (
+        <>
+          <button className="secondary" title={edgeTitle ?? "Rising edge"}
+            disabled={!edges} onClick={() => onApply("rising")}>
+            ↑
+          </button>
+          <button className="secondary" title={edgeTitle ?? "Falling edge"}
+            disabled={!edges} onClick={() => onApply("falling")}>
+            ↓
+          </button>
+          <button className="secondary" title="High (== 1)" onClick={() => onApply("high")}>
+            1
+          </button>
+          <button className="secondary" title="Low (== 0)" onClick={() => onApply("low")}>
+            0
+          </button>
+          <button className="secondary" title="Any toggle" onClick={() => onApply("change")}>
+            ⇅
+          </button>
+        </>
+      ) : (
+        <>
+          <input
+            className="sigval"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            title="decimal or 0x-hex"
+          />
+          <button className="secondary" title="Equals this value"
+            onClick={() => onApply("equals", value)}>
+            =
+          </button>
+          <button className="secondary" title="Any change of this field"
+            onClick={() => onApply("change")}>
+            ⇅
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** ELA trigger/capture configuration. Run controls (Arm / Trigger Immediate /
  *  Auto re-arm / Stop) live in the Run tab and read this shared config. */
 export function ElaPanel() {
   const { ela, setEla, identity } = useSession();
+  const [applied, setApplied] = useState("");
+  const [trigError, setTrigError] = useState("");
+
+  // Signals parsed from the probe definitions; a half-edited textarea just
+  // hides the click-to-trigger list until it parses again.
+  const probes = useMemo(() => {
+    try {
+      return parseProbesText(ela.probesText);
+    } catch {
+      return [];
+    }
+  }, [ela.probesText]);
+
+  function applySignalTrigger(p: ProbeSpec, cond: SignalCondition, equalsText?: string) {
+    try {
+      setEla(signalTrigger(p, cond, equalsText));
+      setApplied(`trigger: ${describeCondition(p, cond, equalsText)}`);
+      setTrigError("");
+    } catch (e) {
+      setTrigError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   async function loadProbeFile(file: File | undefined) {
     if (!file) return;
@@ -85,6 +188,28 @@ export function ElaPanel() {
           spellCheck={false}
         />
       </label>
+
+      {probes.length > 0 && (
+        <>
+          <h3>Signal triggers</h3>
+          <p className="muted">
+            Click a condition to trigger on that signal: ↑ rising, ↓ falling,
+            1/0 level, ⇅ any change, = value.
+          </p>
+          <div className="sigtrig">
+            {probes.map((p) => (
+              <SignalRow
+                key={`${p.name}-${p.lsb}`}
+                probe={p}
+                identity={identity}
+                onApply={(cond, v) => applySignalTrigger(p, cond, v)}
+              />
+            ))}
+          </div>
+          {applied && !trigError && <p className="ok">{applied} — arm from the Run tab.</p>}
+          {trigError && <p className="err">{trigError}</p>}
+        </>
+      )}
 
       <h3>Advanced triggering</h3>
       <div className="form">
