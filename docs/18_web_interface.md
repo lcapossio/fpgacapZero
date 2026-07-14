@@ -83,21 +83,22 @@ connected. The panels:
   core the session is bound to is marked **in use**, and any other capture
   core gets a **Use this core** button that switches to it in one click. EIO
   is also auto-discovered into its own panel on connect.
-- **ELA** — the capture configuration: channel, pre/post-trigger depth, trigger
-  mode/value/mask, **probe definitions** (load a `.prob` file or type
-  `name:width:lsb` lines to get named signals in the waveform), and **advanced
-  triggering** (external trigger AND/OR, multi-stage trigger sequencer,
-  segmented capture). Defined signals appear under **Signal triggers** —
-  click a condition next to a signal to add it to the trigger: **↑ rising /
-  ↓ falling** (needs a `TRIG_STAGES ≥ 2` build; greyed out otherwise),
-  **1/0** level, **⇅ any change**, or **= value** for multi-bit fields.
-  Added signals show as removable chips and combine with **AND/OR**; the
-  composition maps onto the hardware (levels/values merge into one
-  comparator pattern; a second pattern or an edge uses the sequencer stage's
-  dual compare), and combinations the comparators can't express are refused
-  with a message saying why. The result just fills the regular trigger
-  fields (and, for edges, a one-stage sequence), so everything stays visible
-  and editable.
+- **ELA** — the capture configuration: channel, pre/post-trigger window,
+  segmented capture, and **probe definitions** (load a `.prob` file or type
+  `name:width:lsb` lines to get named signals in the waveform and the
+  Trigger tab).
+- **Trigger** — its own tab, front and center. Every signal is listed — the
+  named probes when defined, otherwise the raw probe bits (`bit0`…`bitN`),
+  so click-to-trigger needs zero setup. Click a condition to add a signal to
+  the trigger: **↑ rising / ↓ falling** (needs a `TRIG_STAGES ≥ 2` build;
+  greyed out otherwise), **1/0** level, **⇅ any change**, or **= value** for
+  multi-bit fields. Added signals show as removable chips and combine with
+  **AND/OR**; the composition maps onto the hardware (levels/values merge
+  into one comparator pattern; a second pattern or an edge uses the
+  sequencer stage's dual compare), and combinations the comparators can't
+  express are refused with a message saying why. The raw trigger fields
+  (mode/value/mask, external trigger, sequencer JSON) sit below, always
+  showing — and accepting — the result.
 - **Run** — a slim one-row toolbar with the run controls: **Arm**
   (trigger-gated capture), **Trigger Immediate** (force a capture now),
   **Auto re-arm** (continuous re-arming loop), **Stop**, and a single

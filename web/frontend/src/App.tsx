@@ -7,6 +7,7 @@ import { SessionProvider, useSession } from "./session";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { CoresPanel } from "./components/CoresPanel";
 import { ElaPanel } from "./components/ElaPanel";
+import { TriggerPanel } from "./components/TriggerPanel";
 import { RunPanel } from "./components/RunPanel";
 import { EioPanel } from "./components/EioPanel";
 import { AxiPanel } from "./components/AxiPanel";
@@ -35,6 +36,9 @@ function CoresDock(_: IDockviewPanelProps) {
 function ElaDock(_: IDockviewPanelProps) {
   const s = useSession();
   return s.conn && s.identity ? <ElaPanel /> : <Empty text="Connect to a target first." />;
+}
+function TriggerDock(_: IDockviewPanelProps) {
+  return <TriggerPanel />;
 }
 function RunDock(_: IDockviewPanelProps) {
   const s = useSession();
@@ -164,7 +168,7 @@ function FocusCoresOnConnect({ api }: { api: DockviewApi }) {
 /** Add a per-core viewer tab, stacked with the default viewer when it exists. */
 function addExtraViewer(api: DockviewApi, id: string, title: string) {
   if (api.getPanel(id)) return;
-  const anchor = firstOpen(api, ["viewer", "connection", "ela", "eio", "axi", "axi_mon", "run"]);
+  const anchor = firstOpen(api, ["viewer", "connection", "ela", "trigger", "eio", "axi", "axi_mon", "run"]);
   api.addPanel({
     id,
     component: "viewer",
@@ -185,6 +189,7 @@ const components = {
   connection: ConnectionDock,
   cores: CoresDock,
   ela: ElaDock,
+  trigger: TriggerDock,
   run: RunDock,
   eio: EioDock,
   axi: AxiDock,
@@ -197,6 +202,7 @@ const PANELS: { id: keyof typeof components; title: string }[] = [
   { id: "connection", title: "Connection" },
   { id: "cores", title: "Cores" },
   { id: "ela", title: "ELA" },
+  { id: "trigger", title: "Trigger" },
   { id: "eio", title: "EIO" },
   { id: "axi", title: "AXI" },
   { id: "axi_mon", title: "AXI Mon" },
@@ -227,6 +233,12 @@ function buildDefaultLayout(api: DockviewApi) {
     component: "ela",
     title: "ELA",
     position: { referencePanel: "connection", direction: "right" },
+  });
+  api.addPanel({
+    id: "trigger",
+    component: "trigger",
+    title: "Trigger",
+    position: { referencePanel: "ela", direction: "within" },
   });
   api.addPanel({
     id: "eio",
@@ -273,7 +285,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   const title = PANELS.find((p) => p.id === id)?.title;
   if (id === "run") {
     // Run lives in its own slim group under the config tabs.
-    const anchor = firstOpen(api, ["ela", "eio", "axi", "axi_mon", "connection", "viewer"]);
+    const anchor = firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon", "connection", "viewer"]);
     api.addPanel({
       id,
       component: id,
@@ -284,7 +296,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     return;
   }
   if (id === "viewer") {
-    const anchor = firstOpen(api, ["connection", "ela", "eio", "axi", "axi_mon", "run"]);
+    const anchor = firstOpen(api, ["connection", "ela", "trigger", "eio", "axi", "axi_mon", "run"]);
     api.addPanel({
       id,
       component: id,
@@ -297,7 +309,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (id === "connection" || id === "cores") {
     // Connection and Cores stack together when either survives.
     const sibling = firstOpen(api, id === "connection" ? ["cores"] : ["connection"]);
-    const anchor = sibling ?? firstOpen(api, ["ela", "eio", "axi", "axi_mon", "viewer", "run"]);
+    const anchor = sibling ?? firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon", "viewer", "run"]);
     api.addPanel({
       id,
       component: id,
@@ -314,7 +326,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     return;
   }
   // ELA / EIO / AXI / AXI Mon: stack with their sibling config tabs when any survive.
-  const sibling = firstOpen(api, ["ela", "eio", "axi", "axi_mon"]);
+  const sibling = firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon"]);
   const anchor = sibling ?? firstOpen(api, ["connection", "viewer", "run"]);
   api.addPanel({
     id,

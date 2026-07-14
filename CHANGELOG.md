@@ -119,14 +119,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — Stop works while armed:** Stop is enabled during any armed wait
   (not just auto re-arm); it aborts the in-flight capture request and a new
   `disarm` RPC (`force_idle`) soft-resets the core to verified idle.
-- **Web — click-to-trigger on signals:** the ELA tab lists the defined
-  probes under Signal triggers; clicking ↑/↓/1/0/⇅/= adds that signal's
-  condition — rising/falling edge (TRIG_STAGES ≥ 2 builds), level,
-  any-change, or field value — as a removable chip, and multiple signals
-  combine with AND/OR. Compositions map onto the comparators (merged
-  patterns, dual-compare stage for a second pattern or an edge); impossible
-  ones are refused with the reason. The regular trigger fields are filled
-  in, staying visible and editable.
+- **Web — Trigger tab with click-to-trigger:** triggering gets its own tab
+  next to ELA. It lists every signal — named probes when defined, else the
+  raw probe bits (bit0…bitN), so no setup is needed — and clicking
+  ↑/↓/1/0/⇅/= adds that signal's condition (rising/falling on TRIG_STAGES ≥
+  2 builds, level, any-change, field value) as a removable chip; multiple
+  signals combine with AND/OR. Compositions map onto the comparators
+  (merged patterns, dual-compare stage for a second pattern or an edge);
+  impossible ones are refused with the reason. The raw trigger fields
+  (mode/value/mask, external trigger, sequencer JSON) moved here from the
+  ELA tab and always show the result, staying editable.
 - **Web — per-core viewer tabs:** every capture core (plain ELA, AXI monitor)
   gets its own Surfer viewer tab holding its own last capture, so switching
   cores never clobbers another core's waveform; the tabs appear on connect,
