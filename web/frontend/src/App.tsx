@@ -40,12 +40,15 @@ function ElaDock(_: IDockviewPanelProps) {
 function TriggerDock(_: IDockviewPanelProps) {
   return <TriggerPanel />;
 }
-function RunDock(_: IDockviewPanelProps) {
+/** Run controls as a fixed slim strip above the dock — no dock group, no tab
+ *  header, no vertical overhead. Hidden until a session exists. */
+function RunStrip() {
   const s = useSession();
-  return s.conn && s.identity ? (
-    <RunPanel identity={s.identity} />
-  ) : (
-    <Empty text="Connect to a target first." />
+  if (!s.conn || !s.identity) return null;
+  return (
+    <div className="runstrip">
+      <RunPanel identity={s.identity} />
+    </div>
   );
 }
 function EioDock(_: IDockviewPanelProps) {
@@ -168,7 +171,7 @@ function FocusCoresOnConnect({ api }: { api: DockviewApi }) {
 /** Add a per-core viewer tab, stacked with the default viewer when it exists. */
 function addExtraViewer(api: DockviewApi, id: string, title: string) {
   if (api.getPanel(id)) return;
-  const anchor = firstOpen(api, ["viewer", "connection", "ela", "trigger", "eio", "axi", "axi_mon", "run"]);
+  const anchor = firstOpen(api, ["viewer", "connection", "ela", "trigger", "eio", "axi", "axi_mon"]);
   api.addPanel({
     id,
     component: "viewer",
@@ -190,7 +193,6 @@ const components = {
   cores: CoresDock,
   ela: ElaDock,
   trigger: TriggerDock,
-  run: RunDock,
   eio: EioDock,
   axi: AxiDock,
   axi_mon: AxiMonDock,
@@ -206,7 +208,6 @@ const PANELS: { id: keyof typeof components; title: string }[] = [
   { id: "eio", title: "EIO" },
   { id: "axi", title: "AXI" },
   { id: "axi_mon", title: "AXI Mon" },
-  { id: "run", title: "Run" },
   { id: "viewer", title: "Viewer" },
 ];
 
@@ -227,7 +228,7 @@ function buildDefaultLayout(api: DockviewApi) {
     position: { referencePanel: "connection", direction: "below" },
     initialHeight: 400,
   });
-  // Top row: Connection on the left, ELA/EIO/AXI tabs (+ slim Run) on the right.
+  // Top row: Connection on the left, ELA/EIO/AXI tabs on the right.
   api.addPanel({
     id: "ela",
     component: "ela",
@@ -258,15 +259,7 @@ function buildDefaultLayout(api: DockviewApi) {
     title: "AXI Mon",
     position: { referencePanel: "ela", direction: "within" },
   });
-  // Run gets its own slim group with a real tab — the tab is the drag handle
-  // (dockview can only drag via tab/title bars, so a custom grip can't work).
-  api.addPanel({
-    id: "run",
-    component: "run",
-    title: "Run",
-    position: { referencePanel: "ela", direction: "below" },
-    initialHeight: 60,
-  });
+  // Run is not a dock panel — it's the fixed strip above the dock.
   // Show Connection (not Cores) in its group, and select ELA at startup
   // (panels added later in a group would otherwise win).
   api.getPanel("connection")?.api.setActive();
@@ -283,20 +276,8 @@ function firstOpen(api: DockviewApi, candidates: string[]): string | undefined {
 function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (api.getPanel(id)) return;
   const title = PANELS.find((p) => p.id === id)?.title;
-  if (id === "run") {
-    // Run lives in its own slim group under the config tabs.
-    const anchor = firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon", "connection", "viewer"]);
-    api.addPanel({
-      id,
-      component: id,
-      title,
-      ...(anchor ? { position: { referencePanel: anchor, direction: "below" as const } } : {}),
-      initialHeight: 60,
-    });
-    return;
-  }
   if (id === "viewer") {
-    const anchor = firstOpen(api, ["connection", "ela", "trigger", "eio", "axi", "axi_mon", "run"]);
+    const anchor = firstOpen(api, ["connection", "ela", "trigger", "eio", "axi", "axi_mon"]);
     api.addPanel({
       id,
       component: id,
@@ -309,7 +290,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (id === "connection" || id === "cores") {
     // Connection and Cores stack together when either survives.
     const sibling = firstOpen(api, id === "connection" ? ["cores"] : ["connection"]);
-    const anchor = sibling ?? firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon", "viewer", "run"]);
+    const anchor = sibling ?? firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon", "viewer"]);
     api.addPanel({
       id,
       component: id,
@@ -327,7 +308,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   }
   // ELA / EIO / AXI / AXI Mon: stack with their sibling config tabs when any survive.
   const sibling = firstOpen(api, ["ela", "trigger", "eio", "axi", "axi_mon"]);
-  const anchor = sibling ?? firstOpen(api, ["connection", "viewer", "run"]);
+  const anchor = sibling ?? firstOpen(api, ["connection", "viewer"]);
   api.addPanel({
     id,
     component: id,
@@ -485,6 +466,7 @@ export function App() {
         </header>
         {dockApi && <ViewerTabsSync api={dockApi} />}
         {dockApi && <FocusCoresOnConnect api={dockApi} />}
+        <RunStrip />
         <Dock onApi={setDockApi} />
       </div>
     </SessionProvider>
