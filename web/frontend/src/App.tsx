@@ -40,15 +40,12 @@ function ElaDock(_: IDockviewPanelProps) {
 function TriggerDock(_: IDockviewPanelProps) {
   return <TriggerPanel />;
 }
-/** Run controls as a fixed slim strip above the dock — no dock group, no tab
- *  header, no vertical overhead. Hidden until a session exists. */
-function RunStrip() {
+function RunDock(_: IDockviewPanelProps) {
   const s = useSession();
-  if (!s.conn || !s.identity) return null;
-  return (
-    <div className="runstrip">
-      <RunPanel identity={s.identity} />
-    </div>
+  return s.conn && s.identity ? (
+    <RunPanel identity={s.identity} />
+  ) : (
+    <Empty text="Connect to a target first." />
   );
 }
 function EioDock(_: IDockviewPanelProps) {
@@ -193,6 +190,7 @@ const components = {
   cores: CoresDock,
   ela: ElaDock,
   trigger: TriggerDock,
+  run: RunDock,
   eio: EioDock,
   axi: AxiDock,
   axi_mon: AxiMonDock,
@@ -259,11 +257,43 @@ function buildDefaultLayout(api: DockviewApi) {
     title: "AXI Mon",
     position: { referencePanel: "ela", direction: "within" },
   });
-  // Run is not a dock panel — it's the fixed strip above the dock.
+  // Run sits between the config row and the viewer as a headerless strip.
+  addRunStrip(api);
   // Show Connection (not Cores) in its group, and select ELA at startup
   // (panels added later in a group would otherwise win).
   api.getPanel("connection")?.api.setActive();
   api.getPanel("ela")?.api.setActive();
+}
+
+// The Run strip's fixed height: one control row, no tab header.
+const RUN_STRIP_H = 40;
+
+/** Add the Run controls as a slim strip directly above the viewer: its group
+ *  has no tab header, can't be dragged into or resized — a fixed toolbar in
+ *  the middle of the dock. */
+function addRunStrip(api: DockviewApi) {
+  if (api.getPanel("run")) return;
+  const anchor = firstOpen(api, ["viewer", "connection", "ela", "trigger", "eio", "axi", "axi_mon"]);
+  const panel = api.addPanel({
+    id: "run",
+    component: "run",
+    title: "Run",
+    ...(anchor
+      ? {
+          position: {
+            referencePanel: anchor,
+            direction: anchor === "viewer" ? ("above" as const) : ("below" as const),
+          },
+        }
+      : {}),
+    initialHeight: RUN_STRIP_H,
+  });
+  panel.group.header.hidden = true;
+  panel.group.locked = "no-drop-target";
+  panel.group.api.setConstraints({
+    minimumHeight: RUN_STRIP_H,
+    maximumHeight: RUN_STRIP_H,
+  });
 }
 
 /** First panel id from `candidates` that is currently open, for anchoring a
@@ -466,7 +496,6 @@ export function App() {
         </header>
         {dockApi && <ViewerTabsSync api={dockApi} />}
         {dockApi && <FocusCoresOnConnect api={dockApi} />}
-        <RunStrip />
         <Dock onApi={setDockApi} />
       </div>
     </SessionProvider>

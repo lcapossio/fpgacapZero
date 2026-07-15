@@ -37,17 +37,6 @@ body {
   flex: 0 0 auto;
   padding: 0.5rem 1rem;
 }
-/* Run controls: a fixed slim strip between the topbar and the dock — no dock
-   group, no tab header, minimum vertical footprint. */
-.runstrip {
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--border);
-}
-.runstrip .runbar {
-  height: auto;
-  padding: 0.25rem 1rem;
-}
-
 .dock {
   flex: 1 1 auto;
   min-height: 0;

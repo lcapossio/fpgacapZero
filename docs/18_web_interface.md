@@ -99,12 +99,12 @@ connected. The panels:
   express are refused with a message saying why. The raw trigger fields
   (mode/value/mask, external trigger, sequencer JSON) sit below, always
   showing — and accepting — the result.
-- **Run** — a fixed one-row toolbar strip between the top bar and the dock
-  (not a dock tab, so it costs no tab header and is always visible once
-  connected): **Arm** (trigger-gated capture), **Trigger Immediate** (force
-  a capture now), **Auto re-arm** (continuous re-arming loop), **Stop**, and
-  a single **Download…** picker exporting the last capture as VCD, CSV or
-  JSON.
+- **Run** — a fixed one-row toolbar strip sitting between the config tabs
+  and the waveform viewer (a headerless, fixed-height dock group — no tab,
+  can't be resized or covered): **Arm** (trigger-gated capture), **Trigger
+  Immediate** (force a capture now), **Auto re-arm** (continuous re-arming
+  loop), **Stop**, and a single **Download…** picker exporting the last
+  capture as VCD, CSV or JSON.
   While armed, the status shows a pulsing **armed - waiting for trigger**
   indicator until the condition fires (or Stop disarms). Armed waits have
   **no deadline**: the core is armed once and polled, so the trigger can

@@ -116,9 +116,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   panel into its own Cores tab (stacked with Connection); the dock jumps to
   it once a connection is established. The Run tab is a single row with the
   Download VCD/CSV/JSON buttons folded into one **Download…** picker.
-- **Web — Run strip:** the Run controls moved out of the dock into a fixed
-  one-row strip between the top bar and the dock — no tab header, less
-  vertical space, always visible while connected.
+- **Web — Run strip:** the Run controls became a fixed one-row strip between
+  the config tabs and the waveform viewer — a headerless, fixed-height,
+  locked dock group: no tab header, less vertical space, always visible.
 - **Web — armed indicator:** while a capture is armed and the trigger hasn't
   fired, the Run bar shows a pulsing "armed - waiting for trigger" status
   (single-shot and auto re-arm both).
