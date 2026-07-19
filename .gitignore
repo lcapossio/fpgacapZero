@@ -11,6 +11,7 @@ vivado/
 *.log
 *.backup.*
 dfx_runtime.txt
+clockInfo.txt
 
 # Build artifacts
 dist/
@@ -48,6 +49,7 @@ Thumbs.db
 # Temp test outputs
 tests/_tmp/
 .codex_pytest_tmp*/
+.codex_tmp/
 .claude/
 
 # Local-only working notes (per PROJECTS.md no_commit/ convention)
