@@ -119,6 +119,57 @@ body {
   width: 7rem;
   padding: 0.1rem 0.3rem;
 }
+/* ILA-style Trigger Setup table. */
+.trigsetup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.trigsetup-head h2 {
+  margin-right: auto;
+}
+.trigcond {
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+.trigtable {
+  border-collapse: collapse;
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+.trigtable th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem 0.15rem 0;
+}
+.trigtable td {
+  padding: 0.12rem 0.5rem 0.12rem 0;
+  vertical-align: middle;
+}
+.trigtable select {
+  padding: 0.1rem 0.2rem;
+}
+.trigvalue {
+  width: 9rem;
+  padding: 0.1rem 0.3rem;
+  font-family: ui-monospace, monospace;
+}
+.trigadv {
+  margin-top: 0.6rem;
+}
+.trigadv summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .trigterms {
   display: flex;
   align-items: center;
@@ -145,6 +196,32 @@ body {
 }
 .trigterm-x:hover {
   color: var(--accent);
+}
+.trigrow-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+.trigterm-move {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 0 0.15rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.trigterm-move:hover:not(:disabled) {
+  color: var(--accent);
+}
+.trigterm-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.trigterm-ungroup {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.75rem;
 }
 
 /* Armed-and-waiting indicator: pulsing dot + highlighted status text. */

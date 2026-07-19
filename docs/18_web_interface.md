@@ -87,18 +87,27 @@ connected. The panels:
   segmented capture, and **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
   Trigger tab).
-- **Trigger** — its own tab, front and center. Every signal is listed — the
-  named probes when defined, otherwise the raw probe bits (`bit0`…`bitN`),
-  so click-to-trigger needs zero setup. Click a condition to add a signal to
-  the trigger: **↑ rising / ↓ falling** (needs a `TRIG_STAGES ≥ 2` build;
-  greyed out otherwise), **1/0** level, **⇅ any change**, or **= value** for
-  multi-bit fields. Added signals show as removable chips and combine with
-  **AND/OR**; the composition maps onto the hardware (levels/values merge
-  into one comparator pattern; a second pattern or an edge uses the
-  sequencer stage's dual compare), and combinations the comparators can't
-  express are refused with a message saying why. The raw trigger fields
-  (mode/value/mask, external trigger, sequencer JSON) sit below, always
-  showing — and accepting — the result.
+- **Trigger** — its own tab, laid out like Vivado ILA's **Trigger Setup**.
+  **+ Add probe…** appends a row to the trigger table — named probes when
+  defined, otherwise the raw probe bits (`bit0`…`bitN`), so triggering needs
+  zero setup. Each row is **Name | Operator | Radix | Value**: operators
+  `==`/`!=`; radix **[B]** binary, **[H]** hex, **[U]** unsigned; values
+  take **X** don't-care digits (binary and hex), and 1-bit probes in binary
+  accept the edge tokens **R** (rising), **F** (falling), **B** (either
+  edge). **Grouping:** tick the checkboxes on two or more rows and press
+  **Group selected** to concatenate them into one field (top row = MSB), so a
+  single value spans several probes — e.g. `{addr_hi, addr_lo} == 0x1234`. The
+  ▲/▼ arrows set which member is the MSB, and **Ungroup** splits it back. A
+  group takes `==`/`!=` with **X** don't-cares across the whole field and
+  compiles to one comparator; the hardware compares the packed sample word, so
+  grouped probes need not be adjacent, but every member must sit in the low 32
+  bits. A **Trigger condition** dropdown picks **Global AND / Global OR**,
+  exactly like ILA. The table compiles onto the hardware (all `==` rows
+  merge into one comparator pattern under AND; a second pattern, a `!=`, or
+  an edge uses the sequencer stage's dual compare — `TRIG_STAGES ≥ 2`), and
+  combinations the comparators can't express are refused with a message
+  saying why. The raw trigger fields (mode/value/mask, external trigger,
+  sequencer JSON) stay editable under **Advanced**.
 - **Run** — a fixed one-row toolbar strip sitting between the config tabs
   and the waveform viewer (a headerless, fixed-height dock group — no tab,
   can't be resized or covered): **Arm** (trigger-gated capture), **Trigger

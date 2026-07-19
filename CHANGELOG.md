@@ -116,6 +116,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   panel into its own Cores tab (stacked with Connection); the dock jumps to
   it once a connection is established. The Run tab is a single row with the
   Download VCD/CSV/JSON buttons folded into one **Download…** picker.
+- **Web — ILA-style Trigger Setup:** the Trigger tab became a Vivado-ILA-like
+  table: add probes as rows (Name | Operator | Radix | Value) with `==`/`!=`,
+  binary/hex/unsigned radix, X don't-care digits, R/F/B edge tokens on 1-bit
+  probes, and a Global AND/OR trigger condition; raw fields moved under
+  Advanced.
+- **Web — grouped trigger fields:** trigger rows can be concatenated into one
+  field (check the rows, press **Group selected**; top row = MSB, ▲/▼ reorder,
+  **Ungroup** to split) so a single value spans several probes, e.g.
+  `{addr_hi, addr_lo} == 0x1234`. Groups take `==`/`!=` with X don't-cares
+  across the whole field and compile to one comparator; members may be
+  non-adjacent in the sample word but must lie in the low 32 bits.
 - **Web — Run strip:** the Run controls became a fixed one-row strip between
   the config tabs and the waveform viewer — a headerless, fixed-height,
   locked dock group: no tab header, less vertical space, always visible.

@@ -1,35 +1,67 @@
-// Click-to-trigger glue: turn a list of per-signal conditions ("valid rises",
-// "state == 0xA") combined with AND/OR into the shared ELA trigger config.
-// Bit positions come from the probe definitions; nothing here hardcodes a
-// layout.
+// ILA-style trigger model: a table of comparison rows — operator, radix,
+// value — combined with a global AND/OR condition (mirroring Vivado's ILA
+// Trigger Setup). A row targets one probe, or a *group* of probes concatenated
+// MSB-first into one wider field so a single value spans several signals (e.g.
+// {addr_hi, addr_lo} == 0x1234). Values support per-bit don't-cares (X) in
+// binary and hex radix, and edge tokens (R/F/B) for single-bit rows in binary
+// radix. Everything compiles down to the shared ELA trigger config; bit
+// positions come from the probe definitions — nothing here hardcodes a layout.
 //
 // Hardware mapping (see docs/05). The ELA offers:
 // - one simple comparator: value_match ((probe&mask)==(value&mask)) or
 //   edge_detect (any masked bit changes) — available in every build;
-// - a trigger sequencer stage with two comparators A/B (modes EQ/RISING/
-//   FALLING/CHANGED …) and an AND/OR combine — TRIG_STAGES >= 2 builds,
+// - a trigger sequencer stage with two comparators A/B (EQ/NEQ/RISING/
+//   FALLING/CHANGED) and an AND/OR combine — TRIG_STAGES >= 2 builds,
 //   comparator B additionally needs DUAL_COMPARE.
 //
 // So a trigger composes into at most two comparator "slots":
-// - AND: all level/equality terms merge into one EQ slot (they're just bits
-//   of one pattern); at most one edge-ish term takes the second slot.
-//   Multiple edge terms can't AND — the hardware has no per-bit edge AND.
-// - OR: every level/equality term needs its own slot (merging masks would
-//   AND them); all "changes" terms merge into one CHANGED slot (any-of is
-//   exactly what a merged mask means); rising/falling take a slot each.
+// - AND: all `==` terms merge into one EQ slot (X'd bits just drop out of
+//   the mask); at most one edge (R/F/B) can join via the second slot, and
+//   any `!=` needs a slot of its own. Edges on several probes can't be
+//   required in the same cycle — the hardware has no per-bit edge AND.
+// - OR: every `==`/`!=` term needs its own slot (merging masks would AND
+//   them); all B (either-edge) terms merge into one CHANGED slot; R/F take
+//   a slot each.
 
-import { toHexParam } from "./api";
 import type { Identity, ProbeSpec } from "./api";
 import type { ElaConfig } from "./session";
 
-export type SignalCondition = "rising" | "falling" | "high" | "low" | "change" | "equals";
+export type TriggerOp = "==" | "!=";
+/** ILA radix letters: B(inary), H(ex), U(nsigned decimal). */
+export type TriggerRadix = "B" | "H" | "U";
 export type Combine = "and" | "or";
 
+/** One row of the trigger-setup table. `probes` holds one probe for a plain
+ *  row, or several (MSB-first) concatenated into a single field for a group. */
 export interface TriggerTerm {
-  probe: ProbeSpec;
-  cond: SignalCondition;
-  /** Decimal or 0x-hex; only for cond === "equals". */
-  value?: string;
+  probes: ProbeSpec[];
+  op: TriggerOp;
+  radix: TriggerRadix;
+  value: string;
+}
+
+/** Total bit width of a row's field (sum of its probes' widths). */
+export function termWidth(t: TriggerTerm): number {
+  return t.probes.reduce((sum, p) => sum + p.width, 0);
+}
+
+/** Display name: the probe's name, or `{a, b, …}` for a group. */
+export function termName(t: TriggerTerm): string {
+  return t.probes.length === 1
+    ? t.probes[0].name
+    : `{${t.probes.map((p) => p.name).join(", ")}}`;
+}
+
+/** A single-bit probe row — the only kind that accepts R/F/B edge tokens. */
+function isSingleBit(t: TriggerTerm): boolean {
+  return t.probes.length === 1 && t.probes[0].width === 1;
+}
+
+/** All-don't-cares value string for a field of the given width and radix. */
+export function defaultValue(width: number, radix: TriggerRadix): string {
+  if (radix === "U") return "0";
+  if (radix === "B") return "X".repeat(width);
+  return "X".repeat(Math.ceil(width / 4));
 }
 
 // The trigger comparators are driven through 32-bit registers, so only the
@@ -37,6 +69,7 @@ export interface TriggerTerm {
 export const COMPARATOR_BITS = 32;
 
 const CMP_EQ = 0;
+const CMP_NEQ = 1;
 const CMP_RISING = 6;
 const CMP_FALLING = 7;
 const CMP_CHANGED = 8;
@@ -48,6 +81,8 @@ interface Slot {
   mode: number;
   value: bigint;
   mask: bigint;
+  /** `==` slots merge under AND; everything else stays its own slot. */
+  mergeableEq: boolean;
 }
 
 function hex(v: bigint): string {
@@ -58,12 +93,12 @@ function fieldMask(p: ProbeSpec): bigint {
   return ((1n << BigInt(p.width)) - 1n) << BigInt(p.lsb);
 }
 
-/** Can this probe be used for click-to-trigger at all? */
+/** Can this probe be used in the trigger table at all? */
 export function triggerable(p: ProbeSpec): boolean {
   return p.width > 0 && p.lsb + p.width <= COMPARATOR_BITS;
 }
 
-/** Do directional edges (rising/falling) exist in this bitstream? */
+/** Do directional edges (R/F) exist in this bitstream? */
 export function hasDirectionalEdges(id: Identity | null): boolean {
   const stages = id?.trig_stages ?? 0;
   const modes = id?.compare_modes;
@@ -73,100 +108,211 @@ export function hasDirectionalEdges(id: Identity | null): boolean {
   return stages >= 2 && edgeModes;
 }
 
-/** Human phrasing of one term ("rising edge of valid", "state == 0xA"). */
-export function describeTerm(t: TriggerTerm): string {
-  switch (t.cond) {
-    case "rising":
-      return `${t.probe.name} ↑`;
-    case "falling":
-      return `${t.probe.name} ↓`;
-    case "high":
-      return `${t.probe.name} == 1`;
-    case "low":
-      return `${t.probe.name} == 0`;
-    case "change":
-      return `${t.probe.name} changes`;
-    case "equals":
-      return `${t.probe.name} == ${(t.value ?? "").trim()}`;
+/** Sensible default row for a probe, ILA-style. */
+export function defaultTerm(p: ProbeSpec): TriggerTerm {
+  return p.width === 1
+    ? { probes: [p], op: "==", radix: "B", value: "1" }
+    : { probes: [p], op: "==", radix: "H", value: "X".repeat(Math.ceil(p.width / 4)) };
+}
+
+/** Merge rows into one group (concatenated MSB-first in the given order). The
+ *  op/radix carry over from the first row; the value resets to all-don't-cares
+ *  since the field width changed. */
+export function groupTerms(rows: TriggerTerm[]): TriggerTerm {
+  const probes = rows.flatMap((r) => r.probes);
+  const { op, radix } = rows[0];
+  return { probes, op, radix, value: defaultValue(probes.reduce((s, p) => s + p.width, 0), radix) };
+}
+
+/** Parsed value: cared bits (mask, relative to bit 0 of the field) and their
+ *  levels, or an edge kind for single-bit R/F/B. */
+interface ParsedValue {
+  edge?: "R" | "F" | "B";
+  value: bigint;
+  mask: bigint; // which field bits are compared (X's drop out)
+}
+
+/** Parse a term's value text per its radix (throws with a user-facing message).
+ *  For a group the value spans the whole concatenated field (bit 0 = LSB of the
+ *  last probe); `slotOf` splits it back onto each probe. */
+export function parseTermValue(t: TriggerTerm): ParsedValue {
+  const width = termWidth(t);
+  const w = BigInt(width);
+  const full = (1n << w) - 1n;
+  const raw = t.value.trim().toUpperCase().replace(/_/g, "");
+  const name = termName(t);
+  if (!raw) throw new Error(`${name}: empty value`);
+
+  if (t.radix === "B") {
+    if (isSingleBit(t) && (raw === "R" || raw === "F" || raw === "B")) {
+      if (t.op !== "==") throw new Error(`${name}: edges only combine with ==`);
+      return { edge: raw, value: 0n, mask: 1n };
+    }
+    if (!/^[01X]+$/.test(raw)) {
+      throw new Error(
+        `${name}: binary value may use 0, 1, X${isSingleBit(t) ? ", R, F, B" : ""}`,
+      );
+    }
+    if (raw.length > width) {
+      throw new Error(`${name}: value wider than ${width} bits`);
+    }
+    let value = 0n;
+    let mask = 0n;
+    for (const ch of raw) {
+      value <<= 1n;
+      mask <<= 1n;
+      if (ch !== "X") {
+        mask |= 1n;
+        if (ch === "1") value |= 1n;
+      }
+    }
+    return { value, mask };
   }
+
+  if (t.radix === "H") {
+    if (!/^[0-9A-FX]+$/.test(raw)) {
+      throw new Error(`${name}: hex value may use 0-9, A-F, X`);
+    }
+    let value = 0n;
+    let mask = 0n;
+    for (const ch of raw) {
+      value <<= 4n;
+      mask <<= 4n;
+      if (ch !== "X") {
+        mask |= 0xfn;
+        value |= BigInt(parseInt(ch, 16));
+      }
+    }
+    if ((value & ~full) !== 0n) {
+      throw new Error(`${name}: value exceeds ${width} bits`);
+    }
+    return { value: value & full, mask: mask & full };
+  }
+
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`${name}: unsigned value must be decimal digits`);
+  }
+  const value = BigInt(raw);
+  if (value > full) throw new Error(`${name}: value exceeds ${width} bits`);
+  return { value, mask: full };
+}
+
+/** Human phrasing of one row ("valid == R", "{addr_hi, addr_lo} == 0x1234"). */
+export function describeTerm(t: TriggerTerm): string {
+  const prefix = t.radix === "H" ? "0x" : t.radix === "B" ? "0b" : "";
+  const v = t.value.trim().toUpperCase();
+  const shown = /^[RFB]$/.test(v) && isSingleBit(t) ? v : `${prefix}${v}`;
+  return `${termName(t)} ${t.op} ${shown}`;
 }
 
 export function describeTerms(terms: TriggerTerm[], combine: Combine): string {
   return terms.map(describeTerm).join(combine === "and" ? " AND " : " OR ");
 }
 
-/** Value/mask pair for a level or equality term. */
-function eqSlotOf(t: TriggerTerm): Slot {
-  const mask = fieldMask(t.probe);
-  let v: bigint;
-  if (t.cond === "high") v = 1n;
-  else if (t.cond === "low") v = 0n;
-  else {
-    v = BigInt(toHexParam(t.value ?? "", `${t.probe.name} value`));
-    if (v >= 1n << BigInt(t.probe.width)) {
-      throw new Error(`value exceeds ${t.probe.name}'s ${t.probe.width} bits`);
+function slotOf(t: TriggerTerm): Slot {
+  for (const probe of t.probes) {
+    if (!triggerable(probe)) {
+      throw new Error(
+        `${probe.name} lies above bit ${COMPARATOR_BITS - 1} — the trigger ` +
+          `comparator reaches the low ${COMPARATOR_BITS} bits only`,
+      );
     }
   }
-  return { mode: CMP_EQ, value: v << BigInt(t.probe.lsb), mask };
+  // Grouped probes must occupy distinct bits, else OR-ing their slices below
+  // would silently corrupt the comparator value/mask.
+  let occupied = 0n;
+  for (const probe of t.probes) {
+    const fm = fieldMask(probe);
+    if ((occupied & fm) !== 0n) {
+      throw new Error(`${termName(t)}: grouped probes overlap in the sample word`);
+    }
+    occupied |= fm;
+  }
+
+  const p = parseTermValue(t);
+  if (p.edge) {
+    const mode = p.edge === "R" ? CMP_RISING : p.edge === "F" ? CMP_FALLING : CMP_CHANGED;
+    return { mode, value: 0n, mask: fieldMask(t.probes[0]), mergeableEq: false };
+  }
+  if (p.mask === 0n) {
+    throw new Error(`${termName(t)}: all bits are X — the row matches always`);
+  }
+
+  // Split the field value (parsed as one wide number, MSB-first) back onto each
+  // probe's real bit position. `pos` walks down from the field MSB; each probe
+  // takes the next `width` bits and lands at its own `lsb` in the sample word.
+  let pos = termWidth(t);
+  let value = 0n;
+  let mask = 0n;
+  for (const probe of t.probes) {
+    pos -= probe.width;
+    const slice = (1n << BigInt(probe.width)) - 1n;
+    value |= ((p.value >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+    mask |= ((p.mask >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+  }
+  return {
+    mode: t.op === "==" ? CMP_EQ : CMP_NEQ,
+    value,
+    mask,
+    mergeableEq: t.op === "==",
+  };
 }
 
-function edgeSlotOf(t: TriggerTerm): Slot {
-  const mode =
-    t.cond === "rising" ? CMP_RISING : t.cond === "falling" ? CMP_FALLING : CMP_CHANGED;
-  return { mode, value: 0n, mask: fieldMask(t.probe) };
-}
-
-/** Compose the terms into an ELA-config patch, or throw a message that says
+/** Compose the table into an ELA-config patch, or throw a message that says
  *  which hardware capability is missing. */
 export function composeTrigger(
   terms: TriggerTerm[],
   combine: Combine,
   id: Identity | null,
 ): Partial<ElaConfig> {
-  if (terms.length === 0) throw new Error("no trigger terms");
-  for (const t of terms) {
-    if (!triggerable(t.probe)) {
-      throw new Error(
-        `${t.probe.name} lies above bit ${COMPARATOR_BITS - 1} — the trigger ` +
-          `comparator reaches the low ${COMPARATOR_BITS} bits only`,
-      );
-    }
-  }
-
-  const eqTerms = terms.filter((t) => t.cond === "high" || t.cond === "low" || t.cond === "equals");
-  const changeTerms = terms.filter((t) => t.cond === "change");
-  const edgeTerms = terms.filter((t) => t.cond === "rising" || t.cond === "falling");
+  if (terms.length === 0) throw new Error("no trigger rows");
+  const all = terms.map(slotOf);
 
   let slots: Slot[];
   if (combine === "and") {
-    if (changeTerms.length + edgeTerms.length > 1) {
+    // One pattern: merge the == rows bitwise, rejecting contradictions.
+    const eqs = all.filter((s) => s.mergeableEq);
+    const edges = all.filter((s) => s.mode >= CMP_RISING);
+    const neqs = all.filter((s) => s.mode === CMP_NEQ);
+    if (edges.length > 1) {
       throw new Error(
-        "the hardware can AND at most one edge/change condition with the level terms " +
-          "(edges on several signals can't be required in the same cycle)",
+        "the hardware can AND at most one edge with the other rows " +
+          "(edges on several probes can't be required in the same cycle)",
       );
     }
     slots = [];
-    if (eqTerms.length) {
-      // One pattern: merge bits, rejecting contradictions (e.g. x==1 AND x==0).
-      const merged = eqTerms.map(eqSlotOf).reduce((a, b) => {
-        const overlap = a.mask & b.mask;
-        if ((a.value & overlap) !== (b.value & overlap)) {
-          throw new Error("conflicting level/value conditions on the same bits");
-        }
-        return { mode: CMP_EQ, value: a.value | b.value, mask: a.mask | b.mask };
-      });
-      slots.push(merged);
+    if (eqs.length) {
+      slots.push(
+        eqs.reduce((a, b) => {
+          const overlap = a.mask & b.mask;
+          if ((a.value & overlap) !== (b.value & overlap)) {
+            throw new Error("conflicting == values on the same bits");
+          }
+          return {
+            mode: CMP_EQ,
+            value: a.value | b.value,
+            mask: a.mask | b.mask,
+            mergeableEq: true,
+          };
+        }),
+      );
     }
-    const edgeish = [...changeTerms, ...edgeTerms];
-    if (edgeish.length) slots.push(edgeSlotOf(edgeish[0]));
+    slots.push(...neqs, ...edges);
   } else {
-    // OR: each level/value term is its own pattern; changes merge into one.
-    slots = eqTerms.map(eqSlotOf);
-    if (changeTerms.length) {
-      const mask = changeTerms.map((t) => fieldMask(t.probe)).reduce((a, b) => a | b);
-      slots.push({ mode: CMP_CHANGED, value: 0n, mask });
+    // OR: ==/!= rows keep their own pattern; either-edge (B) rows merge —
+    // "any of these bits changed" is exactly a merged CHANGED mask.
+    const changed = all.filter((s) => s.mode === CMP_CHANGED);
+    slots = all.filter((s) => s.mode !== CMP_CHANGED);
+    if (changed.length) {
+      slots.push(
+        changed.reduce((a, b) => ({
+          mode: CMP_CHANGED,
+          value: 0n,
+          mask: a.mask | b.mask,
+          mergeableEq: false,
+        })),
+      );
     }
-    slots.push(...edgeTerms.map(edgeSlotOf));
   }
 
   if (slots.length === 1 && (slots[0].mode === CMP_EQ || slots[0].mode === CMP_CHANGED)) {
@@ -189,12 +335,12 @@ export function composeTrigger(
   }
   if (slots.length > 2) {
     throw new Error(
-      "too many OR branches — the hardware has two comparators, so at most two " +
-        "patterns/edges (all 'changes' terms together count as one)",
+      "too many rows for the hardware's two comparators — under AND all == rows " +
+        "merge into one; != and edge rows each need a comparator of their own",
     );
   }
   if (slots.length === 2 && id && id.has_dual_compare === false) {
-    throw new Error("combining two conditions needs a DUAL_COMPARE=1 build");
+    throw new Error("combining two comparators needs a DUAL_COMPARE=1 build");
   }
   const caps = id?.compare_modes;
   for (const s of slots) {
