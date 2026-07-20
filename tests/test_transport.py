@@ -420,6 +420,52 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t._parse_bits_u32("some garbage output without bit string")
 
+    def test_select_fpga_target_selects_present_target(self):
+        """_select_fpga_target() sets the filter when the target is present."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        calls: list[str] = []
+
+        def fake_send(tcl: str) -> str:
+            calls.append(tcl)
+            return "  1  xc7a100t\n  2  xck26\n" if tcl == "puts [jtag targets]" else ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._select_fpga_target()
+        self.assertTrue(
+            any("jtag targets -set -filter" in c and "xc7a100t" in c for c in calls)
+        )
+
+    def test_select_fpga_target_waits_out_empty_chain(self):
+        """A transiently empty chain is polled until the target appears."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=2.0)
+        listings = iter(["", "", "  1  xc7a100t\n"])  # empty, empty, then present
+        polls = {"n": 0}
+
+        def fake_send(tcl: str) -> str:
+            if tcl == "puts [jtag targets]":
+                polls["n"] += 1
+                return next(listings, "  1  xc7a100t\n")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            t._select_fpga_target()
+        self.assertGreaterEqual(polls["n"], 3)  # rode out the empty window
+
+    def test_select_fpga_target_times_out_with_clear_error(self):
+        """A never-appearing target fails with a message naming what is visible."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=0.05)
+
+        def fake_send(tcl: str) -> str:
+            return "  1  xck26\n" if tcl == "puts [jtag targets]" else ""  # never the Arty
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            with self.assertRaises(ConnectionError) as cm:
+                t._select_fpga_target()
+        self.assertIn("xc7a100t", str(cm.exception))
+        self.assertIn("xck26", str(cm.exception))
+
     def test_parse_bits_u32_extracts_value(self):
         """_parse_bits_u32() correctly decodes a 32-bit value from LSB-first string."""
         t = XilinxHwServerTransport()

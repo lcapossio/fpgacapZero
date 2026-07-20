@@ -52,6 +52,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Host / hw_server:** `connect()` now waits for a JTAG target matching
+  `fpga_name` to appear before selecting it (bounded by `target_wait_timeout`,
+  default 3s), instead of firing `jtag targets -set` into a transiently empty
+  chain. This rides out the re-enumeration window when another board is
+  plugged in (or right after `fpga -file`); previously that produced opaque
+  "target list is empty" / "no bit string in output" errors. Times out with a
+  clear message listing the visible targets.
 - **Host / hw_server:** `EjtagAxiController.connect()` and
   `EjtagUartController.connect()` now skip the generic 49-bit register
   ready probe during programming and poll their native streaming

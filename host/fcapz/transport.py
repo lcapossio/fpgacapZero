@@ -561,6 +561,7 @@ class XilinxHwServerTransport(Transport):
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
+        target_wait_timeout: float = 3.0,
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
@@ -587,6 +588,11 @@ class XilinxHwServerTransport(Transport):
         self.ready_poll_interval_sec = float(
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
+        # How long connect() waits for a JTAG target matching ``fpga_name`` to
+        # appear before giving up — rides out a transiently empty scan chain
+        # (re-enumeration when another board is plugged in, or right after
+        # ``fpga -file``) instead of selecting nothing and failing later.
+        self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -669,9 +675,7 @@ class XilinxHwServerTransport(Transport):
             )
             mark("fpga_skipped")
 
-        self._send(
-            f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
-        )
+        self._select_fpga_target()
         mark("jtag_target_set")
 
         # Wait for the JTAG chain to respond with valid (non-zero) data on
@@ -745,6 +749,38 @@ class XilinxHwServerTransport(Transport):
             "Either the bitstream failed to load, the wrong fpga_name was "
             "selected, or the probe register address is wrong for this design."
         )
+
+    def _select_fpga_target(self) -> None:
+        """Select the JTAG target matching ``fpga_name``, tolerating a
+        transiently empty scan chain.
+
+        hw_server briefly reports an empty JTAG target list while the chain
+        re-enumerates — right after ``fpga -file``, or when another board is
+        plugged in and the whole chain is re-scanned. Firing
+        ``jtag targets -set -filter`` in that window silently selects nothing,
+        and every later read then fails with XSDB's opaque "target list is
+        empty" / "Invalid target" errors (surfaced to callers as "no bit
+        string in output"). Poll ``jtag targets`` until a matching device
+        appears, then select it; fail with a clear message if it never does.
+        """
+        deadline = time.monotonic() + self.target_wait_timeout
+        names: list[str] = []
+        while True:
+            # ``puts`` forces the list onto stdout — the bare command doesn't
+            # echo its result through a piped (non-interactive) xsdb session.
+            names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
+            if any(self.fpga_name in name for name in names):
+                break
+            if time.monotonic() >= deadline:
+                visible = ", ".join(names) if names else "(none)"
+                raise ConnectionError(
+                    f"no JTAG target matching {self.fpga_name!r} appeared within "
+                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
+                    "may be unplugged or powered off, or the JTAG chain is still "
+                    "re-enumerating (e.g. another board was just connected)."
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
 
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
