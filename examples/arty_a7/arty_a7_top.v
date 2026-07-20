@@ -300,8 +300,26 @@ module arty_a7_top (
         .eio_probe_out  ({eio1_probe_out, eio0_probe_out})
     );
 
-    // ---- EJTAGAXI: JTAG-to-AXI4 bridge (USER4) ----
-    // Bridges JTAG to AXI4 master, connected to a test slave for validation.
+    // ---- 100 MHz AXI subsystem clock/reset ----
+    // MicroBlaze + the shared AXI fabric (SmartConnect, test slave, monitor,
+    // EJTAG bridge) run on a dedicated 100 MHz domain, comfortably within
+    // timing on the -1 part.  The Arty board oscillator is already 100 MHz, so
+    // we buffer it directly.  The reset uses the 150 MHz MMCM lock as a
+    // power-up-done proxy plus btn[0] as a manual reset.
+    wire clk_100;
+    BUFG u_clk100_buf (.I(clk), .O(clk_100));
+    wire rst_100_async = btn[0] | ~clk150_locked;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] rst100_pipe = 4'hF;
+    always @(posedge clk_100 or posedge rst_100_async) begin
+        if (rst_100_async) rst100_pipe <= 4'hF;
+        else               rst100_pipe <= {rst100_pipe[2:0], 1'b0};
+    end
+    wire rst_100 = rst100_pipe[3];
+
+    // ---- EJTAGAXI: JTAG-to-AXI4 bridge master (USER4) ----
+    // Bridges JTAG to an AXI4 master.  Its master now feeds the shared-bus
+    // SmartConnect (M_EJTAG slave port of the MicroBlaze BD) rather than the
+    // test slave directly, so CPU and host traffic share one monitored bus.
 
     wire [31:0] bridge_awaddr, bridge_wdata, bridge_araddr, bridge_rdata;
     wire [7:0]  bridge_awlen, bridge_arlen;
@@ -312,9 +330,6 @@ module arty_a7_top (
     wire        bridge_wlast, bridge_bvalid, bridge_bready;
     wire        bridge_arvalid, bridge_arready, bridge_rvalid, bridge_rready, bridge_rlast;
 
-    // DEBUG_EN is intentionally off in the shipping reference design:
-    // USER4 validation uses host AXI reads/writes, and no ILA consumes the
-    // bridge's internal 256-bit telemetry buses here.
     fcapz_ejtagaxi_xilinx7 #(
         .ADDR_W(32), .DATA_W(32),
         .FIFO_DEPTH(16),
@@ -324,8 +339,8 @@ module arty_a7_top (
         .TIMEOUT(4096),
         .DEBUG_EN(0)
     ) u_ejtagaxi (
-        .axi_clk(clk_150),
-        .axi_rst(rst_150),
+        .axi_clk(clk_100),
+        .axi_rst(rst_100),
         .m_axi_awaddr(bridge_awaddr), .m_axi_awlen(bridge_awlen),
         .m_axi_awsize(bridge_awsize), .m_axi_awburst(bridge_awburst),
         .m_axi_awvalid(bridge_awvalid), .m_axi_awready(bridge_awready),
@@ -344,29 +359,91 @@ module arty_a7_top (
         .m_axi_rlast(bridge_rlast)
     );
 
-    axi4_test_slave #(.NUM_WORDS(16), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
-        .clk(clk_150), .rst(rst_150),
-        .s_axi_awaddr(bridge_awaddr), .s_axi_awlen(bridge_awlen),
-        .s_axi_awsize(bridge_awsize), .s_axi_awburst(bridge_awburst),
-        .s_axi_awvalid(bridge_awvalid), .s_axi_awready(bridge_awready),
-        .s_axi_wdata(bridge_wdata), .s_axi_wstrb(bridge_wstrb),
-        .s_axi_wvalid(bridge_wvalid), .s_axi_wready(bridge_wready),
-        .s_axi_wlast(bridge_wlast),
-        .s_axi_bresp(bridge_bresp), .s_axi_bvalid(bridge_bvalid),
-        .s_axi_bready(bridge_bready),
-        .s_axi_araddr(bridge_araddr), .s_axi_arlen(bridge_arlen),
-        .s_axi_arsize(bridge_arsize), .s_axi_arburst(bridge_arburst),
-        .s_axi_arvalid(bridge_arvalid), .s_axi_arready(bridge_arready),
-        .s_axi_rdata(bridge_rdata), .s_axi_rresp(bridge_rresp),
-        .s_axi_rvalid(bridge_rvalid), .s_axi_rready(bridge_rready),
-        .s_axi_rlast(bridge_rlast)
+    // ---- MicroBlaze subsystem (block-design wrapper) ----
+    // microblaze_0's M_AXI_DP data master and the EJTAG bridge master (above)
+    // are merged by an in-BD SmartConnect onto one AXI4 bus, M_BUS, which
+    // drives the test slave and is passively tapped by the AXI monitor.  The
+    // MicroBlaze Debug Module sits on the free USER3 BSCAN tap.  Firmware
+    // (baked into the LMB BRAM) writes a known pattern to the shared slave when
+    // the host raises a go-flag, giving the monitor real CPU bus traffic.
+    wire [31:0] mbus_awaddr, mbus_wdata, mbus_araddr, mbus_rdata;
+    wire [7:0]  mbus_awlen, mbus_arlen;
+    wire [2:0]  mbus_awsize, mbus_arsize, mbus_awprot, mbus_arprot;
+    wire [1:0]  mbus_awburst, mbus_arburst, mbus_bresp, mbus_rresp;
+    wire [3:0]  mbus_wstrb;
+    wire        mbus_awvalid, mbus_awready, mbus_wvalid, mbus_wready, mbus_wlast;
+    wire        mbus_bvalid, mbus_bready;
+    wire        mbus_arvalid, mbus_arready, mbus_rvalid, mbus_rready, mbus_rlast;
+
+    mb_sys_wrapper u_mb_sys (
+        .Clk   (clk_100),
+        .reset (rst_100),
+        // EJTAG bridge master -> M_EJTAG slave port of the crossbar.
+        // Unused AXI4 qualifiers the bridge does not drive are tied off.
+        .M_EJTAG_awaddr (bridge_awaddr), .M_EJTAG_awlen  (bridge_awlen),
+        .M_EJTAG_awsize (bridge_awsize), .M_EJTAG_awburst(bridge_awburst),
+        .M_EJTAG_awprot (bridge_awprot), .M_EJTAG_awvalid(bridge_awvalid),
+        .M_EJTAG_awready(bridge_awready),
+        .M_EJTAG_awcache(4'b0011), .M_EJTAG_awlock(1'b0), .M_EJTAG_awqos(4'b0000),
+        .M_EJTAG_wdata  (bridge_wdata), .M_EJTAG_wstrb (bridge_wstrb),
+        .M_EJTAG_wlast  (bridge_wlast), .M_EJTAG_wvalid(bridge_wvalid),
+        .M_EJTAG_wready (bridge_wready),
+        .M_EJTAG_bresp  (bridge_bresp), .M_EJTAG_bvalid(bridge_bvalid),
+        .M_EJTAG_bready (bridge_bready),
+        .M_EJTAG_araddr (bridge_araddr), .M_EJTAG_arlen  (bridge_arlen),
+        .M_EJTAG_arsize (bridge_arsize), .M_EJTAG_arburst(bridge_arburst),
+        .M_EJTAG_arprot (bridge_arprot), .M_EJTAG_arvalid(bridge_arvalid),
+        .M_EJTAG_arready(bridge_arready),
+        .M_EJTAG_arcache(4'b0011), .M_EJTAG_arlock(1'b0), .M_EJTAG_arqos(4'b0000),
+        .M_EJTAG_rdata  (bridge_rdata), .M_EJTAG_rresp (bridge_rresp),
+        .M_EJTAG_rlast  (bridge_rlast), .M_EJTAG_rvalid(bridge_rvalid),
+        .M_EJTAG_rready (bridge_rready),
+        // Shared bus master -> test slave + monitor tap.  Unused master
+        // qualifier outputs (awcache/awlock/awqos/...) are left open.
+        .M_BUS_awaddr (mbus_awaddr), .M_BUS_awlen  (mbus_awlen),
+        .M_BUS_awsize (mbus_awsize), .M_BUS_awburst(mbus_awburst),
+        .M_BUS_awprot (mbus_awprot), .M_BUS_awvalid(mbus_awvalid),
+        .M_BUS_awready(mbus_awready),
+        .M_BUS_awcache(), .M_BUS_awlock(), .M_BUS_awqos(),
+        .M_BUS_wdata  (mbus_wdata), .M_BUS_wstrb (mbus_wstrb),
+        .M_BUS_wlast  (mbus_wlast), .M_BUS_wvalid(mbus_wvalid),
+        .M_BUS_wready (mbus_wready),
+        .M_BUS_bresp  (mbus_bresp), .M_BUS_bvalid(mbus_bvalid),
+        .M_BUS_bready (mbus_bready),
+        .M_BUS_araddr (mbus_araddr), .M_BUS_arlen  (mbus_arlen),
+        .M_BUS_arsize (mbus_arsize), .M_BUS_arburst(mbus_arburst),
+        .M_BUS_arprot (mbus_arprot), .M_BUS_arvalid(mbus_arvalid),
+        .M_BUS_arready(mbus_arready),
+        .M_BUS_arcache(), .M_BUS_arlock(), .M_BUS_arqos(),
+        .M_BUS_rdata  (mbus_rdata), .M_BUS_rresp (mbus_rresp),
+        .M_BUS_rlast  (mbus_rlast), .M_BUS_rvalid(mbus_rvalid),
+        .M_BUS_rready (mbus_rready)
     );
 
-    // ---- AXI monitor (USER2): passively tap the bridge AXI bus ----
-    // Captures and triggers on the EJTAG-AXI bridge's transactions to the test
-    // slave -- the host generates traffic via USER4 and observes it here.
-    // DECODE_EN=1 adds the transaction-events word so a hardware test can trigger
-    // on an error response (the slave's ERROR_ADDR=0xFFFF_FFFC returns SLVERR).
+    // Test slave on the shared bus.  32 words so the CPU firmware (words 16+)
+    // never collides with EJTAG host tests (words 0..15).
+    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
+        .clk(clk_100), .rst(rst_100),
+        .s_axi_awaddr(mbus_awaddr), .s_axi_awlen(mbus_awlen),
+        .s_axi_awsize(mbus_awsize), .s_axi_awburst(mbus_awburst),
+        .s_axi_awvalid(mbus_awvalid), .s_axi_awready(mbus_awready),
+        .s_axi_wdata(mbus_wdata), .s_axi_wstrb(mbus_wstrb),
+        .s_axi_wvalid(mbus_wvalid), .s_axi_wready(mbus_wready),
+        .s_axi_wlast(mbus_wlast),
+        .s_axi_bresp(mbus_bresp), .s_axi_bvalid(mbus_bvalid),
+        .s_axi_bready(mbus_bready),
+        .s_axi_araddr(mbus_araddr), .s_axi_arlen(mbus_arlen),
+        .s_axi_arsize(mbus_arsize), .s_axi_arburst(mbus_arburst),
+        .s_axi_arvalid(mbus_arvalid), .s_axi_arready(mbus_arready),
+        .s_axi_rdata(mbus_rdata), .s_axi_rresp(mbus_rresp),
+        .s_axi_rvalid(mbus_rvalid), .s_axi_rready(mbus_rready),
+        .s_axi_rlast(mbus_rlast)
+    );
+
+    // ---- AXI monitor (USER2): passively tap the shared AXI bus ----
+    // Now sees both CPU (MicroBlaze M_AXI_DP) and host (EJTAG-AXI) transactions
+    // to the test slave.  DECODE_EN=1 adds the transaction-events word so a
+    // hardware test can trigger on an error response (ERROR_ADDR returns SLVERR).
     fcapz_axi_mon_xilinx7 #(
         .ADDR_W(32), .DATA_W(32),
         .DEPTH(256),
@@ -378,16 +455,16 @@ module arty_a7_top (
         .DECODE_EN(1),
         .CTRL_CHAIN(2)
     ) u_axi_mon (
-        .ACLK(clk_150), .ARESETN(~rst_150),
-        .AWADDR(bridge_awaddr), .AWPROT(bridge_awprot),
-        .AWVALID(bridge_awvalid), .AWREADY(bridge_awready),
-        .WDATA(bridge_wdata), .WSTRB(bridge_wstrb),
-        .WVALID(bridge_wvalid), .WREADY(bridge_wready),
-        .BRESP(bridge_bresp), .BVALID(bridge_bvalid), .BREADY(bridge_bready),
-        .ARADDR(bridge_araddr), .ARPROT(bridge_arprot),
-        .ARVALID(bridge_arvalid), .ARREADY(bridge_arready),
-        .RDATA(bridge_rdata), .RRESP(bridge_rresp),
-        .RVALID(bridge_rvalid), .RREADY(bridge_rready),
+        .ACLK(clk_100), .ARESETN(~rst_100),
+        .AWADDR(mbus_awaddr), .AWPROT(mbus_awprot),
+        .AWVALID(mbus_awvalid), .AWREADY(mbus_awready),
+        .WDATA(mbus_wdata), .WSTRB(mbus_wstrb),
+        .WVALID(mbus_wvalid), .WREADY(mbus_wready),
+        .BRESP(mbus_bresp), .BVALID(mbus_bvalid), .BREADY(mbus_bready),
+        .ARADDR(mbus_araddr), .ARPROT(mbus_arprot),
+        .ARVALID(mbus_arvalid), .ARREADY(mbus_arready),
+        .RDATA(mbus_rdata), .RRESP(mbus_rresp),
+        .RVALID(mbus_rvalid), .RREADY(mbus_rready),
         .trigger_in(1'b0), .trigger_out(), .armed_out()
     );
 

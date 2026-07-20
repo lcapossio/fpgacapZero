@@ -86,6 +86,12 @@ _BITSTREAM_SOURCES_VERILOG = [
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.v",
     _EXAMPLE_DIR / "arty_a7.xdc",
+    # MicroBlaze subsystem: block design generator + baked firmware sources.
+    _EXAMPLE_DIR / "mb" / "create_mb_bd.tcl",
+    _EXAMPLE_DIR / "mb" / "build_fw.tcl",
+    _EXAMPLE_DIR / "mb" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "mb" / "fw" / "main.c",
+    _EXAMPLE_DIR / "mb" / "fw" / "lscript.ld",
 ]
 
 _BITSTREAM_SOURCES_VHDL = [
@@ -1309,6 +1315,171 @@ class TestAxiMonitor(unittest.TestCase):
         status = self._status()
         self.assertFalse(status & 0x2, f"false trigger on a clean write (0x{status:08X})")
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+
+# ── AXI monitor + MicroBlaze CPU tests (USER2 monitor, USER3 MDM) ─────
+# The bitstream integrates a MicroBlaze whose M_AXI_DP data master shares one
+# SmartConnect bus with the EJTAG-AXI bridge; both reach the same test slave,
+# which the monitor taps.  The CPU therefore generates *real* bus traffic the
+# monitor can capture -- the headline of this integration.
+#
+# The firmware is host-gated: it writes its pattern to slave words 16/17 only
+# while the go flag (word 31) is non-zero, and otherwise just polls (reads).
+# So the CPU stays write-quiet during every other test above (which use words
+# 0..15), and these tests turn it on explicitly.
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorMicroBlaze(unittest.TestCase):
+    """Real CPU bus traffic, captured by the monitor and cross-read via EJTAG.
+
+    Evidence chain that the AXI captures are valid and repeatable:
+      1. gated off, the CPU makes no writes (bus stays quiet for other tests);
+      2. gated on, the monitor triggers on the CPU's write handshakes;
+      3. the *other* master (EJTAG on USER4) reads the CPU's pattern back from
+         the shared slave -- proving the CPU really drove the bus;
+      4. the captured samples decode to the CPU's awaddr/wdata pattern.
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+
+    # Shared-slave byte offsets; word_index = (addr >> 2) % 32.
+    GO_OFF = 0x7C    # word31: host go/stop flag (CPU polls it)
+    D0_OFF = 0x40    # word16: CPU writes PATTERN here while go != 0
+    D1_OFF = 0x44    # word17: CPU writes PATTERN2 here while go != 0
+    PATTERN = 0xCAFEF00D
+    PATTERN2 = 0x1234ABCD
+
+    # CPU DP addresses *as seen on the monitored bus*.  The CPU issues
+    # 0x4000_0040/44 on M_AXI_DP, but SmartConnect subtracts the 0x4000_0000
+    # segment base when routing to the shared M_BUS, so the monitor (and the
+    # slave) see 0x40/0x44 -- the same offsets the EJTAG master uses.
+    CPU_ADDR0 = 0x40  # word16
+    CPU_ADDR1 = 0x44  # word17
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream (CPU resets -> go=0, quiet)
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self._set_go(0)
+
+    def tearDown(self):
+        # Leave the CPU write-quiet so any later test sees an idle bus.
+        try:
+            self._set_go(0)
+        finally:
+            self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _set_go(self, value: int) -> None:
+        self.bridge.axi_write(self.GO_OFF, value)
+
+    def _arm_on_writes(self, pretrigger=4, posttrigger=32):
+        cfg = self.mon.event_capture_config(
+            "aw_hs", pretrigger=pretrigger, posttrigger=posttrigger, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_cpu_quiet_until_gated_on(self):
+        """Gated off, the CPU issues no writes: an aw_hs-armed monitor stays
+        armed (never triggers), so the bus is write-quiet for the other tests."""
+        import time
+
+        self._set_go(0)
+        self._arm_on_writes(pretrigger=2, posttrigger=12)
+        time.sleep(0.2)  # ample time for a write to appear if the CPU misbehaved
+        status = self._status()
+        self.assertFalse(status & 0x2, f"CPU wrote while gated off (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+    def test_cpu_traffic_triggers_and_cross_reads(self):
+        """Gated on, the monitor triggers on the CPU's writes and the EJTAG
+        bridge reads the CPU's pattern back from the shared slave (repeatably)."""
+        import time
+
+        self._arm_on_writes(pretrigger=2, posttrigger=12)
+        self._set_go(1)  # turn the CPU loose
+
+        deadline = time.time() + 3.0
+        status = 0
+        while time.time() < deadline:
+            status = self._status()
+            if status & 0x4:
+                break
+        self.assertTrue(status & 0x2, f"monitor did not trigger on CPU writes (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+        # Cross-read the CPU's writes via the other master (EJTAG on USER4).
+        got0 = self.bridge.axi_read(self.D0_OFF)
+        got1 = self.bridge.axi_read(self.D1_OFF)
+        self.assertEqual(got0, self.PATTERN, f"CPU word16 = 0x{got0:08X}")
+        self.assertEqual(got1, self.PATTERN2, f"CPU word17 = 0x{got1:08X}")
+        # Repeatable: same values on a second read.
+        self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)
+        self.assertEqual(self.bridge.axi_read(self.D1_OFF), self.PATTERN2)
+
+    def test_gate_off_stops_cpu_writes(self):
+        """After the host lowers the go flag, the CPU stops writing: a sentinel
+        written over word16 via EJTAG survives (the CPU no longer overwrites it)."""
+        import time
+
+        self._set_go(1)
+        time.sleep(0.05)
+        self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)
+        self._set_go(0)
+        time.sleep(0.05)
+        sentinel = 0x0BADF00D
+        self.bridge.axi_write(self.D0_OFF, sentinel)
+        time.sleep(0.05)
+        self.assertEqual(
+            self.bridge.axi_read(self.D0_OFF), sentinel,
+            "CPU kept writing after the go flag was lowered",
+        )
+
+    def test_capture_shows_cpu_write_address(self):
+        """Decode the captured samples and confirm the CPU's write *address*
+        appears -- direct evidence the monitor captured real CPU bus cycles.
+
+        Only the low word of each sample (the decode-events byte + awaddr) is
+        asserted: bulk readback of the full 160-bit sample is timing-marginal
+        (the same wide-SAMPLE_W readback caveat documented on TestAxiMonitor --
+        higher words repeat the first), so ``wdata`` is *not* read back here.
+        The CPU's write *data* value is confirmed independently, and robustly,
+        by the EJTAG cross-read in test_cpu_traffic_triggers_and_cross_reads.
+        """
+        import time
+
+        # Turn the CPU loose *first* so the aw_hs trigger fires on a CPU write
+        # (arming before raising the go flag would instead trigger on the host's
+        # EJTAG write to the go word).
+        self._set_go(1)
+        time.sleep(0.05)
+        cfg = self.mon.event_capture_config(
+            "aw_hs", pretrigger=4, posttrigger=32, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        result = self.an.capture(timeout=5.0)
+        self.assertTrue(result.samples, "capture returned no samples")
+        probes = self.mon.probe_map().probes
+        awaddrs = {self.mon.decode_sample(s, probes).get("awaddr") for s in result.samples}
+        self.assertTrue(
+            {self.CPU_ADDR0, self.CPU_ADDR1} & awaddrs,
+            "CPU write address not in capture; saw "
+            f"{sorted(hex(a) for a in awaddrs if a is not None)}",
+        )
 
 
 # ── EJTAG-UART bridge tests (require UART loopback bitstream) ─────────

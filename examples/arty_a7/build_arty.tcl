@@ -147,6 +147,28 @@ if {[file exists $project_xpr]} {
     set_property top arty_a7_top [current_fileset]
 }
 
+# ── MicroBlaze block design + HDL wrapper ─────────────────────
+# arty_a7_top instantiates mb_sys_wrapper (microblaze_0 M_AXI_DP + the EJTAG
+# bridge master merged onto the monitored shared bus; MDM on USER3).  Generated
+# fresh into the project if not already present.
+source $example_dir/mb/create_mb_bd.tcl
+source $example_dir/mb/build_fw.tcl
+if {[llength [get_files -quiet mb_sys.bd]] == 0} {
+    fcapz_build_mb_bd mb_sys
+    make_wrapper -files [get_files mb_sys.bd] -top -import
+}
+set_property top arty_a7_top [current_fileset]
+
+# ── Firmware ELF baked into the LMB BRAM ──────────────────────
+# Compiled with the MicroBlaze GCC shipped alongside Vivado and associated with
+# microblaze_0 so write_bitstream initialises the BRAM with it.
+set fw_elf [fcapz_build_fw $project_dir]
+if {[llength [get_files -quiet mb_fw.elf]] == 0} {
+    add_files -norecurse $fw_elf
+}
+set_property SCOPED_TO_REF   mb_sys       [get_files -quiet mb_fw.elf]
+set_property SCOPED_TO_CELLS microblaze_0 [get_files -quiet mb_fw.elf]
+
 # ── Synthesise + implement + write bitstream ──────────────────
 launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1

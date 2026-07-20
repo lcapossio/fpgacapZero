@@ -35,6 +35,11 @@ examples/**/tmp-clearbox/
 examples/**/*.qws
 # Local capture output
 examples/*/captures/
+# MicroBlaze firmware build artifacts (ELF is regenerated + baked at build time)
+examples/**/fw/*.elf
+examples/**/fw/*.map
+# Vivado in-memory / block-design scratch written at the repo root
+/.srcs/
 
 # Simulation artifacts
 sim/*.vvp

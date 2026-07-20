@@ -18,6 +18,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a loopback name. Together these stop a malicious website from driving the
   board (or starting OpenOCD) via the local API.
 
+### Added
+
+- **Arty A7 example — MicroBlaze on the shared AXI bus:** the reference design
+  now integrates a MicroBlaze soft CPU whose `M_AXI_DP` master and the EJTAG-AXI
+  bridge master are merged by an in-BD SmartConnect onto one AXI4 bus driving the
+  test slave, so the AXI monitor (USER2) captures **real CPU bus traffic** — not
+  just host traffic. The CPU's debug module sits on the free USER3 tap; the AXI
+  fabric runs on a dedicated 100 MHz clock. Baked-in, host-gated firmware writes
+  a known pattern to the slave on demand (staying write-quiet otherwise). New
+  `TestAxiMonitorMicroBlaze` hardware tests validate CPU-driven capture and an
+  EJTAG cross-read of the CPU's writes; the full Arty suite is green with no
+  regressions. Everything ships in one bitstream (Verilog top only).
+
 ### Changed
 
 - **Web:** the default HTTP port is now `7373` (was `8000`), to avoid clashes
