@@ -14,8 +14,16 @@ const POLL_TIMEOUT = 4;
 const SAFE_SAMPLE_BITS = 53;
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
- *  to the active core's Viewer tab. */
-export function RunPanel({ identity: identityProp }: { identity: Identity }) {
+ *  to the active core's Viewer tab. `onActiveChange` reports when a capture is
+ *  armed/running so a host (e.g. the hover-out Run bar) can stay open while the
+ *  user might need Stop or the live status. */
+export function RunPanel({
+  identity: identityProp,
+  onActiveChange,
+}: {
+  identity: Identity;
+  onActiveChange?: (active: boolean) => void;
+}) {
   const { ela, captures, pushCapture, conn, switching } = useSession();
   const capture = conn ? captures[conn.chain] : undefined;
   const [autoRearm, setAutoRearm] = useState(false);
@@ -41,6 +49,11 @@ export function RunPanel({ identity: identityProp }: { identity: Identity }) {
       stopCtl.current?.abort();
     }
   }, [switching]);
+
+  // Report armed/running so a hover-out host keeps itself open across the wait.
+  useEffect(() => {
+    onActiveChange?.(busy || running);
+  }, [busy, running, onActiveChange]);
 
   function params(immediate: boolean, timeout: number) {
     const identity = identityRef.current;

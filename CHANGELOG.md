@@ -33,6 +33,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Web — Trigger & Run move onto the viewer:** the Trigger setup leaves the
+  dock for a hover-out drawer on the waveform's right edge (a thin `⚡ Trigger`
+  rail expands the full ILA-style setup; pin to keep it open). The Run controls
+  (Arm / Trigger Immediate / Stop / Auto re-arm / Download) become a bar above
+  the viewer: pinned by default so it docks and shares the vertical space, or
+  unpinned to collapse to a `▶ Run` tab that peeks on hover and stays open while
+  a capture is armed/running. Reclaims the dock space the two panels used.
 - **Web:** the default HTTP port is now `7373` (was `8000`), to avoid clashes
   with the many tools that default to 8000. Override with `--port`.
 - **Version:** Bumped project/RTL identity version to `0.4.5`.

@@ -1,7 +1,7 @@
 import { useSession } from "../session";
 
 /** ELA capture configuration: window geometry and probe naming. Trigger
- *  conditions live in the Trigger tab; run controls in the Run tab. */
+ *  conditions live in the Trigger drawer; run controls in the Run bar. */
 export function ElaPanel() {
   const { ela, setEla, identity } = useSession();
 
@@ -72,7 +72,8 @@ export function ElaPanel() {
         />
       </label>
       <p className="muted">
-        Set the trigger in the Trigger tab; run captures from the Run tab.
+        Set the trigger in the Trigger drawer (hover the ⚡ Trigger rail on the
+        viewer&apos;s edge); run captures from the Run bar.
       </p>
     </section>
   );

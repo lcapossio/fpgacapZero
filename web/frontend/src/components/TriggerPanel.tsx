@@ -33,7 +33,7 @@ function valueHint(t: TriggerTerm, edges: boolean): string {
   return "unsigned decimal";
 }
 
-/** Trigger tab, laid out like Vivado ILA's Trigger Setup: add probes as rows
+/** Trigger drawer, laid out like Vivado ILA's Trigger Setup: add probes as rows
  *  (Name | Operator | Radix | Value), pick a global AND/OR condition. Values
  *  take X don't-cares (binary/hex) and R/F/B edges on 1-bit probes. The raw
  *  trigger fields stay available under Advanced. */

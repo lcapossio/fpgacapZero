@@ -471,6 +471,212 @@ body.dv-dragging-tabs iframe {
   pointer-events: none;
 }
 
+/* Viewer host: a column of [Run bar][waveform]. When the Run bar is pinned it
+   docks as a real row and the waveform takes the rest; unpinned it collapses to
+   a rail and floats over the waveform on hover. */
+.viewer-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* Waveform area: hosts the Surfer iframe and the right-edge Trigger drawer. */
+.viewer-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Trigger overlay: a thin rail on the viewer's right edge that slides a full
+   Trigger drawer out over the waveform on hover (or when pinned open). */
+.trig-overlay {
+  --trig-rail-w: 26px;
+  --trig-drawer-w: 360px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  z-index: 20;
+  /* Collapsed: only the rail peeks in at the right edge. */
+  transform: translateX(calc(100% - var(--trig-rail-w)));
+  transition: transform 0.18s ease;
+}
+.trig-overlay.open {
+  transform: translateX(0);
+}
+.trig-rail {
+  flex: 0 0 var(--trig-rail-w);
+  width: var(--trig-rail-w);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+}
+.trig-overlay.open .trig-rail {
+  color: var(--muted);
+}
+.trig-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  user-select: none;
+}
+.trig-drawer {
+  flex: 0 0 var(--trig-drawer-w);
+  width: var(--trig-drawer-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.4);
+}
+.trig-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.trig-drawer-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+.trig-pin {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.trig-pin.on {
+  filter: none;
+  opacity: 1;
+  background: var(--border);
+}
+.trig-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 0.6rem 0.6rem;
+}
+/* Drop the standalone panel chrome — the drawer already frames it. */
+.trig-drawer-body .panel {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0.4rem 0;
+  margin-top: 0;
+}
+
+/* Run bar. Unpinned it's a small "▶ Run" tab on the viewer's top edge that
+   drops the Arm / Trigger Immediate controls down over the waveform on hover
+   (or while a capture is armed/running). Absolute so peeking doesn't shift the
+   waveform; inset on the right to clear the Trigger rail at the corner. */
+.run-overlay {
+  --run-rail-h: 20px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: var(--trig-rail-w, 26px);
+  display: flex;
+  flex-direction: column;
+  z-index: 19;
+  /* Collapsed: only the rail peeks in at the top edge. */
+  transform: translateY(calc(-100% + var(--run-rail-h)));
+  transition: transform 0.18s ease;
+}
+.run-overlay.open {
+  transform: translateY(0);
+}
+/* Pinned (default): dock the Run bar as a real row in the viewer column so it
+   shares the vertical space with the waveform instead of floating over it. The
+   rail is hidden — the controls are always shown. */
+.run-overlay.pinned {
+  position: relative;
+  right: auto;
+  transform: none;
+  z-index: auto;
+}
+.run-overlay.pinned .run-rail {
+  display: none;
+}
+.run-overlay.pinned .run-drawer {
+  box-shadow: none;
+}
+.run-drawer {
+  position: relative;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+  padding-right: 1.6rem; /* room for the pin */
+}
+.run-drawer .runbar {
+  height: auto;
+  background: transparent;
+}
+.run-rail {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--run-rail-h);
+  padding: 0 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+}
+.run-overlay.open .run-rail {
+  color: var(--muted);
+}
+.run-rail-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  user-select: none;
+}
+.run-empty {
+  padding: 0.55rem 0.6rem;
+  font-size: 0.85rem;
+}
+.run-pin {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.run-pin.on {
+  filter: none;
+  opacity: 1;
+  background: var(--border);
+}
+
 .bits {
   display: flex;
   align-items: center;
