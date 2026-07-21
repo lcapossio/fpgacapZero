@@ -227,8 +227,10 @@ export function ConnectionPanel({
       if (conn) elaByChain.current[conn.chain] = ela;
       const params: ConnectionParams = { ...connTarget, chain: newChain };
       const t = connTarget.backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
-      await rpc("connect", params as unknown as Record<string, unknown>, t);
-      const r = await rpc("probe", {}, t);
+      // Rebind keeps the live transport and just hops the tap — no reconnect,
+      // so ELA <-> AXI monitor switching is one short round-trip, not two
+      // connect-weight ones plus a teardown.
+      const r = await rpc("rebind", { chain: newChain }, t);
       onConnected(params, r.probe as Identity);
       const saved = elaByChain.current[newChain];
       setEla(saved ?? DEFAULT_ELA);

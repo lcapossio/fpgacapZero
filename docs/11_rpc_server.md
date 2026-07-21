@@ -206,6 +206,27 @@ Response (empty `boards` means nothing compatible was reachable):
 }
 ```
 
+#### `rebind`
+
+Re-bind the connected session to a core on another BSCAN chain **without
+reconnecting**. ELA and AXI-monitor cores sit on different USER taps, so
+switching between them just needs a chain hop, not a fresh transport: `rebind`
+keeps the live transport, points the session at the requested chain, and
+re-probes. This is the cheap path behind the web UI's seamless ELA ↔ AXI
+monitor switch — one short round-trip instead of `connect` (which tears down
+and re-opens every session) plus `probe`.
+
+Requires an active session; the target chain must present an ELA-style
+identity window (a plain ELA or an AXI monitor). Side sessions (EIO/AXI/UART)
+are left untouched.
+
+```json
+{"cmd": "rebind", "chain": 2}
+```
+
+Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
+— `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
+
 #### `close`
 
 Releases the transport.

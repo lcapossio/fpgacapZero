@@ -620,6 +620,25 @@ class RpcServer:
                 ir_table=self._resolved_ir_name(req), chain=analyzer.bscan_chain
             )
 
+        if cmd == "rebind":
+            # Re-bind the session to a core on another BSCAN chain WITHOUT
+            # reconnecting. Both cores share one JTAG transport; hopping taps is
+            # just a chain select + re-probe (probe() selects its own chain), so
+            # this skips the connect() teardown/reopen. Used for the seamless
+            # ELA <-> AXI monitor switch. Side sessions (EIO/AXI/UART) are left
+            # untouched — a chain hop on the ELA control interface is unrelated.
+            analyzer = self._ensure_analyzer()
+            requested = req.get("chain")
+            if requested is None:
+                raise ValueError("rebind requires a chain")
+            new_chain = int(requested)
+            if new_chain != analyzer.bscan_chain:
+                # Keep the SAME transport; point a fresh Analyzer at the new tap.
+                self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+            return self._ok(
+                chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
+            )
+
         if cmd == "close":
             self._close_all()
             return self._ok()

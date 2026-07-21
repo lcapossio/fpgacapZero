@@ -749,6 +749,55 @@ def test_list_cores_reports_other_chain_monitor(monkeypatch):
     assert mon[0]["info"]["decode"] is True
 
 
+def test_rebind_switches_chain_without_reconnect(monkeypatch):
+    """Rebinding to the monitor's chain hops the tap on the live transport:
+    no new transport is built and no reconnect happens, yet the session is now
+    bound to the USER2 core."""
+    transport = FakeChainedAxiMonTransport()
+    built: list = []
+    connects = {"n": 0}
+    orig_connect = transport.connect
+
+    def counting_connect() -> None:
+        connects["n"] += 1
+        orig_connect()
+
+    transport.connect = counting_connect  # type: ignore[assignment]
+
+    def build(self, req):  # noqa: ANN001 - test stub
+        built.append(req)
+        return transport
+
+    monkeypatch.setattr(RpcServer, "_build_transport", build)
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
+    assert len(built) == 1 and connects["n"] == 1
+    r = _rpc(c, "rebind", chain=2).json()
+    assert r["ok"] is True and r["chain"] == 2
+    assert r["probe"]["core_id"] == 0x4C41
+    # No teardown/reopen: same transport instance, no extra connect() call.
+    assert len(built) == 1 and connects["n"] == 1
+    # The session is now the USER2 core — axi_mon_probe answers on the
+    # connected chain.
+    mon = _rpc(c, "axi_mon_probe").json()
+    assert mon["present"] is True and mon["chain"] == 2
+
+
+def test_rebind_same_chain_is_a_noop_reprobe(monkeypatch):
+    """Rebinding to the current chain just re-probes; it never rebuilds."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)  # chain 1
+    r = _rpc(c, "rebind", chain=1).json()
+    assert r["ok"] is True and r["chain"] == 1 and r["probe"]["core_id"] == 0x4C41
+
+
+def test_rebind_requires_connection(monkeypatch):
+    """Rebind before any connect is an error, not a silent transport build."""
+    c = _client(monkeypatch)
+    r = _rpc(c, "rebind", chain=2).json()
+    assert r["ok"] is False and "not connected" in r["error"]
+
+
 def test_list_cores_reports_axi_mon(monkeypatch):
     monkeypatch.setattr(
         RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=False)

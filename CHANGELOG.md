@@ -33,6 +33,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **RPC / Web — instant core switching:** switching the session between the
+  ELA and the AXI monitor (which live on different BSCAN taps) no longer does a
+  full reconnect. A new `rebind` RPC keeps the live JTAG transport and just hops
+  the tap + re-probes, so the switch is one short round-trip instead of a
+  `connect` (transport teardown + reopen) plus `probe`. The web AXI Mon tab and
+  Cores "Use this core" switch use it; side sessions (EIO/AXI/UART) are left
+  untouched.
 - **Web — Trigger & Run move onto the viewer:** the Trigger setup leaves the
   dock for a hover-out drawer on the waveform's right edge (a thin `⚡ Trigger`
   rail expands the full ILA-style setup; pin to keep it open). The Run controls
