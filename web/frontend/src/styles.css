@@ -406,6 +406,16 @@ button.danger {
   gap: 0.5rem;
   align-items: center;
 }
+/* Inline connect status: fills the remaining row width and truncates, so a
+   long "connecting to …" message never wraps and shifts the form below. */
+.conn-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
 
 .ok {
   color: var(--ok);

@@ -472,8 +472,13 @@ export function ConnectionPanel({
             Cancel
           </button>
         )}
+        {/* Inline so the transient connect status can't push the form down. */}
+        {status && (
+          <span className="muted conn-status" title={status}>
+            {status}
+          </span>
+        )}
       </div>
-      {status && <p className="muted">{status}</p>}
       {error && <p className="err">{error}</p>}
       <div className="form">
         <label>
