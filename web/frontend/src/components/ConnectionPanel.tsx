@@ -464,14 +464,20 @@ export function ConnectionPanel({
   return (
     <section className="panel">
       <div className="btnrow">
-        <button onClick={connect} disabled={busy}>
+        {/* Fixed width so the label swap (Connect -> Working…) doesn't resize
+            it, and Cancel keeps its slot when idle — the buttons never move. */}
+        <button className="conn-primary" onClick={connect} disabled={busy}>
           {busy ? "Working…" : "Connect"}
         </button>
-        {busy && (
-          <button className="danger" onClick={() => abortRef.current?.abort()}>
-            Cancel
-          </button>
-        )}
+        <button
+          className={`danger${busy ? "" : " invisible"}`}
+          onClick={() => abortRef.current?.abort()}
+          disabled={!busy}
+          tabIndex={busy ? undefined : -1}
+          aria-hidden={!busy}
+        >
+          Cancel
+        </button>
         {/* Inline so the transient connect status can't push the form down. */}
         {status && (
           <span className="muted conn-status" title={status}>

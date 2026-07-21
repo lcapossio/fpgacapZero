@@ -406,6 +406,16 @@ button.danger {
   gap: 0.5rem;
   align-items: center;
 }
+/* Connect button keeps a stable width across the Connect/Working… label swap
+   so it never resizes mid-connect. */
+.conn-primary {
+  min-width: 6.5rem;
+}
+/* Reserve a hidden button's space so it can't shift its neighbours when it
+   toggles (e.g. Cancel appearing only while connecting). */
+.invisible {
+  visibility: hidden;
+}
 /* Inline connect status: fills the remaining row width and truncates, so a
    long "connecting to …" message never wraps and shifts the form below. */
 .conn-status {
