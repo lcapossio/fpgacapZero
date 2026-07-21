@@ -77,6 +77,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is present, and the EIO dock can attach to managed EIO slots such as Arty's
   USER1 slots 2 and 3.
 
+### Deprecated
+
+- **Python desktop GUI (`fcapz-gui`):** no longer maintained in favour of the
+  web frontend (`fcapz-web`), which is now the supported interface. The GUI
+  still runs but shows a notice on launch and won't get new features or fixes.
+
 ### Fixed
 
 - **Host / hw_server:** `connect()` now waits for a JTAG target matching
