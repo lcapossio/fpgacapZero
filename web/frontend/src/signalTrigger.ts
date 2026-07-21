@@ -23,6 +23,7 @@
 //   them); all B (either-edge) terms merge into one CHANGED slot; R/F take
 //   a slot each.
 
+import { parseProbesText } from "./api";
 import type { Identity, ProbeSpec } from "./api";
 import type { ElaConfig } from "./session";
 
@@ -207,6 +208,87 @@ export function describeTerm(t: TriggerTerm): string {
 
 export function describeTerms(terms: TriggerTerm[], combine: Combine): string {
   return terms.map(describeTerm).join(combine === "and" ? " AND " : " OR ");
+}
+
+/** Parse a hex/decimal (or 0b/0o) bit-vector string as written into the raw
+ *  trigger fields; empty -> 0, unparseable -> null. */
+function parseTriggerBits(s: string): bigint | null {
+  const raw = (s || "").trim().replace(/_/g, "");
+  if (!raw) return 0n;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Decode a masked (value & mask) pattern into named-field terms using the
+ *  probe map, e.g. "awaddr=0x40 & any_err=1"; bits no probe covers fall back to
+ *  a raw "value & mask" slice, and with no probes at all the whole thing does. */
+function describeMasked(
+  value: bigint,
+  mask: bigint,
+  probes: ProbeSpec[],
+  edge: boolean,
+): string {
+  const named: string[] = [];
+  let covered = 0n;
+  for (const p of probes) {
+    const pm = mask & fieldMask(p);
+    if (pm === 0n) continue;
+    covered |= pm;
+    const pv = (value & pm) >> BigInt(p.lsb);
+    named.push(edge ? `${p.name} edge` : p.width === 1 ? `${p.name}=${pv & 1n}` : `${p.name}=${hex(pv)}`);
+  }
+  if (named.length === 0) {
+    return edge ? `edge on ${hex(mask)}` : `${hex(value & mask)} & ${hex(mask)}`;
+  }
+  const leftover = mask & ~covered;
+  if (leftover !== 0n) {
+    named.push(edge ? `edge on ${hex(leftover)}` : `${hex(value & leftover)} & ${hex(leftover)}`);
+  }
+  return named.join(edge ? " / " : " & ");
+}
+
+/** Human-readable summary of the ELA trigger *as it will be armed*, derived
+ *  from the raw config — so it stays correct however the trigger was set (the
+ *  trigger table, the AXI Mon tab, or the raw Advanced fields). Decodes the
+ *  masked value against the named probes when it can, else shows value & mask. */
+export function describeElaTrigger(ela: ElaConfig, _id: Identity | null): string {
+  void _id;
+  const ext =
+    ela.extTriggerMode === "1"
+      ? " + ext (OR)"
+      : ela.extTriggerMode === "2"
+        ? " + ext (AND)"
+        : "";
+
+  if (ela.useSequencer) {
+    let stages = 0;
+    try {
+      const seq = JSON.parse(ela.sequenceJson || "[]");
+      stages = Array.isArray(seq) ? seq.length : 0;
+    } catch {
+      stages = 0; // unparseable — report as unknown depth
+    }
+    return `sequencer (${stages || "?"} stage${stages === 1 ? "" : "s"})` + ext;
+  }
+
+  const value = parseTriggerBits(ela.triggerValue);
+  const mask = parseTriggerBits(ela.triggerMask);
+  if (value === null || mask === null) {
+    return `${ela.triggerMode} value=${ela.triggerValue || "0"} mask=${ela.triggerMask || "0"}` + ext;
+  }
+  const edge = ela.triggerMode === "edge_detect";
+  if (mask === 0n) return (edge ? "any edge" : "any sample") + ext;
+
+  let probes: ProbeSpec[] = [];
+  try {
+    probes = parseProbesText(ela.probesText);
+  } catch {
+    probes = [];
+  }
+  return describeMasked(value, mask, probes, edge) + ext;
 }
 
 function slotOf(t: TriggerTerm): Slot {

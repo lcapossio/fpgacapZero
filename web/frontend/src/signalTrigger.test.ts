@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Identity, ProbeSpec } from "./api";
 import type { TriggerTerm } from "./signalTrigger";
+import type { ElaConfig } from "./session";
 import {
   composeTrigger,
   defaultTerm,
+  describeElaTrigger,
   describeTerms,
   groupTerms,
   hasDirectionalEdges,
@@ -297,5 +299,76 @@ describe("defaults and capabilities", () => {
     expect(hasDirectionalEdges(ident({ trig_stages: 2 }))).toBe(true); // caps unknown
     expect(hasDirectionalEdges(ident({ trig_stages: 4, compare_modes: [0, 1] }))).toBe(false);
     expect(hasDirectionalEdges(null)).toBe(false);
+  });
+});
+
+describe("describeElaTrigger", () => {
+  function ela(patch: Partial<ElaConfig>): ElaConfig {
+    return {
+      channel: "0",
+      pretrigger: "8",
+      posttrigger: "16",
+      triggerMode: "value_match",
+      triggerValue: "0x0",
+      triggerMask: "0x0",
+      extTriggerMode: "0",
+      useSequencer: false,
+      sequenceJson: "",
+      segmented: false,
+      probesText: "",
+      ...patch,
+    };
+  }
+
+  it("decodes a single named field", () => {
+    const e = ela({ triggerValue: "0x80", triggerMask: "0x80", probesText: "any_err:1:7" });
+    expect(describeElaTrigger(e, null)).toBe("any_err=1");
+  });
+
+  it("decodes several named fields, high bits shifted down", () => {
+    const e = ela({
+      triggerValue: "0x4080",
+      triggerMask: "0xFF80",
+      probesText: "any_err:1:7\nawaddr:8:8",
+    });
+    expect(describeElaTrigger(e, null)).toBe("any_err=1 & awaddr=0x40");
+  });
+
+  it("mask 0 means the trigger matches any sample", () => {
+    expect(describeElaTrigger(ela({ triggerMask: "0x0" }), null)).toBe("any sample");
+  });
+
+  it("falls back to value & mask with no probe map", () => {
+    const e = ela({ triggerValue: "0x40", triggerMask: "0xFF" });
+    expect(describeElaTrigger(e, null)).toBe("0x40 & 0xFF");
+  });
+
+  it("appends masked bits no probe covers", () => {
+    const e = ela({ triggerValue: "0x181", triggerMask: "0x181", probesText: "any_err:1:7" });
+    // bit7 is any_err; bits 0 and 8 have no probe -> raw leftover slice.
+    expect(describeElaTrigger(e, null)).toBe("any_err=1 & 0x101 & 0x101");
+  });
+
+  it("edge mode reads as edges, not equality", () => {
+    const e = ela({ triggerMode: "edge_detect", triggerMask: "0x8", probesText: "valid:1:3" });
+    expect(describeElaTrigger(e, null)).toBe("valid edge");
+  });
+
+  it("notes an external trigger combine", () => {
+    const e = ela({ triggerValue: "0x1", triggerMask: "0x1", extTriggerMode: "1", probesText: "go:1:0" });
+    expect(describeElaTrigger(e, null)).toBe("go=1 + ext (OR)");
+  });
+
+  it("summarizes the sequencer by stage count", () => {
+    const e = ela({
+      useSequencer: true,
+      sequenceJson: '[{"is_final":false},{"is_final":true}]',
+    });
+    expect(describeElaTrigger(e, null)).toBe("sequencer (2 stages)");
+  });
+
+  it("shows the raw fields when the value can't be parsed", () => {
+    const e = ela({ triggerValue: "nope", triggerMask: "0xFF" });
+    expect(describeElaTrigger(e, null)).toBe("value_match value=nope mask=0xFF");
   });
 });

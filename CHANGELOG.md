@@ -33,6 +33,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Web — Run bar shows the trigger condition:** the Run bar now displays what
+  Arm will fire on (e.g. `any_err=1 & awaddr=0x40`), decoded live from the
+  config against the named probes — so it's correct whether the trigger came
+  from the trigger table, the AXI Mon tab, or the raw Advanced fields. Falls
+  back to `value & mask` when no probe map is loaded, and reads the sequencer
+  and external-trigger combine too.
 - **RPC / Web — instant core switching:** switching the session between the
   ELA and the AXI monitor (which live on different BSCAN taps) no longer does a
   full reconnect. A new `rebind` RPC keeps the live JTAG transport and just hops

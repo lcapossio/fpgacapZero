@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
+import { describeElaTrigger } from "../signalTrigger";
 import { useSession } from "../session";
 
 const IMMEDIATE_TIMEOUT = 10; // hardware wait (s) — Trigger Immediate fires at once
@@ -237,6 +238,9 @@ export function RunPanel({
   }
 
   const locked = busy || running || switching;
+  // What Arm will actually fire on — decoded from the live config so it tracks
+  // the trigger table, the AXI Mon tab and the raw fields alike.
+  const triggerDesc = describeElaTrigger(ela, identityProp);
 
   return (
     <div className="runbar">
@@ -301,6 +305,10 @@ export function RunPanel({
             </span>
           ) : null}
         </span>
+      </div>
+      <div className="runbar-trigger" title={`Arm fires on: ${triggerDesc}`}>
+        <span className="runbar-trigger-label">⚡ trigger</span>
+        <span className="runbar-trigger-cond">{triggerDesc}</span>
       </div>
     </div>
   );

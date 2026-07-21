@@ -258,6 +258,31 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The armed trigger condition, shown under the controls so it's always in
+   view — one line, truncated, full text on hover. */
+.runbar-trigger {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+.runbar-trigger-label {
+  flex: 0 0 auto;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.runbar-trigger-cond {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace);
+}
 
 .topbar {
   display: flex;
