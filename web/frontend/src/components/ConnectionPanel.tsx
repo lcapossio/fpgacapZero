@@ -441,7 +441,6 @@ export function ConnectionPanel({
   if (identity) {
     return (
       <section className="panel">
-        <h2>Connection</h2>
         <div className="btnrow">
           <span className="ok">✓ Connected</span>
           <button onClick={disconnect} disabled={busy}>
@@ -464,7 +463,6 @@ export function ConnectionPanel({
 
   return (
     <section className="panel">
-      <h2>Connection</h2>
       <div className="btnrow">
         <button onClick={connect} disabled={busy}>
           {busy ? "Working…" : "Connect"}
