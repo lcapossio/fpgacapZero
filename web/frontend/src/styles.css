@@ -41,7 +41,7 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   /* Compact the dockview chrome (tab bar) to match the denser UI. */
-  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-height: 20px;
   --dv-tabs-and-actions-container-font-size: 12px;
   --dv-tab-font-size: 12px;
 }
