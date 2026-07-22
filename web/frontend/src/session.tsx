@@ -12,6 +12,20 @@ export interface CaptureState {
   seq: number; // bumps each capture so the viewer reloads even if panels are detached
 }
 
+/** EJTAG-AXI bridge auto-detected on the target (ejtag_axi_probe), or null.
+ *  `chain` is the USER chain it lives on so the AXI tab can attach without the
+ *  user guessing it. */
+export interface EjtagAxiInfo {
+  chain: number;
+  coreId: number;
+  versionMajor: number;
+  versionMinor: number;
+  addrW: number;
+  dataW: number;
+  fifoDepth: number;
+  legacy: boolean;
+}
+
 /** ELA trigger/capture config — edited in the ELA tab, consumed by the Run tab. */
 export interface ElaConfig {
   channel: string;
@@ -53,6 +67,8 @@ interface Session {
   /** AXI monitor found anywhere on the target (axi_mon_probe), or null.
    *  Its `chain` may differ from the session's — switching is transparent. */
   axiMon: AxiMonInfo | null;
+  /** EJTAG-AXI bridge auto-detected on the target (ejtag_axi_probe), or null. */
+  ejtagAxi: EjtagAxiInfo | null;
   /** Registered by the Connection panel: re-bind the session to another core
    *  (its BSCAN chain) so other panels can switch seamlessly. */
   chainSwitch: MutableRefObject<((chain: number) => Promise<void>) | null>;
@@ -62,6 +78,7 @@ interface Session {
   setSwitching: (b: boolean) => void;
   setEla: (patch: Partial<ElaConfig>) => void;
   setAxiMon: (info: AxiMonInfo | null) => void;
+  setEjtagAxi: (info: EjtagAxiInfo | null) => void;
   setCores: (cores: Core[]) => void;
   onConnected: (params: ConnectionParams, id: Identity) => void;
   onDisconnected: () => void;
@@ -86,6 +103,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [captures, setCaptures] = useState<Record<number, CaptureState>>({});
   const [ela, setElaState] = useState<ElaConfig>(DEFAULT_ELA);
   const [axiMon, setAxiMonState] = useState<AxiMonInfo | null>(null);
+  const [ejtagAxi, setEjtagAxiState] = useState<EjtagAxiInfo | null>(null);
   const [switching, setSwitching] = useState(false);
   const chainSwitch = useRef<((chain: number) => Promise<void>) | null>(null);
 
@@ -97,11 +115,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       captures,
       ela,
       axiMon,
+      ejtagAxi,
       chainSwitch,
       switching,
       setSwitching,
       setEla: (patch) => setElaState((p) => ({ ...p, ...patch })),
       setAxiMon: setAxiMonState,
+      setEjtagAxi: setEjtagAxiState,
       setCores,
       onConnected: (params, id) => {
         setConn(params);
@@ -113,6 +133,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setCores([]);
         setCaptures({});
         setAxiMonState(null);
+        setEjtagAxiState(null);
       },
       pushCapture: (next) => {
         const chain = conn?.chain;
@@ -123,7 +144,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }));
       },
     }),
-    [identity, conn, cores, captures, ela, axiMon, switching],
+    [identity, conn, cores, captures, ela, axiMon, ejtagAxi, switching],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

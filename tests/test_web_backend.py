@@ -18,6 +18,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from fcapz.analyzer import expected_ela_version_reg  # noqa: E402
+from fcapz.ejtagaxi import CMD_CONFIG  # noqa: E402
 from fcapz.rpc import RpcServer  # noqa: E402
 from fcapz.transport import Transport  # noqa: E402
 from fcapz.web import create_app  # noqa: E402
@@ -796,6 +797,80 @@ def test_rebind_requires_connection(monkeypatch):
     c = _client(monkeypatch)
     r = _rpc(c, "rebind", chain=2).json()
     assert r["ok"] is False and "not connected" in r["error"]
+
+
+class FakeElaAndBridgeTransport(FakeTransport):
+    """ELA on USER1 plus an EJTAG-AXI bridge (identity only) on USER4.
+
+    The bridge speaks the 72-bit pipelined CONFIG DR — each scan returns the
+    *previous* command's result — so identity reads lag one scan, matching the
+    real hardware `EjtagAxiController.attach` decode.
+    """
+
+    _BRIDGE_CONFIG = {
+        0x0000: (0x01 << 24) | (0x02 << 16) | 0x4A58,  # VERSION: v1.2, "JX"
+        0x002C: (0x0F << 16) | 0x2020,  # FEATURES: addr_w=32, data_w=32, fifo=16
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._prev_cfg_addr: int | None = None
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        # The bridge only lives on USER4 — other chains shift into nothing.
+        if self.active_chain != 4:
+            self._prev_cfg_addr = None
+            return 0
+        addr = bits & 0xFFFFFFFF
+        cmd = (bits >> 68) & 0xF
+        # Pipelined: answer with the register the *previous* CONFIG read named.
+        rdata = (
+            self._BRIDGE_CONFIG.get(self._prev_cfg_addr, 0)
+            if self._prev_cfg_addr is not None
+            else 0
+        )
+        self._prev_cfg_addr = addr if cmd == CMD_CONFIG else None
+        # status=0 (never busy), resp=0 -> rdata is the whole payload.
+        return rdata & 0xFFFFFFFF
+
+
+def test_ejtag_axi_probe_detects_bridge_on_user4(monkeypatch):
+    """Connected to the USER1 ELA, ejtag_axi_probe finds the bridge on USER4
+    via its own CONFIG scan and reports its identity, leaving the ELA session
+    untouched."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # ELA on chain 1
+    r = _rpc(c, "ejtag_axi_probe").json()
+    assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 4
+    assert r["core_id"] == 0x4A58
+    assert r["addr_w"] == 32 and r["data_w"] == 32 and r["fifo_depth"] == 16
+    assert r["version_major"] == 1 and r["version_minor"] == 2
+    # The ELA session is unaffected by the bridge probe.
+    assert _rpc(c, "probe").json()["ok"] is True
+
+
+def test_ejtag_axi_probe_honors_explicit_chains(monkeypatch):
+    """A caller can point the probe at a specific chain set."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    # The bridge is only on 4 — scanning just chain 3 must not find it.
+    assert _rpc(c, "ejtag_axi_probe", chains=[3]).json()["present"] is False
+    assert _rpc(c, "ejtag_axi_probe", chains=[3, 4]).json()["chain"] == 4
+
+
+def test_ejtag_axi_probe_absent_without_bridge(monkeypatch):
+    """No bridge on the target -> {present: False}, no error."""
+    c = _client(monkeypatch)  # plain FakeTransport, no raw DR access
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "ejtag_axi_probe").json()
+    assert r["ok"] is True and r["present"] is False
 
 
 def test_list_cores_reports_axi_mon(monkeypatch):

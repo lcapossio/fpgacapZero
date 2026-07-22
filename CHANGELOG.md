@@ -31,6 +31,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   EJTAG cross-read of the CPU's writes; the full Arty suite is green with no
   regressions. Everything ships in one bitstream (Verilog top only).
 
+### Added
+
+- **RPC / Web — EJTAG-AXI auto-detect:** a new `ejtag_axi_probe` command finds
+  an EJTAG-AXI bridge on the connected target (its own USER chain, default
+  USER4) using the bridge's read-only CONFIG identity scan on the shared
+  transport — no reconnect, ELA session untouched. The web calls it on connect
+  and the AXI tab shows a "bridge detected on chain N" banner with its chain
+  pre-filled, so attaching is one click instead of guessing the chain.
+
 ### Changed
 
 - **Web — Run bar shows the trigger condition:** the Run bar now displays what

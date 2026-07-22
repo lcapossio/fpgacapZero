@@ -500,6 +500,35 @@ wider than 53 bits survive JSON transport unrounded.
 
 ### EJTAG-AXI
 
+#### `ejtag_axi_probe`
+
+Auto-detect an EJTAG-AXI bridge on the connected target without attaching. The
+bridge sits on its own USER chain (default USER4) and speaks a different DR
+protocol than the ELA, so this probes with the bridge's own **read-only** CONFIG
+identity scan on the shared transport and restores the session's chain — the ELA
+session is untouched. Requires an active session. `chains` (optional) overrides
+the candidate set (default `[4]`).
+
+```json
+{"cmd": "ejtag_axi_probe", "chains": [4]}
+```
+
+Present → the bridge identity plus the `chain` it was found on; absent →
+`{"present": false}`:
+```json
+{
+  "ok": true, "schema_version": "1.1",
+  "present": true, "chain": 4,
+  "bridge_id": 19032, "core_id": 19032,
+  "legacy_id": false, "legacy_raw_id": null,
+  "version_major": 0, "version_minor": 4,
+  "addr_w": 32, "data_w": 32, "fifo_depth": 16
+}
+```
+
+The web UI calls this on connect and pre-fills the AXI tab's chain so attaching
+is one click; `axi_connect` still opens the working session.
+
 #### `axi_connect`
 
 ```json

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { rpc, toHexParam } from "../api";
 import type { ConnectionParams } from "../api";
+import { useSession } from "../session";
 
 const ATTACH_TIMEOUT = 12000;
 const DUMP_TIMEOUT = 20000;
@@ -10,9 +11,12 @@ function msg(e: unknown): string {
 }
 
 /** JTAG-AXI master — attach the bridge, then single read/write and block dump,
- *  mirroring the desktop GUI's AXI panel over the same unified RPC commands. */
+ *  mirroring the desktop GUI's AXI panel over the same unified RPC commands.
+ *  When the bridge was auto-detected on connect, its chain is pre-filled and a
+ *  banner names it, so attaching is one click with no chain to guess. */
 export function AxiPanel({ conn }: { conn: ConnectionParams }) {
-  const [chain, setChain] = useState("4");
+  const { ejtagAxi } = useSession();
+  const [chain, setChain] = useState(ejtagAxi ? String(ejtagAxi.chain) : "4");
   const [attached, setAttached] = useState(false);
   const [info, setInfo] = useState<Record<string, unknown> | null>(null);
   const [busy, setBusy] = useState(false);
@@ -25,6 +29,12 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
   const [dumpAddr, setDumpAddr] = useState("0x0");
   const [dumpCount, setDumpCount] = useState("16");
   const [burst, setBurst] = useState(false);
+
+  // Detection lands after connect — adopt the bridge's chain until the user
+  // attaches (or edits it themselves; this only re-fires when detection does).
+  useEffect(() => {
+    if (ejtagAxi && !attached) setChain(String(ejtagAxi.chain));
+  }, [ejtagAxi, attached]);
 
   function push(lines: string[]) {
     setLog((l) => [...lines, ...l].slice(0, 300));
@@ -128,6 +138,18 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
   if (!attached) {
     return (
       <section className="panel">
+        {ejtagAxi ? (
+          <p className="ok">
+            EJTAG-AXI bridge detected on chain {ejtagAxi.chain} — v
+            {ejtagAxi.versionMajor}.{ejtagAxi.versionMinor} · addr {ejtagAxi.addrW} · data{" "}
+            {ejtagAxi.dataW} · fifo {ejtagAxi.fifoDepth}
+            {ejtagAxi.legacy ? " · legacy" : ""}
+          </p>
+        ) : (
+          <p className="muted">
+            No EJTAG-AXI bridge auto-detected — enter its USER chain to attach.
+          </p>
+        )}
         <div className="form">
           <label>
             Chain

@@ -72,7 +72,8 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
   } | null>(null);
-  const { ela, setEla, setAxiMon, setCores, conn, chainSwitch, setSwitching } = useSession();
+  const { ela, setEla, setAxiMon, setEjtagAxi, setCores, conn, chainSwitch, setSwitching } =
+    useSession();
   // Per-core ELA config, so switching cores doesn't clobber trigger/probe
   // setups — keyed by BSCAN chain, reset with the connection.
   const elaByChain = useRef<Record<number, ElaConfig>>({});
@@ -143,6 +144,32 @@ export function ConnectionPanel({
     setAxiMon(null);
   }
 
+  /** Auto-detect an EJTAG-AXI bridge on the target (its own USER chain) and
+   *  share it with the AXI tab so it can attach without the user typing a
+   *  chain. Best-effort: absent, an older server, or a transient error all
+   *  just leave the AXI tab in its manual-attach state. */
+  async function detectEjtagAxi() {
+    try {
+      const r = await rpc("ejtag_axi_probe", {}, CONNECT_TIMEOUT);
+      if (r.present) {
+        setEjtagAxi({
+          chain: Number(r.chain),
+          coreId: Number(r.core_id ?? r.bridge_id ?? 0),
+          versionMajor: Number(r.version_major ?? 0),
+          versionMinor: Number(r.version_minor ?? 0),
+          addrW: Number(r.addr_w ?? 0),
+          dataW: Number(r.data_w ?? 0),
+          fifoDepth: Number(r.fifo_depth ?? 0),
+          legacy: Boolean(r.legacy_id),
+        });
+        return;
+      }
+    } catch {
+      /* older server or transient error — treat as no bridge */
+    }
+    setEjtagAxi(null);
+  }
+
   function changeBackend(b: string) {
     setBackend(b);
     setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
@@ -180,6 +207,7 @@ export function ConnectionPanel({
     onConnected(params, r.probe as Identity);
     loadCores();
     detectAxiMon(params.chain);
+    detectEjtagAxi();
   }
 
   /** Connect to a discovered board (carries its own port/tap/ir_table). */
@@ -208,6 +236,7 @@ export function ConnectionPanel({
     onConnected(params, r.probe as Identity);
     loadCores();
     detectAxiMon(params.chain);
+    detectEjtagAxi();
   }
 
   /** Re-bind the connected session to a core on another BSCAN chain (e.g.

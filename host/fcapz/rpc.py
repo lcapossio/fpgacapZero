@@ -328,6 +328,38 @@ class RpcServer:
         return str(name)
 
     @staticmethod
+    def _probe_ejtag_axi(analyzer: Analyzer, chains):
+        """``(chain, identity)`` of an EJTAG-AXI bridge on one of ``chains``, or
+        ``None``.
+
+        The bridge sits on its own USER chain (canonically USER4) and speaks a
+        different DR protocol than the ELA, so this probes with the bridge's own
+        read-only CONFIG identity scan (``EjtagAxiController.attach`` on the
+        shared transport, which restores chain 1). A chain whose identity magic
+        doesn't match just falls through. Restores the analyzer's chain
+        afterwards so the ELA/monitor session is untouched wherever the bridge
+        was (or wasn't) found.
+        """
+        found = None
+        for chain in chains:
+            try:
+                info = EjtagAxiController(analyzer.transport, chain=chain).attach()
+            except Exception:
+                info = None
+            if info is not None:
+                found = (chain, info)
+                break
+        try:
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
+        except Exception:
+            pass
+        return found
+
+    @staticmethod
     def _probe_axi_mon(analyzer: Analyzer):
         """``(chain, geometry, probes)`` of the AXI monitor, or None.
 
@@ -737,6 +769,20 @@ class RpcServer:
                 sample_width=geo.sample_width,
                 probes=[{"name": p.name, "width": p.width, "lsb": p.lsb} for p in probes],
             )
+
+        if cmd == "ejtag_axi_probe":
+            # Auto-detect an EJTAG-AXI bridge on its own USER chain (default
+            # USER4). Bridges speak a different DR protocol than the ELA, so
+            # this uses the bridge's read-only CONFIG identity scan on the
+            # shared transport and restores the session's chain. `chains` may
+            # override the candidate set. Absent -> {present: False}.
+            raw = req.get("chains")
+            chains = tuple(int(c) for c in raw) if raw else (4,)
+            found = self._probe_ejtag_axi(analyzer, chains)
+            if found is None:
+                return self._ok(present=False)
+            chain, info = found
+            return self._ok(present=True, chain=chain, **info)
 
         if cmd == "configure":
             analyzer.configure(self._build_config(req))
