@@ -12,7 +12,6 @@ export function ElaPanel() {
 
   return (
     <section className="panel">
-      <h2>ELA config</h2>
       <div className="form">
         <label>
           Channel

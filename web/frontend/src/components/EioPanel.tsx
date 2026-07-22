@@ -112,7 +112,6 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   if (phase === "discovering") {
     return (
       <section className="panel">
-        <h2>EIO</h2>
         <p className="muted">discovering…</p>
       </section>
     );
@@ -121,7 +120,6 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
   if (phase === "manual") {
     return (
       <section className="panel">
-        <h2>EIO</h2>
         <p className="muted">no EIO auto-detected — attach manually:</p>
         <div className="form">
           <label>
@@ -141,7 +139,6 @@ export function EioPanel({ conn }: { conn: ConnectionParams }) {
 
   return (
     <section className="panel">
-      <h2>EIO</h2>
       <p className="muted">
         in {inW} · out {outW} · chain {chain} · base {base}
       </p>

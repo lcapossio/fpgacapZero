@@ -139,7 +139,6 @@ export function CoresPanel() {
   if (!conn || !identity) {
     return (
       <section className="panel">
-        <h2>Cores</h2>
         <p className="muted">Connect to a target first.</p>
       </section>
     );
@@ -148,7 +147,6 @@ export function CoresPanel() {
   const shown = cores.length ? cores : [elaCoreFromIdentity(identity, activeChain)];
   return (
     <section className="panel">
-      <h2>Cores ({shown.length})</h2>
       {shown.map((core, i) => {
         const switchable =
           (core.type === "ela" || core.type === "axi_mon") && core.chain !== activeChain;

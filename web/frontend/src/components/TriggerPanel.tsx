@@ -158,7 +158,6 @@ export function TriggerPanel() {
   if (!conn || !identity) {
     return (
       <section className="panel">
-        <h2>Trigger</h2>
         <p className="muted">Connect to a target first.</p>
       </section>
     );
@@ -167,7 +166,6 @@ export function TriggerPanel() {
   return (
     <section className="panel">
       <div className="trigsetup-head">
-        <h2>Trigger Setup</h2>
         <label className="trigcond">
           Trigger condition{" "}
           <select value={combine} onChange={(e) => setCombine(e.target.value as Combine)}>

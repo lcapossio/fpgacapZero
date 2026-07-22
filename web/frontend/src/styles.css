@@ -126,9 +126,6 @@ body {
   gap: 1rem;
   flex-wrap: wrap;
 }
-.trigsetup-head h2 {
-  margin-right: auto;
-}
 .trigcond {
   font-size: 0.85rem;
   color: var(--muted);

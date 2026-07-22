@@ -19,7 +19,6 @@ export function AxiMonPanel() {
   if (!conn) {
     return (
       <section className="panel">
-        <h2>AXI Monitor</h2>
         <p className="muted">Connect to a target first.</p>
       </section>
     );
@@ -27,7 +26,6 @@ export function AxiMonPanel() {
   if (!axiMon) {
     return (
       <section className="panel">
-        <h2>AXI Monitor</h2>
         <p className="muted">
           No AXI monitor on this target. See the manual&apos;s AXI monitor
           chapter for how to instantiate one.
@@ -97,7 +95,6 @@ export function AxiMonPanel() {
 
   return (
     <section className="panel">
-      <h2>AXI Monitor</h2>
       <p className="muted">
         {axiMon.proto} · addr {axiMon.addr_w} · data {axiMon.data_w} · decode{" "}
         {axiMon.decode ? "on" : "off"} · {axiMon.sample_width}-bit samples

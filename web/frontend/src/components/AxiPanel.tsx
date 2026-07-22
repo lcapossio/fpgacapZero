@@ -128,7 +128,6 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
   if (!attached) {
     return (
       <section className="panel">
-        <h2>JTAG-AXI</h2>
         <div className="form">
           <label>
             Chain
@@ -145,7 +144,6 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
 
   return (
     <section className="panel">
-      <h2>JTAG-AXI</h2>
       <p className="muted">
         core 0x{Number(info?.core_id ?? 0).toString(16).toUpperCase()} · addr_w
         {String(info?.addr_w)} · data_w{String(info?.data_w)} · fifo{" "}
