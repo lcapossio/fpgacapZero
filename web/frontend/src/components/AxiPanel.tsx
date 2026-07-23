@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { rpc, toHexParam } from "../api";
 import type { ConnectionParams } from "../api";
 import { useSession } from "../session";
@@ -36,11 +36,24 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
     if (ejtagAxi && !attached) setChain(String(ejtagAxi.chain));
   }, [ejtagAxi, attached]);
 
+  // Auto-attach once when a bridge was detected — the user shouldn't have to
+  // click Attach for a bridge we already found. A manual detach won't re-trigger
+  // it (the guard stays set); a reconnect remounts this panel and resets it.
+  const autoAttempted = useRef(false);
+  useEffect(() => {
+    if (ejtagAxi && !attached && !busy && !autoAttempted.current) {
+      autoAttempted.current = true;
+      attach(ejtagAxi.chain); // use the detected chain, not the pending state
+    }
+    // attach reads current props/state; run only on detection/attach changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ejtagAxi, attached, busy]);
+
   function push(lines: string[]) {
     setLog((l) => [...lines, ...l].slice(0, 300));
   }
 
-  async function attach() {
+  async function attach(useChain?: number) {
     setBusy(true);
     setError("");
     try {
@@ -52,7 +65,7 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
           port: conn.port,
           tap: conn.tap,
           ir_table: conn.ir_table,
-          chain: Number(chain),
+          chain: useChain ?? Number(chain),
         },
         ATTACH_TIMEOUT,
       );
@@ -156,7 +169,7 @@ export function AxiPanel({ conn }: { conn: ConnectionParams }) {
             <input value={chain} onChange={(e) => setChain(e.target.value)} />
           </label>
         </div>
-        <button onClick={attach} disabled={busy}>
+        <button onClick={() => attach()} disabled={busy}>
           {busy ? "Attaching…" : "Attach AXI"}
         </button>
         {error && <p className="err">{error}</p>}
