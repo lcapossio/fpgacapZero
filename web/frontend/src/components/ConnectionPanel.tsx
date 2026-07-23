@@ -490,23 +490,71 @@ export function ConnectionPanel({
     );
   }
 
+  // A scan that turns up more than one board/target resolves right here in the
+  // button row — the picker replaces Connect instead of appearing below the form.
+  const pickerMode = boards.length > 1 ? "boards" : targets.length > 1 ? "targets" : null;
+
   return (
     <section className="panel">
       <div className="btnrow">
-        {/* Fixed width so the label swap (Connect -> Working…) doesn't resize
-            it, and Cancel keeps its slot when idle — the buttons never move. */}
-        <button className="conn-primary" onClick={connect} disabled={busy}>
-          {busy ? "Working…" : "Connect"}
-        </button>
-        <button
-          className={`danger${busy ? "" : " invisible"}`}
-          onClick={() => abortRef.current?.abort()}
-          disabled={!busy}
-          tabIndex={busy ? undefined : -1}
-          aria-hidden={!busy}
-        >
-          Cancel
-        </button>
+        {pickerMode ? (
+          <>
+            {pickerMode === "boards" ? (
+              <select
+                className="conn-picker"
+                value={pickedIdx}
+                onChange={(e) => setPickedIdx(Number(e.target.value))}
+                title="Choose which discovered board to connect to"
+              >
+                {boards.map((b, i) => (
+                  <option key={`${b.host}:${b.port}:${b.tap}`} value={i}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <select
+                className="conn-picker"
+                value={picked}
+                onChange={(e) => setPicked(e.target.value)}
+                title="Choose which JTAG target to connect to"
+              >
+                {targets.map((t) => (
+                  <option key={t}>{t}</option>
+                ))}
+              </select>
+            )}
+            <button
+              className="conn-primary"
+              onClick={pickerMode === "boards" ? connectPickedBoard : connectPickedTarget}
+              disabled={busy}
+            >
+              {busy
+                ? "Working…"
+                : `Connect to ${pickerMode === "boards" ? boards[pickedIdx]?.tap : picked}`}
+            </button>
+            <button className="secondary" onClick={resetScan} disabled={busy}>
+              Dismiss
+            </button>
+          </>
+        ) : (
+          <>
+            {/* Fixed width so the label swap (Connect -> Working…) doesn't resize
+                it, and Cancel keeps its slot when idle — the buttons never move. */}
+            <button className="conn-primary" onClick={connect} disabled={busy}>
+              {busy ? "Working…" : "Connect"}
+            </button>
+            <button
+              className={`danger${busy ? "" : " invisible"}`}
+              onClick={() => abortRef.current?.abort()}
+              disabled={!busy}
+              tabIndex={busy ? undefined : -1}
+              aria-hidden={!busy}
+            >
+              Cancel
+            </button>
+          </>
+        )}
         {/* Inline so the transient connect status can't push the form down. */}
         {status && (
           <span className="muted conn-status" title={status}>
@@ -551,51 +599,6 @@ export function ConnectionPanel({
           </label>
         )}
       </div>
-
-      {boards.length > 1 ? (
-        <div className="form">
-          <label>
-            Board
-            <select
-              value={pickedIdx}
-              onChange={(e) => setPickedIdx(Number(e.target.value))}
-            >
-              {boards.map((b, i) => (
-                <option key={`${b.host}:${b.port}:${b.tap}`} value={i}>
-                  {b.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="btnrow">
-            <button onClick={connectPickedBoard} disabled={busy}>
-              Connect to {boards[pickedIdx]?.tap}
-            </button>
-            <button className="secondary" onClick={resetScan} disabled={busy}>
-              Dismiss
-            </button>
-          </div>
-        </div>
-      ) : targets.length > 1 ? (
-        <div className="form">
-          <label>
-            Target
-            <select value={picked} onChange={(e) => setPicked(e.target.value)}>
-              {targets.map((t) => (
-                <option key={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-          <div className="btnrow">
-            <button onClick={connectPickedTarget} disabled={busy}>
-              Connect to {picked}
-            </button>
-            <button className="secondary" onClick={resetScan} disabled={busy}>
-              Dismiss
-            </button>
-          </div>
-        </div>
-      ) : null}
 
       {ooEnabled && (
         <div className="btnrow">

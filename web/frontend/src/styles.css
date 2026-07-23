@@ -433,6 +433,13 @@ button.danger {
 .conn-primary {
   min-width: 6.5rem;
 }
+/* Multi-target/board picker sits inline in the button row; cap its width so a
+   long board label can't blow the row out, and let it shrink on narrow docks. */
+.conn-picker {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 16rem;
+}
 /* Reserve a hidden button's space so it can't shift its neighbours when it
    toggles (e.g. Cancel appearing only while connecting). */
 .invisible {
