@@ -78,6 +78,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Tests
 
+- **AXI monitor — wide-trigger validation:** cocotb `wide_trigger_high_bit`
+  triggers on a bit above bit 31 (idle-bus control must not fire) and
+  `beat_storage_qualifier` proves idle cycles are dropped. On hardware,
+  `TestAxiMonitorWideTrigger` validates on the Arty A7 that a trigger on
+  `awvalid` (bit 43) and a VALID-qualified full write-address both work — with
+  the full AXI-monitor and plain-ELA suites green on the rebuilt bitstream.
 - **AXI monitor — stress coverage:** a new cocotb `stress_backtoback_fill`
   target saturates the tap with back-to-back write handshakes, fills the capture
   buffer to depth, and reads every wide (multi-word `SAMPLE_W`) sample back —

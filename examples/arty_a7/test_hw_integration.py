@@ -1674,6 +1674,100 @@ class TestAxiMonitorStress(unittest.TestCase):
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
 
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorWideTrigger(unittest.TestCase):
+    """Validate the full-width (WIDE_TRIG) comparator on real silicon.
+
+    The 160-bit AXI sample used to be triggerable only in its low 32 bits.
+    With WIDE_TRIG, comparator A reaches any field.  These tests prove it on
+    hardware two ways: (1) a trigger on ``awvalid`` alone — bit 43, above bit 31,
+    unreachable by the legacy path — fires on a write but not on an idle bus;
+    (2) a VALID-qualified full write-address trigger fires on the matching
+    address and not on a neighbouring one.
+    """
+
+    STATUS = 0x0008
+    GO_OFF = 0x7C
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self.bridge.axi_write(self.GO_OFF, 0)  # keep the CPU quiet
+        # WIDE_TRIG must be advertised for these tests to mean anything.
+        caps = self._read(0x00E0)
+        self.assertTrue(caps & (1 << 18), f"WIDE_TRIG cap not set (COMPARE_CAPS=0x{caps:08X})")
+
+    def tearDown(self):
+        try:
+            self.bridge.axi_write(self.GO_OFF, 0)
+        finally:
+            self.t.close()
+
+    def _read(self, addr: int) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(addr)
+
+    def _status(self) -> int:
+        return self._read(self.STATUS)
+
+    def _awvalid_lsb(self) -> int:
+        return next(p.lsb for p in self.mon.probe_map().probes if p.name == "awvalid")
+
+    def test_trigger_on_awvalid_high_bit(self):
+        """Trigger on awvalid (bit 43) alone — a bit only the wide window reaches."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        bit = self._awvalid_lsb()
+        self.assertGreaterEqual(bit, 32, "awvalid should be above the low word")
+        cfg = CaptureConfig(
+            pretrigger=2, posttrigger=12,
+            trigger=TriggerConfig(mode="value_match", value=1 << bit, mask=1 << bit),
+            sample_width=self.mon.geometry().sample_width, depth=256,
+            probes=list(self.mon.probe_map().probes),
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+
+        # Idle bus: awvalid low -> must not trigger.
+        time.sleep(0.05)
+        status = self._status()
+        self.assertFalse(status & 0x2, f"triggered on idle bus (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"should still be armed (0x{status:08X})")
+
+        # A write asserts awvalid -> the high-bit trigger fires and completes.
+        self.bridge.axi_write(0x10, 0x1234_5678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on awvalid (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_valid_qualified_write_address(self):
+        """VALID-qualified full write-address trigger: fires on the matching
+        address, not on a neighbour (proves address + awvalid matched wide)."""
+        cfg = self.mon.write_addr_capture_config(
+            0x40, pretrigger=2, posttrigger=12, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        # Write to a *different* address -> no trigger (address mismatch).
+        self.bridge.axi_write(0x44, 0xA5A5_A5A5)
+        status = self._status()
+        self.assertFalse(status & 0x2, f"triggered on the wrong address (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"should still be armed (0x{status:08X})")
+        # Write to the matched address -> trigger + complete.
+        self.bridge.axi_write(0x40, 0x1234_5678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the matched address (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+
 # ── EJTAG-UART bridge tests (require UART loopback bitstream) ─────────
 # These tests require a bitstream with fcapz_ejtaguart on USER3 instead
 # of EIO.  Skip by default; enable with FPGACAP_UART_HW=1.
