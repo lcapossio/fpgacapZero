@@ -290,7 +290,8 @@ module fcapz_ela_xilinx7 #(
     parameter DATA_CHAIN   = 2,      // BSCANE2 USER chain for burst data
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
     parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
-    parameter USER1_DATA_EN = 1      // 0=disable slow USER1 DATA window readback
+    parameter USER1_DATA_EN = 1,     // 0=disable slow USER1 DATA window readback
+    parameter WIDE_TRIG    = 0       // 1=comparator A programmable across full SAMPLE_W
 ) ( ... );
 ```
 
@@ -312,6 +313,7 @@ module fcapz_ela_xilinx7 #(
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
 | `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for a smaller single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
 | `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
+| `WIDE_TRIG` | bit | 0/1 | Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
 | `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
 | `BURST_EN` | bit | 0/1 | Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
 | `SINGLE_CHAIN_BURST` | bit | 0/1 | Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |

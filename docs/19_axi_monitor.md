@@ -107,17 +107,39 @@ if mon.present:
     print(mon.decode_sample(result.samples[0]))        # {'awaddr': …, 'awvalid': …, …}
 ```
 
-`write_addr_capture_config` works because `awaddr` is in the capture vector's
-low 32 bits, which is what the ELA's value-match comparator sees (the 32-bit
-`TRIG_VALUE`/`TRIG_MASK` are zero-extended for wider samples). To trigger on
-*other* fields, enable the decode layer.
+`write_addr_capture_config` builds the trigger at `awaddr`'s real bit offset and,
+by default, also requires `awvalid` — so it fires on a genuine write-address
+handshake, not on a stale address the bus is parked on while `awvalid` is low.
+It works on **both** `DECODE_EN` builds (the address is reached wherever it lands
+in the sample, not just the low 32 bits — see *Full-width triggering* below).
+
+## Full-width triggering (`WIDE_TRIG`)
+
+The trigger comparators are `SAMPLE_W`-wide in silicon, but historically the
+register path only let the host set the **low 32 bits** of comparator A's
+value/mask, so most of a 160-bit AXI sample was un-triggerable. The monitor now
+builds the ELA with `WIDE_TRIG=1`, which adds an indexed-word window
+(`WIDE_SEL` at `0x00E4`, `WIDE_DATA` at `0x00F0`) that programs comparator A
+across the entire sample. `COMPARE_CAPS` bit 18 advertises the capability, and
+`Analyzer.configure` uses it automatically whenever a trigger's value/mask exceed
+32 bits — so you can trigger on any field: a VALID-qualified full write address, a
+`bresp` code in the upper bits, etc. The storage qualifier and sequencer stages
+remain low-32 for now.
+
+## Compressing to transaction beats
+
+A passive tap samples **every** `ACLK`, so a mostly-idle bus fills the buffer
+with idle repeats. On a `DECODE_EN` build, `event_capture_config(...,
+store_on_beats=True)` enables the ELA storage qualifier (NEQ-vs-zero over the
+handshake bits) so only cycles where a channel handshakes are stored — the buffer
+holds transaction beats around the trigger instead of idle.
 
 ## The decode layer (`DECODE_EN=1`)
 
-Because the trigger comparator only reaches the **low 32 bits** of the sample,
-the decode layer prepends an **8-bit transaction-events word** at bit 0 so the
-most useful triggers become expressible. The events (each one combinational, one
-sample wide) are:
+Even with `WIDE_TRIG`, a single value-match reaches one contiguous field; the
+decode layer prepends an **8-bit transaction-events word** at bit 0 so
+handshake/response events are triggerable as a group (e.g. "any error"). The
+events (each one combinational, one sample wide) are:
 
 | Bit | Event | Asserted when |
 |----:|-------|---------------|
@@ -139,10 +161,10 @@ cfg = mon.event_capture_config("any_err")   # value=mask=0x80 over the events by
 an.configure(cfg); an.arm()
 ```
 
-Trade-off: with the decode layer, `awaddr` is no longer in the low 32 bits, so
-`write_addr_capture_config` raises — pick the build (`DECODE_EN`) for the
-triggers you need. Runtime address-range filters that restore address triggering
-on decode builds are future work (see the spec).
+With `WIDE_TRIG`, `write_addr_capture_config` works on decode builds too (the
+address is matched at its real offset, above the events word), so you can combine
+a write-address match with `awvalid` qualification on either build. `DECODE_EN`
+is still the choice for triggering on handshake/response *events* as a group.
 
 ## From the CLI
 

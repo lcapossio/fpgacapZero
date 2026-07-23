@@ -65,7 +65,9 @@ in that bridge’s section.
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
 | `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
 | `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
-| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). |
+| `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
+| `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. |
 
 <a id="regmap-seq-cfg"></a>
