@@ -133,6 +133,40 @@ class MonDriver:
         self.dut.BVALID.value = 0
         self.dut.BREADY.value = 0
 
+    async def axi_write_stream(self, base: int, count: int, step: int = 4) -> None:
+        """Saturate the bus: one AW+W(+B) handshake per ACLK, no idle cycles.
+
+        AWADDR/WDATA advance every cycle so each captured sample is distinct;
+        AWVALID/AWREADY/WVALID/WREADY/BVALID/BREADY stay high so aw_hs/b_hs
+        assert on every cycle of the stream."""
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 1
+        self.dut.AWREADY.value = 1
+        self.dut.WVALID.value = 1
+        self.dut.WREADY.value = 1
+        self.dut.WSTRB.value = 0xF
+        self.dut.BVALID.value = 1
+        self.dut.BREADY.value = 1
+        self.dut.BRESP.value = 0
+        for i in range(count):
+            self.dut.AWADDR.value = base + i * step
+            self.dut.WDATA.value = (0xD000_0000 + i) & 0xFFFF_FFFF
+            await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 0
+        self.dut.AWREADY.value = 0
+        self.dut.WVALID.value = 0
+        self.dut.WREADY.value = 0
+        self.dut.BVALID.value = 0
+        self.dut.BREADY.value = 0
+
+    async def read_sample(self, index: int, words: int) -> int:
+        """Reassemble one packed capture sample from its `words` register words."""
+        val = 0
+        base = ADDR_DATA_BASE + index * words * 4
+        for w in range(words):
+            val |= (await self.read(base + w * 4)) << (32 * w)
+        return val
+
     async def axi_write_error(self, addr: int, data: int) -> None:
         """Like axi_write but the write response is SLVERR (BRESP=2'b10)."""
         await RisingEdge(self.dut.ACLK)
@@ -230,3 +264,47 @@ async def captures_axi_write_address(dut):
     word1 = await d.read(base + 4)
     assert awaddr == 0x4000_0000, f"captured awaddr 0x{awaddr:08x}"
     assert (word1 >> 3) & 1 == 1, "awvalid not set in the trigger sample"
+
+
+@cocotb.test()
+async def stress_backtoback_fill(dut):
+    """Stress: saturate the bus and read every wide sample back.
+
+    Drives back-to-back AXI write handshakes (one per ACLK, address advancing)
+    long enough to fill the capture buffer to DEPTH, then reads *all* DEPTH
+    samples out — exercising the full multi-word (wide-SAMPLE_W) readback for
+    every buffer slot under a fully saturated bus. This is the functional side
+    of the timing-marginal wide readback flagged on hardware: every slot must
+    return its own distinct sample, with awaddr advancing by the driven step
+    (no stuck/duplicated wide word) and awvalid set in every slot (the higher
+    sample words are not read back as zero)."""
+    d = await setup(dut)
+    depth = 16          # matches the runner's DEPTH parameter
+    step = 4
+    base_addr = 0x1000_0000
+    await d.write(ADDR_PRETRIG, 0)
+    await d.write(ADDR_POSTTRIG, depth - 1)
+    await d.write(ADDR_TRIG_MODE, 1)                     # value match
+    if DECODE:
+        await d.write(ADDR_TRIG_VALUE, 0x01)            # aw_hs = events bit 0
+        await d.write(ADDR_TRIG_MASK, 0x01)
+    else:
+        await d.write(ADDR_TRIG_VALUE, base_addr)       # awaddr occupies sample[31:0]
+        await d.write(ADDR_TRIG_MASK, 0xFFFF_FFFF)
+    await d.arm()
+
+    # A few extra cycles past DEPTH so the post-trigger window fills entirely.
+    await d.axi_write_stream(base_addr, depth + 8, step=step)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    shift = 8 if DECODE else 0                           # decode prepends the events byte
+    samples = [await d.read_sample(i, words) for i in range(depth)]
+    awaddrs = [(s >> shift) & 0xFFFF_FFFF for s in samples]
+
+    diffs = [(awaddrs[i] - awaddrs[i - 1]) & 0xFFFF_FFFF for i in range(1, depth)]
+    assert all(delta == step for delta in diffs), (
+        f"wide readback not monotonic by {step}: {[hex(a) for a in awaddrs]}"
+    )
+    for i, s in enumerate(samples):
+        assert (s >> (35 + shift)) & 1 == 1, f"awvalid not set in slot {i}: 0x{s:x}"

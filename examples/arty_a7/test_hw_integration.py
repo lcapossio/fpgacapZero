@@ -1552,6 +1552,128 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         )
 
 
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorStress(unittest.TestCase):
+    """Stress the AXI monitor's arm/trigger/complete path on real silicon.
+
+    Deliberately avoids bulk wide-readback (timing-marginal at 150 MHz for the
+    160-bit SAMPLE_W — see TestAxiMonitor) and instead hammers the capture state
+    machine, which *is* robust: many rapid arm->trigger->done cycles under bridge
+    traffic, sustained real CPU bus traffic re-captured repeatedly, and a long
+    run of clean traffic that must never false-trigger on any_err. Catches
+    stuck-armed / missed-complete / state-leak / false-trigger regressions the
+    single-shot tests can't.
+
+    Shares the MicroBlaze go-flag infra with TestAxiMonitorMicroBlaze: the CPU
+    only writes while word31 (go) is non-zero; setUp/tearDown keep it quiet.
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+    GO_OFF = 0x7C    # word31: host go/stop flag (CPU polls it)
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream once (CPU resets -> go=0, quiet)
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self._set_go(0)
+
+    def tearDown(self):
+        try:
+            self._set_go(0)
+        finally:
+            self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _set_go(self, value: int) -> None:
+        self.bridge.axi_write(self.GO_OFF, value)
+
+    def _arm(self, *events, pretrigger=2, posttrigger=12, depth=256):
+        cfg = self.mon.event_capture_config(
+            *events, pretrigger=pretrigger, posttrigger=posttrigger, depth=depth
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_repeated_arm_trigger_churn(self):
+        """50 back-to-back arm->trigger->done cycles on bridge writes.
+
+        Each iteration re-arms from scratch and drives one write; the monitor
+        must trigger and complete every time — no leaked state, no stuck-armed.
+        """
+        import time
+
+        n = 50
+        t0 = time.perf_counter()
+        for i in range(n):
+            self._arm("aw_hs")
+            self.bridge.axi_write(0x10 + (i % 4) * 4, 0x1000_0000 + i)
+            status = self._status()
+            self.assertTrue(status & 0x2, f"iter {i}: no trigger (0x{status:08X})")
+            self.assertTrue(status & 0x4, f"iter {i}: not done (0x{status:08X})")
+        dt = time.perf_counter() - t0
+        print(f"\n  {n} arm->trigger->done cycles in {dt:.2f}s ({n / dt:.1f}/s)")
+
+    def test_cpu_saturating_traffic_repeated_capture(self):
+        """Under continuous real CPU bus traffic, re-capture many times.
+
+        With the CPU turned loose (go=1) it streams writes to the shared slave;
+        the monitor must reliably re-arm and re-trigger on that sustained bus,
+        run after run.  Proves the capture path survives a saturated real bus,
+        not just single injected transactions.
+        """
+        import time
+
+        self._set_go(1)  # turn the CPU loose — continuous writes
+        try:
+            n = 30
+            t0 = time.perf_counter()
+            for i in range(n):
+                # Under saturated traffic the monitor arms and triggers faster
+                # than a JTAG status read, so we don't assert the (transient)
+                # armed state — reaching *done* proves it armed and triggered.
+                cfg = self.mon.event_capture_config(
+                    "aw_hs", pretrigger=2, posttrigger=32, depth=256
+                )
+                self.an.configure(cfg)
+                self.an.arm()
+                deadline = time.time() + 2.0
+                status = 0
+                while time.time() < deadline:
+                    status = self._status()
+                    if status & 0x4:
+                        break
+                self.assertTrue(status & 0x2, f"iter {i}: no trigger on CPU traffic (0x{status:08X})")
+                self.assertTrue(status & 0x4, f"iter {i}: capture did not complete (0x{status:08X})")
+            dt = time.perf_counter() - t0
+            print(f"\n  {n} captures of live CPU traffic in {dt:.2f}s ({n / dt:.1f}/s)")
+        finally:
+            self._set_go(0)
+
+    def test_sustained_clean_traffic_no_false_trigger(self):
+        """A long burst of clean writes must never trip an any_err trigger.
+
+        Arm on any_err, then drive 128 back-to-back clean (OKAY) writes via the
+        bridge's auto-increment block write.  The monitor must stay armed the
+        whole time — selective event triggering must not degrade under load.
+        """
+        self._arm("any_err", pretrigger=2, posttrigger=12)
+        self.bridge.write_block(0x00, [0xC000_0000 + i for i in range(128)])
+        status = self._status()
+        self.assertFalse(status & 0x2, f"false any_err trigger under clean load (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+
 # ── EJTAG-UART bridge tests (require UART loopback bitstream) ─────────
 # These tests require a bitstream with fcapz_ejtaguart on USER3 instead
 # of EIO.  Skip by default; enable with FPGACAP_UART_HW=1.

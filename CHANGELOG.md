@@ -38,7 +38,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   USER4) using the bridge's read-only CONFIG identity scan on the shared
   transport — no reconnect, ELA session untouched. The web calls it on connect
   and the AXI tab shows a "bridge detected on chain N" banner with its chain
-  pre-filled, so attaching is one click instead of guessing the chain.
+  pre-filled. When a bridge is detected the AXI tab now **auto-attaches** it
+  (once per connection), landing straight in the read/write view with no click.
+
+### Tests
+
+- **AXI monitor — stress coverage:** a new cocotb `stress_backtoback_fill`
+  target saturates the tap with back-to-back write handshakes, fills the capture
+  buffer to depth, and reads every wide (multi-word `SAMPLE_W`) sample back —
+  verifying each slot returns its own distinct sample (the functional side of
+  the timing-marginal wide readback). On hardware, `TestAxiMonitorStress` hammers
+  the arm/trigger/complete path: 50 back-to-back arm→trigger→done churn cycles,
+  30 repeated captures under continuous MicroBlaze CPU traffic, and a sustained
+  clean-traffic run that must not false-trigger on `any_err`. All green on the
+  Arty A7 with no regressions.
 
 ### Changed
 

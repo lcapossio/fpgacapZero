@@ -55,8 +55,10 @@ class Target:
 
 
 TARGETS = (
-    Target("base", 0, ("identity_and_geometry", "captures_axi_write_address")),
-    Target("decode", 1, ("identity_and_geometry", "captures_error_event")),
+    Target("base", 0, ("identity_and_geometry", "captures_axi_write_address",
+                       "stress_backtoback_fill")),
+    Target("decode", 1, ("identity_and_geometry", "captures_error_event",
+                         "stress_backtoback_fill")),
 )
 
 
