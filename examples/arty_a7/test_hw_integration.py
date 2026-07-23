@@ -165,6 +165,17 @@ def _make_transport():
     )
 
 
+def _rpc_connect_req():
+    """`connect` request for the active backend — drives the RpcServer handlers
+    (rebind / ejtag_axi_probe) exactly as the web/CLI do. hw_server programs the
+    bitstream on connect; openocd assumes the board is already loaded."""
+    if _BACKEND == "openocd":
+        return {"cmd": "connect", "backend": "openocd", "host": "127.0.0.1",
+                "port": _OPENOCD_PORT, "tap": _OPENOCD_TAP, "ir_table": "xilinx7"}
+    return {"cmd": "connect", "backend": "hw_server", "host": "127.0.0.1",
+            "port": PORT, "tap": FPGA, "ir_table": "xilinx7", "program": BITFILE}
+
+
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestProbe(unittest.TestCase):
     """Basic connectivity: read identity registers."""
@@ -1151,6 +1162,65 @@ class TestEjtagAxiProbe(unittest.TestCase):
             self.assertGreater(info["data_w"], 0)
         finally:
             bridge.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestRpcAutodetectAndRebind(unittest.TestCase):
+    """RPC-level auto-detect + seamless core switch on real silicon.
+
+    Exercises the exact handlers the web UI uses: `ejtag_axi_probe` finds the
+    USER4 bridge with its own CONFIG scan *without disturbing the ELA session*,
+    and `rebind` hops the live session USER1<->USER2 with no reconnect. One
+    connect (one bitstream program on hw_server) covers both.
+    """
+
+    def setUp(self):
+        from fcapz.rpc import RpcServer
+
+        self.srv = RpcServer()
+        r = self.srv.handle(dict(_rpc_connect_req()))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["chain"], 1)
+
+    def tearDown(self):
+        self.srv.handle({"cmd": "close"})
+
+    def test_autodetect_bridge_and_rebind_monitor(self):
+        from fcapz.analyzer import ELA_CORE_ID
+        from fcapz.ejtagaxi import _BRIDGE_CORE_ID
+
+        # --- EJTAG-AXI auto-detected on its own USER4 chain ---
+        ej = self.srv.handle({"cmd": "ejtag_axi_probe"})
+        self.assertTrue(ej["present"], "EJTAG-AXI bridge not detected")
+        self.assertEqual(ej["chain"], 4)
+        self.assertEqual(ej["core_id"], _BRIDGE_CORE_ID)
+        self.assertEqual(ej["addr_w"], 32)
+        self.assertEqual(ej["data_w"], 32)
+        self.assertGreater(ej["fifo_depth"], 0)
+
+        # The bridge's USER4 CONFIG scan must leave the ELA (USER1) untouched.
+        p = self.srv.handle({"cmd": "probe"})
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["probe"]["core_id"], ELA_CORE_ID)
+
+        # --- rebind hops to the AXI monitor (USER2) and back, no reconnect ---
+        am = self.srv.handle({"cmd": "axi_mon_probe"})
+        self.assertTrue(am["present"], "AXI monitor not detected")
+        mon = am["chain"]
+        self.assertEqual(mon, 2)
+
+        rb = self.srv.handle({"cmd": "rebind", "chain": mon})
+        self.assertTrue(rb["ok"])
+        self.assertEqual(rb["chain"], mon)
+        self.assertEqual(self.srv.handle({"cmd": "axi_mon_probe"})["chain"], mon)
+
+        rb2 = self.srv.handle({"cmd": "rebind", "chain": 1})
+        self.assertTrue(rb2["ok"])
+        self.assertEqual(rb2["chain"], 1)
+        self.assertEqual(rb2["probe"]["core_id"], ELA_CORE_ID)
+
+        # Still detectable after the chain hops — the probe is repeatable.
+        self.assertEqual(self.srv.handle({"cmd": "ejtag_axi_probe"})["chain"], 4)
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
