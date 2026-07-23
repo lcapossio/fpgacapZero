@@ -144,32 +144,42 @@ class AxiMonitor:
         addr_mask: int = 0xFFFF_FFFF,
         depth: int = 1024,
         sample_clock_hz: int = 100_000_000,
+        qualify_valid: bool = True,
     ) -> CaptureConfig:
         """A capture that triggers when a write address (``awaddr``) matches.
 
-        ``awaddr`` occupies the capture vector's low 32 bits, so the ELA's
-        32-bit value-match comparator triggers on it directly.  The bundled
-        probe map is attached so the result decodes to named AXI fields.
+        The trigger value/mask are built at ``awaddr``'s real bit offset from
+        the probe map (bit 0 on a raw build, bit 8 on a decode build where the
+        events word shifts everything up), so this works on **both** builds —
+        the full-width comparator (``WIDE_TRIG``) reaches the address wherever
+        it lands, not just the low 32 bits.
 
-        Only valid on **DECODE_EN=0** builds; with the decode layer the low 32
-        bits hold the events word + ``awaddr[23:0]`` instead — use
-        :meth:`event_capture_config` (or a future address-range filter).
+        With ``qualify_valid=True`` (the default) the trigger also requires
+        ``awvalid`` to be asserted, so it fires on a genuine write-address
+        handshake attempt rather than on a stale address the bus happens to be
+        parked on while ``awvalid`` is low.
+
+        Requires a ``WIDE_TRIG`` core when the address (or the ``awvalid`` bit)
+        falls above bit 31 — the monitor is built that way; ``Analyzer.configure``
+        raises otherwise.
         """
         geo = self.geometry()
-        if geo.decode:
-            raise AxiMonitorError(
-                "write-address triggering needs a DECODE_EN=0 build (awaddr is not "
-                "in the low 32 bits when the decode layer is enabled); use "
-                "event_capture_config() instead"
-            )
+        probes = {p.name: p for p in self.probe_map(geo).probes}
+        aw = probes["awaddr"]
+        value = (addr & addr_mask) << aw.lsb
+        mask = (addr_mask & ((1 << aw.width) - 1)) << aw.lsb
+        if qualify_valid:
+            awv = probes["awvalid"]
+            value |= 1 << awv.lsb
+            mask |= 1 << awv.lsb
         return CaptureConfig(
             pretrigger=pretrigger,
             posttrigger=posttrigger,
-            trigger=TriggerConfig(mode="value_match", value=addr & addr_mask, mask=addr_mask),
+            trigger=TriggerConfig(mode="value_match", value=value, mask=mask),
             sample_width=geo.sample_width,
             depth=depth,
             sample_clock_hz=sample_clock_hz,
-            probes=list(self.probe_map(geo).probes),
+            probes=list(probes.values()),
         )
 
     def beat_storage_qual(self) -> tuple[int, int, int]:

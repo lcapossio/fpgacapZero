@@ -56,6 +56,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **AXI monitor — VALID-qualified write-address trigger (correctness):**
+  `write_addr_capture_config` now builds the trigger at `awaddr`'s real bit
+  offset (from the probe map) and, by default, also requires `awvalid` — so it
+  fires on a genuine write-address handshake attempt instead of on a stale
+  address the bus is parked on while `awvalid` is low. It works on **both** raw
+  and decode builds now (previously it rejected decode builds because `awaddr`
+  left the low 32 bits); `Analyzer.configure` programs the full-width value/mask
+  through the wide window. `Analyzer` gained wide value/mask programming for any
+  trigger whose value/mask exceed 32 bits (guarded by the `WIDE_TRIG` cap bit).
 - **AXI monitor — beat storage qualifier:** `AxiMonitor.event_capture_config`
   gained `store_on_beats=True` (and a `beat_storage_qual()` helper). On a
   DECODE_EN build it enables the ELA storage qualifier to keep only cycles where

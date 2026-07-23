@@ -100,6 +100,11 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
+# Wide-trigger indexed-word window (comparator A value/mask beyond the low 32
+# bits); present when COMPARE_CAPS bit 18 is set (WIDE_TRIG cores).
+_ADDR_WIDE_SEL = 0x00E4
+_ADDR_WIDE_DATA = 0x00F0
+_COMPARE_CAPS_WIDE_TRIG = 1 << 18
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -519,8 +524,28 @@ class Analyzer:
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
         self.transport.write_reg(_ADDR_TRIG_MODE, mode_bits)
-        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value)
-        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask)
+        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask & 0xFFFF_FFFF)
+        # Comparator A above the low 32 bits: program the high words through the
+        # wide window (WIDE_TRIG cores only).  The low word went to TRIG_VALUE/
+        # MASK above, which also mirror wide word 0.
+        if (config.trigger.value >> 32) or (config.trigger.mask >> 32):
+            if not (hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG):
+                raise ValueError(
+                    "trigger value/mask exceed 32 bits but this core lacks "
+                    "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                    "comparator A are programmable"
+                )
+            words = (config.sample_width + 31) // 32
+            for k in range(1, words):
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 0)  # value word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.value >> (32 * k)) & 0xFFFF_FFFF
+                )
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 1)  # mask word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.mask >> (32 * k)) & 0xFFFF_FFFF
+                )
         self.transport.write_reg(_ADDR_CHAN_SEL, config.channel)
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)

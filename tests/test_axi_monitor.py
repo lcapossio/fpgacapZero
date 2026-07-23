@@ -105,13 +105,31 @@ def test_decode_sample():
 
 
 def test_write_addr_capture_config():
-    cfg = _mon().write_addr_capture_config(0x4000_0000, pretrigger=4, posttrigger=10)
+    # Raw build: awaddr at bit 0. Unqualified -> plain low-32 value/mask.
+    cfg = _mon().write_addr_capture_config(
+        0x4000_0000, pretrigger=4, posttrigger=10, qualify_valid=False
+    )
     assert cfg.trigger.mode == "value_match"
     assert cfg.trigger.value == 0x4000_0000
     assert cfg.trigger.mask == 0xFFFF_FFFF
     assert cfg.sample_width == 152
     assert cfg.pretrigger == 4 and cfg.posttrigger == 10
     assert any(p.name == "awaddr" for p in cfg.probes)
+
+
+def test_write_addr_capture_config_valid_qualified():
+    # Default qualifies by awvalid (bit 35 on a raw build) -> a wide trigger.
+    cfg = _mon().write_addr_capture_config(0x4000_0000)
+    assert cfg.trigger.value == 0x4000_0000 | (1 << 35)
+    assert cfg.trigger.mask == 0xFFFF_FFFF | (1 << 35)
+
+
+def test_write_addr_capture_config_decode_build():
+    # Decode build: awaddr at bit 8, awvalid at bit 43 — both need the wide path.
+    cfg = _mon_decode().write_addr_capture_config(0xDEAD_BEEF)
+    assert cfg.trigger.value == (0xDEAD_BEEF << 8) | (1 << 43)
+    assert cfg.trigger.mask == (0xFFFF_FFFF << 8) | (1 << 43)
+    assert cfg.sample_width == 160
 
 
 def test_decode_geometry_and_probe_map():
@@ -154,11 +172,94 @@ def test_event_capture_config_store_on_beats():
 
 def test_mode_guards():
     with pytest.raises(AxiMonitorError):
-        _mon_decode().write_addr_capture_config(0x1000)  # awaddr not low-32 here
-    with pytest.raises(AxiMonitorError):
         _mon().event_capture_config("any_err")  # needs a decode build
     with pytest.raises(AxiMonitorError):
         _mon_decode().event_capture_config("bogus_event")
+
+
+# ── wide-trigger programming (Analyzer.configure) ────────────────────────
+
+
+class RecordingTransport(Transport):
+    """Fake that answers the config reads and records every register write."""
+
+    def __init__(self, regs: dict[int, int]) -> None:
+        self.regs = dict(regs)
+        self.writes: list[tuple[int, int]] = []
+        self.active_chain = 1
+
+    def connect(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def select_chain(self, chain: int) -> None:
+        self.active_chain = chain
+
+    def read_reg(self, addr: int) -> int:
+        return self.regs.get(addr, 0)
+
+    def read_reg_stable(self, addr: int) -> int:
+        return self.regs.get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self.writes.append((addr, value))
+        self.regs[addr] = value
+
+    def read_block(self, addr: int, words: int):
+        return [0] * words
+
+
+def _wide_regs(caps_wide: bool = True) -> dict[int, int]:
+    return {
+        0x0C: 160, 0x10: 1024, 0xA4: 1, 0x3C: 0, 0xB8: 1,       # sample_w/depth/chan/features/segs
+        0xE0: 0x1FF | ((1 << 18) if caps_wide else 0),          # COMPARE_CAPS (+wide bit)
+    }
+
+
+def test_configure_programs_wide_words():
+    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+    t = RecordingTransport(_wide_regs())
+    value = (0xDEAD_BEEF << 8) | (1 << 43)   # decode awaddr + awvalid
+    mask = (0xFFFF_FFFF << 8) | (1 << 43)
+    Analyzer(t).configure(
+        CaptureConfig(
+            pretrigger=2, posttrigger=3,
+            trigger=TriggerConfig(mode="value_match", value=value, mask=mask),
+            sample_width=160, depth=1024,
+        )
+    )
+    assert (0x24, value & 0xFFFF_FFFF) in t.writes  # low word -> TRIG_VALUE
+    assert (0x28, mask & 0xFFFF_FFFF) in t.writes    # low word -> TRIG_MASK
+
+    # Reconstruct what the WIDE_SEL/WIDE_DATA pairs programmed.
+    prog_v = {0: value & 0xFFFF_FFFF}
+    prog_m = {0: mask & 0xFFFF_FFFF}
+    sel = 0
+    for addr, v in t.writes:
+        if addr == 0xE4:
+            sel = v
+        elif addr == 0xF0:
+            (prog_m if sel & 1 else prog_v)[sel >> 4] = v
+    words = (160 + 31) // 32
+    assert sum(prog_v.get(k, 0) << (32 * k) for k in range(words)) == value
+    assert sum(prog_m.get(k, 0) << (32 * k) for k in range(words)) == mask
+
+
+def test_configure_wide_without_support_raises():
+    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+    t = RecordingTransport(_wide_regs(caps_wide=False))
+    with pytest.raises(ValueError):
+        Analyzer(t).configure(
+            CaptureConfig(
+                pretrigger=2, posttrigger=3,
+                trigger=TriggerConfig(mode="value_match", value=1 << 40, mask=1 << 40),
+                sample_width=160, depth=1024,
+            )
+        )
 
 
 # ── single-source layout (fcapz.axi_layout) ──────────────────────────────

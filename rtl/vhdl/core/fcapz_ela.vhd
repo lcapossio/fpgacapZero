@@ -1,5 +1,16 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+--
+-- NOTE ON WIDE_TRIG PARITY: the Verilog fcapz_ela.v gained a WIDE_TRIG
+-- parameter (WIDE_SEL/WIDE_DATA window) that makes comparator A programmable
+-- across the full SAMPLE_W instead of just the low 32 bits.  This VHDL core
+-- does NOT implement it, on purpose: the only wide user is the AXI monitor,
+-- which is the Verilog fcapz_axi_mon(_xilinx7) in BOTH the Verilog and VHDL
+-- Arty tops, so it always instantiates the Verilog ELA.  The VHDL core only
+-- backs plain USER1 ELA cores, which use the default 32-bit comparator (the
+-- WIDE_TRIG=0 behaviour, identical here).  Porting the window would widen this
+-- core's 32-bit trigger CDC for no functional gain; do it only if a wide-vector
+-- core is ever built from the VHDL ELA directly.
 
 library ieee;
 use ieee.std_logic_1164.all;
