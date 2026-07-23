@@ -41,6 +41,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   pre-filled. When a bridge is detected the AXI tab now **auto-attaches** it
   (once per connection), landing straight in the read/write view with no click.
 
+### Changed
+
+- **AXI monitor — beat storage qualifier:** `AxiMonitor.event_capture_config`
+  gained `store_on_beats=True` (and a `beat_storage_qual()` helper). On a
+  DECODE_EN build it enables the ELA storage qualifier to keep only cycles where
+  a channel handshakes (`aw_hs`..`r_hs`), so a mostly-idle bus no longer fills
+  the capture buffer with idle repeats — the window holds transaction beats.
+- **AXI monitor — single-source sample layout:** the capture-vector bit layout
+  now lives in one place (`fcapz.axi_layout`); the host `sample_width`/probe map
+  and the bundled `.prob` sidecars (via `tools/gen_axi_probes.py`) derive from
+  it, and a test asserts the derived width matches the RTL `SAMPLE_W` formula —
+  replacing four hand-maintained copies that had to stay in lockstep.
+
 ### Tests
 
 - **AXI monitor — stress coverage:** a new cocotb `stress_backtoback_fill`

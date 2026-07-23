@@ -24,29 +24,24 @@ the P2 RTL decode layer; see ``docs/specs/axi_monitor.md``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from importlib import resources
 
+from . import axi_layout
 from .analyzer import Analyzer, CaptureConfig, ProbeSpec, TriggerConfig
-from .probes import ProbeFile, load_probe_file
+from .probes import ProbeFile
 
 # AXI-monitor registers (in the free config gap, clear of the ELA data window).
 ADDR_AXI_MON_ID = 0x00E8
 ADDR_AXI_GEOM = 0x00EC
 AXI_MON_MAGIC = 0x414D  # "AM"
 
-# (addr_w, data_w, decode) -> bundled probe-map resource name under fcapz/probes/.
-_PROBE_MAPS = {
-    (32, 32, False): "axi4lite_32.prob",
-    (32, 32, True): "axi4lite_32_decode.prob",
-}
-
 _PROTO_NAMES = {1: "AXI4LITE"}
 
-# Decode-layer event bits (low byte of the capture vector when DECODE_EN=1).
-EVENT_BITS = {
-    "aw_hs": 0, "w_hs": 1, "b_hs": 2, "ar_hs": 3, "r_hs": 4,
-    "b_err": 5, "r_err": 6, "any_err": 7,
-}
+# Decode-layer event bits (low byte of the capture vector when DECODE_EN=1),
+# derived from the single-source layout so the names/positions can't drift.
+EVENT_BITS = {name: bit for bit, (name, _w) in enumerate(axi_layout.EVENT_FIELDS)}
+
+# The per-channel handshake events (a beat = VALID & READY on that channel).
+HANDSHAKE_EVENTS = ("aw_hs", "w_hs", "b_hs", "ar_hs", "r_hs")
 
 
 class AxiMonitorError(RuntimeError):
@@ -68,9 +63,11 @@ class AxiGeometry:
 
     @property
     def sample_width(self) -> int:
-        """Flatten width — must match fcapz_axi_mon's SAMPLE_W localparam."""
-        base = 2 * self.addr_w + 2 * self.data_w + self.data_w // 8 + 20
-        return base + (8 if self.decode else 0)
+        """Flatten width — must match fcapz_axi_mon's SAMPLE_W localparam.
+
+        Derived from the single-source layout in :mod:`fcapz.axi_layout`.
+        """
+        return axi_layout.sample_width(self.addr_w, self.data_w, self.decode)
 
 
 class AxiMonitor:
@@ -117,17 +114,20 @@ class AxiMonitor:
 
     # ---- probe map / field decode --------------------------------------
     def probe_map(self, geometry: AxiGeometry | None = None) -> ProbeFile:
-        """Load the bundled probe map matching the monitor's geometry."""
+        """Named-field probe map for the monitor's geometry.
+
+        Derived directly from the single-source layout in
+        :mod:`fcapz.axi_layout` (the bundled ``.prob`` sidecars are generated
+        from the same source by ``tools/gen_axi_probes.py``), so runtime decode
+        and the shipped files can never drift apart.
+        """
         geo = geometry or self.geometry()
-        name = _PROBE_MAPS.get((geo.addr_w, geo.data_w, geo.decode))
-        if name is None:
+        if geo.proto_code != 1:
             raise AxiMonitorError(
-                f"no bundled probe map for AXI {geo.addr_w}/{geo.data_w} "
-                f"(decode={geo.decode})"
+                f"no probe map for proto {geo.proto_code} (only AXI4-Lite is supported)"
             )
-        path = resources.files("fcapz").joinpath("probes", name)
-        with resources.as_file(path) as real_path:
-            return load_probe_file(real_path)
+        probes = axi_layout.axi_probes(geo.addr_w, geo.data_w, geo.decode)
+        return ProbeFile(probes=probes, sample_width=geo.sample_width, core="axi_mon")
 
     def decode_sample(self, value: int, probes: list[ProbeSpec] | None = None) -> dict[str, int]:
         """Slice a packed capture word into ``{field: value}`` per the probe map."""
@@ -172,6 +172,31 @@ class AxiMonitor:
             probes=list(self.probe_map(geo).probes),
         )
 
+    def beat_storage_qual(self) -> tuple[int, int, int]:
+        """Storage-qualifier ``(mode, value, mask)`` that keeps only beats.
+
+        A passive tap samples every ``ACLK`` cycle, so a mostly-idle bus fills
+        the buffer with idle repeats and only a handful of real transactions.
+        On a DECODE_EN build the five handshake bits (``aw_hs``..``r_hs``) sit
+        in the low byte, so a NEQ-vs-zero storage qualifier over their mask
+        stores a sample **only on cycles where at least one channel handshakes**
+        — compressing the capture to transaction beats.
+
+        Returns the ELA storage-qualifier tuple: mode ``1`` (NEQ, i.e. store
+        when the masked bits are non-zero), value ``0``, mask = the OR of the
+        handshake-event bits.  Requires a DECODE_EN=1 build (the handshake bits
+        do not exist otherwise).
+        """
+        geo = self.geometry()
+        if not geo.decode:
+            raise AxiMonitorError(
+                "beat storage qualification needs a DECODE_EN=1 monitor build"
+            )
+        mask = 0
+        for name in HANDSHAKE_EVENTS:
+            mask |= 1 << EVENT_BITS[name]
+        return (1, 0, mask)  # NEQ vs 0 over the handshake bits
+
     def event_capture_config(
         self,
         *events: str,
@@ -179,6 +204,7 @@ class AxiMonitor:
         posttrigger: int = 24,
         depth: int = 1024,
         sample_clock_hz: int = 100_000_000,
+        store_on_beats: bool = False,
     ) -> CaptureConfig:
         """A capture that triggers on AXI transaction events (DECODE_EN=1 builds).
 
@@ -187,6 +213,10 @@ class AxiMonitor:
         the same cycle (use the pre-ORed ``"any_err"`` for "any error
         response").  The decode layer places these bits in the low byte so the
         ELA's value-match comparator reaches them.
+
+        With ``store_on_beats=True`` the capture also enables the beat storage
+        qualifier (:meth:`beat_storage_qual`), so idle cycles are dropped and
+        the buffer holds only transaction beats around the trigger.
         """
         geo = self.geometry()
         if not geo.decode:
@@ -202,6 +232,7 @@ class AxiMonitor:
                     f"unknown AXI event {name!r}; known: {sorted(EVENT_BITS)}"
                 )
             mask |= 1 << EVENT_BITS[name]
+        sq_mode, sq_value, sq_mask = self.beat_storage_qual() if store_on_beats else (0, 0, 0)
         return CaptureConfig(
             pretrigger=pretrigger,
             posttrigger=posttrigger,
@@ -210,4 +241,7 @@ class AxiMonitor:
             depth=depth,
             sample_clock_hz=sample_clock_hz,
             probes=list(self.probe_map(geo).probes),
+            stor_qual_mode=sq_mode,
+            stor_qual_value=sq_value,
+            stor_qual_mask=sq_mask,
         )

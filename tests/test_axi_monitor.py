@@ -131,6 +131,27 @@ def test_event_capture_config_triggers_on_event():
     assert any(p.name == "any_err" for p in cfg.probes)
 
 
+def test_beat_storage_qual_masks_handshakes():
+    mode, value, mask = _mon_decode().beat_storage_qual()
+    # NEQ (mode 1) vs 0 over aw_hs|w_hs|b_hs|ar_hs|r_hs = bits 0..4 = 0x1F.
+    assert (mode, value, mask) == (1, 0, 0x1F)
+
+
+def test_beat_storage_qual_requires_decode():
+    with pytest.raises(AxiMonitorError):
+        _mon().beat_storage_qual()  # no handshake bits without the decode layer
+
+
+def test_event_capture_config_store_on_beats():
+    cfg = _mon_decode().event_capture_config("aw_hs", store_on_beats=True)
+    assert cfg.stor_qual_mode == 1
+    assert cfg.stor_qual_value == 0
+    assert cfg.stor_qual_mask == 0x1F
+    # default (no beat filtering) leaves storage qualification disabled
+    plain = _mon_decode().event_capture_config("aw_hs")
+    assert plain.stor_qual_mode == 0
+
+
 def test_mode_guards():
     with pytest.raises(AxiMonitorError):
         _mon_decode().write_addr_capture_config(0x1000)  # awaddr not low-32 here
@@ -138,3 +159,49 @@ def test_mode_guards():
         _mon().event_capture_config("any_err")  # needs a decode build
     with pytest.raises(AxiMonitorError):
         _mon_decode().event_capture_config("bogus_event")
+
+
+# ── single-source layout (fcapz.axi_layout) ──────────────────────────────
+
+
+def _rtl_sample_w(addr_w: int, data_w: int, decode: bool) -> int:
+    """The SAMPLE_W formula as written in the RTL localparams (the thing the
+    single source must reproduce): 2*ADDR + 2*DATA + STRB + 20 (+8 events)."""
+    return 2 * addr_w + 2 * data_w + data_w // 8 + 20 + (8 if decode else 0)
+
+
+@pytest.mark.parametrize("addr_w,data_w", [(32, 32), (16, 32), (32, 64), (64, 32)])
+@pytest.mark.parametrize("decode", [False, True])
+def test_layout_width_matches_rtl_formula(addr_w, data_w, decode):
+    from fcapz import axi_layout
+
+    assert axi_layout.sample_width(addr_w, data_w, decode) == _rtl_sample_w(
+        addr_w, data_w, decode
+    )
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_layout_is_contiguous_and_gapless(decode):
+    from fcapz import axi_layout
+
+    probes = axi_layout.axi_probes(32, 32, decode)
+    lsb = 0
+    for p in probes:
+        assert p.lsb == lsb, f"gap/overlap at {p.name}"
+        lsb += p.width
+    assert lsb == axi_layout.sample_width(32, 32, decode)
+
+
+def test_bundled_probe_files_are_in_sync():
+    """The shipped .prob sidecars must match what the single source generates."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run(
+        [sys.executable, str(root / "tools" / "gen_axi_probes.py"), "--check"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, f"stale bundled .prob files:\n{r.stdout}{r.stderr}"
