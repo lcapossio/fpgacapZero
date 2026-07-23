@@ -44,6 +44,8 @@ ADDR_TRIG_DELAY = 0x00D4
 ADDR_STARTUP_ARM = 0x00D8
 ADDR_TRIG_HOLDOFF = 0x00DC
 ADDR_COMPARE_CAPS = 0x00E0
+ADDR_WIDE_SEL = 0x00E4
+ADDR_WIDE_DATA = 0x00F0
 ADDR_DATA_BASE = 0x0100
 
 
@@ -95,6 +97,7 @@ class ElaFunctionalCoverage:
             "full_depth": 0,
             "early_pretrigger": 0,
             "wide_sample": 0,
+            "wide_trigger": 0,
             "sequencer": 0,
             "user1_disabled": 0,
             "rel_compare": 0,
@@ -713,6 +716,43 @@ async def wide_sample_readback(dut):
     assert low == 0x2222_3333
     assert high == 0x0000_1111
     FUNCTIONAL_COVERAGE.hit("wide_sample")
+
+
+@cocotb.test()
+async def wide_trigger_upper_bit(dut):
+    """WIDE_TRIG: program comparator A above bit 31 through the WIDE window and
+    prove the trigger fires on a high bit the 32-bit register path can't reach.
+
+    Runs against both the Verilog and VHDL ELA (HDL parity for WIDE_TRIG)."""
+    ela = await setup(dut)
+    caps = await ela.read(ADDR_COMPARE_CAPS)
+    assert caps & (1 << 18), f"WIDE_TRIG not advertised: caps=0x{caps:08x}"
+
+    bit = 35                      # word 1, offset 3 — unreachable via the 32-bit path
+    word, off = bit // 32, bit % 32
+    assert bit < SAMPLE_W and word < WORDS_PER_SAMPLE
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_TRIG_MODE, 1)
+    await ela.write(ADDR_TRIG_VALUE, 0)          # low 32 bits: value 0 …
+    await ela.write(ADDR_TRIG_MASK, 0)           # … masked out (don't care)
+    await ela.write(ADDR_WIDE_SEL, word << 4)    # word 1, value slot
+    await ela.write(ADDR_WIDE_DATA, 1 << off)
+    await ela.write(ADDR_WIDE_SEL, (word << 4) | 1)  # word 1, mask slot
+    await ela.write(ADDR_WIDE_DATA, 1 << off)
+    assert await ela.read(ADDR_WIDE_SEL) == ((word << 4) | 1)
+
+    # Control: every low bit set but the trigger bit clear -> must not fire.
+    await ela.arm()
+    ela.dut.probe_in.value = (1 << 32) - 1
+    await ela.wait_sample(12)
+    status = await ela.read(ADDR_STATUS)
+    assert not (status & 0x4), f"false trigger with bit {bit} clear: 0x{status:08x}"
+
+    # Assert the high bit -> must fire (still armed from above).
+    ela.dut.probe_in.value = 1 << bit
+    assert await ela.wait_done() & 0x4
+    FUNCTIONAL_COVERAGE.hit("wide_trigger")
 
 
 @cocotb.test()

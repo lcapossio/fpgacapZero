@@ -51,8 +51,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bit-identical) adds a `WIDE_SEL`/`WIDE_DATA` indexed-word window that programs
   comparator A across the entire `SAMPLE_W`. The AXI monitor enables it, so a
   trigger can now match any field — a VALID-qualified full write address, a
-  response code in the upper bits, etc. Proven in cocotb by triggering on a bit
-  above bit 31 (with an idle-bus control that must not fire).
+  response code in the upper bits, etc. The VHDL ELA core
+  (`rtl/vhdl/core/fcapz_ela.vhd`) mirrors the parameter for full HDL parity. The
+  wide path is proven by the shared cocotb `wide_trigger_upper_bit` test, which
+  triggers on a bit above 31 (with an idle-bus control that must not fire)
+  against **both** the Verilog and VHDL ELA; the static and interface parity
+  gates (`run_hdl_parity.py`, `--interface-only`) keep the two in lockstep and
+  the `WIDE_TRIG=0` path stays bit-identical to the previous behaviour.
 
 ### Changed
 

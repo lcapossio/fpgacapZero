@@ -96,6 +96,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
     CocotbTarget("sequencer", {"TRIG_STAGES": 2}, ("sequencer_count_target_one",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
+    CocotbTarget("wide_trig", {"SAMPLE_W": 48, "DEPTH": 8, "WIDE_TRIG": 1},
+                 ("wide_trigger_upper_bit",)),
     CocotbTarget(
         "segmented_ext_rearm",
         {"DEPTH": 1024, "EXT_TRIG_EN": 1, "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},

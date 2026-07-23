@@ -1,16 +1,16 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 --
--- NOTE ON WIDE_TRIG PARITY: the Verilog fcapz_ela.v gained a WIDE_TRIG
--- parameter (WIDE_SEL/WIDE_DATA window) that makes comparator A programmable
--- across the full SAMPLE_W instead of just the low 32 bits.  This VHDL core
--- does NOT implement it, on purpose: the only wide user is the AXI monitor,
--- which is the Verilog fcapz_axi_mon(_xilinx7) in BOTH the Verilog and VHDL
--- Arty tops, so it always instantiates the Verilog ELA.  The VHDL core only
--- backs plain USER1 ELA cores, which use the default 32-bit comparator (the
--- WIDE_TRIG=0 behaviour, identical here).  Porting the window would widen this
--- core's 32-bit trigger CDC for no functional gain; do it only if a wide-vector
--- core is ever built from the VHDL ELA directly.
+-- WIDE_TRIG PARITY: this VHDL core mirrors the Verilog fcapz_ela.v WIDE_TRIG
+-- parameter (WIDE_SEL/WIDE_DATA indexed-word window) that makes comparator A
+-- programmable across the full SAMPLE_W instead of just the low 32 bits.  With
+-- the default WIDE_TRIG=0 the wide path is dead (upper trigger bits are constant
+-- 0, synthesised away) so the legacy 32-bit behaviour is bit-identical.  Parity
+-- is checked by the shared cocotb suite (run_cocotb_ela.py) which runs the same
+-- stimulus against both the Verilog and VHDL ELA -- including the new
+-- 'wide_trigger_upper_bit' test that programs the WIDE window and triggers on a
+-- bit above 31 -- plus the static/interface parity gates (run_hdl_parity.py,
+-- run_formal_hdl_parity.py --interface-only).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -37,7 +37,8 @@ entity fcapz_ela is
         DEFAULT_TRIG_EXT : natural  := 0;
         REL_COMPARE      : natural  := 0;
         DUAL_COMPARE     : natural  := 1;
-        USER1_DATA_EN    : natural  := 1
+        USER1_DATA_EN    : natural  := 1;
+        WIDE_TRIG        : natural  := 0
     );
     port (
         sample_clk       : in  std_logic;
@@ -197,7 +198,12 @@ architecture rtl of fcapz_ela is
     constant ADDR_STARTUP_ARM  : natural := 16#00D8#;
     constant ADDR_TRIG_HOLDOFF : natural := 16#00DC#;
     constant ADDR_COMPARE_CAPS : natural := 16#00E0#;
+    constant ADDR_WIDE_SEL     : natural := 16#00E4#;
+    constant ADDR_WIDE_DATA    : natural := 16#00F0#;
     constant ADDR_DATA_BASE    : natural := 16#0100#;
+
+    -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
+    constant HAS_WIDE_TRIG : boolean := (WIDE_TRIG /= 0) and (SAMPLE_W > 32);
     constant ADDR_TS_DATA_BASE : natural := ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
 
     constant FEATURES : std_logic_vector(31 downto 0) :=
@@ -225,6 +231,15 @@ architecture rtl of fcapz_ela is
     signal jtag_trig_mode    : std_logic_vector(31 downto 0) := x"00000001";
     signal jtag_trig_value   : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_trig_mask    : std_logic_vector(31 downto 0) := x"FFFFFFFF";
+    -- Wide comparator-A words (WIDE_TRIG).  Word 0 mirrors the 32-bit
+    -- TRIG_VALUE/MASK registers; higher words come from the WIDE_SEL/WIDE_DATA
+    -- window.  jtag_trig_value_w/mask_w assemble the full-width value/mask fed
+    -- across the CDC.
+    signal jtag_wide_sel     : std_logic_vector(7 downto 0) := (others => '0');
+    signal wide_va           : reg32_array_t(0 to WORDS_PER_SAMPLE - 1) := (others => (others => '0'));
+    signal wide_ma           : reg32_array_t(0 to WORDS_PER_SAMPLE - 1) := (others => (others => '0'));
+    signal jtag_trig_value_w : std_logic_vector(SAMPLE_W - 1 downto 0);
+    signal jtag_trig_mask_w  : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal jtag_sq_mode      : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_value     : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_mask      : std_logic_vector(31 downto 0) := (others => '0');
@@ -248,10 +263,13 @@ architecture rtl of fcapz_ela is
     signal posttrig_len_sync2     : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal trig_mode_sync1        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mode_sync2        : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_value_sync1       : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_value_sync2       : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_mask_sync1        : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_mask_sync2        : std_logic_vector(31 downto 0) := (others => '0');
+    -- Widened to SAMPLE_W so the full comparator-A value/mask can cross the CDC
+    -- (WIDE_TRIG).  For WIDE_TRIG=0 the upper bits are constant 0 and optimize
+    -- away, leaving the legacy 32-bit behaviour bit-identical.
+    signal trig_value_sync1       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_value_sync2       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_mask_sync1        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_mask_sync2        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal pretrig_len            : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal posttrig_len           : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal cap_trig_mode          : std_logic_vector(31 downto 0) := x"00000001";
@@ -422,6 +440,16 @@ architecture rtl of fcapz_ela is
         return r;
     end function;
 
+    -- Assemble a SAMPLE_W value from its per-word registers (WIDE_TRIG).
+    function wide_assemble(words : reg32_array_t) return std_logic_vector is
+        variable full : std_logic_vector(WORDS_PER_SAMPLE * 32 - 1 downto 0) := (others => '0');
+    begin
+        for i in 0 to WORDS_PER_SAMPLE - 1 loop
+            full(i * 32 + 31 downto i * 32) := words(i);
+        end loop;
+        return full(SAMPLE_W - 1 downto 0);
+    end function;
+
     function ptr_u(n : natural) return unsigned is
     begin
         return to_unsigned(n, PTR_W);
@@ -535,6 +563,14 @@ begin
 
     trigger_out <= trigger_out_i when EXT_TRIG_EN /= 0 else '0';
     armed_out <= armed;
+    -- Full-width comparator-A value/mask fed across the CDC.  With WIDE_TRIG the
+    -- words come from the WIDE_SEL/WIDE_DATA window (word 0 mirrors TRIG_VALUE/
+    -- MASK); otherwise only the low 32 bits are programmable and the upper bits
+    -- are zero-extended, matching the legacy behaviour bit-for-bit.
+    jtag_trig_value_w <= wide_assemble(wide_va) when HAS_WIDE_TRIG
+                         else expand32(jtag_trig_value);
+    jtag_trig_mask_w  <= wide_assemble(wide_ma) when HAS_WIDE_TRIG
+                         else expand32(jtag_trig_mask);
     jtag_rdata <= jtag_rdata_i;
     burst_start_ptr <= burst_start_ptr_i;
     burst_rd_data <= sample_mem_dout_b;
@@ -813,11 +849,13 @@ begin
                 pretrig_len <= pretrig_len_sync2;
                 posttrig_len <= posttrig_len_sync2;
                 cap_trig_mode <= trig_mode_sync2;
-                cap_trig_value <= trig_value_sync2;
-                cap_trig_mask <= trig_mask_sync2;
+                cap_trig_value <= low_u32(trig_value_sync2);
+                cap_trig_mask <= low_u32(trig_mask_sync2);
                 trig_delay <= trig_delay_sync2;
-                trig_value <= expand32(trig_value_sync2);
-                trig_mask <= expand32(trig_mask_sync2);
+                -- trig_value/mask are already SAMPLE_W-wide (WIDE_TRIG); the
+                -- sync words carry the full comparator-A value/mask directly.
+                trig_value <= trig_value_sync2;
+                trig_mask <= trig_mask_sync2;
                 if TRIG_STAGES > 1 and seq_cfg_sync2(0)(9 downto 0) /= "0000000000" then
                     trig_cmp_mode_a <= seq_cfg_sync2(0)(3 downto 0);
                     if DUAL_COMPARE /= 0 then
@@ -915,6 +953,7 @@ begin
         variable addr : natural;
         variable seq_stage : natural;
         variable seq_off : natural;
+        variable wide_word : natural;
     begin
         if jtag_rst = '1' then
             jtag_ctrl <= (others => '0');
@@ -923,6 +962,17 @@ begin
             jtag_trig_mode <= x"00000001";
             jtag_trig_value <= (others => '0');
             jtag_trig_mask <= x"FFFFFFFF";
+            -- Wide comparator-A words (WIDE_TRIG): value words 0, mask word 0
+            -- all-ones (match nothing masked out), higher mask words 0.
+            jtag_wide_sel <= (others => '0');
+            for s in 0 to WORDS_PER_SAMPLE - 1 loop
+                wide_va(s) <= (others => '0');
+                if s = 0 then
+                    wide_ma(s) <= x"FFFFFFFF";
+                else
+                    wide_ma(s) <= (others => '0');
+                end if;
+            end loop;
             jtag_sq_mode <= (others => '0');
             jtag_sq_value <= (others => '0');
             jtag_sq_mask <= (others => '0');
@@ -970,8 +1020,28 @@ begin
                         jtag_trig_mode <= jtag_wdata;
                     when ADDR_TRIG_VALUE =>
                         jtag_trig_value <= jtag_wdata;
+                        if HAS_WIDE_TRIG then
+                            wide_va(0) <= jtag_wdata;  -- mirror word 0
+                        end if;
                     when ADDR_TRIG_MASK =>
                         jtag_trig_mask <= jtag_wdata;
+                        if HAS_WIDE_TRIG then
+                            wide_ma(0) <= jtag_wdata;
+                        end if;
+                    when ADDR_WIDE_SEL =>
+                        if HAS_WIDE_TRIG then
+                            jtag_wide_sel <= jtag_wdata(7 downto 0);
+                        end if;
+                    when ADDR_WIDE_DATA =>
+                        -- [0]=mask/value, [7:4]=word index into the wide slots.
+                        wide_word := to_integer(unsigned(jtag_wide_sel(7 downto 4)));
+                        if HAS_WIDE_TRIG and wide_word < WORDS_PER_SAMPLE then
+                            if jtag_wide_sel(0) = '1' then
+                                wide_ma(wide_word) <= jtag_wdata;
+                            else
+                                wide_va(wide_word) <= jtag_wdata;
+                            end if;
+                        end if;
                     when ADDR_SQ_MODE =>
                         if STOR_QUAL /= 0 then
                             jtag_sq_mode <= jtag_wdata;
@@ -1205,9 +1275,9 @@ begin
             posttrig_len_sync2 <= posttrig_len_sync1;
             trig_mode_sync1 <= jtag_trig_mode;
             trig_mode_sync2 <= trig_mode_sync1;
-            trig_value_sync1 <= jtag_trig_value;
+            trig_value_sync1 <= jtag_trig_value_w;
             trig_value_sync2 <= trig_value_sync1;
-            trig_mask_sync1 <= jtag_trig_mask;
+            trig_mask_sync1 <= jtag_trig_mask_w;
             trig_mask_sync2 <= trig_mask_sync1;
             decim_sync1 <= unsigned(jtag_decim);
             decim_sync2 <= decim_sync1;
@@ -1778,6 +1848,14 @@ begin
                 r := x"000201FF" when REL_COMPARE /= 0 else x"000201C3";
                 if DUAL_COMPARE /= 0 then
                     r(16) := '1';
+                end if;
+                if HAS_WIDE_TRIG then
+                    r(18) := '1';  -- full-width comparator A programmable
+                end if;
+            when ADDR_WIDE_SEL =>
+                r := (others => '0');
+                if HAS_WIDE_TRIG then
+                    r(7 downto 0) := jtag_wide_sel;
                 end if;
             when others =>
                 if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
