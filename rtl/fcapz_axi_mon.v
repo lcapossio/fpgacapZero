@@ -43,6 +43,10 @@ module fcapz_axi_mon #(
     parameter REL_COMPARE  = 1,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    // Make comparator A programmable across the full SAMPLE_W (not just the low
+    // 32 bits), so a trigger can match any AXI field — e.g. a VALID-qualified
+    // full write address, or a response code in the upper sample bits.
+    parameter WIDE_TRIG    = 1,
     // Decode layer (P2): prepend an 8-bit transaction-events word at the LSB so
     // events (handshakes, response errors) are reachable by the ELA's low-32-bit
     // trigger comparator. DECODE_EN=0 keeps the P1 layout (awaddr at [31:0]).
@@ -197,7 +201,8 @@ module fcapz_axi_mon #(
         .STARTUP_ARM(STARTUP_ARM),
         .REL_COMPARE(REL_COMPARE),
         .DUAL_COMPARE(DUAL_COMPARE),
-        .USER1_DATA_EN(USER1_DATA_EN)
+        .USER1_DATA_EN(USER1_DATA_EN),
+        .WIDE_TRIG(WIDE_TRIG)
     ) u_ela (
         .sample_clk(ACLK),
         .sample_rst(~ARESETN),

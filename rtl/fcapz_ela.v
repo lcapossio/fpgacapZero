@@ -43,7 +43,11 @@ module fcapz_ela #(
     parameter DEFAULT_TRIG_EXT = 0, // reset/default external trigger mode
     parameter REL_COMPARE = 0,      // 0=small/faster trigger, 1=enable < > <= >=
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
-    parameter USER1_DATA_EN = 1     // 0=disable slow USER1 DATA window readback
+    parameter USER1_DATA_EN = 1,    // 0=disable slow USER1 DATA window readback
+    parameter WIDE_TRIG = 0         // 0=trigger A value/mask are the low 32 bits only
+                                    // (upper bits masked to 0); 1=make comparator A
+                                    // programmable across the full SAMPLE_W via the
+                                    // WIDE_SEL/WIDE_DATA indexed-word window.
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -123,6 +127,11 @@ module fcapz_ela #(
     localparam ADDR_TRIG_HOLDOFF = 16'h00DC; // RW: [15:0] ignore triggers for
                                              // sample-clock cycles after arm/re-arm
     localparam ADDR_COMPARE_CAPS = 16'h00E0; // RO: compare modes implemented
+    // Wide-trigger indexed-word window (only used when WIDE_TRIG=1).  Program
+    // comparator A's value/mask beyond the low 32 bits: write WIDE_SEL to pick
+    // {word index, value-or-mask}, then WIDE_DATA to load that 32-bit word.
+    localparam ADDR_WIDE_SEL    = 16'h00E4;  // RW: [0]=mask(1)/value(0), [7:4]=word
+    localparam ADDR_WIDE_DATA   = 16'h00F0;  // WO: 32-bit word -> selected slot
 
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
@@ -164,6 +173,8 @@ module fcapz_ela #(
     localparam HAS_USER1_DATA = (USER1_DATA_EN != 0);
     localparam HAS_SEQUENCER = (TRIG_STAGES > 1);
     localparam HAS_STOR_QUAL = (STOR_QUAL != 0);
+    // Wide programmable comparator A only makes sense above 32 bits.
+    localparam HAS_WIDE_TRIG = (WIDE_TRIG != 0) && (SAMPLE_W > 32);
     localparam HAS_DECIM = (DECIM_EN != 0);
     localparam HAS_EXT_TRIG = (EXT_TRIG_EN != 0);
     localparam HAS_SEGMENTS = (NUM_SEGMENTS > 1);
@@ -205,7 +216,8 @@ module fcapz_ela #(
         (REL_COMPARE != 0) ? 32'h0000_01FF : 32'h0000_01C3;
     localparam [31:0] COMPARE_CAPS =
         COMPARE_MODE_CAPS | 32'h0002_0000 |
-        (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000);
+        (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
+        (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000);  // bit18: wide comparator A
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -225,13 +237,32 @@ module fcapz_ela #(
     // SAMPLE_W <= 32: direct truncation (Verilog replication count cannot be 0,
     //   so the ternary trick is avoided — assign from a wider intermediate).
     // SAMPLE_W > 32:  zero-pad upper bits.
+    // Wide comparator-A words (only meaningful when HAS_WIDE_TRIG).  Word 0
+    // mirrors the legacy 32-bit ADDR_TRIG_VALUE/MASK registers; higher words
+    // are loaded through the WIDE_SEL/WIDE_DATA window.  Unused when WIDE_TRIG=0
+    // (no readers/writers -> optimized away).
+    reg [7:0]  jtag_wide_sel;                       // [0]=mask/value, [7:4]=word
+    reg [31:0] wide_va [0:WORDS_PER_SAMPLE-1];      // comparator A value words
+    reg [31:0] wide_ma [0:WORDS_PER_SAMPLE-1];      // comparator A mask words
+
     wire [SAMPLE_W-1:0] jtag_trig_value_w;
     wire [SAMPLE_W-1:0] jtag_trig_mask_w;
     generate
         if (SAMPLE_W <= 32) begin : g_trig_narrow
             assign jtag_trig_value_w = jtag_trig_value[SAMPLE_W-1:0];
             assign jtag_trig_mask_w  = jtag_trig_mask[SAMPLE_W-1:0];
+        end else if (HAS_WIDE_TRIG) begin : g_trig_wideprog
+            // Assemble the full-width value/mask from the per-word registers.
+            wire [WORDS_PER_SAMPLE*32-1:0] va_flat, ma_flat;
+            genvar wk;
+            for (wk = 0; wk < WORDS_PER_SAMPLE; wk = wk + 1) begin : g_wide_words
+                assign va_flat[wk*32 +: 32] = wide_va[wk];
+                assign ma_flat[wk*32 +: 32] = wide_ma[wk];
+            end
+            assign jtag_trig_value_w = va_flat[SAMPLE_W-1:0];
+            assign jtag_trig_mask_w  = ma_flat[SAMPLE_W-1:0];
         end else begin : g_trig_wide
+            // Legacy: only the low 32 bits are programmable; upper bits masked 0.
             assign jtag_trig_value_w = {{(SAMPLE_W-32){1'b0}}, jtag_trig_value};
             assign jtag_trig_mask_w  = {{(SAMPLE_W-32){1'b0}}, jtag_trig_mask};
         end
@@ -780,6 +811,14 @@ module fcapz_ela #(
                 jtag_seq_value_b[s] <= 32'h0;
                 jtag_seq_mask_b[s]  <= 32'hFFFF_FFFF;
             end
+            // Wide comparator-A words: default matches the legacy zero-extend
+            // (word 0 = the 32-bit value/mask defaults, upper words = 0 so the
+            // upper sample bits are don't-care until the host programs them).
+            jtag_wide_sel <= 8'h0;
+            for (s = 0; s < WORDS_PER_SAMPLE; s = s + 1) begin
+                wide_va[s] <= 32'h0;
+                wide_ma[s] <= (s == 0) ? 32'hFFFF_FFFF : 32'h0;
+            end
         end else begin
             if (jtag_wr_en) begin
                 case (jtag_addr)
@@ -791,8 +830,20 @@ module fcapz_ela #(
                     ADDR_PRETRIG:    jtag_pretrig_len  <= jtag_wdata;
                     ADDR_POSTTRIG:   jtag_posttrig_len <= jtag_wdata;
                     ADDR_TRIG_MODE:  jtag_trig_mode    <= jtag_wdata;
-                    ADDR_TRIG_VALUE: jtag_trig_value   <= jtag_wdata;
-                    ADDR_TRIG_MASK:  jtag_trig_mask    <= jtag_wdata;
+                    ADDR_TRIG_VALUE: begin
+                        jtag_trig_value <= jtag_wdata;
+                        if (HAS_WIDE_TRIG) wide_va[0] <= jtag_wdata;  // mirror word 0
+                    end
+                    ADDR_TRIG_MASK: begin
+                        jtag_trig_mask <= jtag_wdata;
+                        if (HAS_WIDE_TRIG) wide_ma[0] <= jtag_wdata;
+                    end
+                    ADDR_WIDE_SEL: if (HAS_WIDE_TRIG) jtag_wide_sel <= jtag_wdata[7:0];
+                    ADDR_WIDE_DATA: if (HAS_WIDE_TRIG &&
+                                        jtag_wide_sel[7:4] < WORDS_PER_SAMPLE) begin
+                        if (jtag_wide_sel[0]) wide_ma[jtag_wide_sel[7:4]] <= jtag_wdata;
+                        else                  wide_va[jtag_wide_sel[7:4]] <= jtag_wdata;
+                    end
                     ADDR_SQ_MODE:    if (HAS_STOR_QUAL) jtag_sq_mode <= jtag_wdata;
                     ADDR_SQ_VALUE:   if (HAS_STOR_QUAL) jtag_sq_value <= jtag_wdata;
                     ADDR_SQ_MASK:    if (HAS_STOR_QUAL) jtag_sq_mask <= jtag_wdata;
@@ -1590,6 +1641,7 @@ module fcapz_ela #(
             ADDR_TRIG_DELAY:  jtag_rdata_mux = {16'h0, jtag_trig_delay};
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
+            ADDR_WIDE_SEL:    jtag_rdata_mux = HAS_WIDE_TRIG ? {24'h0, jtag_wide_sel} : 32'h0;
 
             default: begin
                 if (seq_addr_hit) begin

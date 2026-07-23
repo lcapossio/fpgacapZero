@@ -30,9 +30,19 @@ ADDR_POSTTRIG = 0x0018
 ADDR_TRIG_MODE = 0x0020
 ADDR_TRIG_VALUE = 0x0024
 ADDR_TRIG_MASK = 0x0028
+ADDR_SQ_MODE = 0x0030
+ADDR_SQ_VALUE = 0x0034
+ADDR_SQ_MASK = 0x0038
+ADDR_WIDE_SEL = 0x00E4
+ADDR_WIDE_DATA = 0x00F0
 ADDR_AXI_MON_ID = 0x00E8
 ADDR_AXI_GEOM = 0x00EC
 ADDR_DATA_BASE = 0x0100
+
+# awvalid's absolute position in the flattened vector: awaddr[32] + awprot[3]
+# → channel bit 35, plus the 8-bit events word on a DECODE build.  Both are
+# above bit 31, so triggering on it exercises the wide comparator window.
+AWVALID_BIT = 35 + (8 if DECODE else 0)
 
 AXI_SIGNALS = [
     "AWADDR", "AWPROT", "AWVALID", "AWREADY",
@@ -166,6 +176,13 @@ class MonDriver:
         for w in range(words):
             val |= (await self.read(base + w * 4)) << (32 * w)
         return val
+
+    async def set_wide(self, bit: int, is_mask: bool) -> None:
+        """Set one comparator-A value/mask bit at any position via the wide
+        window (WIDE_SEL selects {word, value-or-mask}, WIDE_DATA loads it)."""
+        word, off = bit // 32, bit % 32
+        await self.write(ADDR_WIDE_SEL, (word << 4) | (1 if is_mask else 0))
+        await self.write(ADDR_WIDE_DATA, 1 << off)
 
     async def axi_write_error(self, addr: int, data: int) -> None:
         """Like axi_write but the write response is SLVERR (BRESP=2'b10)."""
@@ -308,3 +325,75 @@ async def stress_backtoback_fill(dut):
     )
     for i, s in enumerate(samples):
         assert (s >> (35 + shift)) & 1 == 1, f"awvalid not set in slot {i}: 0x{s:x}"
+
+
+@cocotb.test()
+async def wide_trigger_high_bit(dut):
+    """WIDE_TRIG: trigger on a bit above bit 31 that the legacy path can't reach.
+
+    Arms comparator A to match awvalid (bit 35/43) via the wide value/mask
+    window, with the low 32 bits masked don't-care.  Two proofs in one:
+      * an idle bus (awvalid=0) must NOT trigger — so the high mask bit is
+        genuinely in effect (a low-32-only comparator would see mask=value=0,
+        match EQ trivially, and fire immediately);
+      * a write (awvalid=1) MUST trigger and complete, and the captured trigger
+        sample must have awvalid set."""
+    d = await setup(dut)
+    assert AWVALID_BIT >= 32, "test expects awvalid above the low word"
+    await d.write(ADDR_TRIG_VALUE, 0)   # wide_va[0]=0, wide_ma[0]=0 -> low 32 don't-care
+    await d.write(ADDR_TRIG_MASK, 0)
+    await d.set_wide(AWVALID_BIT, is_mask=False)   # value: awvalid bit = 1
+    await d.set_wide(AWVALID_BIT, is_mask=True)    # mask:  compare only that bit
+    await d.write(ADDR_PRETRIG, 2)
+    await d.write(ADDR_POSTTRIG, 3)
+    await d.write(ADDR_TRIG_MODE, 1)               # value match
+    await d.arm()
+
+    # Idle bus: awvalid low -> must stay armed, never trigger.
+    await d.wait_aclk(20)
+    status = await d.read(ADDR_STATUS)
+    assert not (status & 0x2), f"triggered with awvalid low (0x{status:08x})"
+    assert status & 0x1, f"should still be armed (0x{status:08x})"
+
+    # Drive a write: awvalid asserts -> the high-bit trigger fires.
+    await d.axi_write(0x4000_0000, 0xDEAD_BEEF)
+    await d.wait_aclk(8)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    trig_sample = await d.read_sample(2, words)     # trigger sits at index pretrig=2
+    assert (trig_sample >> AWVALID_BIT) & 1 == 1, (
+        f"awvalid not set in the trigger sample: 0x{trig_sample:x}"
+    )
+
+
+@cocotb.test()
+async def beat_storage_qualifier(dut):
+    """DECODE + STOR_QUAL: keep only handshake beats, drop idle cycles.
+
+    A NEQ-vs-zero storage qualifier over the five handshake-event bits stores a
+    sample only when a channel handshakes.  Driving transactions separated by
+    idle gaps, every *stored* sample must have a handshake bit set — the idle
+    gaps are dropped."""
+    if not DECODE:
+        return  # handshake event bits only exist on a DECODE_EN build
+    d = await setup(dut)
+    await d.write(ADDR_SQ_MODE, 1)        # NEQ (store when masked bits != 0)
+    await d.write(ADDR_SQ_VALUE, 0)
+    await d.write(ADDR_SQ_MASK, 0x1F)     # aw_hs..r_hs
+    await d.write(ADDR_PRETRIG, 0)
+    await d.write(ADDR_POSTTRIG, 4)
+    await d.write(ADDR_TRIG_MODE, 1)
+    await d.write(ADDR_TRIG_VALUE, 0x01)  # trigger on aw_hs
+    await d.write(ADDR_TRIG_MASK, 0x01)
+    await d.arm()
+
+    for i in range(8):
+        await d.axi_write(0x100 + i * 4, 0xC0DE_0000 + i)
+        await d.wait_aclk(3)              # idle gap — must be dropped by the SQ
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    for i in range(0 + 1 + 4):            # pre + trigger + post
+        s = await d.read_sample(i, words)
+        assert (s & 0x1F) != 0, f"idle (non-beat) sample stored at {i}: 0x{s & 0xFF:02x}"

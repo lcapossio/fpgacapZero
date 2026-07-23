@@ -35,7 +35,7 @@ BASE_PARAMETERS = {
     "DATA_W": 32,
     "DEPTH": 16,
     "TRIG_STAGES": 1,
-    "STOR_QUAL": 0,
+    "STOR_QUAL": 1,  # exercise the beat storage qualifier
     "NUM_SEGMENTS": 1,
     "TIMESTAMP_W": 0,
     "INPUT_PIPE": 0,
@@ -56,9 +56,10 @@ class Target:
 
 TARGETS = (
     Target("base", 0, ("identity_and_geometry", "captures_axi_write_address",
-                       "stress_backtoback_fill")),
+                       "stress_backtoback_fill", "wide_trigger_high_bit")),
     Target("decode", 1, ("identity_and_geometry", "captures_error_event",
-                         "stress_backtoback_fill")),
+                         "stress_backtoback_fill", "wide_trigger_high_bit",
+                         "beat_storage_qualifier")),
 )
 
 

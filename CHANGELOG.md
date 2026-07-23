@@ -41,6 +41,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   pre-filled. When a bridge is detected the AXI tab now **auto-attaches** it
   (once per connection), landing straight in the read/write view with no click.
 
+### Added
+
+- **ELA — full-width trigger comparator (`WIDE_TRIG`):** the trigger comparators
+  were always `SAMPLE_W`-wide in silicon, but the register path only let the host
+  set the low 32 bits of comparator A's value/mask (upper bits forced to 0), so
+  on a wide core (e.g. the 160-bit AXI monitor) most of the captured vector was
+  un-triggerable. A new `WIDE_TRIG` parameter (default 0 — ELA/EIO builds are
+  bit-identical) adds a `WIDE_SEL`/`WIDE_DATA` indexed-word window that programs
+  comparator A across the entire `SAMPLE_W`. The AXI monitor enables it, so a
+  trigger can now match any field — a VALID-qualified full write address, a
+  response code in the upper bits, etc. Proven in cocotb by triggering on a bit
+  above bit 31 (with an idle-bus control that must not fire).
+
 ### Changed
 
 - **AXI monitor — beat storage qualifier:** `AxiMonitor.event_capture_config`

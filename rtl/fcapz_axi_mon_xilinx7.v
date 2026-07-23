@@ -37,6 +37,7 @@ module fcapz_axi_mon_xilinx7 #(
     parameter REL_COMPARE  = 1,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    parameter WIDE_TRIG    = 1,    // full-width comparator A (trigger on any field)
     parameter DECODE_EN    = 0,    // P2 transaction-events word at the LSB
     parameter BURST_W      = 256,
     parameter CTRL_CHAIN   = 1,    // BSCANE2 USER chain for control + burst
@@ -133,7 +134,7 @@ module fcapz_axi_mon_xilinx7 #(
         .INPUT_PIPE(INPUT_PIPE), .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
         .STARTUP_ARM(STARTUP_ARM), .REL_COMPARE(REL_COMPARE),
         .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN),
-        .DECODE_EN(DECODE_EN)
+        .WIDE_TRIG(WIDE_TRIG), .DECODE_EN(DECODE_EN)
     ) u_mon (
         .ACLK(ACLK), .ARESETN(ARESETN),
         .AWADDR(AWADDR), .AWPROT(AWPROT), .AWVALID(AWVALID), .AWREADY(AWREADY),
