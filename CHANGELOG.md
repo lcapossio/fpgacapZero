@@ -56,6 +56,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **AXI monitor — meaningful geometry telemetry:** the `AXI_GEOM` register's
+  channel-count field carried a hardcoded `0x1F` placeholder and the ID-width
+  field a bare `0` with no documented meaning. They now read the real values —
+  ID width `0` (AXI4-Lite has no `AWID`/`ARID`) and `5` captured channels
+  (AW/W/B/AR/R) — via named RTL localparams, validated in cocotb and on hardware.
 - **AXI monitor — VALID-qualified write-address trigger (correctness):**
   `write_addr_capture_config` now builds the trigger at `awaddr`'s real bit
   offset (from the probe map) and, by default, also requires `awvalid` — so it

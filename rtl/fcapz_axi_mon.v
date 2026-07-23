@@ -169,7 +169,12 @@ module fcapz_axi_mon #(
     localparam [7:0]  PROTO_CODE = 8'd1;  // 1 = AXI4-Lite
     localparam [7:0]  CAP_FLAGS  = (DECODE_EN != 0) ? 8'h01 : 8'h00;  // bit0 DECODE_EN
     wire [31:0] axi_mon_id = {`FCAPZ_AXIMON_CORE_ID, PROTO_CODE, CAP_FLAGS}; // "AM"
-    wire [31:0] axi_geom   = {7'd0, 5'h1F, 4'd0, DATA_W[7:0], ADDR_W[7:0]};
+    // Geometry telemetry: [7:0]=ADDR_W, [15:8]=DATA_W, [19:16]=ID_W,
+    // [24:20]=captured AXI channel count.  For AXI4-Lite the ID width is 0
+    // (no AWID/ARID) and all five channels are captured (AW, W, B, AR, R).
+    localparam [3:0] GEOM_ID_W     = 4'd0;
+    localparam [4:0] GEOM_CHANNELS = 5'd5;
+    wire [31:0] axi_geom = {7'd0, GEOM_CHANNELS, GEOM_ID_W, DATA_W[7:0], ADDR_W[7:0]};
 
     wire [31:0] ela_rdata;
     reg  [31:0] am_rdata;

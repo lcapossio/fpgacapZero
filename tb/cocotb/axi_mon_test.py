@@ -230,6 +230,8 @@ async def identity_and_geometry(dut):
     geom = await d.read(ADDR_AXI_GEOM)
     assert (geom & 0xFF) == 32                              # ADDR_W
     assert ((geom >> 8) & 0xFF) == 32                       # DATA_W
+    assert ((geom >> 16) & 0xF) == 0                        # ID_W: AXI4-Lite has no ID
+    assert ((geom >> 20) & 0x1F) == 5                       # 5 channels: AW/W/B/AR/R
 
 
 @cocotb.test()

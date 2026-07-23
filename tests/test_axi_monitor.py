@@ -13,7 +13,7 @@ from fcapz.axi_monitor import AxiMonitor, AxiMonitorError
 from fcapz.transport import Transport
 
 AM_ID = (0x414D << 16) | (1 << 8) | 0  # "AM", PROTO=AXI4LITE, flags=0
-GEOM = (0x1F << 20) | (0 << 16) | (32 << 8) | 32  # cap=0x1F, id_w=0, data_w=32, addr_w=32
+GEOM = (5 << 20) | (0 << 16) | (32 << 8) | 32  # cap=5 channels, id_w=0, data_w=32, addr_w=32
 
 
 class FakeMon(Transport):
@@ -80,7 +80,7 @@ def test_absent_when_magic_missing():
 
 def test_geometry_decode():
     g = _mon().geometry()
-    assert (g.addr_w, g.data_w, g.id_w, g.cap_channels) == (32, 32, 0, 0x1F)
+    assert (g.addr_w, g.data_w, g.id_w, g.cap_channels) == (32, 32, 0, 5)
     assert g.proto == "AXI4LITE"
     assert g.sample_width == 152  # must match fcapz_axi_mon SAMPLE_W
 

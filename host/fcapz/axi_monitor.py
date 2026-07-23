@@ -52,8 +52,8 @@ class AxiMonitorError(RuntimeError):
 class AxiGeometry:
     addr_w: int
     data_w: int
-    id_w: int
-    cap_channels: int
+    id_w: int          # transaction-ID width (0 for AXI4-Lite — no AWID/ARID)
+    cap_channels: int  # number of AXI channels captured (5 for AXI4-Lite: AW/W/B/AR/R)
     proto_code: int
     decode: bool = False  # DECODE_EN: 8-bit events word prepended at the LSB
 

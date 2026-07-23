@@ -1351,6 +1351,8 @@ class TestAxiMonitor(unittest.TestCase):
         self.assertTrue(self.mon.present, "AXI monitor not detected on USER2")
         geo = self.mon.geometry()
         self.assertEqual((geo.addr_w, geo.data_w), (32, 32))
+        self.assertEqual(geo.id_w, 0)          # AXI4-Lite has no transaction ID
+        self.assertEqual(geo.cap_channels, 5)  # AW/W/B/AR/R
         self.assertTrue(geo.decode, "expected a DECODE_EN=1 build")
         self.assertEqual(geo.sample_width, 160)
 
