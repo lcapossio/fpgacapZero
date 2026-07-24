@@ -20,6 +20,10 @@ const DISCOVER_TIMEOUT = 15000;
 // command lock) instead of outliving an aborted request.
 const DISCOVER_BUDGET_S = 12;
 const START_TIMEOUT = 15000; // server spawns OpenOCD and waits for its TCL port
+// Auto-discovery may start OpenOCD once per candidate config and probe each, so
+// it needs a wider budget than a single start (several starts + probes back to
+// back).
+const AUTO_DISCOVER_TIMEOUT = 40000;
 // hw_server goes through XSDB (slow cold start). Capped at 15s: if XSDB's first
 // start exceeds this the connect aborts, but it leaves hw_server warm so a
 // retry is much faster.
@@ -299,10 +303,18 @@ export function ConnectionPanel({
         let found = await discoverOpenocdBoards();
         let oo: "started" | "picker" | "no" = "no";
         if (found.length === 0) {
-          oo = await ensureOpenocdRunning();
-          if (oo === "started") {
-            setStatus("searching for compatible boards…");
-            found = await discoverOpenocdBoards();
+          // Nothing already running — let the server bring OpenOCD up itself:
+          // filter the configured configs by which USB JTAG adapters are
+          // plugged in, then start + probe each. No config picking needed.
+          found = await autoDiscoverBoards();
+          if (found.length === 0) {
+            // Auto-discovery came up empty (feature off, older server, or no
+            // adapter matched) — fall back to the manual "Start OpenOCD" path.
+            oo = await ensureOpenocdRunning();
+            if (oo === "started") {
+              setStatus("searching for compatible boards…");
+              found = await discoverOpenocdBoards();
+            }
           }
         }
         if (found.length === 0) {
@@ -378,6 +390,27 @@ export function ConnectionPanel({
       sig(),
     );
     return (r.boards as Board[]) ?? [];
+  }
+
+  /** Ask the server to auto-discover boards: filter its allow-listed OpenOCD
+   *  configs by the USB JTAG adapters that are actually attached, then start
+   *  OpenOCD per surviving config and probe for an fpgacapZero core. Returns
+   *  confirmed boards (each on its own running port). Empty when the feature is
+   *  off, the server is older, the client is remote, or nothing answered. */
+  async function autoDiscoverBoards(): Promise<Board[]> {
+    try {
+      setStatus("starting OpenOCD and probing for boards…");
+      const r = await rpc(
+        "openocd_discover",
+        { backend, host, port: Number(port) },
+        AUTO_DISCOVER_TIMEOUT,
+        sig(),
+      );
+      return (r.boards as Board[]) ?? [];
+    } catch (e) {
+      if (e instanceof RpcCancelled) throw e;
+      return []; // feature off / older server / remote client
+    }
   }
 
   /** When discovery finds nothing, transparently bring OpenOCD up if the server

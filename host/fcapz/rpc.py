@@ -714,6 +714,29 @@ class RpcServer:
             )
             return self._ok(backend="openocd", boards=boards)
 
+        if cmd == "openocd_discover":
+            # Auto-discover compatible boards without the user picking a config:
+            # filter the allow-listed configs by which USB JTAG adapters are
+            # actually plugged in, then start OpenOCD per surviving config and
+            # probe for an fpgacapZero core. Confirmed boards come back with the
+            # config that reached them and a running TCL port to connect to.
+            # Spawns processes, so it is loopback-gated by the web layer.
+            if self._openocd_launcher is None:
+                raise RuntimeError(
+                    "OpenOCD launching is not enabled on this server; start "
+                    "fcapz-web with --openocd <exe> and --openocd-cfg/-cfg-dir"
+                )
+            from .board_autodiscover import auto_discover_boards
+
+            boards = auto_discover_boards(
+                self._openocd_launcher,
+                port_base=_valid_port(req.get("port", 6666)),
+                chain=int(req.get("chain", 1)),
+                wait_sec=_wait_sec(req, "wait", 10.0),
+                timeout_sec=_wait_sec(req, "timeout", 5.0),
+            )
+            return self._ok(backend="openocd", boards=boards)
+
         if cmd in ("openocd_start", "openocd_stop", "openocd_status"):
             # Server-managed OpenOCD (web only, loopback-gated by the web layer).
             # Disabled unless fcapz-web was launched with --openocd/--openocd-cfg.

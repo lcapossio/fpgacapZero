@@ -64,6 +64,11 @@ class OpenOcdLauncher:
     def config_names(self) -> List[str]:
         return sorted(self._configs)
 
+    @property
+    def configs(self) -> Dict[str, str]:
+        """Copy of the allow-listed ``name -> resolved config path`` map."""
+        return dict(self._configs)
+
     # -- helpers ---------------------------------------------------------
 
     def _port_open(self, port: int, timeout: float = 0.3) -> bool:

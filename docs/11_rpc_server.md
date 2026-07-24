@@ -287,6 +287,24 @@ includes `{"started": true, "port": 6666, "pid": ...}`, or an in-band error
 
 Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
 
+#### `openocd_discover`
+
+Auto-discover compatible boards without the client picking a config. Reads each
+allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter is
+plugged in (best-effort — every config is probed when USB enumeration is
+unavailable), then starts OpenOCD per surviving config from `port` (default 6666,
+one port per config) and probes each for an fpgacapZero core.
+
+```json
+{"cmd": "openocd_discover", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "boards": [...]}` — the same board
+records as `discover_boards`, each with an added `config` (the config that
+reached it) and a `port` left running for the client to connect to. Unproductive
+instances are stopped. Loopback-only and requires the launcher configured, like
+`openocd_start`.
+
 ### ELA (Analyzer)
 
 #### `probe`

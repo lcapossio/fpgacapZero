@@ -43,6 +43,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web / RPC — auto-discover OpenOCD boards on Connect:** a new
+  `openocd_discover` command (loopback-only, like `openocd_start`) finds
+  compatible boards without the user picking a JTAG config. It reads each
+  allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter
+  is actually plugged in (best-effort enumeration; degrades to probing all when
+  unavailable), then starts OpenOCD per surviving config and probes for an
+  fpgacapZero core — leaving each confirmed board on its own running port. When
+  nothing is already running, Connect calls this automatically: one board
+  connects straight through, several show the existing picker. Two configs that
+  share a VID/PID disambiguate by probing (the first claims the adapter). New
+  `fcapz.board_autodiscover` module with unit tests.
 - **Web — simpler "Start OpenOCD" setup:** enabling the UI's server-managed
   OpenOCD no longer needs two fiddly flags. The `openocd` binary is now
   auto-detected on `PATH` (still overridable via `--openocd`/`$FCAPZ_OPENOCD`),
