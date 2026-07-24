@@ -14,6 +14,19 @@ const POLL_TIMEOUT = 4;
 // sample data uses the string-based VCD/CSV exports, not the JSON-number result.
 const SAFE_SAMPLE_BITS = 53;
 
+/** Client-side readback budget (ms). The server has no readback deadline, but
+ *  the client RPC needs one big enough for the whole buffer. Scale it with the
+ *  sample-buffer size so a deep/wide core (e.g. a 160-bit AXI monitor) — or a
+ *  slow per-word fallback transport — never hits a *false* timeout while the
+ *  server is still streaming valid data. Fast burst/pipelined readback finishes
+ *  far inside this; ~15 ms/word conservatively covers the slow fallback. */
+function readbackBudgetMs(id: Identity | null): number {
+  const sw = Number(id?.sample_width) || 8;
+  const depth = Number(id?.depth) || 0;
+  const words = depth * Math.ceil(sw / 32);
+  return words * 15;
+}
+
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
  *  to the active core's Viewer tab. `onActiveChange` reports when a capture is
  *  armed/running so a host (e.g. the hover-out Run bar) can stay open while the
@@ -101,7 +114,7 @@ export function RunPanel({
     const r = await rpc(
       "capture",
       params(true, IMMEDIATE_TIMEOUT),
-      IMMEDIATE_TIMEOUT * 1000 + 4000,
+      IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
       stopCtl.current?.signal,
     );
     return submitCapture(r);
@@ -125,7 +138,7 @@ export function RunPanel({
             include_vcd: true,
             include_csv: true,
           },
-          POLL_TIMEOUT * 1000 + 6000,
+          POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
           stopCtl.current?.signal,
         );
         return submitCapture(r);
