@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -18,19 +19,36 @@ def _default_static_dir() -> Optional[str]:
     return str(d) if d.is_dir() else None
 
 
-def _build_openocd_launcher(openocd, cfgs):
+def _discover_cfgs(cfg_dirs) -> list[str]:
+    """Glob ``*.cfg`` (non-recursive) in each ``--openocd-cfg-dir``, sorted."""
+    found: list[str] = []
+    for raw in cfg_dirs or ():
+        d = Path(raw).expanduser()
+        if not d.is_dir():
+            print(f"WARNING: --openocd-cfg-dir not a directory, skipping: {d}", file=sys.stderr)
+            continue
+        found.extend(str(p) for p in sorted(d.glob("*.cfg")))
+    return found
+
+
+def _build_openocd_launcher(openocd, cfgs, cfg_dirs=None):
     """Build the OpenOcdLauncher from CLI flags, or None if not fully configured.
 
-    Both an ``openocd`` binary and at least one existing ``--openocd-cfg`` are
-    required; otherwise the UI's "Start OpenOCD" feature stays disabled. Configs
-    are registered by filename stem (the name the UI starts them by).
+    An ``openocd`` binary (``--openocd``, ``$FCAPZ_OPENOCD``, or found on ``PATH``)
+    and at least one config are required; otherwise the UI's "Start OpenOCD"
+    feature stays disabled. Configs come from explicit ``--openocd-cfg`` files
+    and/or from every ``*.cfg`` discovered in the ``--openocd-cfg-dir`` folders.
+    Each is registered by filename stem (the name the UI starts it by).
     """
+    openocd = openocd or shutil.which("openocd")
+    cfgs = list(cfgs or []) + _discover_cfgs(cfg_dirs)
     if not openocd and not cfgs:
         return None
     if not openocd or not cfgs:
         print(
-            "WARNING: --openocd and --openocd-cfg must both be set to enable the "
-            "UI 'Start OpenOCD' feature; it stays disabled.",
+            "WARNING: enabling the UI 'Start OpenOCD' feature needs both an openocd "
+            "binary (--openocd / $FCAPZ_OPENOCD / on PATH) and at least one config "
+            "(--openocd-cfg / --openocd-cfg-dir); it stays disabled.",
             file=sys.stderr,
         )
         return None
@@ -41,11 +59,19 @@ def _build_openocd_launcher(openocd, cfgs):
     for raw in cfgs:
         path = Path(raw).expanduser()
         if not path.is_file():
-            print(f"WARNING: --openocd-cfg not found, skipping: {path}", file=sys.stderr)
+            print(f"WARNING: OpenOCD config not found, skipping: {path}", file=sys.stderr)
             continue
-        configs[path.stem] = str(path.resolve())
+        resolved = str(path.resolve())
+        if path.stem in configs and configs[path.stem] != resolved:
+            print(
+                f"WARNING: duplicate OpenOCD config name {path.stem!r}; keeping "
+                f"{configs[path.stem]}, ignoring {resolved}",
+                file=sys.stderr,
+            )
+            continue
+        configs[path.stem] = resolved
     if not configs:
-        print("WARNING: no valid --openocd-cfg files; 'Start OpenOCD' disabled.", file=sys.stderr)
+        print("WARNING: no valid OpenOCD configs; 'Start OpenOCD' disabled.", file=sys.stderr)
         return None
     return OpenOcdLauncher(openocd=openocd, configs=configs)
 
@@ -76,7 +102,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--openocd",
         default=os.environ.get("FCAPZ_OPENOCD"),
         help="Path to the openocd executable, to let the UI start OpenOCD "
-        "(default: $FCAPZ_OPENOCD). Requires at least one --openocd-cfg.",
+        "(default: $FCAPZ_OPENOCD, else 'openocd' on PATH). Needs at least one "
+        "config via --openocd-cfg or --openocd-cfg-dir.",
     )
     parser.add_argument(
         "--openocd-cfg",
@@ -85,6 +112,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         metavar="PATH",
         help="An OpenOCD config the UI may launch (repeatable). Registered by "
         "its filename stem; only these configs can be started.",
+    )
+    parser.add_argument(
+        "--openocd-cfg-dir",
+        action="append",
+        default=[d] if (d := os.environ.get("FCAPZ_OPENOCD_CFG_DIR")) else None,
+        metavar="DIR",
+        help="Auto-discover OpenOCD configs: register every *.cfg in DIR "
+        "(repeatable; non-recursive; default: $FCAPZ_OPENOCD_CFG_DIR). Lets you "
+        "point at e.g. examples/arty_a7 instead of listing each --openocd-cfg.",
     )
     parser.add_argument(
         "--cors-origin",
@@ -108,7 +144,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "reachable by anyone who can reach this port.",
             file=sys.stderr,
         )
-    launcher = _build_openocd_launcher(args.openocd, args.openocd_cfg)
+    launcher = _build_openocd_launcher(args.openocd, args.openocd_cfg, args.openocd_cfg_dir)
     app = create_app(
         token=args.token,
         static_dir=static_dir,

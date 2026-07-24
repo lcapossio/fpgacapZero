@@ -43,6 +43,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — simpler "Start OpenOCD" setup:** enabling the UI's server-managed
+  OpenOCD no longer needs two fiddly flags. The `openocd` binary is now
+  auto-detected on `PATH` (still overridable via `--openocd`/`$FCAPZ_OPENOCD`),
+  and a new `--openocd-cfg-dir` (or `$FCAPZ_OPENOCD_CFG_DIR`) auto-discovers
+  every `*.cfg` in a folder — so `fcapz-web --openocd-cfg-dir examples/arty_a7`
+  is enough instead of listing each config and the binary path. The security
+  model is unchanged: only discovered/listed configs can be started, loopback
+  only. Using the frontend against an already-running OpenOCD/hw_server still
+  needs none of these flags.
 - **ELA — full-width trigger comparator (`WIDE_TRIG`):** the trigger comparators
   were always `SAMPLE_W`-wide in silicon, but the register path only let the host
   set the low 32 bits of comparator A's value/mask (upper bits forced to 0), so

@@ -251,10 +251,11 @@ Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
 ### OpenOCD control (web, localhost only)
 
 Start/stop OpenOCD **on the server host** so the browser UI can bring the board
-online without a shell. Available only when `fcapz-web` was launched with
-`--openocd <exe>` and one or more `--openocd-cfg <cfg>`, and restricted to
-loopback clients (a remote browser cannot spawn processes, even with a valid
-token). The server only stops OpenOCD instances it started itself.
+online without a shell. Available only when `fcapz-web` has an `openocd` binary
+(`--openocd`, `$FCAPZ_OPENOCD`, or found on `PATH`) plus at least one config
+(`--openocd-cfg <cfg>` or every `*.cfg` in an `--openocd-cfg-dir <dir>`), and
+restricted to loopback clients (a remote browser cannot spawn processes, even
+with a valid token). The server only stops OpenOCD instances it started itself.
 
 #### `openocd_status`
 

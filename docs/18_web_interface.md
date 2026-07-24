@@ -47,15 +47,24 @@ requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 | `--port` | `7373` | HTTP port. |
 | `--token` | `$FCAPZ_WEB_TOKEN` | Bearer token required on the API (unset = open). |
 | `--static-dir` | bundled | Directory of built frontend assets to serve. |
-| `--openocd` | `$FCAPZ_OPENOCD` | Path to the `openocd` executable, to let the UI start OpenOCD. |
+| `--openocd` | `$FCAPZ_OPENOCD`, else `openocd` on `PATH` | Path to the `openocd` executable, to let the UI start OpenOCD. Auto-detected from `PATH` if unset. |
 | `--openocd-cfg` | — | An OpenOCD config the UI may launch (repeatable; registered by filename stem). |
+| `--openocd-cfg-dir` | `$FCAPZ_OPENOCD_CFG_DIR` | Auto-discover configs: register every `*.cfg` in this directory (repeatable; non-recursive). |
 | `--cors-origin` | — | Allow cross-origin API access from this origin (repeatable). Off by default. |
 
-Set both `--openocd` and at least one `--openocd-cfg` so the UI can start OpenOCD
-itself — **Connect brings it up automatically** when no board is reachable, so
-the user never manages the JTAG server (see below). Only those configs can be
-launched, and only from a **localhost** browser — a remote client cannot spawn
-processes, even with a valid token.
+To enable the UI's "Start OpenOCD" convenience you need an `openocd` binary
+**and** at least one config. Both are now low-effort: the binary is found on
+`PATH` automatically, and `--openocd-cfg-dir` discovers configs from a folder so
+you point at, say, `examples/arty_a7` instead of listing each `.cfg`. So with
+`openocd` on `PATH`, `fcapz-web --openocd-cfg-dir examples/arty_a7` is enough —
+**Connect then brings OpenOCD up automatically** when no board is reachable, so
+the user never manages the JTAG server (see below). Only the discovered/listed
+configs can be launched, and only from a **localhost** browser — a remote client
+cannot spawn processes, even with a valid token.
+
+None of this is required just to *use* the web frontend: without these flags you
+simply connect to an already-running OpenOCD or hw_server via the backend/host/
+port fields, and the "Start OpenOCD" button is hidden.
 
 ## The workspace
 
@@ -72,8 +81,9 @@ connected. The panels:
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects
   automatically, several show a picker. If discovery comes up empty **and** the
-  server was launched with `--openocd`/`--openocd-cfg`, Connect **starts OpenOCD
-  automatically** and retries — the user never touches the JTAG server (with
+  server has an OpenOCD binary + config available (`--openocd-cfg-dir` or
+  `--openocd-cfg`, with the binary auto-detected on `PATH`), Connect **starts
+  OpenOCD automatically** and retries — the user never touches the JTAG server (with
   several configured configs it shows a small picker to choose which). hw_server
   needs no such step: XSDB starts a local hw_server itself. The BSCAN chain is
   **autodetected server-side** — the user never picks one.
