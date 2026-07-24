@@ -196,6 +196,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **AXI monitor — immediate/always-true trigger never fired (root cause):** on a
+  `WIDE_TRIG` core (the AXI monitor, `SAMPLE_W=160`), `Analyzer.configure` only
+  programmed the wide-trigger window's upper comparator words when the trigger
+  value/mask exceeded 32 bits. An always-true trigger (`value=0, mask=0`, used by
+  "Trigger Immediate") therefore cleared only the low 32 mask bits and left the
+  upper 128 mask bits at their stale/reset value, so the comparator was not
+  actually don't-care — the trigger never fired and the capture never completed
+  (10s `TimeoutError`). `configure` now programs every high word on every
+  configure for wide cores (zeroing them when the value/mask fit in 32 bits), so
+  the immediate trigger is genuinely always-true. Validated on Arty hardware:
+  immediate monitor captures now complete (8 and full-depth 256 samples).
 - **hw_server — AXI monitor readback hang (root cause):** capturing a wide core
   (`SAMPLE_W > 32`, e.g. the 160-bit AXI monitor) over hw_server could hang the
   server indefinitely — previously mislabeled a "timing-marginal" wide readback.

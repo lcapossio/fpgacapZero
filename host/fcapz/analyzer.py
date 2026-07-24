@@ -526,16 +526,22 @@ class Analyzer:
         self.transport.write_reg(_ADDR_TRIG_MODE, mode_bits)
         self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value & 0xFFFF_FFFF)
         self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask & 0xFFFF_FFFF)
-        # Comparator A above the low 32 bits: program the high words through the
-        # wide window (WIDE_TRIG cores only).  The low word went to TRIG_VALUE/
-        # MASK above, which also mirror wide word 0.
-        if (config.trigger.value >> 32) or (config.trigger.mask >> 32):
-            if not (hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG):
-                raise ValueError(
-                    "trigger value/mask exceed 32 bits but this core lacks "
-                    "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
-                    "comparator A are programmable"
-                )
+        # Comparator A above the low 32 bits.  On a WIDE_TRIG core the comparator
+        # is full SAMPLE_W-wide in silicon and takes its value/mask from the wide
+        # window (word 0 mirrors TRIG_VALUE/MASK, written above).  We must program
+        # EVERY high word on every configure -- not only when value/mask exceed
+        # 32 bits -- so the upper comparator bits reflect the requested trigger
+        # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
+        # always-true) trigger leaves the upper mask bits set, so the trigger is
+        # not actually always-true and never fires (the capture never completes).
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
+        if wide:
             words = (config.sample_width + 31) // 32
             for k in range(1, words):
                 self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 0)  # value word k

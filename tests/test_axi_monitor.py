@@ -248,6 +248,36 @@ def test_configure_programs_wide_words():
     assert sum(prog_m.get(k, 0) << (32 * k) for k in range(words)) == mask
 
 
+def test_configure_zeroes_wide_words_for_immediate():
+    """An always-true trigger (value=0, mask=0) on a WIDE_TRIG core must still
+    write the upper comparator words to 0.  Otherwise the low 32-bit mask is
+    cleared but the high mask words keep their stale/reset value, so the trigger
+    is not actually always-true and the capture never completes (the AXI-monitor
+    immediate-trigger hang)."""
+    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+    t = RecordingTransport(_wide_regs())
+    Analyzer(t).configure(
+        CaptureConfig(
+            pretrigger=0, posttrigger=7,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=160, depth=1024,
+        )
+    )
+    # Reconstruct the (word, is_mask) -> value the wide window programmed.
+    prog: dict[tuple[int, int], int] = {}
+    sel = 0
+    for addr, v in t.writes:
+        if addr == 0xE4:
+            sel = v
+        elif addr == 0xF0:
+            prog[(sel >> 4, sel & 1)] = v
+    words = (160 + 31) // 32  # 5
+    for k in range(1, words):
+        assert prog.get((k, 0)) == 0, f"value word {k} not zeroed"
+        assert prog.get((k, 1)) == 0, f"mask word {k} not zeroed"
+
+
 def test_configure_wide_without_support_raises():
     from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
 
