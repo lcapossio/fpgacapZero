@@ -58,6 +58,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   against **both** the Verilog and VHDL ELA; the static and interface parity
   gates (`run_hdl_parity.py`, `--interface-only`) keep the two in lockstep and
   the `WIDE_TRIG=0` path stays bit-identical to the previous behaviour.
+- **Arty A7 VHDL variant — MicroBlaze parity:** the VHDL reference design now
+  instantiates the same MicroBlaze subsystem as the Verilog build (`mb_sys`
+  block design + firmware ELF, MDM on USER3), sharing one monitored AXI bus with
+  the EJTAG-AXI bridge. `build_arty_vhdl.tcl` moves to a Vivado project flow (so
+  the block design + ELF-in-BRAM work) and `arty_a7_top.vhd` gains the 100 MHz
+  AXI domain, the `mb_sys_wrapper` instance, and the shared-bus rewiring. The
+  full `test_hw_integration.py` suite now passes on the VHDL bitstream on an Arty
+  A7 (67 passed / 7 UART skips), including the CPU-traffic MicroBlaze tests that
+  previously had no CPU to exercise.
 
 ### Changed
 
