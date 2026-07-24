@@ -634,6 +634,41 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
 
+    def test_wide_sample_core_skips_burst_readback(self):
+        """SAMPLE_W>32 (e.g. the 160-bit AXI monitor) must NOT use the
+        sample-packing burst DR: it treats capture()'s 32-bit *word* count as a
+        *sample* count, building a 5x-oversized single-line TCL that xsdb never
+        finishes — hanging the read. Wide cores take the 32-bit word path."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(return_value=160)  # ADDR_SAMPLE_W (0x000C)
+        t._read_block_burst = MagicMock(return_value=[])  # must not be reached
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3, 4, 5])
+
+        self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
+        t._read_block_burst.assert_not_called()
+        t._read_block_user1.assert_called_once_with(0x0100, 5)
+
+    def test_narrow_sample_core_still_uses_burst_readback(self):
+        """SAMPLE_W<=32 keeps the fast burst path (one 32-bit word per sample)."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(return_value=8)
+        t._read_block_burst = MagicMock(return_value=[9, 9])
+        t._read_block_user1 = MagicMock(return_value=[0])
+
+        self.assertEqual(t.read_block(0x0100, 2), [9, 9])
+        t._read_block_burst.assert_called_once_with(2)
+        t._read_block_user1.assert_not_called()
+
+    def test_burst_sample_gate_defaults_open_when_width_unreadable(self):
+        """If SAMPLE_W can't be read, keep the prior fast-path behavior."""
+        t = XilinxHwServerTransport()
+
+        def boom():
+            raise RuntimeError("not connected")
+
+        t.read_reg_stable = MagicMock(side_effect=lambda addr: boom())
+        self.assertTrue(t._burst_sample_ok())
+
     def test_single_chain_burst_fallback_logs_migration_hint(self):
         """Default single-chain failure should point legacy users at two-chain mode."""
         t = XilinxHwServerTransport()

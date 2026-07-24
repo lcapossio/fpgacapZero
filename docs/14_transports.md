@@ -38,6 +38,16 @@ burst readback). Default Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
+The 256-bit burst DR packs **whole samples** per scan, so it is used
+only when a sample fits one 32-bit word (`SAMPLE_W <= 32`). Wider cores
+— notably the AXI monitor (`SAMPLE_W=160`) — are read back through the
+32-bit-word DATA path, which `capture()` reassembles into wide samples;
+`read_block` gates on the selected core's `SAMPLE_W` (read fresh, so it
+is correct when a session hops between an ELA and a monitor). Feeding a
+wide core's 32-bit *word* count to the burst engine would build a
+multi-hundred-KB single-line TCL scan sequence that xsdb never
+completes — a hard readback hang, not a throughput issue.
+
 For single-chain burst readback, the host verifies stability instead of
 trusting the first transaction.  The invariant is simple: after the ELA
 reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,

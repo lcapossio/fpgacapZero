@@ -913,10 +913,18 @@ class XilinxHwServerTransport(Transport):
         available, uses the wide burst DR for ~10x faster throughput.
         Otherwise falls back to single-sequence pipelined reads on the
         active ELA control chain.
+
+        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, so
+        it is only valid when a sample fits one 32-bit word (``SAMPLE_W <= 32``).
+        For a wider core (e.g. the AXI monitor, ``SAMPLE_W=160``) ``capture()``
+        reassembles each sample from 32-bit words and passes a *word* count here;
+        feeding that word count to the burst engine builds a 5x-oversized
+        single-line TCL scan sequence that xsdb never finishes — hanging the
+        read. Wide cores therefore skip burst and use the 32-bit word path.
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available:
+        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
             try:
                 return self._read_block_burst(words)
             except (ConnectionError, RuntimeError) as exc:
@@ -940,6 +948,20 @@ class XilinxHwServerTransport(Transport):
             # side-effecting start toggle for the burst engine.
             self._has_burst = True
         return self._has_burst
+
+    def _burst_sample_ok(self) -> bool:
+        """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
+
+        The burst engine returns whole samples; ``capture()`` only treats them
+        as such for ``SAMPLE_W <= 32`` (one 32-bit word per sample). Read fresh
+        (not cached) so a session that hops between an 8-bit ELA and a 160-bit
+        AXI monitor always gates on the *currently selected* core.
+        """
+        try:
+            sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
+        except (ConnectionError, RuntimeError):
+            return True  # can't tell — keep prior fast-path behavior
+        return sw < 1 or sw <= 32
 
     @property
     def _burst_samples_per_scan(self) -> int:

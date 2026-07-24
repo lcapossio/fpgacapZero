@@ -196,6 +196,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **hw_server — AXI monitor readback hang (root cause):** capturing a wide core
+  (`SAMPLE_W > 32`, e.g. the 160-bit AXI monitor) over hw_server could hang the
+  server indefinitely — previously mislabeled a "timing-marginal" wide readback.
+  The real cause: the 256-bit burst DR packs whole samples per scan, valid only
+  when a sample is one 32-bit word, but `capture()` passes a *word* count for
+  wide samples (5 words for 160 bits). The burst engine read that as a *sample*
+  count and built a 5x-oversized single-line TCL scan sequence that xsdb never
+  finishes, so `_send`'s `readline()` blocked forever (and the returned data
+  would have been wrong-width regardless). `read_block` now gates the burst
+  fast-path on the selected core's `SAMPLE_W`; wide cores use the 32-bit-word
+  DATA path that `capture()` reassembles. Deterministic and correct; no hang.
 - **Web — OpenOCD orphaned on stop (adapter held):** when `openocd` was launched
   via a Windows `.cmd`/`.bat` launcher shim, the real `openocd.exe` ran as a
   *grandchild*, so `openocd_stop` killed the shim but left `openocd.exe` holding
