@@ -689,6 +689,16 @@ class Analyzer:
     def _read_data_words(self, total_words: int) -> list[int]:
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        # Non-burst slot (e.g. the AXI monitor's manager slot).  For a wide core
+        # (SAMPLE_W > 32) read_block is still fast and safe: it skips the 256-bit
+        # sample-packing burst DR for multi-word samples and uses one pipelined
+        # jtag sequence per chunk, so prefer it over a per-word round trip
+        # (1280 reads of a 160-bit x 256 buffer was ~17s; the pipelined path is
+        # sub-second).  Narrow samples keep the per-word path, which avoids
+        # attempting a burst the slot does not support.
+        sw = self._config.sample_width if self._config else 8
+        if sw > 32:
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 

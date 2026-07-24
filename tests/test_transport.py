@@ -659,6 +659,34 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t._read_block_burst.assert_called_once_with(2)
         t._read_block_user1.assert_not_called()
 
+    def test_burst_read_tcl_targets_active_chain(self):
+        """The pipelined DATA reader must shift IR on the ACTIVE chain, not a
+        hardcoded USER1 -- otherwise a wide core on USER2 (the AXI monitor) reads
+        USER1's data window instead of its own."""
+        t = XilinxHwServerTransport()
+        t._active_chain = 1
+        tcl_c1 = t._burst_read_tcl(0x0100, 0, 4)
+        t._active_chain = 2
+        tcl_c2 = t._burst_read_tcl(0x0100, 0, 4)
+        self.assertNotEqual(tcl_c1, tcl_c2)  # IR shift follows the active chain
+
+    def test_read_block_user1_uses_pipelined_path_for_data(self):
+        """DATA-window reads go through one pipelined sequence per chunk (not a
+        per-word round trip), so a wide readback is a handful of _send calls."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._parse_block_bits = MagicMock(return_value=[0] * 8)  # isolate call shape
+        t.read_reg = MagicMock(return_value=0)  # the trailing pipeline flush
+        t._read_block_user1(0x0100, 8)
+        # 8 words fit one _BLOCK_CHUNK -> a single pipelined _send, not 8+.
+        self.assertEqual(len(sent), 1)
+
     def test_burst_sample_gate_defaults_open_when_width_unreadable(self):
         """If SAMPLE_W can't be read, keep the prior fast-path behavior."""
         t = XilinxHwServerTransport()

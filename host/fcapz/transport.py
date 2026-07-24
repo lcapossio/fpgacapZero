@@ -532,7 +532,6 @@ class XilinxHwServerTransport(Transport):
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
     RAW_DR_IDLE_CYCLES = 8
-    USER1_DATA_SETTLE_READS = 5
     USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
 
@@ -1153,23 +1152,19 @@ class XilinxHwServerTransport(Transport):
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
-        """Fallback DATA-window reads via USER1 49-bit DR.
+        """Non-burst block read via the 49-bit DR on the active chain.
 
-        DATA/timestamp windows are read-only after capture completion.  Read
-        each word repeatedly and return the final settled value; this avoids
-        accepting a stale first response from the 49-bit register pipeline.
+        DATA/timestamp windows are read-only after capture completion.  Uses one
+        pipelined ``jtag sequence`` per ``_BLOCK_CHUNK`` words -- priming
+        (``USER1_PIPE_PRIME_READS``) discards the stale register-pipeline word
+        and the RTL jtag_rdata fill latency -- rather than a per-word round trip.
+        This is the fallback for narrow ELAs when USER2 burst is unavailable and
+        the primary readback for wide cores (SAMPLE_W > 32, e.g. the AXI monitor,
+        whose 5-word samples do not fit the sample-packing burst DR).  Reading a
+        160-bit x depth buffer per-word cost tens of seconds of xsdb round trips;
+        the pipelined path is ~25x faster and returns identical data (validated
+        on Arty against the per-word path).
         """
-        if addr >= 0x0100:
-            results: list[int] = []
-            for i in range(words):
-                value = 0
-                word_addr = addr + i * 4
-                for _ in range(self.USER1_DATA_SETTLE_READS):
-                    value = self.read_reg(word_addr)
-                results.append(value)
-            self.read_reg(0x0000)
-            return results
-
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)
@@ -1199,7 +1194,10 @@ class XilinxHwServerTransport(Transport):
         """
         n = self._user_dr_bits(self.DR_BITS)
         idle = self.READ_IDLE_CYCLES
-        ir_cmd = self._irshift_tcl("_q", chain=1)
+        # Target the ACTIVE chain, not a hardcoded USER1: the DATA window of a
+        # core on another chain (e.g. the AXI monitor on USER2) must be read on
+        # that chain, or this returns USER1's data instead.
+        ir_cmd = self._irshift_tcl("_q", chain=self._active_chain)
         frames: list[str] = []
         for i in range(count):
             frames.append(

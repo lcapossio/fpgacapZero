@@ -196,6 +196,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **hw_server — wide-core readback was ~25x too slow (AXI monitor):** reading a
+  160-bit x 256 capture back took ~13-17 s — over the web UI's 14 s
+  "Trigger Immediate" client timeout, so full-depth monitor captures failed
+  intermittently in the browser. Two per-word paths were to blame: `read_block`'s
+  DATA-window fallback did one xsdb round-trip per 32-bit word, and
+  `_read_block_user1` hardcoded USER1 (so a monitor on USER2 read the wrong
+  chain). Both now use one pipelined `jtag sequence` per chunk on the active
+  chain, and `Analyzer._read_data_words` routes wide cores through `read_block`
+  instead of its own per-word loop. Measured on Arty: full-depth monitor capture
+  **13 s -> 0.52 s** (~25x), identical data. `USER1_DATA_SETTLE_READS` removed.
 - **AXI monitor — immediate/always-true trigger never fired (root cause):** on a
   `WIDE_TRIG` core (the AXI monitor, `SAMPLE_W=160`), `Analyzer.configure` only
   programmed the wide-trigger window's upper comparator words when the trigger
