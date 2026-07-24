@@ -292,6 +292,67 @@ def test_configure_wide_without_support_raises():
         )
 
 
+def test_validate_probes_rejects_probe_exceeding_sample_width():
+    """A probe whose field runs past the sample width must be refused.  This is
+    the "probe 'awaddr' exceeds sample width 8" failure: an AXI-monitor probe map
+    (awaddr at bit 8, width 32) leaked onto a plain 8-bit ELA on the next board.
+    The web session now resets its ELA config on disconnect; this pins that the
+    backend still rejects the bad map even if one gets through."""
+    from fcapz.analyzer import ProbeSpec
+
+    with pytest.raises(ValueError, match="awaddr"):
+        Analyzer._validate_probes([ProbeSpec("awaddr", 32, 8)], 8)
+
+
+def test_read_data_words_wide_core_uses_read_block():
+    """A wide core (SAMPLE_W > 32) on a non-burst manager slot (the AXI monitor)
+    must read its DATA window with a single pipelined read_block, not a per-word
+    read_reg_stable loop.  The per-word loop was the ~25x slowdown that pushed
+    full-depth monitor captures past the web UI readback timeout."""
+    from unittest.mock import MagicMock
+    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+    t = RecordingTransport(_wide_regs())
+    t.read_block = MagicMock(return_value=[0] * 8)
+    t.read_reg_stable = MagicMock(return_value=0)
+    a = Analyzer(t, chain=2)
+    a._config = CaptureConfig(
+        pretrigger=0, posttrigger=7,
+        trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+        sample_width=160, depth=1024,
+    )
+    a._selected_slot_has_burst = lambda: False  # non-burst manager slot
+
+    a._read_data_words(8)
+
+    t.read_block.assert_called_once_with(0x0100, 8)
+    t.read_reg_stable.assert_not_called()  # no per-word fallback
+
+
+def test_read_data_words_narrow_core_keeps_per_word_on_nonburst_slot():
+    """A narrow core (SAMPLE_W <= 32) on a non-burst slot keeps the per-word path
+    -- it must NOT attempt read_block, which would try a burst the slot does not
+    support.  Guards against the wide-routing change regressing narrow cores."""
+    from unittest.mock import MagicMock
+    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+    t = RecordingTransport({0x0C: 8, 0x10: 64})
+    t.read_block = MagicMock(return_value=[0] * 4)
+    t.read_reg_stable = MagicMock(return_value=0)
+    a = Analyzer(t, chain=1)
+    a._config = CaptureConfig(
+        pretrigger=0, posttrigger=3,
+        trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+        sample_width=8, depth=64,
+    )
+    a._selected_slot_has_burst = lambda: False
+
+    a._read_data_words(4)
+
+    t.read_block.assert_not_called()
+    assert t.read_reg_stable.call_count == 4  # per-word
+
+
 # ── single-source layout (fcapz.axi_layout) ──────────────────────────────
 
 

@@ -156,3 +156,29 @@ def test_stop_terminates_what_we_started(tmp_path, monkeypatch):
     launcher.start(port=6666, wait_sec=2.0)
     r = launcher.stop(port=6666)
     assert r["stopped"] is True and proc.terminated is True
+
+
+def test_stop_kills_process_tree_on_windows(monkeypatch):
+    """On Windows a .cmd/.bat launcher shim runs the real openocd.exe as a child;
+    terminating just the shim orphans it and it keeps holding the FTDI adapter
+    (LIBUSB_ERROR_ACCESS on the next connect). _terminate must taskkill /T the
+    whole tree by PID so the adapter is released.  Regression for the "no
+    compatible boards found" failure after a stop-then-reconnect."""
+    monkeypatch.setattr("fcapz.openocd_launcher.os.name", "nt")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **k: calls.append(cmd)
+    )
+    proc = _FakeProc(pid=9876)
+    OpenOcdLauncher._terminate(proc)
+    assert ["taskkill", "/F", "/T", "/PID", "9876"] in calls
+    assert proc.terminated is True  # plain terminate still runs after the tree kill
+
+
+def test_stop_does_not_taskkill_on_posix(monkeypatch):
+    """On POSIX there is no shim grandchild — taskkill must not be invoked."""
+    monkeypatch.setattr("fcapz.openocd_launcher.os.name", "posix")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: calls.append(cmd))
+    OpenOcdLauncher._terminate(_FakeProc(pid=9876))
+    assert calls == []

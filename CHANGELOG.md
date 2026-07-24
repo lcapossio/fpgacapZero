@@ -196,6 +196,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Web — AXI-monitor probe map leaked onto the next board's ELA:** the browser
+  session kept its ELA config (probes/trigger) across disconnect, so an
+  AXI-monitor probe map (e.g. `awaddr` at bit 8, width 32) carried over to the
+  next board's plain 8-bit ELA and every capture failed with
+  `probe 'awaddr' exceeds sample width 8`. Disconnect now resets the ELA config
+  to its defaults — probes belong to the board you were on. A backend contract
+  test pins that `Analyzer._validate_probes` still rejects an over-wide probe.
 - **hw_server — wide-core readback was ~25x too slow (AXI monitor):** reading a
   160-bit x 256 capture back took ~13-17 s — over the web UI's 14 s
   "Trigger Immediate" client timeout, so full-depth monitor captures failed

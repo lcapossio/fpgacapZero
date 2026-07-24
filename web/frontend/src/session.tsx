@@ -134,6 +134,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setCaptures({});
         setAxiMonState(null);
         setEjtagAxiState(null);
+        // Reset the ELA config too: probes/trigger belong to the board we were
+        // on. Without this, an AXI-monitor probe map (e.g. awaddr at bit 8,
+        // width 32) carried over to the next board's plain 8-bit ELA and every
+        // capture failed with "probe 'awaddr' exceeds sample width 8".
+        setElaState(DEFAULT_ELA);
       },
       pushCapture: (next) => {
         const chain = conn?.chain;
