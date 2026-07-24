@@ -54,15 +54,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   connects straight through, several show the existing picker. Two configs that
   share a VID/PID disambiguate by probing (the first claims the adapter). New
   `fcapz.board_autodiscover` module with unit tests.
-- **Web — simpler "Start OpenOCD" setup:** enabling the UI's server-managed
-  OpenOCD no longer needs two fiddly flags. The `openocd` binary is now
-  auto-detected on `PATH` (still overridable via `--openocd`/`$FCAPZ_OPENOCD`),
-  and a new `--openocd-cfg-dir` (or `$FCAPZ_OPENOCD_CFG_DIR`) auto-discovers
-  every `*.cfg` in a folder — so `fcapz-web --openocd-cfg-dir examples/arty_a7`
-  is enough instead of listing each config and the binary path. The security
-  model is unchanged: only discovered/listed configs can be started, loopback
-  only. Using the frontend against an already-running OpenOCD/hw_server still
-  needs none of these flags.
+- **Web — zero-config "Start OpenOCD":** enabling the UI's server-managed
+  OpenOCD no longer needs any flags in the common case. The `openocd` binary is
+  found on `PATH` **and** in known off-`PATH` install locations (xPack via `xpm`
+  or a manual extract, chocolatey — what Digilent/BRS boards typically use),
+  preferring a real `.exe` over a `.cmd`/`.bat` launcher shim; still overridable
+  via `--openocd`/`$FCAPZ_OPENOCD`. And when no `--openocd-cfg`/`--openocd-cfg-dir`
+  is given, the repo's bundled `examples/*/` board configs are offered by
+  default — so `fcapz-web` from a source checkout can start OpenOCD for a shipped
+  board with no flags at all. `--openocd-cfg-dir` (or `$FCAPZ_OPENOCD_CFG_DIR`)
+  still registers every `*.cfg` in a folder. The security model is unchanged:
+  only discovered/listed configs can be started, loopback only. Using the
+  frontend against an already-running OpenOCD/hw_server needs none of this.
 - **ELA — full-width trigger comparator (`WIDE_TRIG`):** the trigger comparators
   were always `SAMPLE_W`-wide in silicon, but the register path only let the host
   set the low 32 bits of comparator A's value/mask (upper bits forced to 0), so
@@ -193,6 +196,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Web — OpenOCD orphaned on stop (adapter held):** when `openocd` was launched
+  via a Windows `.cmd`/`.bat` launcher shim, the real `openocd.exe` ran as a
+  *grandchild*, so `openocd_stop` killed the shim but left `openocd.exe` holding
+  the JTAG adapter — the next config (or connect) then failed with
+  `LIBUSB_ERROR_ACCESS`. Teardown now kills the whole process tree
+  (`taskkill /T` on Windows) and binary detection prefers a real `.exe` over a
+  shim, so the adapter is reliably released between probes. This is what made
+  auto-discovery of a second board on the same adapter fail.
 - **Host / hw_server:** `connect()` now waits for a JTAG target matching
   `fpga_name` to appear before selecting it (bounded by `target_wait_timeout`,
   default 3s), instead of firing `jtag targets -set` into a transiently empty

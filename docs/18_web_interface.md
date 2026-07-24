@@ -47,20 +47,24 @@ requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 | `--port` | `7373` | HTTP port. |
 | `--token` | `$FCAPZ_WEB_TOKEN` | Bearer token required on the API (unset = open). |
 | `--static-dir` | bundled | Directory of built frontend assets to serve. |
-| `--openocd` | `$FCAPZ_OPENOCD`, else `openocd` on `PATH` | Path to the `openocd` executable, to let the UI start OpenOCD. Auto-detected from `PATH` if unset. |
+| `--openocd` | `$FCAPZ_OPENOCD`, else `PATH` / known installs | Path to the `openocd` executable, to let the UI start OpenOCD. Auto-detected from `PATH` and common off-`PATH` installs (xPack, chocolatey) if unset, preferring a real `.exe` over a launcher shim. |
 | `--openocd-cfg` | — | An OpenOCD config the UI may launch (repeatable; registered by filename stem). |
-| `--openocd-cfg-dir` | `$FCAPZ_OPENOCD_CFG_DIR` | Auto-discover configs: register every `*.cfg` in this directory (repeatable; non-recursive). |
+| `--openocd-cfg-dir` | `$FCAPZ_OPENOCD_CFG_DIR` | Auto-discover configs: register every `*.cfg` in this directory (repeatable; non-recursive). When neither this nor `--openocd-cfg` is given, the bundled `examples/*/` board configs are offered by default. |
 | `--cors-origin` | — | Allow cross-origin API access from this origin (repeatable). Off by default. |
 
 To enable the UI's "Start OpenOCD" convenience you need an `openocd` binary
-**and** at least one config. Both are now low-effort: the binary is found on
-`PATH` automatically, and `--openocd-cfg-dir` discovers configs from a folder so
-you point at, say, `examples/arty_a7` instead of listing each `.cfg`. So with
-`openocd` on `PATH`, `fcapz-web --openocd-cfg-dir examples/arty_a7` is enough —
-**Connect then brings OpenOCD up automatically** when no board is reachable, so
-the user never manages the JTAG server (see below). Only the discovered/listed
-configs can be launched, and only from a **localhost** browser — a remote client
-cannot spawn processes, even with a valid token.
+**and** at least one config — and in the common case you supply **neither** flag.
+The binary is found automatically on `PATH` and in known off-`PATH` installs
+(xPack via `xpm` or a manual extract, chocolatey — preferring a real `.exe` over
+a `.cmd`/`.bat` shim so the adapter is released cleanly on stop). Configs, when
+you pass no `--openocd-cfg`/`--openocd-cfg-dir`, default to the repo's bundled
+`examples/*/` board configs. So from a source checkout, plain `fcapz-web` is
+enough: **Connect then discovers and brings OpenOCD up automatically** when no
+board is reachable, so the user never manages the JTAG server (see below). You
+can still point `--openocd-cfg-dir` at a folder of your own configs, or
+`--openocd` at a specific binary. Only the discovered/listed configs can be
+launched, and only from a **localhost** browser — a remote client cannot spawn
+processes, even with a valid token.
 
 None of this is required just to *use* the web frontend: without these flags you
 simply connect to an already-running OpenOCD or hw_server via the backend/host/
