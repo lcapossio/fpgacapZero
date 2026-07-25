@@ -47,13 +47,31 @@ export const DEFAULT_ELA: ElaConfig = {
   posttrigger: "16",
   triggerMode: "value_match",
   triggerValue: "0x00",
-  triggerMask: "0xFF",
+  // mask 0 = match anything: a freshly connected core triggers on the next
+  // sample (Arm behaves like "capture now") until a real trigger is set in the
+  // Trigger tab. mask 0xFF would instead wait for the low byte to read 0.
+  triggerMask: "0x00",
   extTriggerMode: "0",
   useSequencer: false,
   sequenceJson: "",
   segmented: false,
   probesText: "",
 };
+
+/** Default ELA config for a core of the given buffer geometry: keep 8
+ *  pre-trigger samples and let the rest of one capture window be post-trigger,
+ *  so a capture fills the usable buffer instead of the tiny fixed 25-sample
+ *  default. A single capture must fit in one segment, so the usable window is
+ *  `depth / num_segments` (equals depth on a non-segmented core). Falls back to
+ *  DEFAULT_ELA when the geometry is unknown. */
+export function defaultElaForDepth(depth?: number, segments?: number): ElaConfig {
+  const d = Number(depth) || 0;
+  const seg = Math.max(1, Number(segments) || 1);
+  const usable = Math.floor(d / seg);
+  const pre = 8;
+  const post = usable > pre + 1 ? usable - pre - 1 : Number(DEFAULT_ELA.posttrigger);
+  return { ...DEFAULT_ELA, pretrigger: String(pre), posttrigger: String(post) };
+}
 
 interface Session {
   identity: Identity | null;

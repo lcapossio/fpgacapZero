@@ -7,6 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Web — sensible capture defaults on connect.** A freshly connected core now
+  defaults to filling one capture window — **8 pre-trigger samples, the rest
+  post-trigger** — sized to the usable per-segment depth (`depth / num_segments`)
+  instead of a fixed 25-sample window that under-filled deep buffers (and
+  overflowed segmented cores with "pre+post+1 exceeds segment depth"). The
+  default trigger is now **match-anything** (`mask=0`), so Arm captures on the
+  next sample until a real trigger is set, rather than waiting for the low byte
+  to read 0.
+- **Web — connection UI.** With multiple discovered targets the connect button
+  reads just **Connect** (the picker already names the target), and the transient
+  scan status drops the "(starting XSDB can take a while)" aside.
+
 ### Security
 
 - **Web — OpenOCD tap injection:** the OpenOCD tap name is now validated

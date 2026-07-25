@@ -3,7 +3,7 @@ import { RpcCancelled, getToken, rpc, setToken } from "../api";
 import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
-import { DEFAULT_ELA, useSession } from "../session";
+import { defaultElaForDepth, useSession } from "../session";
 import type { ElaConfig } from "../session";
 
 const BACKENDS = ["openocd", "hw_server"];
@@ -208,7 +208,10 @@ export function ConnectionPanel({
     };
     const r = await rpc("probe", {}, t, sig());
     setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
-    onConnected(params, r.probe as Identity);
+    const id = r.probe as Identity;
+    onConnected(params, id);
+    // Fill the whole capture buffer by default (8 pre-trigger, the rest post).
+    setEla(defaultElaForDepth(id.depth, id.num_segments));
     loadCores();
     detectAxiMon(params.chain);
     detectEjtagAxi();
@@ -237,7 +240,9 @@ export function ConnectionPanel({
       tap: b.tap,
       ir_table: b.ir_table,
     });
-    onConnected(params, r.probe as Identity);
+    const id = r.probe as Identity;
+    onConnected(params, id);
+    setEla(defaultElaForDepth(id.depth, id.num_segments));
     loadCores();
     detectAxiMon(params.chain);
     detectEjtagAxi();
@@ -264,9 +269,10 @@ export function ConnectionPanel({
       // so ELA <-> AXI monitor switching is one short round-trip, not two
       // connect-weight ones plus a teardown.
       const r = await rpc("rebind", { chain: newChain }, t);
-      onConnected(params, r.probe as Identity);
+      const id = r.probe as Identity;
+      onConnected(params, id);
       const saved = elaByChain.current[newChain];
-      setEla(saved ?? DEFAULT_ELA);
+      setEla(saved ?? defaultElaForDepth(id.depth, id.num_segments));
       loadCores();
       await detectAxiMon(newChain, !saved);
     } catch (e) {
@@ -336,7 +342,7 @@ export function ConnectionPanel({
       // hw_server: XSDB starts a local hw_server as needed, so just scan + connect.
       // XSDB is slow to start, so both the server-side (timeout) and client-side
       // budgets are much larger than the OpenOCD path's.
-      setStatus("scanning for targets… (starting XSDB can take a while)");
+      setStatus("scanning for targets…");
       const r = await rpc(
         "scan_targets",
         { backend, host, port: Number(port), timeout: HW_SCAN_TIMEOUT },
@@ -562,9 +568,7 @@ export function ConnectionPanel({
               onClick={pickerMode === "boards" ? connectPickedBoard : connectPickedTarget}
               disabled={busy}
             >
-              {busy
-                ? "Working…"
-                : `Connect to ${pickerMode === "boards" ? boards[pickedIdx]?.tap : picked}`}
+              {busy ? "Working…" : "Connect"}
             </button>
             <button className="secondary" onClick={resetScan} disabled={busy}>
               Dismiss
