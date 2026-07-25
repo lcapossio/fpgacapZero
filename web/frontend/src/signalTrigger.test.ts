@@ -12,6 +12,7 @@ import {
   parseTermValue,
   termWidth,
   triggerable,
+  triggerBits,
 } from "./signalTrigger";
 
 const VALID: ProbeSpec = { name: "valid", width: 1, lsb: 3 };
@@ -216,6 +217,42 @@ describe("composeTrigger", () => {
     expect(() =>
       composeTrigger([{ probes: [HIGH_FIELD], op: "==", radix: "H", value: "0" }], "and", SIMPLE_BUILD),
     ).toThrow(/low 32 bits/);
+  });
+
+  // --- WIDE_TRIG cores (e.g. the 160-bit AXI monitor) ------------------------
+  const AWADDR: ProbeSpec = { name: "awaddr", width: 32, lsb: 8 }; // above bit 32
+  const WIDE_BUILD = ident({
+    sample_width: 160,
+    has_wide_trigger: true,
+    trig_stages: 4,
+    has_dual_compare: true,
+    compare_modes: [0, 1, 6, 7, 8],
+  });
+
+  it("allows a value-match trigger above bit 32 on a WIDE_TRIG core", () => {
+    // The comparator reach follows the core: 160 bits here, so awaddr@8 is fair
+    // game and the value/mask land at its real bit position (<<8).
+    expect(triggerBits(WIDE_BUILD)).toBe(160);
+    expect(triggerable(AWADDR, triggerBits(WIDE_BUILD))).toBe(true);
+    expect(composeTrigger([g([AWADDR], "40000000")], "and", WIDE_BUILD)).toMatchObject({
+      triggerMode: "value_match",
+      triggerValue: "0x4000000000", // 0x40000000 << 8
+      triggerMask: "0xFFFFFFFF00", // 0xFFFFFFFF << 8
+      useSequencer: false,
+    });
+  });
+
+  it("still rejects wide fields on the sequencer/second-comparator path", () => {
+    // != needs the sequencer, which zero-extends the value/mask from 32 bits —
+    // reject rather than silently matching only the low word.
+    expect(() =>
+      composeTrigger([{ probes: [AWADDR], op: "!=", radix: "H", value: "40000000" }], "and", WIDE_BUILD),
+    ).toThrow(/low 32 bits/);
+  });
+
+  it("narrow cores keep the 32-bit reach even if sample_width is larger", () => {
+    // has_wide_trigger absent -> reach stays 32 regardless of sample_width.
+    expect(triggerBits(ident({ sample_width: 160 }))).toBe(32);
   });
 
   it("describes the table readably", () => {

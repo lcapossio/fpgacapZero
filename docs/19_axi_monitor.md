@@ -207,9 +207,14 @@ uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).
 
 - **AXI4-Lite only** so far. AXI4 (full) — IDs, bursts, `*LAST` — and AXI4-Stream
   are planned; the flatten and probe map are structured to extend.
-- **Trigger reach.** One 32-bit window (`awaddr`, *or* the events byte) is
-  directly triggerable per build. Runtime address-range/ID match filters and a
-  protocol checker are the next phases.
+- **Trigger reach.** On a `WIDE_TRIG` core the **Trigger** tab now lists **every**
+  captured field (`awaddr`, `wdata`, `bresp`, all channels) as a triggerable
+  signal, not just the low-32 window — a single value-match (`==`) or any-change
+  row reaches comparator A's full sample width. The `!=`/second-comparator and
+  sequencer paths still zero-extend from 32 bits, so those combinations on fields
+  above bit 32 are refused with a clear message rather than silently matching the
+  low word. Runtime address-range/ID match filters and a protocol checker are the
+  next phases.
 - **Bundled probe maps** ship for `ADDR_W=DATA_W=32` only; other geometries need
   a matching `.prob` (the layout is in [What gets captured](#what-gets-captured)).
 

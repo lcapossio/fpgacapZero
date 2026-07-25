@@ -119,8 +119,12 @@ connected. The panels:
   ▲/▼ arrows set which member is the MSB, and **Ungroup** splits it back. A
   group takes `==`/`!=` with **X** don't-cares across the whole field and
   compiles to one comparator; the hardware compares the packed sample word, so
-  grouped probes need not be adjacent, but every member must sit in the low 32
-  bits. A **Trigger condition** dropdown picks **Global AND / Global OR**,
+  grouped probes need not be adjacent. Every member must sit in the low 32 bits
+  — **except on a `WIDE_TRIG` core** (e.g. the 160-bit AXI monitor), where a
+  single value-match (`==`) or any-change row reaches the **full sample width**,
+  so every field is listed and triggerable; `!=`/second-comparator combinations
+  on fields above bit 32 still zero-extend and are refused with a clear message.
+  A **Trigger condition** dropdown picks **Global AND / Global OR**,
   exactly like ILA. The table compiles onto the hardware (all `==` rows
   merge into one comparator pattern under AND; a second pattern, a `!=`, or
   an edge uses the sequencer stage's dual compare — `TRIG_STAGES ≥ 2`), and

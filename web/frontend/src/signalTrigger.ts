@@ -65,9 +65,17 @@ export function defaultValue(width: number, radix: TriggerRadix): string {
   return "X".repeat(Math.ceil(width / 4));
 }
 
-// The trigger comparators are driven through 32-bit registers, so only the
-// low 32 probe bits are reachable (fields above that can't be triggered on).
+// The base ELA trigger comparator is driven through a 32-bit register, so only
+// the low 32 probe bits are reachable. WIDE_TRIG cores (e.g. the 160-bit AXI
+// monitor) add a wide-comparator window that reaches the full sample width —
+// see triggerBits().
 export const COMPARATOR_BITS = 32;
+
+/** How many low bits of the sample the trigger comparator can reach for this
+ *  core: the full sample width on a WIDE_TRIG core, else the base 32. */
+export function triggerBits(id: Identity | null): number {
+  return id?.has_wide_trigger ? (id.sample_width ?? COMPARATOR_BITS) : COMPARATOR_BITS;
+}
 
 const CMP_EQ = 0;
 const CMP_NEQ = 1;
@@ -94,9 +102,10 @@ function fieldMask(p: ProbeSpec): bigint {
   return ((1n << BigInt(p.width)) - 1n) << BigInt(p.lsb);
 }
 
-/** Can this probe be used in the trigger table at all? */
-export function triggerable(p: ProbeSpec): boolean {
-  return p.width > 0 && p.lsb + p.width <= COMPARATOR_BITS;
+/** Can this probe be used in the trigger table at all? `maxBits` is the core's
+ *  trigger reach (see triggerBits); defaults to the base 32-bit comparator. */
+export function triggerable(p: ProbeSpec, maxBits: number = COMPARATOR_BITS): boolean {
+  return p.width > 0 && p.lsb + p.width <= maxBits;
 }
 
 /** Do directional edges (R/F) exist in this bitstream? */
@@ -291,12 +300,12 @@ export function describeElaTrigger(ela: ElaConfig, _id: Identity | null): string
   return describeMasked(value, mask, probes, edge) + ext;
 }
 
-function slotOf(t: TriggerTerm): Slot {
+function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot {
   for (const probe of t.probes) {
-    if (!triggerable(probe)) {
+    if (!triggerable(probe, maxBits)) {
       throw new Error(
-        `${probe.name} lies above bit ${COMPARATOR_BITS - 1} — the trigger ` +
-          `comparator reaches the low ${COMPARATOR_BITS} bits only`,
+        `${probe.name} lies above bit ${maxBits - 1} — the trigger ` +
+          `comparator reaches the low ${maxBits} bits only`,
       );
     }
   }
@@ -348,7 +357,8 @@ export function composeTrigger(
   id: Identity | null,
 ): Partial<ElaConfig> {
   if (terms.length === 0) throw new Error("no trigger rows");
-  const all = terms.map(slotOf);
+  const maxBits = triggerBits(id);
+  const all = terms.map((t) => slotOf(t, maxBits));
 
   let slots: Slot[];
   if (combine === "and") {
@@ -398,13 +408,29 @@ export function composeTrigger(
   }
 
   if (slots.length === 1 && (slots[0].mode === CMP_EQ || slots[0].mode === CMP_CHANGED)) {
-    // Fits the simple trigger — works in every build.
+    // Fits the simple trigger — works in every build. On a WIDE_TRIG core this
+    // is the one path the wide-comparator window backs (comparator A, full
+    // sample width), so it's where triggering above bit 32 actually lands.
     return {
       triggerMode: slots[0].mode === CMP_EQ ? "value_match" : "edge_detect",
       triggerValue: hex(slots[0].value),
       triggerMask: hex(slots[0].mask),
       useSequencer: false,
     };
+  }
+
+  // Everything below runs on the sequencer / second comparator, which
+  // zero-extend the value/mask from 32 bits — the wide-comparator window backs
+  // only comparator A above. So a trigger that needs those paths can't reach
+  // bits above 32; reject it clearly instead of silently matching the low word.
+  for (const s of slots) {
+    if (s.value >> BigInt(COMPARATOR_BITS) || s.mask >> BigInt(COMPARATOR_BITS)) {
+      throw new Error(
+        `triggering above bit ${COMPARATOR_BITS - 1} needs a single value-match ` +
+          `(==) or any-change row — the !=/second-comparator path reaches only the ` +
+          `low ${COMPARATOR_BITS} bits. Simplify the trigger to use those signals.`,
+      );
+    }
   }
 
   // Anything else runs on a single sequencer stage.

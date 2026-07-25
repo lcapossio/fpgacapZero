@@ -35,6 +35,10 @@ export interface Identity {
   has_dual_compare?: boolean;
   /** Comparator modes the bitstream supports (0=EQ .. 8=CHANGED). */
   compare_modes?: number[];
+  /** WIDE_TRIG core: triggers reach the full sample width, not just 32 bits
+   *  (e.g. the 160-bit AXI monitor — trigger on any AXI channel, not just the
+   *  low events word). */
+  has_wide_trigger?: boolean;
 }
 
 /** One fcapz debug core present on the connected target (from list_cores). */

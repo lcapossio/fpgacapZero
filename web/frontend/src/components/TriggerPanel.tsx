@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { parseProbesText } from "../api";
 import type { Identity, ProbeSpec } from "../api";
 import {
-  COMPARATOR_BITS,
   composeTrigger,
   defaultTerm,
   describeTerms,
@@ -11,14 +10,17 @@ import {
   termName,
   termWidth,
   triggerable,
+  triggerBits,
 } from "../signalTrigger";
 import type { Combine, TriggerOp, TriggerRadix, TriggerTerm } from "../signalTrigger";
 import { useSession } from "../session";
 
 /** Per-bit fallback signals so triggering works with zero setup — the probe
- *  word simply shows up as bit0..bitN until real names are defined. */
+ *  word simply shows up as bit0..bitN until real names are defined. Reaches the
+ *  core's full trigger width (32 bits, or the whole sample on a WIDE_TRIG core
+ *  like the AXI monitor). */
 function defaultBitProbes(identity: Identity | null): ProbeSpec[] {
-  const width = Math.min(identity?.sample_width ?? 0, COMPARATOR_BITS);
+  const width = Math.min(identity?.sample_width ?? 0, triggerBits(identity));
   return Array.from({ length: width }, (_, i) => ({ name: `bit${i}`, width: 1, lsb: i }));
 }
 
@@ -57,7 +59,9 @@ export function TriggerPanel() {
       return [];
     }
   }, [ela.probesText]);
-  const signals = (probes.length ? probes : defaultBitProbes(identity)).filter(triggerable);
+  const signals = (probes.length ? probes : defaultBitProbes(identity)).filter((p) =>
+    triggerable(p, triggerBits(identity)),
+  );
   const edges = hasDirectionalEdges(identity);
   const available = signals.filter(
     (p) => !terms.some((t) => t.probes.some((mp) => mp.name === p.name)),
@@ -66,6 +70,9 @@ export function TriggerPanel() {
   function addRow(name: string) {
     const p = signals.find((s) => s.name === name);
     if (!p) return;
+    // Auto-tick the newly added row for grouping — the new term lands at the
+    // current end, so its index is the pre-add length.
+    setSelected((sel) => new Set(sel).add(terms.length));
     setTerms((ts) => [...ts, defaultTerm(p)]);
   }
 

@@ -20,6 +20,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — full-width triggering on WIDE_TRIG cores (AXI monitor):** the Trigger
+  tab previously listed only signals in the low 32 bits, so on the 160-bit AXI
+  monitor you could trigger on the events byte or `awaddr` but not `wdata`,
+  `bresp`, or any channel above bit 32 — even though the hardware comparator is
+  full-width. The backend now advertises the capability (`has_wide_trigger` from
+  `COMPARE_CAPS` bit 18) and the Trigger tab lists **every** captured field as
+  triggerable on such a core; a single value-match (`==`) or any-change row
+  reaches the full sample width. The `!=`/second-comparator and sequencer paths
+  still zero-extend from 32 bits, so those combinations on fields above bit 32
+  are refused with a clear message instead of silently matching the low word.
+
 - **Arty A7 example — MicroBlaze on the shared AXI bus:** the reference design
   now integrates a MicroBlaze soft CPU whose `M_AXI_DP` master and the EJTAG-AXI
   bridge master are merged by an in-BD SmartConnect onto one AXI4 bus driving the

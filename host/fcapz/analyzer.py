@@ -1073,6 +1073,10 @@ class Analyzer:
             "compare_caps": compare_caps,
             "compare_modes": [m for m in range(9) if _compare_mode_available(compare_caps, m)],
             "has_dual_compare": _dual_compare_available(compare_caps),
+            # WIDE_TRIG cores (e.g. the 160-bit AXI monitor) can trigger across
+            # their full sample width, not just comparator A's low 32 bits, via
+            # the wide-comparator window that configure() programs.
+            "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
         }
 
     def probe_optional(self) -> Optional[Dict]:
