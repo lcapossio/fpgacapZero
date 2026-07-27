@@ -27,10 +27,11 @@ function defaultBitProbes(identity: Identity | null): ProbeSpec[] {
 function valueHint(t: TriggerTerm, edges: boolean): string {
   const width = termWidth(t);
   const singleBit = t.probes.length === 1 && t.probes[0].width === 1;
+  const e = edges ? ", R (rise), F (fall), B (both)" : "";
   if (t.radix === "B")
-    return singleBit
-      ? `0, 1, X${edges ? ", R (rise), F (fall), B (both)" : ""}`
-      : `${width} binary digits; X = don't care`;
+    // Per-bit 0/1/X and, on edge-capable builds, R/F/B mixed freely (Vivado ILA
+    // style); MSB first. The hardware allows one edge alongside the levels.
+    return singleBit ? `0, 1, X${e}` : `${width} bits, MSB first: 0, 1, X${e} per bit`;
   if (t.radix === "H") return "hex digits; X = don't care nibble";
   return "unsigned decimal";
 }

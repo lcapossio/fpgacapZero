@@ -3,9 +3,10 @@
 // Trigger Setup). A row targets one probe, or a *group* of probes concatenated
 // MSB-first into one wider field so a single value spans several signals (e.g.
 // {addr_hi, addr_lo} == 0x1234). Values support per-bit don't-cares (X) in
-// binary and hex radix, and edge tokens (R/F/B) for single-bit rows in binary
-// radix. Everything compiles down to the shared ELA trigger config; bit
-// positions come from the probe definitions — nothing here hardcodes a layout.
+// binary and hex radix, and — in binary radix — per-bit edge tokens (R rise,
+// F fall, B both) mixed freely with 0/1/X, Vivado ILA style. Everything
+// compiles down to the shared ELA trigger config; bit positions come from the
+// probe definitions — nothing here hardcodes a layout.
 //
 // Hardware mapping (see docs/05). The ELA offers:
 // - one simple comparator: value_match ((probe&mask)==(value&mask)) or
@@ -14,14 +15,18 @@
 //   FALLING/CHANGED) and an AND/OR combine — TRIG_STAGES >= 2 builds,
 //   comparator B additionally needs DUAL_COMPARE.
 //
-// So a trigger composes into at most two comparator "slots":
-// - AND: all `==` terms merge into one EQ slot (X'd bits just drop out of
-//   the mask); at most one edge (R/F/B) can join via the second slot, and
-//   any `!=` needs a slot of its own. Edges on several probes can't be
-//   required in the same cycle — the hardware has no per-bit edge AND.
-// - OR: every `==`/`!=` term needs its own slot (merging masks would AND
-//   them); all B (either-edge) terms merge into one CHANGED slot; R/F take
-//   a slot each.
+// A row's bits are an implicit AND of their conditions: its level (0/1) bits
+// form one EQ compare, and each edge bit (R/F/B) is its own edge comparator (a
+// single-bit mask — the faithful per-bit form, since the hardware's RISING/
+// FALLING act on the whole masked field). So a trigger composes into at most
+// two comparator "slots":
+// - AND: all `==`/level slots merge into one EQ slot (X'd bits drop out of the
+//   mask); at most one edge can join via the second slot, and any `!=` needs a
+//   slot of its own. Two edges can't be required in the same cycle — the
+//   hardware has no per-bit edge AND.
+// - OR: every term must be a single slot (a compound level+edge row is an AND
+//   of its bits, so it needs Global AND); `==`/`!=` each take a slot, all B
+//   (either-edge) terms merge into one CHANGED slot, R/F take a slot each.
 
 import { parseProbesText } from "./api";
 import type { Identity, ProbeSpec } from "./api";
@@ -134,17 +139,24 @@ export function groupTerms(rows: TriggerTerm[]): TriggerTerm {
   return { probes, op, radix, value: defaultValue(probes.reduce((s, p) => s + p.width, 0), radix) };
 }
 
-/** Parsed value: cared bits (mask, relative to bit 0 of the field) and their
- *  levels, or an edge kind for single-bit R/F/B. */
+/** Parsed value in field space (bit 0 = LSB of the field). `mask`/`value` are
+ *  the level (0/1/X) compare; `rising`/`falling`/`changed` are per-bit edge
+ *  masks (Vivado-style R/F/B mixed into a binary value). All are disjoint. */
 interface ParsedValue {
-  edge?: "R" | "F" | "B";
   value: bigint;
-  mask: bigint; // which field bits are compared (X's drop out)
+  mask: bigint; // level bits compared (X's and edge bits drop out)
+  rising: bigint;
+  falling: bigint;
+  changed: bigint;
 }
+
+const NO_EDGES = { rising: 0n, falling: 0n, changed: 0n };
 
 /** Parse a term's value text per its radix (throws with a user-facing message).
  *  For a group the value spans the whole concatenated field (bit 0 = LSB of the
- *  last probe); `slotOf` splits it back onto each probe. */
+ *  last probe); `slotOf` splits it back onto each probe. Binary values accept
+ *  per-bit edges (R=rising, F=falling, B=either) mixed freely with 0/1/X, like
+ *  Vivado ILA; `slotOf` compiles them to edge comparators. */
 export function parseTermValue(t: TriggerTerm): ParsedValue {
   const width = termWidth(t);
   const w = BigInt(width);
@@ -154,29 +166,34 @@ export function parseTermValue(t: TriggerTerm): ParsedValue {
   if (!raw) throw new Error(`${name}: empty value`);
 
   if (t.radix === "B") {
-    if (isSingleBit(t) && (raw === "R" || raw === "F" || raw === "B")) {
-      if (t.op !== "==") throw new Error(`${name}: edges only combine with ==`);
-      return { edge: raw, value: 0n, mask: 1n };
-    }
-    if (!/^[01X]+$/.test(raw)) {
-      throw new Error(
-        `${name}: binary value may use 0, 1, X${isSingleBit(t) ? ", R, F, B" : ""}`,
-      );
+    if (!/^[01XRFB]+$/.test(raw)) {
+      throw new Error(`${name}: binary value may use 0, 1, X, R (rise), F (fall), B (both)`);
     }
     if (raw.length > width) {
       throw new Error(`${name}: value wider than ${width} bits`);
     }
     let value = 0n;
     let mask = 0n;
+    let rising = 0n;
+    let falling = 0n;
+    let changed = 0n;
     for (const ch of raw) {
       value <<= 1n;
       mask <<= 1n;
-      if (ch !== "X") {
-        mask |= 1n;
-        if (ch === "1") value |= 1n;
-      }
+      rising <<= 1n;
+      falling <<= 1n;
+      changed <<= 1n;
+      if (ch === "0") mask |= 1n;
+      else if (ch === "1") (mask |= 1n), (value |= 1n);
+      else if (ch === "R") rising |= 1n;
+      else if (ch === "F") falling |= 1n;
+      else if (ch === "B") changed |= 1n;
+      // X: no bit set anywhere
     }
-    return { value, mask };
+    if ((rising || falling || changed) && t.op !== "==") {
+      throw new Error(`${name}: edges (R/F/B) only combine with ==`);
+    }
+    return { value, mask, rising, falling, changed };
   }
 
   if (t.radix === "H") {
@@ -196,7 +213,7 @@ export function parseTermValue(t: TriggerTerm): ParsedValue {
     if ((value & ~full) !== 0n) {
       throw new Error(`${name}: value exceeds ${width} bits`);
     }
-    return { value: value & full, mask: mask & full };
+    return { value: value & full, mask: mask & full, ...NO_EDGES };
   }
 
   if (!/^[0-9]+$/.test(raw)) {
@@ -204,7 +221,7 @@ export function parseTermValue(t: TriggerTerm): ParsedValue {
   }
   const value = BigInt(raw);
   if (value > full) throw new Error(`${name}: value exceeds ${width} bits`);
-  return { value, mask: full };
+  return { value, mask: full, ...NO_EDGES };
 }
 
 /** Human phrasing of one row ("valid == R", "{addr_hi, addr_lo} == 0x1234"). */
@@ -300,7 +317,10 @@ export function describeElaTrigger(ela: ElaConfig, _id: Identity | null): string
   return describeMasked(value, mask, probes, edge) + ext;
 }
 
-function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot {
+/** One term can compile to several comparator slots: a level compare plus one
+ *  per edge bit (a row is an implicit AND of its bit-conditions). Empty only if
+ *  the row is all-X (rejected). */
+function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot[] {
   for (const probe of t.probes) {
     if (!triggerable(probe, maxBits)) {
       throw new Error(
@@ -309,7 +329,7 @@ function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot {
       );
     }
   }
-  // Grouped probes must occupy distinct bits, else OR-ing their slices below
+  // Grouped probes must occupy distinct bits, else splitting the field below
   // would silently corrupt the comparator value/mask.
   let occupied = 0n;
   for (const probe of t.probes) {
@@ -321,32 +341,55 @@ function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot {
   }
 
   const p = parseTermValue(t);
-  if (p.edge) {
-    const mode = p.edge === "R" ? CMP_RISING : p.edge === "F" ? CMP_FALLING : CMP_CHANGED;
-    return { mode, value: 0n, mask: fieldMask(t.probes[0]), mergeableEq: false };
-  }
-  if (p.mask === 0n) {
-    throw new Error(`${termName(t)}: all bits are X — the row matches always`);
+
+  // Split a field-space value/mask (MSB-first over the concatenated field) onto
+  // each probe's real bit position. `pos` walks down from the field MSB; each
+  // probe takes the next `width` bits and lands at its own `lsb`.
+  const toReal = (fVal: bigint, fMask: bigint): { value: bigint; mask: bigint } => {
+    let pos = termWidth(t);
+    let value = 0n;
+    let mask = 0n;
+    for (const probe of t.probes) {
+      pos -= probe.width;
+      const slice = (1n << BigInt(probe.width)) - 1n;
+      value |= ((fVal >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+      mask |= ((fMask >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+    }
+    return { value, mask };
+  };
+
+  const slots: Slot[] = [];
+
+  // Level (0/1/X) compare, if any bit is fixed.
+  if (p.mask !== 0n) {
+    const lvl = toReal(p.value, p.mask);
+    slots.push({
+      mode: t.op === "==" ? CMP_EQ : CMP_NEQ,
+      value: lvl.value,
+      mask: lvl.mask,
+      mergeableEq: t.op === "==",
+    });
   }
 
-  // Split the field value (parsed as one wide number, MSB-first) back onto each
-  // probe's real bit position. `pos` walks down from the field MSB; each probe
-  // takes the next `width` bits and lands at its own `lsb` in the sample word.
-  let pos = termWidth(t);
-  let value = 0n;
-  let mask = 0n;
-  for (const probe of t.probes) {
-    pos -= probe.width;
-    const slice = (1n << BigInt(probe.width)) - 1n;
-    value |= ((p.value >> BigInt(pos)) & slice) << BigInt(probe.lsb);
-    mask |= ((p.mask >> BigInt(pos)) & slice) << BigInt(probe.lsb);
-  }
-  return {
-    mode: t.op === "==" ? CMP_EQ : CMP_NEQ,
-    value,
-    mask,
-    mergeableEq: t.op === "==",
+  // One edge comparator per edge bit. fcapz RISING/FALLING are whole-field
+  // (all-zero <-> non-zero), so a single-bit mask is the only faithful per-bit
+  // form; multiple edges are left as separate slots for composeTrigger to place
+  // (or reject) against the hardware's two comparators.
+  const addEdges = (fieldBits: bigint, mode: number) => {
+    for (let b = fieldBits, i = 0n; b !== 0n; b >>= 1n, i += 1n) {
+      if (b & 1n) {
+        slots.push({ mode, value: 0n, mask: toReal(0n, 1n << i).mask, mergeableEq: false });
+      }
+    }
   };
+  addEdges(p.rising, CMP_RISING);
+  addEdges(p.falling, CMP_FALLING);
+  addEdges(p.changed, CMP_CHANGED);
+
+  if (slots.length === 0) {
+    throw new Error(`${termName(t)}: all bits are X — the row matches always`);
+  }
+  return slots;
 }
 
 /** Compose the table into an ELA-config patch, or throw a message that says
@@ -358,7 +401,17 @@ export function composeTrigger(
 ): Partial<ElaConfig> {
   if (terms.length === 0) throw new Error("no trigger rows");
   const maxBits = triggerBits(id);
-  const all = terms.map((t) => slotOf(t, maxBits));
+  const perTerm = terms.map((t) => slotOf(t, maxBits));
+  // A compound row (levels + edges, or several edges) is an implicit AND of its
+  // own bit-conditions — only expressible under Global AND. Under OR the row's
+  // conditions would be wrongly OR'd together, so refuse it with a clear steer.
+  if (combine === "or" && perTerm.some((s) => s.length > 1)) {
+    throw new Error(
+      "a row mixing levels and edges (or several edges) is an AND of its bits — " +
+        "use Global AND, or split it across rows",
+    );
+  }
+  const all = perTerm.flat();
 
   let slots: Slot[];
   if (combine === "and") {

@@ -63,16 +63,33 @@ const SIMPLE_BUILD = ident({ trig_stages: 1 });
 
 describe("parseTermValue", () => {
   it("binary with X don't-cares", () => {
-    expect(parseTermValue(t(STATE, "1X0X"))).toEqual({ value: 0b1000n, mask: 0b1010n });
+    expect(parseTermValue(t(STATE, "1X0X"))).toEqual({
+      value: 0b1000n,
+      mask: 0b1010n,
+      rising: 0n,
+      falling: 0n,
+      changed: 0n,
+    });
   });
   it("hex with X nibbles", () => {
     const p = parseTermValue({ probes: [{ name: "a", width: 8, lsb: 0 }], op: "==", radix: "H", value: "AX" });
-    expect(p).toEqual({ value: 0xa0n, mask: 0xf0n });
+    expect(p).toEqual({ value: 0xa0n, mask: 0xf0n, rising: 0n, falling: 0n, changed: 0n });
   });
-  it("edge tokens on 1-bit probes", () => {
-    expect(parseTermValue(t(VALID, "R")).edge).toBe("R");
-    expect(parseTermValue(t(VALID, "r")).edge).toBe("R");
-    expect(() => parseTermValue(t(STATE, "R"))).toThrow(/binary value/);
+  it("per-bit edges R/F/B mixed with levels in a binary value", () => {
+    expect(parseTermValue(t(VALID, "R")).rising).toBe(1n);
+    expect(parseTermValue(t(VALID, "r")).rising).toBe(1n);
+    // STATE is 4 bits, MSB-first: bit3=1 (level), bit2=X, bit1=R, bit0=F.
+    expect(parseTermValue(t(STATE, "1XRF"))).toEqual({
+      value: 0b1000n,
+      mask: 0b1000n,
+      rising: 0b0010n,
+      falling: 0b0001n,
+      changed: 0n,
+    });
+    // edges only make sense with ==
+    expect(() =>
+      parseTermValue({ probes: [VALID], op: "!=", radix: "B", value: "R" }),
+    ).toThrow(/only combine with ==/);
   });
   it("range and character checks", () => {
     expect(() => parseTermValue(t(STATE, "10101"))).toThrow(/wider/);
@@ -87,6 +104,9 @@ describe("parseTermValue", () => {
     expect(parseTermValue(g([ADDR_HI, ADDR_LO], "1234"))).toEqual({
       value: 0x1234n,
       mask: 0xffffn,
+      rising: 0n,
+      falling: 0n,
+      changed: 0n,
     });
   });
 });
@@ -189,6 +209,35 @@ describe("composeTrigger", () => {
     expect(() => composeTrigger([t(VALID, "R"), t(READY, "R")], "and", SEQ_BUILD)).toThrow(
       /at most one edge/,
     );
+  });
+
+  // --- Vivado-style per-bit edges mixed into one binary value ---------------
+  it("one row mixing a level and an edge compiles to level + edge comparators", () => {
+    // STATE is 4 bits @ lsb 8. "1XXR" = bit3 level 1, bit0 rising.
+    const r = composeTrigger([t(STATE, "1XXR")], "and", SEQ_BUILD);
+    const stage = JSON.parse(r.sequenceJson ?? "")[0];
+    expect(stage.cmp_mode_a).toBe(0); // EQ level: bit3 @ real bit 11 -> 0x800
+    expect(stage.value_a).toBe("0x800");
+    expect(stage.mask_a).toBe("0x800");
+    expect(stage.cmp_mode_b).toBe(6); // RISING: bit0 @ real bit 8 -> 0x100
+    expect(stage.mask_b).toBe("0x100");
+    expect(stage.combine).toBe(2); // AND
+  });
+
+  it("a single per-bit edge on a multi-bit probe works", () => {
+    const r = composeTrigger([t(STATE, "XXXR")], "and", SEQ_BUILD);
+    expect(JSON.parse(r.sequenceJson ?? "")).toEqual([
+      { cmp_mode_a: 6, value_a: "0x0", mask_a: "0x100", is_final: true },
+    ]);
+  });
+
+  it("two different edges in one row exceed the hardware's edge budget", () => {
+    // "XXRF" = bit1 rising + bit0 falling — two edges, one comparator each.
+    expect(() => composeTrigger([t(STATE, "XXRF")], "and", SEQ_BUILD)).toThrow(/at most one edge/);
+  });
+
+  it("a compound (level+edge) row can't be OR-combined", () => {
+    expect(() => composeTrigger([t(STATE, "1XXR")], "or", SEQ_BUILD)).toThrow(/Global AND/);
   });
 
   it("more rows than comparators is rejected", () => {

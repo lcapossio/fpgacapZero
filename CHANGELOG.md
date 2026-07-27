@@ -34,6 +34,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — per-bit edges in the trigger value (Vivado ILA style).** A binary
+  trigger value now accepts per-bit edge tokens — `R` (rising), `F` (falling),
+  `B` (either) — mixed freely with `0`/`1`/`X`, MSB first (e.g. `10XR`), on
+  probes of any width, not just 1-bit rows. A row's bits are ANDed and compiled
+  to comparators: the `0`/`1` bits form one level compare and each edge bit its
+  own edge comparator. The hardware's two comparators allow one edge alongside
+  the levels; two different edges in a row, or a level+edge row under Global OR,
+  are refused with a clear message.
+
 - **Web — full-width triggering on WIDE_TRIG cores (AXI monitor):** the Trigger
   tab previously listed only signals in the low 32 bits, so on the 160-bit AXI
   monitor you could trigger on the events byte or `awaddr` but not `wdata`,
