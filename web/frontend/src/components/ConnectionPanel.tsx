@@ -511,7 +511,7 @@ export function ConnectionPanel({
       <section className="panel">
         <div className="btnrow">
           <span className="ok">✓ Connected</span>
-          <button onClick={disconnect} disabled={busy}>
+          <button className="danger" onClick={disconnect} disabled={busy}>
             Disconnect
           </button>
         </div>
