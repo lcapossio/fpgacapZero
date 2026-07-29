@@ -34,6 +34,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — trigger-point marker in the waveform.** After a capture the viewer
+  drops a static yellow `trigger` marker at the trigger sample — a fixed vertical
+  line that stays put while you click around to move the red cursor. Its time is
+  read from the VCD (the `pretrigger`-th `#time` line), so it lands correctly for
+  timestamped and plain captures alike, and it moves (never stacks) to the new
+  trigger on every capture. It carries one `trigger` row in the signal list —
+  Surfer couples a marker's line with a list item, so that row is the cost of a
+  line that doesn't move when you click.
+
 - **Web — per-bit edges in the trigger value (Vivado ILA style).** A binary
   trigger value now accepts per-bit edge tokens — `R` (rising), `F` (falling),
   `B` (either) — mixed freely with `0`/`1`/`X`, MSB first (e.g. `10XR`), on

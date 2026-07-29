@@ -75,7 +75,7 @@ function ViewerDock(props: IDockviewPanelProps) {
     <div className="viewer-host">
       <RunOverlay />
       <div className="viewer-body">
-        <SurferView vcd={cap?.vcd ?? ""} />
+        <SurferView vcd={cap?.vcd ?? ""} triggerTime={cap?.triggerTime} />
         <TriggerOverlay />
       </div>
     </div>

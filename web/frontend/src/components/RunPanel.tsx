@@ -27,6 +27,26 @@ function readbackBudgetMs(id: Identity | null): number {
   return words * 15;
 }
 
+/** VCD time of the `sampleIndex`-th stored sample. export_vcd_text emits one
+ *  `#<time>` line per sample, in capture order, so counting those lines maps a
+ *  sample index to its time — correct whether the time is the bare index (no
+ *  hardware timestamps) or a real per-sample timestamp. Returns undefined when
+ *  the index is out of range or unparsable, so the caller just omits the marker. */
+function vcdTimeAtSample(vcd: string, sampleIndex: number): number | undefined {
+  if (!Number.isFinite(sampleIndex) || sampleIndex < 0) return undefined;
+  const want = Math.floor(sampleIndex);
+  let count = 0;
+  for (const line of vcd.split("\n")) {
+    if (line.charCodeAt(0) !== 35 /* '#' */) continue;
+    if (count === want) {
+      const t = Number(line.slice(1).trim());
+      return Number.isFinite(t) ? t : undefined;
+    }
+    count += 1;
+  }
+  return undefined;
+}
+
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
  *  to the active core's Viewer tab. `onActiveChange` reports when a capture is
  *  armed/running so a host (e.g. the hover-out Run bar) can stay open while the
@@ -104,6 +124,10 @@ export function RunPanel({
         csv: typeof r.csv === "string" ? r.csv : undefined,
         json: r.result,
         sampleCount: r.sample_count as number | string | undefined,
+        // The trigger sample is the `pretrigger`-th stored sample; the VCD emits
+        // one `#time` line per sample in order, so its time is that line's — for
+        // timestamped and plain captures alike (no index==time assumption).
+        triggerTime: vcdTimeAtSample(r.vcd, Number(ela.pretrigger)),
       });
     }
     return (r.sample_count as number | string | undefined) ?? "?";

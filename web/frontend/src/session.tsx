@@ -9,6 +9,11 @@ export interface CaptureState {
   csv?: string;
   json?: unknown;
   sampleCount?: number | string;
+  /** VCD time of the trigger sample (the pretrigger-th stored sample), read
+   *  from the VCD itself so it's correct for timestamped and plain captures
+   *  alike; the viewer parks its cursor there to mark the trigger point.
+   *  Undefined when it can't be read. */
+  triggerTime?: number;
   seq: number; // bumps each capture so the viewer reloads even if panels are detached
 }
 
