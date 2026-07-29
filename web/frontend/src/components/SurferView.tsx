@@ -13,6 +13,11 @@ const ADD_SCOPE = { AddScope: [{ strs: [VCD_SCOPE], id: "None" }, true] };
 // ZoomToFit is a STRUCT variant in this Surfer build (not the bare "ZoomToFit"
 // unit string, which fails to deserialise): it needs a viewport index.
 const ZOOM_TO_FIT = { ZoomToFit: { viewport_idx: 0 } };
+// The VCD uses one time unit per sample, so axis numbers are sample indices.
+// "No" formatting keeps them raw (no SI rescale to µs/ms on deep captures), so a
+// big sample count still reads as its plain sample number. Surfer has no
+// "samples" unit, so the axis is still suffixed "ns" — the number is the sample.
+const RAW_TIME_UNITS = { SetTimeStringFormatting: "No" };
 
 const SETTLE_MS = 450; // let the first waveform parse before adding signals
 // Marker and scope both arrive as messages; injecting them back-to-back lets the
@@ -104,6 +109,7 @@ export function SurferView({ vcd, triggerTime }: { vcd: string; triggerTime?: nu
             timers.push(
               window.setTimeout(() => {
                 inject(ADD_SCOPE);
+                inject(RAW_TIME_UNITS);
                 inject(ZOOM_TO_FIT);
                 if (hasTrigger) inject(COLOR_TRIGGER);
                 // Only now is the view set up. Flipping this before the timer

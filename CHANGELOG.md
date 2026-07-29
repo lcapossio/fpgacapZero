@@ -34,6 +34,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Waveform x-axis reads sample indices, not nanoseconds.** The exported VCD
+  now uses one time unit per stored sample (`$timescale 1 ns`), so the viewer's
+  x-axis and the `#` times are the sample number (sample 8 shows as `8`, was
+  `80 ns` at 100 MHz). The web viewer keeps the units raw (no SI rescale to
+  µs/ms on deep captures). Surfer has no dedicated "samples" unit, so the axis is
+  still suffixed `ns` — the number is the sample. The real sample rate stays in
+  the JSON metadata (`sample_clock_hz`) for converting back to time.
+
 - **Web — trigger-point marker in the waveform.** After a capture the viewer
   drops a static yellow `trigger` marker at the trigger sample — a fixed vertical
   line that stays put while you click around to move the red cursor. Its time is

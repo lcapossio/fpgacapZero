@@ -841,7 +841,12 @@ class Analyzer:
     def export_vcd_text(self, result: CaptureResult) -> str:
         cfg = result.config
         sig_w = cfg.sample_width
-        timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+        # One time unit per stored sample: the viewer's x-axis then reads sample
+        # indices (each `#` line is a sample), not real nanoseconds. Surfer has no
+        # "samples" time unit, so the axis is still labelled "ns" — but the number
+        # equals the sample number. The real sample rate stays in the JSON metadata
+        # (sample_clock_hz) for anyone who needs to convert back to time.
+        timescale_ns = 1
 
         # Build signal list: use probe definitions if available, else one raw signal.
         signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
@@ -914,7 +919,8 @@ class Analyzer:
             return self.export_vcd_text(results[0])
         cfg = results[0].config
         sig_w = cfg.sample_width
-        timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+        # One time unit per sample — x-axis reads sample indices (see export_vcd_text).
+        timescale_ns = 1
 
         signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
         next_id = ord("a")
