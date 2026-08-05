@@ -1422,12 +1422,14 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     PATTERN = 0xCAFEF00D
     PATTERN2 = 0x1234ABCD
 
-    # CPU DP addresses *as seen on the monitored bus*.  The CPU issues
-    # 0x4000_0040/44 on M_AXI_DP, but SmartConnect subtracts the 0x4000_0000
-    # segment base when routing to the shared M_BUS, so the monitor (and the
-    # slave) see 0x40/0x44 -- the same offsets the EJTAG master uses.
-    CPU_ADDR0 = 0x40  # word16
-    CPU_ADDR1 = 0x44  # word17
+    # CPU DP addresses *as seen on the monitored bus*.  SmartConnect does NOT
+    # subtract the segment base: the CPU's M_BUS window is assigned at offset
+    # 0x4000_0000 (create_mb_bd.tcl), so the CPU issues -- and the monitor taps
+    # -- the full 0x4000_0040/44 on M_AXI_DP.  The EJTAG master reaches the same
+    # slave through a 0x0-based segment, so it drives bare 0x40/0x44 (D0/D1_OFF);
+    # the shared test slave decodes (addr >> 2) % 32, so both hit word16/17.
+    CPU_ADDR0 = 0x40000040  # SLAVE_BASE | word16
+    CPU_ADDR1 = 0x40000044  # SLAVE_BASE | word17
 
     def setUp(self):
         from fcapz.analyzer import Analyzer
