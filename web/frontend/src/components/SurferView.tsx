@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { bigIntTime } from "../vcdTime";
 
 // Vendored Surfer WASM build (mounted at /surfer). We drive it via InjectMessage
 // (a small, known surface of the otherwise-unstable surfer::Message API).
@@ -28,20 +29,6 @@ const MARKER_GAP_MS = 120;
 // Surfer's fixed marker id for the trigger. AddMarker creates it (with a name);
 // SetMarker(id) upserts by this id on later captures, so it never stacks.
 const TRIGGER_MARKER_ID = 0;
-
-/** Encode a non-negative integer as Surfer's `time` field: num-bigint's
- *  `(Sign, BigUint)` tuple, `[sign, [u32 digits little-endian]]`, where Sign is
- *  the i8 -1/0/1. Verified against the vendored WASM. */
-function bigIntTime(n: number): [number, number[]] {
-  let v = Math.max(0, Math.floor(n));
-  if (v === 0) return [0, []]; // NoSign, no digits
-  const digits: number[] = [];
-  while (v > 0) {
-    digits.push(v >>> 0); // low 32 bits
-    v = Math.floor(v / 0x1_0000_0000);
-  }
-  return [1, digits]; // Plus
-}
 
 // Create the trigger marker: a STATIC named vertical line pinned to the trigger
 // sample. Unlike the cursor it does not move when the user clicks in the

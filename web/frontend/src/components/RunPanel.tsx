@@ -3,6 +3,7 @@ import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../a
 import type { Identity } from "../api";
 import { describeElaTrigger } from "../signalTrigger";
 import { useSession } from "../session";
+import { vcdTimeAtSample } from "../vcdTime";
 
 const IMMEDIATE_TIMEOUT = 10; // hardware wait (s) — Trigger Immediate fires at once
 // Armed waits have NO deadline: the core is armed once and polled with short
@@ -25,26 +26,6 @@ function readbackBudgetMs(id: Identity | null): number {
   const depth = Number(id?.depth) || 0;
   const words = depth * Math.ceil(sw / 32);
   return words * 15;
-}
-
-/** VCD time of the `sampleIndex`-th stored sample. export_vcd_text emits one
- *  `#<time>` line per sample, in capture order, so counting those lines maps a
- *  sample index to its time — correct whether the time is the bare index (no
- *  hardware timestamps) or a real per-sample timestamp. Returns undefined when
- *  the index is out of range or unparsable, so the caller just omits the marker. */
-function vcdTimeAtSample(vcd: string, sampleIndex: number): number | undefined {
-  if (!Number.isFinite(sampleIndex) || sampleIndex < 0) return undefined;
-  const want = Math.floor(sampleIndex);
-  let count = 0;
-  for (const line of vcd.split("\n")) {
-    if (line.charCodeAt(0) !== 35 /* '#' */) continue;
-    if (count === want) {
-      const t = Number(line.slice(1).trim());
-      return Number.isFinite(t) ? t : undefined;
-    }
-    count += 1;
-  }
-  return undefined;
 }
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
