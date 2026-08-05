@@ -1657,8 +1657,12 @@ class TestAxiMonitorStress(unittest.TestCase):
                     status = self._status()
                     if status & 0x4:
                         break
-                self.assertTrue(status & 0x2, f"iter {i}: no trigger on CPU traffic (0x{status:08X})")
-                self.assertTrue(status & 0x4, f"iter {i}: capture did not complete (0x{status:08X})")
+                self.assertTrue(
+                    status & 0x2, f"iter {i}: no trigger on CPU traffic (0x{status:08X})"
+                )
+                self.assertTrue(
+                    status & 0x4, f"iter {i}: capture did not complete (0x{status:08X})"
+                )
             dt = time.perf_counter() - t0
             print(f"\n  {n} captures of live CPU traffic in {dt:.2f}s ({n / dt:.1f}/s)")
         finally:

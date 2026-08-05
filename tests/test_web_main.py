@@ -8,8 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import fcapz.web.__main__ as web_main
-from fcapz.web.__main__ import (
+import pytest
+
+# fcapz.web.__main__ imports the FastAPI app, so skip this module entirely when
+# the web extra isn't installed (CI's pytest job installs only .[dev,gui]).
+pytest.importorskip("fastapi")
+
+import fcapz.web.__main__ as web_main  # noqa: E402
+from fcapz.web.__main__ import (  # noqa: E402
     _build_openocd_launcher,
     _default_cfg_dirs,
     _discover_cfgs,
