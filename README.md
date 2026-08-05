@@ -30,10 +30,10 @@ Four small RTL cores, all driven over JTAG:
 - **EJTAG-AXI** — a JTAG-to-AXI4 master bridge for memory-mapped bus access.
 - **EJTAG-UART** — a JTAG-to-UART console bridge.
 
-Plus a host stack: a **Python API**, the **`fcapz` command-line tool**, a
-**JSON-RPC server**, an optional **PySide6 desktop GUI** (`fcapz-gui`) with a
-built-in waveform preview, and a **browser-based web interface** (`fcapz-web`)
-you can reach from the local machine or across the network.
+Plus a host stack: a **browser-based web interface** (`fcapz-web`) with an
+embedded **Surfer** waveform viewer that you can reach from the local machine or
+across the network, a **Python API**, the **`fcapz` command-line tool**, a
+**JSON-RPC server**, and an optional **PySide6 desktop GUI** (`fcapz-gui`).
 
 ## Why fpgacapZero
 
@@ -64,26 +64,28 @@ hw_server. Full setup is in [Installation](docs/02_install.md).
 ```bash
 git clone https://github.com/lcapossio/fpgacapZero.git
 cd fpgacapZero
-pip install -e ".[gui]"     # core host stack + desktop GUI
-fcapz-gui                   # the easiest way to take your first capture
+pip install -e ".[web]"      # core host stack + web interface
+fcapz-web                    # the easiest way to take your first capture
 ```
+
+Then open **http://127.0.0.1:7373** in your browser: connect to the board, arm
+an ELA capture with the run controls, set triggers, and inspect the result in
+the embedded **Surfer** waveform viewer — EIO and JTAG-AXI live there too. It
+runs over the same JSON-RPC API as the rest of the stack and can be exposed
+across the network with a bearer token. See
+**[Web interface](docs/18_web_interface.md)**.
 
 <p align="center">
-  <img src="docs/assets/fcapz-gui-demo.png" alt="fcapz-gui desktop application showing connection, ELA capture controls, and log output" width="900">
+  <img src="docs/assets/fcapz-web-demo.png" alt="fcapz-web browser interface showing connection, ELA capture controls, and the embedded Surfer waveform viewer" width="900">
 </p>
 
-Prefer a browser — or need to reach the board from another machine? Install the
-web extra and open the UI instead:
+Prefer a native desktop app? A PySide6 GUI with a built-in waveform preview
+ships alongside it:
 
 ```bash
-pip install -e ".[web]"     # core host stack + web interface
-fcapz-web                   # serves on http://127.0.0.1:7373
+pip install -e ".[gui]"     # core host stack + desktop GUI
+fcapz-gui
 ```
-
-It mirrors the GUI — connect, ELA capture with run controls, EIO, JTAG-AXI, and
-an embedded **Surfer** waveform viewer — over the same JSON-RPC API, and can be
-exposed on the network with a bearer token. See
-**[Web interface](docs/18_web_interface.md)**.
 
 Prefer the command line? Build the Arty A7 reference bitstream (see
 [Build from source](#build-from-source) — or use your own), then capture:
