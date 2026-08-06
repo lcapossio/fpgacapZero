@@ -44,20 +44,22 @@ if {[info exists ::env(FPGACAP_PROJECT_DIR)]} {
     set override_project_dir ""
 }
 
-# The VHDL core files that replace rtl/fcapz_ela.v and rtl/fcapz_eio.v; the
-# Verilog vendor wrappers bind their core instances to these entities.
+# The VHDL core files that replace rtl/fcapz_ela.v, rtl/fcapz_eio.v and
+# rtl/fcapz_axi_mon.v; the Verilog vendor wrappers bind their core instances
+# to these entities (mixed-language, by name).
 set vhdl_sources [list \
     $root/rtl/vhdl/pkg/fcapz_pkg.vhd \
     $root/rtl/vhdl/pkg/fcapz_util_pkg.vhd \
     $root/rtl/vhdl/core/fcapz_dpram.vhd \
     $root/rtl/vhdl/core/fcapz_ela.vhd \
     $root/rtl/vhdl/core/fcapz_eio.vhd \
+    $root/rtl/vhdl/core/fcapz_axi_mon.vhd \
     $example_dir/arty_a7_top.vhd \
 ]
 
-# Verilog TAP plumbing, vendor wrappers, bridge, monitor and test slave.  Same
-# set as the Verilog build minus fcapz_ela.v/fcapz_eio.v (the VHDL cores above)
-# and arty_a7_top.v (the VHDL top above).
+# Verilog TAP plumbing, vendor wrappers, bridge, monitor wrapper and test
+# slave.  Same set as the Verilog build minus fcapz_ela.v/fcapz_eio.v/
+# fcapz_axi_mon.v (the VHDL cores above) and arty_a7_top.v (the VHDL top above).
 set verilog_sources [list \
     $root/rtl/reset_sync.v \
     $root/rtl/dpram.v \
@@ -72,7 +74,6 @@ set verilog_sources [list \
     $root/rtl/fcapz_async_fifo.v \
     $root/rtl/fcapz_ejtagaxi.v \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
-    $root/rtl/fcapz_axi_mon.v \
     $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
     $root/tb/axi4_test_slave.v \

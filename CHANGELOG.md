@@ -45,7 +45,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   each). The full formal-equivalence proof is deferred: the monitor's active-low
   `ARESETN` (inverted to the ELA's `sample_rst` internally) is not drivable by
   the parity miter's active-high reset sequencing; the embedded `fcapz_ela` is
-  proven separately.
+  proven separately. Hardware-validated on Arty A7: the VHDL Arty build binds
+  the Verilog wrapper to the native VHDL core (as the ELA already does), and all
+  13 `TestAxiMonitor*` hardware tests pass on the VHDL bitstream on real silicon.
 - **Waveform x-axis reads sample indices, not nanoseconds.** The exported VCD
   now uses one time unit per stored sample (`$timescale 1 ns`), so the viewer's
   x-axis and the `#` times are the sample number (sample 8 shows as `8`, was
