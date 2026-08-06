@@ -3,7 +3,14 @@
 // auto re-arm depends on. Run with `npm test` (vitest, node environment).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RpcError, parseIntFlexible, parseProbesText, rpc, toHexParam } from "./api";
+import {
+  RpcCancelled,
+  RpcError,
+  parseIntFlexible,
+  parseProbesText,
+  rpc,
+  toHexParam,
+} from "./api";
 
 describe("toHexParam", () => {
   it("converts bare decimal to canonical 0x hex (the server parses base-16)", () => {
@@ -112,5 +119,25 @@ describe("rpc", () => {
   it("reports 401 as a missing-token error", async () => {
     stubFetch(401, {});
     await expect(rpc("probe")).rejects.toThrow(/unauthorized/);
+  });
+
+  it("throws RpcCancelled (not a timeout) when the caller's signal aborts", async () => {
+    // The Cancel button aborts the connect flow; the UI branches on the class
+    // to show "cancelled" instead of an error.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+    const ac = new AbortController();
+    const pending = rpc("connect", {}, 60000, ac.signal).catch((e: unknown) => e);
+    ac.abort();
+    expect(await pending).toBeInstanceOf(RpcCancelled);
   });
 });

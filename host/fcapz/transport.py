@@ -532,6 +532,7 @@ class XilinxHwServerTransport(Transport):
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
     RAW_DR_IDLE_CYCLES = 8
+    USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
@@ -559,6 +560,7 @@ class XilinxHwServerTransport(Transport):
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
+        target_wait_timeout: float = 3.0,
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
@@ -585,6 +587,11 @@ class XilinxHwServerTransport(Transport):
         self.ready_poll_interval_sec = float(
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
+        # How long connect() waits for a JTAG target matching ``fpga_name`` to
+        # appear before giving up — rides out a transiently empty scan chain
+        # (re-enumeration when another board is plugged in, or right after
+        # ``fpga -file``) instead of selecting nothing and failing later.
+        self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -667,9 +674,7 @@ class XilinxHwServerTransport(Transport):
             )
             mark("fpga_skipped")
 
-        self._send(
-            f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
-        )
+        self._select_fpga_target()
         mark("jtag_target_set")
 
         # Wait for the JTAG chain to respond with valid (non-zero) data on
@@ -743,6 +748,38 @@ class XilinxHwServerTransport(Transport):
             "Either the bitstream failed to load, the wrong fpga_name was "
             "selected, or the probe register address is wrong for this design."
         )
+
+    def _select_fpga_target(self) -> None:
+        """Select the JTAG target matching ``fpga_name``, tolerating a
+        transiently empty scan chain.
+
+        hw_server briefly reports an empty JTAG target list while the chain
+        re-enumerates — right after ``fpga -file``, or when another board is
+        plugged in and the whole chain is re-scanned. Firing
+        ``jtag targets -set -filter`` in that window silently selects nothing,
+        and every later read then fails with XSDB's opaque "target list is
+        empty" / "Invalid target" errors (surfaced to callers as "no bit
+        string in output"). Poll ``jtag targets`` until a matching device
+        appears, then select it; fail with a clear message if it never does.
+        """
+        deadline = time.monotonic() + self.target_wait_timeout
+        names: list[str] = []
+        while True:
+            # ``puts`` forces the list onto stdout — the bare command doesn't
+            # echo its result through a piped (non-interactive) xsdb session.
+            names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
+            if any(self.fpga_name in name for name in names):
+                break
+            if time.monotonic() >= deadline:
+                visible = ", ".join(names) if names else "(none)"
+                raise ConnectionError(
+                    f"no JTAG target matching {self.fpga_name!r} appeared within "
+                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
+                    "may be unplugged or powered off, or the JTAG chain is still "
+                    "re-enumerating (e.g. another board was just connected)."
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
 
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
@@ -875,10 +912,18 @@ class XilinxHwServerTransport(Transport):
         available, uses the wide burst DR for ~10x faster throughput.
         Otherwise falls back to single-sequence pipelined reads on the
         active ELA control chain.
+
+        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, so
+        it is only valid when a sample fits one 32-bit word (``SAMPLE_W <= 32``).
+        For a wider core (e.g. the AXI monitor, ``SAMPLE_W=160``) ``capture()``
+        reassembles each sample from 32-bit words and passes a *word* count here;
+        feeding that word count to the burst engine builds a 5x-oversized
+        single-line TCL scan sequence that xsdb never finishes — hanging the
+        read. Wide cores therefore skip burst and use the 32-bit word path.
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available:
+        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
             try:
                 return self._read_block_burst(words)
             except (ConnectionError, RuntimeError) as exc:
@@ -902,6 +947,20 @@ class XilinxHwServerTransport(Transport):
             # side-effecting start toggle for the burst engine.
             self._has_burst = True
         return self._has_burst
+
+    def _burst_sample_ok(self) -> bool:
+        """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
+
+        The burst engine returns whole samples; ``capture()`` only treats them
+        as such for ``SAMPLE_W <= 32`` (one 32-bit word per sample). Read fresh
+        (not cached) so a session that hops between an 8-bit ELA and a 160-bit
+        AXI monitor always gates on the *currently selected* core.
+        """
+        try:
+            sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
+        except (ConnectionError, RuntimeError):
+            return True  # can't tell — keep prior fast-path behavior
+        return sw < 1 or sw <= 32
 
     @property
     def _burst_samples_per_scan(self) -> int:
@@ -1093,14 +1152,32 @@ class XilinxHwServerTransport(Transport):
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
-        """Fallback: single-sequence pipelined reads via USER1 49-bit DR."""
+        """Non-burst block read via the 49-bit DR on the active chain.
+
+        DATA/timestamp windows are read-only after capture completion.  Uses one
+        pipelined ``jtag sequence`` per ``_BLOCK_CHUNK`` words -- priming
+        (``USER1_PIPE_PRIME_READS``) discards the stale register-pipeline word
+        and the RTL jtag_rdata fill latency -- rather than a per-word round trip.
+        This is the fallback for narrow ELAs when USER2 burst is unavailable and
+        the primary readback for wide cores (SAMPLE_W > 32, e.g. the AXI monitor,
+        whose 5-word samples do not fit the sample-packing burst DR).  Reading a
+        160-bit x depth buffer per-word cost tens of seconds of xsdb round trips;
+        the pipelined path is ~25x faster and returns identical data (validated
+        on Arty against the per-word path).
+        """
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)
             chunk_size = end - start
             tcl = self._burst_read_tcl(addr, start, chunk_size)
             out = self._send(tcl)
-            results.extend(self._parse_block_bits(out, chunk_size, skip_words=1))
+            results.extend(
+                self._parse_block_bits(
+                    out,
+                    chunk_size,
+                    skip_words=self.USER1_PIPE_PRIME_READS,
+                )
+            )
         # Flush JTAG pipeline
         self.read_reg(0x0000)
         return results
@@ -1108,15 +1185,19 @@ class XilinxHwServerTransport(Transport):
     def _burst_read_tcl(self, base_addr: int, offset: int, count: int) -> str:
         """Generate TCL for burst block read using a single jtag sequence.
 
-        All scans go into one sequence object: one address setup, one
-        discarded priming capture, then N returned captures.  A short idle
+        All scans go into one sequence object: one address setup,
+        USER1_PIPE_PRIME_READS discarded priming captures, then N returned
+        captures.  A short idle
         follows each address update before the next capture so the
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
         """
         n = self._user_dr_bits(self.DR_BITS)
         idle = self.READ_IDLE_CYCLES
-        ir_cmd = self._irshift_tcl("_q", chain=1)
+        # Target the ACTIVE chain, not a hardcoded USER1: the DATA window of a
+        # core on another chain (e.g. the AXI monitor on USER2) must be read on
+        # that chain, or this returns USER1's data instead.
+        ir_cmd = self._irshift_tcl("_q", chain=self._active_chain)
         frames: list[str] = []
         for i in range(count):
             frames.append(
@@ -1124,6 +1205,7 @@ class XilinxHwServerTransport(Transport):
                     self._frame_bits(addr=base_addr + (offset + i) * 4, data=0, write=False)
                 )
             )
+        flush_frame = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
 
         parts: list[str] = [
             "set _q [jtag sequence]",
@@ -1131,12 +1213,17 @@ class XilinxHwServerTransport(Transport):
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
             f"$_q delay {idle}",
-            # Prime capture: discard this word.  Hardware/XSDB can leave the
-            # first captured USER1 word stale after a previous pipelined read.
-            f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
         ]
+        # Prime captures: discard the stale register-pipeline word plus the
+        # RTL jtag_rdata fill latency before counting returned words. If the
+        # RTL adds another registered readback stage, this constant must grow
+        # with that latency.
+        for _ in range(self.USER1_PIPE_PRIME_READS):
+            parts.append(
+                f"{ir_cmd}; "
+                f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
+            )
+            parts.append(f"$_q delay {idle}")
         # Scans 1..N-1: capture previous AND set next address.
         # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
@@ -1148,7 +1235,7 @@ class XilinxHwServerTransport(Transport):
         # Final scan: capture last result
         parts.append(
             f"{ir_cmd}; "
-            f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
+            f"$_q drshift -state DRUPDATE -capture -bits {n} {flush_frame}"
         )
         parts.append("puts [$_q run -bits]; $_q delete")
         return "; ".join(parts)

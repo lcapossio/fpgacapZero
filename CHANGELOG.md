@@ -7,6 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Web — sensible capture defaults on connect.** A freshly connected core now
+  defaults to filling one capture window — **8 pre-trigger samples, the rest
+  post-trigger** — sized to the usable per-segment depth (`depth / num_segments`)
+  instead of a fixed 25-sample window that under-filled deep buffers (and
+  overflowed segmented cores with "pre+post+1 exceeds segment depth"). The
+  default trigger is now **match-anything** (`mask=0`), so Arm captures on the
+  next sample until a real trigger is set, rather than waiting for the low byte
+  to read 0.
+- **Web — connection UI.** With multiple discovered targets the connect button
+  reads just **Connect** (the picker already names the target), and the transient
+  scan status drops the "(starting XSDB can take a while)" aside.
+
 ### Security
 
 - **Web — OpenOCD tap injection:** the OpenOCD tap name is now validated
@@ -18,8 +32,197 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a loopback name. Together these stop a malicious website from driving the
   board (or starting OpenOCD) via the local API.
 
+### Added
+
+- **AXI monitor — native VHDL implementation.** `fcapz_axi_mon` and its
+  Xilinx-7 wrapper now ship as native VHDL alongside the Verilog source of
+  truth (`rtl/vhdl/core/fcapz_axi_mon.vhd`, `rtl/vhdl/fcapz_axi_mon_xilinx7.vhd`),
+  so the monitor is usable from a pure-VHDL flow rather than only via
+  mixed-language instantiation. Kept in lockstep by the Verilog/VHDL parity
+  checks: static generic/register parity, Layer-0 interface parity, and the
+  shared cocotb bench run against **both** languages
+  (`sim/run_cocotb_axi_mon.py --hdl verilog|vhdl` — identical tests pass on
+  each). The full formal-equivalence proof is deferred: the monitor's active-low
+  `ARESETN` (inverted to the ELA's `sample_rst` internally) is not drivable by
+  the parity miter's active-high reset sequencing; the embedded `fcapz_ela` is
+  proven separately. Hardware-validated on Arty A7: the VHDL Arty build binds
+  the Verilog wrapper to the native VHDL core (as the ELA already does), and all
+  13 `TestAxiMonitor*` hardware tests pass on the VHDL bitstream on real silicon.
+- **Waveform x-axis reads sample indices, not nanoseconds.** The exported VCD
+  now uses one time unit per stored sample (`$timescale 1 ns`), so the viewer's
+  x-axis and the `#` times are the sample number (sample 8 shows as `8`, was
+  `80 ns` at 100 MHz). The web viewer keeps the units raw (no SI rescale to
+  µs/ms on deep captures). Surfer has no dedicated "samples" unit, so the axis is
+  still suffixed `ns` — the number is the sample. The real sample rate stays in
+  the JSON metadata (`sample_clock_hz`) for converting back to time.
+
+- **Web — trigger-point marker in the waveform.** After a capture the viewer
+  drops a static yellow `trigger` marker at the trigger sample — a fixed vertical
+  line that stays put while you click around to move the red cursor. Its time is
+  read from the VCD (the `pretrigger`-th `#time` line), so it lands correctly for
+  timestamped and plain captures alike, and it moves (never stacks) to the new
+  trigger on every capture. It carries one `trigger` row in the signal list —
+  Surfer couples a marker's line with a list item, so that row is the cost of a
+  line that doesn't move when you click.
+
+- **Web — per-bit edges in the trigger value (Vivado ILA style).** A binary
+  trigger value now accepts per-bit edge tokens — `R` (rising), `F` (falling),
+  `B` (either) — mixed freely with `0`/`1`/`X`, MSB first (e.g. `10XR`), on
+  probes of any width, not just 1-bit rows. A row's bits are ANDed and compiled
+  to comparators: the `0`/`1` bits form one level compare and each edge bit its
+  own edge comparator. The hardware's two comparators allow one edge alongside
+  the levels; two different edges in a row, or a level+edge row under Global OR,
+  are refused with a clear message.
+
+- **Web — full-width triggering on WIDE_TRIG cores (AXI monitor):** the Trigger
+  tab previously listed only signals in the low 32 bits, so on the 160-bit AXI
+  monitor you could trigger on the events byte or `awaddr` but not `wdata`,
+  `bresp`, or any channel above bit 32 — even though the hardware comparator is
+  full-width. The backend now advertises the capability (`has_wide_trigger` from
+  `COMPARE_CAPS` bit 18) and the Trigger tab lists **every** captured field as
+  triggerable on such a core; a single value-match (`==`) or any-change row
+  reaches the full sample width. The `!=`/second-comparator and sequencer paths
+  still zero-extend from 32 bits, so those combinations on fields above bit 32
+  are refused with a clear message instead of silently matching the low word.
+
+- **Arty A7 example — MicroBlaze on the shared AXI bus:** the reference design
+  now integrates a MicroBlaze soft CPU whose `M_AXI_DP` master and the EJTAG-AXI
+  bridge master are merged by an in-BD SmartConnect onto one AXI4 bus driving the
+  test slave, so the AXI monitor (USER2) captures **real CPU bus traffic** — not
+  just host traffic. The CPU's debug module sits on the free USER3 tap; the AXI
+  fabric runs on a dedicated 100 MHz clock. Baked-in, host-gated firmware writes
+  a known pattern to the slave on demand (staying write-quiet otherwise). New
+  `TestAxiMonitorMicroBlaze` hardware tests validate CPU-driven capture and an
+  EJTAG cross-read of the CPU's writes; the full Arty suite is green with no
+  regressions. Everything ships in one bitstream (Verilog top only).
+
+### Added
+
+- **RPC / Web — EJTAG-AXI auto-detect:** a new `ejtag_axi_probe` command finds
+  an EJTAG-AXI bridge on the connected target (its own USER chain, default
+  USER4) using the bridge's read-only CONFIG identity scan on the shared
+  transport — no reconnect, ELA session untouched. The web calls it on connect
+  and the AXI tab shows a "bridge detected on chain N" banner with its chain
+  pre-filled. When a bridge is detected the AXI tab now **auto-attaches** it
+  (once per connection), landing straight in the read/write view with no click.
+
+### Added
+
+- **Web / RPC — auto-discover OpenOCD boards on Connect:** a new
+  `openocd_discover` command (loopback-only, like `openocd_start`) finds
+  compatible boards without the user picking a JTAG config. It reads each
+  allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter
+  is actually plugged in (best-effort enumeration; degrades to probing all when
+  unavailable), then starts OpenOCD per surviving config and probes for an
+  fpgacapZero core — leaving each confirmed board on its own running port. When
+  nothing is already running, Connect calls this automatically: one board
+  connects straight through, several show the existing picker. Two configs that
+  share a VID/PID disambiguate by probing (the first claims the adapter). New
+  `fcapz.board_autodiscover` module with unit tests.
+- **Web — zero-config "Start OpenOCD":** enabling the UI's server-managed
+  OpenOCD no longer needs any flags in the common case. The `openocd` binary is
+  found on `PATH` **and** in known off-`PATH` install locations (xPack via `xpm`
+  or a manual extract, chocolatey — what Digilent/BRS boards typically use),
+  preferring a real `.exe` over a `.cmd`/`.bat` launcher shim; still overridable
+  via `--openocd`/`$FCAPZ_OPENOCD`. And when no `--openocd-cfg`/`--openocd-cfg-dir`
+  is given, the repo's bundled `examples/*/` board configs are offered by
+  default — so `fcapz-web` from a source checkout can start OpenOCD for a shipped
+  board with no flags at all. `--openocd-cfg-dir` (or `$FCAPZ_OPENOCD_CFG_DIR`)
+  still registers every `*.cfg` in a folder. The security model is unchanged:
+  only discovered/listed configs can be started, loopback only. Using the
+  frontend against an already-running OpenOCD/hw_server needs none of this.
+- **ELA — full-width trigger comparator (`WIDE_TRIG`):** the trigger comparators
+  were always `SAMPLE_W`-wide in silicon, but the register path only let the host
+  set the low 32 bits of comparator A's value/mask (upper bits forced to 0), so
+  on a wide core (e.g. the 160-bit AXI monitor) most of the captured vector was
+  un-triggerable. A new `WIDE_TRIG` parameter (default 0 — ELA/EIO builds are
+  bit-identical) adds a `WIDE_SEL`/`WIDE_DATA` indexed-word window that programs
+  comparator A across the entire `SAMPLE_W`. The AXI monitor enables it, so a
+  trigger can now match any field — a VALID-qualified full write address, a
+  response code in the upper bits, etc. The VHDL ELA core
+  (`rtl/vhdl/core/fcapz_ela.vhd`) mirrors the parameter for full HDL parity. The
+  wide path is proven by the shared cocotb `wide_trigger_upper_bit` test, which
+  triggers on a bit above 31 (with an idle-bus control that must not fire)
+  against **both** the Verilog and VHDL ELA; the static and interface parity
+  gates (`run_hdl_parity.py`, `--interface-only`) keep the two in lockstep and
+  the `WIDE_TRIG=0` path stays bit-identical to the previous behaviour.
+- **Arty A7 VHDL variant — MicroBlaze parity:** the VHDL reference design now
+  instantiates the same MicroBlaze subsystem as the Verilog build (`mb_sys`
+  block design + firmware ELF, MDM on USER3), sharing one monitored AXI bus with
+  the EJTAG-AXI bridge. `build_arty_vhdl.tcl` moves to a Vivado project flow (so
+  the block design + ELF-in-BRAM work) and `arty_a7_top.vhd` gains the 100 MHz
+  AXI domain, the `mb_sys_wrapper` instance, and the shared-bus rewiring. The
+  full `test_hw_integration.py` suite now passes on the VHDL bitstream on an Arty
+  A7 (67 passed / 7 UART skips), including the CPU-traffic MicroBlaze tests that
+  previously had no CPU to exercise.
+
 ### Changed
 
+- **AXI monitor — meaningful geometry telemetry:** the `AXI_GEOM` register's
+  channel-count field carried a hardcoded `0x1F` placeholder and the ID-width
+  field a bare `0` with no documented meaning. They now read the real values —
+  ID width `0` (AXI4-Lite has no `AWID`/`ARID`) and `5` captured channels
+  (AW/W/B/AR/R) — via named RTL localparams, validated in cocotb and on hardware.
+- **AXI monitor — VALID-qualified write-address trigger (correctness):**
+  `write_addr_capture_config` now builds the trigger at `awaddr`'s real bit
+  offset (from the probe map) and, by default, also requires `awvalid` — so it
+  fires on a genuine write-address handshake attempt instead of on a stale
+  address the bus is parked on while `awvalid` is low. It works on **both** raw
+  and decode builds now (previously it rejected decode builds because `awaddr`
+  left the low 32 bits); `Analyzer.configure` programs the full-width value/mask
+  through the wide window. `Analyzer` gained wide value/mask programming for any
+  trigger whose value/mask exceed 32 bits (guarded by the `WIDE_TRIG` cap bit).
+- **AXI monitor — beat storage qualifier:** `AxiMonitor.event_capture_config`
+  gained `store_on_beats=True` (and a `beat_storage_qual()` helper). On a
+  DECODE_EN build it enables the ELA storage qualifier to keep only cycles where
+  a channel handshakes (`aw_hs`..`r_hs`), so a mostly-idle bus no longer fills
+  the capture buffer with idle repeats — the window holds transaction beats.
+- **AXI monitor — single-source sample layout:** the capture-vector bit layout
+  now lives in one place (`fcapz.axi_layout`); the host `sample_width`/probe map
+  and the bundled `.prob` sidecars (via `tools/gen_axi_probes.py`) derive from
+  it, and a test asserts the derived width matches the RTL `SAMPLE_W` formula —
+  replacing four hand-maintained copies that had to stay in lockstep.
+
+### Tests
+
+- **AXI monitor — wide-trigger validation:** cocotb `wide_trigger_high_bit`
+  triggers on a bit above bit 31 (idle-bus control must not fire) and
+  `beat_storage_qualifier` proves idle cycles are dropped. On hardware,
+  `TestAxiMonitorWideTrigger` validates on the Arty A7 that a trigger on
+  `awvalid` (bit 43) and a VALID-qualified full write-address both work — with
+  the full AXI-monitor and plain-ELA suites green on the rebuilt bitstream.
+- **AXI monitor — stress coverage:** a new cocotb `stress_backtoback_fill`
+  target saturates the tap with back-to-back write handshakes, fills the capture
+  buffer to depth, and reads every wide (multi-word `SAMPLE_W`) sample back —
+  verifying each slot returns its own distinct sample (the functional side of
+  the timing-marginal wide readback). On hardware, `TestAxiMonitorStress` hammers
+  the arm/trigger/complete path: 50 back-to-back arm→trigger→done churn cycles,
+  30 repeated captures under continuous MicroBlaze CPU traffic, and a sustained
+  clean-traffic run that must not false-trigger on `any_err`. All green on the
+  Arty A7 with no regressions.
+
+### Changed
+
+- **Web — Run bar shows the trigger condition:** the Run bar now displays what
+  Arm will fire on (e.g. `any_err=1 & awaddr=0x40`), decoded live from the
+  config against the named probes — so it's correct whether the trigger came
+  from the trigger table, the AXI Mon tab, or the raw Advanced fields. Falls
+  back to `value & mask` when no probe map is loaded, and reads the sequencer
+  and external-trigger combine too.
+- **RPC / Web — instant core switching:** switching the session between the
+  ELA and the AXI monitor (which live on different BSCAN taps) no longer does a
+  full reconnect. A new `rebind` RPC keeps the live JTAG transport and just hops
+  the tap + re-probes, so the switch is one short round-trip instead of a
+  `connect` (transport teardown + reopen) plus `probe`. The web AXI Mon tab and
+  Cores "Use this core" switch use it; side sessions (EIO/AXI/UART) are left
+  untouched.
+- **Web — Trigger & Run move onto the viewer:** the Trigger setup leaves the
+  dock for a hover-out drawer on the waveform's right edge (a thin `⚡ Trigger`
+  rail expands the full ILA-style setup; pin to keep it open). The Run controls
+  (Arm / Trigger Immediate / Stop / Auto re-arm / Download) become a bar above
+  the viewer: pinned by default so it docks and shares the vertical space, or
+  unpinned to collapse to a `▶ Run` tab that peeks on hover and stays open while
+  a capture is armed/running. Reclaims the dock space the two panels used.
 - **Web:** the default HTTP port is now `7373` (was `8000`), to avoid clashes
   with the many tools that default to 8000. Override with `--port`.
 - **Version:** Bumped project/RTL identity version to `0.4.5`.
@@ -50,8 +253,68 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is present, and the EIO dock can attach to managed EIO slots such as Arty's
   USER1 slots 2 and 3.
 
+### Deprecated
+
+- **Python desktop GUI (`fcapz-gui`):** no longer maintained in favour of the
+  web frontend (`fcapz-web`), which is now the supported interface. The GUI
+  still runs but shows a notice on launch and won't get new features or fixes.
+
 ### Fixed
 
+- **Web — AXI-monitor probe map leaked onto the next board's ELA:** the browser
+  session kept its ELA config (probes/trigger) across disconnect, so an
+  AXI-monitor probe map (e.g. `awaddr` at bit 8, width 32) carried over to the
+  next board's plain 8-bit ELA and every capture failed with
+  `probe 'awaddr' exceeds sample width 8`. Disconnect now resets the ELA config
+  to its defaults — probes belong to the board you were on. A backend contract
+  test pins that `Analyzer._validate_probes` still rejects an over-wide probe.
+- **hw_server — wide-core readback was ~25x too slow (AXI monitor):** reading a
+  160-bit x 256 capture back took ~13-17 s — over the web UI's 14 s
+  "Trigger Immediate" client timeout, so full-depth monitor captures failed
+  intermittently in the browser. Two per-word paths were to blame: `read_block`'s
+  DATA-window fallback did one xsdb round-trip per 32-bit word, and
+  `_read_block_user1` hardcoded USER1 (so a monitor on USER2 read the wrong
+  chain). Both now use one pipelined `jtag sequence` per chunk on the active
+  chain, and `Analyzer._read_data_words` routes wide cores through `read_block`
+  instead of its own per-word loop. Measured on Arty: full-depth monitor capture
+  **13 s -> 0.52 s** (~25x), identical data. `USER1_DATA_SETTLE_READS` removed.
+- **AXI monitor — immediate/always-true trigger never fired (root cause):** on a
+  `WIDE_TRIG` core (the AXI monitor, `SAMPLE_W=160`), `Analyzer.configure` only
+  programmed the wide-trigger window's upper comparator words when the trigger
+  value/mask exceeded 32 bits. An always-true trigger (`value=0, mask=0`, used by
+  "Trigger Immediate") therefore cleared only the low 32 mask bits and left the
+  upper 128 mask bits at their stale/reset value, so the comparator was not
+  actually don't-care — the trigger never fired and the capture never completed
+  (10s `TimeoutError`). `configure` now programs every high word on every
+  configure for wide cores (zeroing them when the value/mask fit in 32 bits), so
+  the immediate trigger is genuinely always-true. Validated on Arty hardware:
+  immediate monitor captures now complete (8 and full-depth 256 samples).
+- **hw_server — AXI monitor readback hang (root cause):** capturing a wide core
+  (`SAMPLE_W > 32`, e.g. the 160-bit AXI monitor) over hw_server could hang the
+  server indefinitely — previously mislabeled a "timing-marginal" wide readback.
+  The real cause: the 256-bit burst DR packs whole samples per scan, valid only
+  when a sample is one 32-bit word, but `capture()` passes a *word* count for
+  wide samples (5 words for 160 bits). The burst engine read that as a *sample*
+  count and built a 5x-oversized single-line TCL scan sequence that xsdb never
+  finishes, so `_send`'s `readline()` blocked forever (and the returned data
+  would have been wrong-width regardless). `read_block` now gates the burst
+  fast-path on the selected core's `SAMPLE_W`; wide cores use the 32-bit-word
+  DATA path that `capture()` reassembles. Deterministic and correct; no hang.
+- **Web — OpenOCD orphaned on stop (adapter held):** when `openocd` was launched
+  via a Windows `.cmd`/`.bat` launcher shim, the real `openocd.exe` ran as a
+  *grandchild*, so `openocd_stop` killed the shim but left `openocd.exe` holding
+  the JTAG adapter — the next config (or connect) then failed with
+  `LIBUSB_ERROR_ACCESS`. Teardown now kills the whole process tree
+  (`taskkill /T` on Windows) and binary detection prefers a real `.exe` over a
+  shim, so the adapter is reliably released between probes. This is what made
+  auto-discovery of a second board on the same adapter fail.
+- **Host / hw_server:** `connect()` now waits for a JTAG target matching
+  `fpga_name` to appear before selecting it (bounded by `target_wait_timeout`,
+  default 3s), instead of firing `jtag targets -set` into a transiently empty
+  chain. This rides out the re-enumeration window when another board is
+  plugged in (or right after `fpga -file`); previously that produced opaque
+  "target list is empty" / "no bit string in output" errors. Times out with a
+  clear message listing the visible targets.
 - **Host / hw_server:** `EjtagAxiController.connect()` and
   `EjtagUartController.connect()` now skip the generic 49-bit register
   ready probe during programming and poll their native streaming
@@ -109,6 +372,72 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — connect UX:** Connect/Disconnect moved to the top of the Connection
+  panel, and a **Cancel** button aborts an in-flight connect/scan (the slow
+  XSDB cold start no longer locks the panel until timeout).
+- **Web — Cores tab:** the discovered-cores list moved out of the Connection
+  panel into its own Cores tab (stacked with Connection); the dock jumps to
+  it once a connection is established. The Run tab is a single row with the
+  Download VCD/CSV/JSON buttons folded into one **Download…** picker.
+- **Web — ILA-style Trigger Setup:** the Trigger tab became a Vivado-ILA-like
+  table: add probes as rows (Name | Operator | Radix | Value) with `==`/`!=`,
+  binary/hex/unsigned radix, X don't-care digits, R/F/B edge tokens on 1-bit
+  probes, and a Global AND/OR trigger condition; raw fields moved under
+  Advanced.
+- **Web — grouped trigger fields:** trigger rows can be concatenated into one
+  field (check the rows, press **Group selected**; top row = MSB, ▲/▼ reorder,
+  **Ungroup** to split) so a single value spans several probes, e.g.
+  `{addr_hi, addr_lo} == 0x1234`. Groups take `==`/`!=` with X don't-cares
+  across the whole field and compile to one comparator; members may be
+  non-adjacent in the sample word but must lie in the low 32 bits.
+- **Web — Run strip:** the Run controls became a fixed one-row strip between
+  the config tabs and the waveform viewer — a headerless, fixed-height,
+  locked dock group: no tab header, less vertical space, always visible.
+- **Web — armed indicator:** while a capture is armed and the trigger hasn't
+  fired, the Run bar shows a pulsing "armed - waiting for trigger" status
+  (single-shot and auto re-arm both).
+- **Web — armed waits never time out:** Arm holds one hardware arm and polls
+  the new `capture_wait` RPC (wait + read-out on the existing arm, no
+  re-configure/re-arm) until the trigger fires or Stop disarms — a trigger
+  can arrive arbitrarily late with no blind gaps and no 10 s deadline.
+- **Web — Stop works while armed:** Stop is enabled during any armed wait
+  (not just auto re-arm); it aborts the in-flight capture request and a new
+  `disarm` RPC (`force_idle`) soft-resets the core to verified idle.
+- **Web — Trigger tab with click-to-trigger:** triggering gets its own tab
+  next to ELA. It lists every signal — named probes when defined, else the
+  raw probe bits (bit0…bitN), so no setup is needed — and clicking
+  ↑/↓/1/0/⇅/= adds that signal's condition (rising/falling on TRIG_STAGES ≥
+  2 builds, level, any-change, field value) as a removable chip; multiple
+  signals combine with AND/OR. Compositions map onto the comparators
+  (merged patterns, dual-compare stage for a second pattern or an edge);
+  impossible ones are refused with the reason. The raw trigger fields
+  (mode/value/mask, external trigger, sequencer JSON) moved here from the
+  ELA tab and always show the result, staying editable.
+- **Web — per-core viewer tabs:** every capture core (plain ELA, AXI monitor)
+  gets its own Surfer viewer tab holding its own last capture, so switching
+  cores never clobbers another core's waveform; the tabs appear on connect,
+  are listed in the Tabs menu, and follow the discovered core list. Clicking
+  a viewer tab re-binds the session to that core, so the ELA/Run controls
+  always drive the waveform you're looking at. Run controls freeze during a
+  core switch (and auto re-arm stops) so an arm built for one core can never
+  hit another core's geometry ("sample_width mismatch").
+- **Web — chain autodetection:** `connect` without a `chain` scans the BSCAN
+  USER chains and binds to the first debug core it finds (echoing the resolved
+  chain); `list_cores` reports cores on other chains too, and `axi_mon_probe`
+  returns the monitor's full identity (with its `chain`) from any core. The UI
+  drops the Chain field entirely — core cards get a **Use this core** button,
+  and the AXI Mon tab works regardless of the active core: applying a trigger
+  or probe map re-binds the session to the monitor automatically, with each
+  core keeping its own ELA config across switches (e.g. the Arty reference
+  design's monitor on USER2). Hardware-validated on Arty A7: detection, probe
+  map, and decode-layer event triggers (aw_hs, any_err on a SLVERR) all
+  confirmed over the web RPC.
+- **Web — AXI monitor support:** the UI detects an AXI monitor on connect
+  (`axi_mon_probe`), lists it in the Connection panel's cores, auto-applies its
+  probe map so captures decode to named AXI fields, and adds an **AXI Mon** tab
+  with an AXI-aware trigger builder — transaction-event checkboxes on
+  `DECODE_EN=1` builds, write-address match otherwise. Server side,
+  `axi_mon_probe` now reports `decode` and `list_cores` includes the monitor.
 - **Web — Tabs menu:** a top-bar dropdown that toggles dock tabs (checked =
   open; click to close or reopen) and a **Reset layout** action that rebuilds
   the default arrangement in place — previously a closed tab could only be

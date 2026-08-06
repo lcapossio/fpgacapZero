@@ -10,6 +10,10 @@ package fcapz_util_pkg is
     function fcapz_nonzero_width(n : natural) return positive;
     function fcapz_probe_width(probe_mux_w : natural; num_channels : positive; sample_w : positive) return positive;
     function fcapz_repeat_u32(count : positive; value : natural) return std_logic_vector;
+    -- Capture-vector width of fcapz_axi_mon: the five AXI4-Lite channels plus an
+    -- optional 8-bit transaction-events word (DECODE_EN). Mirrors the Verilog
+    -- SAMPLE_W localparam so the VHDL port widths stay in lockstep.
+    function fcapz_axi_mon_sample_w(addr_w : positive; data_w : positive; decode_en : natural) return positive;
 end package fcapz_util_pkg;
 
 library ieee;
@@ -54,5 +58,16 @@ package body fcapz_util_pkg is
             result(i * 32 + 31 downto i * 32) := std_logic_vector(to_unsigned(value, 32));
         end loop;
         return result;
+    end function;
+
+    function fcapz_axi_mon_sample_w(addr_w : positive; data_w : positive; decode_en : natural) return positive is
+        variable events_w : natural := 0;
+    begin
+        if decode_en /= 0 then
+            events_w := 8;
+        end if;
+        -- AW(addr_w+5) + W(data_w + data_w/8 + 2) + B(4) + AR(addr_w+5) + R(data_w+4)
+        --   = 2*addr_w + 2*data_w + data_w/8 + 20, plus the optional events word.
+        return 2 * addr_w + 2 * data_w + data_w / 8 + 20 + events_w;
     end function;
 end package body fcapz_util_pkg;

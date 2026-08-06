@@ -18,6 +18,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from fcapz.analyzer import expected_ela_version_reg  # noqa: E402
+from fcapz.ejtagaxi import CMD_CONFIG  # noqa: E402
 from fcapz.rpc import RpcServer  # noqa: E402
 from fcapz.transport import Transport  # noqa: E402
 from fcapz.web import create_app  # noqa: E402
@@ -52,11 +53,23 @@ class FakeTransport(Transport):
     def select_chain(self, chain: int) -> None:
         self.active_chain = chain
 
+    # Chains carrying the debug cores' register windows. Real cores answer
+    # only on their own USER chain; a chain-agnostic fake would make every
+    # chain look populated once list_cores/connect scan across chains.
+    CORE_CHAINS = (1,)
+
     def read_reg(self, addr: int) -> int:
+        if addr < 0x8000 and self.active_chain not in self.CORE_CHAINS:
+            return 0
         return self.regs.get(addr, 0)
 
     def write_reg(self, addr: int, value: int) -> None:
         self.regs[addr] = value
+        if addr == 0x0004:  # CTRL: mirror the capture FSM in STATUS
+            if value & 0x2:  # RESET -> verified idle (disarm)
+                self.regs[0x0008] = 0
+            elif value & 0x1:  # ARM -> "completes" immediately (DONE)
+                self.regs[0x0008] = 0x4
 
     def read_block(self, addr: int, words: int):
         if addr == 0x0100:
@@ -81,6 +94,16 @@ class FakeSegmentTransport(FakeTransport):
             base = 0x10 if self.segment == 0 else 0x20
             return [base + i for i in range(words)]
         return [0] * words
+
+
+class FakeAxiMonTransport(FakeTransport):
+    """FakeTransport plus the AXI monitor identity/geometry registers."""
+
+    def __init__(self, decode: bool = True) -> None:
+        super().__init__()
+        # AXI_MON_ID: "AM" magic | proto=1 (AXI4-Lite) | CAP_FLAGS bit0=DECODE_EN
+        self.regs[0x00E8] = (0x414D << 16) | (1 << 8) | (1 if decode else 0)
+        self.regs[0x00EC] = 32 | (32 << 8)  # AXI_GEOM: addr_w=32, data_w=32
 
 
 def _client(monkeypatch, **app_kwargs) -> TestClient:
@@ -133,6 +156,40 @@ def test_capture_returns_samples(monkeypatch):
     assert r["ok"] is True, r
     assert r["sample_count"] == len(r["result"]["samples"])
     assert r["sample_count"] > 0
+
+
+def test_capture_wait_reads_armed_capture(monkeypatch):
+    """configure + arm + capture_wait: the poll returns the capture without
+    re-arming, so clients can hold one hardware arm across many short polls."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    assert _rpc(
+        c, "configure", pretrigger=2, posttrigger=4, channel=0,
+        sample_width=8, depth=64,
+    ).json()["ok"] is True
+    assert _rpc(c, "arm").json()["ok"] is True
+    r = _rpc(c, "capture_wait", timeout=0.2, include_vcd=True).json()
+    assert r["ok"] is True, r
+    assert r["sample_count"] > 0
+    assert "$enddefinitions $end" in r["vcd"]
+
+
+def test_capture_wait_requires_configure(monkeypatch):
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "capture_wait", timeout=0.1).json()
+    assert r["ok"] is False
+    assert "configure" in r["error"]
+
+
+def test_disarm_soft_resets_to_idle(monkeypatch):
+    """Stop-while-armed: disarm force-idles the core and reports ok."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "disarm").json()
+    assert r["ok"] is True, r
+    # The session stays usable afterwards.
+    assert _rpc(c, "probe").json()["ok"] is True
 
 
 def test_capture_include_vcd(monkeypatch):
@@ -586,6 +643,249 @@ def test_eio_discover_finds_shared_chain(monkeypatch):
     assert r["chain"] == 1
     assert r["base_addr"] == 0x8000
     assert (r["in_w"], r["out_w"]) == (2, 6)
+
+
+def test_axi_mon_probe_reports_geometry_and_probes(monkeypatch):
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=True)
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 1  # the monitor is the connected core
+    assert r["proto"] == "AXI4LITE"
+    assert r["decode"] is True
+    assert (r["addr_w"], r["data_w"]) == (32, 32)
+    assert r["sample_width"] == 160  # 152 + 8-bit events word
+    names = [p["name"] for p in r["probes"]]
+    assert "awaddr" in names and "any_err" in names  # fields + decode events
+
+
+def test_axi_mon_probe_absent_on_plain_ela(monkeypatch):
+    """A plain ELA (no AXI_MON_ID magic) reports present=False, not an error."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is False
+
+
+class FakeChainedAxiMonTransport(FakeTransport):
+    """ELA on USER1 and USER2, AXI monitor identity only on USER2 (Arty shape)."""
+
+    CORE_CHAINS = (1, 2)
+
+    _AXI_REGS = {
+        0x00E8: (0x414D << 16) | (1 << 8) | 1,
+        0x00EC: 32 | (32 << 8),
+    }
+
+    def read_reg(self, addr: int) -> int:
+        if addr in self._AXI_REGS:
+            return self._AXI_REGS[addr] if self.active_chain == 2 else 0
+        return super().read_reg(addr)
+
+
+class FakeMonitorOnlyTransport(FakeChainedAxiMonTransport):
+    """A monitor-only design: the sole ELA (an AXI monitor) lives on USER2."""
+
+    CORE_CHAINS = (2,)
+
+
+def test_axi_mon_probe_finds_monitor_on_other_chain(monkeypatch):
+    """Connected to chain 1 while the monitor lives on chain 2: the probe
+    still returns the monitor's full identity, with `chain` saying where it
+    is, and leaves the session on its own chain."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 2
+    assert r["proto"] == "AXI4LITE"
+    assert "awaddr" in [p["name"] for p in r["probes"]]
+    # the session's own core is untouched by the scan
+    probe = _rpc(c, "probe").json()
+    assert probe["ok"] is True
+
+
+def test_connect_autodetects_chain_when_omitted(monkeypatch):
+    """No chain in the request: connect binds the first chain with an ELA and
+    echoes it — a monitor-only design lands on USER2 with zero user input."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+    )
+    c = TestClient(create_app())
+    r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap").json()
+    assert r["ok"] is True
+    assert r["chain"] == 2  # autodetected
+    mon = _rpc(c, "axi_mon_probe").json()
+    assert mon["present"] is True and mon["decode"] is True
+    assert mon["chain"] == 2
+
+
+def test_connect_explicit_chain_is_honored(monkeypatch):
+    """An explicit chain must never be second-guessed, even with no ELA on it."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+    )
+    c = TestClient(create_app())
+    r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap", chain=1).json()
+    assert r["ok"] is True and r["chain"] == 1
+
+
+def test_list_cores_reports_other_chain_monitor(monkeypatch):
+    """Connected to the USER1 ELA, list_cores still reports the USER2 monitor
+    so the UI can offer a one-click switch."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
+    cores = _rpc(c, "list_cores").json()["cores"]
+    mon = [x for x in cores if x["type"] == "axi_mon"]
+    assert len(mon) == 1 and mon[0]["chain"] == 2
+    assert mon[0]["info"]["decode"] is True
+
+
+def test_rebind_switches_chain_without_reconnect(monkeypatch):
+    """Rebinding to the monitor's chain hops the tap on the live transport:
+    no new transport is built and no reconnect happens, yet the session is now
+    bound to the USER2 core."""
+    transport = FakeChainedAxiMonTransport()
+    built: list = []
+    connects = {"n": 0}
+    orig_connect = transport.connect
+
+    def counting_connect() -> None:
+        connects["n"] += 1
+        orig_connect()
+
+    transport.connect = counting_connect  # type: ignore[assignment]
+
+    def build(self, req):  # noqa: ANN001 - test stub
+        built.append(req)
+        return transport
+
+    monkeypatch.setattr(RpcServer, "_build_transport", build)
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1
+    assert len(built) == 1 and connects["n"] == 1
+    r = _rpc(c, "rebind", chain=2).json()
+    assert r["ok"] is True and r["chain"] == 2
+    assert r["probe"]["core_id"] == 0x4C41
+    # No teardown/reopen: same transport instance, no extra connect() call.
+    assert len(built) == 1 and connects["n"] == 1
+    # The session is now the USER2 core — axi_mon_probe answers on the
+    # connected chain.
+    mon = _rpc(c, "axi_mon_probe").json()
+    assert mon["present"] is True and mon["chain"] == 2
+
+
+def test_rebind_same_chain_is_a_noop_reprobe(monkeypatch):
+    """Rebinding to the current chain just re-probes; it never rebuilds."""
+    c = _client(monkeypatch)
+    _rpc(c, "connect", **_GOWIN)  # chain 1
+    r = _rpc(c, "rebind", chain=1).json()
+    assert r["ok"] is True and r["chain"] == 1 and r["probe"]["core_id"] == 0x4C41
+
+
+def test_rebind_requires_connection(monkeypatch):
+    """Rebind before any connect is an error, not a silent transport build."""
+    c = _client(monkeypatch)
+    r = _rpc(c, "rebind", chain=2).json()
+    assert r["ok"] is False and "not connected" in r["error"]
+
+
+class FakeElaAndBridgeTransport(FakeTransport):
+    """ELA on USER1 plus an EJTAG-AXI bridge (identity only) on USER4.
+
+    The bridge speaks the 72-bit pipelined CONFIG DR — each scan returns the
+    *previous* command's result — so identity reads lag one scan, matching the
+    real hardware `EjtagAxiController.attach` decode.
+    """
+
+    _BRIDGE_CONFIG = {
+        0x0000: (0x01 << 24) | (0x02 << 16) | 0x4A58,  # VERSION: v1.2, "JX"
+        0x002C: (0x0F << 16) | 0x2020,  # FEATURES: addr_w=32, data_w=32, fifo=16
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._prev_cfg_addr: int | None = None
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        # The bridge only lives on USER4 — other chains shift into nothing.
+        if self.active_chain != 4:
+            self._prev_cfg_addr = None
+            return 0
+        addr = bits & 0xFFFFFFFF
+        cmd = (bits >> 68) & 0xF
+        # Pipelined: answer with the register the *previous* CONFIG read named.
+        rdata = (
+            self._BRIDGE_CONFIG.get(self._prev_cfg_addr, 0)
+            if self._prev_cfg_addr is not None
+            else 0
+        )
+        self._prev_cfg_addr = addr if cmd == CMD_CONFIG else None
+        # status=0 (never busy), resp=0 -> rdata is the whole payload.
+        return rdata & 0xFFFFFFFF
+
+
+def test_ejtag_axi_probe_detects_bridge_on_user4(monkeypatch):
+    """Connected to the USER1 ELA, ejtag_axi_probe finds the bridge on USER4
+    via its own CONFIG scan and reports its identity, leaving the ELA session
+    untouched."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # ELA on chain 1
+    r = _rpc(c, "ejtag_axi_probe").json()
+    assert r["ok"] is True and r["present"] is True
+    assert r["chain"] == 4
+    assert r["core_id"] == 0x4A58
+    assert r["addr_w"] == 32 and r["data_w"] == 32 and r["fifo_depth"] == 16
+    assert r["version_major"] == 1 and r["version_minor"] == 2
+    # The ELA session is unaffected by the bridge probe.
+    assert _rpc(c, "probe").json()["ok"] is True
+
+
+def test_ejtag_axi_probe_honors_explicit_chains(monkeypatch):
+    """A caller can point the probe at a specific chain set."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    # The bridge is only on 4 — scanning just chain 3 must not find it.
+    assert _rpc(c, "ejtag_axi_probe", chains=[3]).json()["present"] is False
+    assert _rpc(c, "ejtag_axi_probe", chains=[3, 4]).json()["chain"] == 4
+
+
+def test_ejtag_axi_probe_absent_without_bridge(monkeypatch):
+    """No bridge on the target -> {present: False}, no error."""
+    c = _client(monkeypatch)  # plain FakeTransport, no raw DR access
+    _rpc(c, "connect", **_GOWIN)
+    r = _rpc(c, "ejtag_axi_probe").json()
+    assert r["ok"] is True and r["present"] is False
+
+
+def test_list_cores_reports_axi_mon(monkeypatch):
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=False)
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)
+    cores = _rpc(c, "list_cores").json()["cores"]
+    mon = [x for x in cores if x["type"] == "axi_mon"]
+    assert len(mon) == 1
+    assert mon[0]["name"] == "AXI Monitor"
+    assert mon[0]["info"]["proto"] == "AXI4LITE"
+    assert mon[0]["info"]["decode"] is False
+    assert mon[0]["info"]["sample_width"] == 152
 
 
 def test_ir_table_mapping():

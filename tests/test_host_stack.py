@@ -544,6 +544,18 @@ class AnalyzerTests(unittest.TestCase):
         info = analyzer.probe()
         self.assertFalse(info["has_dual_compare"])
 
+    def test_probe_reports_wide_trigger_flag(self):
+        """COMPARE_CAPS bit 18 (WIDE_TRIG) is surfaced as has_wide_trigger so the
+        UI can offer triggering across the full sample width (e.g. the 160-bit
+        AXI monitor), not just comparator A's low 32 bits."""
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        transport.regs[0x00E0] = 0x1C3
+        self.assertFalse(analyzer.probe()["has_wide_trigger"])
+        transport.regs[0x00E0] = 0x1C3 | (1 << 18)
+        self.assertTrue(analyzer.probe()["has_wide_trigger"])
+
 
 class SequencerTests(unittest.TestCase):
     """Tests for trigger sequencer register writes via configure()."""

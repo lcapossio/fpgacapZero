@@ -1,5 +1,16 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+--
+-- WIDE_TRIG PARITY: this VHDL core mirrors the Verilog fcapz_ela.v WIDE_TRIG
+-- parameter (WIDE_SEL/WIDE_DATA indexed-word window) that makes comparator A
+-- programmable across the full SAMPLE_W instead of just the low 32 bits.  With
+-- the default WIDE_TRIG=0 the wide path is dead (upper trigger bits are constant
+-- 0, synthesised away) so the legacy 32-bit behaviour is bit-identical.  Parity
+-- is checked by the shared cocotb suite (run_cocotb_ela.py) which runs the same
+-- stimulus against both the Verilog and VHDL ELA -- including the new
+-- 'wide_trigger_upper_bit' test that programs the WIDE window and triggers on a
+-- bit above 31 -- plus the static/interface parity gates (run_hdl_parity.py,
+-- run_formal_hdl_parity.py --interface-only).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -26,7 +37,8 @@ entity fcapz_ela is
         DEFAULT_TRIG_EXT : natural  := 0;
         REL_COMPARE      : natural  := 0;
         DUAL_COMPARE     : natural  := 1;
-        USER1_DATA_EN    : natural  := 1
+        USER1_DATA_EN    : natural  := 1;
+        WIDE_TRIG        : natural  := 0
     );
     port (
         sample_clk       : in  std_logic;
@@ -46,6 +58,7 @@ entity fcapz_ela is
         jtag_rdata       : out std_logic_vector(31 downto 0);
 
         burst_rd_addr    : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_rd_active  : in  std_logic;
         burst_rd_data    : out std_logic_vector(SAMPLE_W - 1 downto 0);
         burst_rd_ts_data : out std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
         burst_start      : out std_logic;
@@ -185,7 +198,12 @@ architecture rtl of fcapz_ela is
     constant ADDR_STARTUP_ARM  : natural := 16#00D8#;
     constant ADDR_TRIG_HOLDOFF : natural := 16#00DC#;
     constant ADDR_COMPARE_CAPS : natural := 16#00E0#;
+    constant ADDR_WIDE_SEL     : natural := 16#00E4#;
+    constant ADDR_WIDE_DATA    : natural := 16#00F0#;
     constant ADDR_DATA_BASE    : natural := 16#0100#;
+
+    -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
+    constant HAS_WIDE_TRIG : boolean := (WIDE_TRIG /= 0) and (SAMPLE_W > 32);
     constant ADDR_TS_DATA_BASE : natural := ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
 
     constant FEATURES : std_logic_vector(31 downto 0) :=
@@ -213,6 +231,15 @@ architecture rtl of fcapz_ela is
     signal jtag_trig_mode    : std_logic_vector(31 downto 0) := x"00000001";
     signal jtag_trig_value   : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_trig_mask    : std_logic_vector(31 downto 0) := x"FFFFFFFF";
+    -- Wide comparator-A words (WIDE_TRIG).  Word 0 mirrors the 32-bit
+    -- TRIG_VALUE/MASK registers; higher words come from the WIDE_SEL/WIDE_DATA
+    -- window.  jtag_trig_value_w/mask_w assemble the full-width value/mask fed
+    -- across the CDC.
+    signal jtag_wide_sel     : std_logic_vector(7 downto 0) := (others => '0');
+    signal wide_va           : reg32_array_t(0 to WORDS_PER_SAMPLE - 1) := (others => (others => '0'));
+    signal wide_ma           : reg32_array_t(0 to WORDS_PER_SAMPLE - 1) := (others => (others => '0'));
+    signal jtag_trig_value_w : std_logic_vector(SAMPLE_W - 1 downto 0);
+    signal jtag_trig_mask_w  : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal jtag_sq_mode      : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_value     : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_mask      : std_logic_vector(31 downto 0) := (others => '0');
@@ -236,10 +263,13 @@ architecture rtl of fcapz_ela is
     signal posttrig_len_sync2     : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal trig_mode_sync1        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mode_sync2        : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_value_sync1       : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_value_sync2       : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_mask_sync1        : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_mask_sync2        : std_logic_vector(31 downto 0) := (others => '0');
+    -- Widened to SAMPLE_W so the full comparator-A value/mask can cross the CDC
+    -- (WIDE_TRIG).  For WIDE_TRIG=0 the upper bits are constant 0 and optimize
+    -- away, leaving the legacy 32-bit behaviour bit-identical.
+    signal trig_value_sync1       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_value_sync2       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_mask_sync1        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal trig_mask_sync2        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal pretrig_len            : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal posttrig_len           : unsigned(PTR_W - 1 downto 0) := (others => '0');
     signal cap_trig_mode          : std_logic_vector(31 downto 0) := x"00000001";
@@ -329,8 +359,6 @@ architecture rtl of fcapz_ela is
     signal seg_count         : natural range 0 to NUM_SEGMENTS := 0;
     signal all_seg_done      : std_logic := '0';
     signal seg_start_ptr     : seg_ptr_t := (others => 0);
-    signal seg_start_ptr_jtag_sync1 : seg_ptr_t := (others => 0);
-    signal seg_start_ptr_jtag_sync2 : seg_ptr_t := (others => 0);
     signal segment_wrapped   : std_logic := '0';
     signal seq_state         : natural range 0 to TRIG_STAGES - 1 := 0;
     signal seq_counter       : unsigned(15 downto 0) := (others => '0');
@@ -355,50 +383,51 @@ architecture rtl of fcapz_ela is
     signal comb_trigger_commit_now : std_logic := '0';
     signal comb_seq_stage_hit : std_logic := '0';
     signal mem_addr_a        : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
+    signal mem_addr_b        : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal mem_wr_addr       : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal mem_wr_addr_q     : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
-    signal mem_rd_pending    : std_logic := '0';
-    signal idx               : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal sample_mem_din    : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal sample_mem_din_ram : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal mem_wr_data_q     : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal sample_mem_dout_a : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal sample_mem_dout_b : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal ts_mem_din        : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
     signal ts_mem_din_ram    : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
     signal mem_wr_ts_q       : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
-    signal ts_mem_dout_a     : std_logic_vector(TS_WIDTH - 1 downto 0);
     signal ts_mem_dout_b     : std_logic_vector(TS_WIDTH - 1 downto 0);
 
-    signal rd_req_toggle_jtag : std_logic := '0';
-    signal rd_req_sync        : std_logic_vector(2 downto 0) := (others => '0');
-    signal rd_ack_toggle_sample : std_logic := '0';
-    signal rd_ack_sync        : std_logic_vector(1 downto 0) := (others => '0');
-    signal rd_addr_jtag       : std_logic_vector(15 downto 0) := (others => '0');
-    signal rd_addr_sync1      : std_logic_vector(15 downto 0) := (others => '0');
-    signal rd_addr_sync2      : std_logic_vector(15 downto 0) := (others => '0');
-    signal rd_addr_req        : std_logic_vector(15 downto 0) := (others => '0');
-    signal rd_addr_data_window : std_logic := '0';
-    signal rd_is_ts           : std_logic := '0';
-    signal rd_phase           : unsigned(2 downto 0) := (others => '0');
-    signal rd_data_sample     : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal rd_data_sync1      : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal rd_data_sync2      : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal ts_rd_data_sample  : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
-    signal ts_rd_data_sync1   : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
-    signal ts_rd_data_sync2   : std_logic_vector(TS_WIDTH - 1 downto 0) := (others => '0');
-    signal seg_sel_rd_sync1   : natural range 0 to NUM_SEGMENTS - 1 := 0;
-    signal seg_sel_rd_sync2   : natural range 0 to NUM_SEGMENTS - 1 := 0;
-    signal seg_start_ptr_rd   : natural range 0 to DEPTH - 1 := 0;
-    signal rd_start_ptr_req   : natural range 0 to DEPTH - 1 := 0;
     signal burst_start_ptr_i  : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
 
-    constant RD_IDLE      : unsigned(2 downto 0) := "000";
-    constant RD_DECODE    : unsigned(2 downto 0) := "001";
-    constant RD_WAIT_ADDR : unsigned(2 downto 0) := "010";
-    constant RD_WAIT_DATA : unsigned(2 downto 0) := "011";
-    constant RD_CAPTURE   : unsigned(2 downto 0) := "100";
-    constant RD_ACK       : unsigned(2 downto 0) := "101";
+    signal rb_done_d              : std_logic := '0';
+    signal rb_seg_count_d         : natural range 0 to NUM_SEGMENTS := 0;
+    signal rb_meta_toggle_sample  : std_logic := '0';
+    signal rb_capture_len_sample  : unsigned(PTR_W downto 0) := (others => '0');
+    signal rb_start_ptr_sample    : natural range 0 to DEPTH - 1 := 0;
+    signal rb_seg_start_ptr_sample : seg_ptr_t := (others => 0);
+    signal rb_meta_toggle_sync1   : std_logic := '0';
+    signal rb_meta_toggle_sync2   : std_logic := '0';
+    signal rb_meta_toggle_sync3   : std_logic := '0';
+    signal rb_meta_ack_toggle_jtag : std_logic := '0';
+    signal rb_meta_ack_sync1      : std_logic := '0';
+    signal rb_meta_ack_sync2      : std_logic := '0';
+    signal rb_meta_pending_sample : std_logic := '0';
+    signal rb_done_sample         : std_logic := '0';
+    signal rb_capture_len_jtag    : unsigned(PTR_W downto 0) := (others => '0');
+    signal rb_start_ptr_jtag      : natural range 0 to DEPTH - 1 := 0;
+    signal rb_seg_start_ptr_jtag  : seg_ptr_t := (others => 0);
+    signal rb_done_jtag           : std_logic := '0';
+    signal rb_meta_sample_busy    : std_logic := '0';
+    signal rb_meta_event_sample   : std_logic := '0';
+
+    signal jtag_rd_data_window    : std_logic := '0';
+    signal datawin_req_now        : std_logic := '0';
+    signal datawin_is_ts_comb     : std_logic := '0';
+    signal datawin_oob_comb       : std_logic := '0';
+    signal datawin_mem_addr_comb  : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
+    signal datawin_chunk_comb     : natural := 0;
+    signal datawin_reply_q        : std_logic := '0';
+    signal datawin_oob_q          : std_logic := '0';
+    signal datawin_is_ts_q        : std_logic := '0';
+    signal datawin_chunk_q        : natural := 0;
 
     function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
         variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
@@ -409,6 +438,16 @@ architecture rtl of fcapz_ela is
         end if;
         r(n - 1 downto 0) := v(n - 1 downto 0);
         return r;
+    end function;
+
+    -- Assemble a SAMPLE_W value from its per-word registers (WIDE_TRIG).
+    function wide_assemble(words : reg32_array_t) return std_logic_vector is
+        variable full : std_logic_vector(WORDS_PER_SAMPLE * 32 - 1 downto 0) := (others => '0');
+    begin
+        for i in 0 to WORDS_PER_SAMPLE - 1 loop
+            full(i * 32 + 31 downto i * 32) := words(i);
+        end loop;
+        return full(SAMPLE_W - 1 downto 0);
     end function;
 
     function ptr_u(n : natural) return unsigned is
@@ -426,12 +465,10 @@ architecture rtl of fcapz_ela is
         return resize(v, PTR_W + 1);
     end function;
 
-    function sample_word(addr : natural; sample : std_logic_vector(SAMPLE_W - 1 downto 0)) return std_logic_vector is
+    function sample_chunk_word(sample : std_logic_vector(SAMPLE_W - 1 downto 0); chunk : natural) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
-        variable chunk : natural;
         variable bit_base : natural;
     begin
-        chunk := ((addr - ADDR_DATA_BASE) / 4) mod WORDS_PER_SAMPLE;
         bit_base := chunk * 32;
         for i in 0 to 31 loop
             if bit_base + i < SAMPLE_W then
@@ -441,13 +478,11 @@ architecture rtl of fcapz_ela is
         return r;
     end function;
 
-    function ts_word(addr : natural; ts : std_logic_vector(TS_WIDTH - 1 downto 0)) return std_logic_vector is
+    function ts_chunk_word(ts : std_logic_vector(TS_WIDTH - 1 downto 0); chunk : natural) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
-        variable chunk : natural;
         variable bit_base : natural;
     begin
         if TIMESTAMP_W > 0 then
-            chunk := ((addr - ADDR_TS_DATA_BASE) / 4) mod TS_WORDS;
             bit_base := chunk * 32;
             for i in 0 to 31 loop
                 if bit_base + i < TIMESTAMP_W then
@@ -528,6 +563,14 @@ begin
 
     trigger_out <= trigger_out_i when EXT_TRIG_EN /= 0 else '0';
     armed_out <= armed;
+    -- Full-width comparator-A value/mask fed across the CDC.  With WIDE_TRIG the
+    -- words come from the WIDE_SEL/WIDE_DATA window (word 0 mirrors TRIG_VALUE/
+    -- MASK); otherwise only the low 32 bits are programmable and the upper bits
+    -- are zero-extended, matching the legacy behaviour bit-for-bit.
+    jtag_trig_value_w <= wide_assemble(wide_va) when HAS_WIDE_TRIG
+                         else expand32(jtag_trig_value);
+    jtag_trig_mask_w  <= wide_assemble(wide_ma) when HAS_WIDE_TRIG
+                         else expand32(jtag_trig_mask);
     jtag_rdata <= jtag_rdata_i;
     burst_start_ptr <= burst_start_ptr_i;
     burst_rd_data <= sample_mem_dout_b;
@@ -535,9 +578,17 @@ begin
     mem_we_a_ram <= mem_we_a_q when INPUT_PIPE > 0 else mem_we_a;
     sample_mem_din_ram <= mem_wr_data_q when INPUT_PIPE > 0 else sample_mem_din;
     ts_mem_din_ram <= mem_wr_ts_q when INPUT_PIPE > 0 else ts_mem_din;
-    mem_addr_a <= mem_wr_addr_q when INPUT_PIPE > 0 and mem_we_a_q = '1' else
-                  idx when USER1_DATA_EN /= 0 and mem_rd_pending = '1' else
-                  mem_wr_addr;
+    mem_addr_a <= mem_wr_addr_q when INPUT_PIPE > 0 and mem_we_a_q = '1' else mem_wr_addr;
+    mem_addr_b <= burst_rd_addr when burst_rd_active = '1' else
+                  datawin_mem_addr_comb when datawin_req_now = '1' and datawin_oob_comb = '0' else
+                  (others => '0');
+    jtag_rd_data_window <= '1' when USER1_DATA_EN /= 0 and
+                           (to_integer(unsigned(jtag_addr)) >= ADDR_DATA_BASE or
+                            (TIMESTAMP_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) else '0';
+    datawin_req_now <= jtag_rd_en and jtag_rd_data_window;
+    rb_meta_sample_busy <= rb_meta_toggle_sample xor rb_meta_ack_sync2;
+    rb_meta_event_sample <= '1' when (done = '1' and rb_done_d = '0') or
+                                     (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) else '0';
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and
@@ -553,9 +604,9 @@ begin
             we_a   => mem_we_a_ram,
             addr_a => mem_addr_a,
             din_a  => sample_mem_din_ram,
-            dout_a => sample_mem_dout_a,
+            dout_a => open,
             clk_b  => jtag_clk,
-            addr_b => burst_rd_addr,
+            addr_b => mem_addr_b,
             dout_b => sample_mem_dout_b
         );
 
@@ -570,15 +621,14 @@ begin
                 we_a   => mem_we_a_ram,
                 addr_a => mem_addr_a,
                 din_a  => ts_mem_din_ram,
-                dout_a => ts_mem_dout_a,
+                dout_a => open,
                 clk_b  => jtag_clk,
-                addr_b => burst_rd_addr,
+                addr_b => mem_addr_b,
                 dout_b => ts_mem_dout_b
             );
     end generate;
 
     g_no_ts_mem : if TIMESTAMP_W = 0 generate
-        ts_mem_dout_a <= (others => '0');
         ts_mem_dout_b <= (others => '0');
     end generate;
 
@@ -799,11 +849,13 @@ begin
                 pretrig_len <= pretrig_len_sync2;
                 posttrig_len <= posttrig_len_sync2;
                 cap_trig_mode <= trig_mode_sync2;
-                cap_trig_value <= trig_value_sync2;
-                cap_trig_mask <= trig_mask_sync2;
+                cap_trig_value <= low_u32(trig_value_sync2);
+                cap_trig_mask <= low_u32(trig_mask_sync2);
                 trig_delay <= trig_delay_sync2;
-                trig_value <= expand32(trig_value_sync2);
-                trig_mask <= expand32(trig_mask_sync2);
+                -- trig_value/mask are already SAMPLE_W-wide (WIDE_TRIG); the
+                -- sync words carry the full comparator-A value/mask directly.
+                trig_value <= trig_value_sync2;
+                trig_mask <= trig_mask_sync2;
                 if TRIG_STAGES > 1 and seq_cfg_sync2(0)(9 downto 0) /= "0000000000" then
                     trig_cmp_mode_a <= seq_cfg_sync2(0)(3 downto 0);
                     if DUAL_COMPARE /= 0 then
@@ -901,6 +953,7 @@ begin
         variable addr : natural;
         variable seq_stage : natural;
         variable seq_off : natural;
+        variable wide_word : natural;
     begin
         if jtag_rst = '1' then
             jtag_ctrl <= (others => '0');
@@ -909,6 +962,17 @@ begin
             jtag_trig_mode <= x"00000001";
             jtag_trig_value <= (others => '0');
             jtag_trig_mask <= x"FFFFFFFF";
+            -- Wide comparator-A words (WIDE_TRIG): value words 0, mask word 0
+            -- all-ones (match nothing masked out), higher mask words 0.
+            jtag_wide_sel <= (others => '0');
+            for s in 0 to WORDS_PER_SAMPLE - 1 loop
+                wide_va(s) <= (others => '0');
+                if s = 0 then
+                    wide_ma(s) <= x"FFFFFFFF";
+                else
+                    wide_ma(s) <= (others => '0');
+                end if;
+            end loop;
             jtag_sq_mode <= (others => '0');
             jtag_sq_value <= (others => '0');
             jtag_sq_mask <= (others => '0');
@@ -933,16 +997,10 @@ begin
             jtag_trig_holdoff <= (others => '0');
             arm_toggle_jtag <= '0';
             reset_toggle_jtag <= '0';
-            rd_req_toggle_jtag <= '0';
-            rd_addr_jtag <= (others => '0');
             burst_start <= '0';
             burst_timestamp <= '0';
             burst_start_ptr_i <= (others => '0');
-            seg_start_ptr_jtag_sync1 <= (others => 0);
-            seg_start_ptr_jtag_sync2 <= (others => 0);
         elsif rising_edge(jtag_clk) then
-            seg_start_ptr_jtag_sync1 <= seg_start_ptr;
-            seg_start_ptr_jtag_sync2 <= seg_start_ptr_jtag_sync1;
             addr := to_integer(unsigned(jtag_addr));
             if jtag_wr_en = '1' then
                 case addr is
@@ -962,8 +1020,28 @@ begin
                         jtag_trig_mode <= jtag_wdata;
                     when ADDR_TRIG_VALUE =>
                         jtag_trig_value <= jtag_wdata;
+                        if HAS_WIDE_TRIG then
+                            wide_va(0) <= jtag_wdata;  -- mirror word 0
+                        end if;
                     when ADDR_TRIG_MASK =>
                         jtag_trig_mask <= jtag_wdata;
+                        if HAS_WIDE_TRIG then
+                            wide_ma(0) <= jtag_wdata;
+                        end if;
+                    when ADDR_WIDE_SEL =>
+                        if HAS_WIDE_TRIG then
+                            jtag_wide_sel <= jtag_wdata(7 downto 0);
+                        end if;
+                    when ADDR_WIDE_DATA =>
+                        -- [0]=mask/value, [7:4]=word index into the wide slots.
+                        wide_word := to_integer(unsigned(jtag_wide_sel(7 downto 4)));
+                        if HAS_WIDE_TRIG and wide_word < WORDS_PER_SAMPLE then
+                            if jtag_wide_sel(0) = '1' then
+                                wide_ma(wide_word) <= jtag_wdata;
+                            else
+                                wide_va(wide_word) <= jtag_wdata;
+                            end if;
+                        end if;
                     when ADDR_SQ_MODE =>
                         if STOR_QUAL /= 0 then
                             jtag_sq_mode <= jtag_wdata;
@@ -1006,9 +1084,9 @@ begin
                         burst_start <= not burst_start;
                         burst_timestamp <= jtag_wdata(31);
                         if NUM_SEGMENTS > 1 then
-                            burst_start_ptr_i <= std_logic_vector(to_unsigned(seg_start_ptr_jtag_sync2(jtag_seg_sel), PTR_W));
+                            burst_start_ptr_i <= std_logic_vector(to_unsigned(rb_seg_start_ptr_jtag(jtag_seg_sel), PTR_W));
                         else
-                            burst_start_ptr_i <= std_logic_vector(to_unsigned(start_ptr, PTR_W));
+                            burst_start_ptr_i <= std_logic_vector(to_unsigned(rb_start_ptr_jtag, PTR_W));
                         end if;
                     when others =>
                         if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
@@ -1036,13 +1114,113 @@ begin
                         end if;
                 end case;
             end if;
-            if jtag_rd_en = '1' then
-                rd_addr_jtag <= jtag_addr;
-                if USER1_DATA_EN /= 0 and
-                   (to_integer(unsigned(jtag_addr)) >= ADDR_DATA_BASE or
-                    (TIMESTAMP_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) then
-                    rd_req_toggle_jtag <= not rd_req_toggle_jtag;
-                end if;
+        end if;
+    end process;
+
+    p_datawin_decode : process(all)
+        variable addr : natural;
+        variable word_index : natural;
+        variable sample_index : natural;
+        variable start_ptr_v : natural;
+        variable seg_base_v : natural;
+        variable mem_addr_v : natural;
+    begin
+        addr := to_integer(unsigned(jtag_addr));
+        word_index := 0;
+        sample_index := 0;
+        start_ptr_v := rb_start_ptr_jtag;
+        if NUM_SEGMENTS > 1 then
+            start_ptr_v := rb_seg_start_ptr_jtag(jtag_seg_sel);
+        end if;
+        if NUM_SEGMENTS > 1 then
+            seg_base_v := (start_ptr_v / SEG_DEPTH) * SEG_DEPTH;
+        else
+            seg_base_v := 0;
+        end if;
+
+        datawin_is_ts_comb <= '0';
+        datawin_oob_comb <= '0';
+        datawin_mem_addr_comb <= (others => '0');
+        datawin_chunk_comb <= 0;
+
+        if TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
+            datawin_is_ts_comb <= '1';
+            word_index := (addr - ADDR_TS_DATA_BASE) / 4;
+            sample_index := word_index / TS_WORDS;
+            datawin_chunk_comb <= word_index mod TS_WORDS;
+        elsif addr >= ADDR_DATA_BASE then
+            word_index := (addr - ADDR_DATA_BASE) / 4;
+            sample_index := word_index / WORDS_PER_SAMPLE;
+            datawin_chunk_comb <= word_index mod WORDS_PER_SAMPLE;
+        end if;
+
+        if sample_index >= to_integer(rb_capture_len_jtag) then
+            datawin_oob_comb <= '1';
+        else
+            mem_addr_v := seg_base_v + ((start_ptr_v - seg_base_v + sample_index) mod SEG_DEPTH);
+            datawin_mem_addr_comb <= std_logic_vector(to_unsigned(mem_addr_v, PTR_W));
+        end if;
+    end process;
+
+    p_rb_meta_sample : process(sample_clk, sample_rst)
+    begin
+        if sample_rst = '1' then
+            rb_done_d <= '0';
+            rb_seg_count_d <= 0;
+            rb_meta_toggle_sample <= '0';
+            rb_meta_ack_sync1 <= '0';
+            rb_meta_ack_sync2 <= '0';
+            rb_meta_pending_sample <= '0';
+            rb_done_sample <= '0';
+            rb_capture_len_sample <= (others => '0');
+            rb_start_ptr_sample <= 0;
+            rb_seg_start_ptr_sample <= (others => 0);
+        elsif rising_edge(sample_clk) then
+            rb_done_d <= done;
+            rb_seg_count_d <= seg_count;
+            rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
+            rb_meta_ack_sync2 <= rb_meta_ack_sync1;
+
+            if rb_meta_event_sample = '1' then
+                rb_meta_pending_sample <= '1';
+            end if;
+
+            if rb_meta_sample_busy = '0' and (rb_meta_pending_sample = '1' or rb_meta_event_sample = '1') then
+                rb_done_sample <= done;
+                rb_capture_len_sample <= capture_len;
+                rb_start_ptr_sample <= start_ptr;
+                rb_seg_start_ptr_sample <= seg_start_ptr;
+                rb_meta_toggle_sample <= not rb_meta_toggle_sample;
+                rb_meta_pending_sample <= '0';
+            end if;
+        end if;
+    end process;
+
+    p_rb_meta_jtag : process(jtag_clk, jtag_rst)
+    begin
+        if jtag_rst = '1' then
+            rb_meta_toggle_sync1 <= '0';
+            rb_meta_toggle_sync2 <= '0';
+            rb_meta_toggle_sync3 <= '0';
+            rb_meta_ack_toggle_jtag <= '0';
+            rb_capture_len_jtag <= (others => '0');
+            rb_start_ptr_jtag <= 0;
+            rb_seg_start_ptr_jtag <= (others => 0);
+            rb_done_jtag <= '0';
+        elsif rising_edge(jtag_clk) then
+            rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
+            rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
+            rb_meta_toggle_sync3 <= rb_meta_toggle_sync2;
+
+            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
+               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                rb_done_jtag <= '0';
+            elsif (rb_meta_toggle_sync2 xor rb_meta_toggle_sync3) = '1' then
+                rb_capture_len_jtag <= rb_capture_len_sample;
+                rb_start_ptr_jtag <= rb_start_ptr_sample;
+                rb_seg_start_ptr_jtag <= rb_seg_start_ptr_sample;
+                rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
+                rb_done_jtag <= rb_done_sample;
             end if;
         end if;
     end process;
@@ -1097,9 +1275,9 @@ begin
             posttrig_len_sync2 <= posttrig_len_sync1;
             trig_mode_sync1 <= jtag_trig_mode;
             trig_mode_sync2 <= trig_mode_sync1;
-            trig_value_sync1 <= jtag_trig_value;
+            trig_value_sync1 <= jtag_trig_value_w;
             trig_value_sync2 <= trig_value_sync1;
-            trig_mask_sync1 <= jtag_trig_mask;
+            trig_mask_sync1 <= jtag_trig_mask_w;
             trig_mask_sync2 <= trig_mask_sync1;
             decim_sync1 <= unsigned(jtag_decim);
             decim_sync2 <= decim_sync1;
@@ -1585,141 +1763,31 @@ begin
         end if;
     end process;
 
-    p_data_read_sample : process(sample_clk, sample_rst)
-        variable addr : natural;
-        variable word_index : natural;
-        variable sample_index : natural;
-        variable rd_start : natural;
-        variable rd_start_u : unsigned(PTR_W - 1 downto 0);
-        variable rd_base_u : unsigned(PTR_W - 1 downto 0);
-        variable wrap_mask : unsigned(PTR_W - 1 downto 0);
-    begin
-        if sample_rst = '1' then
-            rd_req_sync <= (others => '0');
-            rd_addr_sync1 <= (others => '0');
-            rd_addr_sync2 <= (others => '0');
-            rd_addr_req <= (others => '0');
-            seg_sel_rd_sync1 <= 0;
-            seg_sel_rd_sync2 <= 0;
-            seg_start_ptr_rd <= 0;
-            rd_start_ptr_req <= 0;
-            rd_phase <= RD_IDLE;
-            rd_is_ts <= '0';
-            rd_data_sample <= (others => '0');
-            ts_rd_data_sample <= (others => '0');
-            rd_ack_toggle_sample <= '0';
-            mem_rd_pending <= '0';
-            idx <= (others => '0');
-        elsif rising_edge(sample_clk) then
-            rd_req_sync <= rd_req_sync(1 downto 0) & rd_req_toggle_jtag;
-            rd_addr_sync1 <= rd_addr_jtag;
-            rd_addr_sync2 <= rd_addr_sync1;
-            seg_sel_rd_sync1 <= jtag_seg_sel;
-            seg_sel_rd_sync2 <= seg_sel_rd_sync1;
-            seg_start_ptr_rd <= seg_start_ptr(seg_sel_rd_sync2);
-
-            case rd_phase is
-                when RD_CAPTURE =>
-                    rd_data_sample <= sample_mem_dout_a;
-                    if TIMESTAMP_W > 0 and rd_is_ts = '1' then
-                        ts_rd_data_sample <= ts_mem_dout_a;
-                    end if;
-                    mem_rd_pending <= '0';
-                    rd_phase <= RD_ACK;
-                when RD_ACK =>
-                    rd_ack_toggle_sample <= not rd_ack_toggle_sample;
-                    rd_is_ts <= '0';
-                    rd_phase <= RD_IDLE;
-                when RD_WAIT_DATA =>
-                    rd_phase <= RD_CAPTURE;
-                when RD_WAIT_ADDR =>
-                    rd_phase <= RD_WAIT_DATA;
-                when RD_DECODE =>
-                    addr := to_integer(unsigned(rd_addr_req));
-                    rd_start := rd_start_ptr_req;
-                    rd_start_u := to_unsigned(rd_start, PTR_W);
-                    rd_base_u := rd_start_u;
-                    if NUM_SEGMENTS > 1 then
-                        rd_base_u(SEG_PTR_W - 1 downto 0) := (others => '0');
-                    else
-                        rd_base_u := (others => '0');
-                    end if;
-                    wrap_mask := to_unsigned(SEG_DEPTH - 1, PTR_W);
-                    if TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
-                        word_index := (addr - ADDR_TS_DATA_BASE) / 4;
-                        sample_index := word_index / TS_WORDS;
-                        if sample_index < to_integer(capture_len) then
-                            idx <= std_logic_vector(rd_base_u + ((rd_start_u - rd_base_u + to_unsigned(sample_index, PTR_W)) and wrap_mask));
-                            mem_rd_pending <= '1';
-                            rd_is_ts <= '1';
-                            rd_phase <= RD_WAIT_ADDR;
-                        else
-                        ts_rd_data_sample <= (others => '0');
-                            rd_phase <= RD_ACK;
-                        end if;
-                    elsif addr >= ADDR_DATA_BASE then
-                        word_index := (addr - ADDR_DATA_BASE) / 4;
-                        sample_index := word_index / WORDS_PER_SAMPLE;
-                        if sample_index < to_integer(capture_len) then
-                            idx <= std_logic_vector(rd_base_u + ((rd_start_u - rd_base_u + to_unsigned(sample_index, PTR_W)) and wrap_mask));
-                            mem_rd_pending <= '1';
-                            rd_is_ts <= '0';
-                            rd_phase <= RD_WAIT_ADDR;
-                        else
-                            rd_data_sample <= (others => '0');
-                            rd_phase <= RD_ACK;
-                        end if;
-                    else
-                        rd_data_sample <= (others => '0');
-                        rd_phase <= RD_ACK;
-                    end if;
-                when others =>
-                    if (rd_req_sync(1) xor rd_req_sync(2)) = '1' then
-                        rd_addr_req <= rd_addr_sync2;
-                        rd_start_ptr_req <= seg_start_ptr_rd when NUM_SEGMENTS > 1 else start_ptr;
-                        rd_phase <= RD_DECODE;
-                    end if;
-            end case;
-        end if;
-    end process;
-
     p_data_read_jtag : process(jtag_clk, jtag_rst)
-        variable addr : natural;
     begin
         if jtag_rst = '1' then
-            rd_ack_sync <= (others => '0');
-            rd_data_sync1 <= (others => '0');
-            rd_data_sync2 <= (others => '0');
-            ts_rd_data_sync1 <= (others => '0');
-            ts_rd_data_sync2 <= (others => '0');
-            rd_addr_data_window <= '0';
             jtag_rdata_i <= (others => '0');
+            datawin_reply_q <= '0';
+            datawin_oob_q <= '0';
+            datawin_is_ts_q <= '0';
+            datawin_chunk_q <= 0;
         elsif rising_edge(jtag_clk) then
-            rd_ack_sync <= rd_ack_sync(0) & rd_ack_toggle_sample;
-            rd_data_sync1 <= rd_data_sample;
-            rd_data_sync2 <= rd_data_sync1;
-            ts_rd_data_sync1 <= ts_rd_data_sample;
-            ts_rd_data_sync2 <= ts_rd_data_sync1;
+            datawin_reply_q <= datawin_req_now;
+            datawin_oob_q <= datawin_oob_comb or burst_rd_active;
+            datawin_is_ts_q <= datawin_is_ts_comb;
+            datawin_chunk_q <= datawin_chunk_comb;
 
-            if jtag_rd_en = '1' then
-                addr := to_integer(unsigned(jtag_addr));
-                if USER1_DATA_EN /= 0 and
-                   (addr >= ADDR_DATA_BASE or (TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE)) then
-                    rd_addr_data_window <= '1';
-                else
-                    rd_addr_data_window <= '0';
-                    jtag_rdata_i <= jtag_rdata_mux;
-                end if;
+            if jtag_rd_en = '1' and jtag_rd_data_window = '0' then
+                jtag_rdata_i <= jtag_rdata_mux;
             end if;
 
-            if (rd_ack_sync(0) xor rd_ack_sync(1)) = '1' then
-                addr := to_integer(unsigned(rd_addr_jtag));
-                if rd_addr_data_window = '1' then
-                    if TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
-                        jtag_rdata_i <= ts_word(addr, ts_rd_data_sync1);
-                    else
-                        jtag_rdata_i <= sample_word(addr, rd_data_sync1);
-                    end if;
+            if datawin_reply_q = '1' then
+                if datawin_oob_q = '1' then
+                    jtag_rdata_i <= (others => '0');
+                elsif datawin_is_ts_q = '1' then
+                    jtag_rdata_i <= ts_chunk_word(ts_mem_dout_b, datawin_chunk_q);
+                else
+                    jtag_rdata_i <= sample_chunk_word(sample_mem_dout_b, datawin_chunk_q);
                 end if;
             end if;
         end if;
@@ -1728,29 +1796,26 @@ begin
     p_read_mux : process(all)
         variable addr : natural;
         variable r : std_logic_vector(31 downto 0);
-        variable word_index : natural;
-        variable sample_index : natural;
         variable rd_start : natural;
-        variable ts_read_word : std_logic_vector(31 downto 0);
         variable seq_stage : natural;
         variable seq_off : natural;
     begin
         addr := to_integer(unsigned(jtag_addr));
         r := (others => '0');
-        rd_start := start_ptr;
+        rd_start := rb_start_ptr_jtag;
         if NUM_SEGMENTS > 1 then
-            rd_start := seg_start_ptr_jtag_sync2(jtag_seg_sel);
+            rd_start := rb_seg_start_ptr_jtag(jtag_seg_sel);
         end if;
 
         case addr is
             when ADDR_VERSION => r := FCAPZ_ELA_VERSION_REG;
             when ADDR_CTRL => r := jtag_ctrl;
-            when ADDR_STATUS => r := x"0000000" & overflow & done & triggered & armed;
+            when ADDR_STATUS => r := x"0000000" & overflow & rb_done_jtag & triggered & armed;
             when ADDR_SAMPLE_W => r := u32(SAMPLE_W);
             when ADDR_DEPTH => r := u32(DEPTH);
             when ADDR_PRETRIG => r := jtag_pretrig_len;
             when ADDR_POSTTRIG => r := jtag_posttrig_len;
-            when ADDR_CAPTURE_LEN => r := u32(capture_len);
+            when ADDR_CAPTURE_LEN => r := u32(rb_capture_len_jtag);
             when ADDR_TRIG_MODE => r := jtag_trig_mode;
             when ADDR_TRIG_VALUE => r := jtag_trig_value;
             when ADDR_TRIG_MASK => r := jtag_trig_mask;
@@ -1783,6 +1848,14 @@ begin
                 r := x"000201FF" when REL_COMPARE /= 0 else x"000201C3";
                 if DUAL_COMPARE /= 0 then
                     r(16) := '1';
+                end if;
+                if HAS_WIDE_TRIG then
+                    r(18) := '1';  -- full-width comparator A programmable
+                end if;
+            when ADDR_WIDE_SEL =>
+                r := (others => '0');
+                if HAS_WIDE_TRIG then
+                    r(7 downto 0) := jtag_wide_sel;
                 end if;
             when others =>
                 if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then

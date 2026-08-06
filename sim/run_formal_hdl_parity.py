@@ -48,6 +48,7 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "fcapz_core_manager.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
+    ROOT / "sim" / "parity" / "fcapz_axi_mon.yml",
 )
 
 

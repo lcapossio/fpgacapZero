@@ -152,12 +152,19 @@ readiness wait.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7"}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
 server infers the preset from the tap name (`gw*` → `gowin`,
 `xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
 their own copy of that mapping.
+
+`chain` echoes the BSCAN USER chain the session bound to. When the request
+omits it, the server **autodetects**: it connects on chain 1 and, if no debug
+core answers there, scans chain 2 and binds to the first core found (chains
+3/4 are never scanned — bridges there speak a different DR protocol and must
+not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
+session, e.g. to reach an AXI monitor directly.
 
 #### `discover_boards`
 
@@ -199,6 +206,27 @@ Response (empty `boards` means nothing compatible was reachable):
 }
 ```
 
+#### `rebind`
+
+Re-bind the connected session to a core on another BSCAN chain **without
+reconnecting**. ELA and AXI-monitor cores sit on different USER taps, so
+switching between them just needs a chain hop, not a fresh transport: `rebind`
+keeps the live transport, points the session at the requested chain, and
+re-probes. This is the cheap path behind the web UI's seamless ELA ↔ AXI
+monitor switch — one short round-trip instead of `connect` (which tears down
+and re-opens every session) plus `probe`.
+
+Requires an active session; the target chain must present an ELA-style
+identity window (a plain ELA or an AXI monitor). Side sessions (EIO/AXI/UART)
+are left untouched.
+
+```json
+{"cmd": "rebind", "chain": 2}
+```
+
+Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
+— `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
+
 #### `close`
 
 Releases the transport.
@@ -223,10 +251,11 @@ Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
 ### OpenOCD control (web, localhost only)
 
 Start/stop OpenOCD **on the server host** so the browser UI can bring the board
-online without a shell. Available only when `fcapz-web` was launched with
-`--openocd <exe>` and one or more `--openocd-cfg <cfg>`, and restricted to
-loopback clients (a remote browser cannot spawn processes, even with a valid
-token). The server only stops OpenOCD instances it started itself.
+online without a shell. Available only when `fcapz-web` has an `openocd` binary
+(`--openocd`, `$FCAPZ_OPENOCD`, or found on `PATH`) plus at least one config
+(`--openocd-cfg <cfg>` or every `*.cfg` in an `--openocd-cfg-dir <dir>`), and
+restricted to loopback clients (a remote browser cannot spawn processes, even
+with a valid token). The server only stops OpenOCD instances it started itself.
 
 #### `openocd_status`
 
@@ -257,6 +286,24 @@ includes `{"started": true, "port": 6666, "pid": ...}`, or an in-band error
 ```
 
 Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
+
+#### `openocd_discover`
+
+Auto-discover compatible boards without the client picking a config. Reads each
+allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter is
+plugged in (best-effort — every config is probed when USB enumeration is
+unavailable), then starts OpenOCD per surviving config from `port` (default 6666,
+one port per config) and probes each for an fpgacapZero core.
+
+```json
+{"cmd": "openocd_discover", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "boards": [...]}` — the same board
+records as `discover_boards`, each with an added `config` (the config that
+reached it) and a `port` left running for the client to connect to. Unproductive
+instances are stopped. Loopback-only and requires the launcher configured, like
+`openocd_start`.
 
 ### ELA (Analyzer)
 
@@ -293,9 +340,13 @@ Response:
 #### `list_cores`
 
 Enumerate the fcapz cores present on the connected target. Always reports the
-connected ELA and adds the EIO if one is discoverable. Each entry has `type`,
-`name`, `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
-type-specific `info` (the ELA probe dict, or `{in_w, out_w}` for the EIO).
+connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
+USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. Each entry has `type`, `name`,
+`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
+monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
+`axi_mon`).
 
 ```json
 {"cmd": "list_cores"}
@@ -357,6 +408,27 @@ wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 
 ```json
 {"cmd": "arm"}
+```
+
+#### `capture_wait`
+
+Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
+the same result shape and options as `capture`, but without re-configuring or
+re-arming. A `TimeoutError` here just means "still waiting" and leaves the
+core armed, so clients can hold one hardware arm across many short polls
+(this is how the web UI waits for a trigger with no deadline).
+
+```json
+{"cmd": "capture_wait", "timeout": 4.0, "include_vcd": true}
+```
+
+#### `disarm`
+
+Soft-reset the capture FSM to a verified idle (`force_idle`), discarding any
+in-flight capture — how a client's Stop button cancels an armed wait.
+
+```json
+{"cmd": "disarm"}
 ```
 
 #### `capture`
@@ -446,6 +518,35 @@ integer (53 bits); `value` is the same value as a JSON number.
 wider than 53 bits survive JSON transport unrounded.
 
 ### EJTAG-AXI
+
+#### `ejtag_axi_probe`
+
+Auto-detect an EJTAG-AXI bridge on the connected target without attaching. The
+bridge sits on its own USER chain (default USER4) and speaks a different DR
+protocol than the ELA, so this probes with the bridge's own **read-only** CONFIG
+identity scan on the shared transport and restores the session's chain — the ELA
+session is untouched. Requires an active session. `chains` (optional) overrides
+the candidate set (default `[4]`).
+
+```json
+{"cmd": "ejtag_axi_probe", "chains": [4]}
+```
+
+Present → the bridge identity plus the `chain` it was found on; absent →
+`{"present": false}`:
+```json
+{
+  "ok": true, "schema_version": "1.1",
+  "present": true, "chain": 4,
+  "bridge_id": 19032, "core_id": 19032,
+  "legacy_id": false, "legacy_raw_id": null,
+  "version_major": 0, "version_minor": 4,
+  "addr_w": 32, "data_w": 32, "fifo_depth": 16
+}
+```
+
+The web UI calls this on connect and pre-fills the AXI tab's chain so attaching
+is one click; `axi_connect` still opens the working session.
 
 #### `axi_connect`
 

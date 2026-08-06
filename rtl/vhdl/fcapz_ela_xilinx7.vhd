@@ -76,6 +76,7 @@ architecture rtl of fcapz_ela_xilinx7 is
     signal jtag_rdata : std_logic_vector(31 downto 0);
 
     signal burst_rd_addr    : std_logic_vector(PTR_W - 1 downto 0);
+    signal burst_rd_active  : std_logic := '0';
     signal burst_rd_data    : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal burst_rd_ts_data : std_logic_vector(TS_W_SAFE - 1 downto 0);
     signal burst_start      : std_logic;
@@ -133,6 +134,7 @@ begin
                 reg_wdata => jtag_wdata,
                 reg_rdata => jtag_rdata,
                 mem_addr => burst_rd_addr,
+                mem_active => burst_rd_active,
                 sample_data => burst_rd_data,
                 timestamp_data => burst_rd_ts_data,
                 burst_start => burst_start,
@@ -228,6 +230,7 @@ begin
                 jtag_wdata => ela_wdata,
                 jtag_rdata => ela_rdata,
                 burst_rd_addr => burst_rd_addr,
+                burst_rd_active => burst_rd_active,
                 burst_rd_data => burst_rd_data,
                 burst_rd_ts_data => burst_rd_ts_data,
                 burst_start => burst_start,
@@ -288,6 +291,7 @@ begin
                 jtag_wdata => jtag_wdata,
                 jtag_rdata => jtag_rdata,
                 burst_rd_addr => burst_rd_addr,
+                burst_rd_active => burst_rd_active,
                 burst_rd_data => burst_rd_data,
                 burst_rd_ts_data => burst_rd_ts_data,
                 burst_start => burst_start,
@@ -339,6 +343,7 @@ begin
                 update => tap2_update,
                 sel => tap2_sel,
                 mem_addr => burst_rd_addr,
+                mem_active => burst_rd_active,
                 sample_data => burst_rd_data,
                 timestamp_data => burst_rd_ts_data,
                 burst_start => burst_start,

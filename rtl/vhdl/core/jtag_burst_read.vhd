@@ -28,6 +28,7 @@ entity jtag_burst_read is
         sel      : in  std_logic;
 
         mem_addr       : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        mem_active     : out std_logic;
         sample_data    : in  std_logic_vector(SAMPLE_W - 1 downto 0);
         timestamp_data : in  std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
 
@@ -86,6 +87,7 @@ begin
         severity failure;
 
     tdo <= sr(0);
+    mem_active <= loading or (sel and capture);
 
     words_per_scan <= to_unsigned(TS_PER_SCAN, LOAD_CTR_W)
         when burst_timestamp_r = '1'

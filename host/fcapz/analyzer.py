@@ -100,6 +100,11 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
+# Wide-trigger indexed-word window (comparator A value/mask beyond the low 32
+# bits); present when COMPARE_CAPS bit 18 is set (WIDE_TRIG cores).
+_ADDR_WIDE_SEL = 0x00E4
+_ADDR_WIDE_DATA = 0x00F0
+_COMPARE_CAPS_WIDE_TRIG = 1 << 18
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -519,8 +524,34 @@ class Analyzer:
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
         self.transport.write_reg(_ADDR_TRIG_MODE, mode_bits)
-        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value)
-        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask)
+        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask & 0xFFFF_FFFF)
+        # Comparator A above the low 32 bits.  On a WIDE_TRIG core the comparator
+        # is full SAMPLE_W-wide in silicon and takes its value/mask from the wide
+        # window (word 0 mirrors TRIG_VALUE/MASK, written above).  We must program
+        # EVERY high word on every configure -- not only when value/mask exceed
+        # 32 bits -- so the upper comparator bits reflect the requested trigger
+        # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
+        # always-true) trigger leaves the upper mask bits set, so the trigger is
+        # not actually always-true and never fires (the capture never completes).
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
+        if wide:
+            words = (config.sample_width + 31) // 32
+            for k in range(1, words):
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 0)  # value word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.value >> (32 * k)) & 0xFFFF_FFFF
+                )
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 1)  # mask word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.mask >> (32 * k)) & 0xFFFF_FFFF
+                )
         self.transport.write_reg(_ADDR_CHAN_SEL, config.channel)
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
@@ -657,6 +688,16 @@ class Analyzer:
     @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
         if self._selected_slot_has_burst():
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        # Non-burst slot (e.g. the AXI monitor's manager slot).  For a wide core
+        # (SAMPLE_W > 32) read_block is still fast and safe: it skips the 256-bit
+        # sample-packing burst DR for multi-word samples and uses one pipelined
+        # jtag sequence per chunk, so prefer it over a per-word round trip
+        # (1280 reads of a 160-bit x 256 buffer was ~17s; the pipelined path is
+        # sub-second).  Narrow samples keep the per-word path, which avoids
+        # attempting a burst the slot does not support.
+        sw = self._config.sample_width if self._config else 8
+        if sw > 32:
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
@@ -800,7 +841,12 @@ class Analyzer:
     def export_vcd_text(self, result: CaptureResult) -> str:
         cfg = result.config
         sig_w = cfg.sample_width
-        timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+        # One time unit per stored sample: the viewer's x-axis then reads sample
+        # indices (each `#` line is a sample), not real nanoseconds. Surfer has no
+        # "samples" time unit, so the axis is still labelled "ns" — but the number
+        # equals the sample number. The real sample rate stays in the JSON metadata
+        # (sample_clock_hz) for anyone who needs to convert back to time.
+        timescale_ns = 1
 
         # Build signal list: use probe definitions if available, else one raw signal.
         signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
@@ -873,7 +919,8 @@ class Analyzer:
             return self.export_vcd_text(results[0])
         cfg = results[0].config
         sig_w = cfg.sample_width
-        timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+        # One time unit per sample — x-axis reads sample indices (see export_vcd_text).
+        timescale_ns = 1
 
         signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
         next_id = ord("a")
@@ -1032,6 +1079,10 @@ class Analyzer:
             "compare_caps": compare_caps,
             "compare_modes": [m for m in range(9) if _compare_mode_available(compare_caps, m)],
             "has_dual_compare": _dual_compare_available(compare_caps),
+            # WIDE_TRIG cores (e.g. the 160-bit AXI monitor) can trigger across
+            # their full sample width, not just comparator A's low 32 bits, via
+            # the wide-comparator window that configure() programs.
+            "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
         }
 
     def probe_optional(self) -> Optional[Dict]:

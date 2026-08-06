@@ -129,6 +129,7 @@ module fcapz_debug_multi_xilinx7 #(
     wire [31:0] jtag_wdata, jtag_rdata;
 
     wire [PTR_W-1:0] burst_rd_addr;
+    wire burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
     wire [TS_W_SAFE-1:0] burst_rd_ts_data;
     wire burst_start;
@@ -141,6 +142,7 @@ module fcapz_debug_multi_xilinx7 #(
     wire [NUM_SLOTS*32-1:0] slot_wdata;
     wire [NUM_SLOTS*32-1:0] slot_rdata;
     wire [NUM_SLOTS*PTR_W-1:0] slot_burst_rd_addr;
+    wire [NUM_SLOTS-1:0] slot_burst_rd_active;
     wire [NUM_SLOTS*SAMPLE_W-1:0] slot_burst_rd_data;
     wire [NUM_SLOTS*TS_W_SAFE-1:0] slot_burst_rd_ts_data;
     wire [NUM_SLOTS-1:0] slot_burst_start;
@@ -176,6 +178,7 @@ module fcapz_debug_multi_xilinx7 #(
         .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
         .reg_rdata(jtag_rdata),
         .mem_addr(burst_rd_addr),
+        .mem_active(burst_rd_active),
         .sample_data(burst_rd_data),
         .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start),
@@ -204,7 +207,9 @@ module fcapz_debug_multi_xilinx7 #(
         .slot_wdata(slot_wdata),
         .slot_rdata(slot_rdata),
         .burst_rd_addr(burst_rd_addr),
+        .burst_rd_active(burst_rd_active),
         .slot_burst_rd_addr(slot_burst_rd_addr),
+        .slot_burst_rd_active(slot_burst_rd_active),
         .slot_burst_rd_data(slot_burst_rd_data),
         .slot_burst_rd_ts_data(slot_burst_rd_ts_data),
         .slot_burst_start(slot_burst_start),
@@ -294,6 +299,7 @@ module fcapz_debug_multi_xilinx7 #(
                 .jtag_addr(slot_addr[i*16 +: 16]),
                 .jtag_wdata(slot_wdata[i*32 +: 32]),
                 .jtag_rdata(slot_rdata[i*32 +: 32]),
+                .burst_rd_active(slot_burst_rd_active[i]),
                 .burst_rd_addr(slot_burst_rd_addr[i*PTR_W +: ELA_PTR_W]),
                 .burst_rd_data(ela_burst_rd_data),
                 .burst_rd_ts_data(ela_burst_rd_ts_data),

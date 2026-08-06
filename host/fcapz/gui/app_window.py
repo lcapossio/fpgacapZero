@@ -1670,6 +1670,27 @@ def _windows_set_taskbar_app_identity() -> None:
         pass
 
 
+def _show_gui_deprecation_notice(parent: QWidget) -> None:
+    """Tell the user, once per launch, that this desktop GUI is frozen.
+
+    The PySide6 GUI is kept working but no longer developed — the web frontend
+    (``fcapz-web``) is the maintained interface. Shown modally after the window
+    appears so it can't be missed, but dismissible so the GUI stays usable.
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Python GUI no longer maintained")
+    box.setText("This desktop GUI is no longer maintained.")
+    box.setInformativeText(
+        "Development has moved to the web frontend, which is the supported "
+        "interface going forward. Start it with:\n\n"
+        "    fcapz-web\n\n"
+        "This GUI still works, but won't get new features or fixes."
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.exec()
+
+
 def run_app(argv: list[str] | None = None) -> int:
     global _main_window_ref
     args = argv if argv is not None else sys.argv
@@ -1689,6 +1710,7 @@ def run_app(argv: list[str] | None = None) -> int:
     w = MainWindow()
     _main_window_ref = weakref.ref(w)
     w.show()
+    _show_gui_deprecation_notice(w)
     try:
         return app.exec()
     finally:

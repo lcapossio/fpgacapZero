@@ -420,6 +420,52 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t._parse_bits_u32("some garbage output without bit string")
 
+    def test_select_fpga_target_selects_present_target(self):
+        """_select_fpga_target() sets the filter when the target is present."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        calls: list[str] = []
+
+        def fake_send(tcl: str) -> str:
+            calls.append(tcl)
+            return "  1  xc7a100t\n  2  xck26\n" if tcl == "puts [jtag targets]" else ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._select_fpga_target()
+        self.assertTrue(
+            any("jtag targets -set -filter" in c and "xc7a100t" in c for c in calls)
+        )
+
+    def test_select_fpga_target_waits_out_empty_chain(self):
+        """A transiently empty chain is polled until the target appears."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=2.0)
+        listings = iter(["", "", "  1  xc7a100t\n"])  # empty, empty, then present
+        polls = {"n": 0}
+
+        def fake_send(tcl: str) -> str:
+            if tcl == "puts [jtag targets]":
+                polls["n"] += 1
+                return next(listings, "  1  xc7a100t\n")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            t._select_fpga_target()
+        self.assertGreaterEqual(polls["n"], 3)  # rode out the empty window
+
+    def test_select_fpga_target_times_out_with_clear_error(self):
+        """A never-appearing target fails with a message naming what is visible."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=0.05)
+
+        def fake_send(tcl: str) -> str:
+            return "  1  xck26\n" if tcl == "puts [jtag targets]" else ""  # never the Arty
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            with self.assertRaises(ConnectionError) as cm:
+                t._select_fpga_target()
+        self.assertIn("xc7a100t", str(cm.exception))
+        self.assertIn("xck26", str(cm.exception))
+
     def test_parse_bits_u32_extracts_value(self):
         """_parse_bits_u32() correctly decodes a 32-bit value from LSB-first string."""
         t = XilinxHwServerTransport()
@@ -588,6 +634,69 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
 
+    def test_wide_sample_core_skips_burst_readback(self):
+        """SAMPLE_W>32 (e.g. the 160-bit AXI monitor) must NOT use the
+        sample-packing burst DR: it treats capture()'s 32-bit *word* count as a
+        *sample* count, building a 5x-oversized single-line TCL that xsdb never
+        finishes — hanging the read. Wide cores take the 32-bit word path."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(return_value=160)  # ADDR_SAMPLE_W (0x000C)
+        t._read_block_burst = MagicMock(return_value=[])  # must not be reached
+        t._read_block_user1 = MagicMock(return_value=[1, 2, 3, 4, 5])
+
+        self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
+        t._read_block_burst.assert_not_called()
+        t._read_block_user1.assert_called_once_with(0x0100, 5)
+
+    def test_narrow_sample_core_still_uses_burst_readback(self):
+        """SAMPLE_W<=32 keeps the fast burst path (one 32-bit word per sample)."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(return_value=8)
+        t._read_block_burst = MagicMock(return_value=[9, 9])
+        t._read_block_user1 = MagicMock(return_value=[0])
+
+        self.assertEqual(t.read_block(0x0100, 2), [9, 9])
+        t._read_block_burst.assert_called_once_with(2)
+        t._read_block_user1.assert_not_called()
+
+    def test_burst_read_tcl_targets_active_chain(self):
+        """The pipelined DATA reader must shift IR on the ACTIVE chain, not a
+        hardcoded USER1 -- otherwise a wide core on USER2 (the AXI monitor) reads
+        USER1's data window instead of its own."""
+        t = XilinxHwServerTransport()
+        t._active_chain = 1
+        tcl_c1 = t._burst_read_tcl(0x0100, 0, 4)
+        t._active_chain = 2
+        tcl_c2 = t._burst_read_tcl(0x0100, 0, 4)
+        self.assertNotEqual(tcl_c1, tcl_c2)  # IR shift follows the active chain
+
+    def test_read_block_user1_uses_pipelined_path_for_data(self):
+        """DATA-window reads go through one pipelined sequence per chunk (not a
+        per-word round trip), so a wide readback is a handful of _send calls."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._parse_block_bits = MagicMock(return_value=[0] * 8)  # isolate call shape
+        t.read_reg = MagicMock(return_value=0)  # the trailing pipeline flush
+        t._read_block_user1(0x0100, 8)
+        # 8 words fit one _BLOCK_CHUNK -> a single pipelined _send, not 8+.
+        self.assertEqual(len(sent), 1)
+
+    def test_burst_sample_gate_defaults_open_when_width_unreadable(self):
+        """If SAMPLE_W can't be read, keep the prior fast-path behavior."""
+        t = XilinxHwServerTransport()
+
+        def boom():
+            raise RuntimeError("not connected")
+
+        t.read_reg_stable = MagicMock(side_effect=lambda addr: boom())
+        self.assertTrue(t._burst_sample_ok())
+
     def test_single_chain_burst_fallback_logs_migration_hint(self):
         """Default single-chain failure should point legacy users at two-chain mode."""
         t = XilinxHwServerTransport()
@@ -643,11 +752,17 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
         tcl = t._burst_read_tcl(0x0100, 0, 4)
 
-        self.assertEqual(tcl.count(f"delay {t.READ_IDLE_CYCLES}"), 5)
+        self.assertEqual(
+            tcl.count(f"delay {t.READ_IDLE_CYCLES}"),
+            1 + t.USER1_PIPE_PRIME_READS + 3,
+        )
         # xsdb 2025.2 requires `delay` to follow IDLE/PAUSE/RESET, so every
         # capture-and-delay pair parks the TAP in IDLE. The final scan has no
         # trailing delay and stays in DRUPDATE.
-        self.assertEqual(tcl.count("drshift -state IDLE -capture"), 4)
+        self.assertEqual(
+            tcl.count("drshift -state IDLE -capture"),
+            t.USER1_PIPE_PRIME_READS + 3,
+        )
         self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 1)
 
     def test_default_chain_shape_emits_6bit_ir_and_49bit_dr(self):

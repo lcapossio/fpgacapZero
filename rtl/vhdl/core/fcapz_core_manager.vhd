@@ -35,7 +35,9 @@ entity fcapz_core_manager is
         slot_rdata : in  std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
 
         burst_rd_addr          : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_rd_active        : in  std_logic;
         slot_burst_rd_addr     : out std_logic_vector(NUM_SLOTS * fcapz_clog2(DEPTH) - 1 downto 0);
+        slot_burst_rd_active   : out std_logic_vector(NUM_SLOTS - 1 downto 0);
         slot_burst_rd_data     : in  std_logic_vector(NUM_SLOTS * SAMPLE_W - 1 downto 0);
         slot_burst_rd_ts_data  : in  std_logic_vector(NUM_SLOTS * fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
         slot_burst_start       : in  std_logic_vector(NUM_SLOTS - 1 downto 0);
@@ -66,13 +68,18 @@ architecture rtl of fcapz_core_manager is
     constant ADDR_MGR_DESC_INDEX : std_logic_vector(15 downto 0) := x"F014";
     constant ADDR_MGR_DESC_CORE  : std_logic_vector(15 downto 0) := x"F018";
     constant ADDR_MGR_DESC_CAPS  : std_logic_vector(15 downto 0) := x"F01C";
+    constant ADDR_BURST_PTR      : std_logic_vector(15 downto 0) := x"002C";
 
     signal active_idx : unsigned(IDX_W - 1 downto 0) := (others => '0');
     signal desc_idx   : unsigned(IDX_W - 1 downto 0) := (others => '0');
+    signal burst_owner_idx   : unsigned(IDX_W - 1 downto 0) := (others => '0');
+    signal burst_owner_valid : std_logic := '0';
+    signal burst_rd_active_d : std_logic := '0';
 
     signal manager_hit         : std_logic;
     signal requested_idx_valid : std_logic;
     signal active_onehot       : std_logic_vector(NUM_SLOTS - 1 downto 0);
+    signal burst_mux_idx       : unsigned(IDX_W - 1 downto 0);
 
     signal active_rdata           : std_logic_vector(31 downto 0);
     signal active_burst_data      : std_logic_vector(SAMPLE_W - 1 downto 0);
@@ -88,16 +95,30 @@ begin
     manager_hit <= '1' when jtag_addr(15 downto 8) = x"F0" else '0';
     requested_idx_valid <= '1' when unsigned(jtag_wdata) < NUM_SLOTS else '0';
     active_onehot <= std_logic_vector(shift_left(to_unsigned(1, NUM_SLOTS), to_integer(active_idx)));
+    burst_mux_idx <= burst_owner_idx when burst_owner_valid = '1' else active_idx;
 
     p_regs : process(jtag_clk, jtag_rst)
     begin
         if jtag_rst = '1' then
             active_idx <= (others => '0');
             desc_idx <= (others => '0');
+            burst_owner_idx <= (others => '0');
+            burst_owner_valid <= '0';
+            burst_rd_active_d <= '0';
         elsif rising_edge(jtag_clk) then
+            burst_rd_active_d <= burst_rd_active;
+            if jtag_wr_en = '1' and manager_hit = '0' and
+               jtag_addr = ADDR_BURST_PTR and SLOT_HAS_BURST(to_integer(active_idx)) = '1' then
+                burst_owner_idx <= active_idx;
+                burst_owner_valid <= '1';
+            elsif burst_rd_active = '1' and burst_rd_active_d = '0' then
+                burst_owner_idx <= active_idx;
+                burst_owner_valid <= '1';
+            end if;
+
             if jtag_wr_en = '1' then
                 if jtag_addr = ADDR_MGR_ACTIVE then
-                    if requested_idx_valid = '1' then
+                    if requested_idx_valid = '1' and burst_rd_active = '0' then
                         active_idx <= resize(unsigned(jtag_wdata), IDX_W);
                     end if;
                 elsif jtag_addr = ADDR_MGR_DESC_INDEX then
@@ -115,6 +136,9 @@ begin
         slot_addr((g + 1) * 16 - 1 downto g * 16) <= jtag_addr;
         slot_wdata((g + 1) * 32 - 1 downto g * 32) <= jtag_wdata;
         slot_burst_rd_addr((g + 1) * PTR_W - 1 downto g * PTR_W) <= burst_rd_addr;
+        slot_burst_rd_active(g) <= burst_rd_active when
+            burst_mux_idx = to_unsigned(g, IDX_W) and SLOT_HAS_BURST(g) = '1'
+            else '0';
     end generate;
 
     p_active : process(all)
@@ -135,6 +159,9 @@ begin
         for i in 0 to NUM_SLOTS - 1 loop
             if active_idx = to_unsigned(i, IDX_W) then
                 rdata_v := slot_rdata((i + 1) * 32 - 1 downto i * 32);
+            end if;
+
+            if burst_mux_idx = to_unsigned(i, IDX_W) then
                 if SLOT_HAS_BURST(i) = '1' then
                     data_v := slot_burst_rd_data((i + 1) * SAMPLE_W - 1 downto i * SAMPLE_W);
                     ts_data_v := slot_burst_rd_ts_data((i + 1) * TS_W_SAFE - 1 downto i * TS_W_SAFE);

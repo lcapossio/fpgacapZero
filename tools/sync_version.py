@@ -42,6 +42,7 @@ CORE_IDS: dict[str, tuple[str, str]] = {
     "EIO":  ("IO", "Embedded I/O"),
     "EJTAGAXI":  ("JX", "EJTAG-AXI bridge"),
     "EJTAGUART": ("JU", "EJTAG-UART bridge"),
+    "AXIMON":    ("AM", "AXI Monitor"),
 }
 
 

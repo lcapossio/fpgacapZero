@@ -65,7 +65,9 @@ in that bridge’s section.
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
 | `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
 | `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
-| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). |
+| `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
+| `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. |
 
 <a id="regmap-seq-cfg"></a>
@@ -159,7 +161,7 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 |---------|------|--------|-------------|
 | `0xF000` | MGR_VERSION | RO | Manager identity: `[31:24]` major, `[23:16]` minor, `[15:0]` manager core ID `"CM"` (`0x434D`). |
 | `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
-| `0xF008` | MGR_ACTIVE | RW | Active slot. Non-manager register accesses and burst readback target this slot. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. Burst readback latches the active slot when `BURST_PTR` is written, then routes burst control/data through that owner instead of the live `MGR_ACTIVE` value. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
 | `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported. |
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
@@ -184,6 +186,10 @@ mixed manager returns idle/zero burst controls.
 - Write to `BURST_PTR` (0x002C) via the active ELA control chain to start a burst from `start_ptr`.
   - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
+- In managed multi-core designs, this `BURST_PTR` write captures the current
+  active slot as the burst owner. Later `MGR_ACTIVE` writes do not redirect an
+  in-flight burst; address, data, timestamp, and burst-active control stay
+  routed to the captured owner until another burst owner is selected or reset.
 - Legacy two-chain Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples

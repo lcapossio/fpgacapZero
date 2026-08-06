@@ -1,0 +1,534 @@
+// ILA-style trigger model: a table of comparison rows — operator, radix,
+// value — combined with a global AND/OR condition (mirroring Vivado's ILA
+// Trigger Setup). A row targets one probe, or a *group* of probes concatenated
+// MSB-first into one wider field so a single value spans several signals (e.g.
+// {addr_hi, addr_lo} == 0x1234). Values support per-bit don't-cares (X) in
+// binary and hex radix, and — in binary radix — per-bit edge tokens (R rise,
+// F fall, B both) mixed freely with 0/1/X, Vivado ILA style. Everything
+// compiles down to the shared ELA trigger config; bit positions come from the
+// probe definitions — nothing here hardcodes a layout.
+//
+// Hardware mapping (see docs/05). The ELA offers:
+// - one simple comparator: value_match ((probe&mask)==(value&mask)) or
+//   edge_detect (any masked bit changes) — available in every build;
+// - a trigger sequencer stage with two comparators A/B (EQ/NEQ/RISING/
+//   FALLING/CHANGED) and an AND/OR combine — TRIG_STAGES >= 2 builds,
+//   comparator B additionally needs DUAL_COMPARE.
+//
+// A row's bits are an implicit AND of their conditions: its level (0/1) bits
+// form one EQ compare, and each edge bit (R/F/B) is its own edge comparator (a
+// single-bit mask — the faithful per-bit form, since the hardware's RISING/
+// FALLING act on the whole masked field). So a trigger composes into at most
+// two comparator "slots":
+// - AND: all `==`/level slots merge into one EQ slot (X'd bits drop out of the
+//   mask); at most one edge can join via the second slot, and any `!=` needs a
+//   slot of its own. Two edges can't be required in the same cycle — the
+//   hardware has no per-bit edge AND.
+// - OR: every term must be a single slot (a compound level+edge row is an AND
+//   of its bits, so it needs Global AND); `==`/`!=` each take a slot, all B
+//   (either-edge) terms merge into one CHANGED slot, R/F take a slot each.
+
+import { parseProbesText } from "./api";
+import type { Identity, ProbeSpec } from "./api";
+import type { ElaConfig } from "./session";
+
+export type TriggerOp = "==" | "!=";
+/** ILA radix letters: B(inary), H(ex), U(nsigned decimal). */
+export type TriggerRadix = "B" | "H" | "U";
+export type Combine = "and" | "or";
+
+/** One row of the trigger-setup table. `probes` holds one probe for a plain
+ *  row, or several (MSB-first) concatenated into a single field for a group. */
+export interface TriggerTerm {
+  probes: ProbeSpec[];
+  op: TriggerOp;
+  radix: TriggerRadix;
+  value: string;
+}
+
+/** Total bit width of a row's field (sum of its probes' widths). */
+export function termWidth(t: TriggerTerm): number {
+  return t.probes.reduce((sum, p) => sum + p.width, 0);
+}
+
+/** Display name: the probe's name, or `{a, b, …}` for a group. */
+export function termName(t: TriggerTerm): string {
+  return t.probes.length === 1
+    ? t.probes[0].name
+    : `{${t.probes.map((p) => p.name).join(", ")}}`;
+}
+
+/** A single-bit probe row — the only kind that accepts R/F/B edge tokens. */
+function isSingleBit(t: TriggerTerm): boolean {
+  return t.probes.length === 1 && t.probes[0].width === 1;
+}
+
+/** All-don't-cares value string for a field of the given width and radix. */
+export function defaultValue(width: number, radix: TriggerRadix): string {
+  if (radix === "U") return "0";
+  if (radix === "B") return "X".repeat(width);
+  return "X".repeat(Math.ceil(width / 4));
+}
+
+// The base ELA trigger comparator is driven through a 32-bit register, so only
+// the low 32 probe bits are reachable. WIDE_TRIG cores (e.g. the 160-bit AXI
+// monitor) add a wide-comparator window that reaches the full sample width —
+// see triggerBits().
+export const COMPARATOR_BITS = 32;
+
+/** How many low bits of the sample the trigger comparator can reach for this
+ *  core: the full sample width on a WIDE_TRIG core, else the base 32. */
+export function triggerBits(id: Identity | null): number {
+  return id?.has_wide_trigger ? (id.sample_width ?? COMPARATOR_BITS) : COMPARATOR_BITS;
+}
+
+const CMP_EQ = 0;
+const CMP_NEQ = 1;
+const CMP_RISING = 6;
+const CMP_FALLING = 7;
+const CMP_CHANGED = 8;
+const COMBINE_AND = 2;
+const COMBINE_OR = 3;
+
+/** One comparator's worth of condition. */
+interface Slot {
+  mode: number;
+  value: bigint;
+  mask: bigint;
+  /** `==` slots merge under AND; everything else stays its own slot. */
+  mergeableEq: boolean;
+}
+
+function hex(v: bigint): string {
+  return "0x" + v.toString(16).toUpperCase();
+}
+
+function fieldMask(p: ProbeSpec): bigint {
+  return ((1n << BigInt(p.width)) - 1n) << BigInt(p.lsb);
+}
+
+/** Can this probe be used in the trigger table at all? `maxBits` is the core's
+ *  trigger reach (see triggerBits); defaults to the base 32-bit comparator. */
+export function triggerable(p: ProbeSpec, maxBits: number = COMPARATOR_BITS): boolean {
+  return p.width > 0 && p.lsb + p.width <= maxBits;
+}
+
+/** Do directional edges (R/F) exist in this bitstream? */
+export function hasDirectionalEdges(id: Identity | null): boolean {
+  const stages = id?.trig_stages ?? 0;
+  const modes = id?.compare_modes;
+  // Older servers omit compare_modes; TRIG_STAGES >= 2 alone implies the
+  // baseline EQ/NEQ/RISING/FALLING/CHANGED set unless caps say otherwise.
+  const edgeModes = modes ? modes.includes(CMP_RISING) && modes.includes(CMP_FALLING) : true;
+  return stages >= 2 && edgeModes;
+}
+
+/** Sensible default row for a probe, ILA-style. */
+export function defaultTerm(p: ProbeSpec): TriggerTerm {
+  return p.width === 1
+    ? { probes: [p], op: "==", radix: "B", value: "1" }
+    : { probes: [p], op: "==", radix: "H", value: "X".repeat(Math.ceil(p.width / 4)) };
+}
+
+/** Merge rows into one group (concatenated MSB-first in the given order). The
+ *  op/radix carry over from the first row; the value resets to all-don't-cares
+ *  since the field width changed. */
+export function groupTerms(rows: TriggerTerm[]): TriggerTerm {
+  const probes = rows.flatMap((r) => r.probes);
+  const { op, radix } = rows[0];
+  return { probes, op, radix, value: defaultValue(probes.reduce((s, p) => s + p.width, 0), radix) };
+}
+
+/** Parsed value in field space (bit 0 = LSB of the field). `mask`/`value` are
+ *  the level (0/1/X) compare; `rising`/`falling`/`changed` are per-bit edge
+ *  masks (Vivado-style R/F/B mixed into a binary value). All are disjoint. */
+interface ParsedValue {
+  value: bigint;
+  mask: bigint; // level bits compared (X's and edge bits drop out)
+  rising: bigint;
+  falling: bigint;
+  changed: bigint;
+}
+
+const NO_EDGES = { rising: 0n, falling: 0n, changed: 0n };
+
+/** Parse a term's value text per its radix (throws with a user-facing message).
+ *  For a group the value spans the whole concatenated field (bit 0 = LSB of the
+ *  last probe); `slotOf` splits it back onto each probe. Binary values accept
+ *  per-bit edges (R=rising, F=falling, B=either) mixed freely with 0/1/X, like
+ *  Vivado ILA; `slotOf` compiles them to edge comparators. */
+export function parseTermValue(t: TriggerTerm): ParsedValue {
+  const width = termWidth(t);
+  const w = BigInt(width);
+  const full = (1n << w) - 1n;
+  const raw = t.value.trim().toUpperCase().replace(/_/g, "");
+  const name = termName(t);
+  if (!raw) throw new Error(`${name}: empty value`);
+
+  if (t.radix === "B") {
+    if (!/^[01XRFB]+$/.test(raw)) {
+      throw new Error(`${name}: binary value may use 0, 1, X, R (rise), F (fall), B (both)`);
+    }
+    if (raw.length > width) {
+      throw new Error(`${name}: value wider than ${width} bits`);
+    }
+    let value = 0n;
+    let mask = 0n;
+    let rising = 0n;
+    let falling = 0n;
+    let changed = 0n;
+    for (const ch of raw) {
+      value <<= 1n;
+      mask <<= 1n;
+      rising <<= 1n;
+      falling <<= 1n;
+      changed <<= 1n;
+      if (ch === "0") mask |= 1n;
+      else if (ch === "1") (mask |= 1n), (value |= 1n);
+      else if (ch === "R") rising |= 1n;
+      else if (ch === "F") falling |= 1n;
+      else if (ch === "B") changed |= 1n;
+      // X: no bit set anywhere
+    }
+    if ((rising || falling || changed) && t.op !== "==") {
+      throw new Error(`${name}: edges (R/F/B) only combine with ==`);
+    }
+    return { value, mask, rising, falling, changed };
+  }
+
+  if (t.radix === "H") {
+    if (!/^[0-9A-FX]+$/.test(raw)) {
+      throw new Error(`${name}: hex value may use 0-9, A-F, X`);
+    }
+    let value = 0n;
+    let mask = 0n;
+    for (const ch of raw) {
+      value <<= 4n;
+      mask <<= 4n;
+      if (ch !== "X") {
+        mask |= 0xfn;
+        value |= BigInt(parseInt(ch, 16));
+      }
+    }
+    if ((value & ~full) !== 0n) {
+      throw new Error(`${name}: value exceeds ${width} bits`);
+    }
+    return { value: value & full, mask: mask & full, ...NO_EDGES };
+  }
+
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`${name}: unsigned value must be decimal digits`);
+  }
+  const value = BigInt(raw);
+  if (value > full) throw new Error(`${name}: value exceeds ${width} bits`);
+  return { value, mask: full, ...NO_EDGES };
+}
+
+/** Human phrasing of one row ("valid == R", "{addr_hi, addr_lo} == 0x1234"). */
+export function describeTerm(t: TriggerTerm): string {
+  const prefix = t.radix === "H" ? "0x" : t.radix === "B" ? "0b" : "";
+  const v = t.value.trim().toUpperCase();
+  const shown = /^[RFB]$/.test(v) && isSingleBit(t) ? v : `${prefix}${v}`;
+  return `${termName(t)} ${t.op} ${shown}`;
+}
+
+export function describeTerms(terms: TriggerTerm[], combine: Combine): string {
+  return terms.map(describeTerm).join(combine === "and" ? " AND " : " OR ");
+}
+
+/** Parse a hex/decimal (or 0b/0o) bit-vector string as written into the raw
+ *  trigger fields; empty -> 0, unparseable -> null. */
+function parseTriggerBits(s: string): bigint | null {
+  const raw = (s || "").trim().replace(/_/g, "");
+  if (!raw) return 0n;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Decode a masked (value & mask) pattern into named-field terms using the
+ *  probe map, e.g. "awaddr=0x40 & any_err=1"; bits no probe covers fall back to
+ *  a raw "value & mask" slice, and with no probes at all the whole thing does. */
+function describeMasked(
+  value: bigint,
+  mask: bigint,
+  probes: ProbeSpec[],
+  edge: boolean,
+): string {
+  const named: string[] = [];
+  let covered = 0n;
+  for (const p of probes) {
+    const pm = mask & fieldMask(p);
+    if (pm === 0n) continue;
+    covered |= pm;
+    const pv = (value & pm) >> BigInt(p.lsb);
+    named.push(edge ? `${p.name} edge` : p.width === 1 ? `${p.name}=${pv & 1n}` : `${p.name}=${hex(pv)}`);
+  }
+  if (named.length === 0) {
+    return edge ? `edge on ${hex(mask)}` : `${hex(value & mask)} & ${hex(mask)}`;
+  }
+  const leftover = mask & ~covered;
+  if (leftover !== 0n) {
+    named.push(edge ? `edge on ${hex(leftover)}` : `${hex(value & leftover)} & ${hex(leftover)}`);
+  }
+  return named.join(edge ? " / " : " & ");
+}
+
+/** Human-readable summary of the ELA trigger *as it will be armed*, derived
+ *  from the raw config — so it stays correct however the trigger was set (the
+ *  trigger table, the AXI Mon tab, or the raw Advanced fields). Decodes the
+ *  masked value against the named probes when it can, else shows value & mask. */
+export function describeElaTrigger(ela: ElaConfig, _id: Identity | null): string {
+  void _id;
+  const ext =
+    ela.extTriggerMode === "1"
+      ? " + ext (OR)"
+      : ela.extTriggerMode === "2"
+        ? " + ext (AND)"
+        : "";
+
+  if (ela.useSequencer) {
+    let stages = 0;
+    try {
+      const seq = JSON.parse(ela.sequenceJson || "[]");
+      stages = Array.isArray(seq) ? seq.length : 0;
+    } catch {
+      stages = 0; // unparseable — report as unknown depth
+    }
+    return `sequencer (${stages || "?"} stage${stages === 1 ? "" : "s"})` + ext;
+  }
+
+  const value = parseTriggerBits(ela.triggerValue);
+  const mask = parseTriggerBits(ela.triggerMask);
+  if (value === null || mask === null) {
+    return `${ela.triggerMode} value=${ela.triggerValue || "0"} mask=${ela.triggerMask || "0"}` + ext;
+  }
+  const edge = ela.triggerMode === "edge_detect";
+  if (mask === 0n) return (edge ? "any edge" : "any sample") + ext;
+
+  let probes: ProbeSpec[] = [];
+  try {
+    probes = parseProbesText(ela.probesText);
+  } catch {
+    probes = [];
+  }
+  return describeMasked(value, mask, probes, edge) + ext;
+}
+
+/** One term can compile to several comparator slots: a level compare plus one
+ *  per edge bit (a row is an implicit AND of its bit-conditions). Empty only if
+ *  the row is all-X (rejected). */
+function slotOf(t: TriggerTerm, maxBits: number = COMPARATOR_BITS): Slot[] {
+  for (const probe of t.probes) {
+    if (!triggerable(probe, maxBits)) {
+      throw new Error(
+        `${probe.name} lies above bit ${maxBits - 1} — the trigger ` +
+          `comparator reaches the low ${maxBits} bits only`,
+      );
+    }
+  }
+  // Grouped probes must occupy distinct bits, else splitting the field below
+  // would silently corrupt the comparator value/mask.
+  let occupied = 0n;
+  for (const probe of t.probes) {
+    const fm = fieldMask(probe);
+    if ((occupied & fm) !== 0n) {
+      throw new Error(`${termName(t)}: grouped probes overlap in the sample word`);
+    }
+    occupied |= fm;
+  }
+
+  const p = parseTermValue(t);
+
+  // Split a field-space value/mask (MSB-first over the concatenated field) onto
+  // each probe's real bit position. `pos` walks down from the field MSB; each
+  // probe takes the next `width` bits and lands at its own `lsb`.
+  const toReal = (fVal: bigint, fMask: bigint): { value: bigint; mask: bigint } => {
+    let pos = termWidth(t);
+    let value = 0n;
+    let mask = 0n;
+    for (const probe of t.probes) {
+      pos -= probe.width;
+      const slice = (1n << BigInt(probe.width)) - 1n;
+      value |= ((fVal >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+      mask |= ((fMask >> BigInt(pos)) & slice) << BigInt(probe.lsb);
+    }
+    return { value, mask };
+  };
+
+  const slots: Slot[] = [];
+
+  // Level (0/1/X) compare, if any bit is fixed.
+  if (p.mask !== 0n) {
+    const lvl = toReal(p.value, p.mask);
+    slots.push({
+      mode: t.op === "==" ? CMP_EQ : CMP_NEQ,
+      value: lvl.value,
+      mask: lvl.mask,
+      mergeableEq: t.op === "==",
+    });
+  }
+
+  // One edge comparator per edge bit. fcapz RISING/FALLING are whole-field
+  // (all-zero <-> non-zero), so a single-bit mask is the only faithful per-bit
+  // form; multiple edges are left as separate slots for composeTrigger to place
+  // (or reject) against the hardware's two comparators.
+  const addEdges = (fieldBits: bigint, mode: number) => {
+    for (let b = fieldBits, i = 0n; b !== 0n; b >>= 1n, i += 1n) {
+      if (b & 1n) {
+        slots.push({ mode, value: 0n, mask: toReal(0n, 1n << i).mask, mergeableEq: false });
+      }
+    }
+  };
+  addEdges(p.rising, CMP_RISING);
+  addEdges(p.falling, CMP_FALLING);
+  addEdges(p.changed, CMP_CHANGED);
+
+  if (slots.length === 0) {
+    throw new Error(`${termName(t)}: all bits are X — the row matches always`);
+  }
+  return slots;
+}
+
+/** Compose the table into an ELA-config patch, or throw a message that says
+ *  which hardware capability is missing. */
+export function composeTrigger(
+  terms: TriggerTerm[],
+  combine: Combine,
+  id: Identity | null,
+): Partial<ElaConfig> {
+  if (terms.length === 0) throw new Error("no trigger rows");
+  const maxBits = triggerBits(id);
+  const perTerm = terms.map((t) => slotOf(t, maxBits));
+  // A compound row (levels + edges, or several edges) is an implicit AND of its
+  // own bit-conditions — only expressible under Global AND. Under OR the row's
+  // conditions would be wrongly OR'd together, so refuse it with a clear steer.
+  if (combine === "or" && perTerm.some((s) => s.length > 1)) {
+    throw new Error(
+      "a row mixing levels and edges (or several edges) is an AND of its bits — " +
+        "use Global AND, or split it across rows",
+    );
+  }
+  const all = perTerm.flat();
+
+  let slots: Slot[];
+  if (combine === "and") {
+    // One pattern: merge the == rows bitwise, rejecting contradictions.
+    const eqs = all.filter((s) => s.mergeableEq);
+    const edges = all.filter((s) => s.mode >= CMP_RISING);
+    const neqs = all.filter((s) => s.mode === CMP_NEQ);
+    if (edges.length > 1) {
+      throw new Error(
+        "the hardware can AND at most one edge with the other rows " +
+          "(edges on several probes can't be required in the same cycle)",
+      );
+    }
+    slots = [];
+    if (eqs.length) {
+      slots.push(
+        eqs.reduce((a, b) => {
+          const overlap = a.mask & b.mask;
+          if ((a.value & overlap) !== (b.value & overlap)) {
+            throw new Error("conflicting == values on the same bits");
+          }
+          return {
+            mode: CMP_EQ,
+            value: a.value | b.value,
+            mask: a.mask | b.mask,
+            mergeableEq: true,
+          };
+        }),
+      );
+    }
+    slots.push(...neqs, ...edges);
+  } else {
+    // OR: ==/!= rows keep their own pattern; either-edge (B) rows merge —
+    // "any of these bits changed" is exactly a merged CHANGED mask.
+    const changed = all.filter((s) => s.mode === CMP_CHANGED);
+    slots = all.filter((s) => s.mode !== CMP_CHANGED);
+    if (changed.length) {
+      slots.push(
+        changed.reduce((a, b) => ({
+          mode: CMP_CHANGED,
+          value: 0n,
+          mask: a.mask | b.mask,
+          mergeableEq: false,
+        })),
+      );
+    }
+  }
+
+  if (slots.length === 1 && (slots[0].mode === CMP_EQ || slots[0].mode === CMP_CHANGED)) {
+    // Fits the simple trigger — works in every build. On a WIDE_TRIG core this
+    // is the one path the wide-comparator window backs (comparator A, full
+    // sample width), so it's where triggering above bit 32 actually lands.
+    return {
+      triggerMode: slots[0].mode === CMP_EQ ? "value_match" : "edge_detect",
+      triggerValue: hex(slots[0].value),
+      triggerMask: hex(slots[0].mask),
+      useSequencer: false,
+    };
+  }
+
+  // Everything below runs on the sequencer / second comparator, which
+  // zero-extend the value/mask from 32 bits — the wide-comparator window backs
+  // only comparator A above. So a trigger that needs those paths can't reach
+  // bits above 32; reject it clearly instead of silently matching the low word.
+  for (const s of slots) {
+    if (s.value >> BigInt(COMPARATOR_BITS) || s.mask >> BigInt(COMPARATOR_BITS)) {
+      throw new Error(
+        `triggering above bit ${COMPARATOR_BITS - 1} needs a single value-match ` +
+          `(==) or any-change row — the !=/second-comparator path reaches only the ` +
+          `low ${COMPARATOR_BITS} bits. Simplify the trigger to use those signals.`,
+      );
+    }
+  }
+
+  // Anything else runs on a single sequencer stage.
+  const stages = id?.trig_stages ?? 0;
+  if (stages < 2) {
+    throw new Error(
+      `this combination needs a TRIG_STAGES ≥ 2 bitstream (this build: ${stages || "?"}) — ` +
+        "simplify the trigger or rebuild the core",
+    );
+  }
+  if (slots.length > 2) {
+    throw new Error(
+      "too many rows for the hardware's two comparators — under AND all == rows " +
+        "merge into one; != and edge rows each need a comparator of their own",
+    );
+  }
+  if (slots.length === 2 && id && id.has_dual_compare === false) {
+    throw new Error("combining two comparators needs a DUAL_COMPARE=1 build");
+  }
+  const caps = id?.compare_modes;
+  for (const s of slots) {
+    if (caps && !caps.includes(s.mode)) {
+      throw new Error(`compare mode ${s.mode} not available in this build`);
+    }
+  }
+
+  const stage: Record<string, unknown> = {
+    cmp_mode_a: slots[0].mode,
+    value_a: hex(slots[0].value),
+    mask_a: hex(slots[0].mask),
+    is_final: true,
+  };
+  if (slots.length === 2) {
+    stage.cmp_mode_b = slots[1].mode;
+    stage.value_b = hex(slots[1].value);
+    stage.mask_b = hex(slots[1].mask);
+    stage.combine = combine === "and" ? COMBINE_AND : COMBINE_OR;
+  }
+  return {
+    // The sequencer path drives the trigger; the legacy value/mask pair is
+    // parked at never-matters 0/0.
+    triggerMode: "value_match",
+    triggerValue: "0x0",
+    triggerMask: "0x0",
+    useSequencer: true,
+    sequenceJson: JSON.stringify([stage]),
+  };
+}

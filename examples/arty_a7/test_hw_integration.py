@@ -79,11 +79,19 @@ _BITSTREAM_SOURCES_VERILOG = [
     _ROOT / "rtl" / "fcapz_async_fifo.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon.v",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
     _ROOT / "rtl" / "fcapz_eio.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.v",
     _EXAMPLE_DIR / "arty_a7.xdc",
+    # MicroBlaze subsystem: block design generator + baked firmware sources.
+    _EXAMPLE_DIR / "mb" / "create_mb_bd.tcl",
+    _EXAMPLE_DIR / "mb" / "build_fw.tcl",
+    _EXAMPLE_DIR / "mb" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "mb" / "fw" / "main.c",
+    _EXAMPLE_DIR / "mb" / "fw" / "lscript.ld",
 ]
 
 _BITSTREAM_SOURCES_VHDL = [
@@ -103,6 +111,8 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "fcapz_async_fifo.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_axi_mon.vhd",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.vhd",
@@ -153,6 +163,17 @@ def _make_transport():
     return XilinxHwServerTransport(
         port=PORT, fpga_name=FPGA, bitfile=BITFILE,
     )
+
+
+def _rpc_connect_req():
+    """`connect` request for the active backend — drives the RpcServer handlers
+    (rebind / ejtag_axi_probe) exactly as the web/CLI do. hw_server programs the
+    bitstream on connect; openocd assumes the board is already loaded."""
+    if _BACKEND == "openocd":
+        return {"cmd": "connect", "backend": "openocd", "host": "127.0.0.1",
+                "port": _OPENOCD_PORT, "tap": _OPENOCD_TAP, "ir_table": "xilinx7"}
+    return {"cmd": "connect", "backend": "hw_server", "host": "127.0.0.1",
+            "port": PORT, "tap": FPGA, "ir_table": "xilinx7", "program": BITFILE}
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -1144,6 +1165,65 @@ class TestEjtagAxiProbe(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestRpcAutodetectAndRebind(unittest.TestCase):
+    """RPC-level auto-detect + seamless core switch on real silicon.
+
+    Exercises the exact handlers the web UI uses: `ejtag_axi_probe` finds the
+    USER4 bridge with its own CONFIG scan *without disturbing the ELA session*,
+    and `rebind` hops the live session USER1<->USER2 with no reconnect. One
+    connect (one bitstream program on hw_server) covers both.
+    """
+
+    def setUp(self):
+        from fcapz.rpc import RpcServer
+
+        self.srv = RpcServer()
+        r = self.srv.handle(dict(_rpc_connect_req()))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["chain"], 1)
+
+    def tearDown(self):
+        self.srv.handle({"cmd": "close"})
+
+    def test_autodetect_bridge_and_rebind_monitor(self):
+        from fcapz.analyzer import ELA_CORE_ID
+        from fcapz.ejtagaxi import _BRIDGE_CORE_ID
+
+        # --- EJTAG-AXI auto-detected on its own USER4 chain ---
+        ej = self.srv.handle({"cmd": "ejtag_axi_probe"})
+        self.assertTrue(ej["present"], "EJTAG-AXI bridge not detected")
+        self.assertEqual(ej["chain"], 4)
+        self.assertEqual(ej["core_id"], _BRIDGE_CORE_ID)
+        self.assertEqual(ej["addr_w"], 32)
+        self.assertEqual(ej["data_w"], 32)
+        self.assertGreater(ej["fifo_depth"], 0)
+
+        # The bridge's USER4 CONFIG scan must leave the ELA (USER1) untouched.
+        p = self.srv.handle({"cmd": "probe"})
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["probe"]["core_id"], ELA_CORE_ID)
+
+        # --- rebind hops to the AXI monitor (USER2) and back, no reconnect ---
+        am = self.srv.handle({"cmd": "axi_mon_probe"})
+        self.assertTrue(am["present"], "AXI monitor not detected")
+        mon = am["chain"]
+        self.assertEqual(mon, 2)
+
+        rb = self.srv.handle({"cmd": "rebind", "chain": mon})
+        self.assertTrue(rb["ok"])
+        self.assertEqual(rb["chain"], mon)
+        self.assertEqual(self.srv.handle({"cmd": "axi_mon_probe"})["chain"], mon)
+
+        rb2 = self.srv.handle({"cmd": "rebind", "chain": 1})
+        self.assertTrue(rb2["ok"])
+        self.assertEqual(rb2["chain"], 1)
+        self.assertEqual(rb2["probe"]["core_id"], ELA_CORE_ID)
+
+        # Still detectable after the chain hops — the probe is repeatable.
+        self.assertEqual(self.srv.handle({"cmd": "ejtag_axi_probe"})["chain"], 4)
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEjtagAxiReadWrite(unittest.TestCase):
     """EJTAG-AXI bridge: single and block read/write via on-chip test slave."""
 
@@ -1214,6 +1294,486 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
+
+
+# ── AXI monitor tests (USER2) ────────────────────────────
+# The monitor passively taps the EJTAG-AXI bridge's AXI bus. Each test arms
+# the monitor on USER2, then drives traffic via the bridge on USER4 and
+# confirms the monitor captured/triggered on it. The bitstream builds the
+# monitor with DECODE_EN=1, so triggers fire on transaction events.
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitor(unittest.TestCase):
+    """AXI monitor on USER2, observing the USER4 bridge bus.
+
+    The monitor passively taps the EJTAG-AXI bridge's AXI4-Lite bus. These
+    tests arm the monitor on the decode layer's transaction-event bits, then
+    drive traffic via the bridge on USER4 and confirm the monitor triggers
+    (or doesn't) by reading STATUS. Selective event triggering on real silicon
+    is the AXI monitor's headline.
+
+    Note: bulk readback of the 160-bit samples is *not* asserted here — that
+    path is timing-marginal at 150 MHz for this wide SAMPLE_W (a separate,
+    characterized issue; the capture/trigger logic itself is cocotb-verified
+    and confirmed on hardware via the STATUS checks below).
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream once
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()  # transport already open; don't re-program
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+
+    def tearDown(self):
+        self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _arm(self, *events):
+        cfg = self.mon.event_capture_config(*events, pretrigger=2, posttrigger=12, depth=256)
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_detect_and_geometry(self):
+        """The monitor identity/geometry is reachable on USER2."""
+        self.assertTrue(self.mon.present, "AXI monitor not detected on USER2")
+        geo = self.mon.geometry()
+        self.assertEqual((geo.addr_w, geo.data_w), (32, 32))
+        self.assertEqual(geo.id_w, 0)          # AXI4-Lite has no transaction ID
+        self.assertEqual(geo.cap_channels, 5)  # AW/W/B/AR/R
+        self.assertTrue(geo.decode, "expected a DECODE_EN=1 build")
+        self.assertEqual(geo.sample_width, 160)
+
+    def test_triggers_on_write_handshake(self):
+        """Arm on aw_hs; a host AXI write makes the monitor trigger + complete."""
+        self._arm("aw_hs")
+        self.bridge.axi_write(0x00000010, 0x12345678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the AW handshake (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_triggers_on_slverr(self):
+        """Arm on any_err; a write to the slave's ERROR_ADDR triggers the monitor.
+
+        The test slave returns SLVERR for 0xFFFFFFFC; the bridge surfaces that as
+        AXIError, but the error response still appears on the bus, where the
+        monitor's any_err event fires. This is the P2 decode-layer headline.
+        """
+        from fcapz.ejtagaxi import AXIError
+
+        self._arm("any_err")
+        with self.assertRaises(AXIError):
+            self.bridge.axi_write(0xFFFFFFFC, 0xDEADBEEF)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the error response (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_no_trigger_on_clean_write(self):
+        """Arm on any_err; a *clean* write must NOT trigger (selective events)."""
+        self._arm("any_err")
+        self.bridge.axi_write(0x00000010, 0x12345678)  # OKAY response, no error
+        status = self._status()
+        self.assertFalse(status & 0x2, f"false trigger on a clean write (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+
+# ── AXI monitor + MicroBlaze CPU tests (USER2 monitor, USER3 MDM) ─────
+# The bitstream integrates a MicroBlaze whose M_AXI_DP data master shares one
+# SmartConnect bus with the EJTAG-AXI bridge; both reach the same test slave,
+# which the monitor taps.  The CPU therefore generates *real* bus traffic the
+# monitor can capture -- the headline of this integration.
+#
+# The firmware is host-gated: it writes its pattern to slave words 16/17 only
+# while the go flag (word 31) is non-zero, and otherwise just polls (reads).
+# So the CPU stays write-quiet during every other test above (which use words
+# 0..15), and these tests turn it on explicitly.
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorMicroBlaze(unittest.TestCase):
+    """Real CPU bus traffic, captured by the monitor and cross-read via EJTAG.
+
+    Evidence chain that the AXI captures are valid and repeatable:
+      1. gated off, the CPU makes no writes (bus stays quiet for other tests);
+      2. gated on, the monitor triggers on the CPU's write handshakes;
+      3. the *other* master (EJTAG on USER4) reads the CPU's pattern back from
+         the shared slave -- proving the CPU really drove the bus;
+      4. the captured samples decode to the CPU's awaddr/wdata pattern.
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+
+    # Shared-slave byte offsets; word_index = (addr >> 2) % 32.
+    GO_OFF = 0x7C    # word31: host go/stop flag (CPU polls it)
+    D0_OFF = 0x40    # word16: CPU writes PATTERN here while go != 0
+    D1_OFF = 0x44    # word17: CPU writes PATTERN2 here while go != 0
+    PATTERN = 0xCAFEF00D
+    PATTERN2 = 0x1234ABCD
+
+    # CPU DP addresses *as seen on the monitored bus*.  SmartConnect does NOT
+    # subtract the segment base: the CPU's M_BUS window is assigned at offset
+    # 0x4000_0000 (create_mb_bd.tcl), so the CPU issues -- and the monitor taps
+    # -- the full 0x4000_0040/44 on M_AXI_DP.  The EJTAG master reaches the same
+    # slave through a 0x0-based segment, so it drives bare 0x40/0x44 (D0/D1_OFF);
+    # the shared test slave decodes (addr >> 2) % 32, so both hit word16/17.
+    CPU_ADDR0 = 0x40000040  # SLAVE_BASE | word16
+    CPU_ADDR1 = 0x40000044  # SLAVE_BASE | word17
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream (CPU resets -> go=0, quiet)
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self._set_go(0)
+
+    def tearDown(self):
+        # Leave the CPU write-quiet so any later test sees an idle bus.
+        try:
+            self._set_go(0)
+        finally:
+            self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _set_go(self, value: int) -> None:
+        self.bridge.axi_write(self.GO_OFF, value)
+
+    def _arm_on_writes(self, pretrigger=4, posttrigger=32):
+        cfg = self.mon.event_capture_config(
+            "aw_hs", pretrigger=pretrigger, posttrigger=posttrigger, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_cpu_quiet_until_gated_on(self):
+        """Gated off, the CPU issues no writes: an aw_hs-armed monitor stays
+        armed (never triggers), so the bus is write-quiet for the other tests."""
+        import time
+
+        self._set_go(0)
+        self._arm_on_writes(pretrigger=2, posttrigger=12)
+        time.sleep(0.2)  # ample time for a write to appear if the CPU misbehaved
+        status = self._status()
+        self.assertFalse(status & 0x2, f"CPU wrote while gated off (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+    def test_cpu_traffic_triggers_and_cross_reads(self):
+        """Gated on, the monitor triggers on the CPU's writes and the EJTAG
+        bridge reads the CPU's pattern back from the shared slave (repeatably)."""
+        import time
+
+        self._arm_on_writes(pretrigger=2, posttrigger=12)
+        self._set_go(1)  # turn the CPU loose
+
+        deadline = time.time() + 3.0
+        status = 0
+        while time.time() < deadline:
+            status = self._status()
+            if status & 0x4:
+                break
+        self.assertTrue(status & 0x2, f"monitor did not trigger on CPU writes (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+        # Cross-read the CPU's writes via the other master (EJTAG on USER4).
+        got0 = self.bridge.axi_read(self.D0_OFF)
+        got1 = self.bridge.axi_read(self.D1_OFF)
+        self.assertEqual(got0, self.PATTERN, f"CPU word16 = 0x{got0:08X}")
+        self.assertEqual(got1, self.PATTERN2, f"CPU word17 = 0x{got1:08X}")
+        # Repeatable: same values on a second read.
+        self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)
+        self.assertEqual(self.bridge.axi_read(self.D1_OFF), self.PATTERN2)
+
+    def test_gate_off_stops_cpu_writes(self):
+        """After the host lowers the go flag, the CPU stops writing: a sentinel
+        written over word16 via EJTAG survives (the CPU no longer overwrites it)."""
+        import time
+
+        self._set_go(1)
+        time.sleep(0.05)
+        self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)
+        self._set_go(0)
+        time.sleep(0.05)
+        sentinel = 0x0BADF00D
+        self.bridge.axi_write(self.D0_OFF, sentinel)
+        time.sleep(0.05)
+        self.assertEqual(
+            self.bridge.axi_read(self.D0_OFF), sentinel,
+            "CPU kept writing after the go flag was lowered",
+        )
+
+    def test_capture_shows_cpu_write_address(self):
+        """Decode the captured samples and confirm the CPU's write *address*
+        appears -- direct evidence the monitor captured real CPU bus cycles.
+
+        Only the low word of each sample (the decode-events byte + awaddr) is
+        asserted: bulk readback of the full 160-bit sample is timing-marginal
+        (the same wide-SAMPLE_W readback caveat documented on TestAxiMonitor --
+        higher words repeat the first), so ``wdata`` is *not* read back here.
+        The CPU's write *data* value is confirmed independently, and robustly,
+        by the EJTAG cross-read in test_cpu_traffic_triggers_and_cross_reads.
+        """
+        import time
+
+        # Turn the CPU loose *first* so the aw_hs trigger fires on a CPU write
+        # (arming before raising the go flag would instead trigger on the host's
+        # EJTAG write to the go word).
+        self._set_go(1)
+        time.sleep(0.05)
+        cfg = self.mon.event_capture_config(
+            "aw_hs", pretrigger=4, posttrigger=32, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        result = self.an.capture(timeout=5.0)
+        self.assertTrue(result.samples, "capture returned no samples")
+        probes = self.mon.probe_map().probes
+        awaddrs = {self.mon.decode_sample(s, probes).get("awaddr") for s in result.samples}
+        self.assertTrue(
+            {self.CPU_ADDR0, self.CPU_ADDR1} & awaddrs,
+            "CPU write address not in capture; saw "
+            f"{sorted(hex(a) for a in awaddrs if a is not None)}",
+        )
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorStress(unittest.TestCase):
+    """Stress the AXI monitor's arm/trigger/complete path on real silicon.
+
+    Deliberately avoids bulk wide-readback (timing-marginal at 150 MHz for the
+    160-bit SAMPLE_W — see TestAxiMonitor) and instead hammers the capture state
+    machine, which *is* robust: many rapid arm->trigger->done cycles under bridge
+    traffic, sustained real CPU bus traffic re-captured repeatedly, and a long
+    run of clean traffic that must never false-trigger on any_err. Catches
+    stuck-armed / missed-complete / state-leak / false-trigger regressions the
+    single-shot tests can't.
+
+    Shares the MicroBlaze go-flag infra with TestAxiMonitorMicroBlaze: the CPU
+    only writes while word31 (go) is non-zero; setUp/tearDown keep it quiet.
+    """
+
+    STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
+    GO_OFF = 0x7C    # word31: host go/stop flag (CPU polls it)
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()  # program the bitstream once (CPU resets -> go=0, quiet)
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self._set_go(0)
+
+    def tearDown(self):
+        try:
+            self._set_go(0)
+        finally:
+            self.t.close()
+
+    def _status(self) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(self.STATUS)
+
+    def _set_go(self, value: int) -> None:
+        self.bridge.axi_write(self.GO_OFF, value)
+
+    def _arm(self, *events, pretrigger=2, posttrigger=12, depth=256):
+        cfg = self.mon.event_capture_config(
+            *events, pretrigger=pretrigger, posttrigger=posttrigger, depth=depth
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def test_repeated_arm_trigger_churn(self):
+        """50 back-to-back arm->trigger->done cycles on bridge writes.
+
+        Each iteration re-arms from scratch and drives one write; the monitor
+        must trigger and complete every time — no leaked state, no stuck-armed.
+        """
+        import time
+
+        n = 50
+        t0 = time.perf_counter()
+        for i in range(n):
+            self._arm("aw_hs")
+            self.bridge.axi_write(0x10 + (i % 4) * 4, 0x1000_0000 + i)
+            status = self._status()
+            self.assertTrue(status & 0x2, f"iter {i}: no trigger (0x{status:08X})")
+            self.assertTrue(status & 0x4, f"iter {i}: not done (0x{status:08X})")
+        dt = time.perf_counter() - t0
+        print(f"\n  {n} arm->trigger->done cycles in {dt:.2f}s ({n / dt:.1f}/s)")
+
+    def test_cpu_saturating_traffic_repeated_capture(self):
+        """Under continuous real CPU bus traffic, re-capture many times.
+
+        With the CPU turned loose (go=1) it streams writes to the shared slave;
+        the monitor must reliably re-arm and re-trigger on that sustained bus,
+        run after run.  Proves the capture path survives a saturated real bus,
+        not just single injected transactions.
+        """
+        import time
+
+        self._set_go(1)  # turn the CPU loose — continuous writes
+        try:
+            n = 30
+            t0 = time.perf_counter()
+            for i in range(n):
+                # Under saturated traffic the monitor arms and triggers faster
+                # than a JTAG status read, so we don't assert the (transient)
+                # armed state — reaching *done* proves it armed and triggered.
+                cfg = self.mon.event_capture_config(
+                    "aw_hs", pretrigger=2, posttrigger=32, depth=256
+                )
+                self.an.configure(cfg)
+                self.an.arm()
+                deadline = time.time() + 2.0
+                status = 0
+                while time.time() < deadline:
+                    status = self._status()
+                    if status & 0x4:
+                        break
+                self.assertTrue(
+                    status & 0x2, f"iter {i}: no trigger on CPU traffic (0x{status:08X})"
+                )
+                self.assertTrue(
+                    status & 0x4, f"iter {i}: capture did not complete (0x{status:08X})"
+                )
+            dt = time.perf_counter() - t0
+            print(f"\n  {n} captures of live CPU traffic in {dt:.2f}s ({n / dt:.1f}/s)")
+        finally:
+            self._set_go(0)
+
+    def test_sustained_clean_traffic_no_false_trigger(self):
+        """A long burst of clean writes must never trip an any_err trigger.
+
+        Arm on any_err, then drive 128 back-to-back clean (OKAY) writes via the
+        bridge's auto-increment block write.  The monitor must stay armed the
+        whole time — selective event triggering must not degrade under load.
+        """
+        self._arm("any_err", pretrigger=2, posttrigger=12)
+        self.bridge.write_block(0x00, [0xC000_0000 + i for i in range(128)])
+        status = self._status()
+        self.assertFalse(status & 0x2, f"false any_err trigger under clean load (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestAxiMonitorWideTrigger(unittest.TestCase):
+    """Validate the full-width (WIDE_TRIG) comparator on real silicon.
+
+    The 160-bit AXI sample used to be triggerable only in its low 32 bits.
+    With WIDE_TRIG, comparator A reaches any field.  These tests prove it on
+    hardware two ways: (1) a trigger on ``awvalid`` alone — bit 43, above bit 31,
+    unreachable by the legacy path — fires on a write but not on an idle bus;
+    (2) a VALID-qualified full write-address trigger fires on the matching
+    address and not on a neighbouring one.
+    """
+
+    STATUS = 0x0008
+    GO_OFF = 0x7C
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+        from fcapz.axi_monitor import AxiMonitor
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.t = _make_transport()
+        self.t.connect()
+        self.bridge = EjtagAxiController(self.t, chain=4)
+        self.bridge.attach()
+        self.an = Analyzer(self.t, chain=2)
+        self.mon = AxiMonitor(self.an)
+        self.bridge.axi_write(self.GO_OFF, 0)  # keep the CPU quiet
+        # WIDE_TRIG must be advertised for these tests to mean anything.
+        caps = self._read(0x00E0)
+        self.assertTrue(caps & (1 << 18), f"WIDE_TRIG cap not set (COMPARE_CAPS=0x{caps:08X})")
+
+    def tearDown(self):
+        try:
+            self.bridge.axi_write(self.GO_OFF, 0)
+        finally:
+            self.t.close()
+
+    def _read(self, addr: int) -> int:
+        self.t.select_chain(2)
+        return self.t.read_reg(addr)
+
+    def _status(self) -> int:
+        return self._read(self.STATUS)
+
+    def _awvalid_lsb(self) -> int:
+        return next(p.lsb for p in self.mon.probe_map().probes if p.name == "awvalid")
+
+    def test_trigger_on_awvalid_high_bit(self):
+        """Trigger on awvalid (bit 43) alone — a bit only the wide window reaches."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        bit = self._awvalid_lsb()
+        self.assertGreaterEqual(bit, 32, "awvalid should be above the low word")
+        cfg = CaptureConfig(
+            pretrigger=2, posttrigger=12,
+            trigger=TriggerConfig(mode="value_match", value=1 << bit, mask=1 << bit),
+            sample_width=self.mon.geometry().sample_width, depth=256,
+            probes=list(self.mon.probe_map().probes),
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+
+        # Idle bus: awvalid low -> must not trigger.
+        time.sleep(0.05)
+        status = self._status()
+        self.assertFalse(status & 0x2, f"triggered on idle bus (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"should still be armed (0x{status:08X})")
+
+        # A write asserts awvalid -> the high-bit trigger fires and completes.
+        self.bridge.axi_write(0x10, 0x1234_5678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on awvalid (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+
+    def test_valid_qualified_write_address(self):
+        """VALID-qualified full write-address trigger: fires on the matching
+        address, not on a neighbour (proves address + awvalid matched wide)."""
+        cfg = self.mon.write_addr_capture_config(
+            0x40, pretrigger=2, posttrigger=12, depth=256
+        )
+        self.an.configure(cfg)
+        self.an.arm()
+        # Write to a *different* address -> no trigger (address mismatch).
+        self.bridge.axi_write(0x44, 0xA5A5_A5A5)
+        status = self._status()
+        self.assertFalse(status & 0x2, f"triggered on the wrong address (0x{status:08X})")
+        self.assertTrue(status & 0x1, f"should still be armed (0x{status:08X})")
+        # Write to the matched address -> trigger + complete.
+        self.bridge.axi_write(0x40, 0x1234_5678)
+        status = self._status()
+        self.assertTrue(status & 0x2, f"no trigger on the matched address (0x{status:08X})")
+        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
 
 
 # ── EJTAG-UART bridge tests (require UART loopback bitstream) ─────────

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "features_registers",
             "register_roundtrip",
             "value_capture",
+            "burst_active_blocks_user1_data_window",
             "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
@@ -94,6 +96,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
     CocotbTarget("sequencer", {"TRIG_STAGES": 2}, ("sequencer_count_target_one",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
+    CocotbTarget("wide_trig", {"SAMPLE_W": 48, "DEPTH": 8, "WIDE_TRIG": 1},
+                 ("wide_trigger_upper_bit",)),
     CocotbTarget(
         "segmented_ext_rearm",
         {"DEPTH": 1024, "EXT_TRIG_EN": 1, "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
@@ -219,15 +223,22 @@ def merge_coverage(build_dir: Path, targets: tuple[CocotbTarget, ...]) -> Path:
     return out
 
 
+def cocotb_test_filter(testcases: tuple[str, ...]) -> str:
+    return "|".join(rf".*\.{re.escape(case)}$" for case in testcases)
+
+
 def main() -> None:
     args = parse_args()
     if os.name == "nt" and not running_in_wsl() and args.runner in ("auto", "wsl"):
         raise SystemExit(relaunch_in_wsl(ROOT, sys.argv))
 
     try:
-        from cocotb.runner import get_runner
-    except ModuleNotFoundError as exc:
-        raise SystemExit("cocotb is not installed in this Python environment") from exc
+        from cocotb_tools.runner import get_runner
+    except ModuleNotFoundError:
+        try:
+            from cocotb.runner import get_runner
+        except ModuleNotFoundError as exc:
+            raise SystemExit("cocotb is not installed in this Python environment") from exc
 
     sim = args.sim or ("icarus" if args.hdl == "verilog" else "ghdl")
     verilog_sources, vhdl_sources = resolve_sources(args)
@@ -244,8 +255,7 @@ def main() -> None:
         parameters = target.merged_parameters
 
         runner.build(
-            verilog_sources=verilog_sources,
-            vhdl_sources=vhdl_sources,
+            sources=verilog_sources if args.hdl == "verilog" else vhdl_sources,
             includes=[RTL],
             parameters=parameters,
             hdl_toplevel=args.top,
@@ -261,7 +271,7 @@ def main() -> None:
             test_module=args.test_module,
             hdl_toplevel=args.top,
             hdl_toplevel_lang=args.hdl,
-            testcase=target.testcases,
+            test_filter=cocotb_test_filter(target.testcases),
             build_dir=target_dir,
             test_dir=target_dir if args.hdl == "vhdl" else TB_COCOTB,
             results_xml=results_xml,

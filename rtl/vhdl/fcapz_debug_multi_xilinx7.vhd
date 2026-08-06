@@ -120,6 +120,7 @@ architecture rtl of fcapz_debug_multi_xilinx7 is
     signal jtag_addr : std_logic_vector(15 downto 0);
     signal jtag_wdata, jtag_rdata : std_logic_vector(31 downto 0);
     signal burst_rd_addr : std_logic_vector(PTR_W - 1 downto 0);
+    signal burst_rd_active : std_logic;
     signal burst_rd_data : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal burst_rd_ts_data : std_logic_vector(TS_W_SAFE - 1 downto 0);
     signal burst_start, burst_timestamp : std_logic;
@@ -128,6 +129,7 @@ architecture rtl of fcapz_debug_multi_xilinx7 is
     signal slot_addr : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0);
     signal slot_wdata, slot_rdata : std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
     signal slot_burst_rd_addr : std_logic_vector(NUM_SLOTS * PTR_W - 1 downto 0);
+    signal slot_burst_rd_active : std_logic_vector(NUM_SLOTS - 1 downto 0);
     signal slot_burst_rd_data : std_logic_vector(NUM_SLOTS * SAMPLE_W - 1 downto 0);
     signal slot_burst_rd_ts_data : std_logic_vector(NUM_SLOTS * TS_W_SAFE - 1 downto 0);
     signal slot_burst_start, slot_burst_timestamp : std_logic_vector(NUM_SLOTS - 1 downto 0);
@@ -169,6 +171,7 @@ begin
             reg_addr => jtag_addr, reg_wdata => jtag_wdata,
             reg_rdata => jtag_rdata,
             mem_addr => burst_rd_addr,
+            mem_active => burst_rd_active,
             sample_data => burst_rd_data,
             timestamp_data => burst_rd_ts_data,
             burst_start => burst_start,
@@ -193,7 +196,9 @@ begin
             slot_wr_en => slot_wr_en, slot_rd_en => slot_rd_en,
             slot_addr => slot_addr, slot_wdata => slot_wdata, slot_rdata => slot_rdata,
             burst_rd_addr => burst_rd_addr,
+            burst_rd_active => burst_rd_active,
             slot_burst_rd_addr => slot_burst_rd_addr,
+            slot_burst_rd_active => slot_burst_rd_active,
             slot_burst_rd_data => slot_burst_rd_data,
             slot_burst_rd_ts_data => slot_burst_rd_ts_data,
             slot_burst_start => slot_burst_start,
@@ -270,6 +275,7 @@ begin
                 jtag_wdata => slot_wdata((i + 1) * 32 - 1 downto i * 32),
                 jtag_rdata => slot_rdata((i + 1) * 32 - 1 downto i * 32),
                 burst_rd_addr => slot_burst_rd_addr(i * PTR_W + ELA_PTR_W_I - 1 downto i * PTR_W),
+                burst_rd_active => slot_burst_rd_active(i),
                 burst_rd_data => ela_burst_rd_data_i,
                 burst_rd_ts_data => ela_burst_rd_ts_data_i,
                 burst_start => slot_burst_start(i),

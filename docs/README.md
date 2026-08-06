@@ -38,6 +38,7 @@ back to individual chapters as you need them.
 | 16 | [Versioning and release](16_versioning_and_release.md) | How the project version flows from the `VERSION` file through `tools/sync_version.py` into the RTL `fcapz_version.vh`, the per-core `core_id` magic registers, and the procedure for cutting a new release. |
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
 | 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
+| 19 | [AXI monitor](19_axi_monitor.md) | Capture and trigger on an AXI4-Lite interface over JTAG — a portable, vendor-agnostic AXI bus monitor. Passive tap over the ELA, named AXI fields, and a decode layer for triggering on transaction events (handshakes, error responses). |
 
 ## Reference specs
 
@@ -52,6 +53,7 @@ and should be corrected.
 | [`specs/register_map.md`](specs/register_map.md) | Full register map for ELA, EIO, EJTAG-AXI, EJTAG-UART. Opens with an **Index** (anchor links); each major section ends with **↑ Top**. |
 | [`specs/transport_api.md`](specs/transport_api.md) | The `Transport` ABC contract — required to implement when adding a new backend. |
 | [`specs/waveform_schema.md`](specs/waveform_schema.md) | JSON / CSV / VCD export formats, field-by-field. |
+| [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Proposed/draft.** Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
 
 ## Conventions used in this manual
 
@@ -72,11 +74,12 @@ and should be corrected.
 
 ## What's not in this manual
 
-- Hardware bring-up for vendor wrappers other than Xilinx 7-series.
-  The shared core RTL is covered by simulation, and the vendor wrappers
-  are lint-elaborated, but ECP5, Intel, Gowin, PolarFire, and UltraScale
-  board-level smoke tests are still future work. See chapter 04 for the
-  support matrix and validation levels.
+- Hardware bring-up for vendor wrappers other than Xilinx 7-series and
+  the Gowin BRS-100 path. The shared core RTL is covered by simulation,
+  and the remaining vendor wrappers are lint-elaborated, but ECP5,
+  Intel, PolarFire, and UltraScale board-level smoke tests are still
+  future work. See chapter 04 for the support matrix and validation
+  levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.

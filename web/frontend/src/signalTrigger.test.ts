@@ -1,0 +1,460 @@
+import { describe, expect, it } from "vitest";
+import type { Identity, ProbeSpec } from "./api";
+import type { TriggerTerm } from "./signalTrigger";
+import type { ElaConfig } from "./session";
+import {
+  composeTrigger,
+  defaultTerm,
+  describeElaTrigger,
+  describeTerms,
+  groupTerms,
+  hasDirectionalEdges,
+  parseTermValue,
+  termWidth,
+  triggerable,
+  triggerBits,
+} from "./signalTrigger";
+
+const VALID: ProbeSpec = { name: "valid", width: 1, lsb: 3 };
+const READY: ProbeSpec = { name: "ready", width: 1, lsb: 4 };
+const STATE: ProbeSpec = { name: "state", width: 4, lsb: 8 };
+const HIGH_FIELD: ProbeSpec = { name: "wdata", width: 32, lsb: 66 };
+// A byte pair for the grouping tests: addr_hi is the MSB half, addr_lo the LSB.
+const ADDR_HI: ProbeSpec = { name: "addr_hi", width: 8, lsb: 16 };
+const ADDR_LO: ProbeSpec = { name: "addr_lo", width: 8, lsb: 0 };
+
+function t(
+  probe: ProbeSpec,
+  value: string,
+  op: TriggerTerm["op"] = "==",
+  radix: TriggerTerm["radix"] = "B",
+): TriggerTerm {
+  return { probes: [probe], op, radix, value };
+}
+
+/** A grouped row (probes concatenated MSB-first). */
+function g(
+  probes: ProbeSpec[],
+  value: string,
+  op: TriggerTerm["op"] = "==",
+  radix: TriggerTerm["radix"] = "H",
+): TriggerTerm {
+  return { probes, op, radix, value };
+}
+
+function ident(patch: Partial<Identity>): Identity {
+  return {
+    version_major: 0,
+    version_minor: 4,
+    core_id: 0x4c41,
+    sample_width: 32,
+    depth: 64,
+    num_channels: 1,
+    ...patch,
+  };
+}
+
+const SEQ_BUILD = ident({
+  trig_stages: 4,
+  has_dual_compare: true,
+  compare_modes: [0, 1, 6, 7, 8],
+});
+const SIMPLE_BUILD = ident({ trig_stages: 1 });
+
+describe("parseTermValue", () => {
+  it("binary with X don't-cares", () => {
+    expect(parseTermValue(t(STATE, "1X0X"))).toEqual({
+      value: 0b1000n,
+      mask: 0b1010n,
+      rising: 0n,
+      falling: 0n,
+      changed: 0n,
+    });
+  });
+  it("hex with X nibbles", () => {
+    const p = parseTermValue({ probes: [{ name: "a", width: 8, lsb: 0 }], op: "==", radix: "H", value: "AX" });
+    expect(p).toEqual({ value: 0xa0n, mask: 0xf0n, rising: 0n, falling: 0n, changed: 0n });
+  });
+  it("per-bit edges R/F/B mixed with levels in a binary value", () => {
+    expect(parseTermValue(t(VALID, "R")).rising).toBe(1n);
+    expect(parseTermValue(t(VALID, "r")).rising).toBe(1n);
+    // STATE is 4 bits, MSB-first: bit3=1 (level), bit2=X, bit1=R, bit0=F.
+    expect(parseTermValue(t(STATE, "1XRF"))).toEqual({
+      value: 0b1000n,
+      mask: 0b1000n,
+      rising: 0b0010n,
+      falling: 0b0001n,
+      changed: 0n,
+    });
+    // edges only make sense with ==
+    expect(() =>
+      parseTermValue({ probes: [VALID], op: "!=", radix: "B", value: "R" }),
+    ).toThrow(/only combine with ==/);
+  });
+  it("range and character checks", () => {
+    expect(() => parseTermValue(t(STATE, "10101"))).toThrow(/wider/);
+    expect(() =>
+      parseTermValue({ probes: [STATE], op: "==", radix: "U", value: "16" }),
+    ).toThrow(/exceeds/);
+    expect(() => parseTermValue(t(VALID, "Z"))).toThrow(/may use/);
+  });
+  it("parses a group value across the combined width (bit 0 = LSB of the field)", () => {
+    // {addr_hi, addr_lo} is a 16-bit field; the value is relative to the field,
+    // not yet placed onto the probes' real bit positions.
+    expect(parseTermValue(g([ADDR_HI, ADDR_LO], "1234"))).toEqual({
+      value: 0x1234n,
+      mask: 0xffffn,
+      rising: 0n,
+      falling: 0n,
+      changed: 0n,
+    });
+  });
+});
+
+describe("composeTrigger", () => {
+  it("a single == row is a plain value_match", () => {
+    expect(composeTrigger([t(VALID, "1")], "and", SIMPLE_BUILD)).toMatchObject({
+      triggerMode: "value_match",
+      triggerValue: "0x8",
+      triggerMask: "0x8",
+      useSequencer: false,
+    });
+  });
+
+  it("Global AND merges == rows (X bits drop out of the mask)", () => {
+    expect(
+      composeTrigger(
+        [t(VALID, "1"), t(READY, "0"), { probes: [STATE], op: "==", radix: "H", value: "A" }],
+        "and",
+        SIMPLE_BUILD,
+      ),
+    ).toMatchObject({
+      triggerMode: "value_match",
+      triggerValue: "0xA08",
+      triggerMask: "0xF18",
+      useSequencer: false,
+    });
+  });
+
+  it("AND rejects contradictions on the same bits", () => {
+    expect(() => composeTrigger([t(VALID, "1"), t(VALID, "0")], "and", SIMPLE_BUILD)).toThrow(
+      /conflicting/,
+    );
+  });
+
+  it("all-X rows are refused", () => {
+    expect(() => composeTrigger([t(STATE, "XXXX")], "and", SIMPLE_BUILD)).toThrow(/matches always/);
+  });
+
+  it("Global OR of B (either-edge) rows merges into one edge_detect", () => {
+    expect(
+      composeTrigger([t(VALID, "B"), t(READY, "B")], "or", SIMPLE_BUILD),
+    ).toMatchObject({
+      triggerMode: "edge_detect",
+      triggerMask: "0x18",
+      useSequencer: false,
+    });
+  });
+
+  it("a single R row becomes a one-stage sequence on sequencer builds", () => {
+    const r = composeTrigger([t(VALID, "R")], "and", SEQ_BUILD);
+    expect(r.useSequencer).toBe(true);
+    expect(JSON.parse(r.sequenceJson ?? "")).toEqual([
+      { cmp_mode_a: 6, value_a: "0x0", mask_a: "0x8", is_final: true },
+    ]);
+  });
+
+  it("== rows AND one edge use both comparators with combine=AND", () => {
+    const r = composeTrigger(
+      [{ probes: [STATE], op: "==", radix: "H", value: "3" }, t(VALID, "R")],
+      "and",
+      SEQ_BUILD,
+    );
+    expect(JSON.parse(r.sequenceJson ?? "")).toEqual([
+      {
+        cmp_mode_a: 0,
+        value_a: "0x300",
+        mask_a: "0xF00",
+        cmp_mode_b: 6,
+        value_b: "0x0",
+        mask_b: "0x8",
+        combine: 2,
+        is_final: true,
+      },
+    ]);
+  });
+
+  it("!= takes its own comparator (NEQ mode)", () => {
+    const r = composeTrigger(
+      [{ probes: [STATE], op: "!=", radix: "H", value: "0" }],
+      "and",
+      SEQ_BUILD,
+    );
+    expect(JSON.parse(r.sequenceJson ?? "")[0].cmp_mode_a).toBe(1);
+  });
+
+  it("Global OR of two patterns uses both comparators with combine=OR", () => {
+    const r = composeTrigger(
+      [t(VALID, "1"), { probes: [STATE], op: "==", radix: "H", value: "A" }],
+      "or",
+      SEQ_BUILD,
+    );
+    const stage = JSON.parse(r.sequenceJson ?? "")[0];
+    expect(stage.combine).toBe(3);
+    expect(stage.cmp_mode_a).toBe(0);
+    expect(stage.cmp_mode_b).toBe(0);
+  });
+
+  it("AND of two edges is impossible in hardware", () => {
+    expect(() => composeTrigger([t(VALID, "R"), t(READY, "R")], "and", SEQ_BUILD)).toThrow(
+      /at most one edge/,
+    );
+  });
+
+  // --- Vivado-style per-bit edges mixed into one binary value ---------------
+  it("one row mixing a level and an edge compiles to level + edge comparators", () => {
+    // STATE is 4 bits @ lsb 8. "1XXR" = bit3 level 1, bit0 rising.
+    const r = composeTrigger([t(STATE, "1XXR")], "and", SEQ_BUILD);
+    const stage = JSON.parse(r.sequenceJson ?? "")[0];
+    expect(stage.cmp_mode_a).toBe(0); // EQ level: bit3 @ real bit 11 -> 0x800
+    expect(stage.value_a).toBe("0x800");
+    expect(stage.mask_a).toBe("0x800");
+    expect(stage.cmp_mode_b).toBe(6); // RISING: bit0 @ real bit 8 -> 0x100
+    expect(stage.mask_b).toBe("0x100");
+    expect(stage.combine).toBe(2); // AND
+  });
+
+  it("a single per-bit edge on a multi-bit probe works", () => {
+    const r = composeTrigger([t(STATE, "XXXR")], "and", SEQ_BUILD);
+    expect(JSON.parse(r.sequenceJson ?? "")).toEqual([
+      { cmp_mode_a: 6, value_a: "0x0", mask_a: "0x100", is_final: true },
+    ]);
+  });
+
+  it("two different edges in one row exceed the hardware's edge budget", () => {
+    // "XXRF" = bit1 rising + bit0 falling — two edges, one comparator each.
+    expect(() => composeTrigger([t(STATE, "XXRF")], "and", SEQ_BUILD)).toThrow(/at most one edge/);
+  });
+
+  it("a compound (level+edge) row can't be OR-combined", () => {
+    expect(() => composeTrigger([t(STATE, "1XXR")], "or", SEQ_BUILD)).toThrow(/Global AND/);
+  });
+
+  it("more rows than comparators is rejected", () => {
+    expect(() =>
+      composeTrigger(
+        [t(VALID, "1"), t(READY, "1"), { probes: [STATE], op: "==", radix: "H", value: "1" }],
+        "or",
+        SEQ_BUILD,
+      ),
+    ).toThrow(/two comparators/);
+  });
+
+  it("sequencer combinations are gated on TRIG_STAGES and DUAL_COMPARE", () => {
+    expect(() => composeTrigger([t(VALID, "R")], "and", SIMPLE_BUILD)).toThrow(/TRIG_STAGES/);
+    expect(() =>
+      composeTrigger(
+        [t(VALID, "1"), { probes: [STATE], op: "==", radix: "H", value: "A" }],
+        "or",
+        ident({ trig_stages: 4, has_dual_compare: false }),
+      ),
+    ).toThrow(/DUAL_COMPARE/);
+  });
+
+  it("rejects fields beyond the 32-bit comparator", () => {
+    expect(triggerable(HIGH_FIELD)).toBe(false);
+    expect(() =>
+      composeTrigger([{ probes: [HIGH_FIELD], op: "==", radix: "H", value: "0" }], "and", SIMPLE_BUILD),
+    ).toThrow(/low 32 bits/);
+  });
+
+  // --- WIDE_TRIG cores (e.g. the 160-bit AXI monitor) ------------------------
+  const AWADDR: ProbeSpec = { name: "awaddr", width: 32, lsb: 8 }; // above bit 32
+  const WIDE_BUILD = ident({
+    sample_width: 160,
+    has_wide_trigger: true,
+    trig_stages: 4,
+    has_dual_compare: true,
+    compare_modes: [0, 1, 6, 7, 8],
+  });
+
+  it("allows a value-match trigger above bit 32 on a WIDE_TRIG core", () => {
+    // The comparator reach follows the core: 160 bits here, so awaddr@8 is fair
+    // game and the value/mask land at its real bit position (<<8).
+    expect(triggerBits(WIDE_BUILD)).toBe(160);
+    expect(triggerable(AWADDR, triggerBits(WIDE_BUILD))).toBe(true);
+    expect(composeTrigger([g([AWADDR], "40000000")], "and", WIDE_BUILD)).toMatchObject({
+      triggerMode: "value_match",
+      triggerValue: "0x4000000000", // 0x40000000 << 8
+      triggerMask: "0xFFFFFFFF00", // 0xFFFFFFFF << 8
+      useSequencer: false,
+    });
+  });
+
+  it("still rejects wide fields on the sequencer/second-comparator path", () => {
+    // != needs the sequencer, which zero-extends the value/mask from 32 bits —
+    // reject rather than silently matching only the low word.
+    expect(() =>
+      composeTrigger([{ probes: [AWADDR], op: "!=", radix: "H", value: "40000000" }], "and", WIDE_BUILD),
+    ).toThrow(/low 32 bits/);
+  });
+
+  it("narrow cores keep the 32-bit reach even if sample_width is larger", () => {
+    // has_wide_trigger absent -> reach stays 32 regardless of sample_width.
+    expect(triggerBits(ident({ sample_width: 160 }))).toBe(32);
+  });
+
+  it("describes the table readably", () => {
+    expect(
+      describeTerms(
+        [t(VALID, "R"), { probes: [STATE], op: "==", radix: "H", value: "A" }],
+        "or",
+      ),
+    ).toBe("valid == R OR state == 0xA");
+  });
+
+  // --- probe grouping (concatenated fields) ---------------------------------
+
+  it("groups probes into one concatenated == comparator, split onto each lsb", () => {
+    // {addr_hi@16, addr_lo@0} == 0x1234 → addr_hi=0x12, addr_lo=0x34
+    expect(composeTrigger([g([ADDR_HI, ADDR_LO], "1234")], "and", SIMPLE_BUILD)).toMatchObject({
+      triggerMode: "value_match",
+      triggerValue: "0x120034",
+      triggerMask: "0xFF00FF",
+      useSequencer: false,
+    });
+  });
+
+  it("group X don't-cares drop whole probes out of the mask", () => {
+    // Only the high byte is compared; addr_lo is all don't-care.
+    expect(composeTrigger([g([ADDR_HI, ADDR_LO], "12XX")], "and", SIMPLE_BUILD)).toMatchObject({
+      triggerValue: "0x120000",
+      triggerMask: "0xFF0000",
+    });
+  });
+
+  it("a group != is a single NEQ comparator over all member bits", () => {
+    const r = composeTrigger([g([ADDR_HI, ADDR_LO], "1234", "!=")], "and", SEQ_BUILD);
+    const stage = JSON.parse(r.sequenceJson ?? "")[0];
+    expect(stage.cmp_mode_a).toBe(1);
+    expect(stage.value_a).toBe("0x120034");
+    expect(stage.mask_a).toBe("0xFF00FF");
+  });
+
+  it("rejects overlapping probes in a group", () => {
+    const dup: ProbeSpec = { name: "dup", width: 8, lsb: 0 }; // same bits as addr_lo
+    expect(() => composeTrigger([g([dup, ADDR_LO], "1234")], "and", SIMPLE_BUILD)).toThrow(
+      /overlap/,
+    );
+  });
+
+  it("rejects a group whose member sits above the 32-bit comparator", () => {
+    expect(() =>
+      composeTrigger([g([HIGH_FIELD, ADDR_LO], "0")], "and", SIMPLE_BUILD),
+    ).toThrow(/low 32 bits/);
+  });
+
+  it("groupTerms concatenates MSB-first and resets the value", () => {
+    const grouped = groupTerms([t(STATE, "3", "==", "H"), t(VALID, "1", "==", "B")]);
+    expect(grouped.probes).toEqual([STATE, VALID]);
+    expect(grouped.op).toBe("==");
+    expect(grouped.radix).toBe("H"); // carried from the first row
+    expect(grouped.value).toBe("XX"); // width 5 → 2 hex don't-care nibbles
+  });
+
+  it("describes a group readably", () => {
+    expect(describeTerms([g([ADDR_HI, ADDR_LO], "1234")], "and")).toBe(
+      "{addr_hi, addr_lo} == 0x1234",
+    );
+  });
+});
+
+describe("defaults and capabilities", () => {
+  it("termWidth sums member widths", () => {
+    expect(termWidth(g([ADDR_HI, ADDR_LO], "0"))).toBe(16);
+    expect(termWidth(t(VALID, "1"))).toBe(1);
+  });
+
+  it("defaultTerm: 1-bit gets binary '1', fields get all-X hex", () => {
+    expect(defaultTerm(VALID)).toEqual({ probes: [VALID], op: "==", radix: "B", value: "1" });
+    expect(defaultTerm(STATE)).toEqual({ probes: [STATE], op: "==", radix: "H", value: "X" });
+  });
+
+  it("hasDirectionalEdges requires TRIG_STAGES >= 2 and edge compare modes", () => {
+    expect(hasDirectionalEdges(ident({ trig_stages: 1 }))).toBe(false);
+    expect(hasDirectionalEdges(ident({ trig_stages: 2 }))).toBe(true); // caps unknown
+    expect(hasDirectionalEdges(ident({ trig_stages: 4, compare_modes: [0, 1] }))).toBe(false);
+    expect(hasDirectionalEdges(null)).toBe(false);
+  });
+});
+
+describe("describeElaTrigger", () => {
+  function ela(patch: Partial<ElaConfig>): ElaConfig {
+    return {
+      channel: "0",
+      pretrigger: "8",
+      posttrigger: "16",
+      triggerMode: "value_match",
+      triggerValue: "0x0",
+      triggerMask: "0x0",
+      extTriggerMode: "0",
+      useSequencer: false,
+      sequenceJson: "",
+      segmented: false,
+      probesText: "",
+      ...patch,
+    };
+  }
+
+  it("decodes a single named field", () => {
+    const e = ela({ triggerValue: "0x80", triggerMask: "0x80", probesText: "any_err:1:7" });
+    expect(describeElaTrigger(e, null)).toBe("any_err=1");
+  });
+
+  it("decodes several named fields, high bits shifted down", () => {
+    const e = ela({
+      triggerValue: "0x4080",
+      triggerMask: "0xFF80",
+      probesText: "any_err:1:7\nawaddr:8:8",
+    });
+    expect(describeElaTrigger(e, null)).toBe("any_err=1 & awaddr=0x40");
+  });
+
+  it("mask 0 means the trigger matches any sample", () => {
+    expect(describeElaTrigger(ela({ triggerMask: "0x0" }), null)).toBe("any sample");
+  });
+
+  it("falls back to value & mask with no probe map", () => {
+    const e = ela({ triggerValue: "0x40", triggerMask: "0xFF" });
+    expect(describeElaTrigger(e, null)).toBe("0x40 & 0xFF");
+  });
+
+  it("appends masked bits no probe covers", () => {
+    const e = ela({ triggerValue: "0x181", triggerMask: "0x181", probesText: "any_err:1:7" });
+    // bit7 is any_err; bits 0 and 8 have no probe -> raw leftover slice.
+    expect(describeElaTrigger(e, null)).toBe("any_err=1 & 0x101 & 0x101");
+  });
+
+  it("edge mode reads as edges, not equality", () => {
+    const e = ela({ triggerMode: "edge_detect", triggerMask: "0x8", probesText: "valid:1:3" });
+    expect(describeElaTrigger(e, null)).toBe("valid edge");
+  });
+
+  it("notes an external trigger combine", () => {
+    const e = ela({ triggerValue: "0x1", triggerMask: "0x1", extTriggerMode: "1", probesText: "go:1:0" });
+    expect(describeElaTrigger(e, null)).toBe("go=1 + ext (OR)");
+  });
+
+  it("summarizes the sequencer by stage count", () => {
+    const e = ela({
+      useSequencer: true,
+      sequenceJson: '[{"is_final":false},{"is_final":true}]',
+    });
+    expect(describeElaTrigger(e, null)).toBe("sequencer (2 stages)");
+  });
+
+  it("shows the raw fields when the value can't be parsed", () => {
+    const e = ela({ triggerValue: "nope", triggerMask: "0xFF" });
+    expect(describeElaTrigger(e, null)).toBe("value_match value=nope mask=0xFF");
+  });
+});

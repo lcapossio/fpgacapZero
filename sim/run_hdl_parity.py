@@ -106,6 +106,36 @@ CORES = (
             "ADDR_DATA_BASE",
         ),
     ),
+    CoreParity(
+        name="fcapz_axi_mon",
+        verilog=RTL / "fcapz_axi_mon.v",
+        vhdl=RTL_VHDL / "fcapz_axi_mon.vhd",
+        parameters=(
+            "ADDR_W",
+            "DATA_W",
+            "DEPTH",
+            "TRIG_STAGES",
+            "STOR_QUAL",
+            "NUM_SEGMENTS",
+            "TIMESTAMP_W",
+            "INPUT_PIPE",
+            "DECIM_EN",
+            "EXT_TRIG_EN",
+            "STARTUP_ARM",
+            "REL_COMPARE",
+            "DUAL_COMPARE",
+            "USER1_DATA_EN",
+            "WIDE_TRIG",
+            "DECODE_EN",
+        ),
+        constants=(
+            "ADDR_AXI_MON_ID",
+            "ADDR_AXI_GEOM",
+            "PROTO_CODE",
+            "GEOM_ID_W",
+            "GEOM_CHANNELS",
+        ),
+    ),
 )
 
 
@@ -122,6 +152,12 @@ def parse_int_literal(value: str) -> int:
     verilog_hex = re.fullmatch(r"(?:\d+)?'[hH]([0-9a-fA-F_]+)", value)
     if verilog_hex:
         return int(verilog_hex.group(1).replace("_", ""), 16)
+    verilog_dec = re.fullmatch(r"(?:\d+)?'[dD]([0-9_]+)", value)
+    if verilog_dec:
+        return int(verilog_dec.group(1).replace("_", ""), 10)
+    verilog_bin = re.fullmatch(r"(?:\d+)?'[bB]([01_]+)", value)
+    if verilog_bin:
+        return int(verilog_bin.group(1).replace("_", ""), 2)
     vhdl_hex = re.fullmatch(r"16#([0-9a-fA-F_]+)#", value)
     if vhdl_hex:
         return int(vhdl_hex.group(1).replace("_", ""), 16)
@@ -135,7 +171,12 @@ def parse_verilog_parameters(text: str) -> dict[str, int]:
     body = strip_comments(text)
     found: dict[str, int] = {}
     for match in re.finditer(r"\bparameter\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^,\n)]+)", body):
-        found[match.group(1)] = parse_int_literal(match.group(2))
+        try:
+            found[match.group(1)] = parse_int_literal(match.group(2))
+        except ValueError:
+            # Non-integer parameters (e.g. a string PROTO) have no numeric
+            # parity to check; skip them like parse_verilog_constants does.
+            pass
     return found
 
 

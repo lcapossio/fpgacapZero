@@ -73,6 +73,7 @@ module fcapz_ela_ecp5 #(
 
     // Burst interface
     wire [PTR_W-1:0]    burst_rd_addr;
+    wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
     wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
@@ -156,6 +157,7 @@ module fcapz_ela_ecp5 #(
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
                 .jtag_rdata(ela_rdata),
+                .burst_rd_active(burst_rd_active),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
                 .burst_rd_ts_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
@@ -189,6 +191,7 @@ module fcapz_ela_ecp5 #(
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
                 .jtag_rdata(jtag_rdata),
+                .burst_rd_active(burst_rd_active),
                 .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
                 .burst_rd_ts_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
@@ -209,6 +212,7 @@ module fcapz_ela_ecp5 #(
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),
         .mem_addr(burst_rd_addr),
+        .mem_active(burst_rd_active),
         .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),
         .burst_ptr_in(burst_start_ptr)

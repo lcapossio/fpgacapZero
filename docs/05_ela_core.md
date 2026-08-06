@@ -467,7 +467,7 @@ Manager registers:
 |---|---|
 | `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
-| `0xF008` | MGR_ACTIVE | RW | Active ELA slot. Non-manager register and burst accesses target this slot. |
+| `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
 | `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |

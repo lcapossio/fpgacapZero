@@ -96,8 +96,12 @@ on `arty_a7_top` (xc7a100t, 2025.2). JTAG `tck_bscan` is constrained at 10 MHz
 
 ## Clocking
 - `sample_clk` is the capture clock.
-- JTAG clock (TCK) is independent; control registers cross via 2FF CDC.
+- JTAG clock (TCK) is independent; control/config paths cross through the
+  core's synchronizer and toggle-handshake CDCs.
 - Sample buffer uses true dual-port RAM (port A = sample_clk, port B = TCK).
+- DATA-window readback is decoded in the JTAG domain and reads RAM port B.
+  The sample domain exports completed-capture metadata through an acked
+  snapshot CDC, so per-read sample payloads no longer cross as wide CDC buses.
 - EIO probe_in uses a 2-FF synchroniser into jtag_clk. probe_out is in jtag_clk domain.
 
 ## Data Model

@@ -17,6 +17,7 @@ from .analyzer import (
     _infer_ir_table_name,
     discover_boards,
 )
+from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -62,6 +63,7 @@ _CORE_NAMES = {
     0x434D: "Core Manager",
     0x4A58: "EJTAG-AXI bridge",
     0x4A55: "EJTAG-UART",
+    0x414D: "AXI Monitor",
 }
 
 
@@ -162,7 +164,139 @@ class RpcServer:
                 "version_minor": eio.version_minor,
                 "info": {"in_w": eio.in_w, "out_w": eio.out_w},
             })
+
+        # The AXI monitor is an ELA plus an identity/geometry pair — report it
+        # so clients can label the session as a bus monitor.
+        mon_entry = self._axi_mon_entry(analyzer, ela)
+        if mon_entry is not None:
+            cores.append(mon_entry)
+
+        # Other conservative chains (USER1/2): a plain or monitor ELA the
+        # client can switch the session to — chains are an implementation
+        # detail the UI resolves with a "use this core" action.
+        for chain in (1, 2):
+            if chain == analyzer.bscan_chain:
+                continue
+            try:
+                other = Analyzer(analyzer.transport, chain=chain)
+                ident = other.probe_optional()
+            except Exception:
+                ident = None
+            if ident is None:
+                continue
+            entry = self._axi_mon_entry(other, ident)
+            if entry is None:
+                entry = {
+                    "type": "ela",
+                    "name": _CORE_NAMES.get(ident["core_id"], "Logic Analyzer"),
+                    "core_id": ident["core_id"],
+                    "chain": chain,
+                    "base_addr": 0,
+                    "version_major": ident["version_major"],
+                    "version_minor": ident["version_minor"],
+                    "info": ident,
+                }
+            cores.append(entry)
+        try:
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
+        except Exception:
+            pass
         return cores
+
+    @staticmethod
+    def _axi_mon_entry(analyzer: Analyzer, ela_ident) -> Dict[str, Any] | None:
+        """Core-list entry for the AXI monitor on ``analyzer``'s chain, or None."""
+        if ela_ident is None:
+            return None
+        try:
+            mon = AxiMonitor(analyzer)
+            geo = mon.geometry() if mon.present else None
+        except Exception:
+            geo = None
+        if geo is None:
+            return None
+        return {
+            "type": "axi_mon",
+            "name": _CORE_NAMES[AXI_MON_MAGIC],
+            "core_id": AXI_MON_MAGIC,
+            "chain": analyzer.bscan_chain,
+            "base_addr": 0,
+            "version_major": ela_ident["version_major"],
+            "version_minor": ela_ident["version_minor"],
+            "info": {
+                "proto": geo.proto,
+                "addr_w": geo.addr_w,
+                "data_w": geo.data_w,
+                "decode": geo.decode,
+                "sample_width": geo.sample_width,
+            },
+        }
+
+    def _capture_readout(self, analyzer: Analyzer, cfg, req: Dict[str, Any]):
+        """Wait for the armed capture to complete and serialize it as requested
+        (shared by `capture`, which arms first, and `capture_wait`, which polls
+        an existing arm)."""
+        timeout = _wait_sec(req, "timeout", 10.0)
+        if req.get("segments"):
+            if not analyzer.wait_all_segments_done(timeout=timeout):
+                raise TimeoutError("segmented capture did not complete within timeout")
+            probe_info = analyzer.probe()
+            nseg = max(1, int(probe_info.get("num_segments", 1)))
+            results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
+            fmt = str(req.get("format", "json"))
+            payload = self._ok(
+                format=fmt,
+                overflow=any(r.overflow for r in results),
+                sample_count=sum(len(r.samples) for r in results),
+                channel=cfg.channel,
+                segments=[
+                    self._serialize_capture(
+                        analyzer,
+                        cfg,
+                        r,
+                        fmt=fmt,
+                        include_summary=bool(req.get("summarize", False)),
+                    )
+                    for r in results
+                ],
+            )
+            # Wide captures request a non-json format precisely because JSON
+            # numbers round above 53 bits — only attach the JSON-number
+            # result when the caller asked for it (mirrors _serialize_capture).
+            if fmt == "json":
+                payload["result"] = {
+                    "segments": [analyzer.export_json(r) for r in results]
+                }
+            if req.get("include_vcd") and results:
+                # All segments in one waveform — not just segment 0.
+                payload["vcd"] = analyzer.export_vcd_text_segments(results)
+            if req.get("include_csv"):
+                lines = ["segment,index,value"]
+                for r in results:
+                    for idx, value in enumerate(r.samples):
+                        lines.append(f"{r.segment},{idx},{value}")
+                payload["csv"] = "\n".join(lines) + "\n"
+            return payload
+
+        result = analyzer.capture(timeout=timeout)
+        payload = self._serialize_capture(
+            analyzer,
+            cfg,
+            result,
+            fmt=str(req.get("format", "json")),
+            include_summary=bool(req.get("summarize", False)),
+        )
+        # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
+        # produced by the same exporter the CLI/GUI use.
+        if req.get("include_vcd"):
+            payload["vcd"] = analyzer.export_vcd_text(result)
+        if req.get("include_csv"):
+            payload["csv"] = analyzer.export_csv_text(result)
+        return self._ok(**payload)
 
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
     _IR_TABLES = {
@@ -192,6 +326,74 @@ class RpcServer:
         if name is None or not str(name).strip():
             return _infer_ir_table_name(str(req.get("tap", "")))
         return str(name)
+
+    @staticmethod
+    def _probe_ejtag_axi(analyzer: Analyzer, chains):
+        """``(chain, identity)`` of an EJTAG-AXI bridge on one of ``chains``, or
+        ``None``.
+
+        The bridge sits on its own USER chain (canonically USER4) and speaks a
+        different DR protocol than the ELA, so this probes with the bridge's own
+        read-only CONFIG identity scan (``EjtagAxiController.attach`` on the
+        shared transport, which restores chain 1). A chain whose identity magic
+        doesn't match just falls through. Restores the analyzer's chain
+        afterwards so the ELA/monitor session is untouched wherever the bridge
+        was (or wasn't) found.
+        """
+        found = None
+        for chain in chains:
+            try:
+                info = EjtagAxiController(analyzer.transport, chain=chain).attach()
+            except Exception:
+                info = None
+            if info is not None:
+                found = (chain, info)
+                break
+        try:
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
+        except Exception:
+            pass
+        return found
+
+    @staticmethod
+    def _probe_axi_mon(analyzer: Analyzer):
+        """``(chain, geometry, probes)`` of the AXI monitor, or None.
+
+        The connected chain is answered directly; otherwise a conservative
+        sweep of USER chains 1-2 only — the same set discover_eio probes — so
+        cores speaking a different DR protocol (EJTAG bridges on 3/4) never
+        see stray shifts. Restores the analyzer's chain afterwards, so the
+        caller's session is untouched wherever the monitor was found.
+        """
+        mon = AxiMonitor(analyzer)
+        geo = mon.geometry() if mon.present else None
+        if geo is not None:
+            return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
+        result = None
+        for chain in (1, 2):
+            if chain == analyzer.bscan_chain:
+                continue
+            try:
+                alt = AxiMonitor(Analyzer(analyzer.transport, chain=chain))
+                alt_geo = alt.geometry() if alt.present else None
+            except Exception:
+                alt_geo = None
+            if alt_geo is not None:
+                result = (chain, alt_geo, alt.probe_map(alt_geo).probes)
+                break
+        try:
+            analyzer.transport.select_chain(analyzer.bscan_chain)
+        except NotImplementedError:
+            pass
+        try:
+            analyzer.transport.invalidate_manager_instance_cache()
+        except Exception:
+            pass
+        return result
 
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
@@ -428,13 +630,46 @@ class RpcServer:
             # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
-            self._analyzer = Analyzer(
-                self._build_transport(req), chain=int(req.get("chain", 1))
+            requested = req.get("chain")
+            analyzer = Analyzer(
+                self._build_transport(req),
+                chain=int(requested) if requested is not None else 1,
             )
-            self._analyzer.connect()
-            # Echo the resolved preset so a client that omitted ir_table can
-            # label the session and reuse it for eio/axi side connects.
-            return self._ok(ir_table=self._resolved_ir_name(req))
+            analyzer.connect()
+            if requested is None and analyzer.probe_optional() is None:
+                # No chain given and no ELA on the default chain: autodetect on
+                # the conservative scan set (USER1/2 — bridges on 3/4 speak a
+                # different DR protocol and must not see stray shifts).
+                for chain in (2,):
+                    alt = Analyzer(analyzer.transport, chain=chain)
+                    if alt.probe_optional() is not None:
+                        analyzer = alt
+                        break
+            self._analyzer = analyzer
+            # Echo the resolved preset/chain so a client that omitted them can
+            # label the session and reuse them for eio/axi side connects.
+            return self._ok(
+                ir_table=self._resolved_ir_name(req), chain=analyzer.bscan_chain
+            )
+
+        if cmd == "rebind":
+            # Re-bind the session to a core on another BSCAN chain WITHOUT
+            # reconnecting. Both cores share one JTAG transport; hopping taps is
+            # just a chain select + re-probe (probe() selects its own chain), so
+            # this skips the connect() teardown/reopen. Used for the seamless
+            # ELA <-> AXI monitor switch. Side sessions (EIO/AXI/UART) are left
+            # untouched — a chain hop on the ELA control interface is unrelated.
+            analyzer = self._ensure_analyzer()
+            requested = req.get("chain")
+            if requested is None:
+                raise ValueError("rebind requires a chain")
+            new_chain = int(requested)
+            if new_chain != analyzer.bscan_chain:
+                # Keep the SAME transport; point a fresh Analyzer at the new tap.
+                self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+            return self._ok(
+                chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
+            )
 
         if cmd == "close":
             self._close_all()
@@ -479,6 +714,29 @@ class RpcServer:
             )
             return self._ok(backend="openocd", boards=boards)
 
+        if cmd == "openocd_discover":
+            # Auto-discover compatible boards without the user picking a config:
+            # filter the allow-listed configs by which USB JTAG adapters are
+            # actually plugged in, then start OpenOCD per surviving config and
+            # probe for an fpgacapZero core. Confirmed boards come back with the
+            # config that reached them and a running TCL port to connect to.
+            # Spawns processes, so it is loopback-gated by the web layer.
+            if self._openocd_launcher is None:
+                raise RuntimeError(
+                    "OpenOCD launching is not enabled on this server; start "
+                    "fcapz-web with --openocd <exe> and --openocd-cfg/-cfg-dir"
+                )
+            from .board_autodiscover import auto_discover_boards
+
+            boards = auto_discover_boards(
+                self._openocd_launcher,
+                port_base=_valid_port(req.get("port", 6666)),
+                chain=int(req.get("chain", 1)),
+                wait_sec=_wait_sec(req, "wait", 10.0),
+                timeout_sec=_wait_sec(req, "timeout", 5.0),
+            )
+            return self._ok(backend="openocd", boards=boards)
+
         if cmd in ("openocd_start", "openocd_stop", "openocd_status"):
             # Server-managed OpenOCD (web only, loopback-gated by the web layer).
             # Disabled unless fcapz-web was launched with --openocd/--openocd-cfg.
@@ -511,12 +769,56 @@ class RpcServer:
         if cmd == "list_cores":
             return self._ok(cores=self._list_cores(analyzer))
 
+        if cmd == "axi_mon_probe":
+            # Detect an AXI monitor and return its geometry + the bundled
+            # probe map so the client can capture with named AXI fields. The
+            # monitor captures like an ELA; this just adds the AXI-aware glue.
+            # The scan covers the other conservative USER chains too, so a
+            # session bound to a plain ELA still gets the monitor's full
+            # identity — `chain` says where it lives (== the session's chain
+            # when the monitor is the connected core), letting clients offer
+            # a seamless switch. Absent everywhere -> {present: False}.
+            found = self._probe_axi_mon(analyzer)
+            if found is None:
+                return self._ok(present=False)
+            chain, geo, probes = found
+            return self._ok(
+                present=True,
+                chain=chain,
+                proto=geo.proto,
+                addr_w=geo.addr_w,
+                data_w=geo.data_w,
+                decode=geo.decode,
+                sample_width=geo.sample_width,
+                probes=[{"name": p.name, "width": p.width, "lsb": p.lsb} for p in probes],
+            )
+
+        if cmd == "ejtag_axi_probe":
+            # Auto-detect an EJTAG-AXI bridge on its own USER chain (default
+            # USER4). Bridges speak a different DR protocol than the ELA, so
+            # this uses the bridge's read-only CONFIG identity scan on the
+            # shared transport and restores the session's chain. `chains` may
+            # override the candidate set. Absent -> {present: False}.
+            raw = req.get("chains")
+            chains = tuple(int(c) for c in raw) if raw else (4,)
+            found = self._probe_ejtag_axi(analyzer, chains)
+            if found is None:
+                return self._ok(present=False)
+            chain, info = found
+            return self._ok(present=True, chain=chain, **info)
+
         if cmd == "configure":
             analyzer.configure(self._build_config(req))
             return self._ok()
 
         if cmd == "arm":
             analyzer.arm()
+            return self._ok()
+
+        if cmd == "disarm":
+            # Soft-reset the capture FSM to a verified idle (discards any
+            # in-flight capture) — the web UI's Stop while armed.
+            analyzer.force_idle()
             return self._ok()
 
         if cmd == "capture":
@@ -527,63 +829,17 @@ class RpcServer:
                 cfg = analyzer.immediate_variant(cfg)
             analyzer.configure(cfg)
             analyzer.arm()
-            timeout = _wait_sec(req, "timeout", 10.0)
-            if req.get("segments"):
-                if not analyzer.wait_all_segments_done(timeout=timeout):
-                    raise TimeoutError("segmented capture did not complete within timeout")
-                probe_info = analyzer.probe()
-                nseg = max(1, int(probe_info.get("num_segments", 1)))
-                results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
-                fmt = str(req.get("format", "json"))
-                payload = self._ok(
-                    format=fmt,
-                    overflow=any(r.overflow for r in results),
-                    sample_count=sum(len(r.samples) for r in results),
-                    channel=cfg.channel,
-                    segments=[
-                        self._serialize_capture(
-                            analyzer,
-                            cfg,
-                            r,
-                            fmt=fmt,
-                            include_summary=bool(req.get("summarize", False)),
-                        )
-                        for r in results
-                    ],
-                )
-                # Wide captures request a non-json format precisely because JSON
-                # numbers round above 53 bits — only attach the JSON-number
-                # result when the caller asked for it (mirrors _serialize_capture).
-                if fmt == "json":
-                    payload["result"] = {
-                        "segments": [analyzer.export_json(r) for r in results]
-                    }
-                if req.get("include_vcd") and results:
-                    # All segments in one waveform — not just segment 0.
-                    payload["vcd"] = analyzer.export_vcd_text_segments(results)
-                if req.get("include_csv"):
-                    lines = ["segment,index,value"]
-                    for r in results:
-                        for idx, value in enumerate(r.samples):
-                            lines.append(f"{r.segment},{idx},{value}")
-                    payload["csv"] = "\n".join(lines) + "\n"
-                return payload
+            return self._capture_readout(analyzer, cfg, req)
 
-            result = analyzer.capture(timeout=timeout)
-            payload = self._serialize_capture(
-                analyzer,
-                cfg,
-                result,
-                fmt=str(req.get("format", "json")),
-                include_summary=bool(req.get("summarize", False)),
-            )
-            # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
-            # produced by the same exporter the CLI/GUI use.
-            if req.get("include_vcd"):
-                payload["vcd"] = analyzer.export_vcd_text(result)
-            if req.get("include_csv"):
-                payload["csv"] = analyzer.export_csv_text(result)
-            return self._ok(**payload)
+        if cmd == "capture_wait":
+            # Wait on the already-armed capture (`configure` + `arm`) and read
+            # it out. Clients hold one hardware arm across many short polls, so
+            # an armed wait has no deadline and no re-arm blind gaps; a timeout
+            # here just means "still waiting" and leaves the core armed.
+            cfg = analyzer._config  # noqa: SLF001 - the session's active config
+            if cfg is None:
+                raise RuntimeError("not configured - send `configure` and `arm` first")
+            return self._capture_readout(analyzer, cfg, req)
 
         if cmd == "eio_connect":
             if self._eio is not None:

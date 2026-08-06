@@ -1,7 +1,7 @@
 import { useSession } from "../session";
 
-/** ELA trigger/capture configuration. Run controls (Arm / Trigger Immediate /
- *  Auto re-arm / Stop) live in the Run tab and read this shared config. */
+/** ELA capture configuration: window geometry and probe naming. Trigger
+ *  conditions live in the Trigger drawer; run controls in the Run bar. */
 export function ElaPanel() {
   const { ela, setEla, identity } = useSession();
 
@@ -12,7 +12,6 @@ export function ElaPanel() {
 
   return (
     <section className="panel">
-      <h2>ELA config</h2>
       <div className="form">
         <label>
           Channel
@@ -35,32 +34,18 @@ export function ElaPanel() {
             onChange={(e) => setEla({ posttrigger: e.target.value })}
           />
         </label>
-        <label>
-          Mode
-          <select
-            value={ela.triggerMode}
-            onChange={(e) => setEla({ triggerMode: e.target.value })}
-          >
-            <option value="value_match">value_match</option>
-            <option value="edge_detect">edge_detect</option>
-            <option value="both">both</option>
-          </select>
-        </label>
-        <label>
-          Trigger value
+        <label className="inline">
           <input
-            value={ela.triggerValue}
-            onChange={(e) => setEla({ triggerValue: e.target.value })}
+            type="checkbox"
+            checked={ela.segmented}
+            onChange={(e) => setEla({ segmented: e.target.checked })}
           />
-        </label>
-        <label>
-          Trigger mask
-          <input
-            value={ela.triggerMask}
-            onChange={(e) => setEla({ triggerMask: e.target.value })}
-          />
+          Read all segments
         </label>
       </div>
+      {identity?.num_segments ? (
+        <p className="muted">Hardware segments: {identity.num_segments}</p>
+      ) : null}
 
       <h3>Probe definitions</h3>
       <div className="btnrow">
@@ -85,52 +70,10 @@ export function ElaPanel() {
           spellCheck={false}
         />
       </label>
-
-      <h3>Advanced triggering</h3>
-      <div className="form">
-        <label>
-          External trigger
-          <select
-            value={ela.extTriggerMode}
-            onChange={(e) => setEla({ extTriggerMode: e.target.value })}
-          >
-            <option value="0">disabled</option>
-            <option value="1">OR</option>
-            <option value="2">AND</option>
-          </select>
-        </label>
-        <label className="inline">
-          <input
-            type="checkbox"
-            checked={ela.segmented}
-            onChange={(e) => setEla({ segmented: e.target.checked })}
-          />
-          Read all segments
-        </label>
-        <label className="inline">
-          <input
-            type="checkbox"
-            checked={ela.useSequencer}
-            onChange={(e) => setEla({ useSequencer: e.target.checked })}
-          />
-          Use trigger sequencer
-        </label>
-      </div>
-      {identity?.num_segments ? (
-        <p className="muted">Hardware segments: {identity.num_segments}</p>
-      ) : null}
-      {ela.useSequencer ? (
-        <label>
-          Trigger sequence JSON
-          <textarea
-            value={ela.sequenceJson}
-            onChange={(e) => setEla({ sequenceJson: e.target.value })}
-            placeholder='[{"cmp_mode_a":0,"value_a":0,"mask_a":255,"is_final":true}]'
-            spellCheck={false}
-          />
-        </label>
-      ) : null}
-      <p className="muted">Run captures from the Run tab.</p>
+      <p className="muted">
+        Set the trigger in the Trigger drawer (hover the ⚡ Trigger rail on the
+        viewer&apos;s edge); run captures from the Run bar.
+      </p>
     </section>
   );
 }

@@ -33,6 +33,12 @@ export interface Identity {
   has_timestamp?: boolean;
   timestamp_width?: number;
   has_dual_compare?: boolean;
+  /** Comparator modes the bitstream supports (0=EQ .. 8=CHANGED). */
+  compare_modes?: number[];
+  /** WIDE_TRIG core: triggers reach the full sample width, not just 32 bits
+   *  (e.g. the 160-bit AXI monitor — trigger on any AXI channel, not just the
+   *  low events word). */
+  has_wide_trigger?: boolean;
 }
 
 /** One fcapz debug core present on the connected target (from list_cores). */
@@ -91,10 +97,19 @@ export function setToken(token: string): void {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+/** Thrown when a caller-supplied signal cancels an in-flight rpc(). */
+export class RpcCancelled extends Error {
+  constructor(cmd: string) {
+    super(`'${cmd}' cancelled`);
+    this.name = "RpcCancelled";
+  }
+}
+
 export async function rpc(
   cmd: string,
   params: Record<string, unknown> = {},
   timeoutMs = 8000,
+  signal?: AbortSignal,
 ): Promise<RpcResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const token = getToken();
@@ -102,6 +117,9 @@ export async function rpc(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onCancel = () => controller.abort();
+  if (signal?.aborted) onCancel();
+  signal?.addEventListener("abort", onCancel);
   let res: Response;
   try {
     res = await fetch("/api/rpc", {
@@ -112,11 +130,13 @@ export async function rpc(
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
+      if (signal?.aborted) throw new RpcCancelled(cmd);
       throw new Error(`'${cmd}' timed out after ${timeoutMs / 1000}s`);
     }
     throw e;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onCancel);
   }
   if (res.status === 401) throw new Error("unauthorized — set the API token");
   const data = (await res.json()) as RpcResponse;

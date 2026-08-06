@@ -2,8 +2,14 @@
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
 # Vivado build script for the Arty A7-100T mixed-language reference design.
-# Verilog vendor wrappers/TAP plumbing instantiate VHDL fcapz_ela/fcapz_eio
-# core entities.
+# Verilog vendor wrappers/TAP plumbing instantiate the VHDL fcapz_ela/fcapz_eio
+# core entities.  Topology mirrors the Verilog build (build_arty.tcl) exactly,
+# including the MicroBlaze subsystem: a project flow is used so the MicroBlaze
+# block design plus its firmware ELF (baked into the LMB BRAM) can drive real
+# CPU traffic on the monitored shared bus.
+#
+# Usage (from project root):
+#   vivado -mode batch -source examples/arty_a7/build_arty_vhdl.tcl
 
 set project_name fpgacapZero_arty_vhdl
 set part         xc7a100tcsg324-1
@@ -30,21 +36,30 @@ if {[info exists ::env(APPDATA)]} {
     }
 }
 
-set_param project.enableUnifiedSimulation 0
-
-if {[llength [current_project -quiet]] > 0} {
-    close_project
+# Allow build.py to override the project dir (used to sidestep a locked stale
+# dir from a prior killed build).
+if {[info exists ::env(FPGACAP_PROJECT_DIR)]} {
+    set override_project_dir [file normalize $::env(FPGACAP_PROJECT_DIR)]
+} else {
+    set override_project_dir ""
 }
 
+# The VHDL core files that replace rtl/fcapz_ela.v, rtl/fcapz_eio.v and
+# rtl/fcapz_axi_mon.v; the Verilog vendor wrappers bind their core instances
+# to these entities (mixed-language, by name).
 set vhdl_sources [list \
     $root/rtl/vhdl/pkg/fcapz_pkg.vhd \
     $root/rtl/vhdl/pkg/fcapz_util_pkg.vhd \
     $root/rtl/vhdl/core/fcapz_dpram.vhd \
     $root/rtl/vhdl/core/fcapz_ela.vhd \
     $root/rtl/vhdl/core/fcapz_eio.vhd \
+    $root/rtl/vhdl/core/fcapz_axi_mon.vhd \
     $example_dir/arty_a7_top.vhd \
 ]
 
+# Verilog TAP plumbing, vendor wrappers, bridge, monitor wrapper and test
+# slave.  Same set as the Verilog build minus fcapz_ela.v/fcapz_eio.v/
+# fcapz_axi_mon.v (the VHDL cores above) and arty_a7_top.v (the VHDL top above).
 set verilog_sources [list \
     $root/rtl/reset_sync.v \
     $root/rtl/dpram.v \
@@ -59,18 +74,101 @@ set verilog_sources [list \
     $root/rtl/fcapz_async_fifo.v \
     $root/rtl/fcapz_ejtagaxi.v \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
+    $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
     $root/tb/axi4_test_slave.v \
 ]
 
-read_vhdl -vhdl2008 $vhdl_sources
-read_verilog $verilog_sources
-read_xdc $example_dir/arty_a7.xdc
+proc _vhdl_add_sources {vhdl_sources verilog_sources example_dir} {
+    foreach src $vhdl_sources {
+        if {[llength [get_files -quiet $src]] == 0} {
+            add_files -norecurse $src
+        }
+        # VHDL cores + top use VHDL-2008 constructs; set per-file so the
+        # property sticks regardless of how get_files resolves the path.
+        set_property file_type "VHDL 2008" [get_files $src]
+    }
+    foreach src $verilog_sources {
+        if {[llength [get_files -quiet $src]] == 0} {
+            add_files -norecurse $src
+        }
+    }
+}
 
-synth_design -top arty_a7_top -part $part
-opt_design
-place_design
-route_design
-write_bitstream -force $example_dir/arty_a7_top_vhdl.bit
+set_param project.enableUnifiedSimulation 0
+
+# ── Open or create project ────────────────────────────────────
+if {[llength [current_project -quiet]] > 0} {
+    close_project
+}
+
+if {$override_project_dir ne ""} {
+    set project_dir $override_project_dir
+    puts "Using override project dir: $project_dir"
+} else {
+    set project_dir $root/vivado/$project_name
+}
+set project_xpr $project_dir/$project_name.xpr
+
+# Clear stale peripheral dirs from a killed build if the .xpr is gone (mirrors
+# build_arty.tcl; avoids the Windows [Project 1-161] delete race).
+if {![file exists $project_xpr]} {
+    foreach stale_dir [list \
+        $project_dir/$project_name.runs \
+        $project_dir/$project_name.cache \
+        $project_dir/$project_name.hw \
+        $project_dir/$project_name.ip_user_files \
+        $project_dir/$project_name.sim \
+    ] {
+        if {[file exists $stale_dir]} {
+            puts "Removing stale Vivado dir: $stale_dir"
+            if {[catch {file delete -force -- $stale_dir} err]} {
+                puts "WARNING: could not delete $stale_dir: $err"
+                after 2000
+                catch {file delete -force -- $stale_dir}
+            }
+        }
+    }
+}
+
+if {[file exists $project_xpr]} {
+    open_project $project_xpr
+    if {[get_runs -quiet impl_1] ne {}} { reset_run impl_1 }
+    if {[get_runs -quiet synth_1] ne {}} { reset_run synth_1 }
+    _vhdl_add_sources $vhdl_sources $verilog_sources $example_dir
+} else {
+    create_project $project_name $project_dir -part $part -force
+    _vhdl_add_sources $vhdl_sources $verilog_sources $example_dir
+    add_files -fileset constrs_1 $example_dir/arty_a7.xdc
+}
+set_property top arty_a7_top [current_fileset]
+
+# ── MicroBlaze block design + HDL wrapper ─────────────────────
+# arty_a7_top instantiates mb_sys_wrapper (microblaze_0 M_AXI_DP + the EJTAG
+# bridge master merged onto the monitored shared bus; MDM on USER3).  Same BD as
+# the Verilog build.  Generated fresh into the project if not already present.
+source $example_dir/mb/create_mb_bd.tcl
+source $example_dir/mb/build_fw.tcl
+if {[llength [get_files -quiet mb_sys.bd]] == 0} {
+    fcapz_build_mb_bd mb_sys
+    make_wrapper -files [get_files mb_sys.bd] -top -import
+}
+set_property top arty_a7_top [current_fileset]
+
+# ── Firmware ELF baked into the LMB BRAM ──────────────────────
+set fw_elf [fcapz_build_fw $project_dir]
+if {[llength [get_files -quiet mb_fw.elf]] == 0} {
+    add_files -norecurse $fw_elf
+}
+set_property SCOPED_TO_REF   mb_sys       [get_files -quiet mb_fw.elf]
+set_property SCOPED_TO_CELLS microblaze_0 [get_files -quiet mb_fw.elf]
+
+# ── Synthesise + implement + write bitstream ──────────────────
+launch_runs impl_1 -to_step write_bitstream -jobs 4
+wait_on_run impl_1
+
+file copy -force \
+    $project_dir/${project_name}.runs/impl_1/arty_a7_top.bit \
+    $example_dir/arty_a7_top_vhdl.bit
 
 puts "\n=== VHDL build complete: examples/arty_a7/arty_a7_top_vhdl.bit ==="

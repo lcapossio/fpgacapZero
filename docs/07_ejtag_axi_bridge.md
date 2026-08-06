@@ -19,6 +19,10 @@ JTAG plus a custom 72-bit DR), the source is yours, the host stack
 is Python, and you can read every line of the FSM in
 [`../rtl/fcapz_ejtagaxi.v`](../rtl/fcapz_ejtagaxi.v).
 
+> **See also:** the EJTAG-AXI bridge *drives* an AXI bus (it is a master). To
+> *observe* one passively — capture and trigger on transactions without
+> perturbing them — use the [AXI monitor](19_axi_monitor.md).
+
 ## What it can do
 
 - **Single AXI read** — one address, one data word.

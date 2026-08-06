@@ -42,6 +42,7 @@ architecture rtl of fcapz_ela_intel is
     signal jtag_addr : std_logic_vector(15 downto 0);
     signal jtag_wdata, jtag_rdata : std_logic_vector(31 downto 0);
     signal burst_rd_addr : std_logic_vector(PTR_W - 1 downto 0);
+    signal burst_rd_active : std_logic;
     signal burst_rd_data : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal burst_rd_ts_data : std_logic_vector(TS_W_SAFE - 1 downto 0);
     signal burst_start, burst_timestamp : std_logic;
@@ -99,7 +100,8 @@ begin
             jtag_wr_en => jtag_wr_en, jtag_rd_en => jtag_rd_en,
             jtag_addr => jtag_addr, jtag_wdata => jtag_wdata,
             jtag_rdata => jtag_rdata,
-            burst_rd_addr => burst_rd_addr, burst_rd_data => burst_rd_data,
+            burst_rd_addr => burst_rd_addr, burst_rd_active => burst_rd_active,
+            burst_rd_data => burst_rd_data,
             burst_rd_ts_data => burst_rd_ts_data,
             burst_start => burst_start, burst_timestamp => burst_timestamp,
             burst_start_ptr => burst_start_ptr
@@ -116,6 +118,7 @@ begin
             capture => tap2_capture, shift_en => tap2_shift,
             update => tap2_update, sel => tap2_sel,
             mem_addr => burst_rd_addr,
+            mem_active => burst_rd_active,
             sample_data => burst_rd_data,
             timestamp_data => burst_rd_ts_data,
             burst_start => burst_start,

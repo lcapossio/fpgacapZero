@@ -21,6 +21,7 @@ only when a start fails.
 from __future__ import annotations
 
 import atexit
+import os
 import socket
 import subprocess
 import tempfile
@@ -64,6 +65,11 @@ class OpenOcdLauncher:
     def config_names(self) -> List[str]:
         return sorted(self._configs)
 
+    @property
+    def configs(self) -> Dict[str, str]:
+        """Copy of the allow-listed ``name -> resolved config path`` map."""
+        return dict(self._configs)
+
     # -- helpers ---------------------------------------------------------
 
     def _port_open(self, port: int, timeout: float = 0.3) -> bool:
@@ -100,6 +106,21 @@ class OpenOcdLauncher:
     def _terminate(proc: subprocess.Popen) -> None:
         if proc.poll() is not None:
             return
+        # On Windows a launcher shim (openocd.cmd/.bat) runs the real openocd as
+        # a *child* of the process we spawned; terminating the parent orphans the
+        # child, which keeps holding the JTAG adapter. taskkill /T kills the whole
+        # tree so the adapter is actually released. Best-effort; the plain
+        # terminate/kill below still runs (and is the only path on POSIX).
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            except Exception:
+                pass
         try:
             proc.terminate()
             proc.wait(timeout=5)
