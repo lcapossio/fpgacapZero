@@ -28,6 +28,16 @@ VERILOG_SOURCES = [
     RTL / "fcapz_axi_mon.v",
 ]
 
+# Same hierarchy in native VHDL (the source-of-truth Verilog is above); running
+# the identical cocotb bench against both is the project's behavioral-parity gate.
+VHDL_SOURCES = [
+    RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+    RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+    RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+    RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+    RTL / "vhdl" / "core" / "fcapz_axi_mon.vhd",
+]
+
 # AXI4-Lite 32/32. Small depth, no pipe/timestamps to keep the bench's
 # register-window readback simple and deterministic.
 BASE_PARAMETERS = {
@@ -65,7 +75,8 @@ TARGETS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sim", default="icarus")
+    parser.add_argument("--hdl", choices=("verilog", "vhdl"), default="verilog")
+    parser.add_argument("--sim", default=None)
     parser.add_argument("--runner", choices=("auto", "native", "wsl"), default="auto")
     parser.add_argument("--target", choices=[t.name for t in TARGETS], default=None)
     parser.add_argument("--waves", action="store_true")
@@ -90,14 +101,16 @@ def main() -> None:
     if str(TB_COCOTB) not in sys.path:
         sys.path.insert(0, str(TB_COCOTB))
 
-    runner = get_runner(args.sim)
+    sim = args.sim or ("icarus" if args.hdl == "verilog" else "ghdl")
+    sources = VERILOG_SOURCES if args.hdl == "verilog" else VHDL_SOURCES
+    runner = get_runner(sim)
     for target in TARGETS:
         if args.target and target.name != args.target:
             continue
-        build_dir = BUILD_ROOT / f"{args.sim}_{target.name}"
+        build_dir = BUILD_ROOT / f"{args.hdl}_{sim}_{target.name}"
         results_xml = build_dir / "results.xml"
         runner.build(
-            sources=VERILOG_SOURCES,
+            sources=sources,
             includes=[RTL],
             parameters={**BASE_PARAMETERS, "DECODE_EN": target.decode},
             hdl_toplevel="fcapz_axi_mon",
@@ -107,22 +120,23 @@ def main() -> None:
             waves=args.waves,
             verbose=args.verbose,
             timescale=("1ns", "1ps"),
-            build_args=["-Wall"],
+            build_args=["-Wall"] if args.hdl == "verilog" else ["--std=08"],
         )
         runner.test(
             test_module="axi_mon_test",
             hdl_toplevel="fcapz_axi_mon",
-            hdl_toplevel_lang="verilog",
+            hdl_toplevel_lang=args.hdl,
             test_filter="|".join(rf".*\.{re.escape(case)}$" for case in target.testcases),
             build_dir=build_dir,
-            test_dir=TB_COCOTB,
+            test_dir=build_dir if args.hdl == "vhdl" else TB_COCOTB,
             results_xml=results_xml,
+            test_args=["--std=08"] if args.hdl == "vhdl" else [],
             waves=args.waves,
             verbose=args.verbose,
             extra_env={"COCOTB_RESOLVE_X": "ZEROS", "AXIMON_DECODE": str(target.decode)},
         )
         check_results(results_xml)
-        print(f"cocotb AXI monitor [{target.name}] OK: {build_dir.relative_to(ROOT)}")
+        print(f"cocotb AXI monitor [{args.hdl}][{target.name}] OK: {build_dir.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

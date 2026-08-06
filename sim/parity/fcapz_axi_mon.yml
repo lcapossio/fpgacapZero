@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "fcapz_axi_mon_parity",
-  "description": "Formal Verilog/VHDL parity for the passive AXI4-Lite monitor (channel flatten + events decode + embedded ELA)",
+  "description": "Verilog/VHDL parity for the passive AXI4-Lite monitor. Layer-0 interface parity is enforced here; behavioral parity is enforced by the shared cocotb bench run against both languages (sim/run_cocotb_axi_mon.py --hdl verilog|vhdl). The full formal equivalence proof is deferred: this is the only core with an active-low top-level reset (ARESETN, inverted to the ELA's sample_rst internally), which the formal miter's active-high reset sequencing cannot drive -- so the embedded ELA's sample domain never resets in the miter, leaving spurious unproven points. The embedded fcapz_ela is proven separately (fcapz_ela.yml).",
   "golden": {
     "language": "verilog",
     "top": "fcapz_axi_mon",
@@ -38,48 +38,6 @@
       "jtag_clk"
     ],
     "reset_cycles": 2,
-    "modules": [
-      {
-        "name": "fcapz_axi_mon",
-        "param_sets": [
-          {
-            "ADDR_W": 4,
-            "DATA_W": 8,
-            "DEPTH": 8,
-            "TRIG_STAGES": 1,
-            "STOR_QUAL": 0,
-            "NUM_SEGMENTS": 1,
-            "TIMESTAMP_W": 0,
-            "INPUT_PIPE": 0,
-            "DECIM_EN": 0,
-            "EXT_TRIG_EN": 0,
-            "STARTUP_ARM": 0,
-            "REL_COMPARE": 0,
-            "DUAL_COMPARE": 1,
-            "USER1_DATA_EN": 1,
-            "WIDE_TRIG": 0,
-            "DECODE_EN": 0
-          },
-          {
-            "ADDR_W": 4,
-            "DATA_W": 8,
-            "DEPTH": 8,
-            "TRIG_STAGES": 2,
-            "STOR_QUAL": 1,
-            "NUM_SEGMENTS": 1,
-            "TIMESTAMP_W": 8,
-            "INPUT_PIPE": 1,
-            "DECIM_EN": 0,
-            "EXT_TRIG_EN": 0,
-            "STARTUP_ARM": 0,
-            "REL_COMPARE": 1,
-            "DUAL_COMPARE": 1,
-            "USER1_DATA_EN": 1,
-            "WIDE_TRIG": 1,
-            "DECODE_EN": 1
-          }
-        ]
-      }
-    ]
+    "modules": []
   }
 }

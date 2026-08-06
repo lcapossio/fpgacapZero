@@ -39,8 +39,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   truth (`rtl/vhdl/core/fcapz_axi_mon.vhd`, `rtl/vhdl/fcapz_axi_mon_xilinx7.vhd`),
   so the monitor is usable from a pure-VHDL flow rather than only via
   mixed-language instantiation. Kept in lockstep by the Verilog/VHDL parity
-  checks: static generic/register parity, Layer-0 interface parity, and a formal
-  equivalence manifest (`sim/parity/fcapz_axi_mon.yml`).
+  checks: static generic/register parity, Layer-0 interface parity, and the
+  shared cocotb bench run against **both** languages
+  (`sim/run_cocotb_axi_mon.py --hdl verilog|vhdl` — identical tests pass on
+  each). The full formal-equivalence proof is deferred: the monitor's active-low
+  `ARESETN` (inverted to the ELA's `sample_rst` internally) is not drivable by
+  the parity miter's active-high reset sequencing; the embedded `fcapz_ela` is
+  proven separately.
 - **Waveform x-axis reads sample indices, not nanoseconds.** The exported VCD
   now uses one time unit per stored sample (`$timescale 1 ns`), so the viewer's
   x-axis and the `#` times are the sample number (sample 8 shows as `8`, was
