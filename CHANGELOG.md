@@ -34,6 +34,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **AXI monitor — native VHDL implementation.** `fcapz_axi_mon` and its
+  Xilinx-7 wrapper now ship as native VHDL alongside the Verilog source of
+  truth (`rtl/vhdl/core/fcapz_axi_mon.vhd`, `rtl/vhdl/fcapz_axi_mon_xilinx7.vhd`),
+  so the monitor is usable from a pure-VHDL flow rather than only via
+  mixed-language instantiation. Kept in lockstep by the Verilog/VHDL parity
+  checks: static generic/register parity, Layer-0 interface parity, and a formal
+  equivalence manifest (`sim/parity/fcapz_axi_mon.yml`).
 - **Waveform x-axis reads sample indices, not nanoseconds.** The exported VCD
   now uses one time unit per stored sample (`$timescale 1 ns`), so the viewer's
   x-axis and the `#` times are the sample number (sample 8 shows as `8`, was
