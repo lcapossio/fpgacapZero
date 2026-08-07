@@ -1681,12 +1681,18 @@ class TestAxiMonitorStress(unittest.TestCase):
         self.assertFalse(status & 0x2, f"false any_err trigger under clean load (0x{status:08X})")
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
-    # ---- full-sample content verification -------------------------------
+    # ---- full-sample content verification (soak) ------------------------
     # The 160-bit sample serialises to five 32-bit readback words. awaddr
     # (bits 8..39), wdata (45..76), araddr (87..118) and rdata (124..155) each
     # straddle a *different* word boundary, so verifying all four against known
     # injected values proves every readback word is correct — not just word 0.
-    _FULLCAP_PATTERNS = 8
+    #
+    # Soaked over many rounds with fresh data each round to expose any marginal
+    # or intermittent readback.  The test slave has 16 physical words, so each
+    # round sweeps 16 distinct addresses (one per word); rounds re-seed with new
+    # data.  _FULLCAP_REPS * 16 writes and reads are verified per test.
+    _FULLCAP_WORDS = 16
+    _FULLCAP_REPS = 8
     _FULLCAP_BASE = 0x0000_A000  # word-aligned, inside the test slave's range
 
     def _decoded_field_set(self, samples, field, valid):
@@ -1699,60 +1705,72 @@ class TestAxiMonitorStress(unittest.TestCase):
         return out
 
     def test_full_write_capture_addr_and_data(self):
-        """Inject distinct writes; the capture must contain the exact awaddr
-        AND wdata for each — exercising readback words 0-2 across the boundary.
+        """Soak: inject many distinct writes; each capture must contain the
+        exact awaddr AND wdata — exercising readback words 0-2 across the
+        boundary, repeatedly, to prove the readback is not marginal.
 
         CPU is quiet (go=0 in setUp), so the aw_hs trigger fires only on the
         injected bridge write.  Asserting wdata (bits 45..76) is the coverage
         the single-shot MicroBlaze test deliberately skips.
         """
-        for i in range(self._FULLCAP_PATTERNS):
-            addr = self._FULLCAP_BASE + i * 4
-            data = 0xD000_0000 | (i << 16) | (i ^ 0xA5)
-            self._arm("aw_hs", pretrigger=2, posttrigger=24)
-            self.bridge.axi_write(addr, data)
-            samples = self.an.capture(timeout=5.0).samples
-            self.assertTrue(samples, f"i{i}: no samples captured")
-            aw = self._decoded_field_set(samples, "awaddr", "awvalid")
-            wd = self._decoded_field_set(samples, "wdata", "wvalid")
-            self.assertIn(addr, aw, f"i{i}: awaddr 0x{addr:08X} not captured; saw "
-                          f"{sorted(hex(a) for a in aw)}")
-            self.assertIn(data, wd, f"i{i}: wdata 0x{data:08X} not captured; saw "
-                          f"{sorted(hex(d) for d in wd)}")
+        n = 0
+        for rep in range(self._FULLCAP_REPS):
+            for i in range(self._FULLCAP_WORDS):
+                addr = self._FULLCAP_BASE + i * 4
+                data = 0xD000_0000 | (rep << 20) | (i << 8) | ((i ^ rep) & 0xFF)
+                self._arm("aw_hs", pretrigger=2, posttrigger=24)
+                self.bridge.axi_write(addr, data)
+                samples = self.an.capture(timeout=5.0).samples
+                self.assertTrue(samples, f"rep{rep} i{i}: no samples captured")
+                aw = self._decoded_field_set(samples, "awaddr", "awvalid")
+                wd = self._decoded_field_set(samples, "wdata", "wvalid")
+                self.assertIn(addr, aw, f"rep{rep} i{i}: awaddr 0x{addr:08X} not "
+                              f"captured; saw {sorted(hex(a) for a in aw)}")
+                self.assertIn(data, wd, f"rep{rep} i{i}: wdata 0x{data:08X} not "
+                              f"captured; saw {sorted(hex(d) for d in wd)}")
+                n += 1
+        print(f"\n  full-write soak: {n} writes verified (awaddr + wdata)")
 
     def test_full_read_capture_addr_and_data(self):
-        """Write known values, then read them back; the capture must contain the
-        exact araddr AND rdata for each — exercising readback words 2-4.
+        """Soak: write known values then read them back; each capture must
+        contain the exact araddr AND rdata — exercising readback words 2-4,
+        repeatedly.
 
         Triggers on an araddr-qualified value match (not a bare ar_hs) so it
         isolates the injected read from the CPU's continuous go-flag poll reads
-        that share the monitored bus.
+        that share the monitored bus.  Each round writes all 16 words (distinct,
+        no clobber) then reads them back with fresh data.
         """
-        # Seed known values first (CPU quiet), then read each back and verify.
-        vals = {}
-        for i in range(self._FULLCAP_PATTERNS):
-            addr = self._FULLCAP_BASE + i * 4
-            data = 0xC0DE_0000 | (i << 8) | (i ^ 0x3C)
-            self.bridge.axi_write(addr, data)
-            vals[addr] = data
-        for i in range(self._FULLCAP_PATTERNS):
-            addr = self._FULLCAP_BASE + i * 4
-            cfg = self.mon.read_addr_capture_config(
-                addr, pretrigger=2, posttrigger=24, depth=256
-            )
-            self.an.configure(cfg)
-            self.an.arm()
-            self.assertEqual(self._status() & 0x1, 1, f"i{i}: monitor did not arm")
-            got = self.bridge.axi_read(addr)
-            self.assertEqual(got, vals[addr], f"i{i}: bus read mismatch")
-            samples = self.an.capture(timeout=5.0).samples
-            self.assertTrue(samples, f"i{i}: no samples captured")
-            ar = self._decoded_field_set(samples, "araddr", "arvalid")
-            rd = self._decoded_field_set(samples, "rdata", "rvalid")
-            self.assertIn(addr, ar, f"i{i}: araddr 0x{addr:08X} not captured; saw "
-                          f"{sorted(hex(a) for a in ar)}")
-            self.assertIn(vals[addr], rd, f"i{i}: rdata 0x{vals[addr]:08X} not "
-                          f"captured; saw {sorted(hex(d) for d in rd)}")
+        n = 0
+        for rep in range(self._FULLCAP_REPS):
+            vals = {}
+            for i in range(self._FULLCAP_WORDS):
+                addr = self._FULLCAP_BASE + i * 4
+                data = 0xC0DE_0000 | (rep << 12) | (i << 4) | ((i + rep) & 0xF)
+                self.bridge.axi_write(addr, data)
+                vals[addr] = data
+            for i in range(self._FULLCAP_WORDS):
+                addr = self._FULLCAP_BASE + i * 4
+                cfg = self.mon.read_addr_capture_config(
+                    addr, pretrigger=2, posttrigger=24, depth=256
+                )
+                self.an.configure(cfg)
+                self.an.arm()
+                self.assertEqual(self._status() & 0x1, 1,
+                                 f"rep{rep} i{i}: monitor did not arm")
+                got = self.bridge.axi_read(addr)
+                self.assertEqual(got, vals[addr], f"rep{rep} i{i}: bus read mismatch")
+                samples = self.an.capture(timeout=5.0).samples
+                self.assertTrue(samples, f"rep{rep} i{i}: no samples captured")
+                ar = self._decoded_field_set(samples, "araddr", "arvalid")
+                rd = self._decoded_field_set(samples, "rdata", "rvalid")
+                self.assertIn(addr, ar, f"rep{rep} i{i}: araddr 0x{addr:08X} not "
+                              f"captured; saw {sorted(hex(a) for a in ar)}")
+                self.assertIn(vals[addr], rd, f"rep{rep} i{i}: rdata "
+                              f"0x{vals[addr]:08X} not captured; saw "
+                              f"{sorted(hex(d) for d in rd)}")
+                n += 1
+        print(f"\n  full-read soak: {n} reads verified (araddr + rdata)")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

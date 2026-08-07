@@ -41,11 +41,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   A7 stress tests inject distinct known write and read patterns and read back the
   **full 160-bit sample**, asserting `awaddr`/`wdata`/`araddr`/`rdata` — which
   straddle all five 32-bit readback words. They pass on **both** the Verilog and
-  VHDL bitstreams on real silicon (15/15 `TestAxiMonitor*`). This retires the
-  earlier "wide-SAMPLE_W readback is timing-marginal at 150 MHz" caveat: the full
-  sample reads back correctly and reliably (256+ injected patterns, 0 mismatches);
-  the design meets timing with the tightest paths in ELA segment-pointer logic,
-  not the monitor readback.
+  VHDL bitstreams on real silicon (15/15 `TestAxiMonitor*`). The content tests
+  soak the readback — 128 writes + 128 reads per bitstream, fresh data each
+  round — so intermittent corruption would show. This retires the earlier
+  "wide-SAMPLE_W readback is timing-marginal at 150 MHz" caveat: the full sample
+  reads back correctly and reliably (0 mismatches across both languages); the
+  design meets timing with the tightest paths in ELA segment-pointer logic, not
+  the monitor readback.
 - **AXI monitor — native VHDL implementation.** `fcapz_axi_mon` and its
   Xilinx-7 wrapper now ship as native VHDL alongside the Verilog source of
   truth (`rtl/vhdl/core/fcapz_axi_mon.vhd`, `rtl/vhdl/fcapz_axi_mon_xilinx7.vhd`),
