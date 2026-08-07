@@ -1313,10 +1313,10 @@ class TestAxiMonitor(unittest.TestCase):
     (or doesn't) by reading STATUS. Selective event triggering on real silicon
     is the AXI monitor's headline.
 
-    Note: bulk readback of the 160-bit samples is *not* asserted here — that
-    path is timing-marginal at 150 MHz for this wide SAMPLE_W (a separate,
-    characterized issue; the capture/trigger logic itself is cocotb-verified
-    and confirmed on hardware via the STATUS checks below).
+    These tests assert trigger/no-trigger via STATUS only; full 160-bit sample
+    content (awaddr/wdata/araddr/rdata across all five readback words) is
+    verified separately in TestAxiMonitorStress.test_full_write_capture_* and
+    test_full_read_capture_*.
     """
 
     STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
@@ -1526,12 +1526,11 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         """Decode the captured samples and confirm the CPU's write *address*
         appears -- direct evidence the monitor captured real CPU bus cycles.
 
-        Only the low word of each sample (the decode-events byte + awaddr) is
-        asserted: bulk readback of the full 160-bit sample is timing-marginal
-        (the same wide-SAMPLE_W readback caveat documented on TestAxiMonitor --
-        higher words repeat the first), so ``wdata`` is *not* read back here.
-        The CPU's write *data* value is confirmed independently, and robustly,
-        by the EJTAG cross-read in test_cpu_traffic_triggers_and_cross_reads.
+        This asserts awaddr from live CPU traffic. Full-width sample content
+        (wdata and the read channel, spanning all five readback words) is
+        verified against injected patterns in TestAxiMonitorStress; the CPU's
+        write *data* is additionally cross-checked in
+        test_cpu_traffic_triggers_and_cross_reads.
         """
         import time
 
@@ -1558,15 +1557,16 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestAxiMonitorStress(unittest.TestCase):
-    """Stress the AXI monitor's arm/trigger/complete path on real silicon.
+    """Stress the AXI monitor's capture path — state machine AND sample content.
 
-    Deliberately avoids bulk wide-readback (timing-marginal at 150 MHz for the
-    160-bit SAMPLE_W — see TestAxiMonitor) and instead hammers the capture state
-    machine, which *is* robust: many rapid arm->trigger->done cycles under bridge
-    traffic, sustained real CPU bus traffic re-captured repeatedly, and a long
-    run of clean traffic that must never false-trigger on any_err. Catches
-    stuck-armed / missed-complete / state-leak / false-trigger regressions the
-    single-shot tests can't.
+    Two kinds of coverage the single-shot tests can't give:
+      * State machine: many rapid arm->trigger->done cycles under bridge
+        traffic, sustained real CPU bus traffic re-captured repeatedly, and a
+        long run of clean traffic that must never false-trigger on any_err —
+        catching stuck-armed / missed-complete / state-leak / false-trigger.
+      * Sample content: distinct known write and read patterns injected and
+        read back in full, asserting awaddr/wdata/araddr/rdata across all five
+        32-bit readback words of the 160-bit sample.
 
     Shares the MicroBlaze go-flag infra with TestAxiMonitorMicroBlaze: the CPU
     only writes while word31 (go) is non-zero; setUp/tearDown keep it quiet.
@@ -1680,6 +1680,79 @@ class TestAxiMonitorStress(unittest.TestCase):
         status = self._status()
         self.assertFalse(status & 0x2, f"false any_err trigger under clean load (0x{status:08X})")
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
+
+    # ---- full-sample content verification -------------------------------
+    # The 160-bit sample serialises to five 32-bit readback words. awaddr
+    # (bits 8..39), wdata (45..76), araddr (87..118) and rdata (124..155) each
+    # straddle a *different* word boundary, so verifying all four against known
+    # injected values proves every readback word is correct — not just word 0.
+    _FULLCAP_PATTERNS = 8
+    _FULLCAP_BASE = 0x0000_A000  # word-aligned, inside the test slave's range
+
+    def _decoded_field_set(self, samples, field, valid):
+        """Values of ``field`` across samples where ``valid`` is asserted."""
+        out = set()
+        for s in samples:
+            d = self.mon.decode_sample(s)
+            if d.get(valid):
+                out.add(d[field])
+        return out
+
+    def test_full_write_capture_addr_and_data(self):
+        """Inject distinct writes; the capture must contain the exact awaddr
+        AND wdata for each — exercising readback words 0-2 across the boundary.
+
+        CPU is quiet (go=0 in setUp), so the aw_hs trigger fires only on the
+        injected bridge write.  Asserting wdata (bits 45..76) is the coverage
+        the single-shot MicroBlaze test deliberately skips.
+        """
+        for i in range(self._FULLCAP_PATTERNS):
+            addr = self._FULLCAP_BASE + i * 4
+            data = 0xD000_0000 | (i << 16) | (i ^ 0xA5)
+            self._arm("aw_hs", pretrigger=2, posttrigger=24)
+            self.bridge.axi_write(addr, data)
+            samples = self.an.capture(timeout=5.0).samples
+            self.assertTrue(samples, f"i{i}: no samples captured")
+            aw = self._decoded_field_set(samples, "awaddr", "awvalid")
+            wd = self._decoded_field_set(samples, "wdata", "wvalid")
+            self.assertIn(addr, aw, f"i{i}: awaddr 0x{addr:08X} not captured; saw "
+                          f"{sorted(hex(a) for a in aw)}")
+            self.assertIn(data, wd, f"i{i}: wdata 0x{data:08X} not captured; saw "
+                          f"{sorted(hex(d) for d in wd)}")
+
+    def test_full_read_capture_addr_and_data(self):
+        """Write known values, then read them back; the capture must contain the
+        exact araddr AND rdata for each — exercising readback words 2-4.
+
+        Triggers on an araddr-qualified value match (not a bare ar_hs) so it
+        isolates the injected read from the CPU's continuous go-flag poll reads
+        that share the monitored bus.
+        """
+        # Seed known values first (CPU quiet), then read each back and verify.
+        vals = {}
+        for i in range(self._FULLCAP_PATTERNS):
+            addr = self._FULLCAP_BASE + i * 4
+            data = 0xC0DE_0000 | (i << 8) | (i ^ 0x3C)
+            self.bridge.axi_write(addr, data)
+            vals[addr] = data
+        for i in range(self._FULLCAP_PATTERNS):
+            addr = self._FULLCAP_BASE + i * 4
+            cfg = self.mon.read_addr_capture_config(
+                addr, pretrigger=2, posttrigger=24, depth=256
+            )
+            self.an.configure(cfg)
+            self.an.arm()
+            self.assertEqual(self._status() & 0x1, 1, f"i{i}: monitor did not arm")
+            got = self.bridge.axi_read(addr)
+            self.assertEqual(got, vals[addr], f"i{i}: bus read mismatch")
+            samples = self.an.capture(timeout=5.0).samples
+            self.assertTrue(samples, f"i{i}: no samples captured")
+            ar = self._decoded_field_set(samples, "araddr", "arvalid")
+            rd = self._decoded_field_set(samples, "rdata", "rvalid")
+            self.assertIn(addr, ar, f"i{i}: araddr 0x{addr:08X} not captured; saw "
+                          f"{sorted(hex(a) for a in ar)}")
+            self.assertIn(vals[addr], rd, f"i{i}: rdata 0x{vals[addr]:08X} not "
+                          f"captured; saw {sorted(hex(d) for d in rd)}")
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

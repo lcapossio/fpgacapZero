@@ -34,6 +34,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **AXI monitor — read-address trigger + full-sample hardware verification.**
+  New `AxiMonitor.read_addr_capture_config(addr)` builds an `araddr`-qualified
+  value trigger (the read-channel mirror of `write_addr_capture_config`), so a
+  single read can be isolated on a bus carrying unrelated read traffic. New Arty
+  A7 stress tests inject distinct known write and read patterns and read back the
+  **full 160-bit sample**, asserting `awaddr`/`wdata`/`araddr`/`rdata` — which
+  straddle all five 32-bit readback words. They pass on **both** the Verilog and
+  VHDL bitstreams on real silicon (15/15 `TestAxiMonitor*`). This retires the
+  earlier "wide-SAMPLE_W readback is timing-marginal at 150 MHz" caveat: the full
+  sample reads back correctly and reliably (256+ injected patterns, 0 mismatches);
+  the design meets timing with the tightest paths in ELA segment-pointer logic,
+  not the monitor readback.
 - **AXI monitor — native VHDL implementation.** `fcapz_axi_mon` and its
   Xilinx-7 wrapper now ship as native VHDL alongside the Verilog source of
   truth (`rtl/vhdl/core/fcapz_axi_mon.vhd`, `rtl/vhdl/fcapz_axi_mon_xilinx7.vhd`),
