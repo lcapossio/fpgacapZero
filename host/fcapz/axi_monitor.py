@@ -182,6 +182,53 @@ class AxiMonitor:
             probes=list(probes.values()),
         )
 
+    def read_addr_capture_config(
+        self,
+        addr: int,
+        *,
+        pretrigger: int = 8,
+        posttrigger: int = 24,
+        addr_mask: int = 0xFFFF_FFFF,
+        depth: int = 1024,
+        sample_clock_hz: int = 100_000_000,
+        qualify_valid: bool = True,
+    ) -> CaptureConfig:
+        """A capture that triggers when a read address (``araddr``) matches.
+
+        The read-channel mirror of :meth:`write_addr_capture_config`: the
+        trigger value/mask are built at ``araddr``'s real bit offset from the
+        probe map, so the full-width comparator (``WIDE_TRIG``) reaches the
+        address wherever it lands. With ``qualify_valid=True`` (the default) the
+        trigger also requires ``arvalid``, so it fires on a genuine read-address
+        handshake attempt rather than on a stale address the bus is parked on.
+
+        Useful to isolate one read transaction on a shared bus that carries
+        unrelated read traffic (e.g. a CPU polling a flag word) — a bare
+        ``ar_hs`` event trigger would fire on whichever read comes first.
+
+        Requires a ``WIDE_TRIG`` core when the address (or the ``arvalid`` bit)
+        falls above bit 31 — ``araddr`` starts at bit 87 on a decode build, so
+        this always needs one; ``Analyzer.configure`` raises otherwise.
+        """
+        geo = self.geometry()
+        probes = {p.name: p for p in self.probe_map(geo).probes}
+        ar = probes["araddr"]
+        value = (addr & addr_mask) << ar.lsb
+        mask = (addr_mask & ((1 << ar.width) - 1)) << ar.lsb
+        if qualify_valid:
+            arv = probes["arvalid"]
+            value |= 1 << arv.lsb
+            mask |= 1 << arv.lsb
+        return CaptureConfig(
+            pretrigger=pretrigger,
+            posttrigger=posttrigger,
+            trigger=TriggerConfig(mode="value_match", value=value, mask=mask),
+            sample_width=geo.sample_width,
+            depth=depth,
+            sample_clock_hz=sample_clock_hz,
+            probes=list(probes.values()),
+        )
+
     def beat_storage_qual(self) -> tuple[int, int, int]:
         """Storage-qualifier ``(mode, value, mask)`` that keeps only beats.
 

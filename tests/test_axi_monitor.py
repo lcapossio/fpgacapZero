@@ -132,6 +132,34 @@ def test_write_addr_capture_config_decode_build():
     assert cfg.sample_width == 160
 
 
+def test_read_addr_capture_config():
+    # Raw build: araddr at bit 79. Unqualified -> value/mask shifted to araddr.
+    cfg = _mon().read_addr_capture_config(
+        0x4000_0000, pretrigger=4, posttrigger=10, qualify_valid=False
+    )
+    assert cfg.trigger.mode == "value_match"
+    assert cfg.trigger.value == 0x4000_0000 << 79
+    assert cfg.trigger.mask == 0xFFFF_FFFF << 79
+    assert cfg.sample_width == 152
+    assert cfg.pretrigger == 4 and cfg.posttrigger == 10
+    assert any(p.name == "araddr" for p in cfg.probes)
+
+
+def test_read_addr_capture_config_valid_qualified():
+    # Default qualifies by arvalid (bit 114 on a raw build).
+    cfg = _mon().read_addr_capture_config(0x4000_0000)
+    assert cfg.trigger.value == (0x4000_0000 << 79) | (1 << 114)
+    assert cfg.trigger.mask == (0xFFFF_FFFF << 79) | (1 << 114)
+
+
+def test_read_addr_capture_config_decode_build():
+    # Decode build: araddr at bit 87, arvalid at bit 122 — both need the wide path.
+    cfg = _mon_decode().read_addr_capture_config(0xDEAD_BEEF)
+    assert cfg.trigger.value == (0xDEAD_BEEF << 87) | (1 << 122)
+    assert cfg.trigger.mask == (0xFFFF_FFFF << 87) | (1 << 122)
+    assert cfg.sample_width == 160
+
+
 def test_decode_geometry_and_probe_map():
     g = _mon_decode().geometry()
     assert g.decode is True
