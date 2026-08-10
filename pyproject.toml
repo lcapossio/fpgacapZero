@@ -13,6 +13,8 @@ dynamic = ["version"]
 description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
 readme = "README.md"
 license = {text = "Apache-2.0"}
+authors = [{name = "Leonardo Capossio - bard0 design", email = "hello@bard0.com"}]
+keywords = ["fpga", "debug", "vhdl", "verilog", "axi"]
 requires-python = ">=3.10"
 dependencies = [
     "tomli>=2.0.1; python_version < '3.11'",
@@ -24,6 +26,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
+
+[project.urls]
+Homepage = "https://bard0.com/projects/fcapz.html"
+Repository = "https://github.com/lcapossio/fpgacapZero/"
+Issues = "https://github.com/lcapossio/fpgacapZero/issues"
+Changelog = "https://github.com/lcapossio/fpgacapZero/blob/main/CHANGELOG.md"
 
 [project.scripts]
 fcapz = "fcapz.cli:main"
