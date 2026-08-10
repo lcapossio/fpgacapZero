@@ -10,7 +10,7 @@ name = "fpgacapzero"
 # all share one number.  CI runs the sync script with --check to block
 # merges that would let them drift.
 dynamic = ["version"]
-description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
+description = "Open-source, vendor-agnostic full-featured FPGA debug cores"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Leonardo Capossio - bard0 design", email = "hello@bard0.com"}]
