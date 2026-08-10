@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "fcapz_axi_mon_parity",
+  "description": "Verilog/VHDL parity for the passive AXI4-Lite monitor. Layer-0 interface parity is enforced here; behavioral parity is enforced by the shared cocotb bench run against both languages (sim/run_cocotb_axi_mon.py --hdl verilog|vhdl). The full formal equivalence proof is deferred: this is the only core with an active-low top-level reset (ARESETN, inverted to the ELA's sample_rst internally), which the formal miter's active-high reset sequencing cannot drive -- so the embedded ELA's sample domain never resets in the miter, leaving spurious unproven points. The embedded fcapz_ela is proven separately (fcapz_ela.yml).",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_axi_mon",
+    "sources": [
+      "../../rtl/dpram.v",
+      "../../rtl/trig_compare.v",
+      "../../rtl/fcapz_ela.v",
+      "../../rtl/fcapz_axi_mon.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_axi_mon",
+    "synth_options": [
+      "--latches"
+    ],
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/fcapz_dpram.vhd",
+      "../../rtl/vhdl/core/fcapz_ela.vhd",
+      "../../rtl/vhdl/core/fcapz_axi_mon.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 24,
+    "bounded_depth": 48,
+    "reset_inputs": [
+      "jtag_rst"
+    ],
+    "clock_inputs": [
+      "ACLK",
+      "jtag_clk"
+    ],
+    "reset_cycles": 2,
+    "modules": []
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "jtag_reg_iface_parity",
+  "description": "Formal Verilog/VHDL parity for the JTAG register bridge",
+  "golden": {
+    "language": "verilog",
+    "top": "jtag_reg_iface",
+    "sources": [
+      "../../rtl/jtag_reg_iface.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "jtag_reg_iface",
+    "sources": [
+      "../../rtl/vhdl/core/jtag_reg_iface.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "arst"
+    ],
+    "clock_inputs": [
+      "tck"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "jtag_reg_iface",
+        "param_sets": [
+          {}
+        ]
+      }
+    ]
+  }
+}

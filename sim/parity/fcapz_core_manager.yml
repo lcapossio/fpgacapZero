@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "name": "fcapz_core_manager_parity",
+  "description": "Formal Verilog/VHDL parity for the active debug-core slot manager",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_core_manager",
+    "sources": [
+      "../../rtl/fcapz_core_manager.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_core_manager",
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/fcapz_core_manager.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "jtag_rst"
+    ],
+    "clock_inputs": [
+      "jtag_clk"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "fcapz_core_manager",
+        "param_sets": [
+          {},
+          {
+            "NUM_SLOTS": 3,
+            "SAMPLE_W": 4,
+            "TIMESTAMP_W": 4,
+            "DEPTH": 16
+          }
+        ]
+      }
+    ]
+  }
+}

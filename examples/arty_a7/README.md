@@ -6,16 +6,41 @@ Digilent Arty A7-100T (`xc7a100tcsg324-1`). It instantiates the Xilinx
 
 - two managed ELA slots on USER1
 - two EIO slots on USER1
-- one EJTAG-AXI bridge on USER4 connected to an AXI4 test slave
+- an AXI monitor on USER2, tapping the shared AXI bus
+- a MicroBlaze soft CPU with its debug module (MDM) on USER3
+- one EJTAG-AXI bridge on USER4
 
 The design is intentionally self-stimulating, so you can build it, program the
 board, and exercise the debug cores without adding any external user logic.
+
+### Shared AXI bus + MicroBlaze
+
+A small MicroBlaze subsystem (block design under `mb/`) puts a real CPU on the
+same AXI bus as the EJTAG-AXI bridge. Both masters are merged by an in-BD
+SmartConnect onto one AXI4 bus that drives a 32-word `axi4_test_slave` and is
+passively tapped by the AXI monitor, so the monitor captures **real CPU bus
+traffic** as well as host traffic:
+
+```
+MicroBlaze M_AXI_DP ─┐
+                     ├─ SmartConnect ─ shared bus ─┬─ axi4_test_slave
+EJTAG-AXI (USER4) ───┘   (USER3 MDM debug)         └─ AXI monitor (USER2)
+```
+
+The whole AXI fabric runs on a dedicated 100 MHz clock (the counter-capture
+ELAs stay at 150/130 MHz). Baked-in firmware (`mb/fw/`) is host-gated: it writes
+a known pattern (`0xCAFEF00D`/`0x1234ABCD`) to slave words 16/17 only while the
+host raises a go flag (word 31), and otherwise just polls — so the CPU stays
+write-quiet during the other hardware tests, which use slave words 0..15.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `arty_a7_top.v` | Top-level reference design |
+| `mb/create_mb_bd.tcl` | Generates the MicroBlaze block design (CPU + LMB + MDM@USER3 + SmartConnect) |
+| `mb/build_fw.tcl` | Compiles the CPU firmware with the MicroBlaze GCC shipped with Vivado |
+| `mb/fw/` | Firmware source (`boot.S`, `main.c`, `lscript.ld`) baked into the LMB BRAM |
 | `arty_a7.xdc` | Arty A7-100T pin and clock constraints |
 | `build.py` | Preferred Vivado batch-build launcher |
 | `build_arty.tcl` | Vivado project/script used by `build.py` |

@@ -6,11 +6,13 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from ._version import _version_tuple
-from .transport import Transport
+from .registers import ADDR_MGR_ACTIVE
+from .transport import OpenOcdTransport, Transport, list_openocd_taps
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
@@ -68,7 +70,7 @@ _ADDR_TRIG_DELAY = 0x00D4
 
 _ADDR_MGR_VERSION = 0xF000
 _ADDR_MGR_COUNT = 0xF004
-_ADDR_MGR_ACTIVE = 0xF008
+_ADDR_MGR_ACTIVE = ADDR_MGR_ACTIVE
 _ADDR_MGR_STRIDE = 0xF00C
 _ADDR_MGR_CAPS = 0xF010
 _ADDR_MGR_DESC_INDEX = 0xF014
@@ -98,13 +100,27 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
 _ADDR_SQ_MASK = 0x0038
+# Wide-trigger indexed-word window (comparator A value/mask beyond the low 32
+# bits); present when COMPARE_CAPS bit 18 is set (WIDE_TRIG cores).
+_ADDR_WIDE_SEL = 0x00E4
+_ADDR_WIDE_DATA = 0x00F0
+_COMPARE_CAPS_WIDE_TRIG = 1 << 18
 _ADDR_DATA_BASE = 0x0100
 
+_STATUS_ARMED = 1 << 0
+_STATUS_TRIGGERED = 1 << 1
 _STATUS_DONE = 1 << 2
 _STATUS_OVERFLOW = 1 << 3
+# Capture FSM is "busy" (i.e. not idle) if any of armed/triggered/done is set.
+_STATUS_BUSY = _STATUS_ARMED | _STATUS_TRIGGERED | _STATUS_DONE
 
 _CTRL_ARM = 1 << 0
 _CTRL_RESET = 1 << 1
+
+# force_idle(): per-reset settle window. A re-armed core (startup-arm CDC race)
+# reveals itself within a couple of sample clocks of reset deassert, so a short
+# bounded wait suffices before spending another reset.
+_FORCE_IDLE_SETTLE_S = 0.05
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -195,7 +211,10 @@ class CaptureConfig:
     stor_qual_mode: int = 0    # 0=disabled; 1=store when match, 2=store when no match
     stor_qual_value: int = 0   # storage qualification comparison value
     stor_qual_mask: int = 0    # storage qualification mask
-    startup_arm: bool = False  # if True, reset leaves the core armed
+    startup_arm: bool = False  # runtime STARTUP_ARM register (0xD8): if True a
+                               # soft reset re-arms the core. Distinct from the
+                               # compile-time STARTUP_ARM RTL parameter, which
+                               # sets the power-up (boot-armed) value.
     trigger_holdoff: int = 0   # sample-clock cycles to ignore triggers after arm/re-arm
     trigger_delay: int = 0     # post-trigger delay in sample-clock cycles
                                # (0..65535) — shifts the committed trigger
@@ -242,6 +261,16 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
     return list(range(n))
 
 
+def _selected_transaction(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.transport.transaction_lock():
+            self._select_instance()
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Analyzer:
     def __init__(
         self,
@@ -276,9 +305,14 @@ class Analyzer:
                 raise
 
     def _select_instance(self) -> None:
-        self._select_chain()
-        if self._instance is not None:
-            self.transport.write_reg(_ADDR_MGR_ACTIVE, self._instance)
+        with self.transport.transaction_lock():
+            self._select_chain()
+            if self._instance is not None:
+                self.transport.select_manager_instance_cached(
+                    self._chain,
+                    _ADDR_MGR_ACTIVE,
+                    self._instance,
+                )
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -286,14 +320,17 @@ class Analyzer:
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
         behavior for bitstreams without a manager.
         """
-        self._instance = None if instance is None else int(instance)
-        self._manager_slot_caps = None
-        self._select_instance()
+        with self.transport.transaction_lock():
+            self._instance = None if instance is None else int(instance)
+            self._manager_slot_caps = None
+            self._select_instance()
 
     def connect(self) -> None:
-        self._select_chain()
-        self.transport.connect()
-        self._select_instance()
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.connect()
+            self.transport.invalidate_manager_instance_cache()
+            self._select_instance()
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -304,9 +341,105 @@ class Analyzer:
                 return
         self.transport.close()
 
+    @_selected_transaction
     def reset(self) -> None:
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+
+    def force_idle(
+        self,
+        timeout: float = 1.0,
+        poll_interval: float = 0.01,
+        max_resets: int = 3,
+    ) -> None:
+        """Drive the core to a *verified* idle state before arming.
+
+        A bitstream built with ``STARTUP_ARM=1`` (e.g. the Arty example) comes
+        up already armed -- it may even be triggered/done -- before the host
+        issues a single command. Arming and capturing on top of that yields a
+        valid but *unexpected* window. ``force_idle`` issues a soft reset and
+        confirms the core actually settled to idle (armed=0, triggered=0,
+        done=0) so the next capture is deterministic.
+
+        This is a *soft* reset only: it clears the sample-domain capture FSM
+        (armed/triggered/done and the buffer pointers). It does **not** touch
+        configuration registers, so the canonical sequence is::
+
+            a.configure(cfg)   # cfg.startup_arm defaults False, clearing the
+                               # runtime STARTUP_ARM register (addr 0xD8)
+            a.force_idle()
+            a.arm()
+            result = a.capture()
+
+        Note the boot-armed behavior comes from the *compile-time* ``STARTUP_ARM``
+        RTL parameter, which seeds the auto-arm flag at configuration time and
+        cannot be changed from the host. :meth:`configure` instead clears the
+        *runtime* STARTUP_ARM register (addr 0xD8), which overrides that flag for
+        subsequent resets.
+
+        A startup-armed core re-loads its auto-arm flag from that register on
+        every soft reset, so a single reset can race the configuration
+        clock-domain crossing and come back still armed. ``force_idle`` polls
+        STATUS after the reset and, if the core re-armed, resets again -- by which
+        point the runtime STARTUP_ARM register cleared by :meth:`configure` has
+        crossed into the sample domain -- up to ``max_resets`` times.
+
+        Timing assumption: a STATUS read round-trips over JTAG far slower than
+        the core's reset-to-re-arm latency (a couple of sample clocks), so the
+        first post-reset STATUS read reliably observes the settled state. This
+        holds for any practical sample clock; only a sample clock so slow that a
+        full JTAG access spans fewer than ~2 sample cycles could read a
+        transient idle before a pending re-arm propagates.
+
+        Note this is intentionally lossy: it discards any in-flight or
+        startup-armed capture. Workflows that *want* the from-boot capture
+        (including tests that validate ``STARTUP_ARM`` behavior) should not call
+        it and should use :meth:`reset`/:meth:`arm` directly.
+
+        Args:
+            timeout: overall budget, in seconds, to reach idle across all resets.
+            poll_interval: STATUS poll spacing in seconds.
+            max_resets: maximum soft resets to attempt.
+
+        Raises:
+            RuntimeError: if the core is still busy after ``max_resets`` resets
+                (e.g. ``STARTUP_ARM`` is still enabled because :meth:`configure`
+                was not called first).
+        """
+        read_status = getattr(
+            self.transport, "read_reg_verified", self.transport.read_reg
+        )
+        deadline = time.monotonic() + timeout
+        last_status = -1
+        attempt = 0
+        for attempt in range(max(1, max_resets)):
+            with self.transport.transaction_lock():
+                self._select_instance()
+                self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+            # A re-armed core (startup-arm CDC race) will not clear on its own,
+            # so cap each attempt's wait and fall through to another reset.
+            attempt_deadline = time.monotonic() + _FORCE_IDLE_SETTLE_S
+            while True:
+                with self.transport.transaction_lock():
+                    self._select_instance()
+                    last_status = read_status(_ADDR_STATUS)
+                if (last_status & _STATUS_BUSY) == 0:
+                    return
+                now = time.monotonic()
+                if now >= attempt_deadline or now >= deadline:
+                    break
+                time.sleep(poll_interval)
+            if time.monotonic() >= deadline:
+                break
+        raise RuntimeError(
+            f"force_idle: core still busy after {attempt + 1} reset(s); "
+            f"last STATUS=0x{last_status & 0xFFFFFFFF:08x} "
+            f"(armed={bool(last_status & _STATUS_ARMED)}, "
+            f"triggered={bool(last_status & _STATUS_TRIGGERED)}, "
+            f"done={bool(last_status & _STATUS_DONE)}). "
+            f"If the core keeps re-arming, the runtime STARTUP_ARM register is "
+            f"still set -- call configure() (startup_arm=False) before force_idle()."
+        )
 
     @staticmethod
     def _validate_probes(probes: List[ProbeSpec], sample_width: int) -> None:
@@ -328,6 +461,7 @@ class Analyzer:
                     raise ValueError(f"probe '{probe.name}' overlaps another probe")
                 occupied.add(bit)
 
+    @_selected_transaction
     def configure(self, config: CaptureConfig) -> None:
         self._select_instance()
         if config.pretrigger < 0 or config.posttrigger < 0:
@@ -349,7 +483,7 @@ class Analyzer:
 
         # Validate host config against the synthesized core to avoid silent
         # mismatch between CLI defaults and FPGA bitstream parameters.
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        _read = self.transport.read_reg_stable
         hw_sample_w = int(_read(_ADDR_SAMPLE_W))
         hw_depth = int(_read(_ADDR_DEPTH))
         hw_num_chan = max(1, int(_read(_ADDR_NUM_CHAN)))
@@ -390,8 +524,34 @@ class Analyzer:
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
         self.transport.write_reg(_ADDR_TRIG_MODE, mode_bits)
-        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value)
-        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask)
+        self.transport.write_reg(_ADDR_TRIG_VALUE, config.trigger.value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_TRIG_MASK, config.trigger.mask & 0xFFFF_FFFF)
+        # Comparator A above the low 32 bits.  On a WIDE_TRIG core the comparator
+        # is full SAMPLE_W-wide in silicon and takes its value/mask from the wide
+        # window (word 0 mirrors TRIG_VALUE/MASK, written above).  We must program
+        # EVERY high word on every configure -- not only when value/mask exceed
+        # 32 bits -- so the upper comparator bits reflect the requested trigger
+        # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
+        # always-true) trigger leaves the upper mask bits set, so the trigger is
+        # not actually always-true and never fires (the capture never completes).
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
+        if wide:
+            words = (config.sample_width + 31) // 32
+            for k in range(1, words):
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 0)  # value word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.value >> (32 * k)) & 0xFFFF_FFFF
+                )
+                self.transport.write_reg(_ADDR_WIDE_SEL, (k << 4) | 1)  # mask word k
+                self.transport.write_reg(
+                    _ADDR_WIDE_DATA, (config.trigger.mask >> (32 * k)) & 0xFFFF_FFFF
+                )
         self.transport.write_reg(_ADDR_CHAN_SEL, config.channel)
         self.transport.write_reg(_ADDR_DECIM, config.decimation)
         self.transport.write_reg(_ADDR_TRIG_EXT, config.ext_trigger_mode)
@@ -427,6 +587,7 @@ class Analyzer:
 
         self._config = config
 
+    @_selected_transaction
     def immediate_variant(self, base: CaptureConfig) -> CaptureConfig:
         """Return a config that commits the trigger as soon as pretrigger is ready.
 
@@ -438,7 +599,7 @@ class Analyzer:
         cannot block an immediate run.
         """
         self._select_instance()
-        _read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        _read = self.transport.read_reg_stable
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
         trig = TriggerConfig(mode="value_match", value=0, mask=0)
@@ -458,21 +619,24 @@ class Analyzer:
         )
         return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
 
+    @_selected_transaction
     def arm(self) -> None:
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
-        self._select_instance()
         deadline = time.monotonic() + timeout
-        read_status = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
-            status = read_status(_ADDR_STATUS)
+            with self.transport.transaction_lock():
+                self._select_instance()
+                status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
         return False
 
+    @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
         self._select_instance()
@@ -512,51 +676,64 @@ class Analyzer:
 
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""
-        if self._instance is None:
-            return True
-        if self._manager_slot_caps is None:
-            self._select_chain()
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
-            self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
-        return bool(self._manager_slot_caps & 0x1)
+        with self.transport.transaction_lock():
+            if self._instance is None:
+                return True
+            if self._manager_slot_caps is None:
+                self._select_chain()
+                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
+                self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
+            return bool(self._manager_slot_caps & 0x1)
 
+    @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
-        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        # Non-burst slot (e.g. the AXI monitor's manager slot).  For a wide core
+        # (SAMPLE_W > 32) read_block is still fast and safe: it skips the 256-bit
+        # sample-packing burst DR for multi-word samples and uses one pipelined
+        # jtag sequence per chunk, so prefer it over a per-word round trip
+        # (1280 reads of a 160-bit x 256 buffer was ~17s; the pipelined path is
+        # sub-second).  Narrow samples keep the per-word path, which avoids
+        # attempting a burst the slot does not support.
+        sw = self._config.sample_width if self._config else 8
+        if sw > 32:
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
-        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
             raise TimeoutError("capture did not complete within timeout")
 
-        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        status = read_reg(_ADDR_STATUS)
-        fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-        reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
-        if 0 < reported_total <= self._config.depth:
-            total = reported_total
-        else:
-            total = fallback_total
-        sw = self._config.sample_width
-        words_per_sample = (sw + 31) // 32
-        raw = self._read_data_words(total * words_per_sample)
-        mask = (1 << sw) - 1
-        if words_per_sample == 1:
-            samples = [v & mask for v in raw]
-        else:
-            # Wide samples: reassemble from 32-bit chunks.
-            samples = []
-            for i in range(0, len(raw), words_per_sample):
-                val = 0
-                for j in range(min(words_per_sample, len(raw) - i)):
-                    val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
-                samples.append(val & mask)
+        with self.transport.transaction_lock():
+            self._select_instance()
+            read_reg = self.transport.read_reg_stable
+            status = read_reg(_ADDR_STATUS)
+            fallback_total = self._config.pretrigger + self._config.posttrigger + 1
+            reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
+            if 0 < reported_total <= self._config.depth:
+                total = reported_total
+            else:
+                total = fallback_total
+            sw = self._config.sample_width
+            words_per_sample = (sw + 31) // 32
+            raw = self._read_data_words(total * words_per_sample)
+            mask = (1 << sw) - 1
+            if words_per_sample == 1:
+                samples = [v & mask for v in raw]
+            else:
+                # Wide samples: reassemble from 32-bit chunks.
+                samples = []
+                for i in range(0, len(raw), words_per_sample):
+                    val = 0
+                    for j in range(min(words_per_sample, len(raw) - i)):
+                        val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
+                    samples.append(val & mask)
 
-        timestamps = self._read_timestamps(total)
+            timestamps = self._read_timestamps(total)
 
         return CaptureResult(
             config=self._config,
@@ -571,6 +748,7 @@ class Analyzer:
         """Wait until all segments have completed capture."""
         return self.wait_done(timeout, poll_interval)
 
+    @_selected_transaction
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
         """Read back data from a specific segment after all segments are done."""
         self._select_instance()
@@ -581,7 +759,7 @@ class Analyzer:
         # directly by the burst engine (stable after all_seg_done).
         self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
 
-        read_reg = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+        read_reg = self.transport.read_reg_stable
         status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
         reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
@@ -663,7 +841,12 @@ class Analyzer:
     def export_vcd_text(self, result: CaptureResult) -> str:
         cfg = result.config
         sig_w = cfg.sample_width
-        timescale_ns = max(1, int(round(1_000_000_000 / cfg.sample_clock_hz)))
+        # One time unit per stored sample: the viewer's x-axis then reads sample
+        # indices (each `#` line is a sample), not real nanoseconds. Surfer has no
+        # "samples" time unit, so the axis is still labelled "ns" — but the number
+        # equals the sample number. The real sample rate stays in the JSON metadata
+        # (sample_clock_hz) for anyone who needs to convert back to time.
+        timescale_ns = 1
 
         # Build signal list: use probe definitions if available, else one raw signal.
         signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
@@ -724,10 +907,77 @@ class Analyzer:
     def write_vcd(self, result: CaptureResult, out_path: str) -> None:
         Path(out_path).write_text(self.export_vcd_text(result), encoding="ascii")
 
+    def export_vcd_text_segments(self, results: List[CaptureResult]) -> str:
+        """All segments in one VCD, concatenated on the time axis.
+
+        Segments are separate trigger windows with no shared timebase, so each
+        segment is placed right after the previous one and a ``segment`` wire
+        marks which window a sample came from.  Same single ``logic`` scope as
+        :meth:`export_vcd_text`, so viewers treat both shapes identically.
+        """
+        if len(results) == 1:
+            return self.export_vcd_text(results[0])
+        cfg = results[0].config
+        sig_w = cfg.sample_width
+        # One time unit per sample — x-axis reads sample indices (see export_vcd_text).
+        timescale_ns = 1
+
+        signals: list[tuple[str, str, int, int]] = []  # (var_id, name, width, lsb)
+        next_id = ord("a")
+        if cfg.probes:
+            for probe in cfg.probes:
+                signals.append((chr(next_id), probe.name, probe.width, probe.lsb))
+                next_id += 1
+        else:
+            signals.append(("s", "sample", sig_w, 0))
+            next_id = ord("t")
+        seg_var_id = chr(next_id)
+        seg_w = max(1, max(int(r.segment) for r in results).bit_length())
+
+        lines = [
+            "$date",
+            "  generated by fcapz",
+            "$end",
+            "$version",
+            "  fcapz-mvp",
+            "$end",
+            "$timescale",
+            f"  {timescale_ns} ns",
+            "$end",
+            "$scope module logic $end",
+        ]
+        for var_id, name, width, _ in signals:
+            lines.append(f"$var wire {width} {var_id} {name} $end")
+        lines.append(f"$var wire {seg_w} {seg_var_id} segment $end")
+        lines.extend([
+            "$upscope $end",
+            "$enddefinitions $end",
+            "$dumpvars",
+        ])
+        for var_id, _, width, _ in signals:
+            lines.append(f"b{'0' * width} {var_id}")
+        lines.append(f"b{'0' * seg_w} {seg_var_id}")
+        lines.append("$end")
+
+        offset = 0
+        for result in results:
+            sim_times = vcd_simulation_times(result)
+            for i, sample in enumerate(result.samples):
+                lines.append(f"#{offset + sim_times[i]}")
+                if i == 0:
+                    lines.append(f"b{int(result.segment):0{seg_w}b} {seg_var_id}")
+                for var_id, _, width, lsb in signals:
+                    val = (sample >> lsb) & ((1 << width) - 1)
+                    lines.append(f"b{val:0{width}b} {var_id}")
+            if sim_times:
+                offset += sim_times[-1] + 1
+        return "\n".join(lines) + "\n"
+
     def capture_continuous(
         self,
         count: int = 0,
         timeout_per: float = 10.0,
+        force_idle: bool = False,
     ):
         """Generator that yields successive ``CaptureResult`` objects.
 
@@ -736,9 +986,18 @@ class Analyzer:
         iteration calls :meth:`arm`, then :meth:`capture` to wait for the next
         trigger and read back. Yields *count* results, or runs indefinitely if
         *count* is 0.
+
+        On a bitstream that boots with ``STARTUP_ARM=1`` the first iteration
+        would otherwise inherit the power-up capture window. Pass
+        ``force_idle=True`` to call :meth:`force_idle` once before the first
+        arm so the stream starts from a known-idle state. Defaults to ``False``
+        to preserve the original behavior (and leave the from-boot window
+        observable for callers that want it).
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture_continuous()")
+        if force_idle:
+            self.force_idle()
         yielded = 0
         while count == 0 or yielded < count:
             self.arm()
@@ -746,6 +1005,7 @@ class Analyzer:
             yield result
             yielded += 1
 
+    @_selected_transaction
     def _read_ela_probe_registers_raw(
         self,
     ) -> tuple[int, int, int, int, int, int, int, int, int]:
@@ -764,16 +1024,16 @@ class Analyzer:
             probe_mux_w = int(vals[7])
             compare_caps = int(vals[8])
         else:
-            _vread = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
+            _vread = self.transport.read_reg_stable
             version = int(_vread(_ADDR_VERSION))
-            sample_w = int(self.transport.read_reg(_ADDR_SAMPLE_W))
-            depth = int(self.transport.read_reg(_ADDR_DEPTH))
-            num_chan = int(self.transport.read_reg(_ADDR_NUM_CHAN))
-            features = int(self.transport.read_reg(_ADDR_FEATURES))
-            timestamp_w = int(self.transport.read_reg(_ADDR_TIMESTAMP_W))
-            num_segments = max(1, int(self.transport.read_reg(_ADDR_NUM_SEGMENTS)))
-            probe_mux_w = int(self.transport.read_reg(_ADDR_PROBE_MUX_W))
-            compare_caps = int(self.transport.read_reg(_ADDR_COMPARE_CAPS))
+            sample_w = int(_vread(_ADDR_SAMPLE_W))
+            depth = int(_vread(_ADDR_DEPTH))
+            num_chan = int(_vread(_ADDR_NUM_CHAN))
+            features = int(_vread(_ADDR_FEATURES))
+            timestamp_w = int(_vread(_ADDR_TIMESTAMP_W))
+            num_segments = max(1, int(_vread(_ADDR_NUM_SEGMENTS)))
+            probe_mux_w = int(_vread(_ADDR_PROBE_MUX_W))
+            compare_caps = int(_vread(_ADDR_COMPARE_CAPS))
         if compare_caps == 0:
             compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
@@ -819,6 +1079,10 @@ class Analyzer:
             "compare_caps": compare_caps,
             "compare_modes": [m for m in range(9) if _compare_mode_available(compare_caps, m)],
             "has_dual_compare": _dual_compare_available(compare_caps),
+            # WIDE_TRIG cores (e.g. the 160-bit AXI monitor) can trigger across
+            # their full sample width, not just comparator A's low 32 bits, via
+            # the wide-comparator window that configure() programs.
+            "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
         }
 
     def probe_optional(self) -> Optional[Dict]:
@@ -847,8 +1111,8 @@ class Analyzer:
         :meth:`~fcapz.transport.XilinxHwServerTransport.read_regs_pipelined_user1`
         (hw_server), all probe registers share **one** XSDB ``_send`` plus
         a pipeline flush read.
-        Otherwise uses ``read_reg_verified`` for VERSION when the transport implements it,
-        then :meth:`~fcapz.transport.Transport.read_reg` for the remaining registers.
+        Otherwise uses :meth:`~fcapz.transport.Transport.read_reg_stable`
+        for VERSION, identity, and feature registers.
 
         Returns a dict with `version_major`, `version_minor`, `core_id`
         (always 0x4C41 on success),         `trig_stages` (FEATURES[3:0]: hardware
@@ -866,6 +1130,147 @@ class Analyzer:
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
         return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+
+
+def _infer_ir_table_name(tap: str) -> str:
+    """Guess the IR-table preset from a tap name (mirrors the web inferIrTable)."""
+    t = tap.strip().lower()
+    if t.startswith("gw"):
+        return "gowin"
+    if t.startswith(("xcku", "xcvu", "xcau")):
+        return "ultrascale"
+    return "xilinx7"
+
+
+# IR-table presets discover_boards probes with, keyed by preset name.  The
+# preset inferred from the tap name is tried first, then the rest as a fallback
+# so an oddly-named tap is still matched.  ``None`` = the OpenOcdTransport
+# default (Xilinx 7-series).
+_DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
+    "xilinx7": None,
+    "ultrascale": OpenOcdTransport.IR_TABLE_US,
+    "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+}
+
+
+def _board_label(tap: str, port: int, identity: Dict) -> str:
+    # ASCII only: this string flows through JSON, logs, and possibly a CLI, so
+    # avoid non-ASCII typography that some consoles mangle.
+    return (
+        f"{tap} @ :{port} - {identity['sample_width']}-bit"
+        f"x{identity['depth']}x{identity['num_channels']}ch "
+        f"v{identity['version_major']}.{identity['version_minor']}"
+    )
+
+
+def _probe_openocd_board(
+    *, host: str, port: int, tap: str, chain: int, timeout_sec: float
+) -> Optional[Dict]:
+    """Probe one OpenOCD tap for an fcapz ELA, trying each IR-table preset.
+
+    Opens a single transport and re-probes under each candidate IR table
+    (inferred preset first).  Returns the board entry on the first match, or
+    ``None`` if the tap presents no fcapz ELA under any preset — a wrong IR
+    table simply yields no identity magic, so mismatches are harmless.
+    """
+    order = [_infer_ir_table_name(tap)]
+    order += [name for name in _DISCOVERY_IR_TABLES if name not in order]
+
+    transport = OpenOcdTransport(
+        host=host, port=port, tap=tap, connect_timeout_sec=timeout_sec
+    )
+    try:
+        transport.connect()
+    except OSError:
+        return None
+    try:
+        for ir_name in order:
+            table = _DISCOVERY_IR_TABLES[ir_name]
+            transport.ir_table = (
+                dict(table)
+                if table is not None
+                else dict(OpenOcdTransport.DEFAULT_IR_TABLE)
+            )
+            transport.invalidate_manager_instance_cache()
+            try:
+                identity = Analyzer(transport, chain=chain).probe_optional()
+            except (OSError, RuntimeError, KeyError, ValueError):
+                identity = None
+            if identity:
+                return {
+                    "backend": "openocd",
+                    "host": host,
+                    "port": port,
+                    "tap": tap,
+                    "ir_table": ir_name,
+                    "identity": identity,
+                    "label": _board_label(tap, port, identity),
+                }
+        return None
+    finally:
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+
+def discover_boards(
+    *,
+    host: str = "127.0.0.1",
+    ports: Sequence[int] = (6666,),
+    chain: int = 1,
+    timeout_sec: float = 5.0,
+    budget_sec: Optional[float] = None,
+) -> List[Dict]:
+    """Find fpgacapZero-compatible boards across running OpenOCD instances.
+
+    For every TCL *port* that has an OpenOCD listening, enumerate its taps
+    (``jtag names``) and probe each for the ELA identity magic
+    (:data:`ELA_CORE_ID`).  Returns one entry per **compatible** ``(port, tap)``
+    with its identity; ports with no OpenOCD and taps with no fcapz ELA are
+    silently skipped, so the result is exactly the compatible set — empty only
+    when nothing compatible is reachable.  Never raises for an unreachable
+    port, so a caller can treat an empty list as "nothing to connect to" and
+    fail only then.
+
+    Each entry is ``{backend, host, port, tap, ir_table, identity, label}``
+    where ``ir_table`` is the preset name that matched and ``identity`` is the
+    :meth:`Analyzer.probe` dict.  A single physical board is one OpenOCD
+    instance on its own port; sweep several ports to find several boards.
+
+    *budget_sec* caps the **overall** wall-clock time: per-step timeouts are
+    clamped to the remaining budget and the sweep stops once it is spent.
+    Without it a multi-port sweep against filtered ports can take
+    ``len(ports) * timeout_sec`` and outlive the caller's own deadline (the web
+    client aborts its request, but that cannot cancel this work server-side).
+    """
+    deadline = None if budget_sec is None else time.monotonic() + float(budget_sec)
+
+    def _step_timeout() -> float:
+        if deadline is None:
+            return timeout_sec
+        return min(timeout_sec, deadline - time.monotonic())
+
+    boards: List[Dict] = []
+    for port in ports:
+        port = int(port)
+        step = _step_timeout()
+        if step <= 0:
+            break  # budget spent — return what we have
+        try:
+            taps = list_openocd_taps(host=host, port=port, timeout_sec=step)
+        except OSError:
+            continue  # nothing listening on this port — skip, don't fail
+        for tap in taps:
+            step = _step_timeout()
+            if step <= 0:
+                break
+            entry = _probe_openocd_board(
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=step
+            )
+            if entry is not None:
+                boards.append(entry)
+    return boards
 
 
 class CoreManager:
@@ -888,41 +1293,48 @@ class CoreManager:
 
     def probe(self) -> Dict:
         """Read manager identity and slot count."""
-        self._select_chain()
-        read = getattr(self.transport, "read_reg_verified", self.transport.read_reg)
-        version = int(read(_ADDR_MGR_VERSION))
-        core_id = version & 0xFFFF
-        if core_id != _CORE_MANAGER_CORE_ID:
-            raise RuntimeError(
-                f"core manager identity check failed at VERSION[15:0]: "
-                f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
-                f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
-            )
-        caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
-        info = {
-            "version_major": (version >> 24) & 0xFF,
-            "version_minor": (version >> 16) & 0xFF,
-            "core_id": core_id,
-            "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
-            "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
-            "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
-            "capabilities": caps,
-        }
-        return info
+        with self.transport.transaction_lock():
+            self._select_chain()
+            read = self.transport.read_reg_stable
+            version = int(read(_ADDR_MGR_VERSION))
+            core_id = version & 0xFFFF
+            if core_id != _CORE_MANAGER_CORE_ID:
+                raise RuntimeError(
+                    f"core manager identity check failed at VERSION[15:0]: "
+                    f"expected 0x{_CORE_MANAGER_CORE_ID:04X} ('CM'), got 0x{core_id:04X}. "
+                    f"Wrong JTAG chain, old single-core bitstream, or manager not loaded?"
+                )
+            caps = int(self.transport.read_reg(_ADDR_MGR_CAPS))
+            info = {
+                "version_major": (version >> 24) & 0xFF,
+                "version_minor": (version >> 16) & 0xFF,
+                "core_id": core_id,
+                "num_slots": int(self.transport.read_reg(_ADDR_MGR_COUNT)),
+                "active": int(self.transport.read_reg(_ADDR_MGR_ACTIVE)),
+                "window_stride": int(self.transport.read_reg(_ADDR_MGR_STRIDE)),
+                "capabilities": caps,
+            }
+            return info
 
     def slot_info(self, instance: int) -> Dict:
         """Return descriptor info for one slot when the manager supports it."""
-        self._select_chain()
-        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
-        return {
-            "instance": int(instance),
-            "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-            "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
-        }
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+            return {
+                "instance": int(instance),
+                "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
+                "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+            }
 
     def select_raw(self, instance: int) -> None:
-        self._select_chain()
-        self.transport.write_reg(_ADDR_MGR_ACTIVE, int(instance))
+        with self.transport.transaction_lock():
+            self._select_chain()
+            self.transport.select_manager_instance_cached(
+                self._chain,
+                _ADDR_MGR_ACTIVE,
+                int(instance),
+            )
 
     def select(self, instance: int) -> Analyzer:
         """Select *instance* and return an Analyzer bound to that slot."""

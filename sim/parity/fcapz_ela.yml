@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "name": "fcapz_ela_parity",
+  "description": "Formal Verilog/VHDL parity for representative portable ELA core configurations",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_ela",
+    "sources": [
+      "../../rtl/dpram.v",
+      "../../rtl/trig_compare.v",
+      "../../rtl/fcapz_ela.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_ela",
+    "synth_options": [
+      "--latches"
+    ],
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/fcapz_dpram.vhd",
+      "../../rtl/vhdl/core/fcapz_ela.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 24,
+    "bounded_depth": 48,
+    "reset_inputs": [
+      "sample_rst",
+      "jtag_rst"
+    ],
+    "clock_inputs": [
+      "sample_clk",
+      "jtag_clk"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "fcapz_ela",
+        "param_sets": [
+          {
+            "SAMPLE_W": 8,
+            "DEPTH": 8,
+            "TRIG_STAGES": 1,
+            "STOR_QUAL": 0,
+            "NUM_CHANNELS": 1,
+            "INPUT_PIPE": 0,
+            "DECIM_EN": 0,
+            "EXT_TRIG_EN": 0,
+            "TIMESTAMP_W": 0,
+            "NUM_SEGMENTS": 1,
+            "PROBE_MUX_W": 0,
+            "STARTUP_ARM": 0,
+            "DEFAULT_TRIG_EXT": 0,
+            "REL_COMPARE": 0,
+            "DUAL_COMPARE": 1,
+            "USER1_DATA_EN": 1
+          },
+          {
+            "SAMPLE_W": 8,
+            "DEPTH": 8,
+            "TRIG_STAGES": 2,
+            "STOR_QUAL": 1,
+            "NUM_CHANNELS": 1,
+            "INPUT_PIPE": 1,
+            "DECIM_EN": 1,
+            "EXT_TRIG_EN": 1,
+            "TIMESTAMP_W": 8,
+            "NUM_SEGMENTS": 2,
+            "PROBE_MUX_W": 0,
+            "STARTUP_ARM": 1,
+            "DEFAULT_TRIG_EXT": 1,
+            "REL_COMPARE": 1,
+            "DUAL_COMPARE": 1,
+            "USER1_DATA_EN": 1
+          },
+          {
+            "SAMPLE_W": 8,
+            "DEPTH": 8,
+            "TRIG_STAGES": 1,
+            "STOR_QUAL": 0,
+            "NUM_CHANNELS": 2,
+            "INPUT_PIPE": 0,
+            "DECIM_EN": 0,
+            "EXT_TRIG_EN": 0,
+            "TIMESTAMP_W": 0,
+            "NUM_SEGMENTS": 1,
+            "PROBE_MUX_W": 16,
+            "STARTUP_ARM": 0,
+            "DEFAULT_TRIG_EXT": 0,
+            "REL_COMPARE": 0,
+            "DUAL_COMPARE": 0,
+            "USER1_DATA_EN": 0
+          }
+        ]
+      }
+    ]
+  }
+}

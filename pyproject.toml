@@ -10,9 +10,11 @@ name = "fpgacapzero"
 # all share one number.  CI runs the sync script with --check to block
 # merges that would let them drift.
 dynamic = ["version"]
-description = "Open-source JTAG logic analyzer for Xilinx 7-series FPGAs"
+description = "Open-source, vendor-agnostic full-featured FPGA debug cores"
 readme = "README.md"
 license = {text = "Apache-2.0"}
+authors = [{name = "Leonardo Capossio - bard0 design", email = "hello@bard0.com"}]
+keywords = ["fpga", "debug", "vhdl", "verilog", "axi"]
 requires-python = ">=3.10"
 dependencies = [
     "tomli>=2.0.1; python_version < '3.11'",
@@ -25,9 +27,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
 
+[project.urls]
+Homepage = "https://bard0.com/projects/fcapz.html"
+Repository = "https://github.com/lcapossio/fpgacapZero/"
+Issues = "https://github.com/lcapossio/fpgacapZero/issues"
+Changelog = "https://github.com/lcapossio/fpgacapZero/blob/main/CHANGELOG.md"
+
 [project.scripts]
 fcapz = "fcapz.cli:main"
 fcapz-gui = "fcapz.gui.main:main"
+fcapz-web = "fcapz.web.__main__:main"
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
@@ -37,13 +46,17 @@ where = ["host"]
 include = ["fcapz*"]
 
 [tool.setuptools.package-data]
+"fcapz" = ["probes/*.prob"]
 "fcapz.gui" = ["assets/*.png", "assets/*.bin"]
+"fcapz.web" = ["static/**/*", "vendor/**/*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
+hdl = ["cocotb>=2", "cocotb-tools>=0.1.0", "cocotbext-axi>=0.1.26"]
 litex = ["litex"]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

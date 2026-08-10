@@ -59,6 +59,7 @@ module fcapz_ela_tb;
         .jtag_addr       (jtag_addr),
         .jtag_wdata      (jtag_wdata),
         .jtag_rdata      (jtag_rdata),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr),
         .burst_rd_data   (burst_rd_data),
         .burst_start     (burst_start),
@@ -95,6 +96,7 @@ module fcapz_ela_tb;
         .jtag_addr       (jtag_addr_ts),
         .jtag_wdata      (jtag_wdata_ts),
         .jtag_rdata      (jtag_rdata_ts),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr_ts),
         .burst_rd_data   (burst_rd_data_ts),
         .burst_start     (burst_start_ts),
@@ -130,6 +132,7 @@ module fcapz_ela_tb;
         .jtag_addr       (jtag_addr_seg),
         .jtag_wdata      (jtag_wdata_seg),
         .jtag_rdata      (jtag_rdata_seg),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr_seg),
         .burst_rd_data   (burst_rd_data_seg),
         .burst_start     (burst_start_seg),
@@ -165,6 +168,7 @@ module fcapz_ela_tb;
         .jtag_addr       (jtag_addr_pmux),
         .jtag_wdata      (jtag_wdata_pmux),
         .jtag_rdata      (jtag_rdata_pmux),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr_pmux),
         .burst_rd_data   (burst_rd_data_pmux),
         .burst_start     (burst_start_pmux),
@@ -205,6 +209,7 @@ module fcapz_ela_tb;
         .jtag_addr       (jtag_addr_pipe),
         .jtag_wdata      (jtag_wdata_pipe),
         .jtag_rdata      (jtag_rdata_pipe),
+        .burst_rd_active (1'b0),
         .burst_rd_addr   (burst_rd_addr_pipe),
         .burst_rd_data   (burst_rd_data_pipe),
         .burst_start     (burst_start_pipe),
@@ -449,6 +454,7 @@ module fcapz_ela_tb;
 
         jtag_read(16'h001C, cap_len);
         check($sformatf("CAPTURE_LEN = %0d (expect 6)", cap_len), cap_len == 6);
+        $display("PARITY_VALUE_CAPTURE status=0x%08x cap=0x%08x", status, cap_len);
 
         $display("  Captured samples:");
         for (i = 0; i < 6; i++) begin
@@ -595,6 +601,7 @@ module fcapz_ela_tb;
         check("DECIM=3: done", status[2] == 1'b1);
         jtag_read(16'h001C, cap_len);
         check($sformatf("DECIM=3: CAPTURE_LEN=%0d (expect 4)", cap_len), cap_len == 4);
+        $display("PARITY_DECIM3_CAPTURE status=0x%08x cap=0x%08x", status, cap_len);
 
         // ---- Test 11: Ext trigger disabled ---------------------------------
         $display("\n=== Test 11: Ext trigger disabled ===");
@@ -655,6 +662,7 @@ module fcapz_ela_tb;
         jtag_read(16'h0008, status);
         check("Ext OR: done", status[2] == 1'b1);
         check("Ext OR: triggered", status[1] == 1'b1);
+        $display("PARITY_EXT_OR status=0x%08x", status);
 
         // ---- Test 13: Ext trigger AND mode ---------------------------------
         $display("\n=== Test 13: Ext trigger AND mode ===");
@@ -845,6 +853,7 @@ module fcapz_ela_tb;
         jtag_write_seg(16'h0024, 32'd3);
         jtag_write_seg(16'h0028, 32'h03); // mask = 0x03 (match lower 2 bits)
         jtag_write_seg(16'h0004, 32'h1);  // ARM
+        jtag_write_seg(16'h00DC, 32'd1000); // mid-capture rewrite must not affect re-armed segments
 
         probe_in_seg = '0;
         repeat (80) begin
@@ -862,6 +871,7 @@ module fcapz_ela_tb;
         check("SEG: done", status[2] == 1'b1);
         jtag_read_seg(16'h00BC, seg_status);
         check("SEG: all_seg_done flag", seg_status[31] == 1'b1);
+        $display("PARITY_SEG_HOLDOFF_REWRITE status=0x%08x seg=0x%08x", status, seg_status);
 
         // ---- Test 19: NUM_SEGMENTS=1 regression (dut_seg features) ---------
         $display("\n=== Test 19: Feature flags for segmented DUT ===");
@@ -942,6 +952,7 @@ module fcapz_ela_tb;
         jtag_read_pmux(16'h0100, sample_word);
         check($sformatf("Probe mux slice 2: first sample=0xFF (got 0x%02x)", sample_word[7:0]),
               sample_word[7:0] == 8'hFF);
+        $display("PARITY_PROBE_MUX_SLICE2 status=0x%08x data=0x%08x", status, sample_word);
 
         // ---- Test 22: PROBE_SEL register round-trip -------------------------
         $display("\n=== Test 22: PROBE_SEL register round-trip ===");
@@ -1025,6 +1036,8 @@ module fcapz_ela_tb;
         check($sformatf("Delay=4: trig sample = 12 (got 0x%02x)",
               sample_word[7:0]),
               sample_word[SAMPLE_W-1:0] == 8'd12);
+        $display("PARITY_DELAY4_CAPTURE status=0x%08x cap=0x%08x trig=0x%08x",
+                 status, cap_len, sample_word);
         jtag_read(16'h0100 + 0*4, sample_word);
         check($sformatf("Delay=4: pre[0] = 10 (got 0x%02x)",
               sample_word[7:0]),

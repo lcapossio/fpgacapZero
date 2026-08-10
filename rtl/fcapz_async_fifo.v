@@ -167,6 +167,10 @@ end else begin : gen_behavioral
     reg [AW:0] wptr_bin;        // binary write pointer
     reg [AW:0] wptr_gray;       // gray-coded write pointer (read by rd_clk)
 
+    // ---- Read side (rd_clk) ----------------------------------------
+    reg [AW:0] rptr_gray;       // gray-coded read pointer
+    wire [AW:0] rptr_bin = gray2bin(rptr_gray);
+
     // Sync read pointer into write domain
     (* ASYNC_REG = "TRUE" *) reg [AW:0] rptr_sync1_w, rptr_sync2_w;
 
@@ -194,10 +198,6 @@ end else begin : gen_behavioral
             wptr_gray <= bin2gray(wptr_bin + 1);
         end
     end
-
-    // ---- Read side (rd_clk) ----------------------------------------
-    reg [AW:0] rptr_gray;       // gray-coded read pointer
-    wire [AW:0] rptr_bin = gray2bin(rptr_gray);
 
     // Sync write pointer into read domain
     (* ASYNC_REG = "TRUE" *) reg [AW:0] wptr_sync1_r, wptr_sync2_r;

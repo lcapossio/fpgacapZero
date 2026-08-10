@@ -37,6 +37,16 @@ burst readback). Default Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
+The 256-bit burst DR packs **whole samples** per scan, so it is used
+only when a sample fits one 32-bit word (`SAMPLE_W <= 32`). Wider cores
+— notably the AXI monitor (`SAMPLE_W=160`) — are read back through the
+32-bit-word DATA path, which `capture()` reassembles into wide samples;
+`read_block` gates on the selected core's `SAMPLE_W` (read fresh, so it
+is correct when a session hops between an ELA and a monitor). Feeding a
+wide core's 32-bit *word* count to the burst engine would build a
+multi-hundred-KB single-line TCL scan sequence that xsdb never
+completes — a hard readback hang, not a throughput issue.
+
 For single-chain burst readback, the host verifies stability instead of
 trusting the first transaction.  The invariant is simple: after the ELA
 reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,
@@ -180,6 +190,24 @@ parses the hex responses.  No subprocess, no Vivado required.
 OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
+
+#### Tap auto-detect
+
+The tap name must match a tap defined in the running OpenOCD config.  Pass
+`tap="auto"` (or leave it empty) and `connect()` resolves it to the first name
+OpenOCD reports from `jtag names` — handy for single-FPGA chains where you don't
+want to hard-code the name.  The helper `fcapz.transport.list_openocd_taps()`
+returns that list; the GUI's **Scan** button uses it to populate the TAP field
+for the OpenOCD backend.
+
+#### Gowin over OpenOCD
+
+Gowin boards use this transport with `ir_table=OpenOcdTransport.IR_TABLE_GOWIN`
+(ER1/ER2 → chains 1/2).  The CLI auto-selects it for `--tap GW...`; in code,
+pass it explicitly.  The ELA sits on chain 1; a shared-chain EIO (`EIO_EN=1`) is
+reached on chain 1 at base offset `0x8000`
+(`EioController(t, chain=1, base_addr=0x8000)`).  See the
+[BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
 
 ### `QuartusStpTransport`
 
@@ -632,12 +660,11 @@ will differ.
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
 | `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
-**OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
-hardware-validated on Arty A7 (pending a first run with FT2232; see
-[`specs/transport_api.md`](specs/transport_api.md)).  Expect it to be
-slower than `hw_server` per scan because OpenOCD's TCL listener has
-limited batched-scan support, but the delta is not documented until
-somebody benchmarks it.
+**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9, but not yet
+benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
+to be slower than `hw_server` per scan because OpenOCD's TCL listener has
+limited batched-scan support, but the delta is not documented until somebody
+benchmarks it.
 
 **Quartus USB-Blaster:** hardware probe/capture is validated on
 DE25-Nano; see [`specs/transport_api.md`](specs/transport_api.md) for

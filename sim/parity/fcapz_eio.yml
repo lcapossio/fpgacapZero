@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "name": "fcapz_eio_parity",
+  "description": "Formal Verilog/VHDL parity for the portable EIO core",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_eio",
+    "sources": [
+      "../../rtl/fcapz_eio.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_eio",
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
+      "../../rtl/vhdl/core/fcapz_eio.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 20,
+    "bounded_depth": 40,
+    "reset_inputs": [
+      "jtag_rst"
+    ],
+    "clock_inputs": [
+      "jtag_clk"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "fcapz_eio",
+        "param_sets": [
+          {},
+          {
+            "IN_W": 5,
+            "OUT_W": 7
+          },
+          {
+            "IN_W": 65,
+            "OUT_W": 33
+          }
+        ]
+      }
+    ]
+  }
+}

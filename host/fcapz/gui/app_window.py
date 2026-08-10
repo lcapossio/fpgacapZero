@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
-from ..eio import EIO_CORE_ID, EioController
+from ..eio import EIO_CORE_ID, EioController, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
 from .branding import GUI_DISPLAY_TITLE
@@ -564,8 +564,7 @@ class MainWindow(QMainWindow):
             msg = "Connected — JTAG OK; no ELA on USER1 (EIO/AXI/UART still available)."
         self._conn.set_connected(True, msg)
         self.statusBar().showMessage(msg)
-        if eio_slots:
-            self._on_eio_attach()
+        self._auto_attach_eio(analyzer.transport, eio_slots)
 
         gui = load_gui_settings(self._config_path)
         gui.connection = conn
@@ -1224,28 +1223,59 @@ class MainWindow(QMainWindow):
         self._dock_capture.setWindowTitle("ELA capture")
         self._dock_eio.setWindowTitle("EIO")
 
+    def _discover_eio(self, transport, eio_slots) -> EioController | None:
+        """Probe known locations for the EIO core; never raise into the UI."""
+        try:
+            chains = sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+            return discover_eio(transport, chains=chains, instances=eio_slots or None)
+        except Exception:  # noqa: BLE001 - discovery must not break the UI
+            _log.exception("EIO discovery failed")
+            return None
+
+    def _auto_attach_eio(self, transport, eio_slots) -> None:
+        """Auto-attach EIO on connect so the user needn't pick a chain.
+
+        A core-manager slot is already known from topology, so attach it
+        directly; otherwise probe for a standalone / shared EIO.  Silent when
+        none is found.
+        """
+        if eio_slots:
+            try:
+                eio = EioController(transport, chain=1, instance=int(eio_slots[0]))
+                eio.attach()
+            except (OSError, RuntimeError, ValueError):
+                return
+        else:
+            eio = self._discover_eio(transport, None)
+            if eio is None:
+                return
+        self._eio = eio
+        self._eio_panel.bind_eio(transport, eio)
+        _log.info("EIO auto-attached (chain=%d)", eio.bscan_chain)
+
     def _on_eio_attach(self) -> None:
         if self._analyzer is None:
             return
         t = self._analyzer.transport
-        try:
-            eio = EioController(
-                t,
-                chain=self._eio_panel.chain(),
-                instance=self._eio_panel.instance(),
-            )
-            eio.attach()
-        except (OSError, RuntimeError, ValueError) as exc:
-            QMessageBox.warning(self, "EIO attach", str(exc))
-            return
+        # Auto-discover first so the user needn't pick a USER chain / offset.
+        eio = self._discover_eio(t, self._eio_panel.managed_slots())
+        if eio is None:
+            # Fall back to the panel's manual location (advanced override).
+            try:
+                eio = EioController(
+                    t,
+                    chain=self._eio_panel.chain(),
+                    instance=self._eio_panel.instance(),
+                    base_addr=self._eio_panel.base_addr(),
+                )
+                eio.attach()
+            except (OSError, RuntimeError, ValueError) as exc:
+                QMessageBox.warning(self, "EIO attach", str(exc))
+                return
         self._eio = eio
         self._eio_panel.bind_eio(t, eio)
         self.statusBar().showMessage("EIO attached")
-        _log.info(
-            "EIO attached (chain=%d, instance=%s)",
-            self._eio_panel.chain(),
-            self._eio_panel.instance(),
-        )
+        _log.info("EIO attached (chain=%d)", eio.bscan_chain)
 
     def _on_eio_detach(self) -> None:
         self._eio = None
@@ -1640,6 +1670,27 @@ def _windows_set_taskbar_app_identity() -> None:
         pass
 
 
+def _show_gui_deprecation_notice(parent: QWidget) -> None:
+    """Tell the user, once per launch, that this desktop GUI is frozen.
+
+    The PySide6 GUI is kept working but no longer developed — the web frontend
+    (``fcapz-web``) is the maintained interface. Shown modally after the window
+    appears so it can't be missed, but dismissible so the GUI stays usable.
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Python GUI no longer maintained")
+    box.setText("This desktop GUI is no longer maintained.")
+    box.setInformativeText(
+        "Development has moved to the web frontend, which is the supported "
+        "interface going forward. Start it with:\n\n"
+        "    fcapz-web\n\n"
+        "This GUI still works, but won't get new features or fixes."
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.exec()
+
+
 def run_app(argv: list[str] | None = None) -> int:
     global _main_window_ref
     args = argv if argv is not None else sys.argv
@@ -1659,6 +1710,7 @@ def run_app(argv: list[str] | None = None) -> int:
     w = MainWindow()
     _main_window_ref = weakref.ref(w)
     w.show()
+    _show_gui_deprecation_notice(w)
     try:
         return app.exec()
     finally:

@@ -1,0 +1,773 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --panel: #131722;
+  --border: #232b3a;
+  --fg: #d6dae3;
+  --muted: #8a93a6;
+  --accent: #4ad0ff;
+  --ok: #46d369;
+  --err: #ff6b6b;
+  --warn: #ffd166;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+/* Full-height app: fixed header, dock fills the rest. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.app-shell .topbar {
+  flex: 0 0 auto;
+  padding: 0.5rem 1rem;
+}
+.dock {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Compact the dockview chrome (tab bar) to match the denser UI. */
+  --dv-tabs-and-actions-container-height: 20px;
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-tab-font-size: 12px;
+}
+
+/* Dockview wraps each panel's content in .dv-react-part (a definite-height
+   box). Make that the bounded scroll container so tall panels scroll instead
+   of clipping. Scoped to the dockview class, NOT to our .dock wrapper, because
+   with the "always" renderer panels live in an overlay container that may sit
+   outside .dock. */
+.dv-react-part {
+  height: 100%;
+  overflow: auto;
+}
+/* Panels inside a dock tab: flush, fill the tab body, grow with content. */
+.dv-react-part > .panel {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  min-height: 100%;
+  background: var(--panel);
+}
+.dock-empty {
+  padding: 1rem;
+}
+
+/* Run: a slim horizontal toolbar (its dock tab is the drag handle). */
+.runbar {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.18rem;
+  height: 100%;
+  padding: 0.2rem 0.55rem;
+  background: var(--panel);
+  overflow: auto;
+}
+.runbar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 1.45rem;
+  white-space: nowrap;
+}
+.runbar-row > * {
+  flex: 0 0 auto;
+}
+.runbar button {
+  padding: 0.12rem 0.5rem;
+}
+.runbar .inline {
+  margin-top: 0;
+}
+.sigtrig {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.sigrow {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.sigrow button {
+  padding: 0.05rem 0.45rem;
+  min-width: 1.8rem;
+}
+.signame {
+  min-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sigval {
+  width: 7rem;
+  padding: 0.1rem 0.3rem;
+}
+/* ILA-style Trigger Setup table. */
+.trigsetup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.trigcond {
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+.trigtable {
+  border-collapse: collapse;
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+.trigtable th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem 0.15rem 0;
+}
+.trigtable td {
+  padding: 0.12rem 0.5rem 0.12rem 0;
+  vertical-align: middle;
+}
+.trigtable select {
+  padding: 0.1rem 0.2rem;
+}
+.trigvalue {
+  width: 9rem;
+  padding: 0.1rem 0.3rem;
+  font-family: ui-monospace, monospace;
+}
+.trigadv {
+  margin-top: 0.6rem;
+}
+.trigadv summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.trigterms {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+.trigterm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.05rem 0.2rem 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.trigterm-x {
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  padding: 0 0.25rem;
+  cursor: pointer;
+}
+.trigterm-x:hover {
+  color: var(--accent);
+}
+.trigrow-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+.trigterm-move {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 0 0.15rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.trigterm-move:hover:not(:disabled) {
+  color: var(--accent);
+}
+.trigterm-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.trigterm-ungroup {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+/* Armed-and-waiting indicator: pulsing dot + highlighted status text. */
+.armed {
+  color: var(--accent);
+}
+.armdot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: armpulse 1.2s ease-in-out infinite;
+}
+@keyframes armpulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+.runbar-download {
+  padding: 0.12rem 0.3rem;
+  font-size: 0.85rem;
+}
+.runbar-status {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The armed trigger condition, shown under the controls so it's always in
+   view — one line, truncated, full text on hover. */
+.runbar-trigger {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+.runbar-trigger-label {
+  flex: 0 0 auto;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.runbar-trigger-cond {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+.topbar .logo {
+  height: 26px;
+  width: auto;
+}
+.topbar h1 {
+  font-size: 1.3rem;
+  margin: 0;
+}
+
+/* "Tabs" dropdown: reopen closed dock tabs / reset the layout. */
+.tabs-menu {
+  position: relative;
+  margin-left: auto;
+}
+.tabs-menu > button {
+  padding: 0.2rem 0.6rem;
+}
+.tabs-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1000;
+  min-width: 9rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.tabs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-weight: 400;
+  text-align: left;
+}
+.tabs-menu-item:hover {
+  background: #0b0e14;
+}
+.tabs-menu-check {
+  display: inline-block;
+  width: 1rem;
+  color: var(--accent);
+}
+.tabs-menu-sep {
+  height: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--border);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.6rem;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+label.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+input,
+select,
+textarea {
+  background: #0b0e14;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.panel h3 {
+  margin: 0.9rem 0 0.45rem;
+  color: var(--fg);
+  font-size: 0.85rem;
+}
+.filepick input {
+  max-width: 16rem;
+}
+
+button {
+  background: var(--accent);
+  color: #04202b;
+  border: none;
+  border-radius: 5px;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.secondary {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+button.danger {
+  background: var(--err);
+  color: #2a0a0a;
+}
+.btnrow {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+/* Connect button keeps a stable width across the Connect/Working… label swap
+   so it never resizes mid-connect. */
+.conn-primary {
+  min-width: 6.5rem;
+}
+/* Multi-target/board picker sits inline in the button row; cap its width so a
+   long board label can't blow the row out, and let it shrink on narrow docks. */
+.conn-picker {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 16rem;
+}
+/* Reserve a hidden button's space so it can't shift its neighbours when it
+   toggles (e.g. Cancel appearing only while connecting). */
+.invisible {
+  visibility: hidden;
+}
+/* Inline connect status: fills the remaining row width and truncates, so a
+   long "connecting to …" message never wraps and shifts the form below. */
+.conn-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.ok {
+  color: var(--ok);
+}
+
+/* Connected identity readout: a compact label / value grid. */
+.idinfo {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.3rem 0 0.85rem;
+  font-size: 0.85rem;
+}
+.idinfo dt {
+  color: var(--muted);
+}
+.idinfo dd {
+  margin: 0;
+  color: var(--fg);
+}
+
+/* One debug core in the "Cores" list. */
+.core {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.4rem 0;
+  background: #0b0e14;
+}
+.core-title {
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.core .idinfo {
+  margin: 0;
+}
+.err {
+  color: var(--err);
+}
+.warn {
+  color: var(--warn);
+}
+.muted {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Surfer viewer fills its dock panel. */
+.surfer-fill {
+  width: 100%;
+  height: 100%;
+}
+.surfer-fill iframe.surfer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #404040;
+}
+/* While dragging tabs, keep the Surfer iframe from swallowing the pointer so
+   drops register on the dock. */
+body.dv-dragging-tabs iframe {
+  pointer-events: none;
+}
+
+/* Viewer host: a column of [Run bar][waveform]. When the Run bar is pinned it
+   docks as a real row and the waveform takes the rest; unpinned it collapses to
+   a rail and floats over the waveform on hover. */
+.viewer-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* Waveform area: hosts the Surfer iframe and the right-edge Trigger drawer. */
+.viewer-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Trigger overlay: a thin rail on the viewer's right edge that slides a full
+   Trigger drawer out over the waveform on hover (or when pinned open). */
+.trig-overlay {
+  --trig-rail-w: 26px;
+  --trig-drawer-w: 360px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  z-index: 20;
+  /* Collapsed: only the rail peeks in at the right edge. */
+  transform: translateX(calc(100% - var(--trig-rail-w)));
+  transition: transform 0.18s ease;
+}
+.trig-overlay.open {
+  transform: translateX(0);
+}
+.trig-rail {
+  flex: 0 0 var(--trig-rail-w);
+  width: var(--trig-rail-w);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+}
+.trig-overlay.open .trig-rail {
+  color: var(--muted);
+}
+.trig-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  user-select: none;
+}
+.trig-drawer {
+  flex: 0 0 var(--trig-drawer-w);
+  width: var(--trig-drawer-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.4);
+}
+.trig-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.trig-drawer-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+.trig-pin {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.trig-pin.on {
+  filter: none;
+  opacity: 1;
+  background: var(--border);
+}
+.trig-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 0.6rem 0.6rem;
+}
+/* Drop the standalone panel chrome — the drawer already frames it. */
+.trig-drawer-body .panel {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0.4rem 0;
+  margin-top: 0;
+}
+
+/* Run bar. Unpinned it's a small "▶ Run" tab on the viewer's top edge that
+   drops the Arm / Trigger Immediate controls down over the waveform on hover
+   (or while a capture is armed/running). Absolute so peeking doesn't shift the
+   waveform; inset on the right to clear the Trigger rail at the corner. */
+.run-overlay {
+  --run-rail-h: 20px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: var(--trig-rail-w, 26px);
+  display: flex;
+  flex-direction: column;
+  z-index: 19;
+  /* Collapsed: only the rail peeks in at the top edge. */
+  transform: translateY(calc(-100% + var(--run-rail-h)));
+  transition: transform 0.18s ease;
+}
+.run-overlay.open {
+  transform: translateY(0);
+}
+/* Pinned (default): dock the Run bar as a real row in the viewer column so it
+   shares the vertical space with the waveform instead of floating over it. The
+   rail is hidden — the controls are always shown. */
+.run-overlay.pinned {
+  position: relative;
+  right: auto;
+  transform: none;
+  z-index: auto;
+}
+.run-overlay.pinned .run-rail {
+  display: none;
+}
+.run-overlay.pinned .run-drawer {
+  box-shadow: none;
+}
+.run-drawer {
+  position: relative;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+  padding-right: 1.6rem; /* room for the pin */
+}
+.run-drawer .runbar {
+  height: auto;
+  background: transparent;
+}
+.run-rail {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--run-rail-h);
+  padding: 0 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+}
+.run-overlay.open .run-rail {
+  color: var(--muted);
+}
+.run-rail-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  user-select: none;
+}
+.run-empty {
+  padding: 0.55rem 0.6rem;
+  font-size: 0.85rem;
+}
+.run-pin {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.run-pin.on {
+  filter: none;
+  opacity: 1;
+  background: var(--border);
+}
+
+.bits {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.4rem 0;
+  flex-wrap: wrap;
+}
+.bitlabel {
+  width: 4rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.bit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: #0b0e14;
+}
+.bit.on {
+  background: var(--accent);
+  color: #04202b;
+  border-color: var(--accent);
+}
+.bit.btn {
+  cursor: pointer;
+}
+
+/* JTAG-AXI operation log */
+.axi-log {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem;
+  font: 0.78rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre;
+}

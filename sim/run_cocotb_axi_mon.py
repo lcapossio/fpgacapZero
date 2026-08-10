@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+"""Run the cocotb bench for fcapz_axi_mon (AXI monitor, P1 + P2 decode)."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from _runner_utils import check_results, relaunch_in_wsl, running_in_wsl
+
+ROOT = Path(__file__).resolve().parent.parent
+RTL = ROOT / "rtl"
+TB_COCOTB = ROOT / "tb" / "cocotb"
+BUILD_ROOT = ROOT / "build" / "cocotb_axi_mon"
+
+VERILOG_SOURCES = [
+    RTL / "reset_sync.v",
+    RTL / "dpram.v",
+    RTL / "trig_compare.v",
+    RTL / "fcapz_ela.v",
+    RTL / "fcapz_axi_mon.v",
+]
+
+# Same hierarchy in native VHDL (the source-of-truth Verilog is above); running
+# the identical cocotb bench against both is the project's behavioral-parity gate.
+VHDL_SOURCES = [
+    RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+    RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+    RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+    RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+    RTL / "vhdl" / "core" / "fcapz_axi_mon.vhd",
+]
+
+# AXI4-Lite 32/32. Small depth, no pipe/timestamps to keep the bench's
+# register-window readback simple and deterministic.
+BASE_PARAMETERS = {
+    "ADDR_W": 32,
+    "DATA_W": 32,
+    "DEPTH": 16,
+    "TRIG_STAGES": 1,
+    "STOR_QUAL": 1,  # exercise the beat storage qualifier
+    "NUM_SEGMENTS": 1,
+    "TIMESTAMP_W": 0,
+    "INPUT_PIPE": 0,
+    "DECIM_EN": 0,
+    "EXT_TRIG_EN": 0,
+    "REL_COMPARE": 0,
+    "DUAL_COMPARE": 1,
+    "USER1_DATA_EN": 1,
+}
+
+
+@dataclass(frozen=True)
+class Target:
+    name: str
+    decode: int
+    testcases: tuple[str, ...]
+
+
+TARGETS = (
+    Target("base", 0, ("identity_and_geometry", "captures_axi_write_address",
+                       "stress_backtoback_fill", "wide_trigger_high_bit")),
+    Target("decode", 1, ("identity_and_geometry", "captures_error_event",
+                         "stress_backtoback_fill", "wide_trigger_high_bit",
+                         "beat_storage_qualifier")),
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hdl", choices=("verilog", "vhdl"), default="verilog")
+    parser.add_argument("--sim", default=None)
+    parser.add_argument("--runner", choices=("auto", "native", "wsl"), default="auto")
+    parser.add_argument("--target", choices=[t.name for t in TARGETS], default=None)
+    parser.add_argument("--waves", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--clean", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if os.name == "nt" and not running_in_wsl() and args.runner in ("auto", "wsl"):
+        raise SystemExit(relaunch_in_wsl(ROOT, sys.argv))
+
+    try:
+        from cocotb_tools.runner import get_runner  # cocotb >= 2.0
+    except ModuleNotFoundError:
+        try:
+            from cocotb.runner import get_runner  # cocotb 1.x
+        except ModuleNotFoundError as exc:
+            raise SystemExit("cocotb is not installed in this Python environment") from exc
+
+    if str(TB_COCOTB) not in sys.path:
+        sys.path.insert(0, str(TB_COCOTB))
+
+    sim = args.sim or ("icarus" if args.hdl == "verilog" else "ghdl")
+    sources = VERILOG_SOURCES if args.hdl == "verilog" else VHDL_SOURCES
+    runner = get_runner(sim)
+    for target in TARGETS:
+        if args.target and target.name != args.target:
+            continue
+        build_dir = BUILD_ROOT / f"{args.hdl}_{sim}_{target.name}"
+        results_xml = build_dir / "results.xml"
+        runner.build(
+            sources=sources,
+            includes=[RTL],
+            parameters={**BASE_PARAMETERS, "DECODE_EN": target.decode},
+            hdl_toplevel="fcapz_axi_mon",
+            build_dir=build_dir,
+            clean=args.clean,
+            always=True,
+            waves=args.waves,
+            verbose=args.verbose,
+            timescale=("1ns", "1ps"),
+            build_args=["-Wall"] if args.hdl == "verilog" else ["--std=08"],
+        )
+        runner.test(
+            test_module="axi_mon_test",
+            hdl_toplevel="fcapz_axi_mon",
+            hdl_toplevel_lang=args.hdl,
+            test_filter="|".join(rf".*\.{re.escape(case)}$" for case in target.testcases),
+            build_dir=build_dir,
+            test_dir=build_dir if args.hdl == "vhdl" else TB_COCOTB,
+            results_xml=results_xml,
+            test_args=["--std=08"] if args.hdl == "vhdl" else [],
+            waves=args.waves,
+            verbose=args.verbose,
+            extra_env={"COCOTB_RESOLVE_X": "ZEROS", "AXIMON_DECODE": str(target.decode)},
+        )
+        check_results(results_xml)
+        print(f"cocotb AXI monitor [{args.hdl}][{target.name}] OK: {build_dir.relative_to(ROOT)}")
+
+
+if __name__ == "__main__":
+    main()

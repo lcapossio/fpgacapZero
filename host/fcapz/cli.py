@@ -314,6 +314,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
 
+    p_axi_mon = sub.add_parser(
+        "axi-mon", help="Detect an AXI monitor; print its identity and probe map"
+    )
+    p_axi_mon.add_argument(
+        "--write-probe-file",
+        metavar="PATH",
+        help="Write the matching .prob probe map to PATH (use with capture --probe-file)",
+    )
+
     cfg = sub.add_parser("configure", help="Write capture configuration")
     cap = sub.add_parser("capture", help="Configure, arm, capture, export")
 
@@ -444,6 +453,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_probe.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
     eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -453,6 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_read.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
     eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -461,6 +482,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Managed core slot on the selected chain",
+    )
+    eio_write.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
     eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
 
@@ -569,7 +596,9 @@ def main() -> int:
 
     # -- EIO commands ------------------------------------------------------
     if args.cmd in ("eio-probe", "eio-read", "eio-write"):
-        eio = EioController(transport, chain=args.chain, instance=args.instance)
+        eio = EioController(
+            transport, chain=args.chain, instance=args.instance, base_addr=args.base_addr
+        )
         try:
             eio.connect()
             if args.cmd == "eio-probe":
@@ -697,6 +726,40 @@ def main() -> int:
 
         if args.cmd == "probe":
             print(json.dumps(analyzer.probe(), indent=2))
+            return 0
+
+        if args.cmd == "axi-mon":
+            from .axi_monitor import AxiMonitor
+
+            mon = AxiMonitor(analyzer)
+            if not mon.present:
+                print(json.dumps({"present": False}, indent=2))
+                return 0
+            geo = mon.geometry()
+            pf = mon.probe_map(geo)
+            out = {
+                "present": True,
+                "proto": geo.proto,
+                "addr_w": geo.addr_w,
+                "data_w": geo.data_w,
+                "sample_width": geo.sample_width,
+                "probes": [
+                    {"name": pr.name, "width": pr.width, "lsb": pr.lsb} for pr in pf.probes
+                ],
+            }
+            if args.write_probe_file:
+                from .probes import probe_file_dict
+
+                with open(args.write_probe_file, "w", encoding="utf-8") as fh:
+                    json.dump(
+                        probe_file_dict(
+                            pf.probes, sample_width=geo.sample_width, core="axi_mon"
+                        ),
+                        fh,
+                        indent=2,
+                    )
+                out["wrote"] = args.write_probe_file
+            print(json.dumps(out, indent=2))
             return 0
 
         if args.cmd == "arm":

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "name": "dff_sync_parity",
+  "description": "Formal Verilog/VHDL parity for the bit synchronizer",
+  "golden": {
+    "language": "verilog",
+    "top": "dff_sync",
+    "sources": [
+      "../../rtl/dff_sync.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "dff_sync",
+    "sources": [
+      "../../rtl/vhdl/core/dff_sync.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "srst"
+    ],
+    "clock_inputs": [
+      "clk"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "dff_sync",
+        "param_sets": [
+          {},
+          {
+            "pSYNC_STAGES": 3
+          }
+        ]
+      }
+    ]
+  }
+}

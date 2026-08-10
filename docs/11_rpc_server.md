@@ -164,7 +164,80 @@ For Quartus USB-Blaster, use:
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1"}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
+
+`ir_table` echoes the resolved IR-table preset. When the request omits it, the
+server infers the preset from the tap name (`gw*` → `gowin`,
+`xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
+their own copy of that mapping.
+
+`chain` echoes the BSCAN USER chain the session bound to. When the request
+omits it, the server **autodetects**: it connects on chain 1 and, if no debug
+core answers there, scans chain 2 and binds to the first core found (chains
+3/4 are never scanned — bridges there speak a different DR protocol and must
+not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
+session, e.g. to reach an AXI monitor directly.
+
+#### `discover_boards`
+
+Find fpgacapZero-compatible boards across running OpenOCD instances (OpenOCD
+only). Lists each TCL port's taps (`jtag names`) and probes each for the ELA
+identity, returning **only compatible** boards — so a caller fails only when
+none are found. Requires no active connection.
+
+```json
+{
+  "cmd": "discover_boards",
+  "host": "127.0.0.1",
+  "port": 6666,        // sweep base; each board is one OpenOCD instance
+  "port_span": 4,      // scan port .. port+span-1 (or pass "ports": [6666, 6667])
+  "timeout": 5,        // per-step timeout (per port connect / per tap probe)
+  "budget": 12         // optional: overall wall-clock cap for the whole sweep
+}
+```
+
+`budget` bounds the total sweep time (per-step timeouts are clamped to the
+remaining budget and unswept ports are skipped once it is spent). Set it below
+your own request deadline: a client that aborts the HTTP request cannot cancel
+the server-side sweep, which would otherwise keep the command lock busy.
+
+Response (empty `boards` means nothing compatible was reachable):
+```json
+{
+  "ok": true,
+  "schema_version": "1.1",
+  "backend": "openocd",
+  "boards": [
+    {
+      "host": "127.0.0.1", "port": 6666,
+      "tap": "GW1NR-9C.tap", "ir_table": "gowin",
+      "identity": {"core_id": 19521, "sample_width": 8, "depth": 64, "num_channels": 6},
+      "label": "GW1NR-9C.tap @ :6666 - 8-bitx64x6ch v0.4"
+    }
+  ]
+}
+```
+
+#### `rebind`
+
+Re-bind the connected session to a core on another BSCAN chain **without
+reconnecting**. ELA and AXI-monitor cores sit on different USER taps, so
+switching between them just needs a chain hop, not a fresh transport: `rebind`
+keeps the live transport, points the session at the requested chain, and
+re-probes. This is the cheap path behind the web UI's seamless ELA ↔ AXI
+monitor switch — one short round-trip instead of `connect` (which tears down
+and re-opens every session) plus `probe`.
+
+Requires an active session; the target chain must present an ELA-style
+identity window (a plain ELA or an AXI monitor). Side sessions (EIO/AXI/UART)
+are left untouched.
+
+```json
+{"cmd": "rebind", "chain": 2}
+```
+
+Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
+— `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
 
 #### `close`
 
@@ -173,6 +246,76 @@ Releases the transport.
 ```json
 {"cmd": "close"}
 ```
+
+#### `scan_targets`
+
+List JTAG targets before connecting (no active session needed). For
+`backend: "hw_server"` it returns the XSDB `jtag targets` names; for
+`backend: "openocd"` it returns the tap names (`jtag names`). `discover_boards`
+is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
+
+```json
+{"cmd": "scan_targets", "backend": "openocd", "host": "127.0.0.1", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
+
+### OpenOCD control (web, localhost only)
+
+Start/stop OpenOCD **on the server host** so the browser UI can bring the board
+online without a shell. Available only when `fcapz-web` has an `openocd` binary
+(`--openocd`, `$FCAPZ_OPENOCD`, or found on `PATH`) plus at least one config
+(`--openocd-cfg <cfg>` or every `*.cfg` in an `--openocd-cfg-dir <dir>`), and
+restricted to loopback clients (a remote browser cannot spawn processes, even
+with a valid token). The server only stops OpenOCD instances it started itself.
+
+#### `openocd_status`
+
+```json
+{"cmd": "openocd_status"}
+```
+
+Response: `{"ok": true, "enabled": true, "configs": ["brs_100_gw1nr9_local"], "running": [...]}`.
+`enabled` is `false` (and `configs` empty) when the feature was not configured.
+
+#### `openocd_start`
+
+Spawn `openocd -f <cfg>` on `port` (default 6666) and wait for its TCL port.
+Idempotent — if the port is already open, nothing is spawned.
+
+```json
+{"cmd": "openocd_start", "name": "brs_100_gw1nr9_local", "port": 6666, "wait": 10}
+```
+
+`name` selects one of the configured configs (optional if only one). Response
+includes `{"started": true, "port": 6666, "pid": ...}`, or an in-band error
+(with the OpenOCD log tail) if it exits early or never opens the port.
+
+#### `openocd_stop`
+
+```json
+{"cmd": "openocd_stop", "port": 6666}
+```
+
+Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
+
+#### `openocd_discover`
+
+Auto-discover compatible boards without the client picking a config. Reads each
+allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter is
+plugged in (best-effort — every config is probed when USB enumeration is
+unavailable), then starts OpenOCD per surviving config from `port` (default 6666,
+one port per config) and probes each for an fpgacapZero core.
+
+```json
+{"cmd": "openocd_discover", "port": 6666}
+```
+
+Response: `{"ok": true, "backend": "openocd", "boards": [...]}` — the same board
+records as `discover_boards`, each with an added `config` (the config that
+reached it) and a `port` left running for the client to connect to. Unproductive
+instances are stopped. Loopback-only and requires the launcher configured, like
+`openocd_start`.
 
 ### ELA (Analyzer)
 
@@ -203,6 +346,36 @@ Response:
     "num_segments": 4,
     "probe_mux_w": 0
   }
+}
+```
+
+#### `list_cores`
+
+Enumerate the fcapz cores present on the connected target. Always reports the
+connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
+USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. Each entry has `type`, `name`,
+`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
+monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
+`axi_mon`).
+
+```json
+{"cmd": "list_cores"}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "cores": [
+    {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
+     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 4,
+     "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
+    {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
+     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 4,
+     "info": {"in_w": 2, "out_w": 6}}
+  ]
 }
 ```
 
@@ -239,10 +412,35 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 Use `probe_file` with a `.prob` sidecar path to load the same information
 from disk; `probes` and `probe_file` are mutually exclusive.
 
+`trigger_value`, `trigger_mask`, `stor_qual_value`, and `stor_qual_mask` accept
+a base-prefixed string (`"0x..."` or decimal) as well as an int, so bit vectors
+wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
+
 #### `arm`
 
 ```json
 {"cmd": "arm"}
+```
+
+#### `capture_wait`
+
+Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
+the same result shape and options as `capture`, but without re-configuring or
+re-arming. A `TimeoutError` here just means "still waiting" and leaves the
+core armed, so clients can hold one hardware arm across many short polls
+(this is how the web UI waits for a trigger with no deadline).
+
+```json
+{"cmd": "capture_wait", "timeout": 4.0, "include_vcd": true}
+```
+
+#### `disarm`
+
+Soft-reset the capture FSM to a verified idle (`force_idle`), discarding any
+in-flight capture — how a client's Stop button cancels an armed wait.
+
+```json
+{"cmd": "disarm"}
 ```
 
 #### `capture`
@@ -280,6 +478,16 @@ Response (format = "json"):
 For `format=csv` or `format=vcd`, the response has `"content": "..."`
 with the file body as a string instead of `result`.
 
+With `"segments": true` the response carries one entry per segment under
+`segments` (each shaped like a single-capture response in the requested
+format); `include_vcd` returns **all** segments concatenated on the time axis
+in one VCD, with a `segment` wire marking the boundaries.
+
+All caller-supplied waits (`timeout` on `capture`/`scan_targets`/`uart_recv`,
+`wait` on `openocd_start`, discovery `timeout`/`budget`) are clamped to 300 s:
+on the web server each request holds a threadpool worker for its full wait, so
+unbounded timeouts could starve all clients.
+
 ### EIO
 
 #### `eio_connect`
@@ -308,7 +516,9 @@ Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain":
 {"cmd": "eio_read"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "value": 167}`
+Response: `{"ok": true, "schema_version": "1.1", "value": 167, "value_hex": "0xa7"}`.
+`value_hex` carries the full width losslessly for EIO wider than a JS-safe
+integer (53 bits); `value` is the same value as a JSON number.
 
 #### `eio_write`
 
@@ -316,7 +526,39 @@ Response: `{"ok": true, "schema_version": "1.1", "value": 167}`
 {"cmd": "eio_write", "value": 85}
 ```
 
+`value` accepts a base-prefixed string (`"0x2a"`) as well as an int, so outputs
+wider than 53 bits survive JSON transport unrounded.
+
 ### EJTAG-AXI
+
+#### `ejtag_axi_probe`
+
+Auto-detect an EJTAG-AXI bridge on the connected target without attaching. The
+bridge sits on its own USER chain (default USER4) and speaks a different DR
+protocol than the ELA, so this probes with the bridge's own **read-only** CONFIG
+identity scan on the shared transport and restores the session's chain — the ELA
+session is untouched. Requires an active session. `chains` (optional) overrides
+the candidate set (default `[4]`).
+
+```json
+{"cmd": "ejtag_axi_probe", "chains": [4]}
+```
+
+Present → the bridge identity plus the `chain` it was found on; absent →
+`{"present": false}`:
+```json
+{
+  "ok": true, "schema_version": "1.1",
+  "present": true, "chain": 4,
+  "bridge_id": 19032, "core_id": 19032,
+  "legacy_id": false, "legacy_raw_id": null,
+  "version_major": 0, "version_minor": 4,
+  "addr_w": 32, "data_w": 32, "fifo_depth": 16
+}
+```
+
+The web UI calls this on connect and pre-fills the AXI tab's chain so attaching
+is one click; `axi_connect` still opens the working session.
 
 #### `axi_connect`
 

@@ -183,7 +183,7 @@ module jtag_tap_gowin (
         sel         = 0;
 
         if (out_en_reg == 1'b1) begin
-            for (i = 0; i < 2; i++) begin
+            for (i = 0; i < 2; i = i + 1) begin
                 capture[i]      = jce_reg[i] & (~jshift_capture_reg) & (~jhold_reg);
 
                 shift_out[i]    = jce_reg[i] & jshift_capture_reg;

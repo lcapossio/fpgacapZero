@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "name": "fcapz_async_fifo_parity",
+  "description": "Formal Verilog/VHDL parity for the portable behavioral async FIFO",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_async_fifo",
+    "state_renames": {
+      "\\gen_behavioral.wptr_bin": "g_behavioral_wptr_bin",
+      "\\gen_behavioral.wptr_gray": "g_behavioral_wptr_gray",
+      "\\gen_behavioral.rptr_gray": "g_behavioral_rptr_gray",
+      "\\gen_behavioral.rptr_sync1_w": "g_behavioral_rptr_sync1_w",
+      "\\gen_behavioral.rptr_sync2_w": "g_behavioral_rptr_sync2_w",
+      "\\gen_behavioral.wptr_sync1_r": "g_behavioral_wptr_sync1_r",
+      "\\gen_behavioral.wptr_sync2_r": "g_behavioral_wptr_sync2_r",
+      "\\gen_behavioral.mem[0]": "g_behavioral_mem[0]",
+      "\\gen_behavioral.mem[1]": "g_behavioral_mem[1]",
+      "\\gen_behavioral.mem[2]": "g_behavioral_mem[2]",
+      "\\gen_behavioral.mem[3]": "g_behavioral_mem[3]",
+      "\\gen_behavioral.mem[4]": "g_behavioral_mem[4]",
+      "\\gen_behavioral.mem[5]": "g_behavioral_mem[5]",
+      "\\gen_behavioral.mem[6]": "g_behavioral_mem[6]",
+      "\\gen_behavioral.mem[7]": "g_behavioral_mem[7]"
+    },
+    "sources": [
+      "../../rtl/fcapz_async_fifo.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_async_fifo",
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/fcapz_async_fifo.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "wr_rst",
+      "rd_rst"
+    ],
+    "clock_inputs": [
+      "wr_clk",
+      "rd_clk"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "fcapz_async_fifo",
+        "param_sets": [
+          {
+            "DATA_W": 8,
+            "DEPTH": 8,
+            "USE_BEHAV_ASYNC_FIFO": 1,
+            "ASYNC_FIFO_IMPL": 0
+          }
+        ]
+      }
+    ]
+  }
+}

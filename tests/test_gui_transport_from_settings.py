@@ -30,6 +30,19 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_US)
         self.assertEqual(t._connect_timeout_sec, 60.0)
 
+    def test_openocd_gowin_ir(self) -> None:
+        c = ConnectionSettings(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="GW1NR-9C.tap",
+            ir_table="gowin",
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.tap, "GW1NR-9C.tap")
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
+
     def test_hw_server_port_remap_and_fpga_name(self) -> None:
         c = ConnectionSettings(
             backend="hw_server",

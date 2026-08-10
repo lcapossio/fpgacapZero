@@ -31,7 +31,7 @@ features they expose.
 | Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
-| Gowin GW1N / GW2A | `_gowin` | ❌ |
+| Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
 | Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
@@ -48,10 +48,10 @@ includes the ELA configuration matrix for small/scalable builds:
 
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
-Arty A7 hardware test validates the Xilinx 7-series reference bitstream.
-ECP5, Intel, Gowin, PolarFire, and UltraScale wrappers should be treated as
-RTL-implemented and lint-clean until a board-level smoke test is added for
-that family.
+Arty A7 hardware test validates the Xilinx 7-series reference bitstream and
+the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
+PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
+lint-clean until a board-level smoke test is added for that family.
 
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
 > primitive is byte-identical between 7-series, UltraScale, and
@@ -136,10 +136,9 @@ register file declarations.  The wrapper takes care of:
 Resource usage: ~912 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
 synthesis) for an 8b x 1024 single-comparator, single-chain fast-readout
 configuration.  Simple USER1 register-readout builds are ~596 LUTs.  See
-[`specs/architecture.md`](specs/architecture.md) and the
-[README resource table](../README.md#resource-usage) for sequencer,
-storage qualification, width/depth scaling, and the full `arty_a7_top`
-reference.
+[`specs/architecture.md`](specs/architecture.md) for the full table —
+sequencer, storage qualification, width/depth scaling, and the
+`arty_a7_top` reference build.
 
 ## LiteX integration
 
@@ -291,7 +290,8 @@ module fcapz_ela_xilinx7 #(
     parameter DATA_CHAIN   = 2,      // BSCANE2 USER chain for burst data
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
     parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
-    parameter USER1_DATA_EN = 1      // 0=disable slow USER1 DATA window readback
+    parameter USER1_DATA_EN = 1,     // 0=disable slow USER1 DATA window readback
+    parameter WIDE_TRIG    = 0       // 1=comparator A programmable across full SAMPLE_W
 ) ( ... );
 ```
 
@@ -313,6 +313,7 @@ module fcapz_ela_xilinx7 #(
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
 | `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for a smaller single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
 | `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
+| `WIDE_TRIG` | bit | 0/1 | Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
 | `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
 | `BURST_EN` | bit | 0/1 | Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
 | `SINGLE_CHAIN_BURST` | bit | 0/1 | Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |

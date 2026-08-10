@@ -467,7 +467,7 @@ Manager registers:
 |---|---|
 | `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
-| `0xF008` | MGR_ACTIVE | RW | Active ELA slot. Non-manager register and burst accesses target this slot. |
+| `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
 | `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
@@ -648,6 +648,28 @@ cfg = CaptureConfig(
 )
 ```
 
+> **Host-initiated captures on a startup-armed bitstream.** Because
+> `STARTUP_ARM=1` makes the core boot armed, it may already be armed — or even
+> triggered/done — before your host code runs. A bare `configure(cfg); arm()`
+> then races that power-up window and can read back a valid-but-unexpected
+> capture (clean data, wrong window). Call `Analyzer.force_idle()` between
+> `configure()` and `arm()` to reset the core and poll `STATUS` until it is
+> verifiably idle:
+>
+> ```python
+> a.configure(cfg)   # cfg.startup_arm defaults False -> clears STARTUP_ARM reg
+> a.force_idle()     # discard the boot window; start from known idle
+> a.arm()
+> result = a.capture()
+> ```
+>
+> `force_idle()` issues a soft reset and re-resets if the cleared `STARTUP_ARM`
+> register has not yet crossed the clock domain, so a single call is enough. It
+> is intentionally lossy — skip it when you *want* the from-boot capture (e.g.
+> the `STARTUP_ARM` validation tests, which deliberately use raw
+> `reset()`/`arm()`). For streaming, `capture_continuous(force_idle=True)`
+> establishes idle once before the first arm.
+
 What happens at runtime:
 
 1. The core arms (explicit `ARM`, segmented auto-rearm, or RESET with
@@ -795,25 +817,21 @@ decoded form.
 
 ## Resource usage
 
-Vivado **synthesis**, **xc7a100t**, 2025.2 -- **Slice LUTs**. BRAM is
-Block RAM tiles (18K granularity counts as 0.5 where applicable).
-Rows that mention readout include the wrapper/TAP/register plumbing.
+A small `SAMPLE_W=8`, `DEPTH=1024` ELA fits in about **596 slice LUTs +
+0.5 BRAM** with simple USER1 readout, or **912 LUTs + 0.5 BRAM** with
+single-chain fast readout (`SINGLE_CHAIN_BURST=1`) on xc7a100t. Enabling
+dual comparators, storage qualification, the 4-stage sequencer, or wider
+samples grows LUTs/FFs and sometimes BRAM.
 
-| Configuration | Slice LUTs | FFs | BRAM | Notes |
-|---|---:|---:|---:|---|
-| `SAMPLE_W=8`, `DEPTH=1024`, A-only, slow USER1 readout | 596 | 779 | 0.5 | `DUAL_COMPARE=0`, optional features off |
-| `SAMPLE_W=8`, `DEPTH=1024`, A-only, single-chain fast readout | 912 | 1,234 | 0.5 | `SINGLE_CHAIN_BURST=1` |
-| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,021 | 1,725 | 0.5 | EQ/NEQ/edges/changed |
-| `SAMPLE_W=8`, `DEPTH=1024`, dual compare, `REL_COMPARE=1`, `INPUT_PIPE=1` | 2,010 | 1,754 | 0.5 | relational modes, registered compare hit |
-| Above + `STOR_QUAL=1` | 2,521 | 1,749 | 0.5 | storage qualification |
-| Above + `TRIG_STAGES=4` | 2,954 | 2,788 | 0.5 | 4-stage sequencer |
-| `SAMPLE_W=32`, `DEPTH=1024`, dual compare, `REL_COMPARE=0` | 2,472 | 2,099 | 1.0 | wider samples |
+The full per-configuration table — Slice LUTs, FFs, BRAM, and the
+`arty_a7_top` placed reference rows — is the canonical resource reference in
+[`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t).
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
 with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
 slice LUTs** and **1.5 BRAM tiles** after the EJTAG-AXI FIFO trim
-(see [README.md](../README.md#resource-usage)).
+(see [`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t)).
 Your tool and family will vary.
 
 ## What's next
