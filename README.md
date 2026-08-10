@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/assets/fcapz-logo.png" alt="fpgacapZero logo" width="180">
+  <img src="https://raw.githubusercontent.com/lcapossio/fpgacapZero/main/docs/assets/fcapz-logo.png" alt="fpgacapZero logo" width="180">
 </p>
 
 # fpgacapZero (fcapz)
 
 [![CI](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml/badge.svg)](https://github.com/lcapossio/fpgacapZero/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/lcapossio/fpgacapZero/blob/main/LICENSE)
 [![Sponsor](https://img.shields.io/github/sponsors/lcapossio?logo=githubsponsors&label=Sponsor)](https://github.com/sponsors/lcapossio)
 
 Open-source FPGA debug cores — in **native Verilog and VHDL** — that you drop
@@ -76,7 +76,7 @@ across the network with a bearer token. See
 **[Web interface](docs/18_web_interface.md)**.
 
 <p align="center">
-  <img src="docs/assets/fcapz-web-demo.png" alt="fcapz-web browser interface showing connection, ELA capture controls, and the embedded Surfer waveform viewer" width="900">
+  <img src="https://raw.githubusercontent.com/lcapossio/fpgacapZero/main/docs/assets/fcapz-web-demo.png" alt="fcapz-web browser interface showing connection, ELA capture controls, and the embedded Surfer waveform viewer" width="900">
 </p>
 
 Prefer a native desktop app? A PySide6 GUI with a built-in waveform preview
@@ -184,4 +184,4 @@ development through [GitHub Sponsors](https://github.com/sponsors/lcapossio).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for details.
+Apache License 2.0 — see [LICENSE](https://github.com/lcapossio/fpgacapZero/blob/main/LICENSE) for details.
