@@ -645,6 +645,25 @@ class Analyzer:
             time.sleep(poll_interval)
         return False
 
+    def status(self) -> dict[str, bool]:
+        """Read the capture status bits without transferring any sample data.
+
+        A cheap single register read, so a client can poll for the trigger
+        cheaply and only pay the (potentially long) sample readback once the
+        trigger has actually fired -- distinguishing "waiting for trigger" from
+        "reading back" instead of blanketing both under one blocking capture.
+        """
+        read_status = self.transport.read_reg_stable
+        with self.transport.transaction_lock():
+            self._select_instance()
+            s = int(read_status(_ADDR_STATUS))
+        return {
+            "armed": bool(s & _STATUS_ARMED),
+            "triggered": bool(s & _STATUS_TRIGGERED),
+            "done": bool(s & _STATUS_DONE),
+            "overflow": bool(s & _STATUS_OVERFLOW),
+        }
+
     @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""

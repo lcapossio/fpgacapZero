@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../api";
+import { RpcCancelled, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { describeElaTrigger } from "../signalTrigger";
 import { useSession } from "../session";
@@ -10,6 +10,26 @@ const IMMEDIATE_TIMEOUT = 10; // hardware wait (s) — Trigger Immediate fires a
 // capture_wait calls until the trigger fires or the user stops. The short poll
 // only bounds how long a single RPC blocks the server, keeping Stop responsive.
 const POLL_TIMEOUT = 4;
+// Gap between cheap trigger-status polls while armed. The poll itself is a
+// single register read; this just paces it and bounds Stop latency.
+const STATUS_POLL_MS = 120;
+
+/** Sleep that rejects (RpcCancelled) the moment Stop aborts, so an armed wait
+ *  ends now rather than after the next poll gap. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new RpcCancelled("capture_status"));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new RpcCancelled("capture_status"));
+      },
+      { once: true },
+    );
+  });
+}
 // JS numbers are exact only to 53 bits. Bit vectors (trigger value/mask) go over
 // the wire as strings so wide values (e.g. 160-bit AXI samples) don't round; wide
 // sample data uses the string-based VCD/CSV exports, not the JSON-number result.
@@ -146,28 +166,37 @@ export function RunPanel({
    *  missed between them; a poll timeout just means "still waiting". */
   async function armAndWait() {
     const p = params(false, POLL_TIMEOUT);
-    await rpc("configure", p, 15000, stopCtl.current?.signal);
-    await rpc("arm", {}, 15000, stopCtl.current?.signal);
+    const signal = stopCtl.current?.signal;
+    await rpc("configure", p, 15000, signal);
+    await rpc("arm", {}, 15000, signal);
+    // Phase 1 — the real trigger wait: cheap status polls, no sample transfer.
+    // The caller already shows "waiting for trigger"; hold it until the
+    // hardware reports the trigger fired (or the capture already completed).
     for (;;) {
-      try {
-        const r = await rpc(
-          "capture_wait",
-          {
-            timeout: POLL_TIMEOUT,
-            segments: p.segments,
-            format: p.format,
-            include_vcd: true,
-            include_csv: true,
-          },
-          POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
-          stopCtl.current?.signal,
-        );
-        return submitCapture(r, Number(ela.pretrigger));
-      } catch (e) {
-        if (e instanceof RpcError && e.type === "TimeoutError") continue;
-        throw e;
-      }
+      const s = await rpc("capture_status", {}, 15000, signal);
+      if (s.triggered || s.done) break;
+      await sleep(STATUS_POLL_MS, signal);
     }
+    // Phase 2 — the trigger has fired; the remaining wait is the sample
+    // transfer, which for a wide/deep core (e.g. the 160-bit AXI monitor over
+    // USB-Blaster) is the bulk of the time. Say so, instead of still claiming
+    // to wait for a trigger that already passed.
+    setWaiting(false);
+    const window = Number(p.pretrigger) + Number(p.posttrigger) + 1;
+    setStatus(`trigger fired - reading back ${window} samples...`);
+    const r = await rpc(
+      "capture_wait",
+      {
+        timeout: POLL_TIMEOUT,
+        segments: p.segments,
+        format: p.format,
+        include_vcd: true,
+        include_csv: true,
+      },
+      POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
+      signal,
+    );
+    return submitCapture(r, Number(ela.pretrigger));
   }
 
   /** Disarm the core after a stopped wait (queues behind the in-flight

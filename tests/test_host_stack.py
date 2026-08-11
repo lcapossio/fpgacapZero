@@ -258,6 +258,18 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(imm2.trigger.mask, 0)
         self.assertEqual(imm2.pretrigger, 0)
 
+    def test_status_reports_capture_bits(self):
+        # A cheap poll (no sample transfer) so a client can tell "waiting for
+        # trigger" from "reading back".
+        analyzer = Analyzer(FakeTransport())
+        analyzer.connect()
+        st = analyzer.status()
+        self.assertEqual(set(st), {"armed", "triggered", "done", "overflow"})
+        for v in st.values():
+            self.assertIsInstance(v, bool)
+        # Default FakeTransport STATUS has the done bit (0x4) set.
+        self.assertTrue(st["done"])
+
     def test_capture_and_export_json(self):
         analyzer = Analyzer(FakeTransport())
         analyzer.connect()

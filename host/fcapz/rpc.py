@@ -878,6 +878,12 @@ class RpcServer:
                 raise RuntimeError("not configured - send `configure` and `arm` first")
             return self._capture_readout(analyzer, cfg, req)
 
+        if cmd == "capture_status":
+            # Cheap status poll (no sample transfer): lets a client show the
+            # real "waiting for trigger" phase, then switch to "reading back"
+            # once the trigger has fired -- instead of one opaque blocking wait.
+            return self._ok(**analyzer.status())
+
         if cmd == "eio_connect":
             if self._eio is not None:
                 self._eio.close()
