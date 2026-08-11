@@ -34,12 +34,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 // the wire as strings so wide values (e.g. 160-bit AXI samples) don't round; wide
 // sample data uses the string-based VCD/CSV exports, not the JSON-number result.
 const SAFE_SAMPLE_BITS = 53;
-// Trigger Immediate is a "peek at the bus now", not a deep trace. Reading a full
-// 1024-deep buffer of wide samples (e.g. a 160-bit AXI monitor) over a slow
-// per-word fallback transport takes ~60 s — long enough to look like a hang. An
-// immediate snapshot doesn't need the whole buffer, so cap its window on wide
-// cores; armed captures still keep the user's full pre/post-trigger depth.
-const IMMEDIATE_WIDE_SAMPLES = 64;
 
 /** Client-side readback budget (ms). The server has no readback deadline, but
  *  the client RPC needs one big enough for the whole buffer. Scale it with the
@@ -113,13 +107,14 @@ export function RunPanel({
     const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
     // Immediate fires on sample 0, so there is no fresh pre-trigger history —
     // the server forces pretrigger=0 (else the pretrigger slots hold stale
-    // samples with a backwards timestamp jump). Match it here so the sample
-    // budget and the trigger marker (sample 0) line up with what's captured.
+    // samples with a backwards timestamp jump). Match it here so the trigger
+    // marker (sample 0) lines up with what's captured. Fold the pre-trigger
+    // depth into the post window so an immediate capture still grabs the same
+    // total sample count as an armed one — same window, just no trigger.
     const pre = immediate ? 0 : Number(ela.pretrigger);
-    let post = Number(ela.posttrigger);
-    if (immediate && identity.sample_width > SAFE_SAMPLE_BITS) {
-      post = Math.min(post, Math.max(0, IMMEDIATE_WIDE_SAMPLES - pre - 1));
-    }
+    const post = immediate
+      ? Number(ela.pretrigger) + Number(ela.posttrigger)
+      : Number(ela.posttrigger);
     return {
       channel: Number(ela.channel),
       pretrigger: pre,
