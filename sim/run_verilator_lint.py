@@ -168,6 +168,18 @@ TARGETS = (
         ),
     ),
     LintTarget(
+        name="fcapz_axi_mon_intel",
+        top="fcapz_axi_mon_intel",
+        sources=(
+            SIM / "sld_virtual_jtag_stub.v",
+            *ELA_CORE,
+            RTL / "jtag_pipe_iface.v",
+            RTL / "fcapz_axi_mon.v",
+            RTL / "jtag_tap" / "jtag_tap_intel.v",
+            RTL / "fcapz_axi_mon_intel.v",
+        ),
+    ),
+    LintTarget(
         name="fcapz_ejtagaxi",
         top="fcapz_ejtagaxi",
         sources=EJTAG_AXI_CORE,

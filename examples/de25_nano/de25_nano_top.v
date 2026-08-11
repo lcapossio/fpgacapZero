@@ -12,6 +12,9 @@
 // - EIO on sld_virtual_jtag instance 3 exposes switches/buttons/counter bits,
 //   drives the eight active-low user LEDs, and feeds the ELA external trigger.
 // - EJTAG-AXI on sld_virtual_jtag instance 4 connects to axi4_test_slave.
+// - AXI monitor (DECODE_EN) on sld_virtual_jtag instance 5 passively taps the
+//   EJTAG-AXI bridge's AXI4-Lite bus, so host-driven bridge traffic can be
+//   captured and triggered on (aw_hs / any_err) over the same USB-Blaster.
 
 module de25_nano_top (
     input  wire       CLOCK1_50,
@@ -32,6 +35,8 @@ module de25_nano_top (
     wire [7:0] eio_probe_out;
     wire trigger_out_unused;
     wire ela_armed;
+    wire axi_mon_trig_out_unused;
+    wire axi_mon_armed_unused;
     reg [7:0] eio_out_sync1 = 8'h00;
     reg [7:0] eio_out_sync2 = 8'h00;
     reg ela_armed_d = 1'b0;
@@ -230,6 +235,54 @@ module de25_nano_top (
         .s_axi_rlast(bridge_rlast),
         .s_axi_rvalid(bridge_rvalid),
         .s_axi_rready(bridge_rready)
+    );
+
+    // AXI monitor (instance 5): passively tap the bridge <-> slave AXI4-Lite
+    // bus. Inputs only -- it never drives the bus. DECODE_EN adds the
+    // transaction-events word (aw_hs / any_err / ...) at the sample LSB so the
+    // host can trigger on bus events. ARESETN is active-low; por_rst is active-high.
+    // TRIG_STAGES=1 keeps the trigger on the simple comparator path that the
+    // host's event_capture_config programs (TRIG_VALUE/MASK/MODE); the
+    // multi-stage sequencer (TRIG_STAGES>1) would ignore that config. STOR_QUAL
+    // and REL_COMPARE off match the hardware-validated Arty event-trigger setup.
+    fcapz_axi_mon_intel #(
+        .PROTO("AXI4LITE"),
+        .ADDR_W(32),
+        .DATA_W(32),
+        .DEPTH(DEPTH),
+        .TRIG_STAGES(1),
+        .STOR_QUAL(0),
+        .TIMESTAMP_W(32),
+        .INPUT_PIPE(1),
+        .NUM_SEGMENTS(1),
+        .REL_COMPARE(0),
+        .DECODE_EN(1),
+        .CTRL_CHAIN(5)
+    ) u_axi_mon (
+        .ACLK(CLOCK1_50),
+        .ARESETN(~por_rst),
+        .AWADDR(bridge_awaddr),
+        .AWPROT(bridge_awprot),
+        .AWVALID(bridge_awvalid),
+        .AWREADY(bridge_awready),
+        .WDATA(bridge_wdata),
+        .WSTRB(bridge_wstrb),
+        .WVALID(bridge_wvalid),
+        .WREADY(bridge_wready),
+        .BRESP(bridge_bresp),
+        .BVALID(bridge_bvalid),
+        .BREADY(bridge_bready),
+        .ARADDR(bridge_araddr),
+        .ARPROT(bridge_arprot),
+        .ARVALID(bridge_arvalid),
+        .ARREADY(bridge_arready),
+        .RDATA(bridge_rdata),
+        .RRESP(bridge_rresp),
+        .RVALID(bridge_rvalid),
+        .RREADY(bridge_rready),
+        .trigger_in(1'b0),
+        .trigger_out(axi_mon_trig_out_unused),
+        .armed_out(axi_mon_armed_unused)
     );
 
     // DE25-Nano user LEDs are active-low. LEDR[0] shows heartbeat unless

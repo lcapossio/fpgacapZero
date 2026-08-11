@@ -35,6 +35,9 @@ set verilog_files [list \
     "${repo_path}/rtl/fcapz_eio_intel.v" \
     "${repo_path}/rtl/jtag_reg_iface.v" \
     "${repo_path}/rtl/jtag_burst_read.v" \
+    "${repo_path}/rtl/jtag_pipe_iface.v" \
+    "${repo_path}/rtl/fcapz_axi_mon.v" \
+    "${repo_path}/rtl/fcapz_axi_mon_intel.v" \
     "${repo_path}/rtl/jtag_tap/jtag_tap_intel.v" \
     "${repo_path}/tb/axi4_test_slave.v" \
     "${example_dir}/de25_nano_top.v" \
