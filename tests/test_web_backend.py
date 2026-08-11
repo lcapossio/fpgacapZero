@@ -142,6 +142,10 @@ def test_connect_echoes_resolved_ir_table(monkeypatch):
     assert r["ok"] is True and r["ir_table"] == "ultrascale"
     r = _rpc(c, "connect", backend="openocd", tap="xc7a100t.tap", chain=1).json()
     assert r["ok"] is True and r["ir_table"] == "xilinx7"
+    # USB-Blaster is Intel/Altera sld_virtual_jtag: no Xilinx IR preset, so the
+    # session is labeled by vendor instead of defaulting to xilinx7.
+    r = _rpc(c, "connect", backend="usb_blaster", tap="auto").json()
+    assert r["ok"] is True and r["ir_table"] == "intel"
 
 
 def test_capture_returns_samples(monkeypatch):

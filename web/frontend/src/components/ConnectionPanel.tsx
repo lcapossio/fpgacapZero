@@ -34,6 +34,8 @@ const VENDOR_NAMES: Record<string, string> = {
   gowin: "Gowin",
   xilinx7: "Xilinx 7-series",
   ultrascale: "Xilinx UltraScale+",
+  intel: "Intel/Altera",
+  altera: "Intel/Altera",
 };
 
 function vendorName(ir: string): string {

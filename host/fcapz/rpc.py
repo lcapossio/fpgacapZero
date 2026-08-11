@@ -308,6 +308,9 @@ class RpcServer:
         return self._ok(**payload)
 
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
+    # "intel"/"altera" are vendor labels for the USB-Blaster (sld_virtual_jtag)
+    # transport, which uses no IR preset; they map to None so echoing one back
+    # is a harmless no-op on the shared build path.
     _IR_TABLES = {
         "": None,
         "xilinx7": None,
@@ -317,6 +320,8 @@ class RpcServer:
         "us": OpenOcdTransport.IR_TABLE_US,
         "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+        "intel": None,
+        "altera": None,
     }
 
     @classmethod
@@ -332,9 +337,14 @@ class RpcServer:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
         name = req.get("ir_table")
-        if name is None or not str(name).strip():
-            return _infer_ir_table_name(str(req.get("tap", "")))
-        return str(name)
+        if name is not None and str(name).strip():
+            return str(name)
+        # USB-Blaster is Intel/Altera sld_virtual_jtag -- it has no Xilinx IR
+        # preset, so label the session by vendor instead of defaulting to the
+        # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
+        if req.get("backend") == "usb_blaster":
+            return "intel"
+        return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
     def _probe_ejtag_axi(analyzer: Analyzer, chains):
