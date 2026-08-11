@@ -69,7 +69,11 @@ _CORE_NAMES = {
 
 
 class RpcServer:
-    def __init__(self, openocd_launcher: OpenOcdLauncher | None = None):
+    def __init__(
+        self,
+        openocd_launcher: OpenOcdLauncher | None = None,
+        quartus_stp_path: str | None = None,
+    ):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
@@ -79,6 +83,10 @@ class RpcServer:
         # Optional server-managed OpenOCD (None = the openocd_* commands are
         # disabled and report so). Configured only by the web server launch.
         self._openocd_launcher = openocd_launcher
+        # Optional quartus_stp override for USB-Blaster connects. When a request
+        # omits "quartus_stp", this server default is used; when both are None
+        # the transport auto-detects (PATH / $QUARTUS_ROOTDIR / install roots).
+        self._quartus_stp_path = quartus_stp_path
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
@@ -421,7 +429,7 @@ class RpcServer:
             return QuartusStpTransport(
                 hardware_name=req.get("hardware"),
                 device_name=None if tap in ("", "auto", "xc7a100t.tap") else tap,
-                quartus_stp_path=req.get("quartus_stp"),
+                quartus_stp_path=req.get("quartus_stp") or self._quartus_stp_path,
             )
         raise ValueError(f"unknown backend: {backend}")
 

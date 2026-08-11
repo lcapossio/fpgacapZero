@@ -128,6 +128,7 @@ def create_app(
     surfer_dir: Optional[str] = None,
     cors_origins: Iterable[str] = (),
     openocd_launcher: Optional[OpenOcdLauncher] = None,
+    quartus_stp_path: Optional[str] = None,
     bind_host: Optional[str] = None,
 ) -> FastAPI:
     """Build the fcapz web app.
@@ -139,7 +140,12 @@ def create_app(
     it lives outside ``static_dir`` so a frontend rebuild can't wipe it.
     """
     if gateway is None:
-        gateway = RpcGateway(RpcServer(openocd_launcher=openocd_launcher))
+        gateway = RpcGateway(
+            RpcServer(
+                openocd_launcher=openocd_launcher,
+                quartus_stp_path=quartus_stp_path,
+            )
+        )
     app = FastAPI(title="fpgacapZero web", version="1")
     app.state.gateway = gateway
     # OpenOCD instances this server starts are torn down on interpreter exit via

@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
+    find_quartus_stp,
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
     QuartusStpTransport,
@@ -363,6 +364,29 @@ class QuartusStpTransportTests(unittest.TestCase):
         for idx, value in enumerate(values):
             packed |= (value & mask) << (idx * element_width)
         return f"{packed:0256b}"
+
+    def test_find_quartus_stp_explicit_passthrough(self):
+        self.assertEqual(find_quartus_stp("/x/quartus_stp"), "/x/quartus_stp")
+
+    def test_find_quartus_stp_prefers_shell_over_windowed(self):
+        # Auto-detect must return the quartus_stp Tcl shell, never the
+        # quartus_stpw windowed SignalTap GUI that sits beside it in bin/.
+        import os
+        import tempfile
+
+        suffix = ".exe" if os.name == "nt" else ""
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "quartus" / "bin64"
+            bindir.mkdir(parents=True)
+            (bindir / f"quartus_stpw{suffix}").write_text("")  # GUI decoy
+            (bindir / f"quartus_stp{suffix}").write_text("")
+            with patch("fcapz.transport.shutil.which", return_value=None), patch.dict(
+                os.environ, {"QUARTUS_ROOTDIR": str(Path(tmp) / "quartus")}
+            ):
+                got = find_quartus_stp()
+            self.assertIsNotNone(got)
+            self.assertTrue(got.lower().endswith(f"quartus_stp{suffix}".lower()))
+            self.assertNotIn("stpw", got.lower())
 
     def test_shift_string_is_fixed_width_binary_value(self):
         self.assertEqual(QuartusStpTransport._int_to_shift_string(0b0101, 4), "0101")

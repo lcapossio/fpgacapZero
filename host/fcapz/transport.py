@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import queue
@@ -490,6 +491,69 @@ class OpenOcdTransport(Transport):
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
+def find_quartus_stp(explicit: str | None = None) -> str | None:
+    """Locate the ``quartus_stp`` executable for the USB-Blaster transport.
+
+    Resolution order, first hit wins:
+
+    1. ``explicit`` (an operator-supplied path — returned as-is),
+    2. the ``PATH``,
+    3. ``$QUARTUS_ROOTDIR`` (Quartus sets this in its shells),
+    4. common Intel/Altera install roots, newest version first.
+
+    Returns ``None`` when nothing is found, so callers can raise a message
+    that fits their context.  Kept OS-agnostic: Windows drives + Program
+    Files, POSIX ``/opt`` / ``/tools`` / ``$HOME`` are all globbed.
+    """
+    if explicit:
+        return explicit
+    for name in ("quartus_stp", "quartus_stp.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    roots: list[str] = []
+    rootdir = os.environ.get("QUARTUS_ROOTDIR")
+    if rootdir:
+        roots.append(rootdir)
+    base_names = (
+        "altera_pro",
+        "intelFPGA_pro",
+        "intelFPGA",
+        "altera_lite",
+        "altera",
+        "quartus",
+    )
+    if os.name == "nt":
+        prefixes = [f"{d}:\\" for d in "CDE"]
+        for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            if os.environ.get(env):
+                prefixes.append(os.environ[env])
+    else:
+        prefixes = ["/opt", "/tools", os.path.expanduser("~"), "/usr/local"]
+    for prefix in prefixes:
+        for base in base_names:
+            roots.append(os.path.join(prefix, base))
+
+    # Exact executable name only — a "quartus_stp*" glob would also match
+    # quartus_stpw (the windowed SignalTap GUI), which is not the Tcl shell.
+    # ".exe" first on Windows so the shell wins over any extensionless sibling.
+    exe_names = ("quartus_stp.exe", "quartus_stp") if os.name == "nt" else ("quartus_stp",)
+    # A root may already be a Quartus rootdir (has bin/) or a parent holding
+    # one or more version dirs; try all three shapes.
+    for root in roots:
+        for exe in exe_names:
+            for pat in (
+                os.path.join(root, "bin*", exe),
+                os.path.join(root, "quartus", "bin*", exe),
+                os.path.join(root, "*", "quartus", "bin*", exe),
+            ):
+                for match in sorted(glob.glob(pat), reverse=True):  # newest first
+                    if os.path.isfile(match):
+                        return match
+    return None
+
+
 class QuartusStpTransport(Transport):
     """
     Intel/Altera USB-Blaster transport through Quartus ``quartus_stp``.
@@ -550,15 +614,11 @@ class QuartusStpTransport(Transport):
     def connect(self) -> None:
         argv = self._quartus_stp_argv
         if argv is None:
-            quartus_stp = (
-                self._quartus_stp_path
-                or shutil.which("quartus_stp")
-                or shutil.which("quartus_stp.exe")
-            )
+            quartus_stp = find_quartus_stp(self._quartus_stp_path)
             if not quartus_stp:
                 raise RuntimeError(
-                    "quartus_stp not found. Add Quartus bin to PATH or pass "
-                    "quartus_stp_path=."
+                    "quartus_stp not found. Add the Quartus bin dir to PATH, set "
+                    "$QUARTUS_ROOTDIR, or pass quartus_stp_path=."
                 )
             argv = [quartus_stp, "-s"]
 
