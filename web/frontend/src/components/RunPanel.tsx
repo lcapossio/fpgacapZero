@@ -102,6 +102,37 @@ export function RunPanel({
     onActiveChange?.(busy || running);
   }, [busy, running, onActiveChange]);
 
+  /** Run a readback RPC while showing live progress. The readback is one
+   *  blocking JTAG transfer, so estimate the sample count from elapsed time and
+   *  the measured per-sample rate (exact elapsed seconds shown alongside). The
+   *  rate self-calibrates each capture, so after the first readback "~X of N"
+   *  tracks closely. `label` prefixes the status line. Used by both immediate
+   *  ("reading back") and armed ("trigger fired - reading back") captures. */
+  async function withReadbackProgress(
+    nSamples: number,
+    label: string,
+    run: (signal: AbortSignal | undefined) => Promise<Record<string, unknown>>,
+    signal: AbortSignal | undefined,
+  ) {
+    const start = performance.now();
+    const rate = readbackRateRef.current ?? estMsPerSample(identityRef.current);
+    const tick = () => {
+      const elapsed = performance.now() - start;
+      const done = Math.min(nSamples - 1, Math.floor(elapsed / rate));
+      setStatus(`${label}~${done} of ${nSamples} samples (${Math.round(elapsed / 1000)}s)`);
+    };
+    tick();
+    // Only tick for readbacks long enough to matter; short ones finish first.
+    const timer = nSamples > 128 ? window.setInterval(tick, 300) : 0;
+    try {
+      const r = await run(signal);
+      if (nSamples > 0) readbackRateRef.current = (performance.now() - start) / nSamples;
+      return r;
+    } finally {
+      if (timer) window.clearInterval(timer);
+    }
+  }
+
   function params(immediate: boolean, timeout: number) {
     const identity = identityRef.current;
     const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
@@ -157,12 +188,22 @@ export function RunPanel({
     return (r.sample_count as number | string | undefined) ?? "?";
   }
 
-  /** Trigger Immediate: one bundled capture call — it fires right away. */
+  /** Trigger Immediate: one bundled capture call — it fires right away. The
+   *  readback of a wide/deep core is the bulk of the time, so show the same
+   *  live progress as an armed capture. */
   async function immediateOnce() {
-    const r = await rpc(
-      "capture",
-      params(true, IMMEDIATE_TIMEOUT),
-      IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
+    const p = params(true, IMMEDIATE_TIMEOUT);
+    const nSamples = Number(p.pretrigger) + Number(p.posttrigger) + 1;
+    const r = await withReadbackProgress(
+      nSamples,
+      "reading back ",
+      (signal) =>
+        rpc(
+          "capture",
+          p,
+          IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
+          signal,
+        ),
       stopCtl.current?.signal,
     );
     return submitCapture(r, 0);
@@ -190,40 +231,25 @@ export function RunPanel({
     // to wait for a trigger that already passed.
     setWaiting(false);
     const nSamples = Number(p.pretrigger) + Number(p.posttrigger) + 1;
-    // Live progress: the readback is one blocking JTAG transfer, so estimate the
-    // sample count from elapsed time and the measured per-sample rate (exact
-    // elapsed seconds shown alongside). The rate self-calibrates each capture,
-    // so after the first readback the "~X of N" tracks closely.
-    const start = performance.now();
-    const rate = readbackRateRef.current ?? estMsPerSample(identityRef.current);
-    const tick = () => {
-      const elapsed = performance.now() - start;
-      const done = Math.min(nSamples - 1, Math.floor(elapsed / rate));
-      setStatus(
-        `trigger fired - reading back ~${done} of ${nSamples} samples (${Math.round(elapsed / 1000)}s)`,
-      );
-    };
-    tick();
-    // Only tick for readbacks long enough to matter; short ones finish first.
-    const timer = nSamples > 128 ? window.setInterval(tick, 300) : 0;
-    try {
-      const r = await rpc(
-        "capture_wait",
-        {
-          timeout: POLL_TIMEOUT,
-          segments: p.segments,
-          format: p.format,
-          include_vcd: true,
-          include_csv: true,
-        },
-        POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
-        signal,
-      );
-      if (nSamples > 0) readbackRateRef.current = (performance.now() - start) / nSamples;
-      return submitCapture(r, Number(ela.pretrigger));
-    } finally {
-      if (timer) window.clearInterval(timer);
-    }
+    const r = await withReadbackProgress(
+      nSamples,
+      "trigger fired - reading back ",
+      (sig) =>
+        rpc(
+          "capture_wait",
+          {
+            timeout: POLL_TIMEOUT,
+            segments: p.segments,
+            format: p.format,
+            include_vcd: true,
+            include_csv: true,
+          },
+          POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
+          sig,
+        ),
+      signal,
+    );
+    return submitCapture(r, Number(ela.pretrigger));
   }
 
   /** Disarm the core after a stopped wait (queues behind the in-flight
