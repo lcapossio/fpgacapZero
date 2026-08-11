@@ -603,8 +603,15 @@ class Analyzer:
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
         trig = TriggerConfig(mode="value_match", value=0, mask=0)
+        # An immediate trigger fires on the very first sample, so there is no
+        # fresh pre-trigger history to capture: the pretrigger slots would keep
+        # stale data from a prior arm (garbage samples + a backwards timestamp
+        # jump at the boundary). Force pretrigger=0 so the window is all-fresh,
+        # post-trigger only, with a monotonic timestamp.
         if hw_trig_stages <= 1:
-            return replace(base, trigger=trig, sequence=None, ext_trigger_mode=0)
+            return replace(
+                base, trigger=trig, sequence=None, ext_trigger_mode=0, pretrigger=0
+            )
         imm_stage = SequencerStage(
             cmp_mode_a=0,
             cmp_mode_b=0,
@@ -617,7 +624,9 @@ class Analyzer:
             value_b=0,
             mask_b=0,
         )
-        return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
+        return replace(
+            base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0, pretrigger=0
+        )
 
     @_selected_transaction
     def arm(self) -> None:

@@ -79,7 +79,11 @@ export function RunPanel({
   function params(immediate: boolean, timeout: number) {
     const identity = identityRef.current;
     const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
-    const pre = Number(ela.pretrigger);
+    // Immediate fires on sample 0, so there is no fresh pre-trigger history —
+    // the server forces pretrigger=0 (else the pretrigger slots hold stale
+    // samples with a backwards timestamp jump). Match it here so the sample
+    // budget and the trigger marker (sample 0) line up with what's captured.
+    const pre = immediate ? 0 : Number(ela.pretrigger);
     let post = Number(ela.posttrigger);
     if (immediate && identity.sample_width > SAFE_SAMPLE_BITS) {
       post = Math.min(post, Math.max(0, IMMEDIATE_WIDE_SAMPLES - pre - 1));
@@ -108,7 +112,7 @@ export function RunPanel({
     };
   }
 
-  function submitCapture(r: Record<string, unknown>) {
+  function submitCapture(r: Record<string, unknown>, triggerSample: number) {
     setOverflow(Boolean(r.overflow));
     if (typeof r.vcd === "string") {
       pushCapture({
@@ -119,7 +123,8 @@ export function RunPanel({
         // The trigger sample is the `pretrigger`-th stored sample; the VCD emits
         // one `#time` line per sample in order, so its time is that line's — for
         // timestamped and plain captures alike (no index==time assumption).
-        triggerTime: vcdTimeAtSample(r.vcd, Number(ela.pretrigger)),
+        // Immediate captures have pretrigger=0, so the marker sits at sample 0.
+        triggerTime: vcdTimeAtSample(r.vcd, triggerSample),
       });
     }
     return (r.sample_count as number | string | undefined) ?? "?";
@@ -133,7 +138,7 @@ export function RunPanel({
       IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
       stopCtl.current?.signal,
     );
-    return submitCapture(r);
+    return submitCapture(r, 0);
   }
 
   /** Arm once, then poll until the trigger fires — no deadline. The hardware
@@ -157,7 +162,7 @@ export function RunPanel({
           POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
           stopCtl.current?.signal,
         );
-        return submitCapture(r);
+        return submitCapture(r, Number(ela.pretrigger));
       } catch (e) {
         if (e instanceof RpcError && e.type === "TimeoutError") continue;
         throw e;
