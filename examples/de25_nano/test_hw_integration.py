@@ -75,6 +75,7 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_axi_mon_intel.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_intel.v",
     _ROOT / "tb" / "axi4_test_slave.v",
+    _EXAMPLE_DIR / "axi4_traffic_gen.v",
     _EXAMPLE_DIR / "de25_nano_top.v",
     _EXAMPLE_DIR / "de25_nano.qsf",
     _EXAMPLE_DIR / "de25_nano.sdc",
@@ -693,13 +694,16 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestAxiMonitor(unittest.TestCase):
-    """AXI monitor on instance 5, observing the instance-4 bridge bus.
+    """AXI monitor on instance 5, observing a muxed AXI4-Lite bus.
 
-    The monitor passively taps the EJTAG-AXI bridge's AXI4-Lite bus. These
-    tests arm the monitor on the decode layer's transaction-event bits, then
-    drive traffic via the bridge on instance 4 and confirm the monitor triggers
-    (or doesn't) by reading STATUS. Selective event triggering on real silicon
-    is the AXI monitor's headline.
+    The monitor taps the EJTAG-AXI bridge while the bridge is active, and a
+    self-stimulating traffic generator (axi4_traffic_gen -> its own test slave)
+    otherwise. The generator emits only *clean* writes and reads, so:
+      - arming on a generator event (aw_hs) triggers on its own, with no host
+        driving the bridge -- this is what makes the monitor demoable in the GUI;
+      - arming on any_err stays armed (the generator never forges an error), and
+        only a deliberate host-driven error response fires it. That asymmetry is
+        what keeps the selective-trigger guarantee testable on real silicon.
     """
 
     STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done
@@ -723,11 +727,21 @@ class TestAxiMonitor(unittest.TestCase):
         self.t.select_chain(AXI_MON_CHAIN)
         return self.t.read_reg(self.STATUS)
 
-    def _arm(self, *events):
+    def _configure_arm(self, *events):
+        # force_idle first: the always-on generator usually leaves the monitor
+        # triggered+done from a prior test, so a soft reset guarantees a clean arm.
         cfg = self.mon.event_capture_config(*events, pretrigger=2, posttrigger=12, depth=1024)
         self.an.configure(cfg)
+        self.an.force_idle()
         self.an.arm()
-        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+
+    def _wait_triggered(self, timeout: float = 3.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._status() & 0x2:
+                return True
+            time.sleep(0.02)
+        return False
 
     def test_detect_and_geometry(self):
         """The monitor identity/geometry is reachable on instance 5."""
@@ -739,33 +753,38 @@ class TestAxiMonitor(unittest.TestCase):
         self.assertTrue(geo.decode, "expected a DECODE_EN=1 build")
         self.assertEqual(geo.sample_width, 160)
 
-    def test_triggers_on_write_handshake(self):
-        """Arm on aw_hs; a host AXI write makes the monitor trigger + complete."""
-        self._arm("aw_hs")
-        self.bridge.axi_write(0x00000010, 0x12345678)
-        status = self._status()
-        self.assertTrue(status & 0x2, f"no trigger on the AW handshake (0x{status:08X})")
-        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+    def test_triggers_on_autonomous_write(self):
+        """Arm on aw_hs with NO host driving the bridge: the self-stimulating
+        generator's write traffic makes the monitor trigger + complete on its
+        own. This is the behavior that makes the monitor usable from the GUI."""
+        self._configure_arm("aw_hs")
+        self.assertTrue(
+            self._wait_triggered(),
+            "monitor did not trigger on autonomous generator traffic",
+        )
+        self.assertTrue(self._status() & 0x4, "capture did not complete")
 
     def test_triggers_on_slverr(self):
-        """Arm on any_err; a write to the slave's ERROR_ADDR triggers the monitor.
-
-        The test slave returns SLVERR for 0xFFFFFFFC; the bridge surfaces that as
-        AXIError, but the error response still appears on the bus, where the
-        monitor's any_err event fires.
-        """
+        """Arm on any_err; the generator never forges an error, so the monitor
+        stays armed until a deliberate host write to the slave's ERROR_ADDR
+        produces a SLVERR on the bridge bus, which fires any_err."""
         from fcapz.ejtagaxi import AXIError
 
-        self._arm("any_err")
+        self._configure_arm("any_err")
+        self.assertEqual(
+            self._status() & 0x1, 1,
+            "monitor should stay armed on any_err (generator forged an error?)",
+        )
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0xDEADBEEF)
-        status = self._status()
-        self.assertTrue(status & 0x2, f"no trigger on the error response (0x{status:08X})")
-        self.assertTrue(status & 0x4, f"capture did not complete (0x{status:08X})")
+        self.assertTrue(self._wait_triggered(), "no trigger on the error response")
+        self.assertTrue(self._status() & 0x4, "capture did not complete")
 
     def test_no_trigger_on_clean_write(self):
-        """Arm on any_err; a *clean* write must NOT trigger (selective events)."""
-        self._arm("any_err")
+        """Arm on any_err; neither the generator's clean traffic nor a clean
+        host write triggers it (selective events)."""
+        self._configure_arm("any_err")
+        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
         self.bridge.axi_write(0x00000010, 0x12345678)  # OKAY response, no error
         status = self._status()
         self.assertFalse(status & 0x2, f"false trigger on a clean write (0x{status:08X})")

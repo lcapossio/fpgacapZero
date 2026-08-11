@@ -40,6 +40,7 @@ set verilog_files [list \
     "${repo_path}/rtl/fcapz_axi_mon_intel.v" \
     "${repo_path}/rtl/jtag_tap/jtag_tap_intel.v" \
     "${repo_path}/tb/axi4_test_slave.v" \
+    "${example_dir}/axi4_traffic_gen.v" \
     "${example_dir}/de25_nano_top.v" \
 ]
 
