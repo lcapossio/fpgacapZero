@@ -298,9 +298,10 @@ module de25_nano_top (
     // Self-stimulating traffic generator + its own test slave. Gives the AXI
     // monitor live, clean traffic to trigger on when the EJTAG-AXI bridge is
     // idle. Independent of the bridge's slave, so the EJTAG read/write tests are
-    // unaffected. PERIOD sets the idle gap between transactions (~82 us here).
+    // unaffected. PERIOD sets the idle gap between transactions (~5 us at 50 MHz),
+    // dense enough that an armed capture window shows several back-to-back xfers.
     axi4_traffic_gen #(
-        .ADDR_W(32), .DATA_W(32), .PERIOD(4096), .BASE_ADDR(32'h0000_0020)
+        .ADDR_W(32), .DATA_W(32), .PERIOD(256), .BASE_ADDR(32'h0000_0020)
     ) u_axi_gen (
         .clk(CLOCK1_50), .rst(por_rst),
         .m_axi_awaddr(gen_awaddr), .m_axi_awlen(gen_awlen), .m_axi_awsize(gen_awsize),
