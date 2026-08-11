@@ -696,6 +696,26 @@ class FakeMonitorOnlyTransport(FakeChainedAxiMonTransport):
     CORE_CHAINS = (2,)
 
 
+class FakeDe25AxiMonTransport(FakeTransport):
+    """DE25-Nano shape: ELA on USER1, AXI monitor on sld_virtual_jtag 5.
+
+    Unlike the Arty shape (monitor on USER2), the DE25 monitor sits on instance
+    5, outside the old USER1/2 discovery sweep -- exercises _ELA_SCAN_CHAINS.
+    """
+
+    CORE_CHAINS = (1, 5)
+
+    _AXI_REGS = {
+        0x00E8: (0x414D << 16) | (1 << 8) | 1,
+        0x00EC: 32 | (32 << 8),
+    }
+
+    def read_reg(self, addr: int) -> int:
+        if addr in self._AXI_REGS:
+            return self._AXI_REGS[addr] if self.active_chain == 5 else 0
+        return super().read_reg(addr)
+
+
 def test_axi_mon_probe_finds_monitor_on_other_chain(monkeypatch):
     """Connected to chain 1 while the monitor lives on chain 2: the probe
     still returns the monitor's full identity, with `chain` saying where it
@@ -752,6 +772,23 @@ def test_list_cores_reports_other_chain_monitor(monkeypatch):
     mon = [x for x in cores if x["type"] == "axi_mon"]
     assert len(mon) == 1 and mon[0]["chain"] == 2
     assert mon[0]["info"]["decode"] is True
+
+
+def test_list_cores_reports_monitor_on_instance_5(monkeypatch):
+    """The DE25-Nano AXI monitor sits on sld_virtual_jtag instance 5, outside
+    the original USER1/2 sweep. Connected to the USER1 ELA, list_cores and
+    axi_mon_probe must still surface the monitor on chain 5."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req: FakeDe25AxiMonTransport()
+    )
+    c = TestClient(create_app())
+    _rpc(c, "connect", **_GOWIN)  # explicit chain 1 (the ELA)
+    cores = _rpc(c, "list_cores").json()["cores"]
+    mon = [x for x in cores if x["type"] == "axi_mon"]
+    assert len(mon) == 1 and mon[0]["chain"] == 5
+    assert mon[0]["info"]["decode"] is True
+    r = _rpc(c, "axi_mon_probe").json()
+    assert r["ok"] is True and r["present"] is True and r["chain"] == 5
 
 
 def test_rebind_switches_chain_without_reconnect(monkeypatch):

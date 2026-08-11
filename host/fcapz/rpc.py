@@ -67,6 +67,16 @@ _CORE_NAMES = {
     0x414D: "AXI Monitor",
 }
 
+# Auto-discovery sweep for ELA / AXI-monitor cores. USER1/2 carry the ELA
+# control/data; some reference designs place an AXI monitor on a higher
+# sld_virtual_jtag instance (the DE25-Nano monitor is on instance 5). All of
+# these speak the ELA register DR protocol, so probing them is a read-only
+# identity check -- a chain with no such core, or no such instance, simply
+# reports no identity and is skipped. The EJTAG-AXI bridge (canonically chain 4)
+# speaks a different DR protocol and is deliberately excluded so it never sees a
+# stray ELA read frame.
+_ELA_SCAN_CHAINS = (1, 2, 5)
+
 
 class RpcServer:
     def __init__(
@@ -180,10 +190,10 @@ class RpcServer:
         if mon_entry is not None:
             cores.append(mon_entry)
 
-        # Other conservative chains (USER1/2): a plain or monitor ELA the
-        # client can switch the session to — chains are an implementation
-        # detail the UI resolves with a "use this core" action.
-        for chain in (1, 2):
+        # Other ELA-protocol chains (see _ELA_SCAN_CHAINS): a plain or monitor
+        # ELA the client can switch the session to — chains are an
+        # implementation detail the UI resolves with a "use this core" action.
+        for chain in _ELA_SCAN_CHAINS:
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -382,18 +392,19 @@ class RpcServer:
     def _probe_axi_mon(analyzer: Analyzer):
         """``(chain, geometry, probes)`` of the AXI monitor, or None.
 
-        The connected chain is answered directly; otherwise a conservative
-        sweep of USER chains 1-2 only — the same set discover_eio probes — so
-        cores speaking a different DR protocol (EJTAG bridges on 3/4) never
-        see stray shifts. Restores the analyzer's chain afterwards, so the
-        caller's session is untouched wherever the monitor was found.
+        The connected chain is answered directly; otherwise an ELA-protocol
+        sweep (see _ELA_SCAN_CHAINS: USER1/2 plus the monitor instance 5 the
+        DE25-Nano uses) so cores speaking a different DR protocol (the EJTAG
+        bridge on chain 4) never see stray shifts. Restores the analyzer's chain
+        afterwards, so the caller's session is untouched wherever the monitor
+        was found.
         """
         mon = AxiMonitor(analyzer)
         geo = mon.geometry() if mon.present else None
         if geo is not None:
             return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
         result = None
-        for chain in (1, 2):
+        for chain in _ELA_SCAN_CHAINS:
             if chain == analyzer.bscan_chain:
                 continue
             try:
