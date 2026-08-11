@@ -54,6 +54,15 @@ function readbackBudgetMs(id: Identity | null): number {
   return words * 15;
 }
 
+/** First-capture estimate of ms/sample for the readback progress, before a real
+ *  rate has been measured: the slow per-word JTAG path runs ~4 ms per 32-bit
+ *  word. Burst-capable narrow cores are far faster (and finish before the
+ *  estimate matters); wide cores like the 160-bit monitor track this closely. */
+function estMsPerSample(id: Identity | null): number {
+  const sw = Number(id?.sample_width) || 8;
+  return Math.ceil(sw / 32) * 4;
+}
+
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
  *  to the active core's Viewer tab. `onActiveChange` reports when a capture is
  *  armed/running so a host (e.g. the hover-out Run bar) can stay open while the
@@ -82,6 +91,9 @@ export function RunPanel({
   // ref so a core switch mid-loop can't send another core's geometry.
   const identityRef = useRef(identityProp);
   identityRef.current = identityProp;
+  // Measured readback rate (ms per sample) from the last capture, so the
+  // "reading back" progress self-calibrates. Seeded per-capture from geometry.
+  const readbackRateRef = useRef<number | null>(null);
 
   // A core switch invalidates the armed config — stop any armed wait.
   useEffect(() => {
@@ -182,21 +194,41 @@ export function RunPanel({
     // USB-Blaster) is the bulk of the time. Say so, instead of still claiming
     // to wait for a trigger that already passed.
     setWaiting(false);
-    const window = Number(p.pretrigger) + Number(p.posttrigger) + 1;
-    setStatus(`trigger fired - reading back ${window} samples...`);
-    const r = await rpc(
-      "capture_wait",
-      {
-        timeout: POLL_TIMEOUT,
-        segments: p.segments,
-        format: p.format,
-        include_vcd: true,
-        include_csv: true,
-      },
-      POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
-      signal,
-    );
-    return submitCapture(r, Number(ela.pretrigger));
+    const nSamples = Number(p.pretrigger) + Number(p.posttrigger) + 1;
+    // Live progress: the readback is one blocking JTAG transfer, so estimate the
+    // sample count from elapsed time and the measured per-sample rate (exact
+    // elapsed seconds shown alongside). The rate self-calibrates each capture,
+    // so after the first readback the "~X of N" tracks closely.
+    const start = performance.now();
+    const rate = readbackRateRef.current ?? estMsPerSample(identityRef.current);
+    const tick = () => {
+      const elapsed = performance.now() - start;
+      const done = Math.min(nSamples - 1, Math.floor(elapsed / rate));
+      setStatus(
+        `trigger fired - reading back ~${done} of ${nSamples} samples (${Math.round(elapsed / 1000)}s)`,
+      );
+    };
+    tick();
+    // Only tick for readbacks long enough to matter; short ones finish first.
+    const timer = nSamples > 128 ? window.setInterval(tick, 300) : 0;
+    try {
+      const r = await rpc(
+        "capture_wait",
+        {
+          timeout: POLL_TIMEOUT,
+          segments: p.segments,
+          format: p.format,
+          include_vcd: true,
+          include_csv: true,
+        },
+        POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
+        signal,
+      );
+      if (nSamples > 0) readbackRateRef.current = (performance.now() - start) / nSamples;
+      return submitCapture(r, Number(ela.pretrigger));
+    } finally {
+      if (timer) window.clearInterval(timer);
+    }
   }
 
   /** Disarm the core after a stopped wait (queues behind the in-flight
