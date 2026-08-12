@@ -81,6 +81,7 @@ export function ConnectionPanel({
     port: number;
     tap: string;
     ir_table: string;
+    device?: string;
   } | null>(null);
   const { ela, setEla, setAxiMon, setEjtagAxi, setCores, conn, chainSwitch, setSwitching } =
     useSession();
@@ -218,7 +219,14 @@ export function ConnectionPanel({
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
     const r = await rpc("probe", {}, t, sig());
-    setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
+    setConnTarget({
+      backend,
+      host,
+      port: Number(port),
+      tap,
+      ir_table: params.ir_table,
+      device: typeof c.device === "string" && c.device ? c.device : undefined,
+    });
     const id = r.probe as Identity;
     onConnected(params, id);
     // Fill the whole capture buffer by default (8 pre-trigger, the rest post).
@@ -250,6 +258,7 @@ export function ConnectionPanel({
       port: b.port,
       tap: b.tap,
       ir_table: b.ir_table,
+      device: typeof c.device === "string" && c.device ? c.device : undefined,
     });
     const id = r.probe as Identity;
     onConnected(params, id);
@@ -536,6 +545,11 @@ export function ConnectionPanel({
         {error && <p className="err">{error}</p>}
         {connTarget && (
           <p className="muted">
+            {connTarget.device && (
+              <>
+                <b>{connTarget.device}</b> ·{" "}
+              </>
+            )}
             {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
             {connTarget.backend} {connTarget.host}:{connTarget.port}
           </p>
