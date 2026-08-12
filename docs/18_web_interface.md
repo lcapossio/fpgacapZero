@@ -81,7 +81,7 @@ connected. The panels:
 
 - **Connection** — Connect/Disconnect sit at the top of the panel, with a
   **Cancel** button while a connect or scan is in flight. Pick the backend
-  (OpenOCD, Xilinx hw_server, or Intel/Altera **USB-Blaster**), host and
+  (OpenOCD, AMD/Xilinx hw_server, or Intel/Altera **USB-Blaster**), host and
   port. For `usb_blaster` the host/port fields are replaced by a single
   optional **Quartus cable** field (e.g. `DE25-Nano [USB-1]`; blank
   auto-selects the sole attached cable) — the `quartus_stp` path lives on the

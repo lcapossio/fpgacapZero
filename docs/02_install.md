@@ -14,7 +14,7 @@
 - **Git** to clone the repository.
 - **A JTAG transport**, one of:
   - **Vivado / hw_server (2022.2 or later)** — required for the
-    Xilinx hw_server backend.  This is the path that has been
+    AMD/Xilinx hw_server backend.  This is the path that has been
     hardware-validated on Arty A7-100T.  If you already have Vivado
     installed for your day job, you have hw_server.
   - **OpenOCD with FTDI support** — cross-platform, vendor-neutral.
@@ -100,16 +100,16 @@ walkthrough.
 ## Step 3: install a JTAG transport
 
 You need exactly one of the transports below.  If you have a
-Xilinx board and Vivado already installed, the hw_server path is the
+AMD/Xilinx board and Vivado already installed, the hw_server path is the
 fast lane.  If you are on any other vendor or you do not want to
 install Vivado, use OpenOCD or Quartus USB-Blaster depending on the
 board and RTL wrapper.
 
-### Option A: Xilinx hw_server (recommended for Xilinx boards)
+### Option A: AMD/Xilinx hw_server (recommended for AMD/Xilinx boards)
 
 `hw_server` ships with Vivado.  It is a small daemon that listens on
 TCP port 3121 and gives the host stack a programmatic interface to
-the JTAG cable.  fpgacapZero drives it via `xsdb`, the Xilinx system
+the JTAG cable.  fpgacapZero drives it via `xsdb`, the AMD/Xilinx system
 debugger console.
 
 1. **Make sure `vivado`, `xsdb`, and `hw_server` are on your PATH.**
@@ -172,7 +172,7 @@ fpgacapZero connects to that listener and issues raw `irscan` /
 
 OpenOCD is slower than hw_server (no batched scan support) and has
 not been as thoroughly hardware-validated, but it is still useful on
-non-Xilinx boards with an OpenOCD-supported cable.  See
+non-AMD/Xilinx boards with an OpenOCD-supported cable.  See
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
 for the OpenOCD validation gaps if you want to help close them.
 

@@ -1,7 +1,7 @@
 # Transport API — v0.4.0
 
 ## Purpose
-Abstracts access to the JTAG register map across different backends (Xilinx
+Abstracts access to the JTAG register map across different backends (AMD/Xilinx
 `hw_server`, OpenOCD, Quartus USB-Blaster, other vendors).
 
 ## Interface (Python)
@@ -32,7 +32,7 @@ path for timestamp data.
   transformation that scrambles bit positions.
 - Burst `read_block` via the configured 256-bit burst path: `floor(256/SAMPLE_W)`
   samples per scan.  Default single-chain builds keep the burst scans on the
-  selected ELA control chain; legacy two-chain Xilinx builds use USER2.
+  selected ELA control chain; legacy two-chain AMD/Xilinx builds use USER2.
   How fast samples stream depends on the adapter and how much per-scan overhead
   the transport adds (batched vs single DR).
 - `read_timestamp_block(addr, words, timestamp_width)` — timestamp burst via the
@@ -61,7 +61,7 @@ A write requires one DR scan followed by idle cycles:
 2. Idle 20 TCK cycles for the write to propagate.
 
 #### Burst data readout
-Legacy two-chain Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
+Legacy two-chain AMD/Xilinx builds use a 256-bit DR via BSCANE2 USER2 (IR = `0x03`).
 Default `SINGLE_CHAIN_BURST=1` builds use the same 256-bit packets on the
 selected ELA control chain after the `BURST_PTR` write. Each scan returns
 `256 / SAMPLE_W` packed samples with auto-incrementing read pointer.
@@ -80,7 +80,7 @@ selected ELA control chain instead of switching to USER2.
 ### `OpenOcdTransport`
 - Connects to OpenOCD TCL socket (default port 6666).
 - Uses `irscan`/`drscan`/`runtest` commands.
-- Hardware-validated on Gowin BRS-100-GW1NR9. The Xilinx/OpenOCD path is still
+- Hardware-validated on Gowin BRS-100-GW1NR9. The AMD/Xilinx/OpenOCD path is still
   less exercised than the `hw_server` backend.
 
 ### `QuartusStpTransport`

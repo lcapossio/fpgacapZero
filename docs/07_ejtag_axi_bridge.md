@@ -190,7 +190,7 @@ value = bridge.axi_read(0x40000000)        # returns int
 Two JTAG scans: one to issue the READ command, one NOP to wait
 until `prev_valid` is set and read the data back.
 
-When running over Xilinx `hw_server` / `xsdb`, the host may batch
+When running over AMD/Xilinx `hw_server` / `xsdb`, the host may batch
 that command and its drain scans into one USER4 raw-scan sequence
 internally.  That is a transport detail; the bridge protocol is the
 same.
@@ -333,7 +333,7 @@ fcapz_ejtagaxi_xilinx7 #(
 
 The default 16 is a deliberate compromise: enough for most CSR
 register dumps and small block transfers, small enough that the
-default burst FIFO remains small. On Xilinx XPM builds, bumping to
+default burst FIFO remains small. On AMD/Xilinx XPM builds, bumping to
 256 moves the burst buffer into BRAM rather than exploding LUT use,
 but it does spend another RAMB18 tile to enable full AXI4 max bursts.
 
@@ -341,7 +341,7 @@ but it does spend another RAMB18 tile to enable full AXI4 max bursts.
 response queues between TCK and `axi_clk`. Their wrapper defaults track
 the core default (`2*FIFO_DEPTH`) for compatibility with aggressively
 batched host traffic, but they can be set independently when BRAM is
-tighter than queue depth. On Xilinx XPM FIFO builds, the minimum legal
+tighter than queue depth. On AMD/Xilinx XPM FIFO builds, the minimum legal
 depth is 16. The Arty A7 reference uses:
 
 ```verilog

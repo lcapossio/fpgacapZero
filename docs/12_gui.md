@@ -88,7 +88,7 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
 | **Bitfile** | Optional path to a `.bit` file; if set, the GUI runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected" |
-| **IR table** | Dropdown: `Xilinx 7-series` (default), `Xilinx UltraScale / UltraScale+`, or `Gowin (OpenOCD)`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
+| **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `AMD/Xilinx UltraScale / UltraScale+`, or `Gowin (OpenOCD)`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
 
 > **Gowin boards** connect over the **OpenOCD** backend (the FTDI/Gowin cable
@@ -103,7 +103,7 @@ When you click **Connect**:
    `QuartusStpTransport` with the field values.
 2. Calls `transport.connect()`, which spawns `xsdb`, talks to
    OpenOCD, or starts `quartus_stp`.  The GUI programs the FPGA only
-   for the Xilinx `hw_server` backend when a bitfile is set.
+   for the AMD/Xilinx `hw_server` backend when a bitfile is set.
 3. Reads the USER1 register window with `Analyzer.probe_optional()`.
    If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
    and the probe summary are enabled.  If not (EIO-only / AXI-only

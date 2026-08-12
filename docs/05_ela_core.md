@@ -421,7 +421,7 @@ fcapz_debug_multi_xilinx7 #(
 
 The lower-level `fcapz_core_manager` is also available if you already have
 custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
-yourself.  At this revision the packaged multi-core wrapper is Xilinx
+yourself.  At this revision the packaged multi-core wrapper is AMD/Xilinx
 7-series only; other vendors still use their single-core wrappers until
 equivalent debug-manager wrappers are added.
 

@@ -72,7 +72,7 @@ fabric ← probe_out[*]← | (jtag_clk)       |
 ```
 
 The whole core is in [`../rtl/fcapz_eio.v`](../rtl/fcapz_eio.v) and
-the Xilinx wrapper is
+the AMD/Xilinx wrapper is
 [`../rtl/fcapz_eio_xilinx7.v`](../rtl/fcapz_eio_xilinx7.v) (or
 `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v` for other vendors).
 

@@ -29,7 +29,7 @@ check exists.
 
 **Cause**: Quartus found the cable but the device name passed to
 `open_device` did not match any device on that cable.  This often
-happens if a saved GUI/CLI config still contains a Xilinx target name
+happens if a saved GUI/CLI config still contains an AMD/Xilinx target name
 such as `xc7a100t`.
 
 **Fix**:

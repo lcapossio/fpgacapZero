@@ -1,8 +1,8 @@
 # 14 — Transports
 
 > **Goal**: understand the `Transport` abstract base class, the built-in
-> backends (Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
-> `IR_TABLE_*` presets that handle the Xilinx per-family IR opcode
+> backends (AMD/Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
+> `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
 > differences, the readiness wait that catches "FPGA isn't programmed yet",
 > the TCL injection prevention, and how to add a new transport.
 >
@@ -32,8 +32,8 @@ XSDB `jtag sequence`.
 There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
-throughput (the Xilinx hw_server transport does this for the ELA
-burst readback). Default Xilinx builds keep those wide burst scans on
+throughput (the AMD/Xilinx hw_server transport does this for the ELA
+burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
@@ -78,8 +78,8 @@ spec you implement against if you're adding a new backend.
 
 ### `XilinxHwServerTransport`
 
-Drives Vivado's `hw_server` daemon via `xsdb` (the Xilinx system
-debugger console).  This is the **default for Xilinx boards** and
+Drives Vivado's `hw_server` daemon via `xsdb` (the AMD/Xilinx system
+debugger console).  This is the **default for AMD/Xilinx boards** and
 the only path that has been hardware-validated on Arty A7-100T.
 
 ```python
@@ -130,7 +130,7 @@ logger `fcapz.gui.connect`.
 `XilinxHwServerTransport` implements the optional
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
-256-bit DR burst path used for sample data. Default Xilinx transports
+256-bit DR burst path used for sample data. Default AMD/Xilinx transports
 use the selected ELA control chain; `single_chain_burst=False` selects
 legacy DATA_CHAIN readout.
 
@@ -250,18 +250,18 @@ Auto device selection opens the first Quartus device whose name starts
 with `@1`.  If the FPGA is at another JTAG position, pass the exact
 Quartus device name as `device_name` / CLI `--tap`.  The CLI and GUI
 treat `auto`, an empty tap, `xc7a100t`, and `xc7a100t.tap` as auto for
-USB-Blaster so older Xilinx defaults do not get passed to Quartus as
+USB-Blaster so older AMD/Xilinx defaults do not get passed to Quartus as
 literal device names.
 
 ## IR table presets
 
-Different Xilinx families use different IR opcodes for the BSCANE2
+Different AMD/Xilinx families use different IR opcodes for the BSCANE2
 USER chains.  The `ir_table` constructor parameter is a dict
 mapping `chain_index` (1..4) → `ir_opcode` (e.g. `0x02`).  The
 controllers call `transport.select_chain(N)` and the transport
 looks up the opcode in the table.
 
-To save users from looking up the codes, both Xilinx-style transports expose
+To save users from looking up the codes, both AMD/Xilinx-style transports expose
 named class-level presets:
 
 ```python
@@ -275,16 +275,16 @@ XilinxHwServerTransport.IR_TABLE_US        # alias for IR_TABLE_XILINX_ULTRASCAL
 ```
 
 `OpenOcdTransport` exposes the same three constants under the same
-names — both Xilinx-style transports use identical preset shapes so you can
+names — both AMD/Xilinx-style transports use identical preset shapes so you can
 swap one for the other without changing the IR table.
 
 ### When to use which
 
 | Family | Preset | Extra constructor args |
 |---|---|---|
-| Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
-| Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
-| Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
+| AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
+| AMD/Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
@@ -666,17 +666,17 @@ to be slower than `hw_server` per scan because OpenOCD's TCL listener has
 limited batched-scan support, but the delta is not documented until somebody
 benchmarks it.
 
-**Quartus USB-Blaster:** hardware probe/capture is validated on
-DE25-Nano; see [`specs/transport_api.md`](specs/transport_api.md) for
+**Quartus USB-Blaster:** hardware probe/capture is validated on the
+DE25-Nano (Agilex 5); see [`specs/transport_api.md`](specs/transport_api.md) for
 the tested Quartus edition.  Latency depends heavily on Quartus Tcl
 startup and USB-Blaster speed; `QuartusStpTransport` keeps one
 `quartus_stp` process alive and batches composite reads under one
 `device_lock` to avoid avoidable round trips.
 
 The bottleneck on the measured path is JTAG round-trip latency through
-the tooling, not the RTL.  The fastest measured Xilinx path today is
+the tooling, not the RTL.  The fastest measured AMD/Xilinx path today is
 hw_server with batched scans.  A future raw-TCF transport (bypassing
-xsdb) could cut per-scan overhead further on Xilinx boards.  See the
+xsdb) could cut per-scan overhead further on AMD/Xilinx boards.  See the
 TODO roadmap.
 
 ## What's next

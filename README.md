@@ -13,7 +13,7 @@ into any design to **see and control what's happening inside your FPGA over
 JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
-Reveal that works the same way across **Xilinx, Intel/Altera, Lattice, Gowin,
+Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
 and Microchip** parts, with a Python / CLI / GUI host stack on top.
 
 > 📖 **New here? Start with the [User Manual](docs/README.md)** — especially
@@ -37,8 +37,8 @@ across the network, a **Python API**, the **`fcapz` command-line tool**, a
 
 ## Why fpgacapZero
 
-- **Vendor-agnostic** — one portable core with thin TAP wrappers for Xilinx
-  7-series, Xilinx UltraScale / UltraScale+, Lattice ECP5, Intel / Altera,
+- **Vendor-agnostic** — one portable core with thin TAP wrappers for AMD/Xilinx
+  7-series, AMD/Xilinx UltraScale / UltraScale+, Lattice ECP5, Intel / Altera,
   Gowin, and Microchip PolarFire-family devices.
 - **Small, and only as big as you need** — a usable 8-bit / 1024-sample ELA
   fits in about **600 LUTs + 0.5 BRAM**. Extra triggers, timestamps,
@@ -51,8 +51,9 @@ across the network, a **Python API**, the **`fcapz` command-line tool**, a
 ## Will it work on my board?
 
 Any board with JTAG access works. You drive it through **OpenOCD** (any FTDI
-adapter) or the **Xilinx hw_server** (Vivado). The full per-vendor matrix and
-JTAG-chain rules are in the manual's
+adapter), the **AMD/Xilinx hw_server** (Vivado), or **Quartus `quartus_stp`**
+(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5). The
+full per-vendor matrix and JTAG-chain rules are in the manual's
 [RTL integration chapter](docs/04_rtl_integration.md); see also
 [Support status](#support-status) below.
 
@@ -128,11 +129,13 @@ The canonical register / shift maps live in
 
 | Area | Status |
 |------|--------|
-| Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 |
-| OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100; Xilinx/OpenOCD path still less exercised than `hw_server` |
-| Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
+| AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 |
+| OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
+| Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
+| AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
-| UltraScale / ECP5 / Intel / PolarFire wrappers | RTL complete; host / hardware validation still limited |
+| Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
+| UltraScale / ECP5 / PolarFire wrappers | RTL complete; host / hardware validation still limited |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 (details in the manual) |
 
 The full, always-current matrix is in [Overview](docs/01_overview.md) and

@@ -53,7 +53,7 @@ You construct one transport per session and pass it to as many
 controllers as you need (each controller calls `select_chain()` to
 move to its USER chain).
 
-### `XilinxHwServerTransport` (default for Xilinx)
+### `XilinxHwServerTransport` (default for AMD/Xilinx)
 
 ```python
 from fcapz import XilinxHwServerTransport

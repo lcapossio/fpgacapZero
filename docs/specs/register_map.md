@@ -190,7 +190,7 @@ mixed manager returns idle/zero burst controls.
   active slot as the burst owner. Later `MGR_ACTIVE` writes do not redirect an
   in-flight burst; address, data, timestamp, and burst-active control stay
   routed to the captured owner until another burst owner is selected or reset.
-- Legacy two-chain Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
+- Legacy two-chain AMD/Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
   (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;

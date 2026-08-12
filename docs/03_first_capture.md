@@ -5,14 +5,14 @@
 > the FPGA, captured a waveform that triggers on a specific value,
 > and exported the same capture from the CLI for automation.
 >
-> **What you need**: an Arty A7-100T (or any Xilinx 7-series board
+> **What you need**: an Arty A7-100T (or any AMD/Xilinx 7-series board
 > if you adapt the build script), a USB cable to your PC, Vivado
 > 2025.2 (or 2022.2+) with `hw_server` and `xsdb` on PATH, a working
 > `fcapz` install with the GUI extra per [chapter 02](02_install.md),
 > and optionally GTKWave / Surfer / WaveTrace on PATH for external
 > waveform viewing.
 
-This walkthrough uses the Arty A7 / Xilinx `hw_server` reference
+This walkthrough uses the Arty A7 / AMD/Xilinx `hw_server` reference
 design.  For Intel/Altera boards, use the same GUI capture panels
 after choosing the `usb_blaster` backend and loading a bitstream that
 instantiates the Intel wrappers; see [chapter 02](02_install.md) and
