@@ -610,6 +610,10 @@ class QuartusStpTransport(Transport):
         self._stp_io_lock = threading.Lock()
         self._poisoned = False
         self._has_burst = True
+        # The actual device quartus_stp opened (family/part + IDCODE), filled in
+        # by connect(). None until connected. Surfaced so the UI can name the
+        # FPGA it attached to, not just the vendor.
+        self.opened_device: str | None = None
 
     def connect(self) -> None:
         argv = self._quartus_stp_argv
@@ -647,6 +651,7 @@ class QuartusStpTransport(Transport):
         if self._proc.poll() is not None:
             self._raise_process_exited()
         opened_device = self._send(self._open_device_script())
+        self.opened_device = self._prettify_device_name(opened_device)
         _quartus_log.info("Opened Quartus JTAG device %s", opened_device)
 
     def close(self) -> None:
@@ -958,23 +963,66 @@ class QuartusStpTransport(Transport):
         the burst scans go on the control chain itself.  Raises on a stream that
         will not converge so the caller can fall back to the per-word path.
         """
-        if n_samples <= 0:
+        elements = self._single_chain_burst(
+            n_samples, sample_width, timestamp=False
+        )
+        # Split each whole sample into little-endian 32-bit words -- the flat
+        # layout Analyzer.capture() reassembles.
+        words_per_sample = (sample_width + 31) // 32
+        words: List[int] = []
+        for sample in elements:
+            for w in range(words_per_sample):
+                words.append((sample >> (w * 32)) & 0xFFFFFFFF)
+        return words
+
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Read per-sample timestamps via single-chain burst on the active chain.
+
+        The wide, single-chain cores handled by :meth:`read_sample_block` keep
+        their timestamp window behind the *same* BSCAN instance, so the
+        two-chain :meth:`read_timestamp_block` (which shifts on the ELA's
+        separate ``burst_data_chain``) can never reach them and silently falls
+        back to a slow per-word read.  This mirrors the sample burst but asserts
+        the timestamp-select bit in the burst pointer, returning one value per
+        captured sample.  Raises on a stream that will not converge so the
+        caller can fall back to the per-word path.
+        """
+        return self._single_chain_burst(
+            n_timestamps, timestamp_width, timestamp=True
+        )
+
+    def _single_chain_burst(
+        self, n_elements: int, element_width: int, *, timestamp: bool
+    ) -> List[int]:
+        """Stream ``n_elements`` of ``element_width`` bits, all on the active
+        (control) chain -- one 256-bit DR carries ``256 // element_width``
+        elements.  ``timestamp`` selects the burst engine's timestamp window
+        instead of the sample window.  Returns masked element values; raises if
+        the readback will not converge across the stability retries."""
+        if n_elements <= 0:
             return []
-        if sample_width < 1:
-            raise ValueError(f"sample_width must be >= 1, got {sample_width}")
-        samples_per_scan = max(1, self.BURST_DR_BITS // sample_width)
-        n_scans = (n_samples + samples_per_scan - 1) // samples_per_scan
+        if element_width < 1:
+            raise ValueError(f"element_width must be >= 1, got {element_width}")
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        n_scans = (n_elements + per_scan - 1) // per_scan
         prime_scans = 1
         chain = self._active_chain
-        # write bit | BURST_PTR addr | data = 0 (start at sample 0, not timestamp)
-        burst_frame = (1 << 48) | (self.ADDR_BURST_PTR << 32)
+        # write bit | BURST_PTR addr | data: bit31 selects the timestamp window,
+        # else 0 to start at sample 0.
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
+        )
 
         def run_once() -> List[int]:
-            body = ["set __fcapz_sburst {}"]
+            body = ["set __fcapz_scb {}"]
             body.append(self._virtual_ir_tcl(chain))
             body.append(
                 self._dr_shift_tcl(
-                    chain, burst_frame, self.DR_BITS, "__fcapz_sburst_ptr"
+                    chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
                 )
             )
             body.append(
@@ -983,23 +1031,23 @@ class QuartusStpTransport(Transport):
             )
             # First scan primes/flushes the 256-bit staging register; discarded.
             for idx in range(n_scans + prime_scans):
-                var = f"__fcapz_sburst_{idx}"
+                var = f"__fcapz_scb_{idx}"
                 body.append(
                     self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
                 )
-                body.append(f"lappend __fcapz_sburst ${var}")
+                body.append(f"lappend __fcapz_scb ${var}")
             captured = self._send(
                 self._locked_script(
                     body=body,
-                    result="__fcapz_sburst",
-                    status="__fcapz_sburst_status",
-                    error="__fcapz_sburst_error",
+                    result="__fcapz_scb",
+                    status="__fcapz_scb_status",
+                    error="__fcapz_scb_error",
                 )
             )
-            return self._parse_sample_burst(
+            return self._parse_single_chain_burst(
                 captured.split(),
-                n_samples,
-                sample_width,
+                n_elements,
+                element_width,
                 skip_scans=prime_scans,
             )
 
@@ -1011,38 +1059,33 @@ class QuartusStpTransport(Transport):
             if current == previous:
                 return current
             previous = current
-        raise RuntimeError("Quartus single-chain sample burst did not stabilize")
+        raise RuntimeError("Quartus single-chain burst did not stabilize")
 
-    def _parse_sample_burst(
+    def _parse_single_chain_burst(
         self,
         tokens: list[str],
-        n_samples: int,
-        sample_width: int,
+        n_elements: int,
+        element_width: int,
         *,
         skip_scans: int,
     ) -> List[int]:
-        words_per_sample = (sample_width + 31) // 32
-        samples_per_scan = max(1, self.BURST_DR_BITS // sample_width)
-        sample_mask = (1 << sample_width) - 1
-        words: list[int] = []
-        produced = 0
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        mask = (1 << element_width) - 1
+        values: list[int] = []
         for scan_idx, token in enumerate(tokens):
             if scan_idx < skip_scans:
                 continue
             scan_value = self._shift_string_to_int(token, self.BURST_DR_BITS)
-            for s in range(samples_per_scan):
-                if produced >= n_samples:
+            for s in range(per_scan):
+                if len(values) >= n_elements:
                     break
-                sample = (scan_value >> (s * sample_width)) & sample_mask
-                for w in range(words_per_sample):
-                    words.append((sample >> (w * 32)) & 0xFFFFFFFF)
-                produced += 1
-        if produced != n_samples:
+                values.append((scan_value >> (s * element_width)) & mask)
+        if len(values) != n_elements:
             raise RuntimeError(
-                f"Quartus single-chain sample burst produced {produced} samples, "
-                f"expected {n_samples}: {tokens!r}"
+                f"Quartus single-chain burst returned {len(values)} values, "
+                f"expected {n_elements}: {tokens!r}"
             )
-        return words
+        return values
 
     def _validate_instance(self, instance: int) -> None:
         if instance < 1:
@@ -1184,8 +1227,33 @@ class QuartusStpTransport(Transport):
             None,
         )
         if first_error is not None:
-            raise RuntimeError("\n".join(lines[first_error:]))
+            detail = "\n".join(lines[first_error:])
+            if "virtual JTAG instance cannot be found" in detail:
+                # quartus_stp emits this only when the requested sld_virtual_jtag
+                # node is absent from the bitstream -- i.e. the FPGA carries no
+                # fpgacapZero cores. The connection itself is fine, so say that
+                # plainly instead of the raw JTAG-instance wording, which reads
+                # like a cable/chain fault.
+                raise RuntimeError(
+                    "No fpgacapZero-compatible cores found on the device. The "
+                    "FPGA is reachable but presents no fpgacapZero cores -- "
+                    "check that it is configured with an fpgacapZero build."
+                )
+            raise RuntimeError(detail)
         return lines[-1].strip() if lines else ""
+
+    @staticmethod
+    def _prettify_device_name(opened: str) -> str | None:
+        """Tidy quartus_stp's opened-device string for display.
+
+        ``open_device`` echoes names like ``@1: A5EB013BB23BCS(...)  (0x4362C0DD)``
+        -- the leading ``@N:`` is the chain position, not part of the device.
+        Strip it and collapse whitespace; return None for an empty result so the
+        UI simply omits the device rather than showing a blank.
+        """
+        name = " ".join((opened or "").split())
+        name = re.sub(r"^@\d+:\s*", "", name)
+        return name or None
 
     @staticmethod
     def _strip_quartus_prompt(line: str) -> str:

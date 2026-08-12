@@ -471,6 +471,35 @@ class QuartusStpTransportTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t.read_sample_block(0x0100, 1, 160)
 
+    def test_read_timestamp_block_single_chain_sets_timestamp_bit(self):
+        # Four 32-bit timestamps pack into one 256-bit scan (8 per scan), plus
+        # one discarded prime scan -- read on the active chain, not the ELA's.
+        ts = [10, 21, 33, 48]
+        val = 0
+        for i, v in enumerate(ts):
+            val |= (v & 0xFFFFFFFF) << (32 * i)
+        payload = " ".join(["0" * 256, f"{val:0256b}"])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(5)  # the monitor's single BSCAN instance
+        out = t.read_timestamp_block_single_chain(0x1100, len(ts), 32)
+
+        self.assertEqual(out, ts)
+        # Burst pointer must assert the timestamp-select bit (0x80000000), unlike
+        # the sample burst which starts at sample 0.
+        ts_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0x80000000
+        sample_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32)
+        self.assertIn(f"{ts_frame:049b}", t.last_script)
+        self.assertNotIn(f"{sample_frame:049b}", t.last_script)
+        # Same single-chain routing as the sample burst: active chain, not chain 2.
+        self.assertIn("-instance_index 5", t.last_script)
+        self.assertNotIn("-instance_index 2", t.last_script)
+
     def test_send_times_out_waiting_for_sentinel(self):
         proc = MagicMock()
         proc.stdin = MagicMock()
@@ -516,11 +545,43 @@ class QuartusStpTransportTests(unittest.TestCase):
         t = QuartusStpTransport(read_timeout_sec=0.01)
         t._proc = proc
         t._stdout_lines.put("> > > 1\n")
-        t._stdout_lines.put("> > ERROR: virtual JTAG instance cannot be found\n")
+        t._stdout_lines.put("> > ERROR: virtual dr shift failed\n")
         t._stdout_lines.put("> >     while executing device_virtual_dr_shift\n")
         t._stdout_lines.put(f"> {QuartusStpTransport._SENTINEL}\n")
         with self.assertRaisesRegex(RuntimeError, "while executing"):
             t._send("device_virtual_dr_shift")
+
+    def test_prettify_device_name_strips_position_prefix(self):
+        pretty = QuartusStpTransport._prettify_device_name
+        # quartus_stp echoes "@N: <device>" -- @N is the chain position, not part
+        # of the device; strip it and collapse whitespace.
+        self.assertEqual(
+            pretty("@1: A5EB013BB23BCS  (0x4362C0DD)"),
+            "A5EB013BB23BCS (0x4362C0DD)",
+        )
+        self.assertEqual(pretty("EP4CE6 (0x020F10DD)"), "EP4CE6 (0x020F10DD)")
+        # Empty / whitespace -> None so the UI omits the device rather than
+        # showing a blank.
+        self.assertIsNone(pretty(""))
+        self.assertIsNone(pretty("   "))
+
+    def test_send_translates_missing_instance_to_no_cores(self):
+        # quartus_stp reports "virtual JTAG instance cannot be found" only when
+        # the FPGA carries no fpgacapZero cores -- surface that plainly, and do
+        # not leak JTAG/cable-fault wording (the connection is fine).
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("ERROR: The specified virtual JTAG instance cannot be found.\n")
+        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "No fpgacapZero-compatible cores") as ctx:
+            t._send("device_virtual_dr_shift")
+        msg = str(ctx.exception)
+        self.assertNotIn("JTAG", msg)
+        self.assertNotIn("virtual JTAG instance", msg)
 
     def test_send_rejects_sentinel_collision(self):
         proc = MagicMock()

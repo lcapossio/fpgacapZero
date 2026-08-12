@@ -684,9 +684,13 @@ class RpcServer:
                         break
             self._analyzer = analyzer
             # Echo the resolved preset/chain so a client that omitted them can
-            # label the session and reuse them for eio/axi side connects.
+            # label the session and reuse them for eio/axi side connects, plus
+            # the actual FPGA the backend opened (when it can name it) so the UI
+            # shows the connected device, not just the vendor.
             return self._ok(
-                ir_table=self._resolved_ir_name(req), chain=analyzer.bscan_chain
+                ir_table=self._resolved_ir_name(req),
+                chain=analyzer.bscan_chain,
+                device=getattr(analyzer.transport, "opened_device", None),
             )
 
         if cmd == "rebind":

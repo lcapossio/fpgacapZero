@@ -678,6 +678,43 @@ class Analyzer:
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
         ts_words_per = (self._hw_timestamp_w + 31) // 32
         ts_word_count = total * ts_words_per
+        mask = (1 << self._hw_timestamp_w) - 1
+
+        # Wide, single-chain cores (the 160-bit AXI monitor) keep their timestamp
+        # window on the same BSCAN instance as their samples, so the two-chain
+        # DATA_CHAIN burst below can never reach it -- read it the same way the
+        # samples were (see _read_data_words).  Gated on sw>32 to mirror that
+        # sample-path decision exactly.
+        if sw > 32 and ts_words_per == 1:
+            ts_single = getattr(
+                self.transport, "read_timestamp_block_single_chain", None
+            )
+            if callable(ts_single):
+                try:
+                    raw = ts_single(ts_base, total, self._hw_timestamp_w)
+                    ts = [v & mask for v in raw]
+                    if all(ts[i] > ts[i - 1] for i in range(1, len(ts))):
+                        _log.info(
+                            "single-chain timestamp burst: %d timestamps (%d-bit)",
+                            total,
+                            self._hw_timestamp_w,
+                        )
+                        return ts
+                    _log.warning(
+                        "single-chain timestamp burst non-monotonic; using "
+                        "slower per-word timestamp reads"
+                    )
+                except (ConnectionError, RuntimeError) as exc:
+                    _log.warning(
+                        "single-chain timestamp burst failed (%s); using slower "
+                        "per-word timestamp reads",
+                        exc,
+                    )
+            # The two-chain burst can't reach a single-chain core, so skip it and
+            # read the timestamp words directly (deterministic, just slower).
+            raw = self.transport.read_block(ts_base, ts_word_count)
+            return [v & mask for v in raw]
+
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
         used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
         if used_timestamp_burst and self._selected_slot_has_burst():
@@ -685,7 +722,6 @@ class Analyzer:
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
         timestamps = []
-        mask = (1 << self._hw_timestamp_w) - 1
         if ts_words_per == 1:
             timestamps = [v & mask for v in raw]
         else:
