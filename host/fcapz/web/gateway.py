@@ -12,11 +12,19 @@ envelopes the line-protocol server returns.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 import traceback
 from typing import Any, Dict, Optional
 
 from ..rpc import _SCHEMA_VERSION, RpcServer
+
+_log = logging.getLogger("fcapz.web")
+
+# High-frequency pollers: kept out of the activity log so a steady arm-wait or
+# EIO refresh doesn't drown the interesting commands (connect/capture/arm).
+_QUIET_CMDS = frozenset({"capture_status", "eio_read"})
 
 
 class RpcGateway:
@@ -55,9 +63,12 @@ class RpcGateway:
             return self._dispatch(req)
 
     def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        cmd = req.get("cmd")
+        t0 = time.perf_counter()
         try:
-            return self._server.handle(req)
+            resp = self._server.handle(req)
         except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
+            _log.warning("%s failed: %s", cmd, exc)
             return {
                 "ok": False,
                 "schema_version": _SCHEMA_VERSION,
@@ -65,3 +76,13 @@ class RpcGateway:
                 "type": exc.__class__.__name__,
                 "trace": traceback.format_exc(limit=1).strip(),
             }
+        # Surface command activity (with timing) in the Log tab. The elapsed ms
+        # on capture/capture_wait is exactly the readback time the user is
+        # chasing — fast burst vs slow fallback shows up here directly.
+        if cmd not in _QUIET_CMDS:
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            if resp.get("ok", True):
+                _log.info("%s ok (%.0f ms)", cmd, dt_ms)
+            else:
+                _log.warning("%s -> %s: %s", cmd, resp.get("type"), resp.get("error"))
+        return resp

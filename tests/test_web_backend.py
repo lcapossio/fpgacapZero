@@ -946,6 +946,32 @@ def test_version_endpoint(monkeypatch):
     assert r.json()["version"] == __version__
 
 
+def test_logs_endpoint_returns_captured_records(monkeypatch):
+    import logging
+
+    c = _client(monkeypatch)
+    # A record emitted on the fcapz logger after the app installed its ring
+    # handler must show up in /api/logs with its level and message.
+    logging.getLogger("fcapz.transport.quartus_stp").warning("burst fallback 42")
+    r = c.get("/api/logs")
+    assert r.status_code == 200
+    body = r.json()
+    assert "lines" in body and "next" in body
+    msgs = [ln["msg"] for ln in body["lines"]]
+    assert any("burst fallback 42" in m for m in msgs), body
+    hit = next(ln for ln in body["lines"] if "burst fallback 42" in ln["msg"])
+    assert hit["level"] == "WARNING"
+    # Incremental: since=next returns nothing new until another record arrives.
+    assert c.get(f"/api/logs?since={body['next']}").json()["lines"] == []
+
+
+def test_logs_endpoint_requires_token_when_set(monkeypatch):
+    c = _client(monkeypatch, token="sekret")
+    assert c.get("/api/logs").status_code == 401
+    ok = c.get("/api/logs", headers={"Authorization": "Bearer sekret"})
+    assert ok.status_code == 200
+
+
 def test_surfer_viewer_is_mounted(monkeypatch):
     import os
 

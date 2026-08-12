@@ -40,6 +40,7 @@ from .._version import __version__
 from ..openocd_launcher import OpenOcdLauncher
 from ..rpc import _SCHEMA_VERSION, RpcServer
 from .gateway import RpcGateway
+from .logbuffer import install_log_capture
 
 
 def _default_surfer_dir() -> str:
@@ -148,6 +149,11 @@ def create_app(
         )
     app = FastAPI(title="fpgacapZero web", version="1")
     app.state.gateway = gateway
+    # Capture fcapz backend logs into a ring buffer for the web Log tab, so
+    # diagnostics (JTAG readback fallbacks, connection notices) are visible in
+    # the browser instead of only on the server's stderr.
+    log_ring = install_log_capture()
+    app.state.log_ring = log_ring
     # OpenOCD instances this server starts are torn down on interpreter exit via
     # OpenOcdLauncher's atexit hook (uvicorn returns cleanly on SIGINT/SIGTERM),
     # so no FastAPI shutdown hook is needed here.
@@ -173,6 +179,15 @@ def create_app(
     async def version() -> dict:
         # Public metadata (no auth) so the UI can show the version pre-connect.
         return {"version": __version__}
+
+    @app.get("/api/logs")
+    async def logs(request: Request, since: int = 0, _: None = Depends(auth)) -> dict:
+        # Backend log tail for the Log tab. Auth-gated like /api/rpc, and the
+        # same Host check guards a token-less loopback server from a malicious
+        # page reading logs via DNS rebinding.
+        if not _host_header_ok(request.headers.get("host"), bind_host):
+            raise HTTPException(status_code=403, detail="Host not allowed")
+        return log_ring.snapshot(since)
 
     @app.post("/api/rpc")
     async def rpc(req: dict, request: Request, _: None = Depends(auth)):
