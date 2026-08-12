@@ -10,7 +10,16 @@ import { ElaPanel } from "./components/ElaPanel";
 import { EioPanel } from "./components/EioPanel";
 import { AxiPanel } from "./components/AxiPanel";
 import { AxiMonPanel } from "./components/AxiMonPanel";
+import { LogOverlay } from "./components/LogOverlay";
 import { SurferView } from "./components/SurferView";
+import {
+  deleteNamedLayout,
+  listNamedLayouts,
+  loadCurrentLayout,
+  loadNamedLayout,
+  saveCurrentLayout,
+  saveNamedLayout,
+} from "./layouts";
 import { TriggerOverlay } from "./components/TriggerOverlay";
 import { RunOverlay } from "./components/RunOverlay";
 
@@ -78,6 +87,7 @@ function ViewerDock(props: IDockviewPanelProps) {
         <SurferView vcd={cap?.vcd ?? ""} triggerTime={cap?.triggerTime} />
         <TriggerOverlay />
       </div>
+      <LogOverlay />
     </div>
   );
 }
@@ -401,6 +411,92 @@ function TabsMenu({ api }: { api: DockviewApi }) {
   );
 }
 
+/** Topbar dropdown: save the current dock arrangement under a name and reload
+ *  a saved one later. The current layout also auto-persists across page reloads
+ *  (handled in Dock's onReady); these named slots are for switching between a
+ *  few arrangements on purpose. */
+function LayoutMenu({ api }: { api: DockviewApi }) {
+  const [open, setOpen] = useState(false);
+  const [names, setNames] = useState<string[]>(() => listNamedLayouts());
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  const saveAs = () => {
+    const name = window.prompt("Save current layout as:")?.trim();
+    if (!name) return;
+    if (names.includes(name) && !window.confirm(`Overwrite layout "${name}"?`)) return;
+    saveNamedLayout(name, api.toJSON());
+    setNames(listNamedLayouts());
+  };
+
+  const load = (name: string) => {
+    const data = loadNamedLayout(name);
+    if (!data) return;
+    try {
+      api.fromJSON(data);
+    } catch {
+      window.alert(`Layout "${name}" could not be loaded (incompatible with this build).`);
+    }
+    setOpen(false);
+  };
+
+  const remove = (name: string) => {
+    deleteNamedLayout(name);
+    setNames(listNamedLayouts());
+  };
+
+  return (
+    <div className="tabs-menu" ref={ref}>
+      <button className="secondary" onClick={() => setOpen((o) => !o)}>
+        Layout &#9662;
+      </button>
+      {open && (
+        <div className="tabs-menu-list">
+          <button className="tabs-menu-item" onClick={saveAs}>
+            <span className="tabs-menu-check" />
+            Save current as…
+          </button>
+          {names.length > 0 && <div className="tabs-menu-sep" />}
+          {names.length === 0 ? (
+            <span className="tabs-menu-empty muted">No saved layouts</span>
+          ) : (
+            names.map((n) => (
+              <div key={n} className="tabs-menu-row">
+                <button
+                  className="tabs-menu-item tabs-menu-grow"
+                  onClick={() => load(n)}
+                  title={`Load layout "${n}"`}
+                >
+                  <span className="tabs-menu-check" />
+                  {n}
+                </button>
+                <button
+                  className="tabs-menu-del"
+                  title={`Delete "${n}"`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(n);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Dock({ onApi }: { onApi: (api: DockviewApi) => void }) {
   // While a tab is being dragged, stop the Surfer iframe from swallowing the
   // pointer so drops land on the dock, not inside the waveform.
@@ -422,8 +518,32 @@ function Dock({ onApi }: { onApi: (api: DockviewApi) => void }) {
       className="dockview-theme-abyss dock"
       components={components}
       onReady={(event: DockviewReadyEvent) => {
-        buildDefaultLayout(event.api);
-        onApi(event.api);
+        const api = event.api;
+        // Restore the last layout if one was saved and still loads with the
+        // current panel set; otherwise fall back to the default arrangement (a
+        // layout saved by an older build could reference a panel that no longer
+        // exists — fromJSON throws, and we rebuild from scratch).
+        const saved = loadCurrentLayout();
+        let restored = false;
+        if (saved) {
+          try {
+            api.fromJSON(saved);
+            restored = api.panels.length > 0;
+          } catch {
+            restored = false;
+          }
+        }
+        if (!restored) {
+          api.clear();
+          buildDefaultLayout(api);
+        }
+        // Persist the layout as it changes (debounced) so it survives reloads.
+        let timer: number | undefined;
+        api.onDidLayoutChange(() => {
+          if (timer) window.clearTimeout(timer);
+          timer = window.setTimeout(() => saveCurrentLayout(api.toJSON()), 300);
+        });
+        onApi(api);
       }}
       // Keep hidden tabs mounted (just CSS-hidden) so the Surfer iframe — and
       // every panel's state — survives switching to a stacked tab.
@@ -449,6 +569,7 @@ export function App() {
           <img className="logo" src="/fcapz_logo.png" alt="fcapz logo" />
           <h1>fpgacapZero</h1>
           <span className="muted">web{version ? ` · v${version}` : ""}</span>
+          {dockApi && <LayoutMenu api={dockApi} />}
           {dockApi && <TabsMenu api={dockApi} />}
         </header>
         {dockApi && <ViewerTabsSync api={dockApi} />}

@@ -344,6 +344,34 @@ body {
   margin: 0.25rem 0.2rem;
   background: var(--border);
 }
+/* Saved-layout row: the name loads it, the × deletes it. */
+.tabs-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+.tabs-menu-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tabs-menu-del {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+.tabs-menu-del:hover {
+  color: var(--err);
+  background: #0b0e14;
+}
+.tabs-menu-empty {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+}
 
 .panel {
   background: var(--panel);
@@ -405,7 +433,7 @@ button {
   color: #04202b;
   border: none;
   border-radius: 5px;
-  padding: 0.45rem 0.9rem;
+  padding: 0.22rem 0.9rem;
   font: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -726,6 +754,108 @@ body.dv-dragging-tabs iframe {
   background: var(--border);
 }
 
+/* Backend Log drawer under the waveform. Auto-hidden: a thin "▤ Log" rail on
+   the viewer's bottom edge slides the log up over the waveform on hover; pin it
+   to dock as a real row that shares the vertical space. Mirror of the Run bar,
+   flipped to the bottom edge. */
+.log-overlay {
+  --log-rail-h: 20px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 19;
+  /* Collapsed: slide down so only the rail peeks at the bottom edge. */
+  transform: translateY(calc(100% - var(--log-rail-h)));
+  transition: transform 0.18s ease;
+}
+.log-overlay.open {
+  transform: translateY(0);
+}
+/* Pinned: dock as a real row in the viewer column, sharing vertical space. */
+.log-overlay.pinned {
+  position: relative;
+  transform: none;
+  z-index: auto;
+}
+.log-overlay.pinned .log-rail {
+  display: none;
+}
+.log-overlay.pinned .log-drawer {
+  box-shadow: none;
+}
+.log-rail {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--log-rail-h);
+  padding: 0 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+}
+.log-overlay.open .log-rail {
+  color: var(--muted);
+}
+.log-rail-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  user-select: none;
+}
+.log-drawer {
+  position: relative;
+  height: 220px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -10px 26px rgba(0, 0, 0, 0.4);
+}
+/* The LogPanel fills the drawer; drop its standalone .panel chrome and the
+   default .panel top margin/padding so the controls sit flush at the top. */
+.log-drawer .logpanel {
+  height: 100%;
+  margin-top: 0;
+  padding: 0.3rem 0.45rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+/* Pin sits inline at the far-right of the log control row. */
+.log-pin {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.log-pin.on {
+  filter: none;
+  opacity: 1;
+  background: var(--border);
+}
+
+/* The Log (bottom) and Trigger (right) drawers overlap at the bottom-right
+   corner. Whichever one you reach for — hover to slide it out — lifts above the
+   other, so the drawer you're using is never clipped by its neighbour. */
+.log-overlay:hover {
+  z-index: 30;
+}
+.trig-overlay:hover {
+  z-index: 30;
+}
+
 .bits {
   display: flex;
   align-items: center;
@@ -757,6 +887,82 @@ body.dv-dragging-tabs iframe {
 }
 .bit.btn {
   cursor: pointer;
+}
+
+/* Backend Log tab */
+.logpanel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+/* Slimmer control row: Pause / Clear view / Auto-scroll ~1.3x thinner than the
+   default button, and a tighter row so they take less vertical space. */
+.logpanel .btnrow {
+  gap: 0.38rem;
+}
+.logpanel .btnrow button {
+  padding: 0.17rem 0.7rem;
+  font-size: 0.8rem;
+}
+.logpanel .log-autoscroll {
+  margin-top: 0; /* override label.inline so it lines up with the buttons */
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.logpanel .log-autoscroll input {
+  margin: 0;
+}
+.logview {
+  flex: 1;
+  min-height: 0;
+  margin-top: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  font: 0.76rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: auto;
+}
+.logline {
+  display: grid;
+  grid-template-columns: 5.5rem 3.6rem 7rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.05rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.logline .logtime {
+  color: var(--muted);
+}
+.logline .loglevel {
+  font-weight: 600;
+  color: var(--muted);
+}
+.logline .logname {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.logline .logmsg {
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logline.lvl-warning .loglevel {
+  color: var(--warn);
+}
+.logline.lvl-error .loglevel,
+.logline.lvl-critical .loglevel {
+  color: var(--err);
+}
+.logline.lvl-warning .logmsg {
+  color: var(--warn);
+}
+.logline.lvl-error .logmsg,
+.logline.lvl-critical .logmsg {
+  color: var(--err);
 }
 
 /* JTAG-AXI operation log */

@@ -1,9 +1,33 @@
 import { useSession } from "../session";
 
 /** ELA capture configuration: window geometry and probe naming. Trigger
- *  conditions live in the Trigger drawer; run controls in the Run bar. */
+ *  conditions live in the Trigger drawer; run controls in the Run bar.
+ *
+ *  Window geometry is expressed as a total sample count plus the trigger's
+ *  1-based position within it — more intuitive than raw pre/post counts. The
+ *  wire protocol still takes pretrigger/posttrigger, so they are derived here:
+ *  pretrigger = position - 1, posttrigger = window - position (trigger sample
+ *  included), keeping window = pretrigger + posttrigger + 1. */
 export function ElaPanel() {
   const { ela, setEla, identity } = useSession();
+
+  const pre = Math.max(0, Math.floor(Number(ela.pretrigger) || 0));
+  const post = Math.max(0, Math.floor(Number(ela.posttrigger) || 0));
+  const windowLen = pre + post + 1;
+  const triggerPos = pre + 1; // 1-based index of the trigger sample in the window
+  const seg = Math.max(1, Number(identity?.num_segments) || 1);
+  // A single capture must fit one segment; the usable window is depth/segments.
+  const maxWindow = Math.max(1, Math.floor((Number(identity?.depth) || windowLen) / seg));
+
+  function applyWindow(next: number) {
+    const w = Math.min(Math.max(1, Math.floor(next || 1)), maxWindow);
+    const pos = Math.min(Math.max(1, triggerPos), w); // keep the trigger position
+    setEla({ pretrigger: String(pos - 1), posttrigger: String(w - pos) });
+  }
+  function applyPos(next: number) {
+    const pos = Math.min(Math.max(1, Math.floor(next || 1)), windowLen);
+    setEla({ pretrigger: String(pos - 1), posttrigger: String(windowLen - pos) });
+  }
 
   async function loadProbeFile(file: File | undefined) {
     if (!file) return;
@@ -21,17 +45,23 @@ export function ElaPanel() {
           />
         </label>
         <label>
-          Pre
+          Samples (window)
           <input
-            value={ela.pretrigger}
-            onChange={(e) => setEla({ pretrigger: e.target.value })}
+            type="number"
+            min={1}
+            max={maxWindow}
+            value={windowLen}
+            onChange={(e) => applyWindow(Number(e.target.value))}
           />
         </label>
         <label>
-          Post
+          Trigger position
           <input
-            value={ela.posttrigger}
-            onChange={(e) => setEla({ posttrigger: e.target.value })}
+            type="number"
+            min={1}
+            max={windowLen}
+            value={triggerPos}
+            onChange={(e) => applyPos(Number(e.target.value))}
           />
         </label>
         <label className="inline">
@@ -43,6 +73,19 @@ export function ElaPanel() {
           Read all segments
         </label>
       </div>
+      <input
+        type="range"
+        min={1}
+        max={windowLen}
+        value={triggerPos}
+        onChange={(e) => applyPos(Number(e.target.value))}
+        aria-label="Trigger position in window"
+        style={{ width: "100%" }}
+      />
+      <p className="muted">
+        {pre} pre · trigger @ {triggerPos} · {post} post — {windowLen} samples
+        {maxWindow > 1 ? ` (max ${maxWindow})` : ""}
+      </p>
       {identity?.num_segments ? (
         <p className="muted">Hardware segments: {identity.num_segments}</p>
       ) : null}

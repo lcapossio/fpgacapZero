@@ -144,6 +144,31 @@ export async function rpc(
   return data;
 }
 
+export interface LogLine {
+  seq: number;
+  ts: number; // epoch seconds
+  level: string;
+  name: string;
+  msg: string;
+}
+
+export interface LogSnapshot {
+  lines: LogLine[];
+  next: number;
+  dropped: number;
+}
+
+/** Fetch backend log records newer than `since` (0 = from the buffer start). */
+export async function fetchLogs(since = 0, signal?: AbortSignal): Promise<LogSnapshot> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`/api/logs?since=${since}`, { headers, signal });
+  if (res.status === 401) throw new Error("unauthorized — set the API token");
+  if (!res.ok) throw new Error(`logs fetch failed: ${res.status}`);
+  return (await res.json()) as LogSnapshot;
+}
+
 /** Parse a decimal or 0x-hex string into a number. */
 export function parseIntFlexible(text: string): number {
   const t = text.trim();
