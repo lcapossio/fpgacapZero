@@ -69,7 +69,7 @@ class ConnectionPanel(QGroupBox):
         self._scan_worker: TargetScanWorker | None = None
 
         self._backend = QComboBox()
-        self._backend.addItem("Xilinx hw_server", "hw_server")
+        self._backend.addItem("AMD/Xilinx hw_server", "hw_server")
         self._backend.addItem("OpenOCD", "openocd")
         self._backend.addItem("Intel Quartus JTAG", "usb_blaster")
 
@@ -99,7 +99,7 @@ class ConnectionPanel(QGroupBox):
         tl.addWidget(self._scan_targets_btn)
 
         self._ir = QComboBox()
-        self._ir.addItem("Xilinx 7-series", "xilinx7")
+        self._ir.addItem("AMD/Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
         self._ir.addItem("Gowin (OpenOCD)", "gowin")
 

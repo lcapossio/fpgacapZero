@@ -32,8 +32,8 @@ const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s clien
 
 const VENDOR_NAMES: Record<string, string> = {
   gowin: "Gowin",
-  xilinx7: "Xilinx 7-series",
-  ultrascale: "Xilinx UltraScale+",
+  xilinx7: "AMD/Xilinx 7-series",
+  ultrascale: "AMD/Xilinx UltraScale+",
   intel: "Intel/Altera",
   altera: "Intel/Altera",
 };
