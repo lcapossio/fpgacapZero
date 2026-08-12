@@ -937,6 +937,113 @@ class QuartusStpTransport(Transport):
             )
         return values
 
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples via single-chain burst on the active chain.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample — the exact flat layout ``Analyzer.capture()`` reassembles.
+
+        This is the fast path for a wide, single-chain core such as the 160-bit
+        AXI monitor, whose burst DR shares one BSCAN instance with its control
+        frames (``jtag_pipe_iface``).  One 256-bit scan carries
+        ``256 // sample_width`` samples (one, for the 160-bit monitor), so the
+        whole buffer streams in ~``n_samples`` DR scans instead of
+        ``n_samples * ceil(width/32)`` per-word register reads — ~15x fewer
+        quartus_stp commands, which is where the readback time actually goes.
+
+        The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
+        (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
+        the burst scans go on the control chain itself.  Raises on a stream that
+        will not converge so the caller can fall back to the per-word path.
+        """
+        if n_samples <= 0:
+            return []
+        if sample_width < 1:
+            raise ValueError(f"sample_width must be >= 1, got {sample_width}")
+        samples_per_scan = max(1, self.BURST_DR_BITS // sample_width)
+        n_scans = (n_samples + samples_per_scan - 1) // samples_per_scan
+        prime_scans = 1
+        chain = self._active_chain
+        # write bit | BURST_PTR addr | data = 0 (start at sample 0, not timestamp)
+        burst_frame = (1 << 48) | (self.ADDR_BURST_PTR << 32)
+
+        def run_once() -> List[int]:
+            body = ["set __fcapz_sburst {}"]
+            body.append(self._virtual_ir_tcl(chain))
+            body.append(
+                self._dr_shift_tcl(
+                    chain, burst_frame, self.DR_BITS, "__fcapz_sburst_ptr"
+                )
+            )
+            body.append(
+                "device_run_test_idle "
+                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            )
+            # First scan primes/flushes the 256-bit staging register; discarded.
+            for idx in range(n_scans + prime_scans):
+                var = f"__fcapz_sburst_{idx}"
+                body.append(
+                    self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
+                )
+                body.append(f"lappend __fcapz_sburst ${var}")
+            captured = self._send(
+                self._locked_script(
+                    body=body,
+                    result="__fcapz_sburst",
+                    status="__fcapz_sburst_status",
+                    error="__fcapz_sburst_error",
+                )
+            )
+            return self._parse_sample_burst(
+                captured.split(),
+                n_samples,
+                sample_width,
+                skip_scans=prime_scans,
+            )
+
+        # The capture RAM is read-only once STATUS.done is set, so a correct
+        # stream repeats identically; require a stable pair before trusting it.
+        previous = run_once()
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("Quartus single-chain sample burst did not stabilize")
+
+    def _parse_sample_burst(
+        self,
+        tokens: list[str],
+        n_samples: int,
+        sample_width: int,
+        *,
+        skip_scans: int,
+    ) -> List[int]:
+        words_per_sample = (sample_width + 31) // 32
+        samples_per_scan = max(1, self.BURST_DR_BITS // sample_width)
+        sample_mask = (1 << sample_width) - 1
+        words: list[int] = []
+        produced = 0
+        for scan_idx, token in enumerate(tokens):
+            if scan_idx < skip_scans:
+                continue
+            scan_value = self._shift_string_to_int(token, self.BURST_DR_BITS)
+            for s in range(samples_per_scan):
+                if produced >= n_samples:
+                    break
+                sample = (scan_value >> (s * sample_width)) & sample_mask
+                for w in range(words_per_sample):
+                    words.append((sample >> (w * 32)) & 0xFFFFFFFF)
+                produced += 1
+        if produced != n_samples:
+            raise RuntimeError(
+                f"Quartus single-chain sample burst produced {produced} samples, "
+                f"expected {n_samples}: {tokens!r}"
+            )
+        return words
+
     def _validate_instance(self, instance: int) -> None:
         if instance < 1:
             raise ValueError(

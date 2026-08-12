@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field, replace
 from functools import wraps
@@ -13,6 +14,8 @@ from typing import Dict, List, Optional, Sequence
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import OpenOcdTransport, Transport, list_openocd_taps
+
+_log = logging.getLogger(__name__)
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
@@ -715,18 +718,42 @@ class Analyzer:
 
     @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
+        sw = self._config.sample_width if self._config else 8
+        # Wide cores (e.g. the 160-bit AXI monitor) are single-chain: their burst
+        # DR shares one BSCAN instance with control frames (jtag_pipe_iface), so
+        # the two-chain read_block burst — which targets the ELA's *separate*
+        # DATA_CHAIN — can never reach them and silently falls back to a ~20s
+        # per-word read.  Read them via the single-chain sample burst on the
+        # active chain instead: one 256-bit scan per sample, ~1/15th the
+        # quartus_stp commands (~20s -> ~1-2s for 1024x160-bit).  This is checked
+        # before the burst-slot question because it holds regardless of how the
+        # core is presented (standalone or behind the core manager).
+        if sw > 32:
+            sample_burst = getattr(self.transport, "read_sample_block", None)
+            if sample_burst is not None:
+                words_per_sample = (sw + 31) // 32
+                n_samples = total_words // words_per_sample
+                try:
+                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw)
+                    _log.info(
+                        "single-chain sample burst: %d samples (%d-bit)",
+                        n_samples,
+                        sw,
+                    )
+                    return words
+                except (ConnectionError, RuntimeError) as exc:
+                    _log.warning(
+                        "single-chain sample burst failed (%s); falling back to "
+                        "the slower read_block path",
+                        exc,
+                    )
+            # Fallback: read_block's pipelined word path (fast on hw_server;
+            # slow per-word on quartus_stp when its DATA_CHAIN burst can't reach
+            # this core — but correct either way).
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
-        # Non-burst slot (e.g. the AXI monitor's manager slot).  For a wide core
-        # (SAMPLE_W > 32) read_block is still fast and safe: it skips the 256-bit
-        # sample-packing burst DR for multi-word samples and uses one pipelined
-        # jtag sequence per chunk, so prefer it over a per-word round trip
-        # (1280 reads of a 160-bit x 256 buffer was ~17s; the pipelined path is
-        # sub-second).  Narrow samples keep the per-word path, which avoids
-        # attempting a burst the slot does not support.
-        sw = self._config.sample_width if self._config else 8
-        if sw > 32:
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
         read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 

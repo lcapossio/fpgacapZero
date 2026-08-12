@@ -422,6 +422,55 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertLess(script.index("} __fcapz_scan_error]"), script.index("device_unlock"))
         self.assertIn("if {$__fcapz_scan_status}", script)
 
+    def test_read_sample_block_single_chain_burst(self):
+        # Three 160-bit samples, each five distinct 32-bit words (little-endian).
+        samples = []
+        for i in range(3):
+            words = [0x10 * i + j + 1 for j in range(5)]  # distinct, nonzero
+            val = 0
+            for j, w in enumerate(words):
+                val |= (w & 0xFFFFFFFF) << (32 * j)
+            samples.append((val, words))
+        # The burst returns one 256-bit scan per sample (low 160 bits = sample);
+        # the first (prime) scan flushes staging and is discarded.
+        tokens = ["0" * 256] + [f"{val:0256b}" for val, _ in samples]
+        payload = " ".join(tokens)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(5)  # the monitor's single BSCAN instance
+        out = t.read_sample_block(0x0100, len(samples), 160)
+
+        expected = [w for _, words in samples for w in words]
+        self.assertEqual(out, expected)
+        # Burst scans must target the active control chain, not the ELA's chain 2.
+        self.assertIn("-instance_index 5", t.last_script)
+        self.assertNotIn("-instance_index 2", t.last_script)
+        # One 256-bit DR scan per sample plus one prime scan; one 49-bit BURST_PTR write.
+        self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
+        self.assertEqual(t.last_script.count("-length 49"), 1)
+
+    def test_read_sample_block_raises_when_stream_unstable(self):
+        # Alternating payloads never converge across the stability retries ->
+        # raise, so the caller falls back to the per-word path, not garbage.
+        prime = "0" * 256
+        a = prime + " " + "1" * 256
+        b = prime + " " + "0" * 256
+        payloads = iter([a, b, a, b])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                return next(payloads)
+
+        t = FakeQuartus()
+        t.select_chain(5)
+        with self.assertRaises(RuntimeError):
+            t.read_sample_block(0x0100, 1, 160)
+
     def test_send_times_out_waiting_for_sentinel(self):
         proc = MagicMock()
         proc.stdin = MagicMock()
