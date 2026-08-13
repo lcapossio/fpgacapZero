@@ -30,9 +30,10 @@ features they expose.
 | AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
 | AMD/Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
-| Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
+| Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
+| Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)

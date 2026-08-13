@@ -14,7 +14,8 @@ JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
 Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
-and Microchip** parts, with a Python / CLI / GUI host stack on top.
+and Microchip** parts (with **Efinix** support pending), plus a Python / CLI / GUI
+host stack on top.
 
 > 📖 **New here? Start with the [User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — especially
 > **[First capture in 10 minutes](https://github.com/lcapossio/fpgacapZero/blob/main/docs/03_first_capture.md)**. This page is just
@@ -39,7 +40,8 @@ across the network, a **Python API**, the **`fcapz` command-line tool**, a
 
 - **Vendor-agnostic** — one portable core with thin TAP wrappers for AMD/Xilinx
   7-series, AMD/Xilinx UltraScale / UltraScale+, Lattice ECP5, Intel / Altera,
-  Gowin, and Microchip PolarFire-family devices.
+  Gowin, and Microchip PolarFire-family devices. An **Efinix (Trion / Titanium)**
+  wrapper is planned — support pending.
 - **Small, and only as big as you need** — a usable 8-bit / 1024-sample ELA
   fits in about **600 LUTs + 0.5 BRAM**. Extra triggers, timestamps,
   decimation, segmenting, and more are compile-time options you enable only
@@ -136,6 +138,7 @@ The canonical register / shift maps live in
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
 | Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
 | UltraScale / ECP5 / PolarFire wrappers | RTL complete; host / hardware validation still limited |
+| Efinix (Trion / Titanium) wrapper | ⏳ Planned — support pending, wrapper not yet implemented |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 (details in the manual) |
 
 The full, always-current matrix is in [Overview](https://github.com/lcapossio/fpgacapZero/blob/main/docs/01_overview.md) and

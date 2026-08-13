@@ -205,6 +205,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |
+| Efinix Trion / Titanium | Efinity JTAG User TAP | *planned* (`fcapz_*_efinix.v`) | ⏳ Support pending — wrapper not yet implemented |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 
 The wrappers are all single-instantiation: pick the one for your
