@@ -9,6 +9,49 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
+  warnings) are captured into a bounded ring and served at `GET /api/logs`; the
+  browser tails them in a Log panel that sits as an auto-hiding hover-drawer
+  under the waveform (pin it to keep it open), with Pause, Clear, and
+  auto-scroll. The RPC gateway logs each command with timing and the analyzer
+  logs burst-readback success/fallback, so the fast path is visible, not silent.
+- **Web — saved dock layouts.** The current panel arrangement auto-persists
+  across reloads, and a **Layout** menu saves, loads, and deletes named layouts
+  (localStorage).
+- **Web — connected FPGA shown on the Connection panel.** The status line now
+  leads with the actual device the backend opened (family/part + IDCODE), not
+  just the vendor.
+- **Efinix (Trion / Titanium) listed as a planned vendor** in the README and the
+  manual vendor matrices — support pending, wrapper not yet implemented.
+
+### Changed
+
+- **Transport — fast wide-core readback over USB-Blaster.** Wide, single-chain
+  cores (the 160-bit AXI monitor) now stream their samples **and** timestamps via
+  a single-chain burst on the core's own BSCAN instance — one 256-bit DR scan per
+  sample instead of per-word register reads, ~15× fewer `quartus_stp` commands
+  (~20 s → ~1–2 s for 1024×160-bit). Falls back to the per-word path if the
+  stream will not stabilize. Hardware-validated on the DE25-Nano (Agilex 5).
+- **Web — Trigger Immediate fills the whole window** (the 64-sample cap on wide
+  cores is gone) and shows the same live readback progress as an armed capture.
+- **Web — ELA trigger window model.** The pre/post-trigger boxes are replaced by
+  a **window size + trigger position** pair (e.g. a 1024-sample window with
+  position 512 → 511 pre-trigger / 512 post-trigger samples).
+- **Docs & UI — Xilinx rebranded to AMD/Xilinx** across the manual and the web /
+  PySide vendor labels (code identifiers and `IR_TABLE_*` names unchanged).
+- **Docs — README manual links are absolute** so they resolve on the PyPI
+  project page (PyPI has no repo context, so relative links 404 there).
+
+### Fixed
+
+- **Quartus USB-Blaster — clearer "no cores" message.** A board that presents no
+  fpgacapZero cores (e.g. an unconfigured device) now reports *"No
+  fpgacapZero-compatible cores found"* instead of the raw quartus *"virtual JTAG
+  instance cannot be found"*, which read like a cable/chain fault when the
+  connection was actually fine.
+
+### Added
+
 - **Web — USB-Blaster backend.** The browser Connection panel now offers the
   Intel/Altera `usb_blaster` backend (previously only in the CLI, RPC, and
   desktop GUI). Selecting it swaps host/port for an optional **Quartus cable**
