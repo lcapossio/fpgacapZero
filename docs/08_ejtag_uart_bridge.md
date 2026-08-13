@@ -67,7 +67,7 @@ TCK domain (host) and the `uart_clk` domain (UART hardware) can
 run at completely independent rates.  This is the same
 [`fcapz_async_fifo.v`](../rtl/fcapz_async_fifo.v) used by the
 EJTAG-AXI bridge for burst reads, with `USE_BEHAV_ASYNC_FIFO=0`
-selecting the Xilinx XPM variant for synthesis (or
+selecting the AMD/Xilinx XPM variant for synthesis (or
 `USE_BEHAV_ASYNC_FIFO=1` for the portable behavioral version).
 
 ## The 32-bit DR shift format

@@ -6,7 +6,7 @@ import type { AxiMonInfo } from "../axiMon";
 import { defaultElaForDepth, useSession } from "../session";
 import type { ElaConfig } from "../session";
 
-const BACKENDS = ["openocd", "hw_server"];
+const BACKENDS = ["openocd", "hw_server", "usb_blaster"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
 const CONNECT_TIMEOUT = 6000;
 // Discovery probes every tap on a small sweep of TCL ports, so give it more
@@ -32,8 +32,10 @@ const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s clien
 
 const VENDOR_NAMES: Record<string, string> = {
   gowin: "Gowin",
-  xilinx7: "Xilinx 7-series",
-  ultrascale: "Xilinx UltraScale+",
+  xilinx7: "AMD/Xilinx 7-series",
+  ultrascale: "AMD/Xilinx UltraScale+",
+  intel: "Intel/Altera",
+  altera: "Intel/Altera",
 };
 
 function vendorName(ir: string): string {
@@ -52,6 +54,10 @@ export function ConnectionPanel({
   const [backend, setBackend] = useState("openocd");
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("6666");
+  // USB-Blaster only: optional Quartus cable name (e.g. "DE25-Nano [USB-1]");
+  // blank auto-selects the sole attached cable. The quartus_stp path lives on
+  // the server (auto-detected, or its --quartus-stp flag), never in the browser.
+  const [hardware, setHardware] = useState("");
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
@@ -75,6 +81,7 @@ export function ConnectionPanel({
     port: number;
     tap: string;
     ir_table: string;
+    device?: string;
   } | null>(null);
   const { ela, setEla, setAxiMon, setEjtagAxi, setCores, conn, chainSwitch, setSwitching } =
     useSession();
@@ -197,17 +204,29 @@ export function ConnectionPanel({
     // ir_table and chain are omitted: the server infers the IR preset from
     // the tap name and autodetects the ELA's BSCAN chain, echoing both back —
     // chains are an implementation detail the user never types.
-    const reqParams = { backend, host, port: Number(port), tap };
+    // USB-Blaster ignores host/port; it optionally takes a Quartus cable name.
+    const reqParams: Record<string, unknown> = { backend, host, port: Number(port), tap };
+    if (backend === "usb_blaster" && hardware.trim()) reqParams.hardware = hardware.trim();
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
     const c = await rpc("connect", reqParams, t, sig());
     const params: ConnectionParams = {
-      ...reqParams,
+      backend,
+      host,
+      port: Number(port),
+      tap,
       ir_table: typeof c.ir_table === "string" ? c.ir_table : "",
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
     const r = await rpc("probe", {}, t, sig());
-    setConnTarget({ backend, host, port: Number(port), tap, ir_table: params.ir_table });
+    setConnTarget({
+      backend,
+      host,
+      port: Number(port),
+      tap,
+      ir_table: params.ir_table,
+      device: typeof c.device === "string" && c.device ? c.device : undefined,
+    });
     const id = r.probe as Identity;
     onConnected(params, id);
     // Fill the whole capture buffer by default (8 pre-trigger, the rest post).
@@ -239,6 +258,7 @@ export function ConnectionPanel({
       port: b.port,
       tap: b.tap,
       ir_table: b.ir_table,
+      device: typeof c.device === "string" && c.device ? c.device : undefined,
     });
     const id = r.probe as Identity;
     onConnected(params, id);
@@ -337,6 +357,13 @@ export function ConnectionPanel({
           setPickedIdx(0);
           setStatus(`${found.length} compatible boards found — pick one`);
         }
+        return;
+      }
+      if (backend === "usb_blaster") {
+        // No TCP scan/discovery: the cable is local. Connect with an auto tap
+        // (first @1 device) — the server auto-detects quartus_stp and, with a
+        // blank cable field, the sole attached USB-Blaster.
+        await connectTo("auto");
         return;
       }
       // hw_server: XSDB starts a local hw_server as needed, so just scan + connect.
@@ -518,6 +545,11 @@ export function ConnectionPanel({
         {error && <p className="err">{error}</p>}
         {connTarget && (
           <p className="muted">
+            {connTarget.device && (
+              <>
+                <b>{connTarget.device}</b> ·{" "}
+              </>
+            )}
             {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
             {connTarget.backend} {connTarget.host}:{connTarget.port}
           </p>
@@ -609,16 +641,30 @@ export function ConnectionPanel({
             ))}
           </select>
         </label>
+        {backend !== "usb_blaster" && (
+          <>
+            <label>
+              Host
+              <input value={host} onChange={(e) => setHost(e.target.value)} />
+            </label>
+            <label>
+              Port
+              <input value={port} onChange={(e) => setPort(e.target.value)} />
+            </label>
+          </>
+        )}
+        {backend === "usb_blaster" && (
+          <label>
+            Quartus cable (optional)
+            <input
+              value={hardware}
+              onChange={(e) => setHardware(e.target.value)}
+              placeholder='auto; e.g. "DE25-Nano [USB-1]"'
+            />
+          </label>
+        )}
         <label>
-          Host
-          <input value={host} onChange={(e) => setHost(e.target.value)} />
-        </label>
-        <label>
-          Port
-          <input value={port} onChange={(e) => setPort(e.target.value)} />
-        </label>
-        <label>
-          Tap (optional)
+          {backend === "usb_blaster" ? "Device (optional)" : "Tap (optional)"}
           <input
             value={manualTap}
             onChange={(e) => setManualTap(e.target.value)}

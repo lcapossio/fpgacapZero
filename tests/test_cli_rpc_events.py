@@ -29,7 +29,11 @@ from fcapz.cli import (
     _uint16,
     build_parser,
 )
-from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
+from fcapz.transport import (
+    OpenOcdTransport,
+    QuartusStpTransport,
+    XilinxHwServerTransport,
+)
 from fcapz.events import (
     ProbeDefinition,
     find_bursts,
@@ -732,6 +736,35 @@ class MakeTransportTests(unittest.TestCase):
         t = _make_transport(args)
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
+
+    def test_usb_blaster_backend_uses_quartus_stp_transport(self):
+        args = argparse.Namespace(
+            backend="usb_blaster",
+            host="127.0.0.1",
+            port=6666,
+            tap="@1: 10M50DA",
+            hardware="USB-Blaster [USB-0]",
+            quartus_stp="quartus_stp",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, QuartusStpTransport)
+        self.assertEqual(t.hardware_name, "USB-Blaster [USB-0]")
+        self.assertEqual(t.device_name, "@1: 10M50DA")
+
+    def test_usb_blaster_default_tap_auto_selects_device(self):
+        for tap in ("", "auto", "xc7a100t", "xc7a100t.tap"):
+            with self.subTest(tap=tap):
+                args = argparse.Namespace(
+                    backend="usb_blaster",
+                    host="127.0.0.1",
+                    port=6666,
+                    tap=tap,
+                    hardware=None,
+                    quartus_stp=None,
+                )
+                t = _make_transport(args)
+                self.assertIsInstance(t, QuartusStpTransport)
+                self.assertIsNone(t.device_name)
 
 
 if __name__ == "__main__":

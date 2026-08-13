@@ -9,16 +9,22 @@ hardware or network connection required.
 
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
+    find_quartus_stp,
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
+    QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
     parse_xsdb_jtag_targets,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +352,543 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             r"OpenOCD drscan failed.*GW1NR-9C\.tap.*Tap 'GW1NR-9C\.tap' not found",
         ):
             t.raw_dr_scan(0, 49)
+
+
+class QuartusStpTransportTests(unittest.TestCase):
+    """Intel/Altera USB-Blaster transport helpers."""
+
+    @staticmethod
+    def _quartus_burst_token(values: list[int], element_width: int = 8) -> str:
+        packed = 0
+        mask = (1 << element_width) - 1
+        for idx, value in enumerate(values):
+            packed |= (value & mask) << (idx * element_width)
+        return f"{packed:0256b}"
+
+    def test_find_quartus_stp_explicit_passthrough(self):
+        self.assertEqual(find_quartus_stp("/x/quartus_stp"), "/x/quartus_stp")
+
+    def test_find_quartus_stp_prefers_shell_over_windowed(self):
+        # Auto-detect must return the quartus_stp Tcl shell, never the
+        # quartus_stpw windowed SignalTap GUI that sits beside it in bin/.
+        import os
+        import tempfile
+
+        suffix = ".exe" if os.name == "nt" else ""
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "quartus" / "bin64"
+            bindir.mkdir(parents=True)
+            (bindir / f"quartus_stpw{suffix}").write_text("")  # GUI decoy
+            (bindir / f"quartus_stp{suffix}").write_text("")
+            with patch("fcapz.transport.shutil.which", return_value=None), patch.dict(
+                os.environ, {"QUARTUS_ROOTDIR": str(Path(tmp) / "quartus")}
+            ):
+                got = find_quartus_stp()
+            self.assertIsNotNone(got)
+            self.assertTrue(got.lower().endswith(f"quartus_stp{suffix}".lower()))
+            self.assertNotIn("stpw", got.lower())
+
+    def test_shift_string_is_fixed_width_binary_value(self):
+        self.assertEqual(QuartusStpTransport._int_to_shift_string(0b0101, 4), "0101")
+        self.assertEqual(QuartusStpTransport._shift_string_to_int("0101", 4), 0b0101)
+
+    def test_shift_string_rejects_non_binary_output(self):
+        with self.assertRaisesRegex(RuntimeError, "non-binary"):
+            QuartusStpTransport._shift_string_to_int("0x5", 4)
+
+    def test_select_chain_accepts_rtl_chain_instance_indices(self):
+        t = QuartusStpTransport()
+        self.assertEqual(t._active_chain, 1)
+        t.select_chain(1)
+        self.assertEqual(t._active_chain, 1)
+        t.select_chain(3)
+        self.assertEqual(t._active_chain, 3)
+        with self.assertRaises(ValueError):
+            t.select_chain(0)
+
+    def test_raw_dr_scan_emits_unlock_outside_inner_catch(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
+
+        t = FakeQuartus()
+        t.raw_dr_scan(0, 49)
+        script = scripts[0]
+        self.assertIn("set __fcapz_scan_status [catch {", script)
+        self.assertLess(script.index("device_virtual_ir_shift"), script.index("device_unlock"))
+        self.assertLess(script.index("} __fcapz_scan_error]"), script.index("device_unlock"))
+        self.assertIn("if {$__fcapz_scan_status}", script)
+
+    def test_read_sample_block_single_chain_burst(self):
+        # Three 160-bit samples, each five distinct 32-bit words (little-endian).
+        samples = []
+        for i in range(3):
+            words = [0x10 * i + j + 1 for j in range(5)]  # distinct, nonzero
+            val = 0
+            for j, w in enumerate(words):
+                val |= (w & 0xFFFFFFFF) << (32 * j)
+            samples.append((val, words))
+        # The burst returns one 256-bit scan per sample (low 160 bits = sample);
+        # the first (prime) scan flushes staging and is discarded.
+        tokens = ["0" * 256] + [f"{val:0256b}" for val, _ in samples]
+        payload = " ".join(tokens)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(5)  # the monitor's single BSCAN instance
+        out = t.read_sample_block(0x0100, len(samples), 160)
+
+        expected = [w for _, words in samples for w in words]
+        self.assertEqual(out, expected)
+        # Burst scans must target the active control chain, not the ELA's chain 2.
+        self.assertIn("-instance_index 5", t.last_script)
+        self.assertNotIn("-instance_index 2", t.last_script)
+        # One 256-bit DR scan per sample plus one prime scan; one 49-bit BURST_PTR write.
+        self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
+        self.assertEqual(t.last_script.count("-length 49"), 1)
+
+    def test_read_sample_block_raises_when_stream_unstable(self):
+        # Alternating payloads never converge across the stability retries ->
+        # raise, so the caller falls back to the per-word path, not garbage.
+        prime = "0" * 256
+        a = prime + " " + "1" * 256
+        b = prime + " " + "0" * 256
+        payloads = iter([a, b, a, b])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                return next(payloads)
+
+        t = FakeQuartus()
+        t.select_chain(5)
+        with self.assertRaises(RuntimeError):
+            t.read_sample_block(0x0100, 1, 160)
+
+    def test_read_timestamp_block_single_chain_sets_timestamp_bit(self):
+        # Four 32-bit timestamps pack into one 256-bit scan (8 per scan), plus
+        # one discarded prime scan -- read on the active chain, not the ELA's.
+        ts = [10, 21, 33, 48]
+        val = 0
+        for i, v in enumerate(ts):
+            val |= (v & 0xFFFFFFFF) << (32 * i)
+        payload = " ".join(["0" * 256, f"{val:0256b}"])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(5)  # the monitor's single BSCAN instance
+        out = t.read_timestamp_block_single_chain(0x1100, len(ts), 32)
+
+        self.assertEqual(out, ts)
+        # Burst pointer must assert the timestamp-select bit (0x80000000), unlike
+        # the sample burst which starts at sample 0.
+        ts_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0x80000000
+        sample_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32)
+        self.assertIn(f"{ts_frame:049b}", t.last_script)
+        self.assertNotIn(f"{sample_frame:049b}", t.last_script)
+        # Same single-chain routing as the sample burst: active chain, not chain 2.
+        self.assertIn("-instance_index 5", t.last_script)
+        self.assertNotIn("-instance_index 2", t.last_script)
+
+    def test_send_times_out_waiting_for_sentinel(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        proc.kill = MagicMock()
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        with self.assertRaises(TimeoutError):
+            t._send("puts hello")
+        proc.kill.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "reconnect|not connected"):
+            t._send("puts again")
+
+    def test_send_raises_runtime_error_on_tcl_error(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("ERROR: virtual dr failed\n")
+        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "virtual dr failed"):
+            t._send("device_virtual_dr_shift")
+
+    def test_send_strips_quartus_prompt_prefixes(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("tcl> tcl> 0001\n")
+        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
+
+    def test_send_strips_quartus_continuation_prompts_and_raises_error(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("> > > 1\n")
+        t._stdout_lines.put("> > ERROR: virtual dr shift failed\n")
+        t._stdout_lines.put("> >     while executing device_virtual_dr_shift\n")
+        t._stdout_lines.put(f"> {QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "while executing"):
+            t._send("device_virtual_dr_shift")
+
+    def test_prettify_device_name_strips_position_prefix(self):
+        pretty = QuartusStpTransport._prettify_device_name
+        # quartus_stp echoes "@N: <device>" -- @N is the chain position, not part
+        # of the device; strip it and collapse whitespace.
+        self.assertEqual(
+            pretty("@1: A5EB013BB23BCS  (0x4362C0DD)"),
+            "A5EB013BB23BCS (0x4362C0DD)",
+        )
+        self.assertEqual(pretty("EP4CE6 (0x020F10DD)"), "EP4CE6 (0x020F10DD)")
+        # Empty / whitespace -> None so the UI omits the device rather than
+        # showing a blank.
+        self.assertIsNone(pretty(""))
+        self.assertIsNone(pretty("   "))
+
+    def test_send_translates_missing_instance_to_no_cores(self):
+        # quartus_stp reports "virtual JTAG instance cannot be found" only when
+        # the FPGA carries no fpgacapZero cores -- surface that plainly, and do
+        # not leak JTAG/cable-fault wording (the connection is fine).
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("ERROR: The specified virtual JTAG instance cannot be found.\n")
+        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "No fpgacapZero-compatible cores") as ctx:
+            t._send("device_virtual_dr_shift")
+        msg = str(ctx.exception)
+        self.assertNotIn("JTAG", msg)
+        self.assertNotIn("virtual JTAG instance", msg)
+
+    def test_send_rejects_sentinel_collision(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport()
+        t._proc = proc
+        with self.assertRaises(ValueError):
+            t._send(f"puts {QuartusStpTransport._SENTINEL}")
+
+    def test_write_reg_uses_virtual_dr_scan(self):
+        calls: list[tuple[int, int, int | None]] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def raw_dr_scan(self, bits, width, *, chain=None):
+                calls.append((bits, width, chain))
+                return 0
+
+        t = FakeQuartus()
+        t.write_reg(0x1234, 0xDEADBEEF)
+        expected = (1 << 48) | (0x1234 << 32) | 0xDEADBEEF
+        self.assertEqual(calls, [(expected, 49, None)])
+
+    def test_open_device_auto_script_errors_on_multiple_quartus_cables(self):
+        script = QuartusStpTransport()._open_device_script()
+        self.assertIn("get_hardware_names", script)
+        self.assertIn("multiple Quartus JTAG cables found; pass --hardware", script)
+        self.assertIn('string match "@1*"', script)
+
+    def test_read_reg_choreography(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x12345678:049b}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_reg(0x20), 0x12345678)
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 2)
+        self.assertIn("device_run_test_idle", scripts[0])
+
+    def test_raw_dr_scan_batch_uses_one_lock_window(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0001 0010"
+
+        t = FakeQuartus()
+        self.assertEqual(t.raw_dr_scan_batch([(1, 4), (2, 4)]), [1, 2])
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 2)
+
+    def test_raw_dr_scan_batch_empty_is_noop(self):
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                raise AssertionError("empty raw_dr_scan_batch should not send Tcl")
+
+        self.assertEqual(FakeQuartus().raw_dr_scan_batch([]), [])
+
+    def test_raw_scan_chain_override_does_not_mutate_active_chain(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
+
+        t = FakeQuartus()
+        t.select_chain(1)
+        t.raw_dr_scan(0, 49, chain=5)
+        self.assertIn("-instance_index 5", scripts[-1])
+        self.assertEqual(t._active_chain, 1)
+
+    def test_raw_scan_batch_chain_override_does_not_mutate_active_chain(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return "0000"
+
+        t = FakeQuartus()
+        t.select_chain(1)
+        t.raw_dr_scan_batch([(0, 4)], chain=3)
+        self.assertIn("-instance_index 3", scripts[-1])
+        self.assertEqual(t._active_chain, 1)
+
+    def test_read_reg_uses_configurable_lock_timeout_and_idle_cycles(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x12345678:049b}"
+
+        t = FakeQuartus(lock_timeout_ms=5000, read_idle_cycles=42)
+        t.read_reg(0x20)
+        self.assertIn("device_lock -timeout 5000", scripts[0])
+        self.assertIn("device_run_test_idle -num_clocks 42", scripts[0])
+
+    def test_virtual_ir_result_is_discarded(self):
+        script = QuartusStpTransport()._virtual_ir_tcl(1)
+        self.assertIn("set __fcapz_ir_discard [device_virtual_ir_shift", script)
+        self.assertIn("-no_captured_ir_value]", script)
+
+    def test_send_returns_final_non_error_result_line(self):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.01)
+        t._proc = proc
+        t._stdout_lines.put("tcl> 0\n")
+        t._stdout_lines.put("tcl> 0001\n")
+        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
+
+    def test_read_block_uses_one_lock_window(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0x11111111:049b} {0x22222222:049b}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_block(0x20, 2), [0x11111111, 0x22222222])
+        self.assertEqual(scripts[0].count("device_lock"), 1)
+        self.assertEqual(scripts[0].count("device_unlock"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_ir_shift"), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 4)
+
+    def test_read_block_data_window_uses_burst_data_chain(self):
+        scripts: list[str] = []
+        packed = sum(value << (idx * 8) for idx, value in enumerate([1, 2, 3, 4, 5]))
+        sample_width_reads: list[int] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def read_reg_verified(self, addr):
+                sample_width_reads.append(addr)
+                return 8
+
+            def _send(self, script):
+                scripts.append(script)
+                return f"{0:0256b} {packed:0256b}"
+
+        t = FakeQuartus(burst_data_chain=7, burst_prefill_idle_cycles=123)
+        t.select_chain(5)
+        self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
+        self.assertEqual(sample_width_reads, [0x000C])
+        self.assertEqual(len(scripts), 2)
+        self.assertIn("-instance_index 5", scripts[0])
+        self.assertIn("-instance_index 7", scripts[0])
+        self.assertIn("device_run_test_idle -num_clocks 123", scripts[0])
+        self.assertIn("-length 256", scripts[0])
+
+    def test_quartus_burst_primes_data_chain_before_returned_scans(self):
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 32)
+        fresh0 = self._quartus_burst_token(list(range(32)))
+        fresh1 = self._quartus_burst_token(list(range(32, 64)))
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh0} {fresh1}"
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        self.assertEqual(t._read_block_burst(33), list(range(33)))
+        self.assertEqual(len(scripts), 2)
+        self.assertEqual(scripts[0].count("-length 256"), 3)
+
+    def test_quartus_burst_requires_stable_repeated_readback(self):
+        prime = self._quartus_burst_token([0xAA] * 32)
+        responses = [
+            f"{prime} {self._quartus_burst_token([0x10] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x20] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x30] * 32)}",
+            f"{prime} {self._quartus_burst_token([0x40] * 32)}",
+        ]
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, _script):
+                return responses.pop(0)
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
+            t._read_block_burst(8)
+
+    def test_quartus_burst_accepts_first_stale_then_stable_pair(self):
+        prime = self._quartus_burst_token([0xAA] * 32)
+        stale = f"{prime} {self._quartus_burst_token([0xEE] * 32)}"
+        fresh = f"{prime} {self._quartus_burst_token(list(range(32)))}"
+        responses = [stale, fresh, fresh]
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, _script):
+                return responses.pop(0)
+
+        t = FakeQuartus()
+        t._cached_sps = 32
+        self.assertEqual(t._read_block_burst(8), list(range(8)))
+        self.assertEqual(responses, [])
+
+    def test_quartus_timestamp_burst_primes_and_selects_timestamp_stream(self):
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 8, element_width=32)
+        fresh = self._quartus_burst_token(list(range(8)), element_width=32)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh}"
+
+        t = FakeQuartus()
+        self.assertEqual(
+            t._read_block_burst(8, timestamp=True, element_width=32),
+            list(range(8)),
+        )
+        timestamp_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0x80000000
+        self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
+        self.assertEqual(scripts[0].count("-length 256"), 2)
+
+    def test_quartus_read_block_falls_back_and_disables_failed_burst(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{1:049b} {2:049b}"
+
+        t = FakeQuartus()
+        t._read_block_burst = MagicMock(side_effect=RuntimeError("DATA_CHAIN missing"))  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
+            self.assertEqual(t.read_block(0x0100, 2), [1, 2])
+        self.assertIn("falling back", "\n".join(logs.output))
+        self.assertFalse(t._burst_available)
+
+        self.assertEqual(t.read_block(0x0100, 2), [1, 2])
+        t._read_block_burst.assert_called_once_with(2)
+        self.assertEqual(len(scripts), 2)
+
+    def test_quartus_timestamp_block_falls_back_and_disables_failed_burst(self):
+        scripts: list[str] = []
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{4:049b} {5:049b}"
+
+        t = FakeQuartus()
+        t._read_block_burst = MagicMock(side_effect=RuntimeError("timestamp missing"))  # type: ignore[method-assign]
+
+        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
+            self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
+        self.assertIn("timestamp burst readback failed", "\n".join(logs.output))
+        self.assertFalse(t._burst_available)
+        t._read_block_burst.assert_called_once_with(
+            2,
+            timestamp=True,
+            element_width=32,
+        )
+        self.assertEqual(len(scripts), 1)
+
+    def test_read_block_zero_words_is_noop(self):
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                raise AssertionError("zero-word read_block should not send Tcl")
+
+        self.assertEqual(FakeQuartus().read_block(0x20, 0), [])
+
+    def test_locked_script_rejects_empty_body(self):
+        with self.assertRaises(ValueError):
+            QuartusStpTransport()._locked_script(
+                body=[],
+                status="__status",
+                error="__error",
+            )
+
+    def test_connect_send_close_with_fake_quartus_stp(self):
+        fake_stp = ROOT / "tests" / "fixtures" / "fake_quartus_stp.py"
+        t = QuartusStpTransport(
+            quartus_stp_argv=[sys.executable, str(fake_stp), "-s"],
+            read_timeout_sec=2.0,
+        )
+        t.connect()
+        try:
+            wide_frame = (1 << 48) | (1 << 47) | 1
+            self.assertEqual(t.raw_dr_scan(wide_frame, 49), wide_frame)
+            self.assertEqual(t.read_reg(0x20), 0x12345678)
+            self.assertEqual(t.read_block(0x20, 2), [1, 2])
+            self.assertEqual(t.raw_dr_scan_batch([(0x11, 49), (0x22, 49)]), [0x11, 0x22])
+        finally:
+            t.close()
 
 
 # ---------------------------------------------------------------------------

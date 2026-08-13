@@ -26,6 +26,7 @@ from .openocd_launcher import OpenOcdLauncher
 from .probes import load_probe_file
 from .transport import (
     OpenOcdTransport,
+    QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
     list_openocd_taps,
@@ -66,9 +67,23 @@ _CORE_NAMES = {
     0x414D: "AXI Monitor",
 }
 
+# Auto-discovery sweep for ELA / AXI-monitor cores. USER1/2 carry the ELA
+# control/data; some reference designs place an AXI monitor on a higher
+# sld_virtual_jtag instance (the DE25-Nano monitor is on instance 5). All of
+# these speak the ELA register DR protocol, so probing them is a read-only
+# identity check -- a chain with no such core, or no such instance, simply
+# reports no identity and is skipped. The EJTAG-AXI bridge (canonically chain 4)
+# speaks a different DR protocol and is deliberately excluded so it never sees a
+# stray ELA read frame.
+_ELA_SCAN_CHAINS = (1, 2, 5)
+
 
 class RpcServer:
-    def __init__(self, openocd_launcher: OpenOcdLauncher | None = None):
+    def __init__(
+        self,
+        openocd_launcher: OpenOcdLauncher | None = None,
+        quartus_stp_path: str | None = None,
+    ):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
         self._axi: EjtagAxiController | None = None
@@ -78,6 +93,10 @@ class RpcServer:
         # Optional server-managed OpenOCD (None = the openocd_* commands are
         # disabled and report so). Configured only by the web server launch.
         self._openocd_launcher = openocd_launcher
+        # Optional quartus_stp override for USB-Blaster connects. When a request
+        # omits "quartus_stp", this server default is used; when both are None
+        # the transport auto-detects (PATH / $QUARTUS_ROOTDIR / install roots).
+        self._quartus_stp_path = quartus_stp_path
 
     @staticmethod
     def _ok(**payload: Any) -> Dict[str, Any]:
@@ -171,10 +190,10 @@ class RpcServer:
         if mon_entry is not None:
             cores.append(mon_entry)
 
-        # Other conservative chains (USER1/2): a plain or monitor ELA the
-        # client can switch the session to — chains are an implementation
-        # detail the UI resolves with a "use this core" action.
-        for chain in (1, 2):
+        # Other ELA-protocol chains (see _ELA_SCAN_CHAINS): a plain or monitor
+        # ELA the client can switch the session to — chains are an
+        # implementation detail the UI resolves with a "use this core" action.
+        for chain in _ELA_SCAN_CHAINS:
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -299,6 +318,9 @@ class RpcServer:
         return self._ok(**payload)
 
     # ir_table preset name -> table (None = transport default, Xilinx 7-series).
+    # "intel"/"altera" are vendor labels for the USB-Blaster (sld_virtual_jtag)
+    # transport, which uses no IR preset; they map to None so echoing one back
+    # is a harmless no-op on the shared build path.
     _IR_TABLES = {
         "": None,
         "xilinx7": None,
@@ -308,6 +330,8 @@ class RpcServer:
         "us": OpenOcdTransport.IR_TABLE_US,
         "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+        "intel": None,
+        "altera": None,
     }
 
     @classmethod
@@ -323,9 +347,14 @@ class RpcServer:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
         name = req.get("ir_table")
-        if name is None or not str(name).strip():
-            return _infer_ir_table_name(str(req.get("tap", "")))
-        return str(name)
+        if name is not None and str(name).strip():
+            return str(name)
+        # USB-Blaster is Intel/Altera sld_virtual_jtag -- it has no Xilinx IR
+        # preset, so label the session by vendor instead of defaulting to the
+        # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
+        if req.get("backend") == "usb_blaster":
+            return "intel"
+        return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
     def _probe_ejtag_axi(analyzer: Analyzer, chains):
@@ -363,18 +392,19 @@ class RpcServer:
     def _probe_axi_mon(analyzer: Analyzer):
         """``(chain, geometry, probes)`` of the AXI monitor, or None.
 
-        The connected chain is answered directly; otherwise a conservative
-        sweep of USER chains 1-2 only — the same set discover_eio probes — so
-        cores speaking a different DR protocol (EJTAG bridges on 3/4) never
-        see stray shifts. Restores the analyzer's chain afterwards, so the
-        caller's session is untouched wherever the monitor was found.
+        The connected chain is answered directly; otherwise an ELA-protocol
+        sweep (see _ELA_SCAN_CHAINS: USER1/2 plus the monitor instance 5 the
+        DE25-Nano uses) so cores speaking a different DR protocol (the EJTAG
+        bridge on chain 4) never see stray shifts. Restores the analyzer's chain
+        afterwards, so the caller's session is untouched wherever the monitor
+        was found.
         """
         mon = AxiMonitor(analyzer)
         geo = mon.geometry() if mon.present else None
         if geo is not None:
             return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
         result = None
-        for chain in (1, 2):
+        for chain in _ELA_SCAN_CHAINS:
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -414,6 +444,13 @@ class RpcServer:
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
                 ir_table=ir,
+            )
+        if backend == "usb_blaster":
+            tap = str(req.get("tap", "auto"))
+            return QuartusStpTransport(
+                hardware_name=req.get("hardware"),
+                device_name=None if tap in ("", "auto", "xc7a100t.tap") else tap,
+                quartus_stp_path=req.get("quartus_stp") or self._quartus_stp_path,
             )
         raise ValueError(f"unknown backend: {backend}")
 
@@ -647,9 +684,13 @@ class RpcServer:
                         break
             self._analyzer = analyzer
             # Echo the resolved preset/chain so a client that omitted them can
-            # label the session and reuse them for eio/axi side connects.
+            # label the session and reuse them for eio/axi side connects, plus
+            # the actual FPGA the backend opened (when it can name it) so the UI
+            # shows the connected device, not just the vendor.
             return self._ok(
-                ir_table=self._resolved_ir_name(req), chain=analyzer.bscan_chain
+                ir_table=self._resolved_ir_name(req),
+                chain=analyzer.bscan_chain,
+                device=getattr(analyzer.transport, "opened_device", None),
             )
 
         if cmd == "rebind":
@@ -840,6 +881,12 @@ class RpcServer:
             if cfg is None:
                 raise RuntimeError("not configured - send `configure` and `arm` first")
             return self._capture_readout(analyzer, cfg, req)
+
+        if cmd == "capture_status":
+            # Cheap status poll (no sample transfer): lets a client show the
+            # real "waiting for trigger" phase, then switch to "reading back"
+            # once the trigger has fired -- instead of one opaque blocking wait.
+            return self._ok(**analyzer.status())
 
         if cmd == "eio_connect":
             if self._eio is not None:

@@ -57,7 +57,7 @@ CLI/GUI/web, Surfer) is reused unchanged.
 
 | Phase | Deliverable |
 |-------|-------------|
-| **P1** | Passive AXI4/AXI4-Lite tap → channel flatten → `fcapz_ela.probe_in`; Xilinx-7 wrapper; cocotb bench; a shipped **AXI probe map** so captures show named signals (`awaddr`, `bresp`, …). Gets "capture & view an AXI bus" working — ~80% of the value. |
+| **P1** | Passive AXI4/AXI4-Lite tap → channel flatten → `fcapz_ela.probe_in`; AMD/Xilinx-7 wrapper; cocotb bench; a shipped **AXI probe map** so captures show named signals (`awaddr`, `bresp`, …). Gets "capture & view an AXI bus" working — ~80% of the value. |
 | **P2** | **Transaction decoder**: derived trigger signals wired into the sequencer, plus host **AXI-trigger presets** (trigger on write/read to address-in-range, on response code, on ID). |
 | **P3** | **Protocol checker**: AXI compliance assertions → a sticky `violation` probe bit + a violation-code register. |
 | **P4** | **Transaction decode in the viewer**: emit transaction-stream metadata so Surfer renders AW→W→B / AR→R as a transaction/relation view, not just raw signals. |

@@ -26,14 +26,15 @@ features they expose.
 
 | Vendor / family | Wrapper suffix | Hardware-validated |
 |---|---|---|
-| Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
-| Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
-| Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
+| AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
+| AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
+| AMD/Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
-| Intel / Altera (Cyclone, Arria, Stratix) | `_intel` | ❌ |
+| Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
-| Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
+| Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
+| AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)
 "Adding a new transport / vendor wrapper" for the porting guide.
@@ -48,7 +49,7 @@ includes the ELA configuration matrix for small/scalable builds:
 
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
-Arty A7 hardware test validates the Xilinx 7-series reference bitstream and
+Arty A7 hardware test validates the AMD/Xilinx 7-series reference bitstream and
 the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
 PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
 lint-clean until a board-level smoke test is added for that family.
@@ -182,7 +183,7 @@ fcapz capture --probe-file build/ela.prob --format vcd --out capture.vcd
 This first integration path keeps capture control on the existing JTAG
 transport.  It does not consume LiteX CSRs or Wishbone address space.  Use
 the normal `fcapz` CLI, GUI, or Python API against the programmed bitstream.
-The high-level `FcapzELA` wrapper currently targets the Xilinx 7-series and
+The high-level `FcapzELA` wrapper currently targets the AMD/Xilinx 7-series and
 UltraScale-style ELA wrappers; lower-level source manifests for the other RTL
 wrappers are available through `ela_rtl_sources()` for custom integration.
 
@@ -312,11 +313,11 @@ module fcapz_ela_xilinx7 #(
 | `DEFAULT_TRIG_EXT` | int | 0..3 | Power-up/reset default for `TRIG_EXT`. Useful with `STARTUP_ARM=1` when you want the bitstream to come up armed but wait for an external trigger condition instead of immediately matching the default internal comparator. |
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
 | `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for a smaller single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
-| `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
+| `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal AMD/Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
 | `WIDE_TRIG` | bit | 0/1 | Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
 | `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
-| `BURST_EN` | bit | 0/1 | Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
-| `SINGLE_CHAIN_BURST` | bit | 0/1 | Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
+| `BURST_EN` | bit | 0/1 | AMD/Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
+| `SINGLE_CHAIN_BURST` | bit | 0/1 | AMD/Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
@@ -324,7 +325,7 @@ module fcapz_ela_xilinx7 #(
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
-**Migration note:** older Xilinx bitstreams may have been built with
+**Migration note:** older AMD/Xilinx bitstreams may have been built with
 `SINGLE_CHAIN_BURST=0`, where 256-bit burst scans live on `DATA_CHAIN`.
 The current host default expects single-chain burst on `CTRL_CHAIN`. If a
 legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
@@ -333,7 +334,7 @@ warning, use the CLI `--two-chain-burst` option or construct
 
 **Startup defaults:** `STARTUP_ARM` and `DEFAULT_TRIG_EXT` rely on the FPGA
 and synthesis flow preserving register initial values at configuration time
-(for example, Xilinx GSR/INIT behavior). If a target family or flow does not
+(for example, AMD/Xilinx GSR/INIT behavior). If a target family or flow does not
 guarantee those initial values, configure the registers from the host after
 programming instead of relying on power-up auto-arm behavior.
 
@@ -415,7 +416,7 @@ eio.write_outputs(0x1)
 - You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
   `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
   USER chain).
-- For multiple ELAs plus EIO on one Xilinx 7-series chain, prefer
+- For multiple ELAs plus EIO on one AMD/Xilinx 7-series chain, prefer
   `fcapz_debug_multi_xilinx7`; it uses the descriptor-capable `"CM"`
   active-slot manager instead of the older fixed `0x8000` EIO address window.
 
@@ -461,13 +462,13 @@ module fcapz_ejtagaxi_xilinx7 #(
 | `ADDR_W` | 32, 64 | AXI address width.  64 is supported but not hardware-validated. |
 | `DATA_W` | 32 | AXI data width.  Only 32 is supported today. |
 | `FIFO_DEPTH` | 1..256, **power of 2** | Async FIFO depth for burst reads.  Limits the maximum burst length the host can request — the host caches this from `FEATURES[23:16]` and rejects oversized requests at the API boundary.  See [chapter 07](07_ejtag_axi_bridge.md). |
-| `CMD_FIFO_DEPTH` | power of 2 | TCK-to-AXI command queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; Xilinx XPM FIFO builds require at least 16. |
-| `RESP_FIFO_DEPTH` | power of 2 | AXI-to-TCK response queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; Xilinx XPM FIFO builds require at least 16. |
+| `CMD_FIFO_DEPTH` | power of 2 | TCK-to-AXI command queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
+| `RESP_FIFO_DEPTH` | power of 2 | AXI-to-TCK response queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
 | `TIMEOUT` | int | AXI handshake timeout in `axi_clk` cycles.  Applies to `wready`/`bvalid`/`arready`/`rvalid` waits, **not** between burst beats. |
 | `DEBUG_EN` | 0, 1 | Enables the 256-bit debug buses and debug CONFIG capture records. Defaults off to let synthesis prune debug-only storage and counters. |
-| `CMD_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the command queue. Ignored by the portable behavioral FIFO. |
-| `RESP_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the response queue. Ignored by the portable behavioral FIFO. |
-| `BURST_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | Xilinx XPM storage selector for the burst read FIFO. Ignored by the portable behavioral FIFO. |
+| `CMD_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the command queue. Ignored by the portable behavioral FIFO. |
+| `RESP_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the response queue. Ignored by the portable behavioral FIFO. |
+| `BURST_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the burst read FIFO. Ignored by the portable behavioral FIFO. |
 | `CHAIN` | 1..4 | BSCANE2 USER chain. |
 
 ## EJTAG-UART wrapper parameter reference

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+#
+# Minimal DE25-Nano assignments for the fpgacapZero Intel USB-Blaster example.
+# Pin assignments are from the Terasic DE25-Nano user manual.
+
+set_global_assignment -name FAMILY "Agilex 5"
+set_global_assignment -name DEVICE A5EB013BB23BE4SR1
+set_global_assignment -name TOP_LEVEL_ENTITY de25_nano_top
+
+set_location_assignment PIN_V16 -to CLOCK1_50
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to CLOCK1_50
+
+set_location_assignment PIN_C8 -to KEY[0]
+set_location_assignment PIN_C11 -to KEY[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to KEY[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to KEY[1]
+
+set_location_assignment PIN_DK24 -to SW[0]
+set_location_assignment PIN_DD24 -to SW[1]
+set_location_assignment PIN_DD27 -to SW[2]
+set_location_assignment PIN_DF27 -to SW[3]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to SW[0]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to SW[1]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to SW[2]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to SW[3]
+
+set_location_assignment PIN_DF35 -to LEDR[0]
+set_location_assignment PIN_DJ32 -to LEDR[1]
+set_location_assignment PIN_DN22 -to LEDR[2]
+set_location_assignment PIN_DP23 -to LEDR[3]
+set_location_assignment PIN_DN25 -to LEDR[4]
+set_location_assignment PIN_DP25 -to LEDR[5]
+set_location_assignment PIN_DJ27 -to LEDR[6]
+set_location_assignment PIN_DP30 -to LEDR[7]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[0]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[1]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[2]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[3]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[4]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[5]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[6]
+set_instance_assignment -name IO_STANDARD "1.1 V" -to LEDR[7]

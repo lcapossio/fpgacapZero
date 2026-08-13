@@ -72,7 +72,7 @@ class EioPanel(QGroupBox):
         self._base_addr_spin.setToolTip(
             "Register-bus mux offset for a shared-chain EIO. "
             "Gowin (EIO_EN=1 on the ELA wrapper): 0x8000 on chain 1. "
-            "0 = standalone chain (e.g. Xilinx USER3).",
+            "0 = standalone chain (e.g. AMD/Xilinx USER3).",
         )
         self._attach_btn = QPushButton("Attach EIO")
         self._attach_btn.setToolTip(

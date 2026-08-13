@@ -7,6 +7,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Web — USB-Blaster backend.** The browser Connection panel now offers the
+  Intel/Altera `usb_blaster` backend (previously only in the CLI, RPC, and
+  desktop GUI). Selecting it swaps host/port for an optional **Quartus cable**
+  field; Connect goes straight to the local cable with no TCP scan. The
+  `quartus_stp` executable is **auto-detected** on the server — via `PATH`,
+  `$QUARTUS_ROOTDIR`, and common Intel/Altera install roots (new
+  `find_quartus_stp()`), so the usual case needs no path anywhere. A
+  `fcapz-web --quartus-stp` flag (`$FCAPZ_QUARTUS_STP`) overrides when
+  auto-detect misses. Auto-detect returns the `quartus_stp` Tcl shell, never the
+  `quartus_stpw` windowed GUI beside it.
+
 ### Changed
 
 - **Web — sensible capture defaults on connect.** A freshly connected core now

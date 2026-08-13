@@ -5,7 +5,13 @@
 
 from __future__ import annotations
 
-from ..transport import OpenOcdTransport, Transport, XilinxHwServerTransport
+from ..transport import (
+    QUARTUS_AUTO_DEVICE_TAPS,
+    OpenOcdTransport,
+    QuartusStpTransport,
+    Transport,
+    XilinxHwServerTransport,
+)
 from .settings import ConnectionSettings, ir_table_preset
 
 
@@ -56,5 +62,13 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             post_program_delay_ms=conn.hw_post_program_delay_ms,
             ready_poll_interval_sec=conn.hw_ready_poll_interval_ms / 1000.0,
             **chain_kwargs,
+        )
+    if conn.backend == "usb_blaster":
+        tap = conn.tap.strip()
+        device_name = None if tap in QUARTUS_AUTO_DEVICE_TAPS else tap
+        return QuartusStpTransport(
+            hardware_name=conn.hardware,
+            device_name=device_name,
+            quartus_stp_path=conn.quartus_stp,
         )
     raise ValueError(f"unknown backend {conn.backend!r}")

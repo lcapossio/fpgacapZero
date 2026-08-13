@@ -50,6 +50,7 @@ requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 | `--openocd` | `$FCAPZ_OPENOCD`, else `PATH` / known installs | Path to the `openocd` executable, to let the UI start OpenOCD. Auto-detected from `PATH` and common off-`PATH` installs (xPack, chocolatey) if unset, preferring a real `.exe` over a launcher shim. |
 | `--openocd-cfg` | — | An OpenOCD config the UI may launch (repeatable; registered by filename stem). |
 | `--openocd-cfg-dir` | `$FCAPZ_OPENOCD_CFG_DIR` | Auto-discover configs: register every `*.cfg` in this directory (repeatable; non-recursive). When neither this nor `--openocd-cfg` is given, the bundled `examples/*/` board configs are offered by default. |
+| `--quartus-stp` | `$FCAPZ_QUARTUS_STP`, else auto-detected | Path to `quartus_stp` for the `usb_blaster` backend. Auto-detected from `PATH`, `$QUARTUS_ROOTDIR`, and common Intel/Altera install roots if unset — so you normally pass nothing. Only needed if auto-detect misses. |
 | `--cors-origin` | — | Allow cross-origin API access from this origin (repeatable). Off by default. |
 
 To enable the UI's "Start OpenOCD" convenience you need an `openocd` binary
@@ -80,8 +81,13 @@ connected. The panels:
 
 - **Connection** — Connect/Disconnect sit at the top of the panel, with a
   **Cancel** button while a connect or scan is in flight. Pick the backend
-  (OpenOCD or Xilinx hw_server), host and
-  port. For OpenOCD, Connect **discovers fpgacapZero-compatible boards** — it
+  (OpenOCD, AMD/Xilinx hw_server, or Intel/Altera **USB-Blaster**), host and
+  port. For `usb_blaster` the host/port fields are replaced by a single
+  optional **Quartus cable** field (e.g. `DE25-Nano [USB-1]`; blank
+  auto-selects the sole attached cable) — the `quartus_stp` path lives on the
+  server (auto-detected, or its `--quartus-stp` flag), never in the browser, and
+  Connect goes straight to the local cable with no TCP scan. For OpenOCD, Connect
+  **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects
   automatically, several show a picker. If nothing is already running **and** the

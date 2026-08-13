@@ -113,9 +113,9 @@ chapter 17 for details.
 ## How the cores fit together
 
 By default, each core uses a **separate JTAG USER chain** (USER1 through
-USER4 on Xilinx 7-series / UltraScale, equivalent on other vendors), so
+USER4 on AMD/Xilinx 7-series / UltraScale, equivalent on other vendors), so
 multiple cores can coexist in the same bitstream and the host stack can
-talk to all of them in one xsdb / OpenOCD session.  Xilinx 7-series
+talk to all of them in one xsdb / OpenOCD session.  AMD/Xilinx 7-series
 designs can also put multiple ELA and EIO slots behind one USER1 core
 manager (`fcapz_debug_multi_xilinx7`) when you want more debug endpoints
 than free USER chains.
@@ -169,11 +169,11 @@ automatically, applies the readiness wait after programming the FPGA,
 and surfaces protocol errors with actionable messages.  Bypassing it
 loses all of that.
 
-## Two JTAG transports
+## Three JTAG transports
 
-The host stack supports two JTAG transports out of the box:
+The host stack supports three JTAG transports out of the box:
 
-- **Xilinx hw_server / XSDB** — the default for Xilinx boards.
+- **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
   default).  Programs the FPGA, talks to BSCANE2, hardware-validated
   on Arty A7-100T, no extra software to install if you already have
@@ -182,24 +182,31 @@ The host stack supports two JTAG transports out of the box:
   on any board.  Slower than hw_server but vendor-neutral.  Talks to
   OpenOCD's TCL listener (default `localhost:6666`) and uses raw
   `irscan` / `drscan` commands.
+- **Quartus USB-Blaster / `quartus_stp`** - Intel/Altera virtual
+  JTAG access through Quartus Prime.  Uses `sld_virtual_jtag`
+  instance indices from the Intel RTL wrapper `CHAIN` parameters.
+  Hardware-validated on the DE25-Nano (Agilex 5); see
+  [`specs/transport_api.md`](specs/transport_api.md) for the tested
+  Quartus edition.
 
-Both transports implement the same `Transport` abstract base class,
+All transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To
-add a third (e.g. raw TCF for lower per-scan overhead, or USB-Blaster
-direct), implement the ABC and you are done — no other code changes
-needed.  See [chapter 14](14_transports.md) and
+add another backend (e.g. raw TCF for lower per-scan overhead or a
+direct USB stack), implement the ABC and you are done — no other code
+changes needed.  See [chapter 14](14_transports.md) and
 [`specs/transport_api.md`](specs/transport_api.md).
 
 ## Vendor support matrix
 
 | Vendor | TAP primitive | RTL wrapper | Hardware-validated |
 |--------|--------------|-------------|---------------------|
-| Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
-| Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ❌ lint-clean, not board-validated |
+| AMD/Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
+| AMD/Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ❌ lint-clean, not board-validated |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
-| Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ❌ |
+| Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |
-| Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
+| Efinix Trion / Titanium | Efinity JTAG User TAP | *planned* (`fcapz_*_efinix.v`) | ⏳ Support pending — wrapper not yet implemented |
+| AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 
 The wrappers are all single-instantiation: pick the one for your
 vendor, set parameters, connect your probes, and you are done.  See

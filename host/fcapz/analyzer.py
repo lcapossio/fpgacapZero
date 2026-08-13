@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field, replace
 from functools import wraps
@@ -13,6 +14,8 @@ from typing import Dict, List, Optional, Sequence
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import OpenOcdTransport, Transport, list_openocd_taps
+
+_log = logging.getLogger(__name__)
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
@@ -603,8 +606,15 @@ class Analyzer:
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
         trig = TriggerConfig(mode="value_match", value=0, mask=0)
+        # An immediate trigger fires on the very first sample, so there is no
+        # fresh pre-trigger history to capture: the pretrigger slots would keep
+        # stale data from a prior arm (garbage samples + a backwards timestamp
+        # jump at the boundary). Force pretrigger=0 so the window is all-fresh,
+        # post-trigger only, with a monotonic timestamp.
         if hw_trig_stages <= 1:
-            return replace(base, trigger=trig, sequence=None, ext_trigger_mode=0)
+            return replace(
+                base, trigger=trig, sequence=None, ext_trigger_mode=0, pretrigger=0
+            )
         imm_stage = SequencerStage(
             cmp_mode_a=0,
             cmp_mode_b=0,
@@ -617,7 +627,9 @@ class Analyzer:
             value_b=0,
             mask_b=0,
         )
-        return replace(base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0)
+        return replace(
+            base, trigger=trig, sequence=[imm_stage], ext_trigger_mode=0, pretrigger=0
+        )
 
     @_selected_transaction
     def arm(self) -> None:
@@ -636,6 +648,25 @@ class Analyzer:
             time.sleep(poll_interval)
         return False
 
+    def status(self) -> dict[str, bool]:
+        """Read the capture status bits without transferring any sample data.
+
+        A cheap single register read, so a client can poll for the trigger
+        cheaply and only pay the (potentially long) sample readback once the
+        trigger has actually fired -- distinguishing "waiting for trigger" from
+        "reading back" instead of blanketing both under one blocking capture.
+        """
+        read_status = self.transport.read_reg_stable
+        with self.transport.transaction_lock():
+            self._select_instance()
+            s = int(read_status(_ADDR_STATUS))
+        return {
+            "armed": bool(s & _STATUS_ARMED),
+            "triggered": bool(s & _STATUS_TRIGGERED),
+            "done": bool(s & _STATUS_DONE),
+            "overflow": bool(s & _STATUS_OVERFLOW),
+        }
+
     @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
@@ -647,6 +678,43 @@ class Analyzer:
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
         ts_words_per = (self._hw_timestamp_w + 31) // 32
         ts_word_count = total * ts_words_per
+        mask = (1 << self._hw_timestamp_w) - 1
+
+        # Wide, single-chain cores (the 160-bit AXI monitor) keep their timestamp
+        # window on the same BSCAN instance as their samples, so the two-chain
+        # DATA_CHAIN burst below can never reach it -- read it the same way the
+        # samples were (see _read_data_words).  Gated on sw>32 to mirror that
+        # sample-path decision exactly.
+        if sw > 32 and ts_words_per == 1:
+            ts_single = getattr(
+                self.transport, "read_timestamp_block_single_chain", None
+            )
+            if callable(ts_single):
+                try:
+                    raw = ts_single(ts_base, total, self._hw_timestamp_w)
+                    ts = [v & mask for v in raw]
+                    if all(ts[i] > ts[i - 1] for i in range(1, len(ts))):
+                        _log.info(
+                            "single-chain timestamp burst: %d timestamps (%d-bit)",
+                            total,
+                            self._hw_timestamp_w,
+                        )
+                        return ts
+                    _log.warning(
+                        "single-chain timestamp burst non-monotonic; using "
+                        "slower per-word timestamp reads"
+                    )
+                except (ConnectionError, RuntimeError) as exc:
+                    _log.warning(
+                        "single-chain timestamp burst failed (%s); using slower "
+                        "per-word timestamp reads",
+                        exc,
+                    )
+            # The two-chain burst can't reach a single-chain core, so skip it and
+            # read the timestamp words directly (deterministic, just slower).
+            raw = self.transport.read_block(ts_base, ts_word_count)
+            return [v & mask for v in raw]
+
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
         used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
         if used_timestamp_burst and self._selected_slot_has_burst():
@@ -654,7 +722,6 @@ class Analyzer:
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
         timestamps = []
-        mask = (1 << self._hw_timestamp_w) - 1
         if ts_words_per == 1:
             timestamps = [v & mask for v in raw]
         else:
@@ -687,18 +754,42 @@ class Analyzer:
 
     @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
+        sw = self._config.sample_width if self._config else 8
+        # Wide cores (e.g. the 160-bit AXI monitor) are single-chain: their burst
+        # DR shares one BSCAN instance with control frames (jtag_pipe_iface), so
+        # the two-chain read_block burst — which targets the ELA's *separate*
+        # DATA_CHAIN — can never reach them and silently falls back to a ~20s
+        # per-word read.  Read them via the single-chain sample burst on the
+        # active chain instead: one 256-bit scan per sample, ~1/15th the
+        # quartus_stp commands (~20s -> ~1-2s for 1024x160-bit).  This is checked
+        # before the burst-slot question because it holds regardless of how the
+        # core is presented (standalone or behind the core manager).
+        if sw > 32:
+            sample_burst = getattr(self.transport, "read_sample_block", None)
+            if sample_burst is not None:
+                words_per_sample = (sw + 31) // 32
+                n_samples = total_words // words_per_sample
+                try:
+                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw)
+                    _log.info(
+                        "single-chain sample burst: %d samples (%d-bit)",
+                        n_samples,
+                        sw,
+                    )
+                    return words
+                except (ConnectionError, RuntimeError) as exc:
+                    _log.warning(
+                        "single-chain sample burst failed (%s); falling back to "
+                        "the slower read_block path",
+                        exc,
+                    )
+            # Fallback: read_block's pipelined word path (fast on hw_server;
+            # slow per-word on quartus_stp when its DATA_CHAIN burst can't reach
+            # this core — but correct either way).
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
-        # Non-burst slot (e.g. the AXI monitor's manager slot).  For a wide core
-        # (SAMPLE_W > 32) read_block is still fast and safe: it skips the 256-bit
-        # sample-packing burst DR for multi-word samples and uses one pipelined
-        # jtag sequence per chunk, so prefer it over a per-word round trip
-        # (1280 reads of a 160-bit x 256 buffer was ~17s; the pipelined path is
-        # sub-second).  Narrow samples keep the per-word path, which avoids
-        # attempting a burst the slot does not support.
-        sw = self._config.sample_width if self._config else 8
-        if sw > 32:
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
         read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 

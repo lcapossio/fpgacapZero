@@ -144,11 +144,23 @@ readiness wait.
 ```json
 {
   "cmd": "connect",
-  "backend": "hw_server",     // or "openocd"
+  "backend": "hw_server",     // or "openocd" / "usb_blaster"
   "host": "127.0.0.1",
   "port": 3121,
-  "tap": "xc7a100t",          // hw_server: FPGA target name; openocd: TAP name
+  "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
   "program": "my_design.bit"  // optional, hw_server only
+}
+```
+
+For Quartus USB-Blaster, use:
+
+```json
+{
+  "cmd": "connect",
+  "backend": "usb_blaster",
+  "tap": "auto",
+  "hardware": "DE25-Nano [USB-1]",
+  "quartus_stp": "C:/altera_pro/26.1/quartus/bin64/quartus_stp.exe"
 }
 ```
 

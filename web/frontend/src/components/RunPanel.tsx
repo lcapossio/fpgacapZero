@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { RpcCancelled, RpcError, downloadText, parseProbesText, rpc } from "../api";
+import { RpcCancelled, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { describeElaTrigger } from "../signalTrigger";
 import { useSession } from "../session";
@@ -10,6 +10,26 @@ const IMMEDIATE_TIMEOUT = 10; // hardware wait (s) — Trigger Immediate fires a
 // capture_wait calls until the trigger fires or the user stops. The short poll
 // only bounds how long a single RPC blocks the server, keeping Stop responsive.
 const POLL_TIMEOUT = 4;
+// Gap between cheap trigger-status polls while armed. The poll itself is a
+// single register read; this just paces it and bounds Stop latency.
+const STATUS_POLL_MS = 120;
+
+/** Sleep that rejects (RpcCancelled) the moment Stop aborts, so an armed wait
+ *  ends now rather than after the next poll gap. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new RpcCancelled("capture_status"));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new RpcCancelled("capture_status"));
+      },
+      { once: true },
+    );
+  });
+}
 // JS numbers are exact only to 53 bits. Bit vectors (trigger value/mask) go over
 // the wire as strings so wide values (e.g. 160-bit AXI samples) don't round; wide
 // sample data uses the string-based VCD/CSV exports, not the JSON-number result.
@@ -26,6 +46,15 @@ function readbackBudgetMs(id: Identity | null): number {
   const depth = Number(id?.depth) || 0;
   const words = depth * Math.ceil(sw / 32);
   return words * 15;
+}
+
+/** First-capture estimate of ms/sample for the readback progress, before a real
+ *  rate has been measured: the slow per-word JTAG path runs ~4 ms per 32-bit
+ *  word. Burst-capable narrow cores are far faster (and finish before the
+ *  estimate matters); wide cores like the 160-bit monitor track this closely. */
+function estMsPerSample(id: Identity | null): number {
+  const sw = Number(id?.sample_width) || 8;
+  return Math.ceil(sw / 32) * 4;
 }
 
 /** ELA run controls. Reads trigger config from the ELA tab and pushes captures
@@ -56,6 +85,9 @@ export function RunPanel({
   // ref so a core switch mid-loop can't send another core's geometry.
   const identityRef = useRef(identityProp);
   identityRef.current = identityProp;
+  // Measured readback rate (ms per sample) from the last capture, so the
+  // "reading back" progress self-calibrates. Seeded per-capture from geometry.
+  const readbackRateRef = useRef<number | null>(null);
 
   // A core switch invalidates the armed config — stop any armed wait.
   useEffect(() => {
@@ -70,13 +102,54 @@ export function RunPanel({
     onActiveChange?.(busy || running);
   }, [busy, running, onActiveChange]);
 
+  /** Run a readback RPC while showing live progress. The readback is one
+   *  blocking JTAG transfer, so estimate the sample count from elapsed time and
+   *  the measured per-sample rate (exact elapsed seconds shown alongside). The
+   *  rate self-calibrates each capture, so after the first readback "~X of N"
+   *  tracks closely. `label` prefixes the status line. Used by both immediate
+   *  ("reading back") and armed ("trigger fired - reading back") captures. */
+  async function withReadbackProgress(
+    nSamples: number,
+    label: string,
+    run: (signal: AbortSignal | undefined) => Promise<Record<string, unknown>>,
+    signal: AbortSignal | undefined,
+  ) {
+    const start = performance.now();
+    const rate = readbackRateRef.current ?? estMsPerSample(identityRef.current);
+    const tick = () => {
+      const elapsed = performance.now() - start;
+      const done = Math.min(nSamples - 1, Math.floor(elapsed / rate));
+      setStatus(`${label}~${done} of ${nSamples} samples (${Math.round(elapsed / 1000)}s)`);
+    };
+    tick();
+    // Only tick for readbacks long enough to matter; short ones finish first.
+    const timer = nSamples > 128 ? window.setInterval(tick, 300) : 0;
+    try {
+      const r = await run(signal);
+      if (nSamples > 0) readbackRateRef.current = (performance.now() - start) / nSamples;
+      return r;
+    } finally {
+      if (timer) window.clearInterval(timer);
+    }
+  }
+
   function params(immediate: boolean, timeout: number) {
     const identity = identityRef.current;
     const sequence = ela.useSequencer ? JSON.parse(ela.sequenceJson || "[]") : undefined;
+    // Immediate fires on sample 0, so there is no fresh pre-trigger history —
+    // the server forces pretrigger=0 (else the pretrigger slots hold stale
+    // samples with a backwards timestamp jump). Match it here so the trigger
+    // marker (sample 0) lines up with what's captured. Fold the pre-trigger
+    // depth into the post window so an immediate capture still grabs the same
+    // total sample count as an armed one — same window, just no trigger.
+    const pre = immediate ? 0 : Number(ela.pretrigger);
+    const post = immediate
+      ? Number(ela.pretrigger) + Number(ela.posttrigger)
+      : Number(ela.posttrigger);
     return {
       channel: Number(ela.channel),
-      pretrigger: Number(ela.pretrigger),
-      posttrigger: Number(ela.posttrigger),
+      pretrigger: pre,
+      posttrigger: post,
       trigger_mode: ela.triggerMode,
       // Send as strings (hex or decimal); the backend parses with full precision.
       trigger_value: ela.triggerValue.trim() || "0",
@@ -97,7 +170,7 @@ export function RunPanel({
     };
   }
 
-  function submitCapture(r: Record<string, unknown>) {
+  function submitCapture(r: Record<string, unknown>, triggerSample: number) {
     setOverflow(Boolean(r.overflow));
     if (typeof r.vcd === "string") {
       pushCapture({
@@ -108,21 +181,32 @@ export function RunPanel({
         // The trigger sample is the `pretrigger`-th stored sample; the VCD emits
         // one `#time` line per sample in order, so its time is that line's — for
         // timestamped and plain captures alike (no index==time assumption).
-        triggerTime: vcdTimeAtSample(r.vcd, Number(ela.pretrigger)),
+        // Immediate captures have pretrigger=0, so the marker sits at sample 0.
+        triggerTime: vcdTimeAtSample(r.vcd, triggerSample),
       });
     }
     return (r.sample_count as number | string | undefined) ?? "?";
   }
 
-  /** Trigger Immediate: one bundled capture call — it fires right away. */
+  /** Trigger Immediate: one bundled capture call — it fires right away. The
+   *  readback of a wide/deep core is the bulk of the time, so show the same
+   *  live progress as an armed capture. */
   async function immediateOnce() {
-    const r = await rpc(
-      "capture",
-      params(true, IMMEDIATE_TIMEOUT),
-      IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
+    const p = params(true, IMMEDIATE_TIMEOUT);
+    const nSamples = Number(p.pretrigger) + Number(p.posttrigger) + 1;
+    const r = await withReadbackProgress(
+      nSamples,
+      "reading back ",
+      (signal) =>
+        rpc(
+          "capture",
+          p,
+          IMMEDIATE_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 4000,
+          signal,
+        ),
       stopCtl.current?.signal,
     );
-    return submitCapture(r);
+    return submitCapture(r, 0);
   }
 
   /** Arm once, then poll until the trigger fires — no deadline. The hardware
@@ -130,11 +214,28 @@ export function RunPanel({
    *  missed between them; a poll timeout just means "still waiting". */
   async function armAndWait() {
     const p = params(false, POLL_TIMEOUT);
-    await rpc("configure", p, 15000, stopCtl.current?.signal);
-    await rpc("arm", {}, 15000, stopCtl.current?.signal);
+    const signal = stopCtl.current?.signal;
+    await rpc("configure", p, 15000, signal);
+    await rpc("arm", {}, 15000, signal);
+    // Phase 1 — the real trigger wait: cheap status polls, no sample transfer.
+    // The caller already shows "waiting for trigger"; hold it until the
+    // hardware reports the trigger fired (or the capture already completed).
     for (;;) {
-      try {
-        const r = await rpc(
+      const s = await rpc("capture_status", {}, 15000, signal);
+      if (s.triggered || s.done) break;
+      await sleep(STATUS_POLL_MS, signal);
+    }
+    // Phase 2 — the trigger has fired; the remaining wait is the sample
+    // transfer, which for a wide/deep core (e.g. the 160-bit AXI monitor over
+    // USB-Blaster) is the bulk of the time. Say so, instead of still claiming
+    // to wait for a trigger that already passed.
+    setWaiting(false);
+    const nSamples = Number(p.pretrigger) + Number(p.posttrigger) + 1;
+    const r = await withReadbackProgress(
+      nSamples,
+      "trigger fired - reading back ",
+      (sig) =>
+        rpc(
           "capture_wait",
           {
             timeout: POLL_TIMEOUT,
@@ -144,14 +245,11 @@ export function RunPanel({
             include_csv: true,
           },
           POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
-          stopCtl.current?.signal,
-        );
-        return submitCapture(r);
-      } catch (e) {
-        if (e instanceof RpcError && e.type === "TimeoutError") continue;
-        throw e;
-      }
-    }
+          sig,
+        ),
+      signal,
+    );
+    return submitCapture(r, Number(ela.pretrigger));
   }
 
   /** Disarm the core after a stopped wait (queues behind the in-flight

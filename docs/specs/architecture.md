@@ -26,7 +26,7 @@ designed to fit on any FPGA with minimal resource usage.
 - **Capture Controller**: Arm, trigger detect, post-trigger countdown, done.
 - **JTAG Register Map** (`jtag_reg_iface.v`): 49-bit DR on USER1 for
   control/status + per-word data readback.
-- **Single-Chain Pipe** (`jtag_pipe_iface.v`): default Xilinx path that
+- **Single-Chain Pipe** (`jtag_pipe_iface.v`): default AMD/Xilinx path that
   carries both 49-bit register packets and 256-bit burst packets on USER1.
 - **Burst Readback** (`jtag_burst_read.v`): legacy separate-chain 256-bit DR
   for fast block reads (32 8-bit samples per scan).
@@ -34,7 +34,7 @@ designed to fit on any FPGA with minimal resource usage.
   on USER3 (CHAIN=3). `IN_W`-bit input bus synchronised to jtag_clk;
   `OUT_W`-bit output register driven to fabric.  Parameters: `IN_W`, `OUT_W`.
 - **TAP Wrappers** (`jtag_tap/`): Vendor-specific JTAG primitives for
-  Xilinx, Lattice, Intel, and Gowin.
+  AMD/Xilinx, Lattice, Intel, and Gowin.
 
 ## Parameters
 | Parameter | Default | Description |
@@ -150,7 +150,7 @@ bandwidth you actually see.
 Parameters: `ADDR_W` (default 32), `DATA_W` (default 32), `FIFO_DEPTH`
 (default 16), `TIMEOUT` (default 4096 axi_clk cycles).
 
-**Verified Xilinx 7-series IR codes** (xc7a100t):
+**Verified AMD/Xilinx 7-series IR codes** (xc7a100t):
 USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 
 ## Testing

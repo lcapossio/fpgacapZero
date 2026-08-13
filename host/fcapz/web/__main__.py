@@ -220,6 +220,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         "point at e.g. examples/arty_a7 instead of listing each --openocd-cfg.",
     )
     parser.add_argument(
+        "--quartus-stp",
+        default=os.environ.get("FCAPZ_QUARTUS_STP"),
+        metavar="PATH",
+        help="Path to quartus_stp for the USB-Blaster backend (default: "
+        "$FCAPZ_QUARTUS_STP, else auto-detected on PATH / $QUARTUS_ROOTDIR / "
+        "common Intel-Altera install roots). Only needed if auto-detect misses.",
+    )
+    parser.add_argument(
         "--cors-origin",
         action="append",
         default=None,
@@ -246,6 +254,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         token=args.token,
         static_dir=static_dir,
         openocd_launcher=launcher,
+        quartus_stp_path=args.quartus_stp,
         bind_host=args.host,
         cors_origins=tuple(args.cors_origin or ()),
     )

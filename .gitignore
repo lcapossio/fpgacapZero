@@ -56,6 +56,9 @@ tests/_tmp/
 .codex_pytest_tmp*/
 .codex_tmp/
 .claude/
+examples/de25_nano/de25_nano_quartus/
+examples/de25_nano/output_files/
+examples/de25_nano/captures/
 
 # Local-only working notes (per PROJECTS.md no_commit/ convention)
 no_commit/

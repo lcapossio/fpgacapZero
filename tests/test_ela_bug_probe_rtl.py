@@ -27,6 +27,12 @@ class ElaBugProbeRtlTests(unittest.TestCase):
         ]
         self.assertEqual(len(driver_blocks), 1)
 
+    def test_intel_burst_reader_uses_segment_depth(self):
+        """Intel DATA_CHAIN readback must wrap inside the selected segment."""
+        rtl = (ROOT / "rtl" / "fcapz_ela_intel.v").read_text()
+        self.assertIn("localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;", rtl)
+        self.assertIn(".SEG_DEPTH(BURST_SEG_DEPTH)", rtl)
+
     def test_focused_ela_regressions(self):
         with tempfile.TemporaryDirectory(prefix="ela-bug-probe-") as tmpdir:
             vvp = Path(tmpdir) / "fcapz_ela_bug_probe_tb.vvp"
