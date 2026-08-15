@@ -17,9 +17,11 @@
     AMD/Xilinx hw_server backend.  This is the path that has been
     hardware-validated on Arty A7-100T.  If you already have Vivado
     installed for your day job, you have hw_server.
-  - **OpenOCD with FTDI support** — cross-platform, vendor-neutral.
-    Install from your distro package manager (Linux), Homebrew
-    (macOS), or [openocd.org](https://openocd.org/) (Windows).
+  - **OpenOCD** — cross-platform, vendor-neutral.  Works with any
+    adapter OpenOCD supports (FTDI, WCH CH347, CMSIS-DAP, J-Link, …);
+    FTDI is the most common.  Install from your distro package manager
+    (Linux), Homebrew (macOS), or [openocd.org](https://openocd.org/)
+    (Windows).
   - **Quartus Prime with `quartus_stp`** — required for Intel/Altera
     USB-Blaster access through `sld_virtual_jtag`.  See
     [`specs/transport_api.md`](specs/transport_api.md) for the
@@ -152,10 +154,12 @@ debugger console.
 OpenOCD talks directly to your USB-JTAG cable via libusb / libftdi
 and exposes a TCL listener on TCP port 6666 (by default).
 fpgacapZero connects to that listener and issues raw `irscan` /
-`drscan` commands.
+`drscan` commands — it never touches the adapter itself, so any
+adapter OpenOCD can drive (FTDI, WCH CH347, CMSIS-DAP, J-Link, …)
+works.
 
-1. **Install OpenOCD** with FTDI support.  Confirm with
-   `openocd --version` — you want at least 0.11.
+1. **Install OpenOCD** (0.11 or later).  Confirm with
+   `openocd --version`.
 
 2. **Start OpenOCD** with a board config:
    ```bash

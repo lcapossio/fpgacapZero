@@ -52,8 +52,9 @@ across the network, a **Python API**, the **`fcapz` command-line tool**, a
 
 ## Will it work on my board?
 
-Any board with JTAG access works. You drive it through **OpenOCD** (any FTDI
-adapter), the **AMD/Xilinx hw_server** (Vivado), or **Quartus `quartus_stp`**
+Any board with JTAG access works. You drive it through **OpenOCD** (any
+OpenOCD-supported adapter — FTDI, WCH CH347, CMSIS-DAP, J-Link, …), the
+**AMD/Xilinx hw_server** (Vivado), or **Quartus `quartus_stp`**
 (Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5). The
 full per-vendor matrix and JTAG-chain rules are in the manual's
 [RTL integration chapter](https://github.com/lcapossio/fpgacapZero/blob/main/docs/04_rtl_integration.md); see also

@@ -93,8 +93,9 @@ connected. The panels:
   automatically, several show a picker. If nothing is already running **and** the
   server has an OpenOCD binary + config available (`--openocd-cfg-dir` or
   `--openocd-cfg`, with the binary auto-detected on `PATH`), Connect
-  **auto-discovers boards**: it reads each config's `ftdi vid_pid`, keeps only
-  the configs whose USB adapter is actually plugged in, then starts OpenOCD per
+  **auto-discovers boards**: it reads each config's adapter `vid_pid` (`ftdi`,
+  `ch347`, `cmsis_dap`, …), keeps only the configs whose USB adapter is
+  actually plugged in, then starts OpenOCD per
   surviving config and probes each — so the user never picks a config or touches
   the JTAG server. One confirmed board connects straight through; several show
   the picker. (USB filtering is best-effort — without it every config is probed;

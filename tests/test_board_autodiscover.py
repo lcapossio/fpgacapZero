@@ -32,6 +32,16 @@ def test_parse_legacy_and_multiple_pairs(tmp_path):
     assert parse_cfg_vid_pids(p) == {(0x0403, 0x6010), (0x0403, 0x6014)}
 
 
+def test_parse_ch347_and_bare_vid_pid(tmp_path):
+    # Non-FTDI adapters (WCH CH347) and a bare vid_pid are honoured too.
+    p = _cfg(
+        tmp_path,
+        "ch347.cfg",
+        "adapter driver ch347\nch347 vid_pid 0x1a86 0x55dd\n",
+    )
+    assert parse_cfg_vid_pids(p) == {(0x1A86, 0x55DD)}
+
+
 def test_parse_ignores_comments_and_missing(tmp_path):
     p = _cfg(tmp_path, "c.cfg", "# ftdi vid_pid 0x1111 0x2222\nsource [find hs3.cfg]\n")
     assert parse_cfg_vid_pids(p) == set()

@@ -178,10 +178,15 @@ The host stack supports three JTAG transports out of the box:
   default).  Programs the FPGA, talks to BSCANE2, hardware-validated
   on Arty A7-100T, no extra software to install if you already have
   Vivado.
-- **OpenOCD** — cross-platform, works with any FTDI-based JTAG cable
-  on any board.  Slower than hw_server but vendor-neutral.  Talks to
-  OpenOCD's TCL listener (default `localhost:6666`) and uses raw
-  `irscan` / `drscan` commands.
+- **OpenOCD** — cross-platform, works with any OpenOCD-supported JTAG
+  adapter (FTDI, WCH CH347, CMSIS-DAP, J-Link, …) on any board.  Slower
+  than hw_server but vendor-neutral.  Talks to OpenOCD's TCL listener
+  (default `localhost:6666`) and uses raw `irscan` / `drscan` commands.
+  fpgacapZero only speaks to the TCL listener, so it never touches the
+  USB adapter directly — any adapter OpenOCD can drive works.  (The
+  Connect auto-discovery filters candidates by their config `vid_pid`;
+  FTDI/CH347/CMSIS-DAP are recognised, and adapters without a parseable
+  `vid_pid` are simply probed.)
 - **Quartus USB-Blaster / `quartus_stp`** - Intel/Altera virtual
   JTAG access through Quartus Prime.  Uses `sld_virtual_jtag`
   instance indices from the Intel RTL wrapper `CHAIN` parameters.

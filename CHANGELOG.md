@@ -41,6 +41,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   PySide vendor labels (code identifiers and `IR_TABLE_*` names unchanged).
 - **Docs — README manual links are absolute** so they resolve on the PyPI
   project page (PyPI has no repo context, so relative links 404 there).
+- **OpenOCD — adapter-agnostic wording and auto-discovery.** The docs now state
+  that any OpenOCD-supported adapter (FTDI, WCH CH347, CMSIS-DAP, J-Link, …)
+  works, since fpgacapZero only speaks to OpenOCD's TCL listener and never
+  touches the USB adapter. The Connect USB filter parses each config's adapter
+  `vid_pid` for any driver (`ch347 vid_pid`, `cmsis_dap vid_pid`, a bare
+  `vid_pid`), not just `ftdi vid_pid`, so non-FTDI adapters are recognised
+  instead of always probed.
 
 ### Fixed
 

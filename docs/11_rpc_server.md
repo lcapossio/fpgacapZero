@@ -302,8 +302,9 @@ Terminates the OpenOCD this server started on `port`; a no-op for a foreign one.
 #### `openocd_discover`
 
 Auto-discover compatible boards without the client picking a config. Reads each
-allow-listed config's `ftdi vid_pid`, keeps only the configs whose USB adapter is
-plugged in (best-effort — every config is probed when USB enumeration is
+allow-listed config's adapter `vid_pid` (`ftdi`, `ch347`, `cmsis_dap`, or a bare
+form), keeps only the configs whose USB adapter is plugged in (best-effort — a
+config that names no `vid_pid`, and every config when USB enumeration is
 unavailable), then starts OpenOCD per surviving config from `port` (default 6666,
 one port per config) and probes each for an fpgacapZero core.
 

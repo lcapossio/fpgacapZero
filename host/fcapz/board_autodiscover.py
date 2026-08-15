@@ -7,11 +7,12 @@ The web UI's "Connect" should not make the user pick a JTAG config. This module
 turns the allow-listed OpenOCD configs (see :mod:`fcapz.openocd_launcher`) into a
 list of *confirmed* boards with a two-stage strategy:
 
-1. **USB filter** — read each config's ``ftdi vid_pid`` and keep only the
-   configs whose adapter is actually plugged in (best-effort USB enumeration).
-   A config with no parseable ``vid_pid`` (e.g. one that ``source``\\ s an
-   adapter file) is always a candidate — we cannot rule it out, so we probe it.
-   If USB enumeration is unavailable, *every* config is a candidate.
+1. **USB filter** — read each config's adapter ``vid_pid`` (``ftdi``,
+   ``ch347``, ``cmsis_dap`` or a bare ``vid_pid``) and keep only the configs
+   whose adapter is actually plugged in (best-effort USB enumeration). A config
+   with no parseable ``vid_pid`` (e.g. one that ``source``\\ s an adapter file)
+   is always a candidate — we cannot rule it out, so we probe it. If USB
+   enumeration is unavailable, *every* config is a candidate.
 2. **Probe** — for each surviving config, start OpenOCD on its own TCL port and
    ask :func:`fcapz.analyzer.discover_boards` whether a compatible fpgacapZero
    core answers. Keep the instance running and tag the board with its config on
@@ -37,14 +38,18 @@ VidPid = Tuple[int, int]
 # Sentinel: "run a live USB scan" (distinct from ``None`` = "skip filtering").
 _AUTO = object()
 
-# ``ftdi vid_pid 0x0403 0x6010`` (0.11+) or the legacy ``ftdi_vid_pid``; either
-# may list several VID/PID pairs on one line.
-_VID_PID_RE = re.compile(r"ftdi[ _]vid_pid\b(.*)", re.IGNORECASE)
+# An adapter ``vid_pid`` command: ``ftdi vid_pid 0x0403 0x6010`` (0.11+), the
+# legacy ``ftdi_vid_pid``, or any other driver's form (``ch347 vid_pid``,
+# ``cmsis_dap vid_pid``, a bare ``vid_pid``). Any of these may list several
+# VID/PID pairs on one line. The optional driver word before ``vid_pid`` keeps
+# the filter adapter-agnostic (FTDI, WCH CH347, CMSIS-DAP, ...).
+_VID_PID_RE = re.compile(r"(?:[a-z0-9_]+[ _])?vid_pid\b(.*)", re.IGNORECASE)
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 
 
 def parse_cfg_vid_pids(path: str) -> Set[VidPid]:
-    """Extract every ``(vid, pid)`` an OpenOCD config names via ``ftdi vid_pid``.
+    """Extract every ``(vid, pid)`` an OpenOCD config names via an adapter
+    ``vid_pid`` command (``ftdi``, ``ch347``, ``cmsis_dap``, or a bare form).
 
     Returns an empty set when the file is unreadable or names no VID/PID (e.g.
     it defers the adapter to a ``source``\\ d file) — callers treat empty as
