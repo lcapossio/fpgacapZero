@@ -33,7 +33,7 @@ features they expose.
 | Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
-| Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
+| Efinix Trion / Titanium | `_efinix` | ⏳ implemented in RTL (two JTAG User TAP blocks via the Efinity Interface Designer), hardware validation pending (Trion T20) |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)

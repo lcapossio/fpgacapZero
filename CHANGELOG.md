@@ -21,8 +21,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — connected FPGA shown on the Connection panel.** The status line now
   leads with the actual device the backend opened (family/part + IDCODE), not
   just the vendor.
-- **Efinix (Trion / Titanium) listed as a planned vendor** in the README and the
-  manual vendor matrices — support pending, wrapper not yet implemented.
+- **Efinix (Trion / Titanium) ELA wrapper.** New `fcapz_ela_efinix` (Verilog +
+  VHDL) maps the two hard JTAG User TAP blocks a Trion device exposes onto the
+  control and burst chains. Because the Efinix JTAG User TAP is an Efinity
+  Interface Designer block (not an RTL primitive), the wrapper exposes the two
+  TAP port groups (`jtag1_*`, `jtag2_*`) for top-level wiring. Host support
+  rides the existing OpenOCD transport via a new `IR_TABLE_EFINIX` preset
+  (auto-selected for `--tap trion.../titanium.../efinix...`) wired into
+  discovery, RPC, and CLI; lint self-test targets added. IR opcodes are
+  provisional and hardware validation on a Trion T20 is pending.
 
 ### Changed
 

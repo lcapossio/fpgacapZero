@@ -229,11 +229,13 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 def _make_transport(args: argparse.Namespace):
     if args.backend == "openocd":
         tap_name = args.tap.removesuffix(".tap")
-        ir_table = (
-            OpenOcdTransport.IR_TABLE_GOWIN
-            if tap_name.lower().startswith("gw")
-            else None
-        )
+        tap_lc = tap_name.lower()
+        if tap_lc.startswith("gw"):
+            ir_table = OpenOcdTransport.IR_TABLE_GOWIN
+        elif tap_lc.startswith(("trion", "titanium", "efinix")):
+            ir_table = OpenOcdTransport.IR_TABLE_EFINIX
+        else:
+            ir_table = None
         return OpenOcdTransport(
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )

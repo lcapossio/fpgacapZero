@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from fcapz.analyzer import expected_ela_version_reg  # noqa: E402
 from fcapz.ejtagaxi import CMD_CONFIG  # noqa: E402
 from fcapz.rpc import RpcServer  # noqa: E402
-from fcapz.transport import Transport  # noqa: E402
+from fcapz.transport import OpenOcdTransport, Transport  # noqa: E402
 from fcapz.web import create_app  # noqa: E402
 
 
@@ -933,6 +933,8 @@ def test_ir_table_mapping():
     assert RpcServer._ir_table("xilinx7") is None
     assert RpcServer._ir_table("gowin") is not None
     assert RpcServer._ir_table("ultrascale") is not None
+    assert RpcServer._ir_table("efinix") == OpenOcdTransport.IR_TABLE_EFINIX
+    assert RpcServer._ir_table("trion") == OpenOcdTransport.IR_TABLE_EFINIX
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")
 

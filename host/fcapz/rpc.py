@@ -330,6 +330,9 @@ class RpcServer:
         "us": OpenOcdTransport.IR_TABLE_US,
         "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+        "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
+        "trion": OpenOcdTransport.IR_TABLE_EFINIX,
+        "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
         "intel": None,
         "altera": None,
     }

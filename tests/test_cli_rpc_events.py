@@ -726,6 +726,17 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
+    def test_openocd_efinix_tap_uses_efinix_ir_table(self):
+        args = argparse.Namespace(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="trion-t20.tap",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_EFINIX)
+
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(
             backend="openocd",

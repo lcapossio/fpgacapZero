@@ -1241,6 +1241,7 @@ _DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
     "xilinx7": None,
     "ultrascale": OpenOcdTransport.IR_TABLE_US,
     "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+    "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
 }
 
 

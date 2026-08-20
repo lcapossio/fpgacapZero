@@ -209,6 +209,25 @@ reached on chain 1 at base offset `0x8000`
 (`EioController(t, chain=1, base_addr=0x8000)`).  See the
 [BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
 
+#### Efinix (Trion / Titanium) over OpenOCD
+
+Efinix boards use this transport with
+`ir_table=OpenOcdTransport.IR_TABLE_EFINIX` (JTAG User TAP USER1/USER2 →
+chains 1/2).  The CLI auto-selects it for `--tap trion...`, `--tap titanium...`,
+or `--tap efinix...`; in code, pass it explicitly.
+
+Unlike Xilinx `BSCANE2` or Intel `sld_virtual_jtag`, the Efinix JTAG User TAP
+is **not an RTL primitive** — it is added as a block in the Efinity Interface
+Designer, which surfaces its signals as top-level ports.  A Trion device has
+**two** hard JTAG User TAP blocks: add both and wire them to
+[`fcapz_ela_efinix`](../rtl/fcapz_ela_efinix.v)'s exposed `jtag1_*` (control)
+and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.
+
+> **Provisional IR opcodes.** `IR_TABLE_EFINIX = {1: 0x08, 2: 0x09}` uses the
+> documented JTAG_USER1/USER2 defaults (JTAG Core User Guide, Table 3).  The
+> Trion T20 hard-TAP opcodes must be confirmed against the device BSDL /
+> hardware before this path is claimed as validated.
+
 ### `QuartusStpTransport`
 
 Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus
@@ -288,6 +307,7 @@ swap one for the other without changing the IR table.
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
+| Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes provisional pending T20 BSDL/hardware |
 
 The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
 register sits in series with the PL TAP's DR on the TDI side, so every
