@@ -223,6 +223,13 @@ TARGETS = (
         ),
     ),
     LintTarget(
+        # Efinix JTAG User TAP is an Interface Designer block (top-level ports),
+        # not an RTL primitive, so the adapter needs no simulation stub.
+        name="jtag_tap_efinix",
+        top="jtag_tap_efinix",
+        sources=(RTL / "jtag_tap" / "jtag_tap_efinix.v",),
+    ),
+    LintTarget(
         name="fcapz_ela_xilinx7",
         top="fcapz_ela_xilinx7",
         sources=(
@@ -433,6 +440,17 @@ TARGETS = (
             *EJTAG_UART_WRAPPER_SOURCES,
             RTL / "jtag_tap" / "jtag_tap_intel.v",
             RTL / "fcapz_ejtaguart_intel.v",
+        ),
+    ),
+    LintTarget(
+        # No vendor stub: the JTAG User TAP signals are exposed as wrapper
+        # ports (wired to Efinity Interface Designer blocks at the top level).
+        name="fcapz_ela_efinix",
+        top="fcapz_ela_efinix",
+        sources=(
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_efinix.v",
+            RTL / "fcapz_ela_efinix.v",
         ),
     ),
 )
