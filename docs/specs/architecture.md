@@ -34,7 +34,8 @@ designed to fit on any FPGA with minimal resource usage.
   on USER3 (CHAIN=3). `IN_W`-bit input bus synchronised to jtag_clk;
   `OUT_W`-bit output register driven to fabric.  Parameters: `IN_W`, `OUT_W`.
 - **TAP Wrappers** (`jtag_tap/`): Vendor-specific JTAG primitives for
-  AMD/Xilinx, Lattice, Intel, and Gowin.
+  AMD/Xilinx, Lattice, Intel/Altera, Gowin, Microchip, and Efinix
+  (Trion/Titanium JTAG User TAP).
 
 ## Parameters
 | Parameter | Default | Description |

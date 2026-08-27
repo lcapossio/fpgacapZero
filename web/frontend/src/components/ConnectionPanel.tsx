@@ -36,6 +36,9 @@ const VENDOR_NAMES: Record<string, string> = {
   ultrascale: "AMD/Xilinx UltraScale+",
   intel: "Intel/Altera",
   altera: "Intel/Altera",
+  efinix: "Efinix (Trion/Titanium)",
+  trion: "Efinix Trion",
+  titanium: "Efinix Titanium",
 };
 
 function vendorName(ir: string): string {
