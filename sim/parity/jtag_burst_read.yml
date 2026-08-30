@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "name": "jtag_burst_read_parity",
+  "description": "Formal Verilog/VHDL parity for the JTAG burst read engine",
+  "golden": {
+    "language": "verilog",
+    "top": "jtag_burst_read",
+    "sources": [
+      "../../rtl/jtag_burst_read.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "jtag_burst_read",
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/jtag_burst_read.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 16,
+    "bounded_depth": 32,
+    "reset_inputs": [
+      "arst"
+    ],
+    "clock_inputs": [
+      "tck"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "jtag_burst_read",
+        "param_sets": [
+          {
+            "SAMPLE_W": 8,
+            "TIMESTAMP_W": 0,
+            "DEPTH": 16,
+            "BURST_W": 32,
+            "SEG_DEPTH": 16
+          },
+          {
+            "SAMPLE_W": 8,
+            "TIMESTAMP_W": 8,
+            "DEPTH": 16,
+            "BURST_W": 32,
+            "SEG_DEPTH": 8
+          }
+        ]
+      }
+    ]
+  }
+}

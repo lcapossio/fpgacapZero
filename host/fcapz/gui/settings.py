@@ -36,13 +36,16 @@ def ir_table_preset(name: str) -> dict[int, int]:
     """
     Map a short preset name to an IR-length table for OpenOCD / hw_server transports.
 
-    Aliases: ``xilinx7``, ``7series`` → 7-series table; ``ultrascale``, ``us`` → US+ table.
+    Aliases: ``xilinx7``, ``7series`` → 7-series table; ``ultrascale``, ``us`` → US+ table;
+    ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD only).
     """
     key = name.strip().lower().replace("-", "_")
     if key in ("xilinx7", "7series", "series7"):
         return dict(OpenOcdTransport.IR_TABLE_XILINX7)
     if key in ("ultrascale", "us", "xilinx_ultrascale"):
         return dict(OpenOcdTransport.IR_TABLE_US)
+    if key in ("gowin", "gw"):
+        return dict(OpenOcdTransport.IR_TABLE_GOWIN)
     raise ValueError(f"unknown ir_table preset {name!r}")
 
 
@@ -52,6 +55,8 @@ class ConnectionSettings:
     host: str = "127.0.0.1"
     port: int = 6666
     tap: str = "xc7a100t.tap"
+    hardware: str | None = None
+    quartus_stp: str | None = None
     program: str | None = None
     #: hw_server: if True and ``program`` is set, run ``fpga -file`` on connect.
     program_on_connect: bool = False
@@ -144,6 +149,8 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         program = _empty_to_none(str(conn_raw.get("program", "")))
     else:
         program = None
+    hardware = _empty_to_none(str(conn_raw.get("hardware", "")))
+    quartus_stp = _empty_to_none(str(conn_raw.get("quartus_stp", "")))
     try:
         post_ms = int(conn_raw.get("hw_post_program_delay_ms", 200))
     except (TypeError, ValueError):
@@ -165,6 +172,8 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         host=str(conn_raw.get("host", "127.0.0.1")),
         port=int(conn_raw.get("port", 6666)),
         tap=str(conn_raw.get("tap", "xc7a100t.tap")),
+        hardware=hardware,
+        quartus_stp=quartus_stp,
         program=program,
         program_on_connect=program_on_connect,
         ir_table=str(conn_raw.get("ir_table", "xilinx7")),
@@ -264,6 +273,8 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "host": settings.connection.host,
             "port": settings.connection.port,
             "tap": settings.connection.tap,
+            "hardware": _none_to_str(settings.connection.hardware),
+            "quartus_stp": _none_to_str(settings.connection.quartus_stp),
             "program": _none_to_str(settings.connection.program),
             "program_on_connect": settings.connection.program_on_connect,
             "ir_table": settings.connection.ir_table,

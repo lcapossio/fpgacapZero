@@ -42,6 +42,8 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
     def test_save_load_roundtrip(self) -> None:
         s = GuiSettings()
         s.connection.port = 4444
+        s.connection.hardware = "DE25-Nano [USB-1]"
+        s.connection.quartus_stp = r"C:\altera_lite\quartus\bin64\quartus_stp.exe"
         s.connection.program = None
         s.viewers.default_viewer = "surfer"
         s.viewers.open_viewer_after_capture = True
@@ -55,6 +57,11 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             save_gui_settings(s, path)
             loaded = load_gui_settings(path)
             self.assertEqual(loaded.connection.port, 4444)
+            self.assertEqual(loaded.connection.hardware, "DE25-Nano [USB-1]")
+            self.assertEqual(
+                loaded.connection.quartus_stp,
+                r"C:\altera_lite\quartus\bin64\quartus_stp.exe",
+            )
             self.assertIsNone(loaded.connection.program)
             self.assertEqual(loaded.viewers.default_viewer, "surfer")
             self.assertTrue(loaded.viewers.open_viewer_after_capture)
@@ -187,6 +194,21 @@ class TestFromMapping(unittest.TestCase):
         )
         back = gui_settings_from_mapping(data)
         self.assertEqual(back.probe_profiles["a"].probes, "z:1:0")
+
+    def test_old_connection_without_quartus_fields_loads(self) -> None:
+        back = gui_settings_from_mapping(
+            {
+                "connection": {
+                    "backend": "hw_server",
+                    "host": "127.0.0.1",
+                    "port": 3121,
+                    "tap": "xc7a100t",
+                },
+            },
+        )
+
+        self.assertIsNone(back.connection.hardware)
+        self.assertIsNone(back.connection.quartus_stp)
 
 
 class TestDefaultPath(unittest.TestCase):

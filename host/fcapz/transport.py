@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
+import queue
 import re
 import shutil
 import socket
@@ -28,9 +30,26 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
+_TCL_BRACED_RE = re.compile(r"^[^{}\r\n]*$")
+
+# Character whitelist for OpenOCD tap names. Unlike the XSDB filter/path (which
+# are quoted/braced), the tap is interpolated UNQUOTED into `irscan <tap> ...`
+# and `drscan <tap> ...`, which OpenOCD evaluates as TCL. A space, ';',
+# newline, '$', '[', '{', etc. could split the command or inject TCL (which
+# has `exec`). Restrict to the characters real tap names actually use.
+_OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
+_quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
+QUARTUS_AUTO_DEVICE_TAPS = frozenset(("", "auto", "xc7a100t", "xc7a100t.tap"))
+
+
+def _tcl_braced(value: str) -> str:
+    """Return a Tcl brace-quoted literal for simple tool-discovered names."""
+    if not _TCL_BRACED_RE.match(value):
+        raise ValueError(f"value contains characters unsafe for Tcl braces: {value!r}")
+    return "{" + value + "}"
 
 
 def connect_timing_logs_enabled() -> bool:
@@ -115,6 +134,25 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+def list_openocd_taps(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 6666,
+    timeout_sec: float = 5.0,
+) -> list[str]:
+    """Return JTAG tap names from a running OpenOCD instance (``jtag names``).
+
+    Requires OpenOCD to already be listening on its TCL RPC port (default
+    6666).  Used by the GUI's "Scan" button for the OpenOCD backend.
+    """
+    t = OpenOcdTransport(host=host, port=port, connect_timeout_sec=timeout_sec)
+    t.connect()
+    try:
+        return t.list_taps()
+    finally:
+        t.close()
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -135,6 +173,43 @@ class Transport(ABC):
     * ``OSError`` / ``TimeoutError`` — for network or process-level errors
       during :meth:`connect`.
     """
+
+    def transaction_lock(self) -> threading.RLock:
+        """Return the shared host-side lock for multi-register transactions.
+
+        Analyzer and EIO controllers can share one physical JTAG transport while
+        selecting different core-manager slots.  This lock serializes those
+        higher-level register sequences so one controller cannot switch
+        ``MGR_ACTIVE`` between another controller's read/modify/write halves.
+        """
+        lock = self.__dict__.get("_fcapz_transaction_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self.__dict__["_fcapz_transaction_lock"] = lock
+        return lock
+
+    def select_manager_instance_cached(
+        self,
+        chain: int,
+        active_addr: int,
+        instance: int,
+    ) -> None:
+        """Write a core-manager active slot only when the transport changed.
+
+        The active manager slot is a sticky hardware register.  Host controllers
+        sharing one transport use this cache under :meth:`transaction_lock` to
+        avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
+        agree on which slot was last selected.
+        """
+        key = (int(chain), int(instance))
+        if self.__dict__.get("_fcapz_manager_active_cache") == key:
+            return
+        self.write_reg(active_addr, int(instance))
+        self.__dict__["_fcapz_manager_active_cache"] = key
+
+    def invalidate_manager_instance_cache(self) -> None:
+        """Forget the cached core-manager active slot selection."""
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
 
     @abstractmethod
     def connect(self) -> None:
@@ -164,6 +239,16 @@ class Transport(ABC):
         """
         raise NotImplementedError
 
+    def read_reg_stable(self, addr: int) -> int:
+        """Read a register, applying any transport-specific stale-read workaround.
+
+        The base implementation is a single ``read_reg`` call.  Transports
+        with a known JTAG pipeline hazard may override this to discard a
+        warmup read before returning data.  This is not data-integrity
+        verification: it does not compare reads or detect corruption.
+        """
+        return self.read_reg(addr)
+
     @abstractmethod
     def write_reg(self, addr: int, value: int) -> None:
         """Write *value* (32-bit) to the register at *addr*.
@@ -183,10 +268,15 @@ class Transport(ABC):
         raise NotImplementedError
 
     def select_chain(self, chain: int) -> None:
-        """Select the BSCANE2 USER chain for subsequent register accesses.
+        """Select the transport-defined JTAG user chain for later accesses.
+
+        For Xilinx/OpenOCD transports this is the BSCANE2 USER chain number
+        mapped through the backend's IR table.  For virtual-JTAG transports it
+        may be the vendor instance identifier, such as Intel's
+        ``sld_virtual_jtag`` ``instance_index``.
 
         Subclasses that support multi-chain access must override this.
-        Raises ``ValueError`` if *chain* is not in the transport's IR table.
+        Raises ``ValueError`` if *chain* is invalid for that transport.
         Raises ``NotImplementedError`` on transports that only support a
         single fixed chain.
         """
@@ -196,7 +286,11 @@ class Transport(ABC):
         """Perform a raw DR scan of *width* bits, shifting in *bits*.
 
         Returns the captured TDO value as an unsigned integer.  If *chain*
-        is given it overrides the active chain for this scan only.
+        is given it overrides the active chain for this scan only.  The chain
+        value is transport-specific: Xilinx/OpenOCD transports use the
+        user-chain number that maps through their IR table, while Intel
+        Quartus/USB-Blaster uses the ``sld_virtual_jtag`` ``instance_index``
+        configured by the Intel RTL wrapper's ``CHAIN`` parameter.
 
         Subclasses that expose raw JTAG DR access must override this.
         Raises ``NotImplementedError`` on transports that do not support it.
@@ -282,6 +376,14 @@ class OpenOcdTransport(Transport):
     ):
         self.host = host
         self.port = port
+        # 'auto'/'' are resolved later from OpenOCD's own `jtag names`; any other
+        # value is user-supplied and is interpolated into OpenOCD TCL, so reject
+        # anything outside the safe tap-name set to prevent TCL injection.
+        if tap.strip().lower() not in ("", "auto") and not _OPENOCD_TAP_RE.match(tap):
+            raise ValueError(
+                f"unsafe OpenOCD tap name {tap!r}: only letters, digits, and "
+                "'. _ : -' are allowed (it is interpolated into OpenOCD TCL)."
+            )
         self.tap = tap
         self.ir_table = dict(ir_table) if ir_table else dict(self.DEFAULT_IR_TABLE)
         self._connect_timeout_sec = float(connect_timeout_sec)
@@ -300,6 +402,26 @@ class OpenOcdTransport(Transport):
         except OSError:
             pass
         self._sock.settimeout(5)
+        if self.tap.strip().lower() in ("", "auto"):
+            self.tap = self._resolve_auto_tap()
+
+    def list_taps(self) -> list[str]:
+        """Return the JTAG tap names OpenOCD has configured (``jtag names``)."""
+        return self._cmd("jtag names").split()
+
+    def _resolve_auto_tap(self) -> str:
+        """Resolve ``tap='auto'`` to a concrete name via OpenOCD ``jtag names``.
+
+        Picks the first tap OpenOCD reports — single-FPGA chains have exactly
+        one.  Raises ``RuntimeError`` if OpenOCD has no taps configured.
+        """
+        taps = self.list_taps()
+        if not taps:
+            raise RuntimeError(
+                "tap='auto' but OpenOCD reports no JTAG taps. "
+                "Check your openocd.cfg ('jtag newtap ...')."
+            )
+        return taps[0]
 
     def close(self) -> None:
         if self._sock:
@@ -376,6 +498,837 @@ class OpenOcdTransport(Transport):
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
+def find_quartus_stp(explicit: str | None = None) -> str | None:
+    """Locate the ``quartus_stp`` executable for the USB-Blaster transport.
+
+    Resolution order, first hit wins:
+
+    1. ``explicit`` (an operator-supplied path — returned as-is),
+    2. the ``PATH``,
+    3. ``$QUARTUS_ROOTDIR`` (Quartus sets this in its shells),
+    4. common Intel/Altera install roots, newest version first.
+
+    Returns ``None`` when nothing is found, so callers can raise a message
+    that fits their context.  Kept OS-agnostic: Windows drives + Program
+    Files, POSIX ``/opt`` / ``/tools`` / ``$HOME`` are all globbed.
+    """
+    if explicit:
+        return explicit
+    for name in ("quartus_stp", "quartus_stp.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    roots: list[str] = []
+    rootdir = os.environ.get("QUARTUS_ROOTDIR")
+    if rootdir:
+        roots.append(rootdir)
+    base_names = (
+        "altera_pro",
+        "intelFPGA_pro",
+        "intelFPGA",
+        "altera_lite",
+        "altera",
+        "quartus",
+    )
+    if os.name == "nt":
+        prefixes = [f"{d}:\\" for d in "CDE"]
+        for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            if os.environ.get(env):
+                prefixes.append(os.environ[env])
+    else:
+        prefixes = ["/opt", "/tools", os.path.expanduser("~"), "/usr/local"]
+    for prefix in prefixes:
+        for base in base_names:
+            roots.append(os.path.join(prefix, base))
+
+    # Exact executable name only — a "quartus_stp*" glob would also match
+    # quartus_stpw (the windowed SignalTap GUI), which is not the Tcl shell.
+    # ".exe" first on Windows so the shell wins over any extensionless sibling.
+    exe_names = ("quartus_stp.exe", "quartus_stp") if os.name == "nt" else ("quartus_stp",)
+    # A root may already be a Quartus rootdir (has bin/) or a parent holding
+    # one or more version dirs; try all three shapes.
+    for root in roots:
+        for exe in exe_names:
+            for pat in (
+                os.path.join(root, "bin*", exe),
+                os.path.join(root, "quartus", "bin*", exe),
+                os.path.join(root, "*", "quartus", "bin*", exe),
+            ):
+                for match in sorted(glob.glob(pat), reverse=True):  # newest first
+                    if os.path.isfile(match):
+                        return match
+    return None
+
+
+class QuartusStpTransport(Transport):
+    """
+    Intel/Altera USB-Blaster transport through Quartus ``quartus_stp``.
+
+    The Intel RTL wrappers use ``sld_virtual_jtag`` instances rather than
+    plain device-level USER opcodes.  Quartus exposes those instances through
+    the ``device_virtual_ir_shift`` and ``device_virtual_dr_shift`` Tcl
+    commands.  This transport keeps a persistent ``quartus_stp`` Tcl process,
+    opens the selected USB-Blaster/device pair, and performs fcapz 49-bit
+    register scans through a selected virtual JTAG instance.
+    """
+
+    DR_BITS = 49
+    BURST_DR_BITS = 256
+    ADDR_BURST_PTR = 0x002C
+    # Same idle gap used by the other transports for rtl/jtag_reg_iface.v's
+    # CDC pipeline between the request scan and the response-capture scan.
+    READ_IDLE_CYCLES = 20
+    # fcapz Intel wrappers set sld_ir_width=1 and drive ir_out=0, so the
+    # virtual IR value is currently fixed at zero.
+    VIRTUAL_IR_VALUE = 0
+    _SENTINEL = "<<FCAPZ_QUARTUS_STP_DONE>>"
+
+    def __init__(
+        self,
+        *,
+        hardware_name: str | None = None,
+        device_name: str | None = None,
+        quartus_stp_path: str | None = None,
+        quartus_stp_argv: list[str] | None = None,
+        lock_timeout_ms: int = 10_000,
+        read_timeout_sec: float | None = None,
+        read_idle_cycles: int = READ_IDLE_CYCLES,
+        burst_data_chain: int = 2,
+        burst_prefill_idle_cycles: int = 160,
+    ):
+        self.hardware_name = hardware_name
+        self.device_name = device_name
+        self._quartus_stp_path = quartus_stp_path
+        self._quartus_stp_argv = list(quartus_stp_argv) if quartus_stp_argv else None
+        self.lock_timeout_ms = int(lock_timeout_ms)
+        self.read_idle_cycles = int(read_idle_cycles)
+        self.burst_data_chain = int(burst_data_chain)
+        self.burst_prefill_idle_cycles = int(burst_prefill_idle_cycles)
+        if read_timeout_sec is None:
+            read_timeout_sec = float(os.environ.get("FCAPZ_QUARTUS_TIMEOUT", "60"))
+        self.read_timeout_sec = float(read_timeout_sec)
+        self._active_chain: int = 1
+        self._proc: subprocess.Popen | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_lines: list[str] = []
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stp_io_lock = threading.Lock()
+        self._poisoned = False
+        self._has_burst = True
+        # The actual device quartus_stp opened (family/part + IDCODE), filled in
+        # by connect(). None until connected. Surfaced so the UI can name the
+        # FPGA it attached to, not just the vendor.
+        self.opened_device: str | None = None
+
+    def connect(self) -> None:
+        argv = self._quartus_stp_argv
+        if argv is None:
+            quartus_stp = find_quartus_stp(self._quartus_stp_path)
+            if not quartus_stp:
+                raise RuntimeError(
+                    "quartus_stp not found. Add the Quartus bin dir to PATH, set "
+                    "$QUARTUS_ROOTDIR, or pass quartus_stp_path=."
+                )
+            argv = [quartus_stp, "-s"]
+
+        self._proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._poisoned = False
+        self._has_burst = True
+        self._stdout_lines = queue.Queue()
+        self._stderr_lines = []
+        if self._proc.poll() is not None:
+            self._raise_process_exited()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True
+        )
+        self._stderr_thread.start()
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stdout, daemon=True
+        )
+        self._stdout_thread.start()
+        if self._proc.poll() is not None:
+            self._raise_process_exited()
+        opened_device = self._send(self._open_device_script())
+        self.opened_device = self._prettify_device_name(opened_device)
+        _quartus_log.info("Opened Quartus JTAG device %s", opened_device)
+
+    def close(self) -> None:
+        proc = self._proc
+        if proc and proc.stdin:
+            try:
+                self._send("catch {close_device}")
+            except Exception:
+                _quartus_log.debug("quartus_stp close_device failed", exc_info=True)
+            try:
+                proc.stdin.write("exit\n")
+                proc.stdin.flush()
+            except Exception:
+                _quartus_log.debug("quartus_stp exit write failed", exc_info=True)
+        if proc:
+            try:
+                proc.terminate()
+            except Exception:
+                _quartus_log.debug("quartus_stp terminate failed", exc_info=True)
+        self._proc = None
+        self._poisoned = True
+
+    def select_chain(self, chain: int) -> None:
+        if chain < 1:
+            raise ValueError(f"virtual JTAG instance index must be >= 1, got {chain}")
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        if width < 1:
+            raise ValueError(f"DR scan width must be positive, got {width}")
+        instance = self._active_chain if chain is None else chain
+        self._validate_instance(instance)
+        captured = self._send(
+            self._locked_script(
+                body=[
+                    self._virtual_ir_tcl(instance),
+                    self._dr_shift_tcl(instance, bits, width, "__fcapz_capture"),
+                ],
+                result="__fcapz_capture",
+                status="__fcapz_scan_status",
+                error="__fcapz_scan_error",
+            )
+        )
+        return self._shift_string_to_int(captured.strip(), width)
+
+    def raw_dr_scan_batch(
+        self, scans: list[tuple[int, int]], *, chain: int | None = None
+    ) -> list[int]:
+        if not scans:
+            return []
+        instance = self._active_chain if chain is None else chain
+        self._validate_instance(instance)
+        body = ["set __fcapz_captures {}"]
+        body.append(self._virtual_ir_tcl(instance))
+        for idx, (bits, width) in enumerate(scans):
+            if width < 1:
+                raise ValueError(f"DR scan width must be positive, got {width}")
+            var = f"__fcapz_capture_{idx}"
+            body.append(self._dr_shift_tcl(instance, bits, width, var))
+            body.append(f"lappend __fcapz_captures ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_captures",
+                status="__fcapz_batch_status",
+                error="__fcapz_batch_error",
+            )
+        )
+        tokens = captured.split()
+        if len(tokens) != len(scans):
+            raise RuntimeError(
+                f"Quartus batch DR scan returned {len(tokens)} values, "
+                f"expected {len(scans)}: {captured!r}"
+            )
+        return [
+            self._shift_string_to_int(token, width)
+            for token, (_bits, width) in zip(tokens, scans)
+        ]
+
+    def write_reg(self, addr: int, value: int) -> None:
+        frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+        self.raw_dr_scan(frame, self.DR_BITS)
+
+    def read_reg(self, addr: int) -> int:
+        read_frame = (addr & 0xFFFF) << 32
+        instance = self._active_chain
+        shifted_out = self._send(
+            self._locked_script(
+                body=[
+                    self._virtual_ir_tcl(instance),
+                    self._dr_shift_tcl(
+                        instance, read_frame, self.DR_BITS, "__fcapz_discard"
+                    ),
+                    f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
+                    self._dr_shift_tcl(
+                        instance, read_frame, self.DR_BITS, "__fcapz_capture"
+                    ),
+                ],
+                result="__fcapz_capture",
+                status="__fcapz_read_status",
+                error="__fcapz_read_error",
+            )
+        )
+        return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
+
+    def read_reg_verified(self, addr: int) -> int:
+        """Read a Quartus virtual JTAG register twice and return the second value."""
+        self.read_reg(addr)
+        return self.read_reg(addr)
+
+    def read_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
+        if addr == 0x0100 and self._burst_available:
+            try:
+                return self._read_block_burst(words)
+            except (ConnectionError, RuntimeError) as exc:
+                _quartus_log.warning(
+                    "Quartus ELA burst readback failed (%s); falling back to "
+                    "slow control-chain DATA reads",
+                    exc,
+                )
+                self._has_burst = False
+        instance = self._active_chain
+        body = ["set __fcapz_reads {}"]
+        body.append(self._virtual_ir_tcl(instance))
+        for i in range(words):
+            read_frame = ((addr + i * 4) & 0xFFFF) << 32
+            body.append(
+                self._dr_shift_tcl(
+                    instance, read_frame, self.DR_BITS, f"__fcapz_discard_{i}"
+                )
+            )
+            body.append(f"device_run_test_idle -num_clocks {self.read_idle_cycles}")
+            body.append(
+                self._dr_shift_tcl(
+                    instance, read_frame, self.DR_BITS, f"__fcapz_capture_{i}"
+                )
+            )
+            body.append(f"lappend __fcapz_reads $__fcapz_capture_{i}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_reads",
+                status="__fcapz_read_block_status",
+                error="__fcapz_read_block_error",
+            )
+        )
+        tokens = captured.split()
+        if len(tokens) != words:
+            raise RuntimeError(
+                f"Quartus read_block returned {len(tokens)} values, expected {words}: "
+                f"{captured!r}"
+            )
+        return [
+            self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF
+            for token in tokens
+        ]
+
+    def read_timestamp_block(
+        self, addr: int, words: int, timestamp_width: int
+    ) -> List[int]:
+        """Read timestamp words through the Intel/Altera DATA_CHAIN burst path."""
+        if words <= 0:
+            return []
+        if timestamp_width > 0 and self._burst_available:
+            try:
+                return self._read_block_burst(
+                    words,
+                    timestamp=True,
+                    element_width=timestamp_width,
+                )
+            except (ConnectionError, RuntimeError) as exc:
+                _quartus_log.warning(
+                    "Quartus ELA timestamp burst readback failed (%s); falling back "
+                    "to slow control-chain timestamp reads",
+                    exc,
+                )
+                self._has_burst = False
+        return self.read_block(addr, words)
+
+    @property
+    def _burst_available(self) -> bool:
+        return bool(self._has_burst)
+
+    @property
+    def _burst_samples_per_scan(self) -> int:
+        if not hasattr(self, "_cached_sps"):
+            sw = self.read_reg_verified(0x000C)
+            if sw < 1:
+                sw = 8
+            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
+        return self._cached_sps
+
+    def _read_block_burst(
+        self,
+        words: int,
+        *,
+        timestamp: bool = False,
+        element_width: int | None = None,
+    ) -> List[int]:
+        if timestamp:
+            if element_width is None:
+                element_width = 32
+            per_scan = max(1, self.BURST_DR_BITS // element_width)
+        else:
+            per_scan = self._burst_samples_per_scan
+            element_width = self.BURST_DR_BITS // per_scan
+        n_scans = (words + per_scan - 1) // per_scan
+        prime_scans = 1
+        ctrl_chain = self._active_chain
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
+        )
+
+        def run_once() -> List[int]:
+            body = ["set __fcapz_burst {}"]
+            body.append(self._virtual_ir_tcl(ctrl_chain))
+            body.append(
+                self._dr_shift_tcl(
+                    ctrl_chain,
+                    burst_frame,
+                    self.DR_BITS,
+                    "__fcapz_burst_ptr_discard",
+                )
+            )
+            body.append(
+                "device_run_test_idle "
+                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            )
+            body.append(self._virtual_ir_tcl(self.burst_data_chain))
+            for idx in range(n_scans + prime_scans):
+                var = f"__fcapz_burst_{idx}"
+                body.append(
+                    self._dr_shift_tcl(
+                        self.burst_data_chain, 0, self.BURST_DR_BITS, var
+                    )
+                )
+                body.append(f"lappend __fcapz_burst ${var}")
+            captured = self._send(
+                self._locked_script(
+                    body=body,
+                    result="__fcapz_burst",
+                    status="__fcapz_burst_status",
+                    error="__fcapz_burst_error",
+                )
+            )
+            return self._parse_burst_tokens(
+                captured.split(),
+                words,
+                skip_scans=prime_scans,
+                element_width=element_width,
+            )
+
+        previous = run_once()
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("Quartus DATA_CHAIN burst readback did not stabilize")
+
+    def _parse_burst_tokens(
+        self,
+        tokens: list[str],
+        total_words: int,
+        *,
+        skip_scans: int,
+        element_width: int,
+    ) -> List[int]:
+        values: list[int] = []
+        mask = (1 << element_width) - 1
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        for scan_idx, token in enumerate(tokens):
+            if scan_idx < skip_scans:
+                continue
+            scan_value = self._shift_string_to_int(token, self.BURST_DR_BITS)
+            for sample_idx in range(per_scan):
+                if len(values) >= total_words:
+                    break
+                values.append((scan_value >> (sample_idx * element_width)) & mask)
+        if len(values) != total_words:
+            raise RuntimeError(
+                f"Quartus DATA_CHAIN burst returned {len(values)} values, "
+                f"expected {total_words}: {tokens!r}"
+            )
+        return values
+
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples via single-chain burst on the active chain.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample — the exact flat layout ``Analyzer.capture()`` reassembles.
+
+        This is the fast path for a wide, single-chain core such as the 160-bit
+        AXI monitor, whose burst DR shares one BSCAN instance with its control
+        frames (``jtag_pipe_iface``).  One 256-bit scan carries
+        ``256 // sample_width`` samples (one, for the 160-bit monitor), so the
+        whole buffer streams in ~``n_samples`` DR scans instead of
+        ``n_samples * ceil(width/32)`` per-word register reads — ~15x fewer
+        quartus_stp commands, which is where the readback time actually goes.
+
+        The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
+        (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
+        the burst scans go on the control chain itself.  Raises on a stream that
+        will not converge so the caller can fall back to the per-word path.
+        """
+        elements = self._single_chain_burst(
+            n_samples, sample_width, timestamp=False
+        )
+        # Split each whole sample into little-endian 32-bit words -- the flat
+        # layout Analyzer.capture() reassembles.
+        words_per_sample = (sample_width + 31) // 32
+        words: List[int] = []
+        for sample in elements:
+            for w in range(words_per_sample):
+                words.append((sample >> (w * 32)) & 0xFFFFFFFF)
+        return words
+
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Read per-sample timestamps via single-chain burst on the active chain.
+
+        The wide, single-chain cores handled by :meth:`read_sample_block` keep
+        their timestamp window behind the *same* BSCAN instance, so the
+        two-chain :meth:`read_timestamp_block` (which shifts on the ELA's
+        separate ``burst_data_chain``) can never reach them and silently falls
+        back to a slow per-word read.  This mirrors the sample burst but asserts
+        the timestamp-select bit in the burst pointer, returning one value per
+        captured sample.  Raises on a stream that will not converge so the
+        caller can fall back to the per-word path.
+        """
+        return self._single_chain_burst(
+            n_timestamps, timestamp_width, timestamp=True
+        )
+
+    def _single_chain_burst(
+        self, n_elements: int, element_width: int, *, timestamp: bool
+    ) -> List[int]:
+        """Stream ``n_elements`` of ``element_width`` bits, all on the active
+        (control) chain -- one 256-bit DR carries ``256 // element_width``
+        elements.  ``timestamp`` selects the burst engine's timestamp window
+        instead of the sample window.  Returns masked element values; raises if
+        the readback will not converge across the stability retries."""
+        if n_elements <= 0:
+            return []
+        if element_width < 1:
+            raise ValueError(f"element_width must be >= 1, got {element_width}")
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        n_scans = (n_elements + per_scan - 1) // per_scan
+        prime_scans = 1
+        chain = self._active_chain
+        # write bit | BURST_PTR addr | data: bit31 selects the timestamp window,
+        # else 0 to start at sample 0.
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
+        )
+
+        def run_once() -> List[int]:
+            body = ["set __fcapz_scb {}"]
+            body.append(self._virtual_ir_tcl(chain))
+            body.append(
+                self._dr_shift_tcl(
+                    chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
+                )
+            )
+            body.append(
+                "device_run_test_idle "
+                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            )
+            # First scan primes/flushes the 256-bit staging register; discarded.
+            for idx in range(n_scans + prime_scans):
+                var = f"__fcapz_scb_{idx}"
+                body.append(
+                    self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
+                )
+                body.append(f"lappend __fcapz_scb ${var}")
+            captured = self._send(
+                self._locked_script(
+                    body=body,
+                    result="__fcapz_scb",
+                    status="__fcapz_scb_status",
+                    error="__fcapz_scb_error",
+                )
+            )
+            return self._parse_single_chain_burst(
+                captured.split(),
+                n_elements,
+                element_width,
+                skip_scans=prime_scans,
+            )
+
+        # The capture RAM is read-only once STATUS.done is set, so a correct
+        # stream repeats identically; require a stable pair before trusting it.
+        previous = run_once()
+        for _attempt in range(3):
+            current = run_once()
+            if current == previous:
+                return current
+            previous = current
+        raise RuntimeError("Quartus single-chain burst did not stabilize")
+
+    def _parse_single_chain_burst(
+        self,
+        tokens: list[str],
+        n_elements: int,
+        element_width: int,
+        *,
+        skip_scans: int,
+    ) -> List[int]:
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
+        mask = (1 << element_width) - 1
+        values: list[int] = []
+        for scan_idx, token in enumerate(tokens):
+            if scan_idx < skip_scans:
+                continue
+            scan_value = self._shift_string_to_int(token, self.BURST_DR_BITS)
+            for s in range(per_scan):
+                if len(values) >= n_elements:
+                    break
+                values.append((scan_value >> (s * element_width)) & mask)
+        if len(values) != n_elements:
+            raise RuntimeError(
+                f"Quartus single-chain burst returned {len(values)} values, "
+                f"expected {n_elements}: {tokens!r}"
+            )
+        return values
+
+    def _validate_instance(self, instance: int) -> None:
+        if instance < 1:
+            raise ValueError(
+                f"virtual JTAG instance index must be >= 1, got {instance}"
+            )
+
+    def _virtual_ir_tcl(self, instance: int) -> str:
+        return (
+            "set __fcapz_ir_discard [device_virtual_ir_shift "
+            f"-instance_index {instance} "
+            f"-ir_value {self.VIRTUAL_IR_VALUE} "
+            "-no_captured_ir_value]"
+        )
+
+    def _dr_shift_tcl(self, instance: int, bits: int, width: int, result_var: str) -> str:
+        bit_string = self._int_to_shift_string(bits, width)
+        return (
+            f"set {result_var} [device_virtual_dr_shift "
+            f"-instance_index {instance} "
+            f"-length {width} "
+            f"-dr_value {bit_string}]"
+        )
+
+    def _locked_script(
+        self,
+        *,
+        body: list[str],
+        result: str | None = None,
+        status: str,
+        error: str,
+    ) -> str:
+        if not body:
+            raise ValueError("locked Quartus Tcl script body must not be empty")
+        lines = [
+            f"device_lock -timeout {self.lock_timeout_ms}",
+            f"set {status} [catch {{",
+            *body,
+            f"}} {error}]",
+            "device_unlock",
+            f"if {{${status}}} {{",
+            f"    error ${error}",
+            "}",
+        ]
+        if result is not None:
+            lines.append(f"set {result}")
+        return "\n".join(lines)
+
+    def _open_device_script(self) -> str:
+        lines = [
+            "package require ::quartus::jtag",
+        ]
+        if self.hardware_name:
+            lines.append(f"set __fcapz_hardware {_tcl_braced(self.hardware_name)}")
+        else:
+            lines.extend(
+                [
+                    "set __fcapz_hardware_matches [get_hardware_names]",
+                    "if {[llength $__fcapz_hardware_matches] == 0} {",
+                    '    error "no Quartus JTAG hardware found"',
+                    "}",
+                    "if {[llength $__fcapz_hardware_matches] > 1} {",
+                    '    error "multiple Quartus JTAG cables found; pass --hardware"',
+                    "}",
+                    "set __fcapz_hardware [lindex $__fcapz_hardware_matches 0]",
+                ]
+            )
+        if self.device_name:
+            lines.append(f"set __fcapz_device {_tcl_braced(self.device_name)}")
+        else:
+            lines.extend(
+                [
+                    "set __fcapz_device {}",
+                    "foreach __name [get_device_names -hardware_name $__fcapz_hardware] {",
+                    '    if {[string match "@1*" $__name]} {',
+                    "        set __fcapz_device $__name",
+                    "        break",
+                    "    }",
+                    "}",
+                    'if {$__fcapz_device eq ""} {',
+                    '    error "no @1 device found on selected USB-Blaster chain"',
+                    "}",
+                ]
+            )
+        lines.append(
+            "open_device -hardware_name $__fcapz_hardware -device_name $__fcapz_device"
+        )
+        lines.append("set __fcapz_device")
+        return "\n".join(lines)
+
+    def _send(self, script: str) -> str:
+        if self._poisoned:
+            raise RuntimeError("quartus_stp transport is closed or timed out; reconnect")
+        if not self._proc or not self._proc.stdin or not self._proc.stdout:
+            raise RuntimeError("not connected - call connect() first")
+        if self._SENTINEL in script:
+            raise ValueError("quartus_stp Tcl script contains the response sentinel")
+        wrapped = "\n".join(
+            [
+                "set __fcapz_status [catch {",
+                script,
+                "} __fcapz_result]",
+                "if {$__fcapz_status} {",
+                '    puts "ERROR: $__fcapz_result"',
+                "} else {",
+                "    puts $__fcapz_result",
+                "}",
+                f"puts {self._SENTINEL}",
+                "flush stdout",
+            ]
+        )
+        with self._stp_io_lock:
+            if self._proc.poll() is not None:
+                self._raise_process_exited()
+            self._proc.stdin.write(wrapped + "\n")
+            self._proc.stdin.flush()
+            lines: list[str] = []
+            while True:
+                try:
+                    raw = self._stdout_lines.get(timeout=self.read_timeout_sec)
+                except queue.Empty as exc:
+                    self._poison_after_timeout()
+                    raise TimeoutError(
+                        "timed out waiting for quartus_stp response sentinel "
+                        f"after {self.read_timeout_sec:.1f}s; reconnect required"
+                    ) from exc
+                if raw is None:
+                    stderr = "\n".join(self._stderr_lines[-20:])
+                    raise ConnectionError(
+                        f"quartus_stp process exited unexpectedly. stderr:\n{stderr}"
+                    )
+                line = self._strip_quartus_prompt(raw.rstrip("\n\r"))
+                if line.strip() == self._SENTINEL:
+                    break
+                if line:
+                    lines.append(line)
+        first_error = next(
+            (idx for idx, line in enumerate(lines) if line.startswith("ERROR: ")),
+            None,
+        )
+        if first_error is not None:
+            detail = "\n".join(lines[first_error:])
+            if "virtual JTAG instance cannot be found" in detail:
+                # quartus_stp emits this only when the requested sld_virtual_jtag
+                # node is absent from the bitstream -- i.e. the FPGA carries no
+                # fpgacapZero cores. The connection itself is fine, so say that
+                # plainly instead of the raw JTAG-instance wording, which reads
+                # like a cable/chain fault.
+                raise RuntimeError(
+                    "No fpgacapZero-compatible cores found on the device. The "
+                    "FPGA is reachable but presents no fpgacapZero cores -- "
+                    "check that it is configured with an fpgacapZero build."
+                )
+            raise RuntimeError(detail)
+        return lines[-1].strip() if lines else ""
+
+    @staticmethod
+    def _prettify_device_name(opened: str) -> str | None:
+        """Tidy quartus_stp's opened-device string for display.
+
+        ``open_device`` echoes names like ``@1: A5EB013BB23BCS(...)  (0x4362C0DD)``
+        -- the leading ``@N:`` is the chain position, not part of the device.
+        Strip it and collapse whitespace; return None for an empty result so the
+        UI simply omits the device rather than showing a blank.
+        """
+        name = " ".join((opened or "").split())
+        name = re.sub(r"^@\d+:\s*", "", name)
+        return name or None
+
+    @staticmethod
+    def _strip_quartus_prompt(line: str) -> str:
+        stripped = line.strip()
+        while True:
+            if stripped.startswith("tcl>"):
+                stripped = stripped[4:].lstrip()
+                continue
+            if stripped.startswith(">"):
+                stripped = stripped[1:].lstrip()
+                continue
+            return stripped
+
+    def _poison_after_timeout(self) -> None:
+        self._poisoned = True
+        proc = self._proc
+        self._proc = None
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                _quartus_log.debug("quartus_stp kill after timeout failed", exc_info=True)
+
+    def _raise_process_exited(self) -> None:
+        if not self._proc:
+            raise RuntimeError("not connected - call connect() first")
+        code = self._proc.poll()
+        if code is None:
+            return
+        stderr = "\n".join(self._stderr_lines[-20:])
+        raise ConnectionError(
+            f"quartus_stp exited with status {code}. stderr:\n{stderr}"
+        )
+
+    def _drain_stderr(self) -> None:
+        if not self._proc or not self._proc.stderr:
+            raise RuntimeError("quartus_stp process not initialized")
+        for raw in self._proc.stderr:
+            self._stderr_lines.append(raw.rstrip("\n\r"))
+
+    def _drain_stdout(self) -> None:
+        if not self._proc or not self._proc.stdout:
+            raise RuntimeError("quartus_stp process not initialized")
+        for raw in self._proc.stdout:
+            self._stdout_lines.put(raw)
+        self._stdout_lines.put(None)
+
+    @staticmethod
+    def _int_to_shift_string(value: int, width: int) -> str:
+        # Quartus' binary DR operand is a normal fixed-width numeric string.
+        # Its documented example maps "010001" to hex 0x11 and shifts the
+        # rightmost/least-significant bit first.
+        mask = (1 << width) - 1
+        return f"{value & mask:0{width}b}"
+
+    @staticmethod
+    def _shift_string_to_int(value: str, width: int) -> int:
+        bits = re.sub(r"\s+", "", value)
+        if not re.fullmatch(r"[01]+", bits):
+            raise RuntimeError(f"Quartus virtual DR scan returned non-binary data: {value!r}")
+        if len(bits) != width:
+            raise RuntimeError(
+                f"Quartus virtual DR scan returned {len(bits)} bits, expected {width}: "
+                f"{value!r}"
+            )
+        return int(bits, 2)
+
+
 class XilinxHwServerTransport(Transport):
     """
     Xilinx hw_server transport using a persistent XSDB session.
@@ -438,6 +1391,7 @@ class XilinxHwServerTransport(Transport):
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
     RAW_DR_IDLE_CYCLES = 8
+    USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
@@ -465,6 +1419,7 @@ class XilinxHwServerTransport(Transport):
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
+        target_wait_timeout: float = 3.0,
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
@@ -491,6 +1446,11 @@ class XilinxHwServerTransport(Transport):
         self.ready_poll_interval_sec = float(
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
+        # How long connect() waits for a JTAG target matching ``fpga_name`` to
+        # appear before giving up — rides out a transiently empty scan chain
+        # (re-enumeration when another board is plugged in, or right after
+        # ``fpga -file``) instead of selecting nothing and failing later.
+        self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -573,9 +1533,7 @@ class XilinxHwServerTransport(Transport):
             )
             mark("fpga_skipped")
 
-        self._send(
-            f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}'
-        )
+        self._select_fpga_target()
         mark("jtag_target_set")
 
         # Wait for the JTAG chain to respond with valid (non-zero) data on
@@ -649,6 +1607,38 @@ class XilinxHwServerTransport(Transport):
             "Either the bitstream failed to load, the wrong fpga_name was "
             "selected, or the probe register address is wrong for this design."
         )
+
+    def _select_fpga_target(self) -> None:
+        """Select the JTAG target matching ``fpga_name``, tolerating a
+        transiently empty scan chain.
+
+        hw_server briefly reports an empty JTAG target list while the chain
+        re-enumerates — right after ``fpga -file``, or when another board is
+        plugged in and the whole chain is re-scanned. Firing
+        ``jtag targets -set -filter`` in that window silently selects nothing,
+        and every later read then fails with XSDB's opaque "target list is
+        empty" / "Invalid target" errors (surfaced to callers as "no bit
+        string in output"). Poll ``jtag targets`` until a matching device
+        appears, then select it; fail with a clear message if it never does.
+        """
+        deadline = time.monotonic() + self.target_wait_timeout
+        names: list[str] = []
+        while True:
+            # ``puts`` forces the list onto stdout — the bare command doesn't
+            # echo its result through a piped (non-interactive) xsdb session.
+            names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
+            if any(self.fpga_name in name for name in names):
+                break
+            if time.monotonic() >= deadline:
+                visible = ", ".join(names) if names else "(none)"
+                raise ConnectionError(
+                    f"no JTAG target matching {self.fpga_name!r} appeared within "
+                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
+                    "may be unplugged or powered off, or the JTAG chain is still "
+                    "re-enumerating (e.g. another board was just connected)."
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
 
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
@@ -760,11 +1750,12 @@ class XilinxHwServerTransport(Transport):
         raw = self._send(tcl)
         return self._parse_bits_u32(raw)
 
-    def read_reg_verified(self, addr: int) -> int:
-        """Read a register twice and return the second value.
+    def read_reg_stable(self, addr: int) -> int:
+        """Read through the hw_server register pipeline and return settled data.
 
-        Works around a JTAG pipeline stale-data issue where the first read
-        after a session change may return data from the previous address.
+        XSDB JTAG sequences can return data from the previous register window
+        on the first read after changing addresses or session state.  Discard
+        one warmup read and return the second scan.
         """
         self.read_reg(addr)
         return self.read_reg(addr)
@@ -783,10 +1774,18 @@ class XilinxHwServerTransport(Transport):
         available, uses the wide burst DR for ~10x faster throughput.
         Otherwise falls back to single-sequence pipelined reads on the
         active ELA control chain.
+
+        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, so
+        it is only valid when a sample fits one 32-bit word (``SAMPLE_W <= 32``).
+        For a wider core (e.g. the AXI monitor, ``SAMPLE_W=160``) ``capture()``
+        reassembles each sample from 32-bit words and passes a *word* count here;
+        feeding that word count to the burst engine builds a 5x-oversized
+        single-line TCL scan sequence that xsdb never finishes — hanging the
+        read. Wide cores therefore skip burst and use the 32-bit word path.
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available:
+        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
             try:
                 return self._read_block_burst(words)
             except (ConnectionError, RuntimeError) as exc:
@@ -811,11 +1810,25 @@ class XilinxHwServerTransport(Transport):
             self._has_burst = True
         return self._has_burst
 
+    def _burst_sample_ok(self) -> bool:
+        """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
+
+        The burst engine returns whole samples; ``capture()`` only treats them
+        as such for ``SAMPLE_W <= 32`` (one 32-bit word per sample). Read fresh
+        (not cached) so a session that hops between an 8-bit ELA and a 160-bit
+        AXI monitor always gates on the *currently selected* core.
+        """
+        try:
+            sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
+        except (ConnectionError, RuntimeError):
+            return True  # can't tell — keep prior fast-path behavior
+        return sw < 1 or sw <= 32
+
     @property
     def _burst_samples_per_scan(self) -> int:
         """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
         if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_verified(0x000C)  # ADDR_SAMPLE_W
+            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
             if sw < 1:
                 sw = 8
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)
@@ -1001,14 +2014,32 @@ class XilinxHwServerTransport(Transport):
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
-        """Fallback: single-sequence pipelined reads via USER1 49-bit DR."""
+        """Non-burst block read via the 49-bit DR on the active chain.
+
+        DATA/timestamp windows are read-only after capture completion.  Uses one
+        pipelined ``jtag sequence`` per ``_BLOCK_CHUNK`` words -- priming
+        (``USER1_PIPE_PRIME_READS``) discards the stale register-pipeline word
+        and the RTL jtag_rdata fill latency -- rather than a per-word round trip.
+        This is the fallback for narrow ELAs when USER2 burst is unavailable and
+        the primary readback for wide cores (SAMPLE_W > 32, e.g. the AXI monitor,
+        whose 5-word samples do not fit the sample-packing burst DR).  Reading a
+        160-bit x depth buffer per-word cost tens of seconds of xsdb round trips;
+        the pipelined path is ~25x faster and returns identical data (validated
+        on Arty against the per-word path).
+        """
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)
             chunk_size = end - start
             tcl = self._burst_read_tcl(addr, start, chunk_size)
             out = self._send(tcl)
-            results.extend(self._parse_block_bits(out, chunk_size, skip_words=1))
+            results.extend(
+                self._parse_block_bits(
+                    out,
+                    chunk_size,
+                    skip_words=self.USER1_PIPE_PRIME_READS,
+                )
+            )
         # Flush JTAG pipeline
         self.read_reg(0x0000)
         return results
@@ -1016,15 +2047,19 @@ class XilinxHwServerTransport(Transport):
     def _burst_read_tcl(self, base_addr: int, offset: int, count: int) -> str:
         """Generate TCL for burst block read using a single jtag sequence.
 
-        All scans go into one sequence object: one address setup, one
-        discarded priming capture, then N returned captures.  A short idle
+        All scans go into one sequence object: one address setup,
+        USER1_PIPE_PRIME_READS discarded priming captures, then N returned
+        captures.  A short idle
         follows each address update before the next capture so the
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
         """
         n = self._user_dr_bits(self.DR_BITS)
         idle = self.READ_IDLE_CYCLES
-        ir_cmd = self._irshift_tcl("_q", chain=1)
+        # Target the ACTIVE chain, not a hardcoded USER1: the DATA window of a
+        # core on another chain (e.g. the AXI monitor on USER2) must be read on
+        # that chain, or this returns USER1's data instead.
+        ir_cmd = self._irshift_tcl("_q", chain=self._active_chain)
         frames: list[str] = []
         for i in range(count):
             frames.append(
@@ -1032,6 +2067,7 @@ class XilinxHwServerTransport(Transport):
                     self._frame_bits(addr=base_addr + (offset + i) * 4, data=0, write=False)
                 )
             )
+        flush_frame = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
 
         parts: list[str] = [
             "set _q [jtag sequence]",
@@ -1039,12 +2075,17 @@ class XilinxHwServerTransport(Transport):
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
             f"$_q delay {idle}",
-            # Prime capture: discard this word.  Hardware/XSDB can leave the
-            # first captured USER1 word stale after a previous pipelined read.
-            f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
         ]
+        # Prime captures: discard the stale register-pipeline word plus the
+        # RTL jtag_rdata fill latency before counting returned words. If the
+        # RTL adds another registered readback stage, this constant must grow
+        # with that latency.
+        for _ in range(self.USER1_PIPE_PRIME_READS):
+            parts.append(
+                f"{ir_cmd}; "
+                f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
+            )
+            parts.append(f"$_q delay {idle}")
         # Scans 1..N-1: capture previous AND set next address.
         # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
@@ -1056,7 +2097,7 @@ class XilinxHwServerTransport(Transport):
         # Final scan: capture last result
         parts.append(
             f"{ir_cmd}; "
-            f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
+            f"$_q drshift -state DRUPDATE -capture -bits {n} {flush_frame}"
         )
         parts.append("puts [$_q run -bits]; $_q delete")
         return "; ".join(parts)

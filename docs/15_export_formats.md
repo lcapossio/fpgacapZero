@@ -161,6 +161,13 @@ VCD with:
 - Per-cycle value-change records using the actual cycle number
   (or sample index, when no timestamps are present)
 
+For segmented captures, `Analyzer.export_vcd_text_segments(results)` emits all
+segments in **one** VCD: the same signals and `logic` scope, segments
+concatenated on the time axis (they are separate trigger windows with no shared
+timebase), plus a `segment` wire marking which window each sample came from.
+This is what the RPC `capture` command returns for `include_vcd` when
+`segments: true`.
+
 ### Example output
 
 For a capture with `--probes addr:4:0,data:4:4` (two named lanes

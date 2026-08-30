@@ -51,6 +51,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_full), .jtag_rd_en(rd_full),
         .jtag_addr(addr_full), .jtag_wdata(wdata_full), .jtag_rdata(rdata_full),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_full), .burst_rd_data(burst_data_full),
         .burst_start(burst_start_full), .burst_start_ptr(burst_start_ptr_full)
     );
@@ -91,6 +92,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_dec), .jtag_rd_en(rd_dec),
         .jtag_addr(addr_dec), .jtag_wdata(wdata_dec), .jtag_rdata(rdata_dec),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_dec), .burst_rd_data(burst_data_dec),
         .burst_start(burst_start_dec), .burst_start_ptr(burst_start_ptr_dec)
     );
@@ -130,6 +132,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_seq), .jtag_rd_en(rd_seq),
         .jtag_addr(addr_seq), .jtag_wdata(wdata_seq), .jtag_rdata(rdata_seq),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_seq), .burst_rd_data(burst_data_seq),
         .burst_start(burst_start_seq), .burst_start_ptr(burst_start_ptr_seq)
     );
@@ -169,6 +172,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_ts), .jtag_rd_en(rd_ts),
         .jtag_addr(addr_ts), .jtag_wdata(wdata_ts), .jtag_rdata(rdata_ts),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_ts), .burst_rd_data(burst_data_ts),
         .burst_start(burst_start_ts), .burst_start_ptr(burst_start_ptr_ts)
     );
@@ -208,6 +212,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_w48), .jtag_rd_en(rd_w48),
         .jtag_addr(addr_w48), .jtag_wdata(wdata_w48), .jtag_rdata(rdata_w48),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_w48), .burst_rd_data(burst_data_w48),
         .burst_start(burst_start_w48), .burst_start_ptr(burst_start_ptr_w48)
     );
@@ -256,6 +261,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_segtrig), .jtag_rd_en(rd_segtrig),
         .jtag_addr(addr_segtrig), .jtag_wdata(wdata_segtrig), .jtag_rdata(rdata_segtrig),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_segtrig), .burst_rd_data(burst_data_segtrig),
         .burst_start(burst_start_segtrig), .burst_start_ptr(burst_start_ptr_segtrig)
     );
@@ -302,6 +308,7 @@ module fcapz_ela_bug_probe_tb;
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(wr_roll), .jtag_rd_en(rd_roll),
         .jtag_addr(addr_roll), .jtag_wdata(wdata_roll), .jtag_rdata(rdata_roll),
+        .burst_rd_active(1'b0),
         .burst_rd_addr(burst_addr_roll), .burst_rd_data(burst_data_roll),
         .burst_start(burst_start_roll), .burst_start_ptr(burst_start_ptr_roll)
     );
@@ -324,6 +331,7 @@ module fcapz_ela_bug_probe_tb;
 
     initial begin
         logic [31:0] word0, word1, word2, status, seg_status;
+        logic [31:0] wrap_samples [0:12];
         int i;
 
         repeat (4) @(posedge sample_clk);
@@ -641,6 +649,45 @@ module fcapz_ela_bug_probe_tb;
               word1[7:0] == 8'd92);
         check("second post-trigger sample follows trigger sample",
               word2[7:0] == 8'd93);
+
+        $display("\n=== Regression 11: segmented post-trigger wraps within segment ===");
+        write_segtrig(16'h0004, 32'h2);
+        wait_sample(8);
+        write_segtrig(16'h0014, 32'd4);
+        write_segtrig(16'h0018, 32'd8);
+        write_segtrig(16'h0020, 32'h1);
+        write_segtrig(16'h0024, 32'd250);
+        write_segtrig(16'h0028, 32'hFF);
+        write_segtrig(16'h00B4, 32'd0);
+        write_segtrig(16'h00DC, 32'd0);
+        write_segtrig(16'h00C0, 32'd0);
+        probe_segtrig = '0;
+        ext_trig_segtrig = 1'b0;
+        write_segtrig(16'h0004, 32'h1);
+        repeat (1120) begin
+            @(posedge sample_clk);
+            probe_segtrig <= probe_segtrig + 1'b1;
+        end
+        wait_sample(40);
+        write_segtrig(16'h00C0, 32'd0);
+        wait_sample(8);
+        for (i = 0; i < 13; i = i + 1)
+            read_segtrig(16'h0100 + i*4, wrap_samples[i]);
+        $display("  seg0 samples=%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                 wrap_samples[0][7:0], wrap_samples[1][7:0], wrap_samples[2][7:0],
+                 wrap_samples[3][7:0], wrap_samples[4][7:0], wrap_samples[5][7:0],
+                 wrap_samples[6][7:0], wrap_samples[7][7:0], wrap_samples[8][7:0],
+                 wrap_samples[9][7:0], wrap_samples[10][7:0], wrap_samples[11][7:0],
+                 wrap_samples[12][7:0]);
+        begin
+            logic wrap_ok;
+            wrap_ok = 1'b1;
+            for (i = 1; i < 13; i = i + 1) begin
+                if (wrap_samples[i][7:0] != ((wrap_samples[i-1][7:0] + 8'd1) & 8'hFF))
+                    wrap_ok = 1'b0;
+            end
+            check("segment 0 capture is contiguous across offset wrap", wrap_ok);
+        end
 
         $display("\n=== Regression summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);

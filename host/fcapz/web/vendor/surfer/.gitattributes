@@ -1,0 +1,5 @@
+# Vendored upstream Surfer build — keep every file byte-exact (no EOL
+# normalization) so the Subresource Integrity hashes in index.html keep
+# matching surfer.js / surfer_bg.wasm. Without this, autocrlf could rewrite
+# surfer.js on Windows checkout and the browser would refuse to load it.
+* -text

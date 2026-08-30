@@ -10,7 +10,8 @@
 //
 // Usage:
 //   fcapz_ela_intel #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
-//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals)
+//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
+//       .trigger_in(1'b0), .trigger_out(), .armed_out()
 //   );
 
 module fcapz_ela_intel #(
@@ -20,7 +21,13 @@ module fcapz_ela_intel #(
     parameter STOR_QUAL   = 0,
     parameter INPUT_PIPE  = 0,
     parameter NUM_CHANNELS = 1,
+    parameter DECIM_EN    = 0,
+    parameter EXT_TRIG_EN = 0,
     parameter TIMESTAMP_W = 0,
+    parameter NUM_SEGMENTS = 1,
+    parameter PROBE_MUX_W = 0,
+    parameter STARTUP_ARM = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W     = 256,
     parameter CTRL_CHAIN  = 1,   // BSCANE2 USER chain for control
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
@@ -30,10 +37,15 @@ module fcapz_ela_intel #(
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in
+    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
+    input  wire                          trigger_in,
+    output wire                          trigger_out,
+    output wire                          armed_out
 );
 
     localparam PTR_W = $clog2(DEPTH);
+    // Segment depth for burst read ring-wrap (equals DEPTH when unsegmented).
+    localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
 
     // TAP signals — control (USER1)
     wire tap1_tck, tap1_tdi, tap1_tdo;
@@ -51,6 +63,7 @@ module fcapz_ela_intel #(
 
     // Burst interface
     wire [PTR_W-1:0]    burst_rd_addr;
+    wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
     wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
@@ -58,8 +71,6 @@ module fcapz_ela_intel #(
     wire [PTR_W-1:0]    burst_start_ptr;
     wire                jtag_rst_ctrl;
     wire                jtag_rst_data;
-    wire                trigger_out_unused;
-    wire                armed_out_unused;
 
     // ---- TAP wrappers ----
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
@@ -103,18 +114,22 @@ module fcapz_ela_intel #(
         .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
         .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
         .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-        .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
+        .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
+        .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
+        .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+        .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
         .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
     ) u_ela (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
-        .trigger_in(1'b0),
-        .trigger_out(trigger_out_unused),
-        .armed_out(armed_out_unused),
+        .trigger_in(trigger_in),
+        .trigger_out(trigger_out),
+        .armed_out(armed_out),
         .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
         .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
         .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
         .jtag_rdata(jtag_rdata),
+        .burst_rd_active(burst_rd_active),
         .burst_rd_addr(burst_rd_addr), .burst_rd_data(burst_rd_data),
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),
@@ -124,13 +139,14 @@ module fcapz_ela_intel #(
     // ---- Burst read engine ----
     jtag_burst_read #(
         .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH), .BURST_W(BURST_W)
+        .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
     ) u_burst (
         .arst(jtag_rst_data),
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),
         .mem_addr(burst_rd_addr),
+        .mem_active(burst_rd_active),
         .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),
         .burst_ptr_in(burst_start_ptr)

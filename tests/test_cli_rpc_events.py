@@ -29,7 +29,11 @@ from fcapz.cli import (
     _uint16,
     build_parser,
 )
-from fcapz.transport import OpenOcdTransport, XilinxHwServerTransport
+from fcapz.transport import (
+    OpenOcdTransport,
+    QuartusStpTransport,
+    XilinxHwServerTransport,
+)
 from fcapz.events import (
     ProbeDefinition,
     find_bursts,
@@ -73,7 +77,41 @@ class FakeTransport(Transport):
         return [0] * words
 
 
+class StaleFirstReadTransport(FakeTransport):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_addr: int | None = None
+        self._stale_value = 0
+
+    def read_reg(self, addr: int) -> int:
+        value = super().read_reg(addr)
+        if addr != self._last_addr:
+            stale = self._stale_value
+            self._last_addr = addr
+            self._stale_value = value
+            return stale
+        self._stale_value = value
+        return value
+
+    def read_reg_stable(self, addr: int) -> int:
+        self.read_reg(addr)
+        return self.read_reg(addr)
+
+
 class AnalyzerValidationTests(unittest.TestCase):
+    def test_probe_stabilizes_all_identity_register_reads(self):
+        analyzer = Analyzer(StaleFirstReadTransport(sample_w=8, depth=1024, num_chan=1))
+        analyzer.connect()
+
+        info = analyzer.probe()
+        expected_version = expected_ela_version_reg()
+
+        self.assertEqual(info["version_major"], (expected_version >> 24) & 0xFF)
+        self.assertEqual(info["version_minor"], (expected_version >> 16) & 0xFF)
+        self.assertEqual(info["sample_width"], 8)
+        self.assertEqual(info["depth"], 1024)
+        self.assertEqual(info["num_channels"], 1)
+
     def test_wide_samples_reassembled_from_words(self):
         transport = FakeTransport(
             sample_w=64,
@@ -514,6 +552,15 @@ class RpcBooleanValidationTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_eio_parsers_accept_base_addr_for_shared_chain(self):
+        parser = build_parser()
+        for cmd, extra in (("eio-probe", []), ("eio-read", []), ("eio-write", ["0x3f"])):
+            args = parser.parse_args([cmd, "--chain", "1", "--base-addr", "0x8000", *extra])
+            self.assertEqual(args.chain, 1)
+            self.assertEqual(args.base_addr, 0x8000)
+        # Default is 0 (standalone chain, e.g. Xilinx USER3)
+        self.assertEqual(parser.parse_args(["eio-read"]).base_addr, 0)
+
     def test_capture_parser_accepts_channel_and_probes(self):
         parser = build_parser()
         args = parser.parse_args(
@@ -689,6 +736,35 @@ class MakeTransportTests(unittest.TestCase):
         t = _make_transport(args)
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
+
+    def test_usb_blaster_backend_uses_quartus_stp_transport(self):
+        args = argparse.Namespace(
+            backend="usb_blaster",
+            host="127.0.0.1",
+            port=6666,
+            tap="@1: 10M50DA",
+            hardware="USB-Blaster [USB-0]",
+            quartus_stp="quartus_stp",
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, QuartusStpTransport)
+        self.assertEqual(t.hardware_name, "USB-Blaster [USB-0]")
+        self.assertEqual(t.device_name, "@1: 10M50DA")
+
+    def test_usb_blaster_default_tap_auto_selects_device(self):
+        for tap in ("", "auto", "xc7a100t", "xc7a100t.tap"):
+            with self.subTest(tap=tap):
+                args = argparse.Namespace(
+                    backend="usb_blaster",
+                    host="127.0.0.1",
+                    port=6666,
+                    tap=tap,
+                    hardware=None,
+                    quartus_stp=None,
+                )
+                t = _make_transport(args)
+                self.assertIsInstance(t, QuartusStpTransport)
+                self.assertIsNone(t.device_name)
 
 
 if __name__ == "__main__":

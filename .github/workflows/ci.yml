@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 # Cancel in-progress runs on the same branch when a new push lands.
 concurrency:
@@ -13,17 +14,16 @@ concurrency:
 
 jobs:
   # ── 0. Version sync guard ──────────────────────────────────────────
-  # Catches the "I bumped VERSION but forgot to regenerate
-  # rtl/fcapz_version.vh" foot-gun before any other job wastes minutes.
+  # Catches stale generated HDL constants before any other job wastes minutes.
   version-sync:
-    name: VERSION ↔ rtl/fcapz_version.vh in sync
+    name: VERSION and HDL constants in sync
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Verify fcapz_version.vh is regenerated from VERSION
+      - name: Verify HDL version constants are regenerated from VERSION
         run: python tools/sync_version.py --check
 
   # ── 1. Python lint ────────────────────────────────────────────────
@@ -98,23 +98,35 @@ jobs:
             tests/test_host_stack.py::AnalyzerTests::test_capture_reads_32_bit_timestamps_via_burst_block \
             -v --tb=short
 
-  # ── 4. RTL elaboration (iverilog -Wall) ──────────────────────────
-  lint-rtl:
-    name: RTL elaboration (iverilog -Wall)
+  # ── 3b. Frontend build + static bundle drift guard ────────────────
+  # Rebuilds the web UI and fails if the committed bundle under
+  # host/fcapz/web/static is stale relative to web/frontend/src (Vite writes
+  # straight into the package's static dir, and both are committed).
+  frontend-build:
+    name: Frontend build + static drift
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install iverilog
-        run: sudo apt-get install -y iverilog
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
-      - name: Run shared RTL lint regression
-        run: python sim/run_sim.py --lint-only
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web/frontend
+        run: npm ci
+      - name: Run frontend unit tests (vitest)
+        working-directory: web/frontend
+        run: npm test
+      - name: Build the web bundle (writes into host/fcapz/web/static)
+        working-directory: web/frontend
+        run: npm run build
+      - name: Fail if the committed static bundle is stale
+        run: git diff --exit-code -- host/fcapz/web/static
 
-  # -- 5. Full RTL driver lint (Verilator) --------------------------
-  lint-rtl-verilator:
-    name: RTL driver lint (Verilator)
+  # ── 4. Strict RTL lint (Verilator) ───────────────────────────────
+  lint-rtl:
+    name: Strict RTL lint (Verilator)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -123,19 +135,67 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run Verilator lint and MULTIDRIVEN self-test
+      - name: Run strict Verilator RTL lint
         run: python sim/run_verilator_lint.py --self-test
 
-  # -- 6. RTL simulation (iverilog + vvp) ---------------------------
-  sim:
-    name: RTL simulation (iverilog + vvp)
+  # -- 5. Verilog/VHDL static parity gate ------------------------------------
+  hdl-parity:
+    name: HDL static parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install iverilog
-        run: sudo apt-get install -y iverilog
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run all RTL testbenches
-        run: python sim/run_sim.py
+      - name: Run static HDL parity checks
+        run: python sim/run_hdl_parity.py
+      - name: Verify formal parity manifests
+        run: python sim/run_formal_hdl_parity.py --interface-only
+
+  # -- 6. Manual formal Verilog/VHDL equivalence proof -----------------------
+  hdl-formal-parity:
+    name: HDL formal parity (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install formal HDL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl yosys
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run formal Verilog/VHDL parity proofs
+        run: python sim/run_formal_hdl_parity.py
+
+  # -- 7. RTL simulation (cocotb + Icarus/GHDL) ---------------------
+  # Sharded so the 16-target ELA suite runs in parallel with the protocol
+  # benches, and runs the same cocotb stimulus against Verilog and VHDL.
+  sim:
+    name: RTL simulation (cocotb ${{ matrix.hdl }}) [${{ matrix.shard }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [protocol, ela]
+        hdl: [verilog, vhdl]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HDL simulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog ghdl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install cocotb dependencies
+        run: pip install -e ".[hdl]"
+      - name: Run cocotb RTL regression (protocol shard)
+        if: matrix.shard == 'protocol'
+        run: python sim/run_cocotb.py --runner native --hdl ${{ matrix.hdl }} --clean --skip-ela --require-protocol-coverage
+      - name: Run cocotb RTL regression (ELA shard)
+        if: matrix.shard == 'ela'
+        run: python sim/run_cocotb.py --runner native --hdl ${{ matrix.hdl }} --clean ela

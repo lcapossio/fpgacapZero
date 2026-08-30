@@ -72,7 +72,7 @@ fabric ← probe_out[*]← | (jtag_clk)       |
 ```
 
 The whole core is in [`../rtl/fcapz_eio.v`](../rtl/fcapz_eio.v) and
-the Xilinx wrapper is
+the AMD/Xilinx wrapper is
 [`../rtl/fcapz_eio_xilinx7.v`](../rtl/fcapz_eio_xilinx7.v) (or
 `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v` for other vendors).
 
@@ -160,6 +160,18 @@ eio.connect()
 EIO wrapper with a non-default `CHAIN` parameter (see
 [chapter 04](04_rtl_integration.md)).  The host's `chain` argument
 must match the RTL `CHAIN` parameter.
+
+**Shared-chain EIO.** When EIO is address-muxed onto another core's chain
+instead of having its own, pass `base_addr` (the mux offset) so every register
+access is routed to the EIO window.  The common case is Gowin `EIO_EN=1`, which
+muxes EIO onto the ELA chain at offset `0x8000`:
+
+```python
+eio = EioController(transport, chain=1, base_addr=0x8000)
+```
+
+The CLI equivalent is `--base-addr 0x8000`, and the desktop GUI discovers this
+location automatically on connect.
 
 After `connect()`, the controller has cached `IN_W` and `OUT_W` from
 the bitstream's identity registers, so subsequent reads/writes know

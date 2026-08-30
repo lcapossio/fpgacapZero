@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+# Build and publish fpgacapzero to PyPI via Trusted Publishing (OIDC).
+# No API token is stored anywhere: at publish time GitHub Actions mints a
+# short-lived OIDC token that PyPI verifies against the trusted publisher
+# registered for this repo + workflow, then issues a one-time upload token.
+#
+# Release flow:
+#   1. bump the VERSION file (source of truth; CI's version-sync guard keeps
+#      the RTL constants in step)
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z   (tag must match VERSION)
+#   3. this workflow builds, checks, and publishes the sdist + wheel
+#
+# A manual run (workflow_dispatch) publishes to TestPyPI instead, for dry runs
+# (requires a separate trusted publisher registered on test.pypi.org).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Publish to TestPyPI instead of PyPI (dry run)"
+        type: boolean
+        default: true
+
+jobs:
+  # ── 1. Build sdist + wheel (no special permissions) ────────────────
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # On a tag build, the tag (vX.Y.Z) must match the VERSION file so the
+      # published version is never a surprise.
+      - name: Verify tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(cat VERSION)"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (${tag}) != VERSION (${ver})"
+            exit 1
+          fi
+          echo "tag matches VERSION: $ver"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ── 2a. Publish to PyPI (tag pushes) ───────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: release          # optional gate; add required reviewers on GitHub
+    permissions:
+      id-token: write             # mint the OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # No password/token: the trusted publisher on PyPI authorizes this
+        # repo + workflow via the OIDC token.
+
+  # ── 2b. Publish to TestPyPI (manual dry run) ───────────────────────
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

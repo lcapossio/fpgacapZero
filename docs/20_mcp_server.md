@@ -1,4 +1,4 @@
-# 18 - MCP server
+# 20 - MCP server
 
 This chapter explains the `fcapz-mcp` server: what it exposes, how to run it,
 which operations are gated for safety, and how agents should read large results

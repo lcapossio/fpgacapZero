@@ -21,7 +21,12 @@ from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
 from .probes import load_probe_file
-from .transport import OpenOcdTransport, XilinxHwServerTransport
+from .transport import (
+    QUARTUS_AUTO_DEVICE_TAPS,
+    OpenOcdTransport,
+    QuartusStpTransport,
+    XilinxHwServerTransport,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -232,6 +237,13 @@ def _make_transport(args: argparse.Namespace):
         return OpenOcdTransport(
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )
+    if args.backend == "usb_blaster":
+        device_name = None if args.tap in QUARTUS_AUTO_DEVICE_TAPS else args.tap
+        return QuartusStpTransport(
+            hardware_name=getattr(args, "hardware", None),
+            device_name=device_name,
+            quartus_stp_path=getattr(args, "quartus_stp", None),
+        )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
     bitfile = getattr(args, "program", None)
@@ -251,10 +263,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to gui.toml (default: per-user fpgacapzero config directory)",
     )
-    p.add_argument("--backend", choices=["openocd", "hw_server"], default="hw_server")
+    p.add_argument(
+        "--backend",
+        choices=["openocd", "hw_server", "usb_blaster"],
+        default="hw_server",
+    )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=_tcp_port, default=6666)
     p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
+    p.add_argument(
+        "--hardware",
+        default=None,
+        help="usb_blaster only: Quartus hardware name; default selects first USB-Blaster",
+    )
+    p.add_argument(
+        "--quartus-stp",
+        default=None,
+        help="usb_blaster only: path to quartus_stp executable",
+    )
     p.add_argument(
         "--two-chain-burst",
         action="store_true",
@@ -287,6 +313,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
+
+    p_axi_mon = sub.add_parser(
+        "axi-mon", help="Detect an AXI monitor; print its identity and probe map"
+    )
+    p_axi_mon.add_argument(
+        "--write-probe-file",
+        metavar="PATH",
+        help="Write the matching .prob probe map to PATH (use with capture --probe-file)",
+    )
 
     cfg = sub.add_parser("configure", help="Write capture configuration")
     cap = sub.add_parser("capture", help="Configure, arm, capture, export")
@@ -418,6 +453,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_probe.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
     eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -427,6 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Managed core slot on the selected chain",
     )
+    eio_read.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+    )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
     eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
@@ -435,6 +482,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Managed core slot on the selected chain",
+    )
+    eio_write.add_argument(
+        "--base-addr",
+        type=lambda x: int(x, 0),
+        default=0,
+        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
     eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
 
@@ -543,7 +596,9 @@ def main() -> int:
 
     # -- EIO commands ------------------------------------------------------
     if args.cmd in ("eio-probe", "eio-read", "eio-write"):
-        eio = EioController(transport, chain=args.chain, instance=args.instance)
+        eio = EioController(
+            transport, chain=args.chain, instance=args.instance, base_addr=args.base_addr
+        )
         try:
             eio.connect()
             if args.cmd == "eio-probe":
@@ -671,6 +726,40 @@ def main() -> int:
 
         if args.cmd == "probe":
             print(json.dumps(analyzer.probe(), indent=2))
+            return 0
+
+        if args.cmd == "axi-mon":
+            from .axi_monitor import AxiMonitor
+
+            mon = AxiMonitor(analyzer)
+            if not mon.present:
+                print(json.dumps({"present": False}, indent=2))
+                return 0
+            geo = mon.geometry()
+            pf = mon.probe_map(geo)
+            out = {
+                "present": True,
+                "proto": geo.proto,
+                "addr_w": geo.addr_w,
+                "data_w": geo.data_w,
+                "sample_width": geo.sample_width,
+                "probes": [
+                    {"name": pr.name, "width": pr.width, "lsb": pr.lsb} for pr in pf.probes
+                ],
+            }
+            if args.write_probe_file:
+                from .probes import probe_file_dict
+
+                with open(args.write_probe_file, "w", encoding="utf-8") as fh:
+                    json.dump(
+                        probe_file_dict(
+                            pf.probes, sample_width=geo.sample_width, core="axi_mon"
+                        ),
+                        fh,
+                        indent=2,
+                    )
+                out["wrote"] = args.write_probe_file
+            print(json.dumps(out, indent=2))
             return 0
 
         if args.cmd == "arm":

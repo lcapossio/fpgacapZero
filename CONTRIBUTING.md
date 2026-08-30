@@ -293,6 +293,10 @@ def transport(request):
 - New RTL modules must have a testbench in `tb/` and a sim entry in
   `sim/run_sim.py`.  Add them to the lint target list too if they should be
   elaborated by the shared `iverilog -Wall` regression.
+- When a Verilog test has a translated VHDL peer, add matching one-line
+  `PARITY_*` marker output for shared scenarios. Use stable scalar `key=value`
+  fields on the marker line so `sim/run_hdl_parity.py` can compare observed
+  behavior across simulators.
 - New Python modules must have at least basic unit test coverage in `tests/`.
 - All new test files must carry the SPDX header described above.
 

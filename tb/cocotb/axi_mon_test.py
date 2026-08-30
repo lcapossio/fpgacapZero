@@ -1,0 +1,401 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+"""cocotb bench for fcapz_axi_mon (AXI monitor, P1).
+
+Drives a single-cycle AXI4-Lite write on the passive tap and proves the monitor
+(a) reports the AM identity + geometry, (b) triggers on the write address, and
+(c) flattens the captured channels at the documented bit offsets. The DUT is the
+portable core fcapz_axi_mon driven over its raw jtag register bus, mirroring
+ela_core_test.py.
+"""
+
+from __future__ import annotations
+
+import os
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge
+
+# Set by the runner per target: 0 = P1 raw layout, 1 = P2 decode (events at LSB).
+DECODE = int(os.environ.get("AXIMON_DECODE", "0"))
+
+ADDR_VERSION = 0x0000
+ADDR_CTRL = 0x0004
+ADDR_STATUS = 0x0008
+ADDR_SAMPLE_W = 0x000C
+ADDR_PRETRIG = 0x0014
+ADDR_POSTTRIG = 0x0018
+ADDR_TRIG_MODE = 0x0020
+ADDR_TRIG_VALUE = 0x0024
+ADDR_TRIG_MASK = 0x0028
+ADDR_SQ_MODE = 0x0030
+ADDR_SQ_VALUE = 0x0034
+ADDR_SQ_MASK = 0x0038
+ADDR_WIDE_SEL = 0x00E4
+ADDR_WIDE_DATA = 0x00F0
+ADDR_AXI_MON_ID = 0x00E8
+ADDR_AXI_GEOM = 0x00EC
+ADDR_DATA_BASE = 0x0100
+
+# awvalid's absolute position in the flattened vector: awaddr[32] + awprot[3]
+# → channel bit 35, plus the 8-bit events word on a DECODE build.  Both are
+# above bit 31, so triggering on it exercises the wide comparator window.
+AWVALID_BIT = 35 + (8 if DECODE else 0)
+
+AXI_SIGNALS = [
+    "AWADDR", "AWPROT", "AWVALID", "AWREADY",
+    "WDATA", "WSTRB", "WVALID", "WREADY",
+    "BRESP", "BVALID", "BREADY",
+    "ARADDR", "ARPROT", "ARVALID", "ARREADY",
+    "RDATA", "RRESP", "RVALID", "RREADY",
+]
+
+
+class MonDriver:
+    def __init__(self, dut) -> None:
+        self.dut = dut
+
+    async def start(self) -> None:
+        cocotb.start_soon(Clock(self.dut.ACLK, 10, unit="ns").start())
+        cocotb.start_soon(Clock(self.dut.jtag_clk, 14, unit="ns").start())
+        for sig in AXI_SIGNALS:
+            getattr(self.dut, sig).value = 0
+        self.dut.ARESETN.value = 0
+        self.dut.jtag_rst.value = 1
+        self.dut.trigger_in.value = 0
+        self.dut.jtag_wr_en.value = 0
+        self.dut.jtag_rd_en.value = 0
+        self.dut.jtag_addr.value = 0
+        self.dut.jtag_wdata.value = 0
+        if hasattr(self.dut, "burst_rd_active"):
+            self.dut.burst_rd_active.value = 0
+        self.dut.burst_rd_addr.value = 0
+        await self.wait_aclk(4)
+        self.dut.ARESETN.value = 1
+        await self.wait_jtag(2)
+        self.dut.jtag_rst.value = 0
+        await self.wait_jtag(4)
+
+    async def wait_aclk(self, n: int) -> None:
+        for _ in range(n):
+            await RisingEdge(self.dut.ACLK)
+
+    async def wait_jtag(self, n: int) -> None:
+        for _ in range(n):
+            await RisingEdge(self.dut.jtag_clk)
+
+    async def write(self, addr: int, data: int) -> None:
+        await RisingEdge(self.dut.jtag_clk)
+        self.dut.jtag_addr.value = addr
+        self.dut.jtag_wdata.value = data
+        self.dut.jtag_wr_en.value = 1
+        await RisingEdge(self.dut.jtag_clk)
+        self.dut.jtag_wr_en.value = 0
+
+    async def read(self, addr: int) -> int:
+        await RisingEdge(self.dut.jtag_clk)
+        self.dut.jtag_addr.value = addr
+        self.dut.jtag_rd_en.value = 1
+        await RisingEdge(self.dut.jtag_clk)
+        self.dut.jtag_rd_en.value = 0
+        await self.wait_jtag(8)
+        return int(self.dut.jtag_rdata.value)
+
+    async def arm(self) -> None:
+        await self.write(ADDR_CTRL, 0x1)
+        for _ in range(80):
+            await self.wait_aclk(1)
+            if int(self.dut.armed_out.value):
+                return
+        raise AssertionError("arm did not reach the sample domain")
+
+    async def wait_done(self, timeout: int = 300) -> int:
+        status = 0
+        for _ in range(timeout):
+            await self.wait_aclk(1)
+            status = await self.read(ADDR_STATUS)
+            if status & 0x4:
+                return status
+        raise AssertionError(f"capture did not complete, status=0x{status:08x}")
+
+    async def axi_write(self, addr: int, data: int) -> None:
+        """One-cycle AW+W handshake then B; the monitor passively observes."""
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWADDR.value = addr
+        self.dut.AWVALID.value = 1
+        self.dut.AWREADY.value = 1
+        self.dut.WDATA.value = data
+        self.dut.WSTRB.value = 0xF
+        self.dut.WVALID.value = 1
+        self.dut.WREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWADDR.value = 0
+        self.dut.AWVALID.value = 0
+        self.dut.AWREADY.value = 0
+        self.dut.WVALID.value = 0
+        self.dut.WREADY.value = 0
+        self.dut.BRESP.value = 0
+        self.dut.BVALID.value = 1
+        self.dut.BREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.BVALID.value = 0
+        self.dut.BREADY.value = 0
+
+    async def axi_write_stream(self, base: int, count: int, step: int = 4) -> None:
+        """Saturate the bus: one AW+W(+B) handshake per ACLK, no idle cycles.
+
+        AWADDR/WDATA advance every cycle so each captured sample is distinct;
+        AWVALID/AWREADY/WVALID/WREADY/BVALID/BREADY stay high so aw_hs/b_hs
+        assert on every cycle of the stream."""
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 1
+        self.dut.AWREADY.value = 1
+        self.dut.WVALID.value = 1
+        self.dut.WREADY.value = 1
+        self.dut.WSTRB.value = 0xF
+        self.dut.BVALID.value = 1
+        self.dut.BREADY.value = 1
+        self.dut.BRESP.value = 0
+        for i in range(count):
+            self.dut.AWADDR.value = base + i * step
+            self.dut.WDATA.value = (0xD000_0000 + i) & 0xFFFF_FFFF
+            await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 0
+        self.dut.AWREADY.value = 0
+        self.dut.WVALID.value = 0
+        self.dut.WREADY.value = 0
+        self.dut.BVALID.value = 0
+        self.dut.BREADY.value = 0
+
+    async def read_sample(self, index: int, words: int) -> int:
+        """Reassemble one packed capture sample from its `words` register words."""
+        val = 0
+        base = ADDR_DATA_BASE + index * words * 4
+        for w in range(words):
+            val |= (await self.read(base + w * 4)) << (32 * w)
+        return val
+
+    async def set_wide(self, bit: int, is_mask: bool) -> None:
+        """Set one comparator-A value/mask bit at any position via the wide
+        window (WIDE_SEL selects {word, value-or-mask}, WIDE_DATA loads it)."""
+        word, off = bit // 32, bit % 32
+        await self.write(ADDR_WIDE_SEL, (word << 4) | (1 if is_mask else 0))
+        await self.write(ADDR_WIDE_DATA, 1 << off)
+
+    async def axi_write_error(self, addr: int, data: int) -> None:
+        """Like axi_write but the write response is SLVERR (BRESP=2'b10)."""
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWADDR.value = addr
+        self.dut.AWVALID.value = 1
+        self.dut.AWREADY.value = 1
+        self.dut.WDATA.value = data
+        self.dut.WSTRB.value = 0xF
+        self.dut.WVALID.value = 1
+        self.dut.WREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.AWVALID.value = 0
+        self.dut.AWREADY.value = 0
+        self.dut.WVALID.value = 0
+        self.dut.WREADY.value = 0
+        self.dut.BRESP.value = 0b10  # SLVERR -> b_err / any_err
+        self.dut.BVALID.value = 1
+        self.dut.BREADY.value = 1
+        await RisingEdge(self.dut.ACLK)
+        self.dut.BVALID.value = 0
+        self.dut.BREADY.value = 0
+        self.dut.BRESP.value = 0
+
+
+async def setup(dut) -> MonDriver:
+    d = MonDriver(dut)
+    await d.start()
+    return d
+
+
+@cocotb.test()
+async def identity_and_geometry(dut):
+    d = await setup(dut)
+    # The embedded ELA reports "LA"; the AM identity is at 0x00E8.
+    assert (await d.read(ADDR_VERSION)) & 0xFFFF == 0x4C41
+    # Flatten width: 152 raw, +8 events word when the decode layer is enabled.
+    assert (await d.read(ADDR_SAMPLE_W)) == (160 if DECODE else 152)
+
+    amid = await d.read(ADDR_AXI_MON_ID)
+    assert (amid >> 16) == 0x414D, f"AM id 0x{amid:08x}"   # "AM"
+    assert ((amid >> 8) & 0xFF) == 1                        # PROTO = AXI4-Lite
+    assert (amid & 0x1) == DECODE                           # CAP_FLAGS bit0 = DECODE_EN
+
+    geom = await d.read(ADDR_AXI_GEOM)
+    assert (geom & 0xFF) == 32                              # ADDR_W
+    assert ((geom >> 8) & 0xFF) == 32                       # DATA_W
+    assert ((geom >> 16) & 0xF) == 0                        # ID_W: AXI4-Lite has no ID
+    assert ((geom >> 20) & 0x1F) == 5                       # 5 channels: AW/W/B/AR/R
+
+
+@cocotb.test()
+async def captures_error_event(dut):
+    """Decode layer: trigger on the any_err event bit and capture an SLVERR."""
+    d = await setup(dut)
+    pre, post = 2, 3
+    await d.write(ADDR_PRETRIG, pre)
+    await d.write(ADDR_POSTTRIG, post)
+    await d.write(ADDR_TRIG_MODE, 1)            # value match
+    await d.write(ADDR_TRIG_VALUE, 0x80)        # any_err = events bit 7 (low byte)
+    await d.write(ADDR_TRIG_MASK, 0x80)
+    await d.arm()
+
+    await d.wait_aclk(3)
+    await d.axi_write_error(0x4000_0000, 0xDEAD_BEEF)
+    await d.wait_aclk(8)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    # Trigger sample sits at buffer index `pre`; its low byte is the events word.
+    events = (await d.read(ADDR_DATA_BASE + (pre * words) * 4)) & 0xFF
+    assert (events >> 7) & 1 == 1, f"any_err not set: events=0x{events:02x}"
+    assert (events >> 5) & 1 == 1, f"b_err not set: events=0x{events:02x}"
+    assert (events >> 2) & 1 == 1, f"b_hs not set: events=0x{events:02x}"
+
+
+@cocotb.test()
+async def captures_axi_write_address(dut):
+    d = await setup(dut)
+    pre, post = 2, 3
+    await d.write(ADDR_PRETRIG, pre)
+    await d.write(ADDR_POSTTRIG, post)
+    await d.write(ADDR_TRIG_MODE, 1)                # value match
+    await d.write(ADDR_TRIG_VALUE, 0x4000_0000)     # awaddr occupies sample[31:0]
+    await d.write(ADDR_TRIG_MASK, 0xFFFF_FFFF)
+    await d.arm()
+
+    await d.wait_aclk(3)
+    await d.axi_write(0x4000_0000, 0xDEAD_BEEF)
+    await d.wait_aclk(8)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    # Trigger sample sits at buffer index `pre`; word 0 is awaddr, awvalid is
+    # bit 35 (= word 1, bit 3).
+    base = ADDR_DATA_BASE + (pre * words) * 4
+    awaddr = await d.read(base)
+    word1 = await d.read(base + 4)
+    assert awaddr == 0x4000_0000, f"captured awaddr 0x{awaddr:08x}"
+    assert (word1 >> 3) & 1 == 1, "awvalid not set in the trigger sample"
+
+
+@cocotb.test()
+async def stress_backtoback_fill(dut):
+    """Stress: saturate the bus and read every wide sample back.
+
+    Drives back-to-back AXI write handshakes (one per ACLK, address advancing)
+    long enough to fill the capture buffer to DEPTH, then reads *all* DEPTH
+    samples out — exercising the full multi-word (wide-SAMPLE_W) readback for
+    every buffer slot under a fully saturated bus. This is the functional side
+    of the timing-marginal wide readback flagged on hardware: every slot must
+    return its own distinct sample, with awaddr advancing by the driven step
+    (no stuck/duplicated wide word) and awvalid set in every slot (the higher
+    sample words are not read back as zero)."""
+    d = await setup(dut)
+    depth = 16          # matches the runner's DEPTH parameter
+    step = 4
+    base_addr = 0x1000_0000
+    await d.write(ADDR_PRETRIG, 0)
+    await d.write(ADDR_POSTTRIG, depth - 1)
+    await d.write(ADDR_TRIG_MODE, 1)                     # value match
+    if DECODE:
+        await d.write(ADDR_TRIG_VALUE, 0x01)            # aw_hs = events bit 0
+        await d.write(ADDR_TRIG_MASK, 0x01)
+    else:
+        await d.write(ADDR_TRIG_VALUE, base_addr)       # awaddr occupies sample[31:0]
+        await d.write(ADDR_TRIG_MASK, 0xFFFF_FFFF)
+    await d.arm()
+
+    # A few extra cycles past DEPTH so the post-trigger window fills entirely.
+    await d.axi_write_stream(base_addr, depth + 8, step=step)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    shift = 8 if DECODE else 0                           # decode prepends the events byte
+    samples = [await d.read_sample(i, words) for i in range(depth)]
+    awaddrs = [(s >> shift) & 0xFFFF_FFFF for s in samples]
+
+    diffs = [(awaddrs[i] - awaddrs[i - 1]) & 0xFFFF_FFFF for i in range(1, depth)]
+    assert all(delta == step for delta in diffs), (
+        f"wide readback not monotonic by {step}: {[hex(a) for a in awaddrs]}"
+    )
+    for i, s in enumerate(samples):
+        assert (s >> (35 + shift)) & 1 == 1, f"awvalid not set in slot {i}: 0x{s:x}"
+
+
+@cocotb.test()
+async def wide_trigger_high_bit(dut):
+    """WIDE_TRIG: trigger on a bit above bit 31 that the legacy path can't reach.
+
+    Arms comparator A to match awvalid (bit 35/43) via the wide value/mask
+    window, with the low 32 bits masked don't-care.  Two proofs in one:
+      * an idle bus (awvalid=0) must NOT trigger — so the high mask bit is
+        genuinely in effect (a low-32-only comparator would see mask=value=0,
+        match EQ trivially, and fire immediately);
+      * a write (awvalid=1) MUST trigger and complete, and the captured trigger
+        sample must have awvalid set."""
+    d = await setup(dut)
+    assert AWVALID_BIT >= 32, "test expects awvalid above the low word"
+    await d.write(ADDR_TRIG_VALUE, 0)   # wide_va[0]=0, wide_ma[0]=0 -> low 32 don't-care
+    await d.write(ADDR_TRIG_MASK, 0)
+    await d.set_wide(AWVALID_BIT, is_mask=False)   # value: awvalid bit = 1
+    await d.set_wide(AWVALID_BIT, is_mask=True)    # mask:  compare only that bit
+    await d.write(ADDR_PRETRIG, 2)
+    await d.write(ADDR_POSTTRIG, 3)
+    await d.write(ADDR_TRIG_MODE, 1)               # value match
+    await d.arm()
+
+    # Idle bus: awvalid low -> must stay armed, never trigger.
+    await d.wait_aclk(20)
+    status = await d.read(ADDR_STATUS)
+    assert not (status & 0x2), f"triggered with awvalid low (0x{status:08x})"
+    assert status & 0x1, f"should still be armed (0x{status:08x})"
+
+    # Drive a write: awvalid asserts -> the high-bit trigger fires.
+    await d.axi_write(0x4000_0000, 0xDEAD_BEEF)
+    await d.wait_aclk(8)
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    trig_sample = await d.read_sample(2, words)     # trigger sits at index pretrig=2
+    assert (trig_sample >> AWVALID_BIT) & 1 == 1, (
+        f"awvalid not set in the trigger sample: 0x{trig_sample:x}"
+    )
+
+
+@cocotb.test()
+async def beat_storage_qualifier(dut):
+    """DECODE + STOR_QUAL: keep only handshake beats, drop idle cycles.
+
+    A NEQ-vs-zero storage qualifier over the five handshake-event bits stores a
+    sample only when a channel handshakes.  Driving transactions separated by
+    idle gaps, every *stored* sample must have a handshake bit set — the idle
+    gaps are dropped."""
+    if not DECODE:
+        return  # handshake event bits only exist on a DECODE_EN build
+    d = await setup(dut)
+    await d.write(ADDR_SQ_MODE, 1)        # NEQ (store when masked bits != 0)
+    await d.write(ADDR_SQ_VALUE, 0)
+    await d.write(ADDR_SQ_MASK, 0x1F)     # aw_hs..r_hs
+    await d.write(ADDR_PRETRIG, 0)
+    await d.write(ADDR_POSTTRIG, 4)
+    await d.write(ADDR_TRIG_MODE, 1)
+    await d.write(ADDR_TRIG_VALUE, 0x01)  # trigger on aw_hs
+    await d.write(ADDR_TRIG_MASK, 0x01)
+    await d.arm()
+
+    for i in range(8):
+        await d.axi_write(0x100 + i * 4, 0xC0DE_0000 + i)
+        await d.wait_aclk(3)              # idle gap — must be dropped by the SQ
+    assert (await d.wait_done()) & 0x4
+
+    words = ((await d.read(ADDR_SAMPLE_W)) + 31) // 32
+    for i in range(0 + 1 + 4):            # pre + trigger + post
+        s = await d.read_sample(i, words)
+        assert (s & 0x1F) != 0, f"idle (non-beat) sample stored at {i}: 0x{s & 0xFF:02x}"

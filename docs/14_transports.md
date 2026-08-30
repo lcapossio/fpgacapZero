@@ -1,11 +1,10 @@
 # 14 — Transports
 
-> **Goal**: understand the `Transport` abstract base class, the two
-> built-in backends (Xilinx hw_server and OpenOCD), the named
-> `IR_TABLE_*` presets that handle the per-family IR opcode
-> differences, the readiness wait that catches "FPGA isn't
-> programmed yet", the TCL injection prevention, and how to add a
-> new transport for a vendor we don't ship today.
+> **Goal**: understand the `Transport` abstract base class, the built-in
+> backends (AMD/Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
+> `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
+> differences, the readiness wait that catches "FPGA isn't programmed yet",
+> the TCL injection prevention, and how to add a new transport.
 >
 > **Audience**: anyone whose default transport doesn't work for
 > their board, or anyone porting fcapz to a new JTAG cable / TCF /
@@ -33,10 +32,20 @@ XSDB `jtag sequence`.
 There is also `read_block(addr, words)` for batched register reads,
 which by default falls back to a loop of `read_reg()` but can be
 overridden by transports that want to batch round-trips for
-throughput (the Xilinx hw_server transport does this for the ELA
-burst readback). Default Xilinx builds keep those wide burst scans on
+throughput (the AMD/Xilinx hw_server transport does this for the ELA
+burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
+
+The 256-bit burst DR packs **whole samples** per scan, so it is used
+only when a sample fits one 32-bit word (`SAMPLE_W <= 32`). Wider cores
+— notably the AXI monitor (`SAMPLE_W=160`) — are read back through the
+32-bit-word DATA path, which `capture()` reassembles into wide samples;
+`read_block` gates on the selected core's `SAMPLE_W` (read fresh, so it
+is correct when a session hops between an ELA and a monitor). Feeding a
+wide core's 32-bit *word* count to the burst engine would build a
+multi-hundred-KB single-line TCL scan sequence that xsdb never
+completes — a hard readback hang, not a throughput issue.
 
 For single-chain burst readback, the host verifies stability instead of
 trusting the first transaction.  The invariant is simple: after the ELA
@@ -65,12 +74,12 @@ The full ABC contract is documented in
 [`specs/transport_api.md`](specs/transport_api.md) — it's the
 spec you implement against if you're adding a new backend.
 
-## The two built-in transports
+## The built-in transports
 
 ### `XilinxHwServerTransport`
 
-Drives Vivado's `hw_server` daemon via `xsdb` (the Xilinx system
-debugger console).  This is the **default for Xilinx boards** and
+Drives Vivado's `hw_server` daemon via `xsdb` (the AMD/Xilinx system
+debugger console).  This is the **default for AMD/Xilinx boards** and
 the only path that has been hardware-validated on Arty A7-100T.
 
 ```python
@@ -121,7 +130,7 @@ logger `fcapz.gui.connect`.
 `XilinxHwServerTransport` implements the optional
 `read_timestamp_block(addr, words, timestamp_width)` method, which
 reads timestamp data from the ELA's timestamp BRAM using the same
-256-bit DR burst path used for sample data. Default Xilinx transports
+256-bit DR burst path used for sample data. Default AMD/Xilinx transports
 use the selected ELA control chain; `single_chain_burst=False` selects
 legacy DATA_CHAIN readout.
 
@@ -182,15 +191,77 @@ OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
 
+#### Tap auto-detect
+
+The tap name must match a tap defined in the running OpenOCD config.  Pass
+`tap="auto"` (or leave it empty) and `connect()` resolves it to the first name
+OpenOCD reports from `jtag names` — handy for single-FPGA chains where you don't
+want to hard-code the name.  The helper `fcapz.transport.list_openocd_taps()`
+returns that list; the GUI's **Scan** button uses it to populate the TAP field
+for the OpenOCD backend.
+
+#### Gowin over OpenOCD
+
+Gowin boards use this transport with `ir_table=OpenOcdTransport.IR_TABLE_GOWIN`
+(ER1/ER2 → chains 1/2).  The CLI auto-selects it for `--tap GW...`; in code,
+pass it explicitly.  The ELA sits on chain 1; a shared-chain EIO (`EIO_EN=1`) is
+reached on chain 1 at base offset `0x8000`
+(`EioController(t, chain=1, base_addr=0x8000)`).  See the
+[BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
+
+### `QuartusStpTransport`
+
+Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus
+virtual JTAG commands to reach Intel/Altera `sld_virtual_jtag` instances.
+This is the built-in path for USB-Blaster / USB-Blaster II cables.
+
+```python
+from fcapz.transport import QuartusStpTransport
+
+t = QuartusStpTransport(
+    hardware_name="DE25-Nano [USB-1]",     # optional when one cable is present
+    device_name=None,                      # None / auto selects first @1 device
+    quartus_stp_path=None,                 # or full path to quartus_stp.exe
+)
+t.connect()
+```
+
+The Intel RTL wrapper sets:
+
+```verilog
+.sld_auto_instance_index ("NO"),
+.sld_instance_index      (CHAIN),
+.sld_ir_width            (1)
+```
+
+That means host-side `select_chain()` uses the RTL `CHAIN` parameter,
+not a zero-based Python index.  The default fcapz Intel control path
+is instance 1; EIO and other subsidiary cores use their own wrapper
+parameters.
+
+`QuartusStpTransport` keeps a persistent `quartus_stp` process, frames
+each Tcl request with sentinels, and uses `device_lock` around composite
+operations so a read transaction is not interleaved with SignalTap,
+Programmer, or another Quartus Tcl session.  `read_reg()`,
+`read_block()`, and `raw_dr_scan_batch()` are emitted as single locked
+Tcl blocks where atomicity matters.
+
+Auto device selection opens the first Quartus device whose name starts
+with `@1`.  If the FPGA is at another JTAG position, pass the exact
+Quartus device name as `device_name` / CLI `--tap`.  The CLI and GUI
+treat `auto`, an empty tap, `xc7a100t`, and `xc7a100t.tap` as auto for
+USB-Blaster so older AMD/Xilinx defaults do not get passed to Quartus as
+literal device names.
+
 ## IR table presets
 
-Different Xilinx families use different IR opcodes for the BSCANE2
+Different AMD/Xilinx families use different IR opcodes for the BSCANE2
 USER chains.  The `ir_table` constructor parameter is a dict
 mapping `chain_index` (1..4) → `ir_opcode` (e.g. `0x02`).  The
 controllers call `transport.select_chain(N)` and the transport
 looks up the opcode in the table.
 
-To save users from looking up the codes, both transports expose
+To save users from looking up the codes, both AMD/Xilinx-style transports expose
 named class-level presets:
 
 ```python
@@ -204,16 +275,16 @@ XilinxHwServerTransport.IR_TABLE_US        # alias for IR_TABLE_XILINX_ULTRASCAL
 ```
 
 `OpenOcdTransport` exposes the same three constants under the same
-names — both transports use identical preset shapes so you can
+names — both AMD/Xilinx-style transports use identical preset shapes so you can
 swap one for the other without changing the IR table.
 
 ### When to use which
 
 | Family | Preset | Extra constructor args |
 |---|---|---|
-| Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
-| Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
-| Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
+| AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
+| AMD/Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
@@ -535,6 +606,9 @@ for the full implementations of:
 
 - `OpenOcdTransport` — TCP socket to OpenOCD's TCL listener;
   ~150 LOC; the simplest reference impl
+- `QuartusStpTransport` â€” subprocess + `quartus_stp` Tcl framing
+  for Intel/Altera USB-Blaster access to `sld_virtual_jtag`
+  instances via `device_virtual_ir_shift` / `device_virtual_dr_shift`
 - `XilinxHwServerTransport` — subprocess + xsdb stdin/stdout
   framing with a `<<XSDB_DONE>>` sentinel; ~400 LOC; richer
   because it handles programming, readiness, error parsing
@@ -586,17 +660,24 @@ will differ.
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
 | `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
-**OpenOCD:** no measured numbers yet — `OpenOcdTransport` is not yet
-hardware-validated on Arty A7 (pending a first run with FT2232; see
-[`specs/transport_api.md`](specs/transport_api.md)).  Expect it to be
-slower than `hw_server` per scan because OpenOCD's TCL listener has
-limited batched-scan support, but the delta is not documented until
-somebody benchmarks it.
+**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9, but not yet
+benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
+to be slower than `hw_server` per scan because OpenOCD's TCL listener has
+limited batched-scan support, but the delta is not documented until somebody
+benchmarks it.
+
+**Quartus USB-Blaster:** hardware probe/capture is validated on the
+DE25-Nano (Agilex 5); see [`specs/transport_api.md`](specs/transport_api.md) for
+the tested Quartus edition.  Latency depends heavily on Quartus Tcl
+startup and USB-Blaster speed; `QuartusStpTransport` keeps one
+`quartus_stp` process alive and batches composite reads under one
+`device_lock` to avoid avoidable round trips.
 
 The bottleneck on the measured path is JTAG round-trip latency through
-the tooling, not the RTL.  The fastest path today is hw_server with
-batched scans.  A future raw-TCF transport (bypassing xsdb) could cut
-per-scan overhead further on Xilinx boards.  See the TODO roadmap.
+the tooling, not the RTL.  The fastest measured AMD/Xilinx path today is
+hw_server with batched scans.  A future raw-TCF transport (bypassing
+xsdb) could cut per-scan overhead further on AMD/Xilinx boards.  See the
+TODO roadmap.
 
 ## What's next
 

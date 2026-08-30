@@ -45,6 +45,7 @@ module jtag_pipe_iface #(
 
     // Dual-port memory read (tck domain)
     output wire [$clog2(DEPTH)-1:0] mem_addr,
+    output wire                      mem_active,
     input  wire [SAMPLE_W-1:0]      sample_data,
     input  wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] timestamp_data,
 
@@ -125,6 +126,8 @@ module jtag_pipe_iface #(
     assign tdo = sr[0];
     assign reg_clk = tck;
     assign reg_rst = arst;
+    assign mem_active = loading |
+                        (sel && capture && ((burst_start ^ burst_start_seen) || burst_mode));
 
     generate
         if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat

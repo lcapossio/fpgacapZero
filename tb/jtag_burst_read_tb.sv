@@ -47,6 +47,7 @@ module jtag_burst_read_tb;
         .update(update),
         .sel(sel),
         .mem_addr(mem_addr),
+        .mem_active(),
         .sample_data(sample_data),
         .timestamp_data(timestamp_data),
         .burst_start(burst_start),

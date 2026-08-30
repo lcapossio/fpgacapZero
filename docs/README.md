@@ -11,8 +11,8 @@ reviewable on its own.  Read them in order the first time, then come
 back to individual chapters as you need them.
 
 > **Tip**: this manual is in addition to the project README, which is
-> the elevator pitch and the quick-reference card.  When in doubt the
-> manual is more accurate; it is updated with every release.
+> a short overview and quick tour.  When in doubt the manual is more
+> accurate; it is updated with every release.
 
 ---
 
@@ -21,7 +21,7 @@ back to individual chapters as you need them.
 | # | Chapter | When to read |
 |---|---------|--------------|
 | 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
-| 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD or Vivado hw_server). |
+| 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD, Vivado hw_server, or Quartus USB-Blaster). |
 | 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the GUI, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
@@ -33,11 +33,13 @@ back to individual chapters as you need them.
 | 11 | [JSON-RPC server](11_rpc_server.md) | Driving fpgacapZero from another language or process: the line-delimited JSON-RPC protocol, full schema, and all commands. |
 | 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
 | 13 | [Register map](13_register_map.md) | The full register map for all four cores. Stub chapter that links straight to the canonical reference at [`specs/register_map.md`](specs/register_map.md). |
-| 14 | [Transports](14_transports.md) | OpenOCD vs Xilinx hw_server, the named `IR_TABLE_*` presets for 7-series and UltraScale, the readiness wait, and how to add a new transport backend. |
+| 14 | [Transports](14_transports.md) | OpenOCD, AMD/Xilinx hw_server, Quartus USB-Blaster, the named AMD/Xilinx `IR_TABLE_*` presets, the readiness wait, and how to add a new transport backend. |
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |
 | 16 | [Versioning and release](16_versioning_and_release.md) | How the project version flows from the `VERSION` file through `tools/sync_version.py` into the RTL `fcapz_version.vh`, the per-core `core_id` magic registers, and the procedure for cutting a new release. |
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
-| 18 | [MCP server](18_mcp_server.md) | Agent-facing stdio server: tools, resources, safety flags, backend fields, and large-capture handling. |
+| 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
+| 19 | [AXI monitor](19_axi_monitor.md) | Capture and trigger on an AXI4-Lite interface over JTAG — a portable, vendor-agnostic AXI bus monitor. Passive tap over the ELA, named AXI fields, and a decode layer for triggering on transaction events (handshakes, error responses). |
+| 20 | [MCP server](20_mcp_server.md) | Agent-facing stdio MCP server (`fcapz-mcp`): the ELA/EIO/AXI/UART tools, resources, safety flags, backend fields, and large-capture handling. |
 
 ## Reference specs
 
@@ -52,6 +54,7 @@ and should be corrected.
 | [`specs/register_map.md`](specs/register_map.md) | Full register map for ELA, EIO, EJTAG-AXI, EJTAG-UART. Opens with an **Index** (anchor links); each major section ends with **↑ Top**. |
 | [`specs/transport_api.md`](specs/transport_api.md) | The `Transport` ABC contract — required to implement when adding a new backend. |
 | [`specs/waveform_schema.md`](specs/waveform_schema.md) | JSON / CSV / VCD export formats, field-by-field. |
+| [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Proposed/draft.** Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
 
 ## Conventions used in this manual
 
@@ -72,19 +75,20 @@ and should be corrected.
 
 ## What's not in this manual
 
-- Hardware bring-up for vendor wrappers other than Xilinx 7-series.
-  The shared core RTL is covered by simulation, and the vendor wrappers
-  are lint-elaborated, but ECP5, Intel, Gowin, PolarFire, and UltraScale
-  board-level smoke tests are still future work. See chapter 04 for the
-  support matrix and validation levels.
+- Hardware bring-up for vendor wrappers other than AMD/Xilinx 7-series and
+  the Gowin BRS-100 path. The shared core RTL is covered by simulation,
+  and the remaining vendor wrappers are lint-elaborated, but ECP5,
+  Intel, PolarFire, and UltraScale board-level smoke tests are still
+  future work. See chapter 04 for the support matrix and validation
+  levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.
 
 ## Project resources
 
-- **README**: [`../README.md`](../README.md) — top-level pitch and
-  quick reference.
+- **README**: [`../README.md`](../README.md) — top-level overview and
+  quick tour.
 - **CHANGELOG**: [`../CHANGELOG.md`](../CHANGELOG.md) — every release
   with breaking changes called out.
 - **CONTRIBUTING**: [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — how

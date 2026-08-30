@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "trig_compare_parity",
+  "description": "Formal Verilog/VHDL parity for trigger compare modes",
+  "golden": {
+    "language": "verilog",
+    "top": "trig_compare",
+    "sources": [
+      "../../rtl/trig_compare.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "trig_compare",
+    "sources": [
+      "../../rtl/vhdl/core/trig_compare.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 2,
+    "bounded_depth": 2,
+    "reset_inputs": [],
+    "clock_inputs": [],
+    "reset_cycles": 0,
+    "modules": [
+      {
+        "name": "trig_compare",
+        "param_sets": [
+          {},
+          {
+            "W": 4,
+            "REL_COMPARE": 1
+          },
+          {
+            "W": 12,
+            "REL_COMPARE": 0
+          }
+        ]
+      }
+    ]
+  }
+}

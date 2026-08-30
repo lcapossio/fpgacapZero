@@ -10,6 +10,7 @@ from .analyzer import (
     SequencerStage,
     TriggerConfig,
 )
+from .axi_monitor import AxiGeometry, AxiMonitor, AxiMonitorError
 from .eio import EioController
 from .ejtagaxi import AXIError, EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -59,6 +60,9 @@ __all__ = [
     "frequency_estimate",
     "summarize",
     "ProbeDefinition",
+    "AxiMonitor",
+    "AxiGeometry",
+    "AxiMonitorError",
     "EioController",
     "EjtagAxiController",
     "AXIError",

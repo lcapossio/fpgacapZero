@@ -1,0 +1,9 @@
+# Vendored third-party assets (Surfer WASM viewer): keep upstream bytes as-is,
+# skip whitespace checks (git diff --check), and exclude from language stats.
+host/fcapz/web/vendor/** linguist-vendored -whitespace
+
+# Built web bundle: normalize to LF so a Linux CI rebuild matches the committed
+# tree byte-for-byte (see the frontend-build drift guard in CI).
+host/fcapz/web/static/assets/*.js  text eol=lf
+host/fcapz/web/static/assets/*.css text eol=lf
+host/fcapz/web/static/*.html       text eol=lf
