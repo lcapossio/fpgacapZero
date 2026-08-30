@@ -9,6 +9,7 @@ import importlib.util
 import json
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -141,6 +142,27 @@ class StubbornCancelRpc(BlockingRpc):
 
     def cancel_active(self):
         self.cancelled = True
+
+
+class SlowRpc:
+    """Finishes a little after the watchdog fires, with no cancel_active hook.
+
+    Models the real RpcServer (no cancellation) on a call whose readback
+    overran the watchdog but completes within the grace window.
+    """
+
+    def __init__(self, delay=0.06):
+        self.delay = delay
+        self.calls = 0
+
+    def handle(self, req):
+        self.calls += 1
+        time.sleep(self.delay)
+        return {
+            "ok": True,
+            "schema_version": "test",
+            "probe": {"sample_width": 8, "depth": 1024},
+        }
 
 
 class SparseCaptureRpc(FakeRpc):
@@ -348,18 +370,52 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "count must be >= 0"):
             session.axi_dump(0x1000, -5)
 
+    def test_capture_rejects_timeout_over_cap(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(ValueError, r"timeout must be <= 300"):
+            session.capture(timeout=3600)
+        with self.assertRaisesRegex(ValueError, r"timeout must be <= 300"):
+            session.capture_wait(timeout=3600)
+        with self.assertRaisesRegex(ValueError, r"timeout must be <= 300"):
+            session.uart_recv(4, timeout=3600)
+
+    def test_capture_wait_timeout_returns_still_armed(self):
+        class ArmedWaitingRpc:
+            def handle(self, req):
+                # The RPC-side wait expired but returned control cleanly.
+                raise TimeoutError("capture did not complete within timeout")
+
+        session = FcapzMcpSession(rpc=ArmedWaitingRpc())
+        result = session.capture_wait(timeout=0.5)
+        self.assertEqual(
+            result, {"ok": True, "triggered": False, "still_armed": True}
+        )
+
+    def test_uart_send_rejects_invalid_base64(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_uart_send=True)
+        )
+        with self.assertRaisesRegex(ValueError, "not valid base64"):
+            session.uart_send(data_base64="@@@not-base64@@@")
+        # A well-formed payload still goes through.
+        session.uart_send(data_base64="aGk=")
+
     def test_worker_join_timeout_outlasts_capture_timeout(self):
         session = FcapzMcpSession(
             rpc=FakeRpc(), capabilities=McpCapabilities(rpc_timeout_sec=30.0)
         )
-        # A short wait keeps the base watchdog window.
+        # No wait-bearing field: plain base window.
         self.assertEqual(session._worker_join_timeout({"cmd": "probe"}), 30.0)
         self.assertEqual(
-            session._worker_join_timeout({"cmd": "capture", "timeout": 5.0}), 30.0
+            session._worker_join_timeout({"cmd": "capture", "timeout": 0.0}), 30.0
         )
-        # A long capture wait extends the watchdog past the caller's timeout.
-        self.assertGreater(
-            session._worker_join_timeout({"cmd": "capture", "timeout": 60.0}), 60.0
+        # The caller's timeout gets a full base window of readback headroom on
+        # top, so the watchdog never trips mid-readout of a completed capture.
+        self.assertEqual(
+            session._worker_join_timeout({"cmd": "capture", "timeout": 5.0}), 35.0
+        )
+        self.assertEqual(
+            session._worker_join_timeout({"cmd": "capture", "timeout": 60.0}), 90.0
         )
 
     def test_capture_summary_always_reports_success(self):
@@ -786,7 +842,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
             capabilities=McpCapabilities(rpc_timeout_sec=0.01),
         )
 
-        with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+        with self.assertRaisesRegex(TimeoutError, "was cancelled after"):
             session.connect()
 
         self.assertTrue(rpc.cancelled)
@@ -796,6 +852,24 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         rpc.handle = FakeRpc().handle  # type: ignore[method-assign]
         self.assertEqual(session.probe()["probe"]["sample_width"], 8)
+
+    def test_late_worker_result_is_salvaged_not_discarded(self):
+        # A completed call that overran the watchdog (no cancel hook, finishes
+        # within the grace window) must return its result, not raise a spurious
+        # TimeoutError and wipe session state — the finding-1 regression.
+        rpc = SlowRpc(delay=0.06)
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(rpc_timeout_sec=0.01, rpc_cancel_grace_sec=1.0),
+        )
+
+        result = session.probe()
+        self.assertEqual(result["probe"]["sample_width"], 8)
+        self.assertEqual(rpc.calls, 1)
+        # Slot reclaimed and no desync reset fired: the next call proceeds.
+        self.assertIsNone(session._active_rpc_worker)
+        self.assertFalse(session.status()["rpc_busy"])
+        self.assertEqual(session.probe()["probe"]["depth"], 1024)
 
     def test_rpc_timeout_reports_cancel_failure(self):
         rpc = FailingCancelRpc()
@@ -810,7 +884,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
         try:
             with redirect_stderr(stderr):
-                with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+                with self.assertRaisesRegex(TimeoutError, "still running"):
                     session.connect()
             payload = json.loads(stderr.getvalue())
             self.assertEqual(payload["event"], "rpc_cancel_error")
@@ -837,7 +911,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
         )
 
         try:
-            with self.assertRaisesRegex(TimeoutError, "attempted backend cancellation"):
+            with self.assertRaisesRegex(TimeoutError, "still running"):
                 session.connect()
             self.assertTrue(rpc.cancelled)
             self.assertIsNotNone(session._active_rpc_worker)
@@ -893,6 +967,11 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertTrue(tools["fcapz_eio_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_axi_write"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_uart_send"].annotations.destructiveHint)
+        # capture_wait consumes the armed capture and is capability-gated, so it
+        # must not advertise itself as read-only; disarm mutates FSM state.
+        self.assertFalse(tools["fcapz_capture_wait"].annotations.readOnlyHint)
+        self.assertTrue(tools["fcapz_disarm"].annotations.destructiveHint)
+        self.assertTrue(tools["fcapz_list_cores"].annotations.readOnlyHint)
         self.assertEqual(
             tools["fcapz_axi_read"].inputSchema["properties"]["addr"]["type"],
             "integer",

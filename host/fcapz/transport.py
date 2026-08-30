@@ -678,6 +678,16 @@ class QuartusStpTransport(Transport):
                 proc.terminate()
             except Exception:
                 _quartus_log.debug("quartus_stp terminate failed", exc_info=True)
+            # Reap the child so it doesn't linger as a zombie / hold the cable.
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    _quartus_log.debug("quartus_stp kill failed", exc_info=True)
+            except Exception:
+                _quartus_log.debug("quartus_stp wait failed", exc_info=True)
         self._proc = None
         self._poisoned = True
 

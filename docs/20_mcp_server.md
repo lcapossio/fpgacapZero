@@ -132,16 +132,25 @@ programming a bitstream — and rejected otherwise (including under
 The MCP session enforces a 30 second RPC response timeout by default; override
 it with `--rpc-timeout SEC`. For wait-bearing commands (`fcapz_capture`,
 `fcapz_capture_wait`, `fcapz_uart_recv`) the watchdog deadline is extended to
-outlast the caller's own `timeout`, so a legitimate long wait never trips it;
-for all other commands the `--rpc-timeout` window applies. If the MCP timeout
-fires,
-the server asks the RPC layer to cancel any active transport when that layer
-exposes a cancellation hook, and treats the timeout as a session-wide reset:
-ELA, EIO, AXI, UART, cached probe data, and cached capture data are all cleared
-if the worker unwinds. If the RPC layer has no cancellation hook, or a backend
-cannot be unwound promptly, the timed-out worker is left running and the server
-refuses new hardware commands until the process is restarted — this fail-closed
-guard is what prevents a stuck call from corrupting a later one.
+the caller's own `timeout` *plus* a full `--rpc-timeout` window of readback
+headroom — so neither a long trigger wait nor a slow deep-capture readback
+trips it. The caller's `timeout` itself is capped at 300 s (the RPC layer's
+ceiling) and rejected above that rather than silently clamped. For all other
+commands the plain `--rpc-timeout` window applies.
+
+If the watchdog does fire, the server asks the RPC layer to cancel any active
+transport when that layer exposes a cancellation hook. If the worker then
+unwinds, the timeout is treated as a session-wide reset (ELA, EIO, AXI, UART,
+cached probe, and cached capture data cleared). If the RPC layer has no
+cancellation hook and the worker simply finished a little late, its completed
+result is returned rather than discarded — a slow-but-successful capture is not
+thrown away. Only a worker still running after the grace window leaves the slot
+reserved; the server then refuses new hardware commands until it exits (**this
+self-heals** — the next call reclaims the slot once the worker finishes; a
+restart is only needed if it never does). This fail-closed guard is what keeps
+a stuck call from corrupting a later one, and `fcapz_status` reports `rpc_busy`
+/ `active_rpc_cmd` so an agent can see the wait instead of guessing.
+
 `--rpc-cancel-grace SEC` controls how long the MCP layer waits for the worker
 to unwind after a cancel attempt before declaring it still active. It must be greater than zero.
 Transport construction is still best-effort: if a backend blocks before a
@@ -162,7 +171,7 @@ same still-running worker guard applies.
 | `fcapz_configure` | capture* | Configure the connected ELA without arming. |
 | `fcapz_arm` | capture* | Arm the connected ELA using the current hardware configuration. |
 | `fcapz_capture` | capture* | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
-| `fcapz_capture_wait` | capture* | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. |
+| `fcapz_capture_wait` | capture* | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. Returns `{triggered: false, still_armed: true}` (not an error) if the trigger has not fired yet. |
 | `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
@@ -176,9 +185,13 @@ configures, arms, and reads out in a single call, re-arming every time. For a
 long wait on a real hardware event, use the manual flow instead —
 `fcapz_configure`, then `fcapz_arm` once, then `fcapz_capture_status` to poll
 and `fcapz_capture_wait` to read out — so a single hardware arm is held across
-many short polls with no re-arm blind gaps. `fcapz_disarm` stops an arm. A
-capture `timeout` may exceed `--rpc-timeout`; the MCP watchdog extends its
-deadline to outlast the caller's wait rather than orphaning the call.
+many short polls with no re-arm blind gaps. `fcapz_capture_wait` returns
+`{triggered: false, still_armed: true}` when its `timeout` expires before the
+trigger fires, so the poll loop treats "not yet" as data rather than an error;
+the core stays armed. `fcapz_disarm` stops an arm. A capture `timeout` may
+exceed `--rpc-timeout` (up to the 300 s cap); the MCP watchdog extends its
+deadline to outlast the caller's wait plus readback rather than orphaning the
+call.
 
 `fcapz_capture` also takes `immediate=true`, which rewrites the trigger to an
 always-true condition so the capture fires now — a snapshot of current state

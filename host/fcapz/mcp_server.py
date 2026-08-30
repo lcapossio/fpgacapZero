@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import importlib.metadata
 import os
 import queue
@@ -33,9 +34,10 @@ JsonDict = dict[str, Any]
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
 _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
 _RPC_CANCEL_GRACE_SEC = 1.0
-# Slack added on top of a wait-bearing command's own timeout before the MCP
-# watchdog fires, so a legitimate long wait can't trip the watchdog first.
-_RPC_WORKER_MARGIN_SEC = 5.0
+# The RPC layer caps every wait-bearing command at this many seconds
+# (rpc._MAX_WAIT_SEC); callers are rejected above it rather than silently
+# clamped, so the watchdog and the docstrings stay honest.
+_MAX_WAIT_SEC = 300.0
 
 
 @dataclass
@@ -58,6 +60,16 @@ class FcapzMcpError(RuntimeError):
     def __init__(self, message: str, *, payload: JsonDict | None = None) -> None:
         super().__init__(message)
         self.payload = dict(payload or {"error": message})
+
+
+class McpWatchdogTimeout(TimeoutError):
+    """The MCP watchdog gave up on a still-running RPC worker.
+
+    Distinct from a plain ``TimeoutError`` delivered *through* the worker (an
+    RPC-layer wait that expired but returned control cleanly): a watchdog
+    timeout means the worker is or was abandoned, so callers that treat an
+    RPC-side timeout as normal polling can re-raise this one instead.
+    """
 
 
 @dataclass
@@ -112,7 +124,13 @@ class FcapzMcpSession:
         that legitimately waits longer than ``rpc_timeout_sec`` for a trigger
         would trip the watchdog, orphan the still-running worker, and — because
         the real RPC layer has no ``cancel_active`` — wedge the whole session
-        behind the "previous call still running" guard until restart.
+        behind the "previous call still running" guard until it self-heals.
+
+        The extra headroom on top of the caller's own ``timeout`` is a full
+        ``rpc_timeout_sec`` window, not a small constant: the RPC call also has
+        to *read back* the samples after the trigger fires, and on the slow
+        transports (quartus_stp per-register fallback, OpenOCD) a deep capture's
+        readback can take many seconds. A fixed margin would trip mid-readback.
         """
         base = self.capabilities.rpc_timeout_sec
         wait = req.get("timeout")
@@ -122,7 +140,7 @@ class FcapzMcpSession:
             wait = float(wait)
         except (TypeError, ValueError):
             return base
-        return max(base, wait + _RPC_WORKER_MARGIN_SEC)
+        return max(base, wait + base)
 
     def _rpc_call(self, req: JsonDict) -> JsonDict:
         result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
@@ -151,28 +169,51 @@ class FcapzMcpSession:
         worker.join(join_timeout)
         if worker.is_alive():
             cancel = getattr(self.rpc, "cancel_active", None)
+            cancelled = False
             if callable(cancel):
                 try:
                     cancel()
+                    cancelled = True
                 except Exception as exc:
                     self._emit_rpc_cancel_error(str(req.get("cmd")), exc)
             worker.join(self.capabilities.rpc_cancel_grace_sec)
-            if not worker.is_alive():
-                with self._rpc_lock:
-                    if self._active_rpc_worker is worker:
-                        self._active_rpc_worker = None
-                        self._active_rpc_cmd = None
+            if worker.is_alive():
+                # Still running. Leave the slot reserved so the next call refuses
+                # to drive the transport concurrently; it self-heals once this
+                # worker finally exits (the guard at the top reclaims the slot).
+                raise McpWatchdogTimeout(
+                    f"fcapz RPC call {req.get('cmd')!r} timed out after "
+                    f"{join_timeout:g}s and is still running; wait and retry "
+                    "(fcapz_status shows progress) — restart only if it persists"
+                )
+            # The worker finished within the grace window. Reclaim the slot.
+            with self._rpc_lock:
+                if self._active_rpc_worker is worker:
+                    self._active_rpc_worker = None
+                    self._active_rpc_cmd = None
+            if cancelled:
+                # A backend cancel tore the in-flight call down, so the RPC
+                # session may be inconsistent: resync MCP state and surface the
+                # worker's own error (or a timeout if it exited clean anyway).
                 self._reset_session_state_after_cancel()
-            raise TimeoutError(
-                f"fcapz RPC call {req.get('cmd')!r} timed out after "
-                f"{join_timeout:g}s; attempted backend cancellation"
-            )
-        with self._rpc_lock:
-            # A timed-out worker may finish after a later call has reserved the slot.
-            # Only the owner may clear the active marker.
-            if self._active_rpc_worker is worker:
-                self._active_rpc_worker = None
-                self._active_rpc_cmd = None
+                ok, result = result_queue.get_nowait()
+                if not ok:
+                    raise result  # type: ignore[misc]
+                raise McpWatchdogTimeout(
+                    f"fcapz RPC call {req.get('cmd')!r} was cancelled after "
+                    f"{join_timeout:g}s"
+                )
+            # No cancel hook: the worker merely finished a little late (e.g. a
+            # slow readback overran the watchdog). Salvage its completed result
+            # instead of discarding it — often a successful capture — and
+            # desyncing the session. Fall through to normal result handling.
+        else:
+            with self._rpc_lock:
+                # A timed-out worker may finish after a later call has reserved
+                # the slot. Only the owner may clear the active marker.
+                if self._active_rpc_worker is worker:
+                    self._active_rpc_worker = None
+                    self._active_rpc_cmd = None
         ok, result = result_queue.get_nowait()
         if not ok:
             raise result  # type: ignore[misc]
@@ -470,6 +511,21 @@ class FcapzMcpSession:
             raise ValueError(f"format must be one of json, csv, vcd; got {fmt!r}")
         return fmt
 
+    @staticmethod
+    def _validated_wait_timeout(timeout: float) -> float:
+        # The RPC layer clamps waits at _MAX_WAIT_SEC and would otherwise raise a
+        # generic "did not complete" long before a large caller value elapsed.
+        # Reject up front so the failure names the real ceiling.
+        seconds = float(timeout)
+        if seconds < 0:
+            raise ValueError(f"timeout must be >= 0, got {seconds:g}")
+        if seconds > _MAX_WAIT_SEC:
+            raise ValueError(
+                f"timeout must be <= {_MAX_WAIT_SEC:g}s (the RPC layer's cap), "
+                f"got {seconds:g}"
+            )
+        return seconds
+
     def _store_capture(self, response: JsonDict) -> JsonDict:
         """Cache a capture readout and return its compact summary."""
         self.last_capture = response
@@ -496,7 +552,7 @@ class FcapzMcpSession:
             raise PermissionError("capture tools are disabled for this MCP server")
         req: JsonDict = {
             "cmd": "capture",
-            "timeout": float(timeout),
+            "timeout": self._validated_wait_timeout(timeout),
             "format": self._validated_capture_format(fmt),
             # MCP names this by intent; RPC still uses its historical field.
             "summarize": bool(include_event_summary),
@@ -522,11 +578,21 @@ class FcapzMcpSession:
             raise PermissionError("capture tools are disabled for this MCP server")
         req: JsonDict = {
             "cmd": "capture_wait",
-            "timeout": float(timeout),
+            "timeout": self._validated_wait_timeout(timeout),
             "format": self._validated_capture_format(fmt),
             "summarize": bool(include_event_summary),
         }
-        return self._store_capture(self._rpc_call(req))
+        try:
+            return self._store_capture(self._rpc_call(req))
+        except McpWatchdogTimeout:
+            # The watchdog abandoned the worker — a real fault, not "still
+            # waiting". Let it propagate so the caller stops polling.
+            raise
+        except TimeoutError:
+            # The RPC-side wait expired but returned cleanly: the trigger simply
+            # has not fired and the core is still armed. The documented poll
+            # loop treats this as normal, so report it as data, not an error.
+            return {"ok": True, "triggered": False, "still_armed": True}
 
     def capture_status(self) -> JsonDict:
         return self._rpc_call({"cmd": "capture_status"})
@@ -756,21 +822,41 @@ class FcapzMcpSession:
             if text is None:
                 raise ValueError("provide either data_base64 or text")
             data_base64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        else:
+            # RPC decodes with validate=False, which silently DROPS non-alphabet
+            # characters and transmits whatever garbage remains. Reject it here
+            # instead of mangling the payload onto the wire.
+            try:
+                base64.b64decode(data_base64, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ValueError(f"data_base64 is not valid base64: {exc}") from exc
         return self._rpc_call({"cmd": "uart_send", "data": data_base64})
 
     def uart_recv(self, count: int, timeout: float = 1.0) -> JsonDict:
         count_i = int(count)
         if count_i < 0:
             raise ValueError(f"count must be >= 0, got {count_i}")
-        return self._rpc_call({"cmd": "uart_recv", "count": count_i, "timeout": float(timeout)})
+        return self._rpc_call(
+            {
+                "cmd": "uart_recv",
+                "count": count_i,
+                "timeout": self._validated_wait_timeout(timeout),
+            }
+        )
 
     def uart_status(self) -> JsonDict:
         return self._rpc_call({"cmd": "uart_status"})
 
     def status(self) -> JsonDict:
+        with self._rpc_lock:
+            worker = self._active_rpc_worker
+            rpc_busy = worker is not None and worker.is_alive()
+            active_rpc_cmd = self._active_rpc_cmd if rpc_busy else None
         return {
             "mcp_server_version": self._server_version(),
             "rpc_schema_version": self.last_rpc_schema_version,
+            "rpc_busy": rpc_busy,
+            "active_rpc_cmd": active_rpc_cmd,
             "connected": self.connected,
             "eio_connected": self.eio_connected,
             "axi_connected": self.axi_connected,
@@ -1005,8 +1091,9 @@ def build_mcp_server(session: FcapzMcpSession):
     ) -> JsonDict:
         """Configure, arm, and capture samples from the ELA.
 
-        timeout is in seconds and may exceed the server's --rpc-timeout — the
-        watchdog waits out the capture. format is "json", "csv", or "vcd".
+        timeout is in seconds and may exceed the server's --rpc-timeout (up to a
+        300 s server cap) — the watchdog waits out the capture. format is
+        "json", "csv", or "vcd".
         immediate=true rewrites the trigger to fire now (no waiting), for a
         snapshot of current state. include_event_summary asks the RPC layer to
         add decoded event metadata to the capture result. config may contain
@@ -1081,7 +1168,7 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.arm()
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_capture_wait(
         timeout: float = 10.0,
         format: str = "json",
@@ -1090,8 +1177,10 @@ def build_mcp_server(session: FcapzMcpSession):
         """Read out an already-armed capture without reconfiguring or re-arming.
 
         Pairs with fcapz_configure + fcapz_arm: arm once, then poll here.
-        timeout is in seconds (it may exceed --rpc-timeout); a timeout leaves
-        the core armed and just means "still waiting for the trigger". Returns
+        timeout is in seconds (it may exceed --rpc-timeout, up to a 300 s server
+        cap). If the trigger has not fired the tool returns
+        {"triggered": false, "still_armed": true} rather than erroring, so it is
+        safe to call in a poll loop; the core stays armed. On a hit it returns
         summary metadata only — use fcapz_get_last_capture or
         fcapz://last-capture for the full payload.
         """
@@ -1392,7 +1481,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         metavar="SEC",
-        help="Seconds to wait for one RPC call before attempting backend cancellation",
+        help=(
+            "Watchdog window for one RPC call before attempting backend "
+            "cancellation. Wait-bearing commands (capture/capture_wait/"
+            "uart_recv) extend it to outlast their own timeout plus this much "
+            "readback headroom"
+        ),
     )
     parser.add_argument(
         "--rpc-cancel-grace",

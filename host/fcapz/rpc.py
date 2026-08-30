@@ -668,11 +668,21 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
+            transport = self._build_transport(req)
             analyzer = Analyzer(
-                self._build_transport(req),
+                transport,
                 chain=int(requested) if requested is not None else 1,
             )
-            analyzer.connect()
+            try:
+                analyzer.connect()
+            except Exception:
+                # Don't leak the transport's child process / socket on a failed
+                # connect (hw_server down, wrong tap, program failure, ...).
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
             if requested is None and analyzer.probe_optional() is None:
                 # No chain given and no ELA on the default chain: autodetect on
                 # the conservative scan set (USER1/2 — bridges on 3/4 speak a
@@ -894,16 +904,27 @@ class RpcServer:
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            self._eio = EioController(
-                self._build_transport(req),
+            transport = self._build_transport(req)
+            eio = EioController(
+                transport,
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
             )
-            self._eio.connect()
+            try:
+                eio.connect()
+            except Exception:
+                # Mirror axi_connect / eio_discover: close the transport and
+                # leave self._eio unset rather than leaking a half-open session.
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
+            self._eio = eio
             return self._ok(
-                in_w=self._eio.in_w,
-                out_w=self._eio.out_w,
+                in_w=eio.in_w,
+                out_w=eio.out_w,
                 chain=chain,
                 base_addr=base_addr,
             )
