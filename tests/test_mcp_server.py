@@ -46,10 +46,31 @@ class FakeRpc:
                 "trigger_index": 1,
                 "result": {"samples": [1, 2]},
             }
+        if cmd == "capture_wait":
+            return {
+                "ok": True,
+                "schema_version": "test",
+                "format": req.get("format", "json"),
+                "sample_count": 2,
+                "overflow": False,
+                "channel": 0,
+                "trigger_index": 1,
+                "result": {"samples": [3, 4]},
+            }
+        if cmd == "capture_status":
+            return {"ok": True, "schema_version": "test", "state": "waiting", "triggered": False}
         if cmd == "configure":
             return {"ok": True, "schema_version": "test"}
         if cmd == "arm":
             return {"ok": True, "schema_version": "test"}
+        if cmd == "disarm":
+            return {"ok": True, "schema_version": "test"}
+        if cmd == "list_cores":
+            return {
+                "ok": True,
+                "schema_version": "test",
+                "cores": [{"type": "ela", "chain": 1, "core_id": "0x454C"}],
+            }
         if cmd == "eio_connect":
             return {
                 "ok": True,
@@ -182,7 +203,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
     def test_connect_forwards_usb_blaster_options(self):
         rpc = FakeRpc()
-        session = FcapzMcpSession(rpc=rpc)
+        # A caller-supplied quartus_stp executable requires --allow-program.
+        session = FcapzMcpSession(
+            rpc=rpc, capabilities=McpCapabilities(allow_program=True)
+        )
 
         session.connect(
             backend="usb_blaster",
@@ -195,6 +219,36 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertNotIn("tap", rpc.requests[0])
         self.assertEqual(rpc.requests[0]["hardware"], "USB-Blaster")
         self.assertEqual(rpc.requests[0]["quartus_stp"], "quartus_stp")
+
+    def test_usb_blaster_hardware_forwards_without_allow_program(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        # hardware is a cable selector, not an executable: no gate.
+        session.connect(backend="usb_blaster", hardware="USB-Blaster")
+        self.assertEqual(rpc.requests[0]["hardware"], "USB-Blaster")
+
+    def test_caller_quartus_stp_requires_allow_program(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaisesRegex(PermissionError, "quartus_stp"):
+            session.connect(backend="usb_blaster", quartus_stp="/tmp/evil")
+        # Also gated on the bridge connects.
+        with self.assertRaisesRegex(PermissionError, "quartus_stp"):
+            session.eio_connect(backend="usb_blaster", quartus_stp="/tmp/evil")
+
+    def test_connect_forwards_explicit_chain(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        session.connect(backend="hw_server", chain=5)
+        self.assertEqual(rpc.requests[0]["chain"], 5)
+
+    def test_connect_rejects_out_of_range_port(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaisesRegex(ValueError, "port must be in 1..65535"):
+            session.connect(backend="hw_server", port=70000)
 
     def test_connect_rejects_spi_backend(self):
         session = FcapzMcpSession(rpc=FakeRpc())
@@ -232,6 +286,81 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertGreater(session.status()["last_capture_size_bytes"], 0)
         self.assertEqual(session.status()["last_capture_summary"]["trigger_index"], 1)
         self.assertEqual(session.last_capture["result"], {"samples": [1, 2]})
+
+    def test_capture_immediate_sets_flag(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        session.capture(immediate=True)
+        self.assertTrue(rpc.requests[-1]["immediate"])
+
+    def test_capture_rejects_bad_format(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaisesRegex(ValueError, "format must be one of"):
+            session.capture(fmt="vcdd")
+
+    def test_capture_wait_reads_out_without_rearming(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        summary = session.capture_wait(timeout=3.0)
+        self.assertEqual(rpc.requests[-1]["cmd"], "capture_wait")
+        self.assertEqual(rpc.requests[-1]["timeout"], 3.0)
+        self.assertEqual(summary["sample_count"], 2)
+        # capture_wait populates the same cache as capture.
+        self.assertEqual(session.last_capture["result"], {"samples": [3, 4]})
+        # No configure/arm was issued by capture_wait.
+        self.assertNotIn("configure", [r["cmd"] for r in rpc.requests])
+
+    def test_capture_status_and_disarm(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        self.assertEqual(session.capture_status()["state"], "waiting")
+        self.assertEqual(session.disarm(), {"ok": True, "schema_version": "test"})
+        self.assertEqual(rpc.requests[-1]["cmd"], "disarm")
+
+    def test_capture_flow_tools_gated_by_read_only(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_capture=False)
+        )
+        with self.assertRaisesRegex(PermissionError, "capture tools are disabled"):
+            session.capture_wait()
+        with self.assertRaisesRegex(PermissionError, "disarm tools are disabled"):
+            session.disarm()
+
+    def test_list_cores_forwards(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        cores = session.list_cores()["cores"]
+        self.assertEqual(rpc.requests[-1]["cmd"], "list_cores")
+        self.assertEqual(cores[0]["chain"], 1)
+
+    def test_uart_recv_rejects_negative_count(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(ValueError, "count must be >= 0"):
+            session.uart_recv(-1)
+
+    def test_axi_dump_rejects_negative_count(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(ValueError, "count must be >= 0"):
+            session.axi_dump(0x1000, -5)
+
+    def test_worker_join_timeout_outlasts_capture_timeout(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(rpc_timeout_sec=30.0)
+        )
+        # A short wait keeps the base watchdog window.
+        self.assertEqual(session._worker_join_timeout({"cmd": "probe"}), 30.0)
+        self.assertEqual(
+            session._worker_join_timeout({"cmd": "capture", "timeout": 5.0}), 30.0
+        )
+        # A long capture wait extends the watchdog past the caller's timeout.
+        self.assertGreater(
+            session._worker_join_timeout({"cmd": "capture", "timeout": 60.0}), 60.0
+        )
 
     def test_capture_summary_always_reports_success(self):
         session = FcapzMcpSession(rpc=SparseCaptureRpc())
@@ -732,12 +861,16 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_connect",
                 "fcapz_close",
                 "fcapz_probe",
+                "fcapz_list_cores",
                 "fcapz_capture",
                 "fcapz_drop_last_capture",
                 "fcapz_get_last_capture",
                 "fcapz_get_last_capture_chunk",
                 "fcapz_configure",
                 "fcapz_arm",
+                "fcapz_capture_wait",
+                "fcapz_capture_status",
+                "fcapz_disarm",
                 "fcapz_eio_connect",
                 "fcapz_eio_close",
                 "fcapz_eio_read",

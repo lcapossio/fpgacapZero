@@ -33,6 +33,9 @@ JsonDict = dict[str, Any]
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
 _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
 _RPC_CANCEL_GRACE_SEC = 1.0
+# Slack added on top of a wait-bearing command's own timeout before the MCP
+# watchdog fires, so a legitimate long wait can't trip the watchdog first.
+_RPC_WORKER_MARGIN_SEC = 5.0
 
 
 @dataclass
@@ -101,6 +104,26 @@ class FcapzMcpSession:
         "trigger_delay",
     })
 
+    def _worker_join_timeout(self, req: JsonDict) -> float:
+        """Seconds to let the RPC worker run before the watchdog declares a timeout.
+
+        Wait-bearing commands (``capture``/``capture_wait``/``uart_recv``) carry
+        their own ``timeout``; the watchdog must outlast it. Otherwise a caller
+        that legitimately waits longer than ``rpc_timeout_sec`` for a trigger
+        would trip the watchdog, orphan the still-running worker, and — because
+        the real RPC layer has no ``cancel_active`` — wedge the whole session
+        behind the "previous call still running" guard until restart.
+        """
+        base = self.capabilities.rpc_timeout_sec
+        wait = req.get("timeout")
+        if wait is None:
+            return base
+        try:
+            wait = float(wait)
+        except (TypeError, ValueError):
+            return base
+        return max(base, wait + _RPC_WORKER_MARGIN_SEC)
+
     def _rpc_call(self, req: JsonDict) -> JsonDict:
         result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
@@ -124,7 +147,8 @@ class FcapzMcpSession:
             self._active_rpc_worker = worker
             self._active_rpc_cmd = str(req.get("cmd"))
             worker.start()
-        worker.join(self.capabilities.rpc_timeout_sec)
+        join_timeout = self._worker_join_timeout(req)
+        worker.join(join_timeout)
         if worker.is_alive():
             cancel = getattr(self.rpc, "cancel_active", None)
             if callable(cancel):
@@ -141,7 +165,7 @@ class FcapzMcpSession:
                 self._reset_session_state_after_cancel()
             raise TimeoutError(
                 f"fcapz RPC call {req.get('cmd')!r} timed out after "
-                f"{self.capabilities.rpc_timeout_sec:g}s; attempted backend cancellation"
+                f"{join_timeout:g}s; attempted backend cancellation"
             )
         with self._rpc_lock:
             # A timed-out worker may finish after a later call has reserved the slot.
@@ -216,6 +240,13 @@ class FcapzMcpSession:
                 f"{', '.join(present)} not supported for backend {backend!r}"
             )
 
+    @staticmethod
+    def _validated_port(port: int) -> int:
+        port_i = int(port)
+        if not 1 <= port_i <= 65535:
+            raise ValueError(f"port must be in 1..65535, got {port_i}")
+        return port_i
+
     def _add_connection_fields(
         self,
         req: JsonDict,
@@ -238,7 +269,7 @@ class FcapzMcpSession:
             req["host"] = host or "127.0.0.1"
             req["tap"] = tap or self._default_tap(backend)
             if port is not None:
-                req["port"] = int(port)
+                req["port"] = self._validated_port(port)
             return
 
         if backend == "usb_blaster":
@@ -253,6 +284,17 @@ class FcapzMcpSession:
             if hardware is not None:
                 req["hardware"] = hardware
             if quartus_stp is not None:
+                # quartus_stp names a host executable that gets spawned
+                # (transport -> subprocess). Letting an agent pick an arbitrary
+                # path would sidestep the whole capability model, including
+                # --read-only. Require the same opt-in as programming; the
+                # operator-configured default is still used when omitted.
+                if not self.capabilities.allow_program:
+                    raise PermissionError(
+                        "naming a quartus_stp executable is disabled; restart "
+                        "fcapz-mcp with --allow-program to allow it, or omit "
+                        "quartus_stp to use the server's configured toolchain"
+                    )
                 req["quartus_stp"] = quartus_stp
             return
 
@@ -265,6 +307,7 @@ class FcapzMcpSession:
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
+        chain: int | None = None,
         program: str | None = None,
         single_chain_burst: bool = True,
         hardware: str | None = None,
@@ -277,6 +320,8 @@ class FcapzMcpSession:
             "cmd": "connect",
             "backend": backend,
         }
+        if chain is not None:
+            req["chain"] = int(chain)
         self._add_connection_fields(
             req,
             backend=backend,
@@ -419,29 +464,14 @@ class FcapzMcpSession:
         self.last_probe = dict(response.get("probe", {}))
         return response
 
-    def capture(
-        self,
-        *,
-        config: JsonDict | None = None,
-        timeout: float = 10.0,
-        fmt: str = "json",
-        include_event_summary: bool = False,
-    ) -> JsonDict:
-        if not self.capabilities.allow_capture:
-            raise PermissionError("capture tools are disabled for this MCP server")
-        req: JsonDict = {
-            "cmd": "capture",
-            "timeout": float(timeout),
-            "format": fmt,
-            # MCP names this by intent; RPC still uses its historical field.
-            "summarize": bool(include_event_summary),
-        }
-        if config:
-            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
-            if unknown:
-                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
-            req = {**config, **req}
-        response = self._rpc_call(req)
+    @staticmethod
+    def _validated_capture_format(fmt: str) -> str:
+        if fmt not in ("json", "csv", "vcd"):
+            raise ValueError(f"format must be one of json, csv, vcd; got {fmt!r}")
+        return fmt
+
+    def _store_capture(self, response: JsonDict) -> JsonDict:
+        """Cache a capture readout and return its compact summary."""
         self.last_capture = response
         self.last_capture_json = json.dumps(
             response,
@@ -452,6 +482,54 @@ class FcapzMcpSession:
         self.last_capture_size_bytes = len(self.last_capture_json_bytes)
         self.last_capture_summary = self._capture_summary()
         return dict(self.last_capture_summary or {})
+
+    def capture(
+        self,
+        *,
+        config: JsonDict | None = None,
+        timeout: float = 10.0,
+        fmt: str = "json",
+        include_event_summary: bool = False,
+        immediate: bool = False,
+    ) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("capture tools are disabled for this MCP server")
+        req: JsonDict = {
+            "cmd": "capture",
+            "timeout": float(timeout),
+            "format": self._validated_capture_format(fmt),
+            # MCP names this by intent; RPC still uses its historical field.
+            "summarize": bool(include_event_summary),
+        }
+        if immediate:
+            # RPC rewrites the config to an always-true trigger and fires now.
+            req["immediate"] = True
+        if config:
+            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
+            if unknown:
+                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
+            req = {**config, **req}
+        return self._store_capture(self._rpc_call(req))
+
+    def capture_wait(
+        self,
+        *,
+        timeout: float = 10.0,
+        fmt: str = "json",
+        include_event_summary: bool = False,
+    ) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("capture tools are disabled for this MCP server")
+        req: JsonDict = {
+            "cmd": "capture_wait",
+            "timeout": float(timeout),
+            "format": self._validated_capture_format(fmt),
+            "summarize": bool(include_event_summary),
+        }
+        return self._store_capture(self._rpc_call(req))
+
+    def capture_status(self) -> JsonDict:
+        return self._rpc_call({"cmd": "capture_status"})
 
     def configure(self, config: JsonDict | None = None) -> JsonDict:
         if not self.capabilities.allow_capture:
@@ -468,6 +546,14 @@ class FcapzMcpSession:
         if not self.capabilities.allow_capture:
             raise PermissionError("arm tools are disabled for this MCP server")
         return self._rpc_call({"cmd": "arm"})
+
+    def disarm(self) -> JsonDict:
+        if not self.capabilities.allow_capture:
+            raise PermissionError("disarm tools are disabled for this MCP server")
+        return self._rpc_call({"cmd": "disarm"})
+
+    def list_cores(self) -> JsonDict:
+        return self._rpc_call({"cmd": "list_cores"})
 
     def _bridge_connect_req(
         self,
@@ -617,8 +703,11 @@ class FcapzMcpSession:
         )
 
     def axi_dump(self, addr: int, count: int, *, burst: bool = False) -> JsonDict:
+        count_i = int(count)
+        if count_i < 0:
+            raise ValueError(f"count must be >= 0, got {count_i}")
         return self._rpc_call(
-            {"cmd": "axi_dump", "addr": int(addr), "count": int(count), "burst": bool(burst)}
+            {"cmd": "axi_dump", "addr": int(addr), "count": count_i, "burst": bool(burst)}
         )
 
     def uart_connect(
@@ -670,7 +759,10 @@ class FcapzMcpSession:
         return self._rpc_call({"cmd": "uart_send", "data": data_base64})
 
     def uart_recv(self, count: int, timeout: float = 1.0) -> JsonDict:
-        return self._rpc_call({"cmd": "uart_recv", "count": int(count), "timeout": float(timeout)})
+        count_i = int(count)
+        if count_i < 0:
+            raise ValueError(f"count must be >= 0, got {count_i}")
+        return self._rpc_call({"cmd": "uart_recv", "count": count_i, "timeout": float(timeout)})
 
     def uart_status(self) -> JsonDict:
         return self._rpc_call({"cmd": "uart_status"})
@@ -847,6 +939,7 @@ def build_mcp_server(session: FcapzMcpSession):
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
+        chain: int | None = None,
         program: str | None = None,
         single_chain_burst: bool = True,
         hardware: str | None = None,
@@ -857,11 +950,14 @@ def build_mcp_server(session: FcapzMcpSession):
         Backends: "hw_server" (AMD/Xilinx hw_server, the default), "openocd"
         (any OpenOCD-supported adapter), and "usb_blaster" (Intel/Altera via
         Quartus). For usb_blaster, `hardware` selects the Quartus cable and
-        `quartus_stp` selects the quartus_stp executable; those two fields are
-        rejected for the other backends, and host/port/tap are rejected for
-        usb_blaster. All timeout values are in seconds. `program` is
-        hw_server-only, disabled unless fcapz-mcp was started with
-        --allow-program, and must be an existing .bit file.
+        `quartus_stp` names the quartus_stp executable — the latter spawns a
+        host process, so it is rejected unless fcapz-mcp was started with
+        --allow-program (omit it to use the server's configured toolchain).
+        `hardware`/`quartus_stp` are rejected for the other backends, and
+        host/port/tap are rejected for usb_blaster. `chain` selects the JTAG
+        USER chain the ELA sits on; omit it to probe the default and autodetect.
+        All timeout values are in seconds. `program` is hw_server-only, disabled
+        unless started with --allow-program, and must be an existing .bit file.
         """
 
         return session.connect(
@@ -869,6 +965,7 @@ def build_mcp_server(session: FcapzMcpSession):
             host=host,
             port=port,
             tap=tap,
+            chain=chain,
             program=program,
             single_chain_burst=single_chain_burst,
             hardware=hardware,
@@ -887,23 +984,38 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.probe()
 
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_list_cores() -> JsonDict:
+        """List debug cores discovered on the connected board.
+
+        Read-only orientation: reports each core's type, JTAG USER `chain`, and
+        identity so an agent can pick the right `chain` for the eio/axi/uart
+        connect tools instead of guessing. Requires an active connection.
+        """
+
+        return session.list_cores()
+
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_capture(
         config: JsonDict | None = None,
         timeout: float = 10.0,
         format: str = "json",
         include_event_summary: bool = False,
+        immediate: bool = False,
     ) -> JsonDict:
         """Configure, arm, and capture samples from the ELA.
 
-        timeout is in seconds. format is "json", "csv", or "vcd".
-        include_event_summary asks the RPC layer to add decoded event metadata
-        to the capture result. config may contain capture fields only:
-        pretrigger, posttrigger, trigger_mode, trigger_value, trigger_mask,
-        sample_width, depth, sample_clock_hz, probes, probe_file, channel,
-        decimation, ext_trigger_mode, stor_qual_mode/value/mask, startup_arm,
-        trigger_holdoff, trigger_delay. The tool returns summary metadata only;
-        use fcapz_get_last_capture or fcapz://last-capture for full payloads.
+        timeout is in seconds and may exceed the server's --rpc-timeout — the
+        watchdog waits out the capture. format is "json", "csv", or "vcd".
+        immediate=true rewrites the trigger to fire now (no waiting), for a
+        snapshot of current state. include_event_summary asks the RPC layer to
+        add decoded event metadata to the capture result. config may contain
+        capture fields only: pretrigger, posttrigger, trigger_mode,
+        trigger_value, trigger_mask, sample_width, depth, sample_clock_hz,
+        probes, probe_file, channel, decimation, ext_trigger_mode,
+        stor_qual_mode/value/mask, startup_arm, trigger_holdoff, trigger_delay.
+        The tool returns summary metadata only; use fcapz_get_last_capture or
+        fcapz://last-capture for full payloads.
         """
 
         return session.capture(
@@ -911,6 +1023,7 @@ def build_mcp_server(session: FcapzMcpSession):
             timeout=timeout,
             fmt=format,
             include_event_summary=include_event_summary,
+            immediate=immediate,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -950,18 +1063,64 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
         """Configure the connected ELA without arming it.
 
-        config accepts the same capture fields as fcapz_capture. This is useful
-        when an agent must configure trigger settings and arm later in a
-        separate step.
+        config accepts the same capture fields as fcapz_capture. Use this to
+        stage a trigger, then fcapz_arm to arm once, fcapz_capture_status to
+        poll, and fcapz_capture_wait to read the result out — the manual flow
+        that holds one hardware arm across many polls (fcapz_capture instead
+        reconfigures and re-arms on every call). fcapz_disarm stops an arm.
         """
 
         return session.configure(config=config)
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_arm() -> JsonDict:
-        """Arm the connected ELA using the current hardware configuration."""
+        """Arm the connected ELA using the current hardware configuration.
+
+        Pairs with fcapz_configure; read the result out with fcapz_capture_wait.
+        """
 
         return session.arm()
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_capture_wait(
+        timeout: float = 10.0,
+        format: str = "json",
+        include_event_summary: bool = False,
+    ) -> JsonDict:
+        """Read out an already-armed capture without reconfiguring or re-arming.
+
+        Pairs with fcapz_configure + fcapz_arm: arm once, then poll here.
+        timeout is in seconds (it may exceed --rpc-timeout); a timeout leaves
+        the core armed and just means "still waiting for the trigger". Returns
+        summary metadata only — use fcapz_get_last_capture or
+        fcapz://last-capture for the full payload.
+        """
+
+        return session.capture_wait(
+            timeout=timeout,
+            fmt=format,
+            include_event_summary=include_event_summary,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    def fcapz_capture_status() -> JsonDict:
+        """Poll an armed ELA without transferring samples.
+
+        Returns the capture FSM state (waiting-for-trigger vs. triggered) so an
+        agent can show progress before reading out with fcapz_capture_wait.
+        """
+
+        return session.capture_status()
+
+    @tool(destructiveHint=True, idempotentHint=True, readOnlyHint=False)
+    def fcapz_disarm() -> JsonDict:
+        """Soft-reset the ELA capture FSM to idle, discarding any in-flight arm.
+
+        The clean way to stop an armed capture that is still waiting for a
+        trigger. Requires capture access (disabled under --read-only).
+        """
+
+        return session.disarm()
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_eio_connect(
@@ -1215,7 +1374,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-program",
         action="store_true",
-        help="Allow fcapz_connect(program=...) to program a .bit file",
+        help=(
+            "Allow fcapz_connect(program=...) to program a .bit file (any path "
+            "unless --bitfile-root is set) and allow a caller-supplied "
+            "quartus_stp executable path for the usb_blaster backend"
+        ),
     )
     parser.add_argument(
         "--bitfile-root",

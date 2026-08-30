@@ -123,9 +123,18 @@ Backend-irrelevant fields are rejected instead of being silently forwarded.
 `port`, and `tap` are rejected for it — even an explicit `host="127.0.0.1"`.
 Any other backend name is rejected up front with `unknown backend: <name>`.
 
+A caller-supplied `quartus_stp` names a host executable that the transport
+spawns, so it is gated behind `--allow-program` — the same opt-in as
+programming a bitstream — and rejected otherwise (including under
+`--read-only`). Omit it to use the server's configured/`PATH` toolchain. The
+`hardware` cable selector is a plain string and needs no gate.
+
 The MCP session enforces a 30 second RPC response timeout by default; override
-it with `--rpc-timeout SEC`. Backend transports may also have their own
-timeouts; whichever timeout is shorter fires first. If the MCP timeout fires,
+it with `--rpc-timeout SEC`. For wait-bearing commands (`fcapz_capture`,
+`fcapz_capture_wait`, `fcapz_uart_recv`) the watchdog deadline is extended to
+outlast the caller's own `timeout`, so a legitimate long wait never trips it;
+for all other commands the `--rpc-timeout` window applies. If the MCP timeout
+fires,
 the server asks the RPC layer to cancel any active transport when that layer
 exposes a cancellation hook, and treats the timeout as a session-wide reset:
 ELA, EIO, AXI, UART, cached probe data, and cached capture data are all cleared
@@ -146,17 +155,34 @@ same still-running worker guard applies.
 | Tool | Requires | Purpose |
 | --- | --- | --- |
 | `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
-| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` is set | Connect to an ELA core. |
+| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to an ELA core. `chain` selects the JTAG USER chain (omit to autodetect). |
 | `fcapz_close` | always available | Close the active ELA connection. Idempotent. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
+| `fcapz_list_cores` | connected ELA | List debug cores on the board (type, JTAG `chain`, identity) so an agent can pick the right chain for side connects. |
 | `fcapz_configure` | capture* | Configure the connected ELA without arming. |
 | `fcapz_arm` | capture* | Arm the connected ELA using the current hardware configuration. |
 | `fcapz_capture` | capture* | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
+| `fcapz_capture_wait` | capture* | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. |
+| `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
+| `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
 | `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
 
 `capture*` tools are enabled by default and blocked by `--read-only`.
+
+Two capture flows are available. `fcapz_capture` is the one-shot path: it
+configures, arms, and reads out in a single call, re-arming every time. For a
+long wait on a real hardware event, use the manual flow instead —
+`fcapz_configure`, then `fcapz_arm` once, then `fcapz_capture_status` to poll
+and `fcapz_capture_wait` to read out — so a single hardware arm is held across
+many short polls with no re-arm blind gaps. `fcapz_disarm` stops an arm. A
+capture `timeout` may exceed `--rpc-timeout`; the MCP watchdog extends its
+deadline to outlast the caller's wait rather than orphaning the call.
+
+`fcapz_capture` also takes `immediate=true`, which rewrites the trigger to an
+always-true condition so the capture fires now — a snapshot of current state
+with no waiting.
 
 `fcapz_capture` takes `include_event_summary` to ask the RPC layer for decoded
 event metadata. The MCP name is deliberately more explicit than the RPC field
