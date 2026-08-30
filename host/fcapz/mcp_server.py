@@ -33,6 +33,10 @@ JsonDict = dict[str, Any]
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
 _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
+# Ceiling on AXI block ops: a single tool call reads/writes at most this many
+# 32-bit words. Bounds both the JTAG round-trip time (watchdog) and the size of
+# a dump landing straight in model context; larger transfers must be chunked.
+_MAX_AXI_WORDS = 4096
 _RPC_CANCEL_GRACE_SEC = 1.0
 # The RPC layer caps every wait-bearing command at this many seconds
 # (rpc._MAX_WAIT_SEC); callers are rejected above it rather than silently
@@ -72,6 +76,24 @@ class McpWatchdogTimeout(TimeoutError):
     """
 
 
+@dataclass(frozen=True)
+class _CaptureCache:
+    """Immutable snapshot of the last capture, published by a single assignment.
+
+    Every derived view — the JSON text, its UTF-8 bytes, the byte size, and the
+    compact summary — is computed once at store time and never mutated. A reader
+    that grabs one ``_capture_cache`` reference therefore sees a fully
+    consistent set even if a new capture lands concurrently (FastMCP runs sync
+    tools/resources in a thread pool, so stores and reads can interleave).
+    """
+
+    payload: JsonDict
+    json_text: str
+    json_bytes: bytes
+    size_bytes: int
+    summary: JsonDict
+
+
 @dataclass
 class FcapzMcpSession:
     """Small stateful facade over :class:`RpcServer` for MCP tools."""
@@ -83,13 +105,9 @@ class FcapzMcpSession:
     axi_connected: bool = False
     uart_connected: bool = False
     last_probe: JsonDict | None = None
-    last_capture: JsonDict | None = None
-    last_capture_json: str | None = None
-    last_capture_json_bytes: bytes | None = None
-    last_capture_size_bytes: int | None = None
-    last_capture_summary: JsonDict | None = None
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
+    _capture_cache: "_CaptureCache | None" = field(default=None, init=False, repr=False)
     _rpc_lock: RLock = field(default_factory=RLock, init=False, repr=False)
     _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
@@ -115,6 +133,12 @@ class FcapzMcpSession:
         "trigger_holdoff",
         "trigger_delay",
     })
+
+    @property
+    def last_capture(self) -> JsonDict | None:
+        """The last capture's raw payload, or None. Read-only view of the cache."""
+        cache = self._capture_cache
+        return cache.payload if cache is not None else None
 
     def _worker_join_timeout(self, req: JsonDict) -> float:
         """Seconds to let the RPC worker run before the watchdog declares a timeout.
@@ -249,11 +273,7 @@ class FcapzMcpSession:
         self.axi_connected = False
         self.uart_connected = False
         self.last_probe = None
-        self.last_capture = None
-        self.last_capture_json = None
-        self.last_capture_json_bytes = None
-        self.last_capture_size_bytes = None
-        self.last_capture_summary = None
+        self._capture_cache = None
         self.last_eio_read = None
 
     @staticmethod
@@ -410,52 +430,41 @@ class FcapzMcpSession:
     def close(self) -> JsonDict:
         if not self.connected:
             self.last_probe = None
-            self.last_capture = None
-            self.last_capture_json = None
-            self.last_capture_json_bytes = None
-            self.last_capture_size_bytes = None
-            self.last_capture_summary = None
+            self._capture_cache = None
             return {"ok": True}
         response = self._rpc_call({"cmd": "close"})
         self.connected = False
         self.last_probe = None
-        self.last_capture = None
-        self.last_capture_json = None
-        self.last_capture_json_bytes = None
-        self.last_capture_size_bytes = None
-        self.last_capture_summary = None
+        self._capture_cache = None
         return response
 
     def drop_last_capture(self) -> JsonDict:
         # Captures may contain large sample payloads. Probe and EIO caches are small
         # enough to retain until overwritten or closed.
-        had_capture = self.last_capture is not None
-        self.last_capture = None
-        self.last_capture_json = None
-        self.last_capture_json_bytes = None
-        self.last_capture_size_bytes = None
-        self.last_capture_summary = None
+        had_capture = self._capture_cache is not None
+        self._capture_cache = None
         return {"ok": True, "had_capture": had_capture}
 
     def get_last_capture(self, max_bytes: int | None = _DEFAULT_FULL_CAPTURE_MAX_BYTES) -> JsonDict:
-        if self.last_capture is None:
+        cache = self._capture_cache  # one consistent snapshot for this call
+        if cache is None:
             return {"available": False}
         if max_bytes is not None and int(max_bytes) < 0:
             raise ValueError("max_bytes must be >= 0 or null")
-        size_bytes = self._last_capture_size_bytes()
+        size_bytes = cache.size_bytes
         if max_bytes is not None and size_bytes > int(max_bytes):
             return {
                 "available": True,
                 "truncated": True,
                 "size_bytes": size_bytes,
                 "max_bytes": int(max_bytes),
-                "summary": self._bounded_capture_summary(),
+                "summary": self._bounded_capture_summary(cache.summary),
                 "message": (
                     "cached capture is larger than max_bytes; use "
                     "fcapz_get_last_capture_chunk for bounded retrieval"
                 ),
             }
-        response = dict(self.last_capture)
+        response = dict(cache.payload)
         response.setdefault("available", True)
         response.setdefault("truncated", False)
         response.setdefault("size_bytes", size_bytes)
@@ -467,7 +476,8 @@ class FcapzMcpSession:
         offset: int = 0,
         max_bytes: int = _DEFAULT_CAPTURE_CHUNK_BYTES,
     ) -> JsonDict:
-        if self.last_capture is None:
+        cache = self._capture_cache  # one consistent snapshot for this call
+        if cache is None:
             return {"available": False}
         offset_i = int(offset)
         max_bytes_i = int(max_bytes)
@@ -475,8 +485,8 @@ class FcapzMcpSession:
             raise ValueError("offset must be >= 0")
         if max_bytes_i <= 0:
             raise ValueError("max_bytes must be > 0")
-        payload_bytes = self._last_capture_json_bytes()
-        size_bytes = self._last_capture_size_bytes()
+        payload_bytes = cache.json_bytes
+        size_bytes = cache.size_bytes
         start = min(offset_i, size_bytes)
         if start < size_bytes and not self._is_utf8_start_byte(payload_bytes[start]):
             raise ValueError("offset must point to a UTF-8 character boundary")
@@ -527,17 +537,20 @@ class FcapzMcpSession:
         return seconds
 
     def _store_capture(self, response: JsonDict) -> JsonDict:
-        """Cache a capture readout and return its compact summary."""
-        self.last_capture = response
-        self.last_capture_json = json.dumps(
-            response,
-            ensure_ascii=False,
-            separators=(",", ":"),
+        """Cache a capture readout as one immutable snapshot; return its summary."""
+        json_text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        json_bytes = json_text.encode("utf-8")
+        summary = self._capture_summary(response)
+        # Publish every derived view at once with a single assignment so a
+        # concurrent reader never sees a half-updated cache (see _CaptureCache).
+        self._capture_cache = _CaptureCache(
+            payload=response,
+            json_text=json_text,
+            json_bytes=json_bytes,
+            size_bytes=len(json_bytes),
+            summary=summary,
         )
-        self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
-        self.last_capture_size_bytes = len(self.last_capture_json_bytes)
-        self.last_capture_summary = self._capture_summary()
-        return dict(self.last_capture_summary or {})
+        return dict(summary)
 
     def capture(
         self,
@@ -759,11 +772,17 @@ class FcapzMcpSession:
             raise PermissionError(
                 "AXI writes are disabled; restart with --allow-axi-write to enable them"
             )
+        words = [int(word) for word in data]
+        if len(words) > _MAX_AXI_WORDS:
+            raise ValueError(
+                f"data has {len(words)} words; the per-call limit is "
+                f"{_MAX_AXI_WORDS} — split the write into smaller blocks"
+            )
         return self._rpc_call(
             {
                 "cmd": "axi_write_block",
                 "addr": int(addr),
-                "data": [int(word) for word in data],
+                "data": words,
                 "burst": bool(burst),
             }
         )
@@ -772,6 +791,11 @@ class FcapzMcpSession:
         count_i = int(count)
         if count_i < 0:
             raise ValueError(f"count must be >= 0, got {count_i}")
+        if count_i > _MAX_AXI_WORDS:
+            raise ValueError(
+                f"count is {count_i}; the per-call limit is {_MAX_AXI_WORDS} "
+                "words — dump in smaller chunks with successive addresses"
+            )
         return self._rpc_call(
             {"cmd": "axi_dump", "addr": int(addr), "count": count_i, "burst": bool(burst)}
         )
@@ -852,6 +876,7 @@ class FcapzMcpSession:
             worker = self._active_rpc_worker
             rpc_busy = worker is not None and worker.is_alive()
             active_rpc_cmd = self._active_rpc_cmd if rpc_busy else None
+        cache = self._capture_cache  # one consistent snapshot
         return {
             "mcp_server_version": self._server_version(),
             "rpc_schema_version": self.last_rpc_schema_version,
@@ -877,12 +902,10 @@ class FcapzMcpSession:
             },
             "last_probe": dict(self.last_probe) if self.last_probe is not None else None,
             "last_capture_summary": (
-                dict(self.last_capture_summary)
-                if self.last_capture_summary is not None
-                else None
+                dict(cache.summary) if cache is not None else None
             ),
             "last_capture_size_bytes": (
-                self._last_capture_size_bytes() if self.last_capture is not None else None
+                cache.size_bytes if cache is not None else None
             ),
             "last_eio_read": (
                 dict(self.last_eio_read) if self.last_eio_read is not None else None
@@ -890,42 +913,21 @@ class FcapzMcpSession:
         }
 
     def last_capture_json_text(self) -> str:
-        if self.last_capture is None:
+        cache = self._capture_cache
+        if cache is None:
             return json.dumps(
                 {"available": False},
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-        if self.last_capture_json is None:
-            self.last_capture_json = json.dumps(
-                self.last_capture,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            self.last_capture_json_bytes = self.last_capture_json.encode("utf-8")
-            self.last_capture_size_bytes = len(self.last_capture_json_bytes)
-        return self.last_capture_json
-
-    def _last_capture_json_bytes(self) -> bytes:
-        if self.last_capture is None:
-            return json.dumps({"available": False}, separators=(",", ":")).encode("utf-8")
-        if self.last_capture_json_bytes is None:
-            self.last_capture_json_bytes = self.last_capture_json_text().encode("utf-8")
-            self.last_capture_size_bytes = len(self.last_capture_json_bytes)
-        return self.last_capture_json_bytes
-
-    def _last_capture_size_bytes(self) -> int:
-        if self.last_capture_size_bytes is None:
-            self.last_capture_size_bytes = len(self._last_capture_json_bytes())
-        return self.last_capture_size_bytes
+        return cache.json_text
 
     @staticmethod
     def _is_utf8_start_byte(byte: int) -> bool:
         return byte < 0x80 or 0xC2 <= byte <= 0xF4
 
-    def _capture_summary(self) -> JsonDict | None:
-        if self.last_capture is None:
-            return None
+    @staticmethod
+    def _capture_summary(payload: JsonDict) -> JsonDict:
         # Keep tool results compact while allowing newly added top-level metadata
         # to surface automatically. Update this set when RPC adds bulky payloads.
         bulky_keys = {
@@ -940,13 +942,13 @@ class FcapzMcpSession:
             "words",
         }
         summary: JsonDict = {
-            key: value for key, value in self.last_capture.items() if key not in bulky_keys
+            key: value for key, value in payload.items() if key not in bulky_keys
         }
         summary.setdefault("ok", True)
         return summary
 
-    def _bounded_capture_summary(self, max_bytes: int = 8192) -> JsonDict:
-        summary = dict(self.last_capture_summary or {})
+    def _bounded_capture_summary(self, summary: JsonDict, max_bytes: int = 8192) -> JsonDict:
+        summary = dict(summary)
         payload = json.dumps(summary, separators=(",", ":")).encode("utf-8")
         if len(payload) <= max_bytes:
             return summary
@@ -1322,7 +1324,8 @@ def build_mcp_server(session: FcapzMcpSession):
     ) -> JsonDict:
         """Write 32-bit AXI words starting at an integer byte address.
 
-        data is a list of integer words. When burst is false, words are written
+        data is a list of integer words (at most 4096 per call — split larger
+        writes into successive blocks). When burst is false, words are written
         sequentially; when true, the bridge uses its burst write path.
         """
 
@@ -1332,7 +1335,8 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_axi_dump(addr: int, count: int, burst: bool = False) -> JsonDict:
         """Read count 32-bit AXI words starting at an integer byte address.
 
-        count is measured in 32-bit words, not bytes.
+        count is measured in 32-bit words, not bytes, and is capped at 4096 per
+        call — dump larger regions in chunks at successive addresses.
         """
 
         return session.axi_dump(addr, count, burst=burst)

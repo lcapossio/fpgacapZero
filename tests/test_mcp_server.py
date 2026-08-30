@@ -400,6 +400,32 @@ class FcapzMcpSessionTests(unittest.TestCase):
         # A well-formed payload still goes through.
         session.uart_send(data_base64="aGk=")
 
+    def test_capture_cache_is_a_consistent_snapshot(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.capture()
+
+        cache = session._capture_cache
+        self.assertIsNotNone(cache)
+        # Every derived view agrees — the invariant a concurrent reader relies on.
+        self.assertEqual(cache.size_bytes, len(cache.json_bytes))
+        self.assertEqual(cache.json_bytes, cache.json_text.encode("utf-8"))
+        self.assertEqual(session.last_capture, cache.payload)
+        # drop clears the whole snapshot atomically.
+        session.drop_last_capture()
+        self.assertIsNone(session._capture_cache)
+        self.assertIsNone(session.last_capture)
+
+    def test_axi_block_ops_reject_over_word_limit(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_axi_write=True)
+        )
+        with self.assertRaisesRegex(ValueError, "per-call limit"):
+            session.axi_dump(0x1000, mcp_server._MAX_AXI_WORDS + 1)
+        with self.assertRaisesRegex(ValueError, "per-call limit"):
+            session.axi_write_block(0x1000, [0] * (mcp_server._MAX_AXI_WORDS + 1))
+        # At the limit it still goes through.
+        session.axi_dump(0x1000, mcp_server._MAX_AXI_WORDS)
+
     def test_worker_join_timeout_outlasts_capture_timeout(self):
         session = FcapzMcpSession(
             rpc=FakeRpc(), capabilities=McpCapabilities(rpc_timeout_sec=30.0)
@@ -522,21 +548,29 @@ class FcapzMcpSessionTests(unittest.TestCase):
 
     def test_get_last_capture_chunk_rejects_invalid_utf8_start_offset(self):
         session = FcapzMcpSession(rpc=FakeRpc())
-        session.last_capture = {"ok": True}
-        session.last_capture_json = None
-        session.last_capture_json_bytes = b'{"bad":"\xff"}'
-        session.last_capture_size_bytes = len(session.last_capture_json_bytes)
+        json_bytes = b'{"bad":"\xff"}'
+        session._capture_cache = mcp_server._CaptureCache(
+            payload={"ok": True},
+            json_text=json_bytes.decode("latin-1"),
+            json_bytes=json_bytes,
+            size_bytes=len(json_bytes),
+            summary={"ok": True},
+        )
 
         with self.assertRaisesRegex(ValueError, "UTF-8 character boundary"):
             session.get_last_capture_chunk(offset=8, max_bytes=16)
 
     def test_get_last_capture_bounds_large_summary(self):
         session = FcapzMcpSession(rpc=FakeRpc())
-        session.last_capture = {"ok": True}
-        session.last_capture_summary = {"events": ["x" * 9000]}
-        session.last_capture_json = '{"ok":true,"result":"' + ("x" * 200) + '"}'
-        session.last_capture_json_bytes = session.last_capture_json.encode("utf-8")
-        session.last_capture_size_bytes = len(session.last_capture_json_bytes)
+        json_text = '{"ok":true,"result":"' + ("x" * 200) + '"}'
+        json_bytes = json_text.encode("utf-8")
+        session._capture_cache = mcp_server._CaptureCache(
+            payload={"ok": True},
+            json_text=json_text,
+            json_bytes=json_bytes,
+            size_bytes=len(json_bytes),
+            summary={"ok": True, "events": ["x" * 9000]},
+        )
 
         response = session.get_last_capture(max_bytes=16)
 

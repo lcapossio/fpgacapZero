@@ -248,7 +248,10 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 AXI MCP schemas use integer byte addresses and integer 32-bit data words. Convert
 hex strings such as `"0x40000000"` to JSON integers before calling. `count` is
 measured in 32-bit words, not bytes. `wstrb` is a 4-bit integer byte-lane mask;
-bit 0 controls the lowest byte.
+bit 0 controls the lowest byte. `fcapz_axi_dump` and `fcapz_axi_write_block` are
+capped at **4096 words per call** — both to bound the JTAG round-trip against the
+watchdog and to keep a dump from flooding model context; transfer larger regions
+in chunks at successive addresses.
 
 ### eJTAG-UART
 
