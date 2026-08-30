@@ -180,47 +180,39 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(session.eio_close(), {"ok": True})
         self.assertEqual(rpc.requests, [])
 
-    def test_connect_forwards_future_backend_options(self):
+    def test_connect_forwards_usb_blaster_options(self):
         rpc = FakeRpc()
         session = FcapzMcpSession(rpc=rpc)
 
-        session.connect(
-            backend="spi",
-            spi_url="ftdi://ftdi:232h/1",
-            spi_frequency=2_000_000,
-            spi_cs=1,
-            spi_timeout=3.5,
-        )
         session.connect(
             backend="usb_blaster",
             hardware="USB-Blaster",
             quartus_stp="quartus_stp",
         )
 
-        self.assertEqual(rpc.requests[0]["backend"], "spi")
+        self.assertEqual(rpc.requests[0]["backend"], "usb_blaster")
         self.assertNotIn("host", rpc.requests[0])
         self.assertNotIn("tap", rpc.requests[0])
-        self.assertEqual(rpc.requests[0]["spi_url"], "ftdi://ftdi:232h/1")
-        self.assertEqual(rpc.requests[0]["spi_frequency"], 2_000_000.0)
-        self.assertEqual(rpc.requests[0]["spi_cs"], 1)
-        self.assertEqual(rpc.requests[0]["spi_timeout"], 3.5)
-        self.assertEqual(rpc.requests[2]["backend"], "usb_blaster")
-        self.assertNotIn("host", rpc.requests[2])
-        self.assertNotIn("tap", rpc.requests[2])
-        self.assertEqual(rpc.requests[2]["hardware"], "USB-Blaster")
-        self.assertEqual(rpc.requests[2]["quartus_stp"], "quartus_stp")
+        self.assertEqual(rpc.requests[0]["hardware"], "USB-Blaster")
+        self.assertEqual(rpc.requests[0]["quartus_stp"], "quartus_stp")
+
+    def test_connect_rejects_spi_backend(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+
+        with self.assertRaisesRegex(ValueError, "unknown backend: spi"):
+            session.connect(backend="spi")
 
     def test_connect_rejects_backend_irrelevant_options(self):
         session = FcapzMcpSession(rpc=FakeRpc())
 
-        with self.assertRaisesRegex(ValueError, "spi_url not supported"):
-            session.connect(backend="hw_server", spi_url="ftdi://ftdi:232h/1")
-        with self.assertRaisesRegex(ValueError, "tap not supported"):
-            session.connect(backend="spi", tap="xc7a100t.tap")
-        with self.assertRaisesRegex(ValueError, "host not supported"):
-            session.connect(backend="spi", host="127.0.0.1")
         with self.assertRaisesRegex(ValueError, "hardware not supported"):
-            session.eio_connect(backend="spi", hardware="USB-Blaster")
+            session.connect(backend="hw_server", hardware="USB-Blaster")
+        with self.assertRaisesRegex(ValueError, "tap not supported"):
+            session.connect(backend="usb_blaster", tap="xc7a100t.tap")
+        with self.assertRaisesRegex(ValueError, "host not supported"):
+            session.connect(backend="usb_blaster", host="127.0.0.1")
+        with self.assertRaisesRegex(ValueError, "quartus_stp not supported"):
+            session.eio_connect(backend="openocd", quartus_stp="quartus_stp")
 
     def test_capture_merges_config_and_records_summary(self):
         rpc = FakeRpc()
@@ -444,7 +436,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
         session = FcapzMcpSession(rpc=rpc)
 
         session.eio_connect(backend="hw_server")
-        session.eio_connect(backend="spi")
+        session.eio_connect(backend="usb_blaster")
 
         self.assertEqual(rpc.requests[0]["chain"], 3)
         self.assertEqual(rpc.requests[1], {"cmd": "eio_close"})

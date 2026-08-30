@@ -204,7 +204,7 @@ class FcapzMcpSession:
 
     @staticmethod
     def _default_eio_chain(backend: str) -> int:
-        if backend in ("usb_blaster", "spi"):
+        if backend == "usb_blaster":
             return 0
         return 3
 
@@ -226,10 +226,6 @@ class FcapzMcpSession:
         tap: str | None,
         hardware: str | None,
         quartus_stp: str | None,
-        spi_url: str | None,
-        spi_frequency: float | None,
-        spi_cs: int | None,
-        spi_timeout: float | None,
     ) -> None:
         if backend in ("hw_server", "openocd"):
             self._reject_fields(
@@ -237,10 +233,6 @@ class FcapzMcpSession:
                 {
                     "hardware": hardware,
                     "quartus_stp": quartus_stp,
-                    "spi_url": spi_url,
-                    "spi_frequency": spi_frequency,
-                    "spi_cs": spi_cs,
-                    "spi_timeout": spi_timeout,
                 },
             )
             req["host"] = host or "127.0.0.1"
@@ -254,10 +246,6 @@ class FcapzMcpSession:
                 backend,
                 {
                     "tap": tap,
-                    "spi_url": spi_url,
-                    "spi_frequency": spi_frequency,
-                    "spi_cs": spi_cs,
-                    "spi_timeout": spi_timeout,
                     "port": port,
                     "host": host,
                 },
@@ -266,27 +254,6 @@ class FcapzMcpSession:
                 req["hardware"] = hardware
             if quartus_stp is not None:
                 req["quartus_stp"] = quartus_stp
-            return
-
-        if backend == "spi":
-            self._reject_fields(
-                backend,
-                {
-                    "tap": tap,
-                    "hardware": hardware,
-                    "quartus_stp": quartus_stp,
-                    "port": port,
-                    "host": host,
-                },
-            )
-            if spi_url is not None:
-                req["spi_url"] = spi_url
-            if spi_frequency is not None:
-                req["spi_frequency"] = float(spi_frequency)
-            if spi_cs is not None:
-                req["spi_cs"] = int(spi_cs)
-            if spi_timeout is not None:
-                req["spi_timeout"] = float(spi_timeout)
             return
 
         raise ValueError(f"unknown backend: {backend}")
@@ -302,10 +269,6 @@ class FcapzMcpSession:
         single_chain_burst: bool = True,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         program_path = self._validated_program_path(program, backend=backend)
         if self.connected:
@@ -322,10 +285,6 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
         if backend == "hw_server":
             req["single_chain_burst"] = single_chain_burst
@@ -521,10 +480,6 @@ class FcapzMcpSession:
         chain: int | None,
         hardware: str | None,
         quartus_stp: str | None,
-        spi_url: str | None,
-        spi_frequency: float | None,
-        spi_cs: int | None,
-        spi_timeout: float | None,
     ) -> JsonDict:
         req: JsonDict = {
             "cmd": cmd,
@@ -539,10 +494,6 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
         return req
 
@@ -556,10 +507,6 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         if self.eio_connected:
             self.eio_close()
@@ -576,10 +523,6 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
         response = self._rpc_call(req)
         self.eio_connected = True
@@ -616,10 +559,6 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         if self.axi_connected:
             self.axi_close()
@@ -633,10 +572,6 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
-                spi_url=spi_url,
-                spi_frequency=spi_frequency,
-                spi_cs=spi_cs,
-                spi_timeout=spi_timeout,
             )
         )
         self.axi_connected = True
@@ -696,10 +631,6 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         if self.uart_connected:
             self.uart_close()
@@ -713,10 +644,6 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
-                spi_url=spi_url,
-                spi_frequency=spi_frequency,
-                spi_cs=spi_cs,
-                spi_timeout=spi_timeout,
             )
         )
         self.uart_connected = True
@@ -924,22 +851,17 @@ def build_mcp_server(session: FcapzMcpSession):
         single_chain_burst: bool = True,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         """Connect to an ELA core.
 
-        Supported by this branch's RPC layer: backend="hw_server" and
-        backend="openocd". Backend-specific parameters are accepted and
-        forwarded for compatibility with newer transports: hardware selects a
-        Quartus cable, quartus_stp selects the Quartus STP executable, spi_url
-        selects a pyftdi SPI adapter, spi_frequency is in Hz, spi_cs is the SPI
-        chip-select index, and spi_timeout is in seconds. Other timeout values
-        are also seconds. Backend-irrelevant fields are rejected instead of
-        forwarded. program is hw_server-only, disabled unless fcapz-mcp was
-        started with --allow-program, and must be an existing .bit file.
+        Backends: "hw_server" (AMD/Xilinx hw_server, the default), "openocd"
+        (any OpenOCD-supported adapter), and "usb_blaster" (Intel/Altera via
+        Quartus). For usb_blaster, `hardware` selects the Quartus cable and
+        `quartus_stp` selects the quartus_stp executable; those two fields are
+        rejected for the other backends, and host/port/tap are rejected for
+        usb_blaster. All timeout values are in seconds. `program` is
+        hw_server-only, disabled unless fcapz-mcp was started with
+        --allow-program, and must be an existing .bit file.
         """
 
         return session.connect(
@@ -951,10 +873,6 @@ def build_mcp_server(session: FcapzMcpSession):
             single_chain_burst=single_chain_burst,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -1054,19 +972,14 @@ def build_mcp_server(session: FcapzMcpSession):
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         """Connect to an Embedded I/O core.
 
         chain defaults by backend: 3 for hw_server/openocd, 0 for
-        usb_blaster/spi. Pass chain explicitly for non-default JTAG USER chains,
+        usb_blaster. Pass chain explicitly for non-default JTAG USER chains,
         Intel virtual JTAG instance indices, or managed core slots. Backend
         fields mirror fcapz_connect: hardware/quartus_stp for Quartus USB
-        Blaster sessions and spi_url/spi_frequency/spi_cs/spi_timeout for SPI
-        register transports.
+        Blaster sessions.
         """
 
         return session.eio_connect(
@@ -1077,10 +990,6 @@ def build_mcp_server(session: FcapzMcpSession):
             chain=chain,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -1110,10 +1019,6 @@ def build_mcp_server(session: FcapzMcpSession):
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         """Connect to an eJTAG-to-AXI4 bridge.
 
@@ -1129,10 +1034,6 @@ def build_mcp_server(session: FcapzMcpSession):
             chain=chain,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -1197,10 +1098,6 @@ def build_mcp_server(session: FcapzMcpSession):
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
-        spi_url: str | None = None,
-        spi_frequency: float | None = None,
-        spi_cs: int | None = None,
-        spi_timeout: float | None = None,
     ) -> JsonDict:
         """Connect to an eJTAG-UART bridge.
 
@@ -1216,10 +1113,6 @@ def build_mcp_server(session: FcapzMcpSession):
             chain=chain,
             hardware=hardware,
             quartus_stp=quartus_stp,
-            spi_url=spi_url,
-            spi_frequency=spi_frequency,
-            spi_cs=spi_cs,
-            spi_timeout=spi_timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)

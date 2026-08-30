@@ -109,37 +109,32 @@ safety policy first.
 
 ## Backends And Connection Fields
 
-The branch's live RPC layer supports:
+The live RPC layer supports:
 
 | Backend | Target fields | Optional fields |
 | --- | --- | --- |
 | `hw_server` | `host`, `port`, `tap` | `program`, `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap` | - |
-
-The MCP layer also validates and forwards newer backend-specific fields for
-compatibility with transports on adjacent branches:
-
-| Backend | Target fields | Optional fields |
-| --- | --- | --- |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
-| `spi` | `spi_url` | `spi_frequency`, `spi_cs`, `spi_timeout` |
 
 Backend-irrelevant fields are rejected instead of being silently forwarded.
-`hw_server` and `openocd` default `host` to `127.0.0.1` when omitted. `spi` and
-`usb_blaster` have no host concept, so even explicit `host="127.0.0.1"` is
-rejected.
+`hw_server` and `openocd` default `host` to `127.0.0.1` when omitted.
+`usb_blaster` (Intel/Altera via Quartus) has no host concept, so `host`,
+`port`, and `tap` are rejected for it — even an explicit `host="127.0.0.1"`.
+Any other backend name is rejected up front with `unknown backend: <name>`.
 
 The MCP session enforces a 30 second RPC response timeout by default; override
 it with `--rpc-timeout SEC`. Backend transports may also have their own
 timeouts; whichever timeout is shorter fires first. If the MCP timeout fires,
-the server asks the RPC layer to cancel active transports and treats that as a
-session-wide reset: ELA, EIO, AXI, UART, cached probe data, and cached capture
-data are all cleared if the worker unwinds. Xilinx `xsdb` sessions are killed
-quickly and OpenOCD sockets are closed; other backends use best-effort
-`close()`. If a backend cannot be cancelled promptly, the server refuses new
-hardware commands until the process is restarted. `--rpc-cancel-grace SEC`
-controls how long the MCP layer waits for the worker to unwind after
-cancellation before declaring it still active. It must be greater than zero.
+the server asks the RPC layer to cancel any active transport when that layer
+exposes a cancellation hook, and treats the timeout as a session-wide reset:
+ELA, EIO, AXI, UART, cached probe data, and cached capture data are all cleared
+if the worker unwinds. If the RPC layer has no cancellation hook, or a backend
+cannot be unwound promptly, the timed-out worker is left running and the server
+refuses new hardware commands until the process is restarted — this fail-closed
+guard is what prevents a stuck call from corrupting a later one.
+`--rpc-cancel-grace SEC` controls how long the MCP layer waits for the worker
+to unwind after a cancel attempt before declaring it still active. It must be greater than zero.
 Transport construction is still best-effort: if a backend blocks before a
 transport object exists, cancellation cannot nudge that backend directly and the
 same still-running worker guard applies.
@@ -331,7 +326,7 @@ fcapz_uart_close()
 | Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | The server attempted a session-wide backend cancellation. Retry only if `fcapz_status` responds; restart if the next call reports a previous RPC still running. |
 | A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
-| SPI or USB-Blaster rejects `host` | Those backends do not use host/port sockets. | Omit `host` entirely for those backends. |
+| USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
 
 ## Related Chapters
 
