@@ -92,7 +92,9 @@ def build_firmware(out_dir: Path | None = None) -> Path:
     prefix = _resolve_prefix()
     cc = f"{prefix}gcc"
     objcopy = f"{prefix}objcopy"
-    out_dir = Path(out_dir) if out_dir else _FW_DIR
+    # Resolve to an absolute path: the compiler runs with cwd=_FW_DIR, so a
+    # relative out_dir would otherwise be taken relative to the firmware dir.
+    out_dir = Path(out_dir).resolve() if out_dir else _FW_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     elf = out_dir / "fw.elf"
@@ -100,8 +102,12 @@ def build_firmware(out_dir: Path | None = None) -> Path:
     mapf = out_dir / "fw.map"
     mem = _FW_DIR / "fw.mem"  # where vex_cpu.v's $readmemh looks
 
+    # --build-id=none: some GCCs (e.g. the Vitis riscv build) emit a
+    # .note.gnu.build-id by default, which the bare link script would place at
+    # address 0 and collide with .text.init. We do not consume the note.
     link = [cc, *_CFLAGS, "-nostdlib",
             f"-Wl,-T,{_FW_DIR / 'link.ld'}",
+            "-Wl,--build-id=none",
             "-Wl,--gc-sections", f"-Wl,-Map,{mapf}",
             "-o", str(elf), *_SOURCES, "-lgcc"]
     _run(link)

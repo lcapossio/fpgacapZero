@@ -6,7 +6,7 @@
  * The Dhrystone benchmark was written by Reinhold P. Weicker (1988) and is
  * freely distributable. This is a faithful, freestanding re-implementation of
  * the standard version 2.1 for the Arty A7 VexRiscv reference design: it keeps
- * the benchmark's types, globals, and the Proc_*/Func_* procedure mix exactly,
+ * the benchmark's types, globals, and the Proc/Func procedure mix exactly,
  * but replaces the host I/O (malloc / scanf / printf / clock()) with a fixed
  * run count, static record storage, an MMIO cycle counter, and result stores
  * to the shared AXI slave (see platform.h). The computed workload -- and hence
