@@ -33,13 +33,12 @@ a known pattern (`0xCAFEF00D`/`0x1234ABCD`) to slave words 16/17 only while the
 host raises a go flag (word 31), and otherwise just polls — so the CPU stays
 write-quiet during the other hardware tests, which use slave words 0..15.
 
-### VexRiscv variant (Dhrystone)
+### VexRiscv variant (open-source CPU)
 
-A second top-level, `arty_a7_vex_top`, is identical except the shared-bus CPU is
-an **open-source VexRiscv** (RV32I) instead of the proprietary MicroBlaze — so
-the reference design can be built without a MicroBlaze licence or `mb-gcc`. Its
-firmware (`vex/fw/`) runs the **Dhrystone** benchmark from on-chip BRAM and, when
-the host raises the go flag (word 31), publishes its score to the shared slave:
+A second top-level, `arty_a7_vex_top`, is a **drop-in** for the MicroBlaze
+design — same debug cores, same shared-bus wiring — except the CPU is an
+**open-source VexRiscv** (RV32I) instead of the proprietary MicroBlaze, so the
+reference design can be built without a MicroBlaze licence or `mb-gcc`:
 
 ```
 VexRiscv (M_CPU) ─┐
@@ -47,13 +46,15 @@ VexRiscv (M_CPU) ─┐
 EJTAG-AXI (USER4) ┘   (USER3 free, no MDM)      └─ AXI monitor (USER2)
 ```
 
-The CPU writes `Number_Of_Runs` (word 17), the measured cycle delta (word 18),
-the clock rate (word 19) and a global checksum (word 20), then a `DONE` sentinel
-(word 16). The host reads them back over EJTAG-AXI and computes
-DMIPS = runs / (cycles / Hz) / 1757. The `vex/` subsystem is pure RTL
-(`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v` with a Wishbone→AXI bridge and
-64 KB `$readmemh` BRAM) plus a SmartConnect-only block design (`create_vex_bd.tcl`);
-`get_deps.py` fetches the pinned VexRiscv core on the first build.
+Its firmware (`vex/fw/main.c`) is deliberately identical in behaviour to the
+MicroBlaze firmware: host-gated on the go flag (word 31), it writes the same
+`0xCAFEF00D`/`0x1234ABCD` pattern to slave words 16/17, and otherwise only polls.
+Because the observable bus contract is the same, **the full `test_hw_integration.py`
+suite runs unchanged against the vex bitstream** (see Hardware Tests). The `vex/`
+subsystem is pure RTL (`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v` with a
+Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM) plus a SmartConnect-only block
+design (`create_vex_bd.tcl`); `get_deps.py` fetches the pinned VexRiscv core on
+the first build.
 
 ## Files
 
@@ -68,7 +69,7 @@ DMIPS = runs / (cycles / Hz) / 1757. The `vex/` subsystem is pure RTL
 | `vex/vex_sys.v` | RTL wrapper presenting the same `M_EJTAG`/`M_BUS` interface as `mb_sys` |
 | `vex/create_vex_bd.tcl` | SmartConnect-only block design merging the CPU and EJTAG-AXI masters |
 | `vex/get_deps.py` | Fetches the SHA-pinned `VexRiscv_Lite.v` core (first build only) |
-| `vex/fw/` | Dhrystone firmware (`boot.S`, `dhry_*.c`, `link.ld`, `build_fw.py`) packed into the BRAM |
+| `vex/fw/` | Bus pattern-generator firmware (`boot.S`, `main.c`, `link.ld`, `build_fw.py`) packed into the BRAM |
 | `arty_a7.xdc` | Arty A7-100T pin and clock constraints |
 | `build.py` | Preferred Vivado batch-build launcher (MicroBlaze top) |
 | `build_arty.tcl` | Vivado project/script used by `build.py` |
@@ -76,8 +77,7 @@ DMIPS = runs / (cycles / Hz) / 1757. The `vex/` subsystem is pure RTL
 | `build_arty_vex.tcl` | Vivado project/script used by `build_arty_vex.py` |
 | `arty_a7.cfg` | OpenOCD config for the onboard USB-JTAG adapter |
 | `arty_a7_hs3.cfg` | OpenOCD config for an external Digilent HS3 cable |
-| `test_hw_integration.py` | Hardware integration regression tests (MicroBlaze top) |
-| `test_hw_integration_vex.py` | Hardware integration tests for the VexRiscv Dhrystone top |
+| `test_hw_integration.py` | Hardware integration regression tests (both tops; `FPGACAP_BITSTREAM_VARIANT=vex` targets the VexRiscv one) |
 | `arty_a7_top.bit` | Generated/reference bitstream |
 
 ## Board I/O
@@ -113,7 +113,7 @@ If `vivado` is not on `PATH`, pass it explicitly:
 python examples/arty_a7/build.py --vivado /path/to/vivado
 ```
 
-### VexRiscv (Dhrystone) variant
+### VexRiscv variant
 
 The open-source variant needs a RISC-V GCC toolchain (for the firmware) and, on
 the first build only, network access (to fetch the pinned VexRiscv core):
@@ -124,8 +124,8 @@ RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build_arty_vex.py
 
 Set `RISCV_PREFIX` to your toolchain prefix (the launcher also probes common
 prefixes on `PATH`). The build fetches `vex/VexRiscv_Lite.v`, compiles the
-Dhrystone firmware into `vex/fw/fw.mem`, then runs Vivado and copies the
-bitstream to `examples/arty_a7/arty_a7_vex_top.bit`.
+firmware into `vex/fw/fw.mem`, then runs Vivado and copies the bitstream to
+`examples/arty_a7/arty_a7_vex_top.bit`.
 
 ## Connect With hw_server
 
@@ -195,6 +195,14 @@ backend:
 ```sh
 openocd -f examples/arty_a7/arty_a7.cfg
 FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
+```
+
+To run the same suite against the **VexRiscv** bitstream (it is a drop-in, so
+every test applies), set the variant — it selects the `arty_a7_vex_top.bit`
+default and the matching freshness sources:
+
+```sh
+FPGACAP_BITSTREAM_VARIANT=vex python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
 To skip hardware tests in an environment without the board:

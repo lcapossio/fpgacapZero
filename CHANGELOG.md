@@ -9,15 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Arty A7 — VexRiscv (Dhrystone) reference variant.** A new `arty_a7_vex_top`
-  mirrors the MicroBlaze design but drops in an open-source VexRiscv (RV32I) soft
-  CPU on the shared AXI bus, so the reference design builds without a MicroBlaze
-  licence. Its firmware runs the Dhrystone benchmark from on-chip BRAM and
-  publishes its score to the test slave; the host reads it back over EJTAG-AXI
-  and reports DMIPS. New `vex/` RTL + SmartConnect block design, `build_arty_vex`
-  launcher, and `test_hw_integration_vex.py`. Hardware-validated on the Arty
-  A7-100T (Vivado 2025.2 + Vitis riscv gcc 13.4): ~0.55 DMIPS/MHz, and the AXI
-  monitor captures the CPU's write bursts.
+- **Arty A7 — VexRiscv reference variant.** A new `arty_a7_vex_top` is a drop-in
+  for the MicroBlaze design — same debug cores, same shared-bus wiring — with an
+  open-source VexRiscv (RV32I) soft CPU in place of the proprietary MicroBlaze,
+  so the reference design builds without a MicroBlaze licence or `mb-gcc`. Its
+  firmware presents the identical host-gated bus pattern, so the whole
+  `test_hw_integration.py` suite runs unchanged against it via
+  `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL + SmartConnect block design and
+  `build_arty_vex` launcher. Hardware-validated on the Arty A7-100T (Vivado
+  2025.2 + Vitis riscv gcc 13.4): full suite green on the vex bitstream.
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
