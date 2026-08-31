@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Arty A7 — VexRiscv (Dhrystone) reference variant.** A new `arty_a7_vex_top`
+  mirrors the MicroBlaze design but drops in an open-source VexRiscv (RV32I) soft
+  CPU on the shared AXI bus, so the reference design builds without a MicroBlaze
+  licence. Its firmware runs the Dhrystone benchmark from on-chip BRAM and
+  publishes its score to the test slave; the host reads it back over EJTAG-AXI
+  and reports DMIPS. New `vex/` RTL + SmartConnect block design, `build_arty_vex`
+  launcher, and `test_hw_integration_vex.py`.
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer

@@ -33,20 +33,51 @@ a known pattern (`0xCAFEF00D`/`0x1234ABCD`) to slave words 16/17 only while the
 host raises a go flag (word 31), and otherwise just polls — so the CPU stays
 write-quiet during the other hardware tests, which use slave words 0..15.
 
+### VexRiscv variant (Dhrystone)
+
+A second top-level, `arty_a7_vex_top`, is identical except the shared-bus CPU is
+an **open-source VexRiscv** (RV32I) instead of the proprietary MicroBlaze — so
+the reference design can be built without a MicroBlaze licence or `mb-gcc`. Its
+firmware (`vex/fw/`) runs the **Dhrystone** benchmark from on-chip BRAM and, when
+the host raises the go flag (word 31), publishes its score to the shared slave:
+
+```
+VexRiscv (M_CPU) ─┐
+                  ├─ SmartConnect ─ shared bus ─┬─ axi4_test_slave
+EJTAG-AXI (USER4) ┘   (USER3 free, no MDM)      └─ AXI monitor (USER2)
+```
+
+The CPU writes `Number_Of_Runs` (word 17), the measured cycle delta (word 18),
+the clock rate (word 19) and a global checksum (word 20), then a `DONE` sentinel
+(word 16). The host reads them back over EJTAG-AXI and computes
+DMIPS = runs / (cycles / Hz) / 1757. The `vex/` subsystem is pure RTL
+(`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v` with a Wishbone→AXI bridge and
+64 KB `$readmemh` BRAM) plus a SmartConnect-only block design (`create_vex_bd.tcl`);
+`get_deps.py` fetches the pinned VexRiscv core on the first build.
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `arty_a7_top.v` | Top-level reference design |
+| `arty_a7_top.v` | Top-level reference design (MicroBlaze CPU) |
 | `mb/create_mb_bd.tcl` | Generates the MicroBlaze block design (CPU + LMB + MDM@USER3 + SmartConnect) |
 | `mb/build_fw.tcl` | Compiles the CPU firmware with the MicroBlaze GCC shipped with Vivado |
 | `mb/fw/` | Firmware source (`boot.S`, `main.c`, `lscript.ld`) baked into the LMB BRAM |
+| `arty_a7_vex_top.v` | Top-level VexRiscv (Dhrystone) variant — same cores, open-source CPU |
+| `vex/vex_cpu.v` | VexRiscv core + Wishbone arbiter/decode + 64 KB BRAM + cycle counter + WB→AXI4 bridge |
+| `vex/vex_sys.v` | RTL wrapper presenting the same `M_EJTAG`/`M_BUS` interface as `mb_sys` |
+| `vex/create_vex_bd.tcl` | SmartConnect-only block design merging the CPU and EJTAG-AXI masters |
+| `vex/get_deps.py` | Fetches the SHA-pinned `VexRiscv_Lite.v` core (first build only) |
+| `vex/fw/` | Dhrystone firmware (`boot.S`, `dhry_*.c`, `link.ld`, `build_fw.py`) packed into the BRAM |
 | `arty_a7.xdc` | Arty A7-100T pin and clock constraints |
-| `build.py` | Preferred Vivado batch-build launcher |
+| `build.py` | Preferred Vivado batch-build launcher (MicroBlaze top) |
 | `build_arty.tcl` | Vivado project/script used by `build.py` |
+| `build_arty_vex.py` | Fetch core + build firmware + Vivado batch-build launcher (VexRiscv top) |
+| `build_arty_vex.tcl` | Vivado project/script used by `build_arty_vex.py` |
 | `arty_a7.cfg` | OpenOCD config for the onboard USB-JTAG adapter |
 | `arty_a7_hs3.cfg` | OpenOCD config for an external Digilent HS3 cable |
-| `test_hw_integration.py` | Hardware integration regression tests |
+| `test_hw_integration.py` | Hardware integration regression tests (MicroBlaze top) |
+| `test_hw_integration_vex.py` | Hardware integration tests for the VexRiscv Dhrystone top |
 | `arty_a7_top.bit` | Generated/reference bitstream |
 
 ## Board I/O
@@ -81,6 +112,20 @@ If `vivado` is not on `PATH`, pass it explicitly:
 ```sh
 python examples/arty_a7/build.py --vivado /path/to/vivado
 ```
+
+### VexRiscv (Dhrystone) variant
+
+The open-source variant needs a RISC-V GCC toolchain (for the firmware) and, on
+the first build only, network access (to fetch the pinned VexRiscv core):
+
+```sh
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build_arty_vex.py
+```
+
+Set `RISCV_PREFIX` to your toolchain prefix (the launcher also probes common
+prefixes on `PATH`). The build fetches `vex/VexRiscv_Lite.v`, compiles the
+Dhrystone firmware into `vex/fw/fw.mem`, then runs Vivado and copies the
+bitstream to `examples/arty_a7/arty_a7_vex_top.bit`.
 
 ## Connect With hw_server
 
