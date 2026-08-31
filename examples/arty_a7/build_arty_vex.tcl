@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-# Vivado build script for the fpgacapZero Arty A7-100T VexRiscv (Dhrystone)
-# reference design. Sibling of build_arty.tcl; the CPU subsystem is an
+# Vivado build script for the fpgacapZero Arty A7-100T VexRiscv reference
+# design. Sibling of build_arty.tcl; the CPU subsystem is an
 # open-source VexRiscv (examples/arty_a7/vex/) instead of MicroBlaze.
 #
 # Prerequisites (done by build_arty_vex.py before Vivado): vex/VexRiscv_Lite.v

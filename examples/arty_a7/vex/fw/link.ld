@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
  *
- * Linker script for the Arty VexRiscv Dhrystone firmware. Everything lives in
+ * Linker script for the Arty VexRiscv firmware. Everything lives in
  * the 64 KB on-chip BRAM at 0x0 (matches the RAM aperture decoded in
  * vex_cpu.v). The reset vector is forced to 0x0 so the CPU boots into _start.
  */

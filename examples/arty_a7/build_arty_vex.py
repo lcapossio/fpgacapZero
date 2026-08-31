@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Launch a Vivado batch build of the Arty A7 VexRiscv (Dhrystone) design.
+"""Launch a Vivado batch build of the Arty A7 VexRiscv design.
 
 Before Vivado runs, this fetches the pinned VexRiscv core and compiles the
 firmware into examples/arty_a7/vex/fw/fw.mem (loaded by vex_cpu.v via

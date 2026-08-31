@@ -7,7 +7,7 @@
 //
 // Wraps the pre-generated VexRiscv_Lite core (RV32I, plain Wishbone iBus/dBus;
 // fetched by examples/arty_a7/vex/get_deps.py) with just enough glue to run the
-// bare-metal Dhrystone firmware and drive the shared, monitored AXI bus:
+// bare-metal firmware and drive the shared, monitored AXI bus:
 //
 //   * a 2->1 classic-Wishbone arbiter merges the instruction and data buses;
 //   * an address decoder splits the merged bus into three regions --

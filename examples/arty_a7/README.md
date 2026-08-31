@@ -64,7 +64,7 @@ the first build.
 | `mb/create_mb_bd.tcl` | Generates the MicroBlaze block design (CPU + LMB + MDM@USER3 + SmartConnect) |
 | `mb/build_fw.tcl` | Compiles the CPU firmware with the MicroBlaze GCC shipped with Vivado |
 | `mb/fw/` | Firmware source (`boot.S`, `main.c`, `lscript.ld`) baked into the LMB BRAM |
-| `arty_a7_vex_top.v` | Top-level VexRiscv (Dhrystone) variant — same cores, open-source CPU |
+| `arty_a7_vex_top.v` | Top-level VexRiscv variant — same cores, open-source CPU |
 | `vex/vex_cpu.v` | VexRiscv core + Wishbone arbiter/decode + 64 KB BRAM + cycle counter + WB→AXI4 bridge |
 | `vex/vex_sys.v` | RTL wrapper presenting the same `M_EJTAG`/`M_BUS` interface as `mb_sys` |
 | `vex/create_vex_bd.tcl` | SmartConnect-only block design merging the CPU and EJTAG-AXI masters |

@@ -6,9 +6,9 @@
 // Arty A7-100T hardware-validation top-level for fpgacapZero -- VexRiscv variant.
 //
 // Identical to arty_a7_top.v except the shared-bus CPU is an open-source
-// VexRiscv (examples/arty_a7/vex/) running Dhrystone instead of the proprietary
-// MicroBlaze. The VexRiscv subsystem has no JTAG debug module, so USER3 is left
-// free (USER1=debug-multi, USER2=axi-mon, USER4=ejtag-axi as before).
+// VexRiscv (examples/arty_a7/vex/) instead of the proprietary MicroBlaze. The
+// VexRiscv subsystem has no JTAG debug module, so USER3 is left free
+// (USER1=debug-multi, USER2=axi-mon, USER4=ejtag-axi as before).
 //
 // The design is intentionally small and self-stimulating so the Python
 // hardware tests can run without external fabric logic:
@@ -368,9 +368,9 @@ module arty_a7_vex_top (
     // vex_cpu's AXI4 data master and the EJTAG bridge master (above) are merged
     // by an in-BD SmartConnect onto one AXI4 bus, M_BUS, which drives the test
     // slave and is passively tapped by the AXI monitor.  VexRiscv has no debug
-    // module, so USER3 stays free.  Firmware (in the on-chip BRAM) runs
-    // Dhrystone when the host raises a go-flag and publishes its score to the
-    // shared slave, giving the monitor real CPU bus traffic.
+    // module, so USER3 stays free.  Firmware (in the on-chip BRAM) writes a
+    // known pattern to the shared slave when the host raises a go-flag, giving
+    // the monitor real CPU bus traffic (same contract as the MicroBlaze top).
     wire [31:0] mbus_awaddr, mbus_wdata, mbus_araddr, mbus_rdata;
     wire [7:0]  mbus_awlen, mbus_arlen;
     wire [2:0]  mbus_awsize, mbus_arsize, mbus_awprot, mbus_arprot;
