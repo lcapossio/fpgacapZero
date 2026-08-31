@@ -15,7 +15,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   licence. Its firmware runs the Dhrystone benchmark from on-chip BRAM and
   publishes its score to the test slave; the host reads it back over EJTAG-AXI
   and reports DMIPS. New `vex/` RTL + SmartConnect block design, `build_arty_vex`
-  launcher, and `test_hw_integration_vex.py`.
+  launcher, and `test_hw_integration_vex.py`. Hardware-validated on the Arty
+  A7-100T (Vivado 2025.2 + Vitis riscv gcc 13.4): ~0.55 DMIPS/MHz, and the AXI
+  monitor captures the CPU's write bursts.
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
