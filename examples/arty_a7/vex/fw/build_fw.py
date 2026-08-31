@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Build the Arty VexRiscv Dhrystone firmware and emit a $readmemh image.
+"""Build the Arty VexRiscv firmware and emit a $readmemh image.
 
-Compiles the freestanding RV32I firmware (boot.S + the Dhrystone port) with a
-RISC-V GCC toolchain and packs the result into ``fw.mem`` -- 32-bit
-little-endian words, one hex value per line -- which ``vex_cpu.v`` loads into
-the on-chip BRAM via ``$readmemh`` at synthesis time.
+Compiles the freestanding RV32I firmware (boot.S + the host-gated bus pattern
+generator in main.c) with a RISC-V GCC toolchain and packs the result into
+``fw.mem`` -- 32-bit little-endian words, one hex value per line -- which
+``vex_cpu.v`` loads into the on-chip BRAM via ``$readmemh`` at synthesis time.
 
 No hardcoded toolchain paths: the cross toolchain is found from ``$RISCV_PREFIX``
 (e.g. ``riscv64-unknown-elf-``) or, failing that, the first known ``*-gcc`` on
@@ -26,17 +26,16 @@ from pathlib import Path
 
 _FW_DIR = Path(__file__).resolve().parent
 
-# RV32I so the base VexRiscv_Lite core (no M extension) runs it; soft mul/div
-# come from libgcc. -ffreestanding disables builtins, so our memcpy/strcpy in
-# support.c are not turned into self-recursive libcalls, while the compiler
-# still lowers Dhrystone's struct copies to memcpy (provided in support.c).
+# RV32I so the base VexRiscv_Lite core (no M extension) runs it; -ffreestanding
+# keeps the compiler from assuming a hosted libc. The pattern generator is pure
+# volatile loads/stores, so no libgcc/libc runtime is needed.
 _CFLAGS = [
     "-march=rv32i", "-mabi=ilp32", "-O2",
-    "-ffreestanding", "-fno-tree-loop-distribute-patterns",
+    "-ffreestanding",
     "-Wall", "-Wextra", "-std=c11",
     "-ffunction-sections", "-fdata-sections",
 ]
-_SOURCES = ["boot.S", "support.c", "dhry_1.c", "dhry_2.c"]
+_SOURCES = ["boot.S", "main.c"]
 
 # Must match the RAM aperture in link.ld / vex_cpu.v (64 KB, 16384 words).
 _MEM_WORDS = 16384
@@ -109,7 +108,7 @@ def build_firmware(out_dir: Path | None = None) -> Path:
             f"-Wl,-T,{_FW_DIR / 'link.ld'}",
             "-Wl,--build-id=none",
             "-Wl,--gc-sections", f"-Wl,-Map,{mapf}",
-            "-o", str(elf), *_SOURCES, "-lgcc"]
+            "-o", str(elf), *_SOURCES]
     _run(link)
     _run([objcopy, "-O", "binary", str(elf), str(binf)])
     _pack_mem(binf, mem)
