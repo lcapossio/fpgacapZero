@@ -46,8 +46,12 @@ _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
 
 _EXAMPLE_DIR = Path(__file__).resolve().parent
 _BITFILE_ENV = os.environ.get("FPGACAP_BITFILE")
-BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / "arty_a7_top.bit")
 _BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").lower()
+# The VexRiscv variant (arty_a7_vex_top) is a drop-in for the MicroBlaze design:
+# same debug cores, same host-gated CPU bus pattern, so this whole suite runs
+# against it with FPGACAP_BITSTREAM_VARIANT=vex (its default bitfile differs).
+_DEFAULT_BITNAME = "arty_a7_vex_top.bit" if _BITSTREAM_VARIANT == "vex" else "arty_a7_top.bit"
+BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
@@ -119,11 +123,37 @@ _BITSTREAM_SOURCES_VHDL = [
     _EXAMPLE_DIR / "arty_a7.xdc",
 ]
 
-_BITSTREAM_SOURCES = (
-    _BITSTREAM_SOURCES_VHDL
-    if _BITSTREAM_VARIANT == "vhdl"
-    else _BITSTREAM_SOURCES_VERILOG
-)
+# VexRiscv variant: shared cores + the new top + the vex subsystem RTL and its
+# firmware (boot.S + main.c packed into fw.mem). The fetched VexRiscv core and
+# fw.mem are listed but skipped if absent (get_deps.py / build_fw.py drop them
+# in at build time).
+_BITSTREAM_SOURCES_VEX = [
+    _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "tb" / "axi4_test_slave.v",
+    _EXAMPLE_DIR / "arty_a7_vex_top.v",
+    _EXAMPLE_DIR / "arty_a7.xdc",
+    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
+    _EXAMPLE_DIR / "vex" / "vex_sys.v",
+    _EXAMPLE_DIR / "vex" / "create_vex_bd.tcl",
+    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "vex" / "fw" / "main.c",
+    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
+    _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
+]
+
+if _BITSTREAM_VARIANT == "vhdl":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VHDL
+elif _BITSTREAM_VARIANT == "vex":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VEX
+else:
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VERILOG
 
 
 def _check_bitstream_freshness() -> str | None:
@@ -137,11 +167,10 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime:
             stale.append(src.name)
     if stale:
-        build_cmd = (
-            "python examples/arty_a7/build_vhdl.py"
-            if _BITSTREAM_VARIANT == "vhdl"
-            else "python examples/arty_a7/build.py"
-        )
+        build_cmd = {
+            "vhdl": "python examples/arty_a7/build_vhdl.py",
+            "vex": "python examples/arty_a7/build_arty_vex.py",
+        }.get(_BITSTREAM_VARIANT, "python examples/arty_a7/build.py")
         return (
             f"bitstream is stale — these sources are newer than "
             f"{bitpath.name}: {', '.join(stale)}. "
@@ -1389,11 +1418,13 @@ class TestAxiMonitor(unittest.TestCase):
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
 
-# ── AXI monitor + MicroBlaze CPU tests (USER2 monitor, USER3 MDM) ─────
-# The bitstream integrates a MicroBlaze whose M_AXI_DP data master shares one
-# SmartConnect bus with the EJTAG-AXI bridge; both reach the same test slave,
-# which the monitor taps.  The CPU therefore generates *real* bus traffic the
-# monitor can capture -- the headline of this integration.
+# ── AXI monitor + shared-bus CPU tests (USER2 monitor, USER3 CPU) ─────
+# The bitstream integrates a soft CPU whose data master shares one SmartConnect
+# bus with the EJTAG-AXI bridge; both reach the same test slave, which the
+# monitor taps.  The CPU therefore generates *real* bus traffic the monitor can
+# capture -- the headline of this integration.  The default (MicroBlaze) and the
+# VexRiscv variant (FPGACAP_BITSTREAM_VARIANT=vex) present the same host-gated
+# pattern contract, so these classes cover both unchanged.
 #
 # The firmware is host-gated: it writes its pattern to slave words 16/17 only
 # while the go flag (word 31) is non-zero, and otherwise just polls (reads).
