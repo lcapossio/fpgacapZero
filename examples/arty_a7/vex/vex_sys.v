@@ -8,15 +8,21 @@
 // Drop-in analogue of mb_sys_wrapper: it presents the same Clk/reset plus an
 // M_EJTAG AXI4 slave port (the EJTAG-AXI bridge master feeds it) and an M_BUS
 // AXI4 master port (drives the shared test slave + AXI-monitor tap). Internally
-// it wires the VexRiscv CPU (vex_cpu) and the EJTAG bridge onto a block-design
-// SmartConnect (vex_bus) that merges both masters onto M_BUS -- exactly how the
-// MicroBlaze subsystem merges microblaze_0's M_AXI_DP with the bridge, minus
-// the proprietary CPU/LMB/MDM.
+// it wires the VexRiscv CPU (vex_cpu) and the EJTAG bridge onto the vendor-
+// neutral fcapz_axi_interconnect (axiZero-generated 2x1 full-AXI4 crossbar)
+// that merges both masters onto M_BUS -- the same shared-bus merge the
+// MicroBlaze subsystem gets from a SmartConnect, but as portable RTL so the
+// DE25-Nano can reuse the identical interconnect.
 //
-//   vex_cpu (M_CPU) ─┐
-//                    ├─ SmartConnect (vex_bus) ─ M_BUS ─► test slave + monitor
-//   EJTAG bridge  ───┘   (S00=M_CPU, S01=M_EJTAG, M00=M_BUS)
-//        (M_EJTAG)
+//   vex_cpu (s0) ─┐
+//                 ├─ fcapz_axi_interconnect ─ M_BUS (m0) ─► test slave + monitor
+//   EJTAG bridge ─┘   (s0=CPU, s1=M_EJTAG, m0=M_BUS)
+//     (M_EJTAG, s1)
+//
+// The interconnect uses a single global slave map covering the whole 4 GiB, so
+// (unlike the SmartConnect per-master remap) the CPU's 0x4000_0000 traffic and
+// the host's addresses reach the test slave unmodified; axi4_test_slave aliases
+// by address-modulo, so both land on the same register words as before.
 
 module vex_sys (
     input  wire        Clk,
@@ -118,74 +124,70 @@ module vex_sys (
         .m_axi_rready (cpu_rready)
     );
 
-    // ---- SmartConnect block-design wrapper -----------------------------
-    // aresetn is active-low; the CPU's AXI4 qualifier inputs the bridge does
-    // not drive (awcache/awlock/awqos) are tied to sane defaults, mirroring how
-    // arty_a7_top ties them on the M_EJTAG port.
-    vex_bus_wrapper u_bus (
-        .aclk         (Clk),
-        .aresetn      (~reset),
+    // ---- Vendor-neutral AXI4 interconnect ------------------------------
+    // s0 = VexRiscv CPU, s1 = EJTAG-AXI bridge (M_EJTAG), m0 = shared M_BUS.
+    // aresetn is active-low. The masters do not drive awid/arid/awregion/
+    // arregion (single-ID masters) so those are tied off; the CPU's AXI4
+    // qualifier inputs (awcache/awlock/awqos) get the same sane defaults the
+    // SmartConnect build used, while the bridge forwards its own. m0's ID and
+    // qualifier outputs are unused downstream (the test slave/monitor ignore
+    // them) and left open; bid/rid inputs are tied off because response routing
+    // is by internal grant tracking (maxOutstanding=1 blocking), not slave IDs.
+    fcapz_axi_interconnect u_bus (
+        .aclk    (Clk),
+        .aresetn (~reset),
 
-        .M_CPU_awaddr (cpu_awaddr), .M_CPU_awlen  (cpu_awlen),
-        .M_CPU_awsize (cpu_awsize), .M_CPU_awburst(cpu_awburst),
-        .M_CPU_awprot (cpu_awprot), .M_CPU_awvalid(cpu_awvalid),
-        .M_CPU_awready(cpu_awready),
-        .M_CPU_awcache(4'b0011), .M_CPU_awlock(1'b0), .M_CPU_awqos(4'b0000),
-        .M_CPU_wdata  (cpu_wdata), .M_CPU_wstrb (cpu_wstrb),
-        .M_CPU_wlast  (cpu_wlast), .M_CPU_wvalid(cpu_wvalid),
-        .M_CPU_wready (cpu_wready),
-        .M_CPU_bresp  (cpu_bresp), .M_CPU_bvalid(cpu_bvalid),
-        .M_CPU_bready (cpu_bready),
-        .M_CPU_araddr (cpu_araddr), .M_CPU_arlen  (cpu_arlen),
-        .M_CPU_arsize (cpu_arsize), .M_CPU_arburst(cpu_arburst),
-        .M_CPU_arprot (cpu_arprot), .M_CPU_arvalid(cpu_arvalid),
-        .M_CPU_arready(cpu_arready),
-        .M_CPU_arcache(4'b0011), .M_CPU_arlock(1'b0), .M_CPU_arqos(4'b0000),
-        .M_CPU_rdata  (cpu_rdata), .M_CPU_rresp (cpu_rresp),
-        .M_CPU_rlast  (cpu_rlast), .M_CPU_rvalid(cpu_rvalid),
-        .M_CPU_rready (cpu_rready),
+        // ---- s0: VexRiscv CPU master ----
+        .s0_axi_awvalid(cpu_awvalid), .s0_axi_awready(cpu_awready),
+        .s0_axi_awaddr (cpu_awaddr), .s0_axi_awid(4'd0), .s0_axi_awregion(4'd0),
+        .s0_axi_awlen  (cpu_awlen), .s0_axi_awsize(cpu_awsize), .s0_axi_awburst(cpu_awburst),
+        .s0_axi_awlock (1'b0), .s0_axi_awcache(4'b0011), .s0_axi_awqos(4'b0000),
+        .s0_axi_awprot (cpu_awprot),
+        .s0_axi_wvalid (cpu_wvalid), .s0_axi_wready(cpu_wready),
+        .s0_axi_wdata  (cpu_wdata), .s0_axi_wstrb(cpu_wstrb), .s0_axi_wlast(cpu_wlast),
+        .s0_axi_bvalid (cpu_bvalid), .s0_axi_bready(cpu_bready),
+        .s0_axi_bid    (), .s0_axi_bresp(cpu_bresp),
+        .s0_axi_arvalid(cpu_arvalid), .s0_axi_arready(cpu_arready),
+        .s0_axi_araddr (cpu_araddr), .s0_axi_arid(4'd0), .s0_axi_arregion(4'd0),
+        .s0_axi_arlen  (cpu_arlen), .s0_axi_arsize(cpu_arsize), .s0_axi_arburst(cpu_arburst),
+        .s0_axi_arlock (1'b0), .s0_axi_arcache(4'b0011), .s0_axi_arqos(4'b0000),
+        .s0_axi_arprot (cpu_arprot),
+        .s0_axi_rvalid (cpu_rvalid), .s0_axi_rready(cpu_rready),
+        .s0_axi_rdata  (cpu_rdata), .s0_axi_rid(), .s0_axi_rresp(cpu_rresp), .s0_axi_rlast(cpu_rlast),
 
-        .M_EJTAG_awaddr (M_EJTAG_awaddr), .M_EJTAG_awlen  (M_EJTAG_awlen),
-        .M_EJTAG_awsize (M_EJTAG_awsize), .M_EJTAG_awburst(M_EJTAG_awburst),
-        .M_EJTAG_awprot (M_EJTAG_awprot), .M_EJTAG_awvalid(M_EJTAG_awvalid),
-        .M_EJTAG_awready(M_EJTAG_awready),
-        .M_EJTAG_awcache(M_EJTAG_awcache), .M_EJTAG_awlock(M_EJTAG_awlock),
-        .M_EJTAG_awqos  (M_EJTAG_awqos),
-        .M_EJTAG_wdata  (M_EJTAG_wdata), .M_EJTAG_wstrb (M_EJTAG_wstrb),
-        .M_EJTAG_wlast  (M_EJTAG_wlast), .M_EJTAG_wvalid(M_EJTAG_wvalid),
-        .M_EJTAG_wready (M_EJTAG_wready),
-        .M_EJTAG_bresp  (M_EJTAG_bresp), .M_EJTAG_bvalid(M_EJTAG_bvalid),
-        .M_EJTAG_bready (M_EJTAG_bready),
-        .M_EJTAG_araddr (M_EJTAG_araddr), .M_EJTAG_arlen  (M_EJTAG_arlen),
-        .M_EJTAG_arsize (M_EJTAG_arsize), .M_EJTAG_arburst(M_EJTAG_arburst),
-        .M_EJTAG_arprot (M_EJTAG_arprot), .M_EJTAG_arvalid(M_EJTAG_arvalid),
-        .M_EJTAG_arready(M_EJTAG_arready),
-        .M_EJTAG_arcache(M_EJTAG_arcache), .M_EJTAG_arlock(M_EJTAG_arlock),
-        .M_EJTAG_arqos  (M_EJTAG_arqos),
-        .M_EJTAG_rdata  (M_EJTAG_rdata), .M_EJTAG_rresp (M_EJTAG_rresp),
-        .M_EJTAG_rlast  (M_EJTAG_rlast), .M_EJTAG_rvalid(M_EJTAG_rvalid),
-        .M_EJTAG_rready (M_EJTAG_rready),
+        // ---- s1: EJTAG-AXI bridge master (M_EJTAG) ----
+        .s1_axi_awvalid(M_EJTAG_awvalid), .s1_axi_awready(M_EJTAG_awready),
+        .s1_axi_awaddr (M_EJTAG_awaddr), .s1_axi_awid(4'd0), .s1_axi_awregion(4'd0),
+        .s1_axi_awlen  (M_EJTAG_awlen), .s1_axi_awsize(M_EJTAG_awsize), .s1_axi_awburst(M_EJTAG_awburst),
+        .s1_axi_awlock (M_EJTAG_awlock), .s1_axi_awcache(M_EJTAG_awcache), .s1_axi_awqos(M_EJTAG_awqos),
+        .s1_axi_awprot (M_EJTAG_awprot),
+        .s1_axi_wvalid (M_EJTAG_wvalid), .s1_axi_wready(M_EJTAG_wready),
+        .s1_axi_wdata  (M_EJTAG_wdata), .s1_axi_wstrb(M_EJTAG_wstrb), .s1_axi_wlast(M_EJTAG_wlast),
+        .s1_axi_bvalid (M_EJTAG_bvalid), .s1_axi_bready(M_EJTAG_bready),
+        .s1_axi_bid    (), .s1_axi_bresp(M_EJTAG_bresp),
+        .s1_axi_arvalid(M_EJTAG_arvalid), .s1_axi_arready(M_EJTAG_arready),
+        .s1_axi_araddr (M_EJTAG_araddr), .s1_axi_arid(4'd0), .s1_axi_arregion(4'd0),
+        .s1_axi_arlen  (M_EJTAG_arlen), .s1_axi_arsize(M_EJTAG_arsize), .s1_axi_arburst(M_EJTAG_arburst),
+        .s1_axi_arlock (M_EJTAG_arlock), .s1_axi_arcache(M_EJTAG_arcache), .s1_axi_arqos(M_EJTAG_arqos),
+        .s1_axi_arprot (M_EJTAG_arprot),
+        .s1_axi_rvalid (M_EJTAG_rvalid), .s1_axi_rready(M_EJTAG_rready),
+        .s1_axi_rdata  (M_EJTAG_rdata), .s1_axi_rid(), .s1_axi_rresp(M_EJTAG_rresp), .s1_axi_rlast(M_EJTAG_rlast),
 
-        .M_BUS_awaddr (M_BUS_awaddr), .M_BUS_awlen  (M_BUS_awlen),
-        .M_BUS_awsize (M_BUS_awsize), .M_BUS_awburst(M_BUS_awburst),
-        .M_BUS_awprot (M_BUS_awprot), .M_BUS_awvalid(M_BUS_awvalid),
-        .M_BUS_awready(M_BUS_awready),
-        // Master-side AXI4 qualifier outputs are unused downstream (the test
-        // slave and monitor ignore them), left open as arty_a7_top does.
-        .M_BUS_awcache(), .M_BUS_awlock(), .M_BUS_awqos(),
-        .M_BUS_wdata  (M_BUS_wdata), .M_BUS_wstrb (M_BUS_wstrb),
-        .M_BUS_wlast  (M_BUS_wlast), .M_BUS_wvalid(M_BUS_wvalid),
-        .M_BUS_wready (M_BUS_wready),
-        .M_BUS_bresp  (M_BUS_bresp), .M_BUS_bvalid(M_BUS_bvalid),
-        .M_BUS_bready (M_BUS_bready),
-        .M_BUS_araddr (M_BUS_araddr), .M_BUS_arlen  (M_BUS_arlen),
-        .M_BUS_arsize (M_BUS_arsize), .M_BUS_arburst(M_BUS_arburst),
-        .M_BUS_arprot (M_BUS_arprot), .M_BUS_arvalid(M_BUS_arvalid),
-        .M_BUS_arready(M_BUS_arready),
-        .M_BUS_arcache(), .M_BUS_arlock(), .M_BUS_arqos(),
-        .M_BUS_rdata  (M_BUS_rdata), .M_BUS_rresp (M_BUS_rresp),
-        .M_BUS_rlast  (M_BUS_rlast), .M_BUS_rvalid(M_BUS_rvalid),
-        .M_BUS_rready (M_BUS_rready)
+        // ---- m0: shared bus master (M_BUS) -> test slave + monitor tap ----
+        .m0_axi_awvalid(M_BUS_awvalid), .m0_axi_awready(M_BUS_awready),
+        .m0_axi_awaddr (M_BUS_awaddr), .m0_axi_awid(), .m0_axi_awregion(),
+        .m0_axi_awlen  (M_BUS_awlen), .m0_axi_awsize(M_BUS_awsize), .m0_axi_awburst(M_BUS_awburst),
+        .m0_axi_awlock (), .m0_axi_awcache(), .m0_axi_awqos(), .m0_axi_awprot(M_BUS_awprot),
+        .m0_axi_wvalid (M_BUS_wvalid), .m0_axi_wready(M_BUS_wready),
+        .m0_axi_wdata  (M_BUS_wdata), .m0_axi_wstrb(M_BUS_wstrb), .m0_axi_wlast(M_BUS_wlast),
+        .m0_axi_bvalid (M_BUS_bvalid), .m0_axi_bready(M_BUS_bready),
+        .m0_axi_bid    (5'd0), .m0_axi_bresp(M_BUS_bresp),
+        .m0_axi_arvalid(M_BUS_arvalid), .m0_axi_arready(M_BUS_arready),
+        .m0_axi_araddr (M_BUS_araddr), .m0_axi_arid(), .m0_axi_arregion(),
+        .m0_axi_arlen  (M_BUS_arlen), .m0_axi_arsize(M_BUS_arsize), .m0_axi_arburst(M_BUS_arburst),
+        .m0_axi_arlock (), .m0_axi_arcache(), .m0_axi_arqos(), .m0_axi_arprot(M_BUS_arprot),
+        .m0_axi_rvalid (M_BUS_rvalid), .m0_axi_rready(M_BUS_rready),
+        .m0_axi_rdata  (M_BUS_rdata), .m0_axi_rid(5'd0), .m0_axi_rresp(M_BUS_rresp), .m0_axi_rlast(M_BUS_rlast)
     );
 
 endmodule

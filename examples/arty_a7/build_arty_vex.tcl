@@ -75,6 +75,7 @@ set src_list [list \
     $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio.v \
     $root/rtl/fcapz_eio_xilinx7.v \
+    $root/rtl/fcapz_axi_interconnect.v \
     $root/tb/axi4_test_slave.v \
     $example_dir/arty_a7_vex_top.v \
     $example_dir/vex/VexRiscv_Lite.v \
@@ -106,14 +107,10 @@ if {[file exists $project_xpr]} {
     set_property top arty_a7_vex_top [current_fileset]
 }
 
-# ── VexRiscv SmartConnect block design + HDL wrapper ──────────
-# vex_sys instantiates vex_bus_wrapper (SmartConnect: S00=vex_cpu master,
-# S01=EJTAG bridge, M00=M_BUS). Generated fresh into the project if absent.
-source $example_dir/vex/create_vex_bd.tcl
-if {[llength [get_files -quiet vex_bus.bd]] == 0} {
-    fcapz_build_vex_bd vex_bus
-    make_wrapper -files [get_files vex_bus.bd] -top -import
-}
+# ── Shared AXI4 bus ───────────────────────────────────────────
+# vex_sys merges the VexRiscv CPU and the EJTAG bridge onto M_BUS with the
+# vendor-neutral fcapz_axi_interconnect (rtl/, added to src_list above), so no
+# vendor block design / SmartConnect is generated any more.
 set_property top arty_a7_vex_top [current_fileset]
 
 # ── Synthesise + implement + write bitstream ──────────────────
