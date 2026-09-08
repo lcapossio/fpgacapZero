@@ -1641,14 +1641,15 @@ class TestAxiMonitorStress(unittest.TestCase):
         self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
 
     def test_repeated_arm_trigger_churn(self):
-        """50 back-to-back arm->trigger->done cycles on bridge writes.
+        """N back-to-back arm->trigger->done cycles on bridge writes.
 
         Each iteration re-arms from scratch and drives one write; the monitor
         must trigger and complete every time — no leaked state, no stuck-armed.
+        Count defaults to 50; raise it with FCAPZ_STRESS_CHURN (e.g. 100).
         """
         import time
 
-        n = 50
+        n = int(os.environ.get("FCAPZ_STRESS_CHURN", "50"))
         t0 = time.perf_counter()
         for i in range(n):
             self._arm("aw_hs")
@@ -1665,13 +1666,14 @@ class TestAxiMonitorStress(unittest.TestCase):
         With the CPU turned loose (go=1) it streams writes to the shared slave;
         the monitor must reliably re-arm and re-trigger on that sustained bus,
         run after run.  Proves the capture path survives a saturated real bus,
-        not just single injected transactions.
+        not just single injected transactions.  Count defaults to 30; raise it
+        with FCAPZ_STRESS_CAPTURES (e.g. 100).
         """
         import time
 
         self._set_go(1)  # turn the CPU loose — continuous writes
         try:
-            n = 30
+            n = int(os.environ.get("FCAPZ_STRESS_CAPTURES", "30"))
             t0 = time.perf_counter()
             for i in range(n):
                 # Under saturated traffic the monitor arms and triggers faster
