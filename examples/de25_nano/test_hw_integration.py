@@ -97,9 +97,14 @@ _BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
 # The VexRiscv variant swaps the RTL traffic generator for the CPU subsystem and
 # its baked-in firmware image; VexRiscv_Lite.v and fw.mem are fetched/built and
 # may be absent until the first build (the freshness check skips missing files).
+# The firmware sources are listed too, so editing main.c without rebuilding the
+# .mem still trips the freshness gate.
 _BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
     _EXAMPLE_DIR / "vex" / "vex_cpu.v",
     _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "vex" / "fw" / "main.c",
+    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
     _EXAMPLE_DIR / "de25_nano_vex_top.v",
     _EXAMPLE_DIR / "build_de25_nano_vex.tcl",
@@ -121,9 +126,14 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime
     ]
     if stale:
+        build_cmd = (
+            "python examples/de25_nano/build_de25_nano_vex.py"
+            if _BITSTREAM_VARIANT == "vex"
+            else "python examples/de25_nano/build.py"
+        )
         return (
             f"bitstream is stale; these sources are newer than {bitpath.name}: "
-            f"{', '.join(stale)}. Re-run: python examples/de25_nano/build.py"
+            f"{', '.join(stale)}. Re-run: {build_cmd}"
         )
     return None
 

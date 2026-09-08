@@ -92,10 +92,21 @@ Set `RISCV_PREFIX` to your toolchain prefix. The build fetches
 `vex/VexRiscv_Lite.v`, compiles the firmware into `vex/fw/fw.mem`, then runs
 Quartus and writes `examples/de25_nano/output_files/de25_nano_vex_fcapz.sof`.
 
-Run the hardware suite against it by selecting the variant (it applies unchanged,
-so every test runs):
+Program the board and run the hardware suite against it. The pytest suite does
+not program the FPGA, so use the runner (it builds, programs, and pytests the
+selected variant in one go):
 
 ```sh
+python examples/de25_nano/run_hw_tests.py \
+  --hardware "DE25-Nano [USB-1]" --variant vex --pytest
+```
+
+Or program it yourself and run pytest directly (it applies unchanged, so every
+test runs):
+
+```sh
+quartus_pgm -c "DE25-Nano [USB-1]" -m jtag \
+  -o "p;examples/de25_nano/output_files/de25_nano_vex_fcapz.sof@1"
 FPGACAP_BITSTREAM_VARIANT=vex python -m pytest examples/de25_nano/test_hw_integration.py -v
 ```
 

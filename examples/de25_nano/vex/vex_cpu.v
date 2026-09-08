@@ -23,9 +23,11 @@
 // transfers (CTI/BTE are ignored). The design favours obvious correctness over
 // throughput: one outstanding transaction, 1-cycle BRAM/counter latency.
 //
-// This file is byte-for-byte equivalent to examples/arty_a7/vex/vex_cpu.v; only
-// the RAM-inference attribute carries both the Xilinx (ram_style) and Intel
-// (ramstyle) spellings so the one source builds under either vendor.
+// This is a self-contained copy of the arbiter/decode/WB->AXI logic in
+// examples/arty_a7/vex/vex_cpu.v (kept per-example like the other DE25 RTL);
+// it is functionally identical, differing only in this header and in the
+// RAM-inference attribute, which here also carries the Intel (ramstyle)
+// spelling alongside the Xilinx (ram_style) one. Keep the two in sync.
 
 module vex_cpu #(
     parameter MEM_INIT_FILE = "fw.mem",
