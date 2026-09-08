@@ -3,30 +3,32 @@
 //
 // VexRiscv firmware for the DE25-Nano fpgacapZero reference design.
 //
-// The open-source VexRiscv replaces the RTL axi4_traffic_gen as the master on
-// the monitored AXI bus: the AXI monitor (instance 5) taps a mux that shows the
-// EJTAG-AXI bridge while the host drives it and, otherwise, this CPU's traffic.
-// So the monitor captures *real CPU bus traffic* the same way the Arty A7
-// VexRiscv variant does -- but here the CPU drives its own dedicated
-// axi4_test_slave, independent of the EJTAG-AXI bridge's slave.
+// The open-source VexRiscv replaces the RTL axi4_traffic_gen as a master on
+// the monitored AXI bus. The CPU and the EJTAG-AXI bridge are now merged by the
+// vendor-neutral fcapz_axi_interconnect onto one shared axi4_test_slave (M_BUS),
+// which the AXI monitor (instance 5) taps -- the same shared-bus topology the
+// Arty A7 VexRiscv variant gets from a SmartConnect. The host can therefore
+// read back CPU writes over EJTAG-AXI, just like on the Arty.
 //
-// Because that slave is not reachable from the host (no shared bus / no GO
-// flag), the firmware is free-running rather than host-gated: it continuously
-// issues a clean write/write/read burst so the monitor always has live traffic
-// to trigger on (aw_hs / w_hs / b_hs / ar_hs / r_hs) with no host present. It
-// only ever touches a clean, in-range address, so it can never forge an
-// error response -- the monitor's any_err trigger stays a host-only stimulus.
+// Unlike the Arty firmware, this stays free-running (not host-gated): it
+// continuously issues a clean write/write/read burst so the monitor always has
+// live CPU traffic to trigger on (aw_hs / w_hs / b_hs / ar_hs / r_hs) with no
+// host present -- what makes the monitor demoable from the GUI. It only ever
+// touches clean, in-range addresses, so it can never forge an error response;
+// the monitor's any_err trigger stays a host-only stimulus.
 //
-// Protocol (CPU's own slave, byte addresses off 0x4000_0000, 16-word slave):
-//   word0 (0x00)  DATA   : PATTERN
-//   word1 (0x04)  DATA2  : PATTERN2
-//   word0 read-back keeps the read channels live for the monitor.
+// The CPU writes the shared slave's high words (16/17) so it never collides
+// with words 0..15, which the host's EJTAG read/write tests use. The slave has
+// 32 words (like the Arty build); addresses are byte offsets off 0x4000_0000:
+//   word16 (0x40)  DATA   : PATTERN
+//   word17 (0x44)  DATA2  : PATTERN2
+//   word16 read-back keeps the read channels live for the monitor.
 
 #include <stdint.h>
 
 #define SLAVE_BASE  0x40000000u
-#define DATA_WORD   0u   /* 0x00 */
-#define DATA2_WORD  1u   /* 0x04 */
+#define DATA_WORD   16u  /* 0x40 */
+#define DATA2_WORD  17u  /* 0x44 */
 
 #define PATTERN     0xCAFEF00Du
 #define PATTERN2    0x1234ABCDu

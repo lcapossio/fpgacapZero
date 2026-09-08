@@ -51,6 +51,7 @@ set verilog_files [list \
     "${repo_path}/rtl/fcapz_axi_mon.v" \
     "${repo_path}/rtl/fcapz_axi_mon_intel.v" \
     "${repo_path}/rtl/jtag_tap/jtag_tap_intel.v" \
+    "${repo_path}/rtl/fcapz_axi_interconnect.v" \
     "${repo_path}/tb/axi4_test_slave.v" \
     "${example_dir}/vex/VexRiscv_Lite.v" \
     "${example_dir}/vex/vex_cpu.v" \

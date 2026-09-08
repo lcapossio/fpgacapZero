@@ -100,6 +100,7 @@ _BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
 # The firmware sources are listed too, so editing main.c without rebuilding the
 # .mem still trips the freshness gate.
 _BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
+    _ROOT / "rtl" / "fcapz_axi_interconnect.v",
     _EXAMPLE_DIR / "vex" / "vex_cpu.v",
     _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
     _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
@@ -731,16 +732,17 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestAxiMonitor(unittest.TestCase):
-    """AXI monitor on instance 5, observing a muxed AXI4-Lite bus.
+    """AXI monitor on instance 5, observing the merged shared AXI4-Lite bus.
 
-    The monitor taps the EJTAG-AXI bridge while the bridge is active, and a
-    self-stimulating traffic generator (axi4_traffic_gen -> its own test slave)
-    otherwise. The generator emits only *clean* writes and reads, so:
-      - arming on a generator event (aw_hs) triggers on its own, with no host
-        driving the bridge -- this is what makes the monitor demoable in the GUI;
-      - arming on any_err stays armed (the generator never forges an error), and
-        only a deliberate host-driven error response fires it. That asymmetry is
-        what keeps the selective-trigger guarantee testable on real silicon.
+    The fcapz_axi_interconnect merges the VexRiscv CPU and the EJTAG-AXI bridge
+    onto one shared test slave, and the monitor taps that merged bus. The CPU is
+    free-running and emits only *clean* writes/reads (to the slave's high words
+    16/17, away from the host's words 0..15), so:
+      - arming on a CPU event (aw_hs) triggers on its own, with no host driving
+        the bridge -- this is what makes the monitor demoable in the GUI;
+      - arming on any_err stays armed (the CPU never forges an error), and only a
+        deliberate host-driven error response fires it. That asymmetry is what
+        keeps the selective-trigger guarantee testable on real silicon.
     """
 
     STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done

@@ -111,29 +111,54 @@ module de25_nano_vex_top (
     wire        gen_rready;
     wire        gen_rlast;
 
-    // Muxed AXI4-Lite view the monitor taps: the bridge while it is active,
-    // otherwise the VexRiscv CPU.
-    wire        bridge_active = bridge_awvalid | bridge_wvalid | bridge_bvalid |
-                                bridge_arvalid | bridge_rvalid;
-    wire [31:0] mon_awaddr  = bridge_active ? bridge_awaddr  : gen_awaddr;
-    wire [2:0]  mon_awprot  = bridge_active ? bridge_awprot  : gen_awprot;
-    wire        mon_awvalid = bridge_active ? bridge_awvalid : gen_awvalid;
-    wire        mon_awready = bridge_active ? bridge_awready : gen_awready;
-    wire [31:0] mon_wdata   = bridge_active ? bridge_wdata   : gen_wdata;
-    wire [3:0]  mon_wstrb   = bridge_active ? bridge_wstrb   : gen_wstrb;
-    wire        mon_wvalid  = bridge_active ? bridge_wvalid  : gen_wvalid;
-    wire        mon_wready  = bridge_active ? bridge_wready  : gen_wready;
-    wire [1:0]  mon_bresp   = bridge_active ? bridge_bresp   : gen_bresp;
-    wire        mon_bvalid  = bridge_active ? bridge_bvalid  : gen_bvalid;
-    wire        mon_bready  = bridge_active ? bridge_bready  : gen_bready;
-    wire [31:0] mon_araddr  = bridge_active ? bridge_araddr  : gen_araddr;
-    wire [2:0]  mon_arprot  = bridge_active ? bridge_arprot  : gen_arprot;
-    wire        mon_arvalid = bridge_active ? bridge_arvalid : gen_arvalid;
-    wire        mon_arready = bridge_active ? bridge_arready : gen_arready;
-    wire [31:0] mon_rdata   = bridge_active ? bridge_rdata   : gen_rdata;
-    wire [1:0]  mon_rresp   = bridge_active ? bridge_rresp   : gen_rresp;
-    wire        mon_rvalid  = bridge_active ? bridge_rvalid  : gen_rvalid;
-    wire        mon_rready  = bridge_active ? bridge_rready  : gen_rready;
+    // Shared merged bus (M_BUS): the fcapz_axi_interconnect drives both the
+    // VexRiscv CPU (s0) and the EJTAG-AXI bridge (s1) onto this one bus, which
+    // feeds the single shared axi4_test_slave. Same vendor-neutral shared-bus
+    // topology as the Arty A7 VexRiscv build (there the SmartConnect's job) --
+    // both masters now reach the same slave, so the host can read back CPU
+    // writes over EJTAG-AXI. Full AXI4 subset; single-beat traffic only.
+    wire [31:0] mbus_awaddr;
+    wire [7:0]  mbus_awlen;
+    wire [2:0]  mbus_awsize;
+    wire [1:0]  mbus_awburst;
+    wire [2:0]  mbus_awprot;
+    wire        mbus_awvalid, mbus_awready;
+    wire [31:0] mbus_wdata;
+    wire [3:0]  mbus_wstrb;
+    wire        mbus_wlast, mbus_wvalid, mbus_wready;
+    wire [1:0]  mbus_bresp;
+    wire        mbus_bvalid, mbus_bready;
+    wire [31:0] mbus_araddr;
+    wire [7:0]  mbus_arlen;
+    wire [2:0]  mbus_arsize;
+    wire [1:0]  mbus_arburst;
+    wire [2:0]  mbus_arprot;
+    wire        mbus_arvalid, mbus_arready;
+    wire [31:0] mbus_rdata;
+    wire [1:0]  mbus_rresp;
+    wire        mbus_rlast, mbus_rvalid, mbus_rready;
+
+    // The AXI monitor taps the AXI4-Lite subset of the merged bus, so it now
+    // captures both the CPU's and the bridge's transactions directly (no mux).
+    wire [31:0] mon_awaddr  = mbus_awaddr;
+    wire [2:0]  mon_awprot  = mbus_awprot;
+    wire        mon_awvalid = mbus_awvalid;
+    wire        mon_awready = mbus_awready;
+    wire [31:0] mon_wdata   = mbus_wdata;
+    wire [3:0]  mon_wstrb   = mbus_wstrb;
+    wire        mon_wvalid  = mbus_wvalid;
+    wire        mon_wready  = mbus_wready;
+    wire [1:0]  mon_bresp   = mbus_bresp;
+    wire        mon_bvalid  = mbus_bvalid;
+    wire        mon_bready  = mbus_bready;
+    wire [31:0] mon_araddr  = mbus_araddr;
+    wire [2:0]  mon_arprot  = mbus_arprot;
+    wire        mon_arvalid = mbus_arvalid;
+    wire        mon_arready = mbus_arready;
+    wire [31:0] mon_rdata   = mbus_rdata;
+    wire [1:0]  mon_rresp   = mbus_rresp;
+    wire        mon_rvalid  = mbus_rvalid;
+    wire        mon_rready  = mbus_rready;
 
     always @(posedge CLOCK1_50) begin
         if (por_rst) begin
@@ -263,34 +288,69 @@ module de25_nano_vex_top (
         .debug_axi_edge(debug_axi_edge_unused)
     );
 
-    axi4_test_slave #(.NUM_WORDS(16), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
-        .clk(CLOCK1_50),
-        .rst(por_rst),
-        .s_axi_awaddr(bridge_awaddr),
-        .s_axi_awlen(bridge_awlen),
-        .s_axi_awsize(bridge_awsize),
-        .s_axi_awburst(bridge_awburst),
-        .s_axi_awvalid(bridge_awvalid),
-        .s_axi_awready(bridge_awready),
-        .s_axi_wdata(bridge_wdata),
-        .s_axi_wstrb(bridge_wstrb),
-        .s_axi_wlast(bridge_wlast),
-        .s_axi_wvalid(bridge_wvalid),
-        .s_axi_wready(bridge_wready),
-        .s_axi_bresp(bridge_bresp),
-        .s_axi_bvalid(bridge_bvalid),
-        .s_axi_bready(bridge_bready),
-        .s_axi_araddr(bridge_araddr),
-        .s_axi_arlen(bridge_arlen),
-        .s_axi_arsize(bridge_arsize),
-        .s_axi_arburst(bridge_arburst),
-        .s_axi_arvalid(bridge_arvalid),
-        .s_axi_arready(bridge_arready),
-        .s_axi_rdata(bridge_rdata),
-        .s_axi_rresp(bridge_rresp),
-        .s_axi_rlast(bridge_rlast),
-        .s_axi_rvalid(bridge_rvalid),
-        .s_axi_rready(bridge_rready)
+    // Vendor-neutral AXI4 interconnect: merges the VexRiscv CPU (s0) and the
+    // EJTAG-AXI bridge (s1) onto the shared M_BUS (m0). Single global slave map
+    // covering the whole 4 GiB, so the host's 0xFFFF_FFFC error probe still
+    // reaches the slave. Masters are single-ID so awid/arid/awregion/arregion
+    // are tied off; the CPU does not drive awcache/awlock/awqos so those get
+    // sane defaults while the bridge forwards its own. m0 ID/qualifier outputs
+    // are unused downstream; bid/rid inputs are tied off because response
+    // routing is by internal grant tracking (maxOutstanding=1 blocking).
+    fcapz_axi_interconnect u_bus (
+        .aclk    (CLOCK1_50),
+        .aresetn (~por_rst),
+
+        // ---- s0: VexRiscv CPU master (gen_*) ----
+        .s0_axi_awvalid(gen_awvalid), .s0_axi_awready(gen_awready),
+        .s0_axi_awaddr (gen_awaddr), .s0_axi_awid(4'd0), .s0_axi_awregion(4'd0),
+        .s0_axi_awlen  (gen_awlen), .s0_axi_awsize(gen_awsize), .s0_axi_awburst(gen_awburst),
+        .s0_axi_awlock (1'b0), .s0_axi_awcache(4'b0011), .s0_axi_awqos(4'b0000),
+        .s0_axi_awprot (gen_awprot),
+        .s0_axi_wvalid (gen_wvalid), .s0_axi_wready(gen_wready),
+        .s0_axi_wdata  (gen_wdata), .s0_axi_wstrb(gen_wstrb), .s0_axi_wlast(gen_wlast),
+        .s0_axi_bvalid (gen_bvalid), .s0_axi_bready(gen_bready),
+        .s0_axi_bid    (), .s0_axi_bresp(gen_bresp),
+        .s0_axi_arvalid(gen_arvalid), .s0_axi_arready(gen_arready),
+        .s0_axi_araddr (gen_araddr), .s0_axi_arid(4'd0), .s0_axi_arregion(4'd0),
+        .s0_axi_arlen  (gen_arlen), .s0_axi_arsize(gen_arsize), .s0_axi_arburst(gen_arburst),
+        .s0_axi_arlock (1'b0), .s0_axi_arcache(4'b0011), .s0_axi_arqos(4'b0000),
+        .s0_axi_arprot (gen_arprot),
+        .s0_axi_rvalid (gen_rvalid), .s0_axi_rready(gen_rready),
+        .s0_axi_rdata  (gen_rdata), .s0_axi_rid(), .s0_axi_rresp(gen_rresp), .s0_axi_rlast(gen_rlast),
+
+        // ---- s1: EJTAG-AXI bridge master (bridge_*) ----
+        .s1_axi_awvalid(bridge_awvalid), .s1_axi_awready(bridge_awready),
+        .s1_axi_awaddr (bridge_awaddr), .s1_axi_awid(4'd0), .s1_axi_awregion(4'd0),
+        .s1_axi_awlen  (bridge_awlen), .s1_axi_awsize(bridge_awsize), .s1_axi_awburst(bridge_awburst),
+        .s1_axi_awlock (1'b0), .s1_axi_awcache(4'b0011), .s1_axi_awqos(4'b0000),
+        .s1_axi_awprot (bridge_awprot),
+        .s1_axi_wvalid (bridge_wvalid), .s1_axi_wready(bridge_wready),
+        .s1_axi_wdata  (bridge_wdata), .s1_axi_wstrb(bridge_wstrb), .s1_axi_wlast(bridge_wlast),
+        .s1_axi_bvalid (bridge_bvalid), .s1_axi_bready(bridge_bready),
+        .s1_axi_bid    (), .s1_axi_bresp(bridge_bresp),
+        .s1_axi_arvalid(bridge_arvalid), .s1_axi_arready(bridge_arready),
+        .s1_axi_araddr (bridge_araddr), .s1_axi_arid(4'd0), .s1_axi_arregion(4'd0),
+        .s1_axi_arlen  (bridge_arlen), .s1_axi_arsize(bridge_arsize), .s1_axi_arburst(bridge_arburst),
+        .s1_axi_arlock (1'b0), .s1_axi_arcache(4'b0011), .s1_axi_arqos(4'b0000),
+        .s1_axi_arprot (bridge_arprot),
+        .s1_axi_rvalid (bridge_rvalid), .s1_axi_rready(bridge_rready),
+        .s1_axi_rdata  (bridge_rdata), .s1_axi_rid(), .s1_axi_rresp(bridge_rresp), .s1_axi_rlast(bridge_rlast),
+
+        // ---- m0: shared bus master (M_BUS) -> shared slave + monitor tap ----
+        .m0_axi_awvalid(mbus_awvalid), .m0_axi_awready(mbus_awready),
+        .m0_axi_awaddr (mbus_awaddr), .m0_axi_awid(), .m0_axi_awregion(),
+        .m0_axi_awlen  (mbus_awlen), .m0_axi_awsize(mbus_awsize), .m0_axi_awburst(mbus_awburst),
+        .m0_axi_awlock (), .m0_axi_awcache(), .m0_axi_awqos(), .m0_axi_awprot(mbus_awprot),
+        .m0_axi_wvalid (mbus_wvalid), .m0_axi_wready(mbus_wready),
+        .m0_axi_wdata  (mbus_wdata), .m0_axi_wstrb(mbus_wstrb), .m0_axi_wlast(mbus_wlast),
+        .m0_axi_bvalid (mbus_bvalid), .m0_axi_bready(mbus_bready),
+        .m0_axi_bid    (5'd0), .m0_axi_bresp(mbus_bresp),
+        .m0_axi_arvalid(mbus_arvalid), .m0_axi_arready(mbus_arready),
+        .m0_axi_araddr (mbus_araddr), .m0_axi_arid(), .m0_axi_arregion(),
+        .m0_axi_arlen  (mbus_arlen), .m0_axi_arsize(mbus_arsize), .m0_axi_arburst(mbus_arburst),
+        .m0_axi_arlock (), .m0_axi_arcache(), .m0_axi_arqos(), .m0_axi_arprot(mbus_arprot),
+        .m0_axi_rvalid (mbus_rvalid), .m0_axi_rready(mbus_rready),
+        .m0_axi_rdata  (mbus_rdata), .m0_axi_rid(5'd0), .m0_axi_rresp(mbus_rresp), .m0_axi_rlast(mbus_rlast)
     );
 
     // VexRiscv CPU: the self-stimulating master on the monitored bus. Runs the
@@ -317,34 +377,39 @@ module de25_nano_vex_top (
         .m_axi_rvalid(gen_rvalid), .m_axi_rready(gen_rready)
     );
 
-    axi4_test_slave #(.NUM_WORDS(16), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave_gen (
+    // Single shared test slave on the merged bus (M_BUS). 32 words like the
+    // Arty A7 build: the host uses words 0..15 for its EJTAG read/write tests,
+    // while the free-running CPU writes words 16/17 (0x4000_0040/44), so the
+    // two masters share the slave without colliding. ERROR_ADDR (0xFFFF_FFFC)
+    // still returns SLVERR because the interconnect maps the whole 4 GiB here.
+    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
         .clk(CLOCK1_50),
         .rst(por_rst),
-        .s_axi_awaddr(gen_awaddr),
-        .s_axi_awlen(gen_awlen),
-        .s_axi_awsize(gen_awsize),
-        .s_axi_awburst(gen_awburst),
-        .s_axi_awvalid(gen_awvalid),
-        .s_axi_awready(gen_awready),
-        .s_axi_wdata(gen_wdata),
-        .s_axi_wstrb(gen_wstrb),
-        .s_axi_wlast(gen_wlast),
-        .s_axi_wvalid(gen_wvalid),
-        .s_axi_wready(gen_wready),
-        .s_axi_bresp(gen_bresp),
-        .s_axi_bvalid(gen_bvalid),
-        .s_axi_bready(gen_bready),
-        .s_axi_araddr(gen_araddr),
-        .s_axi_arlen(gen_arlen),
-        .s_axi_arsize(gen_arsize),
-        .s_axi_arburst(gen_arburst),
-        .s_axi_arvalid(gen_arvalid),
-        .s_axi_arready(gen_arready),
-        .s_axi_rdata(gen_rdata),
-        .s_axi_rresp(gen_rresp),
-        .s_axi_rlast(gen_rlast),
-        .s_axi_rvalid(gen_rvalid),
-        .s_axi_rready(gen_rready)
+        .s_axi_awaddr(mbus_awaddr),
+        .s_axi_awlen(mbus_awlen),
+        .s_axi_awsize(mbus_awsize),
+        .s_axi_awburst(mbus_awburst),
+        .s_axi_awvalid(mbus_awvalid),
+        .s_axi_awready(mbus_awready),
+        .s_axi_wdata(mbus_wdata),
+        .s_axi_wstrb(mbus_wstrb),
+        .s_axi_wlast(mbus_wlast),
+        .s_axi_wvalid(mbus_wvalid),
+        .s_axi_wready(mbus_wready),
+        .s_axi_bresp(mbus_bresp),
+        .s_axi_bvalid(mbus_bvalid),
+        .s_axi_bready(mbus_bready),
+        .s_axi_araddr(mbus_araddr),
+        .s_axi_arlen(mbus_arlen),
+        .s_axi_arsize(mbus_arsize),
+        .s_axi_arburst(mbus_arburst),
+        .s_axi_arvalid(mbus_arvalid),
+        .s_axi_arready(mbus_arready),
+        .s_axi_rdata(mbus_rdata),
+        .s_axi_rresp(mbus_rresp),
+        .s_axi_rlast(mbus_rlast),
+        .s_axi_rvalid(mbus_rvalid),
+        .s_axi_rready(mbus_rready)
     );
 
     // AXI monitor (instance 5): passively tap the muxed AXI4-Lite bus (bridge
