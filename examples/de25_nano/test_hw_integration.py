@@ -43,7 +43,16 @@ _SKIP = _env_bool("FPGACAP_SKIP_HW")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_DIR = Path(__file__).resolve().parent
-BITFILE = str(_EXAMPLE_DIR / "output_files" / "de25_nano_fcapz.sof")
+
+# FPGACAP_BITSTREAM_VARIANT selects which top-level this suite targets. Both are
+# drop-in equivalents on the observable bus, so every test below applies to
+# either. "vex" swaps the RTL axi4_traffic_gen for an open-source VexRiscv CPU
+# driving the same monitored bus (examples/de25_nano/de25_nano_vex_top.v).
+_BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").strip().lower()
+_DEFAULT_BITNAME = (
+    "de25_nano_vex_fcapz.sof" if _BITSTREAM_VARIANT == "vex" else "de25_nano_fcapz.sof"
+)
+BITFILE = str(_EXAMPLE_DIR / "output_files" / _DEFAULT_BITNAME)
 _HARDWARE = os.environ.get("FPGACAP_QUARTUS_HARDWARE")
 _DEVICE_ENV = os.environ.get("FPGACAP_QUARTUS_DEVICE", "auto")
 _DEVICE = None if _DEVICE_ENV.lower() in ("", "auto") else _DEVICE_ENV
@@ -56,7 +65,7 @@ AXI_MON_CHAIN = 5
 SAMPLE_CLOCK_HZ = 50_000_000
 TRIGGER_DECISION_LATENCY = 1
 
-_BITSTREAM_SOURCES = [
+_BITSTREAM_SOURCES_COMMON = [
     _ROOT / "rtl" / "fcapz_version.vh",
     _ROOT / "rtl" / "reset_sync.v",
     _ROOT / "rtl" / "dpram.v",
@@ -75,12 +84,30 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_axi_mon_intel.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_intel.v",
     _ROOT / "tb" / "axi4_test_slave.v",
-    _EXAMPLE_DIR / "axi4_traffic_gen.v",
-    _EXAMPLE_DIR / "de25_nano_top.v",
     _EXAMPLE_DIR / "de25_nano.qsf",
     _EXAMPLE_DIR / "de25_nano.sdc",
+]
+
+_BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
+    _EXAMPLE_DIR / "axi4_traffic_gen.v",
+    _EXAMPLE_DIR / "de25_nano_top.v",
     _EXAMPLE_DIR / "build_de25_nano.tcl",
 ]
+
+# The VexRiscv variant swaps the RTL traffic generator for the CPU subsystem and
+# its baked-in firmware image; VexRiscv_Lite.v and fw.mem are fetched/built and
+# may be absent until the first build (the freshness check skips missing files).
+_BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
+    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
+    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
+    _EXAMPLE_DIR / "de25_nano_vex_top.v",
+    _EXAMPLE_DIR / "build_de25_nano_vex.tcl",
+]
+
+_BITSTREAM_SOURCES = (
+    _BITSTREAM_SOURCES_VEX if _BITSTREAM_VARIANT == "vex" else _BITSTREAM_SOURCES_VERILOG
+)
 
 
 def _check_bitstream_freshness() -> str | None:

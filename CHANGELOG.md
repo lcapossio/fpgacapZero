@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **DE25-Nano — VexRiscv reference variant.** A new `de25_nano_vex_top` is a
+  drop-in for the default design — same debug cores, same monitor mux — with an
+  open-source VexRiscv (RV32I) soft CPU in place of the RTL `axi4_traffic_gen`, so
+  the AXI monitor captures real CPU bus traffic. Its free-running firmware keeps
+  the observable bus contract, so the whole `test_hw_integration.py` suite runs
+  unchanged against it via `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL (no
+  SmartConnect on Altera — the CPU drives the monitored slave directly) and
+  `build_de25_nano_vex` launcher (Quartus Pro + riscv gcc).
 - **Arty A7 — VexRiscv reference variant.** A new `arty_a7_vex_top` is a drop-in
   for the MicroBlaze design — same debug cores, same shared-bus wiring — with an
   open-source VexRiscv (RV32I) soft CPU in place of the proprietary MicroBlaze,

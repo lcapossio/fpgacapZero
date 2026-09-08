@@ -40,8 +40,8 @@ examples/*/captures/
 examples/**/fw/*.elf
 examples/**/fw/*.map
 examples/**/fw/*.mem
-# Fetched, pinned VexRiscv core (examples/arty_a7/vex/get_deps.py drops it in)
-examples/arty_a7/vex/VexRiscv*.v
+# Fetched, pinned VexRiscv core (examples/*/vex/get_deps.py drops it in)
+examples/**/vex/VexRiscv*.v
 # Vivado in-memory / block-design scratch written at the repo root
 /.srcs/
 
@@ -61,6 +61,7 @@ tests/_tmp/
 .codex_tmp/
 .claude/
 examples/de25_nano/de25_nano_quartus/
+examples/de25_nano/de25_nano_vex_quartus/
 examples/de25_nano/output_files/
 examples/de25_nano/captures/
 
