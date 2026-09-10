@@ -6,17 +6,19 @@
 // DE25-Nano VexRiscv variant of the fpgacapZero Intel/Altera top-level.
 //
 // A drop-in for de25_nano_top: identical debug cores (ELA on instances 1/2, EIO
-// on 3, EJTAG-AXI on 4, AXI monitor on 5) and identical monitor mux -- the one
-// difference is that the self-stimulating master feeding the monitored bus is an
-// open-source VexRiscv CPU (examples/de25_nano/vex/vex_cpu.v) running baked-in
-// firmware, instead of the RTL axi4_traffic_gen. The CPU drives its own
-// dedicated axi4_test_slave, so the EJTAG-AXI read/write tests (which use the
-// bridge's separate slave) are unaffected, and the AXI monitor captures real
-// CPU bus traffic whenever the host is not driving the bridge.
+// on 3, EJTAG-AXI on 4, AXI monitor on 5) -- the one difference is that the
+// self-stimulating master feeding the monitored bus is an open-source VexRiscv
+// CPU (examples/de25_nano/vex/vex_cpu.v) running baked-in firmware, instead of
+// the RTL axi4_traffic_gen. The CPU and the EJTAG-AXI bridge are merged by the
+// vendor-neutral fcapz_axi_interconnect onto one shared axi4_test_slave, which
+// the AXI monitor taps directly (no bus mux). The CPU uses the slave's high
+// words (16/17) and the host's EJTAG read/write tests use words 0..15, so they
+// never collide and the host can read CPU writes back over EJTAG-AXI.
 //
 // The firmware is free-running (it continuously issues clean write/write/read
-// bursts to 0x4000_0000) because the CPU's slave is not reachable from the host;
-// it never touches an error/hang address, so it cannot forge an any_err event.
+// bursts to 0x4000_0000) so the monitor always has live CPU traffic with no
+// host present; it never touches an error/hang address, so it cannot forge an
+// any_err event.
 
 module de25_nano_vex_top (
     input  wire       CLOCK1_50,
@@ -81,8 +83,8 @@ module de25_nano_vex_top (
     wire [255:0] debug_axi_unused;
     wire [255:0] debug_axi_edge_unused;
 
-    // VexRiscv CPU master (drives its own test slave). Same wire names as the
-    // axi4_traffic_gen it replaces, so the monitor mux below is unchanged.
+    // VexRiscv CPU master (s0 of the merged bus). Same wire names as the
+    // axi4_traffic_gen it replaces, so the downstream taps below are unchanged.
     wire [31:0] gen_awaddr;
     wire [31:0] gen_wdata;
     wire [31:0] gen_araddr;
@@ -382,7 +384,9 @@ module de25_nano_vex_top (
     // while the free-running CPU writes words 16/17 (0x4000_0040/44), so the
     // two masters share the slave without colliding. ERROR_ADDR (0xFFFF_FFFC)
     // still returns SLVERR because the interconnect maps the whole 4 GiB here.
-    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
+    // HANG_EN=0: on this shared bus a never-ready hang would wedge the blocking
+    // interconnect for both masters, so 0xFFFF_FFF8 is just a normal word.
+    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC), .HANG_EN(0)) u_axi_slave (
         .clk(CLOCK1_50),
         .rst(por_rst),
         .s_axi_awaddr(mbus_awaddr),

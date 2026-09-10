@@ -306,7 +306,7 @@ module arty_a7_vex_top (
     );
 
     // ---- 100 MHz AXI subsystem clock/reset ----
-    // VexRiscv + the shared AXI fabric (SmartConnect, test slave, monitor,
+    // VexRiscv + the shared AXI fabric (interconnect, test slave, monitor,
     // EJTAG bridge) run on a dedicated 100 MHz domain, comfortably within
     // timing on the -1 part.  The Arty board oscillator is already 100 MHz, so
     // we buffer it directly.  The reset uses the 150 MHz MMCM lock as a
@@ -323,8 +323,8 @@ module arty_a7_vex_top (
 
     // ---- EJTAGAXI: JTAG-to-AXI4 bridge master (USER4) ----
     // Bridges JTAG to an AXI4 master.  Its master now feeds the shared-bus
-    // SmartConnect (M_EJTAG slave port of the VexRiscv BD) rather than the
-    // test slave directly, so CPU and host traffic share one monitored bus.
+    // interconnect (M_EJTAG slave port of vex_sys) rather than the test slave
+    // directly, so CPU and host traffic share one monitored bus.
 
     wire [31:0] bridge_awaddr, bridge_wdata, bridge_araddr, bridge_rdata;
     wire [7:0]  bridge_awlen, bridge_arlen;
@@ -364,10 +364,11 @@ module arty_a7_vex_top (
         .m_axi_rlast(bridge_rlast)
     );
 
-    // ---- VexRiscv subsystem (RTL wrapper over a SmartConnect BD) ----
+    // ---- VexRiscv subsystem (RTL wrapper over fcapz_axi_interconnect) ----
     // vex_cpu's AXI4 data master and the EJTAG bridge master (above) are merged
-    // by an in-BD SmartConnect onto one AXI4 bus, M_BUS, which drives the test
-    // slave and is passively tapped by the AXI monitor.  VexRiscv has no debug
+    // by the vendor-neutral fcapz_axi_interconnect onto one AXI4 bus, M_BUS,
+    // which drives the test slave and is passively tapped by the AXI monitor.
+    // VexRiscv has no debug
     // module, so USER3 stays free.  Firmware (in the on-chip BRAM) writes a
     // known pattern to the shared slave when the host raises a go-flag, giving
     // the monitor real CPU bus traffic (same contract as the MicroBlaze top).
@@ -426,7 +427,10 @@ module arty_a7_vex_top (
 
     // Test slave on the shared bus.  32 words so the CPU firmware (words 16+)
     // never collides with EJTAG host tests (words 0..15).
-    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC)) u_axi_slave (
+    // HANG_EN=0: this slave sits on the shared interconnect bus, so it must
+    // never stall forever -- a hung transaction would wedge the blocking fabric
+    // for both the CPU and the EJTAG bridge (0xFFFF_FFF8 is just a normal word).
+    axi4_test_slave #(.NUM_WORDS(32), .ERROR_ADDR(32'hFFFF_FFFC), .HANG_EN(0)) u_axi_slave (
         .clk(clk_100), .rst(rst_100),
         .s_axi_awaddr(mbus_awaddr), .s_axi_awlen(mbus_awlen),
         .s_axi_awsize(mbus_awsize), .s_axi_awburst(mbus_awburst),
