@@ -1,5 +1,10 @@
-// Copyright (c) 2026 Leonardo Capossio - bard0 design  hello@bard0.com
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+//
+// Generated output of the axiZero crossbar generator (SpinalHDL). SpinalHDL
+// places no licence on generated HDL, so this file is released under the
+// repository's Apache-2.0 licence like the rest of the RTL.
+//
 // Generator : SpinalHDL v1.14.2    git head : 78f29dc66110fc099a777992b6daa2f803ab445e
 // Component : fcapz_axi_interconnect
 // Git hash  : 483b05ea25c4f1f0498a5d44cf295e3e4ef2b859
@@ -19,8 +24,17 @@
 //                        5 bits (4-bit master ID + 1-bit master index)
 //   aclk , aresetn       clock and active-low synchronous reset
 //
-// Regenerate with the axiZero generator; the top module is renamed from the
-// generator default to fcapz_axi_interconnect.
+// Regenerating this file (axiZero generator, 2-master x 1-slave full-AXI4,
+// round-robin, 32-bit, single 4 GiB slave). Apply these mechanical
+// post-generation edits so the result drops back in unchanged:
+//   1. rename the top module to fcapz_axi_interconnect;
+//   2. rename the two internal submodule definitions and their single
+//      instantiations -- Axi4Crossbar -> fcapz_axi_ic_crossbar and
+//      Axi4DecErrSlave -> fcapz_axi_ic_decerr (the generic generator defaults
+//      could collide with other IP in a shared build); leave the modules'
+//      internal signal names untouched;
+//   3. replace the generator's licence header with the two-line Apache-2.0
+//      SPDX header above (per CONTRIBUTING.md).
 
 `timescale 1ns/1ps
 
@@ -197,7 +211,7 @@ module fcapz_axi_interconnect (
   wire                xbar_io_slaves_0_r_ready;
   wire                xbar_io_slaves_0_b_ready;
 
-  Axi4Crossbar xbar (
+  fcapz_axi_ic_crossbar xbar (
     .s0_axi_awvalid          (s0_axi_awvalid                  ), //i
     .s0_axi_awready          (xbar_io_masters_0_aw_ready             ), //o
     .s0_axi_awaddr   (s0_axi_awaddr[31:0]     ), //i
@@ -371,7 +385,7 @@ module fcapz_axi_interconnect (
 
 endmodule
 
-module Axi4Crossbar (
+module fcapz_axi_ic_crossbar (
   input  wire          s0_axi_awvalid,
   output reg           s0_axi_awready,
   input  wire [31:0]   s0_axi_awaddr,
@@ -681,7 +695,7 @@ module Axi4Crossbar (
   assign _zz__zz_when_Axi4Crossbar_l484_3_1 = {(! (|_zz_when_Axi4Crossbar_l484_5)),_zz_when_Axi4Crossbar_l484_5};
   assign _zz__zz_when_Axi4Crossbar_l267_19 = (_zz_when_Axi4Crossbar_l267_17 - 2'b01);
   assign _zz__zz_when_Axi4Crossbar_l267_19_1 = (_zz_when_Axi4Crossbar_l267_18 - 2'b01);
-  Axi4DecErrSlave decErr (
+  fcapz_axi_ic_decerr decErr (
     .io_axi_aw_valid          (decErr_io_axi_aw_valid              ), //i
     .io_axi_aw_ready          (decErr_io_axi_aw_ready              ), //o
     .io_axi_aw_payload_addr   (decErr_io_axi_aw_payload_addr[31:0] ), //i
@@ -2125,7 +2139,7 @@ module Axi4Crossbar (
 
 endmodule
 
-module Axi4DecErrSlave (
+module fcapz_axi_ic_decerr (
   input  wire          io_axi_aw_valid,
   output wire          io_axi_aw_ready,
   input  wire [31:0]   io_axi_aw_payload_addr,
