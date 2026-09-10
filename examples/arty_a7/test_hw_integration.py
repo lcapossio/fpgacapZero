@@ -127,24 +127,44 @@ _BITSTREAM_SOURCES_VHDL = [
 # firmware (boot.S + main.c packed into fw.mem). The fetched VexRiscv core and
 # fw.mem are listed but skipped if absent (get_deps.py / build_fw.py drop them
 # in at build time).
+# Mirror the full compile input set from build_arty_vex.tcl's src_list (every
+# rtl/ file the vex top pulls in, not a subset), so editing any build input --
+# e.g. the EJTAG bridge core or the interconnect -- correctly trips the
+# freshness gate. The fetched VexRiscv core and fw.mem are listed but skipped
+# if absent (get_deps.py / build_fw.py drop them in at build time).
 _BITSTREAM_SOURCES_VEX = [
     _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "reset_sync.v",
+    _ROOT / "rtl" / "dpram.v",
+    _ROOT / "rtl" / "trig_compare.v",
     _ROOT / "rtl" / "fcapz_ela.v",
     _ROOT / "rtl" / "fcapz_core_manager.v",
     _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
+    _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_pipe_iface.v",
+    _ROOT / "rtl" / "jtag_burst_read.v",
+    _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_async_fifo.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon.v",
     _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
     _ROOT / "rtl" / "fcapz_axi_interconnect.v",
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_vex_top.v",
     _EXAMPLE_DIR / "arty_a7.xdc",
+    _EXAMPLE_DIR / "build_arty_vex.tcl",
     _EXAMPLE_DIR / "vex" / "vex_cpu.v",
     _EXAMPLE_DIR / "vex" / "vex_sys.v",
     _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "get_deps.py",
     _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
     _EXAMPLE_DIR / "vex" / "fw" / "main.c",
     _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
+    _EXAMPLE_DIR / "vex" / "fw" / "build_fw.py",
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
 ]
 
@@ -1419,8 +1439,10 @@ class TestAxiMonitor(unittest.TestCase):
 
 
 # ── AXI monitor + shared-bus CPU tests (USER2 monitor, USER3 CPU) ─────
-# The bitstream integrates a soft CPU whose data master shares one SmartConnect
-# bus with the EJTAG-AXI bridge; both reach the same test slave, which the
+# The bitstream integrates a soft CPU whose data master shares one AXI bus
+# with the EJTAG-AXI bridge (the MicroBlaze variant merges them with a
+# SmartConnect, the VexRiscv variant with fcapz_axi_interconnect); both reach
+# the same test slave, which the
 # monitor taps.  The CPU therefore generates *real* bus traffic the monitor can
 # capture -- the headline of this integration.  The default (MicroBlaze) and the
 # VexRiscv variant (FPGACAP_BITSTREAM_VARIANT=vex) present the same host-gated
@@ -1453,10 +1475,11 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     PATTERN = 0xCAFEF00D
     PATTERN2 = 0x1234ABCD
 
-    # CPU DP addresses *as seen on the monitored bus*.  SmartConnect does NOT
-    # subtract the segment base: the CPU's M_BUS window is assigned at offset
-    # 0x4000_0000 (create_mb_bd.tcl), so the CPU issues -- and the monitor taps
-    # -- the full 0x4000_0040/44 on M_AXI_DP.  The EJTAG master reaches the same
+    # CPU DP addresses *as seen on the monitored bus*.  Neither merge subtracts
+    # the segment base: the MicroBlaze SmartConnect assigns the CPU's M_BUS
+    # window at offset 0x4000_0000 (create_mb_bd.tcl), and fcapz_axi_interconnect
+    # uses a single global slave map (no per-master remap), so the CPU issues --
+    # and the monitor taps -- the full 0x4000_0040/44.  The EJTAG master reaches the same
     # slave through a 0x0-based segment, so it drives bare 0x40/0x44 (D0/D1_OFF);
     # the shared test slave decodes (addr >> 2) % 32, so both hit word16/17.
     CPU_ADDR0 = 0x40000040  # SLAVE_BASE | word16
