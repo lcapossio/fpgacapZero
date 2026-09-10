@@ -720,6 +720,24 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0x1234)
 
+    def test_cpu_writes_reach_shared_slave(self):
+        """Both masters are merged onto one slave by fcapz_axi_interconnect, so
+        the host must be able to read back what the CPU wrote. The free-running
+        firmware writes 0xCAFEF00D/0x1234ABCD to the shared slave's words 16/17
+        (0x40/0x44); the slave powers up zeroed and the host only ever touches
+        words 0..15, so seeing these constants proves the CPU's writes traverse
+        the interconnect to the shared slave and the host reads them back."""
+        deadline = time.time() + 2.0
+        got40 = got44 = None
+        while time.time() < deadline:
+            got40 = self.bridge.axi_read(0x40)
+            got44 = self.bridge.axi_read(0x44)
+            if got40 == 0xCAFEF00D and got44 == 0x1234ABCD:
+                break
+            time.sleep(0.02)
+        self.assertEqual(got40, 0xCAFEF00D, "CPU write to word 16 not visible over the merged bus")
+        self.assertEqual(got44, 0x1234ABCD, "CPU write to word 17 not visible over the merged bus")
+
     def test_throughput(self):
         data = [i for i in range(256)]
         t0 = time.perf_counter()
