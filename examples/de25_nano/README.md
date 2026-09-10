@@ -36,22 +36,24 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 ## VexRiscv variant (open-source CPU)
 
 A second top-level, `de25_nano_vex_top`, is a **drop-in** for the default design
-— same debug cores, same monitor mux — except the self-stimulating master on the
-monitored AXI bus is an **open-source VexRiscv** (RV32I) instead of the RTL
-`axi4_traffic_gen`, so the AXI monitor captures **real CPU bus traffic**. The
-CPU drives its own dedicated `axi4_test_slave`, independent of the EJTAG-AXI
-bridge's slave, so the bridge read/write tests are unaffected.
+— same debug cores — except the self-stimulating master on the monitored AXI bus
+is an **open-source VexRiscv** (RV32I) instead of the RTL `axi4_traffic_gen`, so
+the AXI monitor captures **real CPU bus traffic**. The CPU and the EJTAG-AXI
+bridge are merged by the vendor-neutral `fcapz_axi_interconnect` (a generated
+2×1 AXI4 crossbar shared with the Arty A7 example) onto one shared
+`axi4_test_slave`, which the monitor taps directly (no bus mux). The CPU writes
+the slave's high words (16/17) and the host's EJTAG tests use words 0..15, so
+they never collide and the host can read CPU writes back over EJTAG-AXI.
 
-Its firmware (`vex/fw/main.c`) is free-running (the CPU's slave is not reachable
-from the host, so there is no host go flag): it continuously issues clean
-write/write/read bursts to `0x4000_0000`, giving the monitor live traffic to
-trigger on (`aw_hs`) with no host present, while never touching an error/hang
-address (so it cannot forge an `any_err` event). Because the observable bus
-contract matches the RTL generator, **the full `test_hw_integration.py` suite
-runs unchanged against the vex bitstream**. The `vex/` subsystem is pure RTL
-(`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v` with a Wishbone→AXI bridge and
-a 64 KB `$readmemh` BRAM); `get_deps.py` fetches the pinned core on the first
-build.
+Its firmware (`vex/fw/main.c`) is free-running (no host go flag): it continuously
+issues clean write/write/read bursts to `0x4000_0000`, giving the monitor live
+traffic to trigger on (`aw_hs`) with no host present, while never touching an
+error/hang address (so it cannot forge an `any_err` event). Because the
+observable bus contract matches the RTL generator, **the full
+`test_hw_integration.py` suite runs unchanged against the vex bitstream**. The
+`vex/` subsystem is pure RTL (`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v`
+with a Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM); `get_deps.py` fetches
+the pinned core on the first build.
 
 ## Board I/O
 

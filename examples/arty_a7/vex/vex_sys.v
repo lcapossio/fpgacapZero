@@ -93,7 +93,7 @@ module vex_sys (
     output wire        M_BUS_rready
 );
 
-    // ---- CPU AXI4 master (single-beat) -> SmartConnect S00 (M_CPU) -----
+    // ---- CPU AXI4 master (single-beat) -> interconnect s0 (M_CPU) ------
     wire [31:0] cpu_awaddr, cpu_wdata, cpu_araddr, cpu_rdata;
     wire [7:0]  cpu_awlen, cpu_arlen;
     wire [2:0]  cpu_awsize, cpu_arsize, cpu_awprot, cpu_arprot;
@@ -129,7 +129,8 @@ module vex_sys (
     // aresetn is active-low. The masters do not drive awid/arid/awregion/
     // arregion (single-ID masters) so those are tied off; the CPU's AXI4
     // qualifier inputs (awcache/awlock/awqos) get the same sane defaults the
-    // SmartConnect build used, while the bridge forwards its own. m0's ID and
+    // MicroBlaze SmartConnect build used, while the bridge forwards its own.
+    // m0's ID and
     // qualifier outputs are unused downstream (the test slave/monitor ignore
     // them) and left open; bid/rid inputs are tied off because response routing
     // is by internal grant tracking (maxOutstanding=1 blocking), not slave IDs.

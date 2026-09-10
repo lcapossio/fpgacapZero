@@ -6,11 +6,12 @@
 // Deliberately identical in behaviour to the MicroBlaze firmware
 // (examples/arty_a7/mb/fw/main.c) so arty_a7_vex_top is a drop-in for the same
 // hardware tests: the open-source VexRiscv replaces the proprietary MicroBlaze
-// as the second AXI master on the shared SmartConnect bus, generating the same
+// as the second AXI master on the shared interconnect bus, generating the same
 // host-gated pattern traffic the AXI monitor (USER2) captures.
 //
 // The CPU reaches the shared axi4_test_slave through the Wishbone->AXI4 bridge
-// in vex_cpu.v, which maps 0x4000_0000 onto the SmartConnect (the CPU issues --
+// in vex_cpu.v, whose 0x4000_0000 master port feeds fcapz_axi_interconnect (the
+// CPU issues --
 // and the monitor taps -- the full 0x4000_00xx addresses). The EJTAG-AXI bridge
 // (USER4) reaches the same slave through its own 0x0-based segment.
 //

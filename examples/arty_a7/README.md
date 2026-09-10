@@ -42,8 +42,8 @@ reference design can be built without a MicroBlaze licence or `mb-gcc`:
 
 ```
 VexRiscv (M_CPU) ─┐
-                  ├─ SmartConnect ─ shared bus ─┬─ axi4_test_slave
-EJTAG-AXI (USER4) ┘   (USER3 free, no MDM)      └─ AXI monitor (USER2)
+                  ├─ fcapz_axi_interconnect ─ shared bus ─┬─ axi4_test_slave
+EJTAG-AXI (USER4) ┘   (USER3 free, no MDM)                └─ AXI monitor (USER2)
 ```
 
 Its firmware (`vex/fw/main.c`) is deliberately identical in behaviour to the
@@ -52,9 +52,10 @@ MicroBlaze firmware: host-gated on the go flag (word 31), it writes the same
 Because the observable bus contract is the same, **the full `test_hw_integration.py`
 suite runs unchanged against the vex bitstream** (see Hardware Tests). The `vex/`
 subsystem is pure RTL (`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v` with a
-Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM) plus a SmartConnect-only block
-design (`create_vex_bd.tcl`); `get_deps.py` fetches the pinned VexRiscv core on
-the first build.
+Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM) that merges the CPU and
+EJTAG-AXI masters with the vendor-neutral `fcapz_axi_interconnect` (a generated
+2×1 AXI4 crossbar shared with the DE25-Nano example) — no vendor block design;
+`get_deps.py` fetches the pinned VexRiscv core on the first build.
 
 ## Files
 
@@ -66,8 +67,7 @@ the first build.
 | `mb/fw/` | Firmware source (`boot.S`, `main.c`, `lscript.ld`) baked into the LMB BRAM |
 | `arty_a7_vex_top.v` | Top-level VexRiscv variant — same cores, open-source CPU |
 | `vex/vex_cpu.v` | VexRiscv core + Wishbone arbiter/decode + 64 KB BRAM + cycle counter + WB→AXI4 bridge |
-| `vex/vex_sys.v` | RTL wrapper presenting the same `M_EJTAG`/`M_BUS` interface as `mb_sys` |
-| `vex/create_vex_bd.tcl` | SmartConnect-only block design merging the CPU and EJTAG-AXI masters |
+| `vex/vex_sys.v` | RTL wrapper presenting the same `M_EJTAG`/`M_BUS` interface as `mb_sys`; merges the CPU and EJTAG-AXI masters with `fcapz_axi_interconnect` |
 | `vex/get_deps.py` | Fetches the SHA-pinned `VexRiscv_Lite.v` core (first build only) |
 | `vex/fw/` | Bus pattern-generator firmware (`boot.S`, `main.c`, `link.ld`, `build_fw.py`) packed into the BRAM |
 | `arty_a7.xdc` | Arty A7-100T pin and clock constraints |

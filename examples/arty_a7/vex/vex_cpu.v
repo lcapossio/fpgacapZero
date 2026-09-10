@@ -14,8 +14,9 @@
 //       0x0000_0000  64 KB on-chip BRAM   (firmware image, $readmemh fw.mem)
 //       0x1000_0000  free-running 32-bit cycle counter (read-only)
 //       0x4000_0000  everything else -> Wishbone-to-AXI4 single-beat master;
-//   * the AXI4 master is a single, single-outstanding master that the block
-//     design's SmartConnect merges with the EJTAG-AXI bridge onto M_BUS.
+//   * the AXI4 master is a single, single-outstanding master that
+//     fcapz_axi_interconnect (in vex_sys) merges with the EJTAG-AXI bridge
+//     onto M_BUS.
 //
 // VexRiscv_Lite has no cache, so both buses issue single classic Wishbone
 // transfers (CTI/BTE are ignored). The design favours obvious correctness over

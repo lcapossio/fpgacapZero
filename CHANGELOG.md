@@ -9,21 +9,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
+  (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
+  onto one monitored bus as portable RTL, shared by both VexRiscv variants below
+  in place of a vendor block design. Simulated in `tb/` and hardware-validated on
+  both boards.
 - **DE25-Nano — VexRiscv reference variant.** A new `de25_nano_vex_top` is a
-  drop-in for the default design — same debug cores, same monitor mux — with an
-  open-source VexRiscv (RV32I) soft CPU in place of the RTL `axi4_traffic_gen`, so
-  the AXI monitor captures real CPU bus traffic. Its free-running firmware keeps
-  the observable bus contract, so the whole `test_hw_integration.py` suite runs
-  unchanged against it via `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL (no
-  SmartConnect on Altera — the CPU drives the monitored slave directly) and
-  `build_de25_nano_vex` launcher (Quartus Pro + riscv gcc).
+  drop-in for the default design — same debug cores — with an open-source
+  VexRiscv (RV32I) soft CPU in place of the RTL `axi4_traffic_gen`, so the AXI
+  monitor captures real CPU bus traffic. The CPU and the EJTAG-AXI bridge are
+  merged by `fcapz_axi_interconnect` onto one shared `axi4_test_slave` (the CPU
+  uses words 16/17, the host words 0..15), so the host reads CPU writes back over
+  EJTAG-AXI. Free-running firmware keeps the observable bus contract, so the whole
+  `test_hw_integration.py` suite runs unchanged via `FPGACAP_BITSTREAM_VARIANT=vex`.
+  New `vex/` RTL and `build_de25_nano_vex` launcher (Quartus Pro + riscv gcc).
 - **Arty A7 — VexRiscv reference variant.** A new `arty_a7_vex_top` is a drop-in
   for the MicroBlaze design — same debug cores, same shared-bus wiring — with an
   open-source VexRiscv (RV32I) soft CPU in place of the proprietary MicroBlaze,
   so the reference design builds without a MicroBlaze licence or `mb-gcc`. Its
   firmware presents the identical host-gated bus pattern, so the whole
   `test_hw_integration.py` suite runs unchanged against it via
-  `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL + SmartConnect block design and
+  `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL merging the CPU and EJTAG-AXI
+  masters with `fcapz_axi_interconnect` (no vendor block design) and
   `build_arty_vex` launcher. Hardware-validated on the Arty A7-100T (Vivado
   2025.2 + Vitis riscv gcc 13.4): full suite green on the vex bitstream.
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport

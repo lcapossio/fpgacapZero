@@ -14,10 +14,10 @@
 //       0x0000_0000  64 KB on-chip BRAM   (firmware image, $readmemh fw.mem)
 //       0x1000_0000  free-running 32-bit cycle counter (read-only)
 //       0x4000_0000  everything else -> Wishbone-to-AXI4 single-beat master;
-//   * the AXI4 master drives the AXI monitor's traffic-generator slave directly
-//     (no SmartConnect: Intel/Altera has none, and the DE25-Nano keeps the
-//     generator bus separate from the EJTAG-AXI bridge -- the monitor mux shows
-//     the CPU whenever the bridge is idle).
+//   * the AXI4 master feeds fcapz_axi_interconnect (in de25_nano_vex_top),
+//     which merges it with the EJTAG-AXI bridge onto one shared
+//     axi4_test_slave the AXI monitor taps -- vendor-neutral RTL, since
+//     Intel/Altera has no SmartConnect equivalent.
 //
 // VexRiscv_Lite has no cache, so both buses issue single classic Wishbone
 // transfers (CTI/BTE are ignored). The design favours obvious correctness over
