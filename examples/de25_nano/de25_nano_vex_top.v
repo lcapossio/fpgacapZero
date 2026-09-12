@@ -116,8 +116,9 @@ module de25_nano_vex_top (
     // Shared merged bus (M_BUS): the fcapz_axi_interconnect drives both the
     // VexRiscv CPU (s0) and the EJTAG-AXI bridge (s1) onto this one bus, which
     // feeds the single shared axi4_test_slave. Same vendor-neutral shared-bus
-    // topology as the Arty A7 VexRiscv build (there the SmartConnect's job) --
-    // both masters now reach the same slave, so the host can read back CPU
+    // topology as the Arty A7 VexRiscv build (which uses the same interconnect;
+    // only the MicroBlaze top uses a SmartConnect) -- both masters now reach the
+    // same slave, so the host can read back CPU
     // writes over EJTAG-AXI. Full AXI4 subset; single-beat traffic only.
     wire [31:0] mbus_awaddr;
     wire [7:0]  mbus_awlen;
@@ -416,8 +417,8 @@ module de25_nano_vex_top (
         .s_axi_rready(mbus_rready)
     );
 
-    // AXI monitor (instance 5): passively tap the muxed AXI4-Lite bus (bridge
-    // when active, else the VexRiscv CPU). Inputs only -- it never drives the
+    // AXI monitor (instance 5): passively tap the merged AXI4-Lite bus (both
+    // the VexRiscv CPU and the EJTAG-AXI bridge). Inputs only -- it never drives the
     // bus. DECODE_EN adds the transaction-events word (aw_hs / any_err / ...)
     // at the sample LSB so the host can trigger on bus events. ARESETN is
     // active-low; por_rst is active-high.

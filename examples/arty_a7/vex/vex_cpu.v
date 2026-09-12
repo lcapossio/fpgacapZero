@@ -18,9 +18,12 @@
 //     fcapz_axi_interconnect (in vex_sys) merges with the EJTAG-AXI bridge
 //     onto M_BUS.
 //
-// VexRiscv_Lite has no cache, so both buses issue single classic Wishbone
-// transfers (CTI/BTE are ignored). The design favours obvious correctness over
-// throughput: one outstanding transaction, 1-cycle BRAM/counter latency.
+// The core's iBus is cached, so it asserts CTI incrementing-burst hints on
+// line fills; this glue ignores CTI/BTE and services every beat as an
+// independent classic Wishbone transfer, so the merged bus and the AXI4
+// master stay single-beat (awlen/arlen = 0). The design favours obvious
+// correctness over throughput: one outstanding transaction, 1-cycle
+// BRAM/counter latency.
 
 module vex_cpu #(
     parameter MEM_INIT_FILE = "fw.mem",
@@ -29,7 +32,7 @@ module vex_cpu #(
     input  wire        clk,
     input  wire        rst,               // active-high (VexRiscv reset polarity)
 
-    // AXI4 master -> block-design S00 (M_CPU). Single-beat (awlen/arlen = 0).
+    // AXI4 master -> fcapz_axi_interconnect s0 (M_CPU). Single-beat (awlen/arlen = 0).
     output wire [31:0] m_axi_awaddr,
     output wire [7:0]  m_axi_awlen,
     output wire [2:0]  m_axi_awsize,

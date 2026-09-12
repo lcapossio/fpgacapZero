@@ -1334,12 +1334,18 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         """Write 256 words, measure wall time, report KB/s."""
         import time
 
-        data = [i for i in range(256)]
+        # The shared slave aliases (addr>>2)%NUM_WORDS and the CPU/GO words live
+        # at 16/17/31, so keep every host write inside words 0..15 (< 0x40) to
+        # preserve the host/CPU address split. Write a 16-word block 16x rather
+        # than one 256-word block, which would alias onto the CPU's words (and on
+        # Arty spuriously set the GO flag at word 31).
+        block = [i for i in range(16)]
         t0 = time.perf_counter()
-        self.bridge.write_block(0x00, data)
+        for _ in range(16):
+            self.bridge.write_block(0x00, block)
         elapsed = time.perf_counter() - t0
-        kb_per_s = (256 * 4) / 1024 / elapsed if elapsed > 0 else 0
-        print(f"\n  write_block 256 words: {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
+        kb_per_s = (16 * 16 * 4) / 1024 / elapsed if elapsed > 0 else 0
+        print(f"\n  write_block 256 words (16x16): {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
@@ -1438,7 +1444,7 @@ class TestAxiMonitor(unittest.TestCase):
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
 
-# ── AXI monitor + shared-bus CPU tests (USER2 monitor, USER3 CPU) ─────
+# ── AXI monitor + shared-bus CPU tests (USER2 monitor) ─────
 # The bitstream integrates a soft CPU whose data master shares one AXI bus
 # with the EJTAG-AXI bridge (the MicroBlaze variant merges them with a
 # SmartConnect, the VexRiscv variant with fcapz_axi_interconnect); both reach

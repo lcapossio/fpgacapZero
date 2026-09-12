@@ -107,6 +107,13 @@ TESTBENCHES = {
             RTL / "trig_compare.v",
         ],
     ),
+    "fcapz_axi_interconnect": (
+        TB / "fcapz_axi_interconnect_tb.sv",
+        [
+            TB / "axi4_test_slave.v",
+            RTL / "fcapz_axi_interconnect.v",
+        ],
+    ),
 }
 
 DEFAULT_TESTBENCHES = [
@@ -120,6 +127,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_eio",
     "fcapz_core_manager",
     "chan_mux",
+    "fcapz_axi_interconnect",
 ]
 
 LINT_TARGETS = [
@@ -135,6 +143,7 @@ LINT_TARGETS = [
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",
     RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_axi_interconnect.v",
     RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_eio.v",
     RTL / "fcapz_eio_xilinx7.v",

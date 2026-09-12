@@ -19,9 +19,12 @@
 //     axi4_test_slave the AXI monitor taps -- vendor-neutral RTL, since
 //     Intel/Altera has no SmartConnect equivalent.
 //
-// VexRiscv_Lite has no cache, so both buses issue single classic Wishbone
-// transfers (CTI/BTE are ignored). The design favours obvious correctness over
-// throughput: one outstanding transaction, 1-cycle BRAM/counter latency.
+// The core's iBus is cached, so it asserts CTI incrementing-burst hints on
+// line fills; this glue ignores CTI/BTE and services every beat as an
+// independent classic Wishbone transfer, so the merged bus and the AXI4
+// master stay single-beat (awlen/arlen = 0). The design favours obvious
+// correctness over throughput: one outstanding transaction, 1-cycle
+// BRAM/counter latency.
 //
 // This is a self-contained copy of the arbiter/decode/WB->AXI logic in
 // examples/arty_a7/vex/vex_cpu.v (kept per-example like the other DE25 RTL);

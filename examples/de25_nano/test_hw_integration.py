@@ -739,12 +739,17 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         self.assertEqual(got44, 0x1234ABCD, "CPU write to word 17 not visible over the merged bus")
 
     def test_throughput(self):
-        data = [i for i in range(256)]
+        # The shared slave aliases (addr>>2)%NUM_WORDS and the CPU writes words
+        # 16/17, so keep every host write inside words 0..15 (< 0x40) to preserve
+        # the host/CPU address split. Write a 16-word block 16x rather than one
+        # 256-word block, which would alias onto the CPU's words.
+        block = [i for i in range(16)]
         t0 = time.perf_counter()
-        self.bridge.write_block(0x00, data)
+        for _ in range(16):
+            self.bridge.write_block(0x00, block)
         elapsed = time.perf_counter() - t0
-        kb_per_s = (256 * 4) / 1024 / elapsed if elapsed > 0 else 0
-        print(f"\n  write_block 256 words: {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
+        kb_per_s = (16 * 16 * 4) / 1024 / elapsed if elapsed > 0 else 0
+        print(f"\n  write_block 256 words (16x16): {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
         self.assertGreater(kb_per_s, 0.3)
 
 

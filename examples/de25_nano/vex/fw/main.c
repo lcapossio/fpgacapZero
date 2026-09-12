@@ -6,8 +6,8 @@
 // The open-source VexRiscv replaces the RTL axi4_traffic_gen as a master on
 // the monitored AXI bus. The CPU and the EJTAG-AXI bridge are now merged by the
 // vendor-neutral fcapz_axi_interconnect onto one shared axi4_test_slave (M_BUS),
-// which the AXI monitor (instance 5) taps -- the same shared-bus topology the
-// Arty A7 VexRiscv variant gets from a SmartConnect. The host can therefore
+// which the AXI monitor (instance 5) taps -- the same interconnect and
+// shared-bus topology the Arty A7 VexRiscv variant uses. The host can therefore
 // read back CPU writes over EJTAG-AXI, just like on the Arty.
 //
 // Unlike the Arty firmware, this stays free-running (not host-gated): it
