@@ -31,7 +31,7 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 | 2 | ELA burst readout |
 | 3 | EIO |
 | 4 | EJTAG-AXI bridge |
-| 5 | AXI monitor (taps the muxed bus) |
+| 5 | AXI monitor (taps the monitored AXI bus) |
 
 ## VexRiscv variant (open-source CPU)
 
