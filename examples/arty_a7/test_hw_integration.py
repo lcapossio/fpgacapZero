@@ -46,8 +46,12 @@ _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
 
 _EXAMPLE_DIR = Path(__file__).resolve().parent
 _BITFILE_ENV = os.environ.get("FPGACAP_BITFILE")
-BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / "arty_a7_top.bit")
 _BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").lower()
+# The VexRiscv variant (arty_a7_vex_top) is a drop-in for the MicroBlaze design:
+# same debug cores, same host-gated CPU bus pattern, so this whole suite runs
+# against it with FPGACAP_BITSTREAM_VARIANT=vex (its default bitfile differs).
+_DEFAULT_BITNAME = "arty_a7_vex_top.bit" if _BITSTREAM_VARIANT == "vex" else "arty_a7_top.bit"
+BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
@@ -119,11 +123,57 @@ _BITSTREAM_SOURCES_VHDL = [
     _EXAMPLE_DIR / "arty_a7.xdc",
 ]
 
-_BITSTREAM_SOURCES = (
-    _BITSTREAM_SOURCES_VHDL
-    if _BITSTREAM_VARIANT == "vhdl"
-    else _BITSTREAM_SOURCES_VERILOG
-)
+# VexRiscv variant: shared cores + the new top + the vex subsystem RTL and its
+# firmware (boot.S + main.c packed into fw.mem). The fetched VexRiscv core and
+# fw.mem are listed but skipped if absent (get_deps.py / build_fw.py drop them
+# in at build time).
+# Mirror the full compile input set from build_arty_vex.tcl's src_list (every
+# rtl/ file the vex top pulls in, not a subset), so editing any build input --
+# e.g. the EJTAG bridge core or the interconnect -- correctly trips the
+# freshness gate. The fetched VexRiscv core and fw.mem are listed but skipped
+# if absent (get_deps.py / build_fw.py drop them in at build time).
+_BITSTREAM_SOURCES_VEX = [
+    _ROOT / "rtl" / "fcapz_version.vh",
+    _ROOT / "rtl" / "reset_sync.v",
+    _ROOT / "rtl" / "dpram.v",
+    _ROOT / "rtl" / "trig_compare.v",
+    _ROOT / "rtl" / "fcapz_ela.v",
+    _ROOT / "rtl" / "fcapz_core_manager.v",
+    _ROOT / "rtl" / "fcapz_debug_multi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_ela_xilinx7.v",
+    _ROOT / "rtl" / "jtag_reg_iface.v",
+    _ROOT / "rtl" / "jtag_pipe_iface.v",
+    _ROOT / "rtl" / "jtag_burst_read.v",
+    _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_async_fifo.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_mon.v",
+    _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_eio.v",
+    _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_interconnect.v",
+    _ROOT / "tb" / "axi4_test_slave.v",
+    _EXAMPLE_DIR / "arty_a7_vex_top.v",
+    _EXAMPLE_DIR / "arty_a7.xdc",
+    _EXAMPLE_DIR / "build_arty_vex.tcl",
+    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
+    _EXAMPLE_DIR / "vex" / "vex_sys.v",
+    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "get_deps.py",
+    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "vex" / "fw" / "main.c",
+    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
+    _EXAMPLE_DIR / "vex" / "fw" / "build_fw.py",
+    _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
+]
+
+if _BITSTREAM_VARIANT == "vhdl":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VHDL
+elif _BITSTREAM_VARIANT == "vex":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VEX
+else:
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VERILOG
 
 
 def _check_bitstream_freshness() -> str | None:
@@ -137,11 +187,10 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime:
             stale.append(src.name)
     if stale:
-        build_cmd = (
-            "python examples/arty_a7/build_vhdl.py"
-            if _BITSTREAM_VARIANT == "vhdl"
-            else "python examples/arty_a7/build.py"
-        )
+        build_cmd = {
+            "vhdl": "python examples/arty_a7/build_vhdl.py",
+            "vex": "python examples/arty_a7/build_arty_vex.py",
+        }.get(_BITSTREAM_VARIANT, "python examples/arty_a7/build.py")
         return (
             f"bitstream is stale — these sources are newer than "
             f"{bitpath.name}: {', '.join(stale)}. "
@@ -1285,12 +1334,18 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         """Write 256 words, measure wall time, report KB/s."""
         import time
 
-        data = [i for i in range(256)]
+        # The shared slave aliases (addr>>2)%NUM_WORDS and the CPU/GO words live
+        # at 16/17/31, so keep every host write inside words 0..15 (< 0x40) to
+        # preserve the host/CPU address split. Write a 16-word block 16x rather
+        # than one 256-word block, which would alias onto the CPU's words (and on
+        # Arty spuriously set the GO flag at word 31).
+        block = [i for i in range(16)]
         t0 = time.perf_counter()
-        self.bridge.write_block(0x00, data)
+        for _ in range(16):
+            self.bridge.write_block(0x00, block)
         elapsed = time.perf_counter() - t0
-        kb_per_s = (256 * 4) / 1024 / elapsed if elapsed > 0 else 0
-        print(f"\n  write_block 256 words: {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
+        kb_per_s = (16 * 16 * 4) / 1024 / elapsed if elapsed > 0 else 0
+        print(f"\n  write_block 256 words (16x16): {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
@@ -1389,11 +1444,15 @@ class TestAxiMonitor(unittest.TestCase):
         self.assertTrue(status & 0x1, f"monitor should still be armed (0x{status:08X})")
 
 
-# ── AXI monitor + MicroBlaze CPU tests (USER2 monitor, USER3 MDM) ─────
-# The bitstream integrates a MicroBlaze whose M_AXI_DP data master shares one
-# SmartConnect bus with the EJTAG-AXI bridge; both reach the same test slave,
-# which the monitor taps.  The CPU therefore generates *real* bus traffic the
-# monitor can capture -- the headline of this integration.
+# ── AXI monitor + shared-bus CPU tests (USER2 monitor) ─────
+# The bitstream integrates a soft CPU whose data master shares one AXI bus
+# with the EJTAG-AXI bridge (the MicroBlaze variant merges them with a
+# SmartConnect, the VexRiscv variant with fcapz_axi_interconnect); both reach
+# the same test slave, which the
+# monitor taps.  The CPU therefore generates *real* bus traffic the monitor can
+# capture -- the headline of this integration.  The default (MicroBlaze) and the
+# VexRiscv variant (FPGACAP_BITSTREAM_VARIANT=vex) present the same host-gated
+# pattern contract, so these classes cover both unchanged.
 #
 # The firmware is host-gated: it writes its pattern to slave words 16/17 only
 # while the go flag (word 31) is non-zero, and otherwise just polls (reads).
@@ -1422,10 +1481,11 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     PATTERN = 0xCAFEF00D
     PATTERN2 = 0x1234ABCD
 
-    # CPU DP addresses *as seen on the monitored bus*.  SmartConnect does NOT
-    # subtract the segment base: the CPU's M_BUS window is assigned at offset
-    # 0x4000_0000 (create_mb_bd.tcl), so the CPU issues -- and the monitor taps
-    # -- the full 0x4000_0040/44 on M_AXI_DP.  The EJTAG master reaches the same
+    # CPU DP addresses *as seen on the monitored bus*.  Neither merge subtracts
+    # the segment base: the MicroBlaze SmartConnect assigns the CPU's M_BUS
+    # window at offset 0x4000_0000 (create_mb_bd.tcl), and fcapz_axi_interconnect
+    # uses a single global slave map (no per-master remap), so the CPU issues --
+    # and the monitor taps -- the full 0x4000_0040/44.  The EJTAG master reaches the same
     # slave through a 0x0-based segment, so it drives bare 0x40/0x44 (D0/D1_OFF);
     # the shared test slave decodes (addr >> 2) % 32, so both hit word16/17.
     CPU_ADDR0 = 0x40000040  # SLAVE_BASE | word16
@@ -1610,14 +1670,15 @@ class TestAxiMonitorStress(unittest.TestCase):
         self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
 
     def test_repeated_arm_trigger_churn(self):
-        """50 back-to-back arm->trigger->done cycles on bridge writes.
+        """N back-to-back arm->trigger->done cycles on bridge writes.
 
         Each iteration re-arms from scratch and drives one write; the monitor
         must trigger and complete every time — no leaked state, no stuck-armed.
+        Count defaults to 50; raise it with FCAPZ_STRESS_CHURN (e.g. 100).
         """
         import time
 
-        n = 50
+        n = int(os.environ.get("FCAPZ_STRESS_CHURN", "50"))
         t0 = time.perf_counter()
         for i in range(n):
             self._arm("aw_hs")
@@ -1634,13 +1695,14 @@ class TestAxiMonitorStress(unittest.TestCase):
         With the CPU turned loose (go=1) it streams writes to the shared slave;
         the monitor must reliably re-arm and re-trigger on that sustained bus,
         run after run.  Proves the capture path survives a saturated real bus,
-        not just single injected transactions.
+        not just single injected transactions.  Count defaults to 30; raise it
+        with FCAPZ_STRESS_CAPTURES (e.g. 100).
         """
         import time
 
         self._set_go(1)  # turn the CPU loose — continuous writes
         try:
-            n = 30
+            n = int(os.environ.get("FCAPZ_STRESS_CAPTURES", "30"))
             t0 = time.perf_counter()
             for i in range(n):
                 # Under saturated traffic the monitor arms and triggers faster

@@ -8,13 +8,20 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 
 | File | Purpose |
 | --- | --- |
-| `de25_nano_top.v` | Top-level reference design |
+| `de25_nano_top.v` | Top-level reference design (RTL traffic generator) |
 | `de25_nano.qsf` | Quartus device, top-level, and pin assignments |
 | `de25_nano.sdc` | Timing constraints |
 | `build_de25_nano.tcl` | Quartus batch build script |
 | `build.py` | Preferred build launcher |
+| `axi4_traffic_gen.v` | Self-stimulating AXI master for the AXI monitor |
+| `de25_nano_vex_top.v` | Top-level VexRiscv variant — same cores, open-source CPU |
+| `vex/vex_cpu.v` | VexRiscv core + Wishbone arbiter/decode + 64 KB BRAM + WB→AXI4 bridge |
+| `vex/get_deps.py` | Fetches the SHA-pinned `VexRiscv_Lite.v` core (first build only) |
+| `vex/fw/` | Free-running bus pattern firmware (`boot.S`, `main.c`, `link.ld`, `build_fw.py`) |
+| `build_de25_nano_vex.py` | Fetch core + build firmware + Quartus build launcher (VexRiscv top) |
+| `build_de25_nano_vex.tcl` | Quartus batch build script used by `build_de25_nano_vex.py` |
 | `run_hw_tests.py` | Build, program, probe, and optional capture runner |
-| `test_hw_integration.py` | Pytest hardware integration regression tests |
+| `test_hw_integration.py` | Pytest hardware integration regression tests (both tops; `FPGACAP_BITSTREAM_VARIANT=vex` targets the VexRiscv one) |
 
 ## JTAG Instances
 
@@ -24,6 +31,29 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 | 2 | ELA burst readout |
 | 3 | EIO |
 | 4 | EJTAG-AXI bridge |
+| 5 | AXI monitor (taps the muxed bus) |
+
+## VexRiscv variant (open-source CPU)
+
+A second top-level, `de25_nano_vex_top`, is a **drop-in** for the default design
+— same debug cores — except the self-stimulating master on the monitored AXI bus
+is an **open-source VexRiscv** (RV32I) instead of the RTL `axi4_traffic_gen`, so
+the AXI monitor captures **real CPU bus traffic**. The CPU and the EJTAG-AXI
+bridge are merged by the vendor-neutral `fcapz_axi_interconnect` (a generated
+2×1 AXI4 crossbar shared with the Arty A7 example) onto one shared
+`axi4_test_slave`, which the monitor taps directly (no bus mux). The CPU writes
+the slave's high words (16/17) and the host's EJTAG tests use words 0..15, so
+they never collide and the host can read CPU writes back over EJTAG-AXI.
+
+Its firmware (`vex/fw/main.c`) is free-running (no host go flag): it continuously
+issues clean write/write/read bursts to `0x4000_0000`, giving the monitor live
+traffic to trigger on (`aw_hs`) with no host present, while never touching an
+error/hang address (so it cannot forge an `any_err` event). Because the
+observable bus contract matches the RTL generator, **the full
+`test_hw_integration.py` suite runs unchanged against the vex bitstream**. The
+`vex/` subsystem is pure RTL (`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v`
+with a Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM); `get_deps.py` fetches
+the pinned core on the first build.
 
 ## Board I/O
 
@@ -49,6 +79,37 @@ The generated bitstream is:
 
 ```text
 examples/de25_nano/output_files/de25_nano_fcapz.sof
+```
+
+### VexRiscv variant
+
+The open-source variant needs a RISC-V GCC toolchain (for the firmware) and, on
+the first build only, network access (to fetch the pinned VexRiscv core):
+
+```sh
+RISCV_PREFIX=riscv64-unknown-elf- python examples/de25_nano/build_de25_nano_vex.py
+```
+
+Set `RISCV_PREFIX` to your toolchain prefix. The build fetches
+`vex/VexRiscv_Lite.v`, compiles the firmware into `vex/fw/fw.mem`, then runs
+Quartus and writes `examples/de25_nano/output_files/de25_nano_vex_fcapz.sof`.
+
+Program the board and run the hardware suite against it. The pytest suite does
+not program the FPGA, so use the runner (it builds, programs, and pytests the
+selected variant in one go):
+
+```sh
+python examples/de25_nano/run_hw_tests.py \
+  --hardware "DE25-Nano [USB-1]" --variant vex --pytest
+```
+
+Or program it yourself and run pytest directly (it applies unchanged, so every
+test runs):
+
+```sh
+quartus_pgm -c "DE25-Nano [USB-1]" -m jtag \
+  -o "p;examples/de25_nano/output_files/de25_nano_vex_fcapz.sof@1"
+FPGACAP_BITSTREAM_VARIANT=vex python -m pytest examples/de25_nano/test_hw_integration.py -v
 ```
 
 ## Build, Program, And Test

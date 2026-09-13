@@ -43,7 +43,16 @@ _SKIP = _env_bool("FPGACAP_SKIP_HW")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_DIR = Path(__file__).resolve().parent
-BITFILE = str(_EXAMPLE_DIR / "output_files" / "de25_nano_fcapz.sof")
+
+# FPGACAP_BITSTREAM_VARIANT selects which top-level this suite targets. Both are
+# drop-in equivalents on the observable bus, so every test below applies to
+# either. "vex" swaps the RTL axi4_traffic_gen for an open-source VexRiscv CPU
+# driving the same monitored bus (examples/de25_nano/de25_nano_vex_top.v).
+_BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").strip().lower()
+_DEFAULT_BITNAME = (
+    "de25_nano_vex_fcapz.sof" if _BITSTREAM_VARIANT == "vex" else "de25_nano_fcapz.sof"
+)
+BITFILE = str(_EXAMPLE_DIR / "output_files" / _DEFAULT_BITNAME)
 _HARDWARE = os.environ.get("FPGACAP_QUARTUS_HARDWARE")
 _DEVICE_ENV = os.environ.get("FPGACAP_QUARTUS_DEVICE", "auto")
 _DEVICE = None if _DEVICE_ENV.lower() in ("", "auto") else _DEVICE_ENV
@@ -56,7 +65,7 @@ AXI_MON_CHAIN = 5
 SAMPLE_CLOCK_HZ = 50_000_000
 TRIGGER_DECISION_LATENCY = 1
 
-_BITSTREAM_SOURCES = [
+_BITSTREAM_SOURCES_COMMON = [
     _ROOT / "rtl" / "fcapz_version.vh",
     _ROOT / "rtl" / "reset_sync.v",
     _ROOT / "rtl" / "dpram.v",
@@ -75,12 +84,36 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_axi_mon_intel.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_intel.v",
     _ROOT / "tb" / "axi4_test_slave.v",
-    _EXAMPLE_DIR / "axi4_traffic_gen.v",
-    _EXAMPLE_DIR / "de25_nano_top.v",
     _EXAMPLE_DIR / "de25_nano.qsf",
     _EXAMPLE_DIR / "de25_nano.sdc",
+]
+
+_BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
+    _EXAMPLE_DIR / "axi4_traffic_gen.v",
+    _EXAMPLE_DIR / "de25_nano_top.v",
     _EXAMPLE_DIR / "build_de25_nano.tcl",
 ]
+
+# The VexRiscv variant swaps the RTL traffic generator for the CPU subsystem and
+# its baked-in firmware image; VexRiscv_Lite.v and fw.mem are fetched/built and
+# may be absent until the first build (the freshness check skips missing files).
+# The firmware sources are listed too, so editing main.c without rebuilding the
+# .mem still trips the freshness gate.
+_BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
+    _ROOT / "rtl" / "fcapz_axi_interconnect.v",
+    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
+    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "vex" / "fw" / "main.c",
+    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
+    _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
+    _EXAMPLE_DIR / "de25_nano_vex_top.v",
+    _EXAMPLE_DIR / "build_de25_nano_vex.tcl",
+]
+
+_BITSTREAM_SOURCES = (
+    _BITSTREAM_SOURCES_VEX if _BITSTREAM_VARIANT == "vex" else _BITSTREAM_SOURCES_VERILOG
+)
 
 
 def _check_bitstream_freshness() -> str | None:
@@ -94,9 +127,14 @@ def _check_bitstream_freshness() -> str | None:
         if src.exists() and src.stat().st_mtime > bit_mtime
     ]
     if stale:
+        build_cmd = (
+            "python examples/de25_nano/build_de25_nano_vex.py"
+            if _BITSTREAM_VARIANT == "vex"
+            else "python examples/de25_nano/build.py"
+        )
         return (
             f"bitstream is stale; these sources are newer than {bitpath.name}: "
-            f"{', '.join(stale)}. Re-run: python examples/de25_nano/build.py"
+            f"{', '.join(stale)}. Re-run: {build_cmd}"
         )
     return None
 
@@ -682,28 +720,52 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0x1234)
 
+    def test_cpu_writes_reach_shared_slave(self):
+        """Both masters are merged onto one slave by fcapz_axi_interconnect, so
+        the host must be able to read back what the CPU wrote. The free-running
+        firmware writes 0xCAFEF00D/0x1234ABCD to the shared slave's words 16/17
+        (0x40/0x44); the slave powers up zeroed and the host only ever touches
+        words 0..15, so seeing these constants proves the CPU's writes traverse
+        the interconnect to the shared slave and the host reads them back."""
+        deadline = time.time() + 2.0
+        got40 = got44 = None
+        while time.time() < deadline:
+            got40 = self.bridge.axi_read(0x40)
+            got44 = self.bridge.axi_read(0x44)
+            if got40 == 0xCAFEF00D and got44 == 0x1234ABCD:
+                break
+            time.sleep(0.02)
+        self.assertEqual(got40, 0xCAFEF00D, "CPU write to word 16 not visible over the merged bus")
+        self.assertEqual(got44, 0x1234ABCD, "CPU write to word 17 not visible over the merged bus")
+
     def test_throughput(self):
-        data = [i for i in range(256)]
+        # The shared slave aliases (addr>>2)%NUM_WORDS and the CPU writes words
+        # 16/17, so keep every host write inside words 0..15 (< 0x40) to preserve
+        # the host/CPU address split. Write a 16-word block 16x rather than one
+        # 256-word block, which would alias onto the CPU's words.
+        block = [i for i in range(16)]
         t0 = time.perf_counter()
-        self.bridge.write_block(0x00, data)
+        for _ in range(16):
+            self.bridge.write_block(0x00, block)
         elapsed = time.perf_counter() - t0
-        kb_per_s = (256 * 4) / 1024 / elapsed if elapsed > 0 else 0
-        print(f"\n  write_block 256 words: {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
+        kb_per_s = (16 * 16 * 4) / 1024 / elapsed if elapsed > 0 else 0
+        print(f"\n  write_block 256 words (16x16): {elapsed:.3f}s = {kb_per_s:.1f} KB/s")
         self.assertGreater(kb_per_s, 0.3)
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestAxiMonitor(unittest.TestCase):
-    """AXI monitor on instance 5, observing a muxed AXI4-Lite bus.
+    """AXI monitor on instance 5, observing the merged shared AXI4-Lite bus.
 
-    The monitor taps the EJTAG-AXI bridge while the bridge is active, and a
-    self-stimulating traffic generator (axi4_traffic_gen -> its own test slave)
-    otherwise. The generator emits only *clean* writes and reads, so:
-      - arming on a generator event (aw_hs) triggers on its own, with no host
-        driving the bridge -- this is what makes the monitor demoable in the GUI;
-      - arming on any_err stays armed (the generator never forges an error), and
-        only a deliberate host-driven error response fires it. That asymmetry is
-        what keeps the selective-trigger guarantee testable on real silicon.
+    The fcapz_axi_interconnect merges the VexRiscv CPU and the EJTAG-AXI bridge
+    onto one shared test slave, and the monitor taps that merged bus. The CPU is
+    free-running and emits only *clean* writes/reads (to the slave's high words
+    16/17, away from the host's words 0..15), so:
+      - arming on a CPU event (aw_hs) triggers on its own, with no host driving
+        the bridge -- this is what makes the monitor demoable in the GUI;
+      - arming on any_err stays armed (the CPU never forges an error), and only a
+        deliberate host-driven error response fires it. That asymmetry is what
+        keeps the selective-trigger guarantee testable on real silicon.
     """
 
     STATUS = 0x0008  # bit0=armed, bit1=triggered, bit2=done

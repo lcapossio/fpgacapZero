@@ -17,10 +17,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_DIR = ROOT / "examples" / "de25_nano"
-BITFILE = EXAMPLE_DIR / "output_files" / "de25_nano_fcapz.sof"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _variant_paths(variant: str) -> tuple[Path, Path]:
+    """Return (bitfile, build_script) for the selected top-level variant."""
+    if (variant or "verilog").strip().lower() == "vex":
+        return (
+            EXAMPLE_DIR / "output_files" / "de25_nano_vex_fcapz.sof",
+            EXAMPLE_DIR / "build_de25_nano_vex.py",
+        )
+    return (
+        EXAMPLE_DIR / "output_files" / "de25_nano_fcapz.sof",
+        EXAMPLE_DIR / "build.py",
+    )
 
 
 def _tool(name: str, explicit: str | None = None) -> str:
@@ -42,14 +54,14 @@ def _run(cmd: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None)
         raise SystemExit(result.returncode)
 
 
-def _program_sof(quartus_pgm: str, hardware: str | None, device_index: str) -> None:
-    if not BITFILE.is_file():
-        raise FileNotFoundError(f"SOF bitstream not found: {BITFILE}")
+def _program_sof(quartus_pgm: str, hardware: str | None, device_index: str, bitfile: Path) -> None:
+    if not bitfile.is_file():
+        raise FileNotFoundError(f"SOF bitstream not found: {bitfile}")
     device_suffix = device_index if device_index.startswith("@") else f"@{device_index}"
     cmd = [quartus_pgm, "-m", "JTAG"]
     if hardware:
         cmd.extend(["-c", hardware])
-    cmd.extend(["-o", f"p;{BITFILE}{device_suffix}"])
+    cmd.extend(["-o", f"p;{bitfile}{device_suffix}"])
     _run(cmd)
 
 
@@ -230,6 +242,12 @@ def _run_soak(args: argparse.Namespace) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hardware", default=None, help='Quartus cable, e.g. "DE25-Nano [USB-1]"')
+    parser.add_argument(
+        "--variant",
+        default=os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog"),
+        help="Top-level variant: 'verilog' (default) or 'vex' (VexRiscv CPU). "
+        "Selects the bitfile, build script, and pytest variant.",
+    )
     parser.add_argument("--tap", default="auto", help="Quartus device name or auto")
     parser.add_argument("--device-index", default="@1", help="quartus_pgm device suffix")
     parser.add_argument("--chain", type=int, default=1, help="ELA control sld_virtual_jtag index")
@@ -269,8 +287,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    bitfile, build_script = _variant_paths(args.variant)
+
     if not args.no_build:
-        build_cmd = [sys.executable, str(EXAMPLE_DIR / "build.py")]
+        build_cmd = [sys.executable, str(build_script)]
         if args.quartus_sh:
             build_cmd.extend(["--quartus-sh", args.quartus_sh])
         _run(build_cmd)
@@ -279,7 +299,9 @@ def main() -> int:
         _run([_tool("jtagconfig")])
 
     if not args.no_program:
-        _program_sof(_tool("quartus_pgm", args.quartus_pgm), args.hardware, args.device_index)
+        _program_sof(
+            _tool("quartus_pgm", args.quartus_pgm), args.hardware, args.device_index, bitfile
+        )
 
     _run([*_fcapz_base(args), "probe"])
 
@@ -310,6 +332,9 @@ def main() -> int:
 
     if args.pytest:
         env = os.environ.copy()
+        # Keep the pytest child on the same variant we built/programmed, so it
+        # picks the matching .sof + freshness sources (not a stale env value).
+        env["FPGACAP_BITSTREAM_VARIANT"] = args.variant
         if args.hardware:
             env["FPGACAP_QUARTUS_HARDWARE"] = args.hardware
         if args.tap and args.tap.lower() != "auto":

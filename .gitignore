@@ -35,9 +35,13 @@ examples/**/tmp-clearbox/
 examples/**/*.qws
 # Local capture output
 examples/*/captures/
-# MicroBlaze firmware build artifacts (ELF is regenerated + baked at build time)
+# Soft-CPU firmware build artifacts (regenerated at build time; ELF baked or
+# packed into BRAM). *.bin is already ignored globally above.
 examples/**/fw/*.elf
 examples/**/fw/*.map
+examples/**/fw/*.mem
+# Fetched, pinned VexRiscv core (examples/*/vex/get_deps.py drops it in)
+examples/**/vex/VexRiscv*.v
 # Vivado in-memory / block-design scratch written at the repo root
 /.srcs/
 
@@ -57,6 +61,7 @@ tests/_tmp/
 .codex_tmp/
 .claude/
 examples/de25_nano/de25_nano_quartus/
+examples/de25_nano/de25_nano_vex_quartus/
 examples/de25_nano/output_files/
 examples/de25_nano/captures/
 
