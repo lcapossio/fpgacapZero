@@ -151,8 +151,8 @@ if {[file exists $project_xpr]} {
 # arty_a7_top instantiates mb_sys_wrapper (microblaze_0 M_AXI_DP + the EJTAG
 # bridge master merged onto the monitored shared bus; MDM on USER3).  Generated
 # fresh into the project if not already present.
-source $example_dir/mb/create_mb_bd.tcl
-source $example_dir/mb/build_fw.tcl
+source $example_dir/legacy-microblaze/create_mb_bd.tcl
+source $example_dir/legacy-microblaze/build_fw.tcl
 if {[llength [get_files -quiet mb_sys.bd]] == 0} {
     fcapz_build_mb_bd mb_sys
     make_wrapper -files [get_files mb_sys.bd] -top -import

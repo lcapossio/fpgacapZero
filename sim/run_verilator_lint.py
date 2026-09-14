@@ -87,6 +87,10 @@ class LintTarget:
     name: str
     top: str
     sources: tuple[Path, ...]
+    # Extra Verilator flags for this target only (appended after COMMON_FLAGS).
+    # Used to relax style lint on generated third-party RTL down to an
+    # elaboration-only check, without weakening the shared flag set.
+    extra_flags: tuple[str, ...] = ()
 
 
 TARGETS = (
@@ -435,6 +439,17 @@ TARGETS = (
             RTL / "fcapz_ejtaguart_intel.v",
         ),
     ),
+    # Generated SpinalHDL output (axiZero crossbar): we do not control its
+    # coding style, and a fully combinational crossbar reliably trips Verilator
+    # style warnings (UNOPTFLAT, always-true compares, wide zero slices). Lint
+    # it as an elaboration-only check (-Wno-lint) so a botched regen or a broken
+    # submodule rename is still caught, without style waivers we cannot own.
+    LintTarget(
+        name="fcapz_axi_interconnect",
+        top="fcapz_axi_interconnect",
+        sources=(RTL / "fcapz_axi_interconnect.v",),
+        extra_flags=("-Wno-lint",),
+    ),
 )
 
 COMMON_FLAGS = (
@@ -562,6 +577,7 @@ def command_for(target: LintTarget) -> list[str]:
     return [
         "verilator",
         *COMMON_FLAGS,
+        *target.extra_flags,
         "-I" + str(RTL),
         "-I" + str(RTL / "jtag_tap"),
         "--top-module",
