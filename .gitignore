@@ -41,8 +41,11 @@ examples/**/fw/*.elf
 examples/**/fw/*.map
 examples/**/fw/*.mem
 # The VexRiscv core is vendored (tracked) under third_party/vexriscv/, verified
-# offline by examples/common/vexriscv/get_deps.py; it is no longer fetched into
-# examples/, so nothing to ignore there.
+# offline by examples/common/vexriscv/get_deps.py. Keep ignoring the old
+# fetched-into-examples location so a stale copy from a pre-vendoring checkout is
+# never accidentally re-committed (this pattern never matched the tracked
+# third_party/ file).
+examples/**/vex/VexRiscv*.v
 # Vivado in-memory / block-design scratch written at the repo root
 /.srcs/
 

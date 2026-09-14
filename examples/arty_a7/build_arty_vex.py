@@ -4,10 +4,10 @@
 
 """Launch a Vivado batch build of the Arty A7 VexRiscv design.
 
-Before Vivado runs, this fetches the pinned VexRiscv core and compiles the
-firmware into examples/arty_a7/vex/fw/fw.mem (loaded by vex_cpu.v via
-$readmemh). Requires a RISC-V GCC toolchain on PATH (or $RISCV_PREFIX) and,
-on the first run only, network access to fetch the core.
+Before Vivado runs, this verifies the vendored VexRiscv core (checked in under
+third_party/vexriscv/, no network needed) and compiles the firmware into
+examples/arty_a7/vex/fw/fw.mem (loaded by vex_cpu.v via $readmemh). Requires a
+RISC-V GCC toolchain on PATH (or $RISCV_PREFIX).
 
     RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build_arty_vex.py
 """

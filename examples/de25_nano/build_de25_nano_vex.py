@@ -4,10 +4,10 @@
 
 """Launch a Quartus batch build of the DE25-Nano VexRiscv design.
 
-Before Quartus runs, this fetches the pinned VexRiscv core and compiles the
-firmware into examples/de25_nano/vex/fw/fw.mem (loaded by vex_cpu.v via
-$readmemh). Requires a RISC-V GCC toolchain on PATH (or $RISCV_PREFIX) and,
-on the first run only, network access to fetch the core.
+Before Quartus runs, this verifies the vendored VexRiscv core (checked in under
+third_party/vexriscv/, no network needed) and compiles the firmware into
+examples/de25_nano/vex/fw/fw.mem (loaded by vex_cpu.v via $readmemh). Requires a
+RISC-V GCC toolchain on PATH (or $RISCV_PREFIX).
 
 Usage
 -----

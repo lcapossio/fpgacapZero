@@ -97,16 +97,18 @@ _BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
 ]
 
 # The VexRiscv variant swaps the RTL traffic generator for the CPU subsystem and
-# its baked-in firmware image; VexRiscv_Lite.v and fw.mem are fetched/built and
-# may be absent until the first build (the freshness check skips missing files).
-# The firmware sources are listed too, so editing main.c without rebuilding the
-# .mem still trips the freshness gate.
+# its baked-in firmware image. The vendored core is tracked; fw.mem is generated
+# at build time. All entries here are mandatory build inputs -- a missing one
+# fails the freshness check (see _check_bitstream_freshness). The firmware sources
+# are listed too, so editing main.c without rebuilding the .mem trips the gate.
 _BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
     _ROOT / "rtl" / "fcapz_axi_interconnect.v",
     # Shared VexRiscv subsystem (examples/common) + vendored core (third_party).
     _COMMON_VEX / "vex_cpu.v",
+    _COMMON_VEX / "get_deps.py",
     _COMMON_VEX / "fw" / "boot.S",
     _COMMON_VEX / "fw" / "link.ld",
+    _COMMON_VEX / "fw" / "build_fw.py",
     _VENDOR_VEX / "VexRiscv_Lite.v",
     # Board-local firmware workload + built image.
     _EXAMPLE_DIR / "vex" / "fw" / "main.c",
@@ -125,20 +127,32 @@ def _check_bitstream_freshness() -> str | None:
     if not bitpath.exists():
         return f"bitfile not found: {BITFILE}"
     bit_mtime = bitpath.stat().st_mtime
-    stale = [
-        src.name
-        for src in _BITSTREAM_SOURCES
-        if src.exists() and src.stat().st_mtime > bit_mtime
-    ]
-    if stale:
+    missing = []
+    stale = []
+    for src in _BITSTREAM_SOURCES:
+        if not src.exists():
+            # A missing mandatory build input (vendored core, shared CPU/firmware
+            # sources, generated fw.mem) means the bitstream's provenance cannot
+            # be verified -- fail rather than silently testing it.
+            missing.append(src.name)
+        elif src.stat().st_mtime > bit_mtime:
+            stale.append(src.name)
+    if missing or stale:
         build_cmd = (
             "python examples/de25_nano/build_de25_nano_vex.py"
             if _BITSTREAM_VARIANT == "vex"
             else "python examples/de25_nano/build.py"
         )
+        parts = []
+        if missing:
+            parts.append(f"missing build inputs: {', '.join(missing)}")
+        if stale:
+            parts.append(
+                f"these sources are newer than {bitpath.name}: {', '.join(stale)}"
+            )
         return (
-            f"bitstream is stale; these sources are newer than {bitpath.name}: "
-            f"{', '.join(stale)}. Re-run: {build_cmd}"
+            f"bitstream cannot be certified fresh — {'; '.join(parts)}. "
+            f"Re-run: {build_cmd}"
         )
     return None
 
