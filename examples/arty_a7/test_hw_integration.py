@@ -52,7 +52,10 @@ _BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "vex").lower()
 # host-gated CPU bus pattern), so this whole suite runs against it unchanged.
 # Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, or =vhdl
 # for the VHDL top.
-_DEFAULT_BITNAME = "arty_a7_vex_top.bit" if _BITSTREAM_VARIANT == "vex" else "arty_a7_top.bit"
+_DEFAULT_BITNAME = {
+    "vex": "arty_a7_vex_top.bit",
+    "vhdl": "arty_a7_top_vhdl.bit",
+}.get(_BITSTREAM_VARIANT, "arty_a7_top.bit")
 BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
@@ -122,9 +125,19 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_axi_mon.vhd",
     _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
     _ROOT / "rtl" / "fcapz_eio_xilinx7.v",
+    _ROOT / "rtl" / "fcapz_axi_interconnect.v",
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.vhd",
     _EXAMPLE_DIR / "arty_a7.xdc",
+    _EXAMPLE_DIR / "build_arty_vhdl.tcl",
+    # The VHDL top now instantiates the shared Verilog VexRiscv subsystem.
+    _COMMON_VEX / "vex_cpu.v",
+    _COMMON_VEX / "fw" / "boot.S",
+    _COMMON_VEX / "fw" / "link.ld",
+    _VENDOR_VEX / "VexRiscv_Lite.v",
+    _EXAMPLE_DIR / "vex" / "vex_sys.v",
+    _EXAMPLE_DIR / "vex" / "fw" / "main.c",
+    _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
 ]
 
 # VexRiscv variant: shared cores + the new top + the vex subsystem RTL and its
