@@ -8,7 +8,8 @@
 // A drop-in for de25_nano_top: identical debug cores (ELA on instances 1/2, EIO
 // on 3, EJTAG-AXI on 4, AXI monitor on 5) -- the one difference is that the
 // self-stimulating master feeding the monitored bus is an open-source VexRiscv
-// CPU (examples/de25_nano/vex/vex_cpu.v) running baked-in firmware, instead of
+// CPU (shared examples/common/vexriscv/vex_cpu.v) running baked-in firmware,
+// with a board-local workload (vex/fw/main.c), instead of
 // the RTL axi4_traffic_gen. The CPU and the EJTAG-AXI bridge are merged by the
 // vendor-neutral fcapz_axi_interconnect onto one shared axi4_test_slave, which
 // the AXI monitor taps directly (no bus mux). The CPU uses the slave's high

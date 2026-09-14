@@ -43,6 +43,8 @@ _SKIP = _env_bool("FPGACAP_SKIP_HW")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_DIR = Path(__file__).resolve().parent
+_COMMON_VEX = _ROOT / "examples" / "common" / "vexriscv"   # shared CPU subsystem
+_VENDOR_VEX = _ROOT / "third_party" / "vexriscv"           # vendored core
 
 # FPGACAP_BITSTREAM_VARIANT selects which top-level this suite targets. Both are
 # drop-in equivalents on the observable bus, so every test below applies to
@@ -101,11 +103,13 @@ _BITSTREAM_SOURCES_VERILOG = _BITSTREAM_SOURCES_COMMON + [
 # .mem still trips the freshness gate.
 _BITSTREAM_SOURCES_VEX = _BITSTREAM_SOURCES_COMMON + [
     _ROOT / "rtl" / "fcapz_axi_interconnect.v",
-    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
-    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
-    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
+    # Shared VexRiscv subsystem (examples/common) + vendored core (third_party).
+    _COMMON_VEX / "vex_cpu.v",
+    _COMMON_VEX / "fw" / "boot.S",
+    _COMMON_VEX / "fw" / "link.ld",
+    _VENDOR_VEX / "VexRiscv_Lite.v",
+    # Board-local firmware workload + built image.
     _EXAMPLE_DIR / "vex" / "fw" / "main.c",
-    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
     _EXAMPLE_DIR / "de25_nano_vex_top.v",
     _EXAMPLE_DIR / "build_de25_nano_vex.tcl",

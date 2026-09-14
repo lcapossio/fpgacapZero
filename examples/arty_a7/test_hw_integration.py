@@ -65,6 +65,8 @@ ELA0_SAMPLE_CLOCK_HZ = 150_000_000
 ELA1_SAMPLE_CLOCK_HZ = 130_000_000
 
 _ROOT = Path(__file__).resolve().parents[2]
+_COMMON_VEX = _ROOT / "examples" / "common" / "vexriscv"   # shared CPU subsystem
+_VENDOR_VEX = _ROOT / "third_party" / "vexriscv"           # vendored core
 
 # RTL and design sources that feed the bitstream (must match build_arty.tcl)
 _BITSTREAM_SOURCES_VERILOG = [
@@ -157,14 +159,16 @@ _BITSTREAM_SOURCES_VEX = [
     _EXAMPLE_DIR / "arty_a7_vex_top.v",
     _EXAMPLE_DIR / "arty_a7.xdc",
     _EXAMPLE_DIR / "build_arty_vex.tcl",
-    _EXAMPLE_DIR / "vex" / "vex_cpu.v",
+    # Shared VexRiscv subsystem (examples/common) + vendored core (third_party).
+    _COMMON_VEX / "vex_cpu.v",
+    _COMMON_VEX / "get_deps.py",
+    _COMMON_VEX / "fw" / "boot.S",
+    _COMMON_VEX / "fw" / "link.ld",
+    _COMMON_VEX / "fw" / "build_fw.py",
+    _VENDOR_VEX / "VexRiscv_Lite.v",
+    # Board-local: bus adapter + firmware workload + built image.
     _EXAMPLE_DIR / "vex" / "vex_sys.v",
-    _EXAMPLE_DIR / "vex" / "VexRiscv_Lite.v",
-    _EXAMPLE_DIR / "vex" / "get_deps.py",
-    _EXAMPLE_DIR / "vex" / "fw" / "boot.S",
     _EXAMPLE_DIR / "vex" / "fw" / "main.c",
-    _EXAMPLE_DIR / "vex" / "fw" / "link.ld",
-    _EXAMPLE_DIR / "vex" / "fw" / "build_fw.py",
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
 ]
 

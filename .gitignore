@@ -40,8 +40,9 @@ examples/*/captures/
 examples/**/fw/*.elf
 examples/**/fw/*.map
 examples/**/fw/*.mem
-# Fetched, pinned VexRiscv core (examples/*/vex/get_deps.py drops it in)
-examples/**/vex/VexRiscv*.v
+# The VexRiscv core is vendored (tracked) under third_party/vexriscv/, verified
+# offline by examples/common/vexriscv/get_deps.py; it is no longer fetched into
+# examples/, so nothing to ignore there.
 # Vivado in-memory / block-design scratch written at the repo root
 /.srcs/
 

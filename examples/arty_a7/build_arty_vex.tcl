@@ -3,10 +3,11 @@
 
 # Vivado build script for the fpgacapZero Arty A7-100T VexRiscv reference
 # design. Sibling of build_arty.tcl; the CPU subsystem is an
-# open-source VexRiscv (examples/arty_a7/vex/) instead of MicroBlaze.
+# open-source VexRiscv (shared examples/common/vexriscv/) instead of MicroBlaze.
 #
-# Prerequisites (done by build_arty_vex.py before Vivado): vex/VexRiscv_Lite.v
-# is fetched and vex/fw/fw.mem is built. Usage (from project root):
+# Prerequisites (done by build_arty_vex.py before Vivado): the vendored
+# third_party/vexriscv/VexRiscv_Lite.v is verified and vex/fw/fw.mem is built.
+# Usage (from project root):
 #   vivado -mode batch -source examples/arty_a7/build_arty_vex.tcl
 
 set project_name fpgacapZero_arty_vex
@@ -78,8 +79,8 @@ set src_list [list \
     $root/rtl/fcapz_axi_interconnect.v \
     $root/tb/axi4_test_slave.v \
     $example_dir/arty_a7_vex_top.v \
-    $example_dir/vex/VexRiscv_Lite.v \
-    $example_dir/vex/vex_cpu.v \
+    $root/third_party/vexriscv/VexRiscv_Lite.v \
+    $root/examples/common/vexriscv/vex_cpu.v \
     $example_dir/vex/vex_sys.v \
     $example_dir/vex/fw/fw.mem \
 ]

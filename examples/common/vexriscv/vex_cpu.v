@@ -3,20 +3,24 @@
 
 `timescale 1ns/1ps
 
-// VexRiscv CPU subsystem for the Arty A7 fpgacapZero reference design.
+// Shared VexRiscv CPU subsystem for the fpgacapZero board examples.
 //
-// Wraps the pre-generated VexRiscv_Lite core (RV32I, plain Wishbone iBus/dBus;
-// fetched by examples/arty_a7/vex/get_deps.py) with just enough glue to run the
-// bare-metal firmware and drive the shared, monitored AXI bus:
+// One vendor-neutral copy used by both reference designs (examples/arty_a7 and
+// examples/de25_nano); each board supplies only its own firmware (fw/main.c)
+// and top-level bus glue. Wraps the vendored VexRiscv_Lite core (RV32I, plain
+// Wishbone iBus/dBus; third_party/vexriscv/, verified by
+// examples/common/vexriscv/get_deps.py) with just enough glue to run the
+// bare-metal firmware and drive the monitored AXI bus:
 //
 //   * a 2->1 classic-Wishbone arbiter merges the instruction and data buses;
 //   * an address decoder splits the merged bus into three regions --
 //       0x0000_0000  64 KB on-chip BRAM   (firmware image, $readmemh fw.mem)
 //       0x1000_0000  free-running 32-bit cycle counter (read-only)
 //       0x4000_0000  everything else -> Wishbone-to-AXI4 single-beat master;
-//   * the AXI4 master is a single, single-outstanding master that
-//     fcapz_axi_interconnect (in vex_sys) merges with the EJTAG-AXI bridge
-//     onto M_BUS.
+//   * the AXI4 master feeds fcapz_axi_interconnect (in each board's top),
+//     which merges it with the EJTAG-AXI bridge onto one shared
+//     axi4_test_slave the AXI monitor taps -- vendor-neutral RTL that drops
+//     into both the Xilinx and the Intel/Altera flows unchanged.
 //
 // The core's iBus is cached, so it asserts CTI incrementing-burst hints on
 // line fills; this glue ignores CTI/BTE and services every beat as an
@@ -24,6 +28,10 @@
 // master stay single-beat (awlen/arlen = 0). The design favours obvious
 // correctness over throughput: one outstanding transaction, 1-cycle
 // BRAM/counter latency.
+//
+// The BRAM inference attribute carries both the Xilinx (ram_style) and the
+// Intel (ramstyle) spellings; each vendor ignores the other's, so this single
+// file infers block RAM on both toolchains.
 
 module vex_cpu #(
     parameter MEM_INIT_FILE = "fw.mem",
@@ -32,7 +40,7 @@ module vex_cpu #(
     input  wire        clk,
     input  wire        rst,               // active-high (VexRiscv reset polarity)
 
-    // AXI4 master -> fcapz_axi_interconnect s0 (M_CPU). Single-beat (awlen/arlen = 0).
+    // AXI4 master -> monitored traffic-generator slave. Single-beat (len = 0).
     output wire [31:0] m_axi_awaddr,
     output wire [7:0]  m_axi_awlen,
     output wire [2:0]  m_axi_awsize,
@@ -145,7 +153,8 @@ module vex_cpu #(
     wire is_unmap  = v_stb & ~is_ram & ~is_cycle & ~is_periph;
 
     // ---- On-chip BRAM (firmware image) ---------------------------------
-    (* ram_style = "block" *) reg [31:0] ram [0:RAM_WORDS-1];
+    (* ram_style = "block", ramstyle = "no_rw_check, M20K" *)
+    reg [31:0] ram [0:RAM_WORDS-1];
     initial begin
         $readmemh(MEM_INIT_FILE, ram);
     end

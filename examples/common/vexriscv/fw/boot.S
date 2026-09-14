@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 #
-# Minimal RISC-V (RV32I) reset/boot for the Arty VexRiscv firmware.
+# Minimal RISC-V (RV32I) reset/boot shared by the fpgacapZero VexRiscv examples.
 # VexRiscv boots at externalResetVector = 0x0 (tied in vex_cpu.v), so _start
 # is placed at 0x0 by the linker (.text.init). It sets gp/sp, zeroes .bss, and
-# calls main(). main() polls the host go flag and drives the shared bus forever
-# and never returns, but a safety spin follows just in case.
+# calls main(). Each board's main() drives the monitored bus forever and never
+# returns, but a safety spin follows just in case.
 
     .section .text.init, "ax"
     .global _start

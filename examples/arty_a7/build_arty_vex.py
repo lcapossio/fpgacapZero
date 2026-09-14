@@ -25,7 +25,8 @@ from build import cleanup_orphans, find_vivado
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_DIR = ROOT / "examples" / "arty_a7"
-VEX_DIR = EXAMPLE_DIR / "vex"
+VEX_DIR = EXAMPLE_DIR / "vex"                       # board-local: main.c, vex_sys.v
+COMMON_VEX = ROOT / "examples" / "common" / "vexriscv"  # shared CPU subsystem
 TCL_SCRIPT = EXAMPLE_DIR / "build_arty_vex.tcl"
 BITFILE = EXAMPLE_DIR / "arty_a7_vex_top.bit"
 
@@ -39,11 +40,11 @@ def _load(name: str, path: Path):
 
 
 def prepare_sources(out_dir: Path) -> None:
-    """Fetch the VexRiscv core and build the firmware image (pre-Vivado)."""
-    get_deps = _load("vex_get_deps", VEX_DIR / "get_deps.py")
-    build_fw = _load("vex_build_fw", VEX_DIR / "fw" / "build_fw.py")
+    """Verify the vendored VexRiscv core and build the firmware (pre-Vivado)."""
+    get_deps = _load("vex_get_deps", COMMON_VEX / "get_deps.py")
+    build_fw = _load("vex_build_fw", COMMON_VEX / "fw" / "build_fw.py")
     get_deps.fetch_vexriscv()
-    build_fw.build_firmware(out_dir)
+    build_fw.build_firmware(VEX_DIR / "fw", out_dir)
 
 
 def main() -> int:

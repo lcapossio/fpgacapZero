@@ -3,11 +3,11 @@
 #
 # Quartus build script for the fpgacapZero DE25-Nano VexRiscv reference design.
 # Sibling of build_de25_nano.tcl; the self-stimulating master on the monitored
-# bus is an open-source VexRiscv CPU (examples/de25_nano/vex/) instead of the
-# RTL axi4_traffic_gen.
+# bus is an open-source VexRiscv CPU (shared examples/common/vexriscv/) instead
+# of the RTL axi4_traffic_gen.
 #
-# Prerequisites (done by build_de25_nano_vex.py before Quartus):
-# vex/VexRiscv_Lite.v is fetched and vex/fw/fw.mem is built.
+# Prerequisites (done by build_de25_nano_vex.py before Quartus): the vendored
+# third_party/vexriscv/VexRiscv_Lite.v is verified and vex/fw/fw.mem is built.
 
 if {$argc < 1} {
     error "Expecting -tclargs <repo path>"
@@ -53,8 +53,8 @@ set verilog_files [list \
     "${repo_path}/rtl/jtag_tap/jtag_tap_intel.v" \
     "${repo_path}/rtl/fcapz_axi_interconnect.v" \
     "${repo_path}/tb/axi4_test_slave.v" \
-    "${example_dir}/vex/VexRiscv_Lite.v" \
-    "${example_dir}/vex/vex_cpu.v" \
+    "${repo_path}/third_party/vexriscv/VexRiscv_Lite.v" \
+    "${repo_path}/examples/common/vexriscv/vex_cpu.v" \
     "${example_dir}/de25_nano_vex_top.v" \
 ]
 

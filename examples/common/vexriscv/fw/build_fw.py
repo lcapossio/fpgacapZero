@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Build the DE25-Nano VexRiscv firmware and emit a $readmemh image.
+"""Build a board's VexRiscv firmware and emit a $readmemh image.
 
-Compiles the freestanding RV32I firmware (boot.S + the free-running bus pattern
-generator in main.c) with a RISC-V GCC toolchain and packs the result into
-``fw.mem`` -- 32-bit little-endian words, one hex value per line -- which
-``vex_cpu.v`` loads into the on-chip BRAM via ``$readmemh`` at synthesis time.
+Shared by both fpgacapZero board examples. Compiles the freestanding RV32I
+firmware -- the shared ``boot.S`` here plus the board's own ``main.c`` (the bus
+pattern generator, which differs per board) -- with a RISC-V GCC toolchain and
+packs the result into ``fw.mem`` (32-bit little-endian words, one hex value per
+line) in the board's firmware directory, where ``vex_cpu.v`` loads it via
+``$readmemh`` at synthesis time. The linker script (``link.ld``) is shared too.
 
 No hardcoded toolchain paths: the cross toolchain is found from ``$RISCV_PREFIX``
 (e.g. ``riscv64-unknown-elf-``) or, failing that, the first known ``*-gcc`` on
-``PATH``. Runs standalone or is called by ``build_de25_nano_vex.py`` before
-Quartus.
+``PATH``. Runs standalone (pass the board firmware dir) or is called by a
+per-board build launcher before Vivado/Quartus:
 
-    RISCV_PREFIX=riscv64-unknown-elf- python examples/de25_nano/vex/fw/build_fw.py
+    RISCV_PREFIX=riscv64-unknown-elf- \\
+        python examples/common/vexriscv/fw/build_fw.py examples/arty_a7/vex/fw
 """
 
 from __future__ import annotations
@@ -25,7 +28,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-_FW_DIR = Path(__file__).resolve().parent
+# Shared firmware sources live next to this script.
+_COMMON_FW_DIR = Path(__file__).resolve().parent
+_BOOT_S = _COMMON_FW_DIR / "boot.S"
+_LINK_LD = _COMMON_FW_DIR / "link.ld"
 
 # RV32I so the base VexRiscv_Lite core (no M extension) runs it; -ffreestanding
 # keeps the compiler from assuming a hosted libc. The pattern generator is pure
@@ -36,7 +42,6 @@ _CFLAGS = [
     "-Wall", "-Wextra", "-std=c11",
     "-ffunction-sections", "-fdata-sections",
 ]
-_SOURCES = ["boot.S", "main.c"]
 
 # Must match the RAM aperture in link.ld / vex_cpu.v (64 KB, 16384 words).
 _MEM_WORDS = 16384
@@ -65,9 +70,9 @@ def _resolve_prefix() -> str:
     )
 
 
-def _run(cmd: list[str]) -> None:
+def _run(cmd: list[str], cwd: Path) -> None:
     print("fcapz:", " ".join(cmd))
-    subprocess.run(cmd, cwd=_FW_DIR, check=True)
+    subprocess.run(cmd, cwd=cwd, check=True)
 
 
 def _pack_mem(bin_path: Path, mem_path: Path) -> None:
@@ -87,35 +92,50 @@ def _pack_mem(bin_path: Path, mem_path: Path) -> None:
     print(f"fcapz: wrote {mem_path.name} ({words} words / {len(data)} bytes)")
 
 
-def build_firmware(out_dir: Path | None = None) -> Path:
-    """Compile + link + pack. Returns the path to fw.mem."""
+def build_firmware(board_fw_dir: Path | str, out_dir: Path | None = None) -> Path:
+    """Compile + link + pack a board's firmware. Returns the path to fw.mem.
+
+    ``board_fw_dir`` holds the board's ``main.c`` and receives ``fw.mem`` (where
+    that board's ``$readmemh`` looks). ``out_dir`` (default: board_fw_dir) takes
+    the intermediate elf/bin/map artefacts.
+    """
+    board_fw_dir = Path(board_fw_dir).resolve()
+    main_c = board_fw_dir / "main.c"
+    if not main_c.is_file():
+        raise SystemExit(f"fcapz: board firmware source missing: {main_c}")
+
     prefix = _resolve_prefix()
     cc = f"{prefix}gcc"
     objcopy = f"{prefix}objcopy"
-    # Resolve to an absolute path: the compiler runs with cwd=_FW_DIR, so a
-    # relative out_dir would otherwise be taken relative to the firmware dir.
-    out_dir = Path(out_dir).resolve() if out_dir else _FW_DIR
+    out_dir = Path(out_dir).resolve() if out_dir else board_fw_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     elf = out_dir / "fw.elf"
     binf = out_dir / "fw.bin"
     mapf = out_dir / "fw.map"
-    mem = _FW_DIR / "fw.mem"  # where vex_cpu.v's $readmemh looks
+    mem = board_fw_dir / "fw.mem"  # where this board's vex_cpu.v $readmemh looks
 
     # --build-id=none: some GCCs (e.g. the Vitis riscv build) emit a
     # .note.gnu.build-id by default, which the bare link script would place at
     # address 0 and collide with .text.init. We do not consume the note.
+    # cwd=board_fw_dir so "main.c" resolves locally; boot.S/link.ld are shared.
     link = [cc, *_CFLAGS, "-nostdlib",
-            f"-Wl,-T,{_FW_DIR / 'link.ld'}",
+            f"-Wl,-T,{_LINK_LD}",
             "-Wl,--build-id=none",
             "-Wl,--gc-sections", f"-Wl,-Map,{mapf}",
-            "-o", str(elf), *_SOURCES]
-    _run(link)
-    _run([objcopy, "-O", "binary", str(elf), str(binf)])
+            "-o", str(elf), str(_BOOT_S), "main.c"]
+    _run(link, cwd=board_fw_dir)
+    _run([objcopy, "-O", "binary", str(elf), str(binf)], cwd=board_fw_dir)
     _pack_mem(binf, mem)
     return mem
 
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else None
-    build_firmware(Path(out) if out else None)
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "usage: build_fw.py <board_fw_dir> [out_dir]\n"
+            "  e.g. build_fw.py examples/arty_a7/vex/fw"
+        )
+    board = Path(sys.argv[1])
+    out = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+    build_firmware(board, out)

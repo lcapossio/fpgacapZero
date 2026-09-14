@@ -6,7 +6,8 @@
 // Arty A7-100T hardware-validation top-level for fpgacapZero -- VexRiscv variant.
 //
 // Identical to arty_a7_top.v except the shared-bus CPU is an open-source
-// VexRiscv (examples/arty_a7/vex/) instead of the proprietary MicroBlaze. The
+// VexRiscv (shared examples/common/vexriscv/, board glue in vex/) instead of
+// the proprietary MicroBlaze. The
 // VexRiscv subsystem has no JTAG debug module, so USER3 is left free
 // (USER1=debug-multi, USER2=axi-mon, USER4=ejtag-axi as before).
 //

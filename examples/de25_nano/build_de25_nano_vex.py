@@ -30,7 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_DIR = ROOT / "examples" / "de25_nano"
-VEX_DIR = EXAMPLE_DIR / "vex"
+VEX_DIR = EXAMPLE_DIR / "vex"                       # board-local: main.c
+COMMON_VEX = ROOT / "examples" / "common" / "vexriscv"  # shared CPU subsystem
 BUILD_SCRIPT = EXAMPLE_DIR / "build_de25_nano_vex.tcl"
 BITFILE = EXAMPLE_DIR / "output_files" / "de25_nano_vex_fcapz.sof"
 
@@ -44,11 +45,11 @@ def _load(name: str, path: Path):
 
 
 def prepare_sources() -> None:
-    """Fetch the VexRiscv core and build the firmware image (pre-Quartus)."""
-    get_deps = _load("vex_get_deps", VEX_DIR / "get_deps.py")
-    build_fw = _load("vex_build_fw", VEX_DIR / "fw" / "build_fw.py")
+    """Verify the vendored VexRiscv core and build the firmware (pre-Quartus)."""
+    get_deps = _load("vex_get_deps", COMMON_VEX / "get_deps.py")
+    build_fw = _load("vex_build_fw", COMMON_VEX / "fw" / "build_fw.py")
     get_deps.fetch_vexriscv()
-    build_fw.build_firmware()
+    build_fw.build_firmware(VEX_DIR / "fw")
 
 
 def find_quartus_sh(explicit: str | None) -> str:
