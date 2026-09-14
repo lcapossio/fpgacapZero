@@ -50,6 +50,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
+  a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with
+  `--variant microblaze`/`--variant vhdl` for the others; `test_hw_integration.py`
+  defaults to the vex bitstream. The Arty VHDL top (`arty_a7_top.vhd`) is now a
+  mixed-language design instantiating the Verilog VexRiscv subsystem in place of
+  the MicroBlaze block design.
+- **VexRiscv core vendored + subsystem shared across boards.** The pinned core is
+  vendored under `third_party/vexriscv/` (MIT licence + provenance, hash-verified
+  offline — clean builds need no network), and the duplicated per-board CPU glue,
+  firmware boot/link/build, and dependency check now live once in
+  `examples/common/vexriscv/`. Only each board's `main.c` workload (and Arty's
+  `vex_sys` bus adapter) stay board-local.
 - **Transport — fast wide-core readback over USB-Blaster.** Wide, single-chain
   cores (the 160-bit AXI monitor) now stream their samples **and** timestamps via
   a single-chain burst on the core's own BSCAN instance — one 256-bit DR scan per
@@ -72,6 +84,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `vid_pid` for any driver (`ch347 vid_pid`, `cmsis_dap vid_pid`, a bare
   `vid_pid`), not just `ftdi vid_pid`, so non-FTDI adapters are recognised
   instead of always probed.
+
+### Deprecated
+
+- **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
+  (`arty_a7_top.v`, block design moved to `examples/arty_a7/legacy-microblaze/`)
+  is deprecated in favour of the VexRiscv default, but retained — it proves the
+  fcapz cores drop into a proprietary-CPU design. Build it with
+  `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
 

@@ -15,10 +15,8 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 | `build.py` | Preferred build launcher |
 | `axi4_traffic_gen.v` | Self-stimulating AXI master for the AXI monitor |
 | `de25_nano_vex_top.v` | Top-level VexRiscv variant — same cores, open-source CPU |
-| `vex/vex_cpu.v` | VexRiscv core + Wishbone arbiter/decode + 64 KB BRAM + WB→AXI4 bridge |
-| `vex/get_deps.py` | Fetches the SHA-pinned `VexRiscv_Lite.v` core (first build only) |
-| `vex/fw/` | Free-running bus pattern firmware (`boot.S`, `main.c`, `link.ld`, `build_fw.py`) |
-| `build_de25_nano_vex.py` | Fetch core + build firmware + Quartus build launcher (VexRiscv top) |
+| `vex/fw/main.c` | Free-running bus pattern firmware (board-local workload) |
+| `build_de25_nano_vex.py` | Verify vendored core + build firmware + Quartus build launcher (VexRiscv top) |
 | `build_de25_nano_vex.tcl` | Quartus batch build script used by `build_de25_nano_vex.py` |
 | `run_hw_tests.py` | Build, program, probe, and optional capture runner |
 | `test_hw_integration.py` | Pytest hardware integration regression tests (both tops; `FPGACAP_BITSTREAM_VARIANT=vex` targets the VexRiscv one) |
@@ -51,9 +49,11 @@ traffic to trigger on (`aw_hs`) with no host present, while never touching an
 error/hang address (so it cannot forge an `any_err` event). Because the
 observable bus contract matches the RTL generator, **the full
 `test_hw_integration.py` suite runs unchanged against the vex bitstream**. The
-`vex/` subsystem is pure RTL (`vex_cpu.v` wraps the fetched `VexRiscv_Lite.v`
-with a Wishbone→AXI bridge and a 64 KB `$readmemh` BRAM); `get_deps.py` fetches
-the pinned core on the first build.
+CPU subsystem is shared, vendor-neutral RTL: `examples/common/vexriscv/vex_cpu.v`
+wraps the vendored `VexRiscv_Lite.v` (`third_party/vexriscv/`, verified offline
+by `examples/common/vexriscv/get_deps.py`) with a Wishbone→AXI bridge and a
+64 KB `$readmemh` BRAM. Only this board's `vex/fw/main.c` workload is local; it
+is the same shared subsystem the Arty A7 VexRiscv variant uses.
 
 ## Board I/O
 
@@ -83,16 +83,16 @@ examples/de25_nano/output_files/de25_nano_fcapz.sof
 
 ### VexRiscv variant
 
-The open-source variant needs a RISC-V GCC toolchain (for the firmware) and, on
-the first build only, network access (to fetch the pinned VexRiscv core):
+The open-source variant needs a RISC-V GCC toolchain (for the firmware); the
+VexRiscv core is vendored (`third_party/vexriscv/`), so no network is needed:
 
 ```sh
 RISCV_PREFIX=riscv64-unknown-elf- python examples/de25_nano/build_de25_nano_vex.py
 ```
 
-Set `RISCV_PREFIX` to your toolchain prefix. The build fetches
-`vex/VexRiscv_Lite.v`, compiles the firmware into `vex/fw/fw.mem`, then runs
-Quartus and writes `examples/de25_nano/output_files/de25_nano_vex_fcapz.sof`.
+Set `RISCV_PREFIX` to your toolchain prefix. The build verifies the vendored
+core, compiles the firmware into `vex/fw/fw.mem`, then runs Quartus and writes
+`examples/de25_nano/output_files/de25_nano_vex_fcapz.sof`.
 
 Program the board and run the hardware suite against it. The pytest suite does
 not program the FPGA, so use the runner (it builds, programs, and pytests the
