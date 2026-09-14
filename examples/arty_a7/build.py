@@ -4,14 +4,20 @@
 
 """Launch a Vivado batch build of the Arty A7 reference design.
 
-This is the only supported entry point for building the bitstream — it does
-not invoke any shell primitive (no ``rm``) and relies on Vivado's own
-``-force`` flag to recreate the project directory.  All build artefacts land
-under ``vivado/fpgacapZero_arty/`` and ``examples/arty_a7/arty_a7_top.bit``.
+Variant dispatcher. The default is the open-source **VexRiscv** design
+(``arty_a7_vex_top``); the proprietary MicroBlaze design is deprecated and
+built only on request:
 
-Usage
------
-    python examples/arty_a7/build.py              # default, ~10-15 min
+    python examples/arty_a7/build.py                        # vex (default)
+    python examples/arty_a7/build.py --variant microblaze   # legacy MicroBlaze
+    python examples/arty_a7/build.py --variant vhdl         # VHDL top
+
+The ``vex`` and ``vhdl`` variants delegate to ``build_arty_vex.py`` and
+``build_vhdl.py``; ``microblaze`` builds ``build_arty.tcl`` here (artefacts
+under ``vivado/fpgacapZero_arty/`` and ``examples/arty_a7/arty_a7_top.bit``).
+It invokes no shell primitive (no ``rm``) and relies on Vivado's own
+``-force`` flag to recreate the project directory.
+
     python examples/arty_a7/build.py --vivado PATH/TO/vivado
     python examples/arty_a7/build.py --log-dir vivado/logs
 
@@ -158,10 +164,28 @@ def find_vivado(explicit: str | None) -> str:
     return found
 
 
+def _delegate(script_name: str, args) -> int:
+    """Run a sibling build launcher (vex/vhdl) as a subprocess."""
+    script = ROOT / "examples" / "arty_a7" / script_name
+    cmd = [sys.executable, str(script)]
+    if args.vivado:
+        cmd += ["--vivado", args.vivado]
+    cmd += ["--log-dir", args.log_dir]
+    print(f"[build.py] variant '{args.variant}' -> {script_name}: {' '.join(cmd)}")
+    return subprocess.run(cmd, cwd=str(ROOT), check=False).returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["vex", "microblaze", "vhdl"],
+        default="vex",
+        help="Design variant: 'vex' (default, open-source VexRiscv), "
+             "'microblaze' (legacy, proprietary), or 'vhdl'.",
     )
     parser.add_argument("--vivado", default=None, help="Path to vivado executable")
     parser.add_argument(
@@ -171,6 +195,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.variant == "vex":
+        return _delegate("build_arty_vex.py", args)
+    if args.variant == "vhdl":
+        return _delegate("build_vhdl.py", args)
+    return _build_microblaze(args)
+
+
+def _build_microblaze(args) -> int:
     vivado = find_vivado(args.vivado)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

@@ -46,10 +46,12 @@ _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
 
 _EXAMPLE_DIR = Path(__file__).resolve().parent
 _BITFILE_ENV = os.environ.get("FPGACAP_BITFILE")
-_BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "verilog").lower()
-# The VexRiscv variant (arty_a7_vex_top) is a drop-in for the MicroBlaze design:
-# same debug cores, same host-gated CPU bus pattern, so this whole suite runs
-# against it with FPGACAP_BITSTREAM_VARIANT=vex (its default bitfile differs).
+_BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "vex").lower()
+# The open-source VexRiscv variant (arty_a7_vex_top) is now the DEFAULT design;
+# it is a drop-in for the deprecated MicroBlaze one (same debug cores, same
+# host-gated CPU bus pattern), so this whole suite runs against it unchanged.
+# Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, or =vhdl
+# for the VHDL top.
 _DEFAULT_BITNAME = "arty_a7_vex_top.bit" if _BITSTREAM_VARIANT == "vex" else "arty_a7_top.bit"
 BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
@@ -92,12 +94,12 @@ _BITSTREAM_SOURCES_VERILOG = [
     _ROOT / "tb" / "axi4_test_slave.v",
     _EXAMPLE_DIR / "arty_a7_top.v",
     _EXAMPLE_DIR / "arty_a7.xdc",
-    # MicroBlaze subsystem: block design generator + baked firmware sources.
-    _EXAMPLE_DIR / "mb" / "create_mb_bd.tcl",
-    _EXAMPLE_DIR / "mb" / "build_fw.tcl",
-    _EXAMPLE_DIR / "mb" / "fw" / "boot.S",
-    _EXAMPLE_DIR / "mb" / "fw" / "main.c",
-    _EXAMPLE_DIR / "mb" / "fw" / "lscript.ld",
+    # MicroBlaze subsystem (legacy): block design generator + baked firmware.
+    _EXAMPLE_DIR / "legacy-microblaze" / "create_mb_bd.tcl",
+    _EXAMPLE_DIR / "legacy-microblaze" / "build_fw.tcl",
+    _EXAMPLE_DIR / "legacy-microblaze" / "fw" / "boot.S",
+    _EXAMPLE_DIR / "legacy-microblaze" / "fw" / "main.c",
+    _EXAMPLE_DIR / "legacy-microblaze" / "fw" / "lscript.ld",
 ]
 
 _BITSTREAM_SOURCES_VHDL = [
