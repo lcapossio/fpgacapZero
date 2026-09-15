@@ -35,10 +35,30 @@
 
 module vex_cpu #(
     parameter MEM_INIT_FILE = "fw.mem",
-    parameter integer RAM_WORDS = 16384   // 64 KB / 4
+    parameter integer RAM_WORDS = 16384,  // 64 KB / 4
+    // DEBUG_EN=0 (default): instantiate the vendored VexRiscv_Lite core --
+    //   byte-identical to the original non-debug subsystem; the debug ports
+    //   below are ignored (inputs unused, outputs driven to 0).
+    // DEBUG_EN=1: instantiate VexRiscv_EmbeddedJtag (official RISC-V Debug
+    //   Module + JTAG DTM, no-TAP tunnel). The debug ports carry the tunnel
+    //   (driven by a vendor BSCANE2/sld_virtual_jtag wrapper in the top) plus
+    //   an independent debug reset and the DM's ndmreset request.
+    parameter integer DEBUG_EN = 0
 ) (
     input  wire        clk,
     input  wire        rst,               // active-high (VexRiscv reset polarity)
+
+    // ---- CPU-debug tunnel (used only when DEBUG_EN=1) ------------------
+    input  wire        jtag_clk,          // DTM tunnel clock (BSCANE2 TCK)
+    input  wire        ji_tdi,
+    input  wire        ji_enable,
+    input  wire        ji_capture,
+    input  wire        ji_shift,
+    input  wire        ji_update,
+    input  wire        ji_reset,
+    output wire        ji_tdo,
+    input  wire        debugReset,        // free-running debug POR (see top)
+    output wire        ndmreset,          // DM non-debug-module reset request
 
     // AXI4 master -> monitored traffic-generator slave. Single-beat (len = 0).
     output wire [31:0] m_axi_awaddr,
@@ -85,36 +105,88 @@ module vex_cpu #(
     wire [2:0]  dbus_cti;
     wire [1:0]  dbus_bte;
 
-    VexRiscv u_core (
-        .externalResetVector    (32'h0000_0000),
-        .timerInterrupt         (1'b0),
-        .softwareInterrupt      (1'b0),
-        .externalInterruptArray (32'h0000_0000),
-        .iBusWishbone_CYC       (ibus_cyc),
-        .iBusWishbone_STB       (ibus_stb),
-        .iBusWishbone_ACK       (ibus_ack),
-        .iBusWishbone_WE        (ibus_we),
-        .iBusWishbone_ADR       (ibus_adr),
-        .iBusWishbone_DAT_MISO  (ibus_dat_miso),
-        .iBusWishbone_DAT_MOSI  (ibus_dat_mosi),
-        .iBusWishbone_SEL       (ibus_sel),
-        .iBusWishbone_ERR       (ibus_err),
-        .iBusWishbone_CTI       (ibus_cti),
-        .iBusWishbone_BTE       (ibus_bte),
-        .dBusWishbone_CYC       (dbus_cyc),
-        .dBusWishbone_STB       (dbus_stb),
-        .dBusWishbone_ACK       (dbus_ack),
-        .dBusWishbone_WE        (dbus_we),
-        .dBusWishbone_ADR       (dbus_adr),
-        .dBusWishbone_DAT_MISO  (dbus_dat_miso),
-        .dBusWishbone_DAT_MOSI  (dbus_dat_mosi),
-        .dBusWishbone_SEL       (dbus_sel),
-        .dBusWishbone_ERR       (dbus_err),
-        .dBusWishbone_CTI       (dbus_cti),
-        .dBusWishbone_BTE       (dbus_bte),
-        .clk                    (clk),
-        .reset                  (rst)
-    );
+    // Both cores share iBus/dBus/interrupt/reset wiring; the debug core adds
+    // the JTAG tunnel, debugReset and ndmreset. Only one core module is in the
+    // build's source list (the variant selector swaps VexRiscv_Lite.v <->
+    // VexRiscv_EmbeddedJtag.v), so the dead generate branch is never elaborated.
+    generate
+    if (DEBUG_EN) begin : g_dbg
+        VexRiscv_EmbeddedJtag u_core (
+            .externalResetVector    (32'h0000_0000),
+            .timerInterrupt         (1'b0),
+            .softwareInterrupt      (1'b0),
+            .externalInterruptArray (32'h0000_0000),
+            .jtagInstruction_tdi    (ji_tdi),
+            .jtagInstruction_enable (ji_enable),
+            .jtagInstruction_capture(ji_capture),
+            .jtagInstruction_shift  (ji_shift),
+            .jtagInstruction_update (ji_update),
+            .jtagInstruction_reset  (ji_reset),
+            .jtagInstruction_tdo    (ji_tdo),
+            .ndmreset               (ndmreset),
+            .stoptime               (),         // WFI stop-time hint, unused
+            .iBusWishbone_CYC       (ibus_cyc),
+            .iBusWishbone_STB       (ibus_stb),
+            .iBusWishbone_ACK       (ibus_ack),
+            .iBusWishbone_WE        (ibus_we),
+            .iBusWishbone_ADR       (ibus_adr),
+            .iBusWishbone_DAT_MISO  (ibus_dat_miso),
+            .iBusWishbone_DAT_MOSI  (ibus_dat_mosi),
+            .iBusWishbone_SEL       (ibus_sel),
+            .iBusWishbone_ERR       (ibus_err),
+            .iBusWishbone_CTI       (ibus_cti),
+            .iBusWishbone_BTE       (ibus_bte),
+            .dBusWishbone_CYC       (dbus_cyc),
+            .dBusWishbone_STB       (dbus_stb),
+            .dBusWishbone_ACK       (dbus_ack),
+            .dBusWishbone_WE        (dbus_we),
+            .dBusWishbone_ADR       (dbus_adr),
+            .dBusWishbone_DAT_MISO  (dbus_dat_miso),
+            .dBusWishbone_DAT_MOSI  (dbus_dat_mosi),
+            .dBusWishbone_SEL       (dbus_sel),
+            .dBusWishbone_ERR       (dbus_err),
+            .dBusWishbone_CTI       (dbus_cti),
+            .dBusWishbone_BTE       (dbus_bte),
+            .clk                    (clk),
+            .reset                  (rst),
+            .debugReset             (debugReset),
+            .jtag_clk               (jtag_clk)
+        );
+    end else begin : g_nodbg
+        assign ji_tdo   = 1'b0;
+        assign ndmreset = 1'b0;
+        VexRiscv u_core (
+            .externalResetVector    (32'h0000_0000),
+            .timerInterrupt         (1'b0),
+            .softwareInterrupt      (1'b0),
+            .externalInterruptArray (32'h0000_0000),
+            .iBusWishbone_CYC       (ibus_cyc),
+            .iBusWishbone_STB       (ibus_stb),
+            .iBusWishbone_ACK       (ibus_ack),
+            .iBusWishbone_WE        (ibus_we),
+            .iBusWishbone_ADR       (ibus_adr),
+            .iBusWishbone_DAT_MISO  (ibus_dat_miso),
+            .iBusWishbone_DAT_MOSI  (ibus_dat_mosi),
+            .iBusWishbone_SEL       (ibus_sel),
+            .iBusWishbone_ERR       (ibus_err),
+            .iBusWishbone_CTI       (ibus_cti),
+            .iBusWishbone_BTE       (ibus_bte),
+            .dBusWishbone_CYC       (dbus_cyc),
+            .dBusWishbone_STB       (dbus_stb),
+            .dBusWishbone_ACK       (dbus_ack),
+            .dBusWishbone_WE        (dbus_we),
+            .dBusWishbone_ADR       (dbus_adr),
+            .dBusWishbone_DAT_MISO  (dbus_dat_miso),
+            .dBusWishbone_DAT_MOSI  (dbus_dat_mosi),
+            .dBusWishbone_SEL       (dbus_sel),
+            .dBusWishbone_ERR       (dbus_err),
+            .dBusWishbone_CTI       (dbus_cti),
+            .dBusWishbone_BTE       (dbus_bte),
+            .clk                    (clk),
+            .reset                  (rst)
+        );
+    end
+    endgenerate
 
     // ---- 2->1 classic-Wishbone arbiter ---------------------------------
     // Grant one bus at a time and hold until the transfer is acked. Data bus

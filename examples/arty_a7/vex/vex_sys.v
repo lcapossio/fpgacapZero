@@ -24,9 +24,25 @@
 // the host's addresses reach the test slave unmodified; axi4_test_slave aliases
 // by address-modulo, so both land on the same register words as before.
 
-module vex_sys (
+module vex_sys #(
+    // Forwarded to vex_cpu: 0 = VexRiscv_Lite (no CPU debug, default),
+    // 1 = VexRiscv_EmbeddedJtag (standard RISC-V debug via the JTAG tunnel).
+    parameter integer DEBUG_EN = 0
+) (
     input  wire        Clk,
     input  wire        reset,             // active-high
+
+    // ---- CPU-debug tunnel (used only when DEBUG_EN=1) ------------------
+    input  wire        jtag_clk,
+    input  wire        ji_tdi,
+    input  wire        ji_enable,
+    input  wire        ji_capture,
+    input  wire        ji_shift,
+    input  wire        ji_update,
+    input  wire        ji_reset,
+    output wire        ji_tdo,
+    input  wire        debugReset,
+    output wire        ndmreset,
 
     // ---- M_EJTAG: AXI4 slave (EJTAG-AXI bridge master drives this) -----
     input  wire [31:0] M_EJTAG_awaddr,
@@ -103,9 +119,16 @@ module vex_sys (
     wire        cpu_bvalid, cpu_bready;
     wire        cpu_arvalid, cpu_arready, cpu_rvalid, cpu_rready, cpu_rlast;
 
-    vex_cpu u_cpu (
+    vex_cpu #(.DEBUG_EN(DEBUG_EN)) u_cpu (
         .clk          (Clk),
         .rst          (reset),
+        // CPU-debug tunnel (inert when DEBUG_EN=0).
+        .jtag_clk     (jtag_clk),
+        .ji_tdi       (ji_tdi),   .ji_enable (ji_enable),
+        .ji_capture   (ji_capture), .ji_shift(ji_shift),
+        .ji_update    (ji_update), .ji_reset (ji_reset),
+        .ji_tdo       (ji_tdo),
+        .debugReset   (debugReset), .ndmreset(ndmreset),
         .m_axi_awaddr (cpu_awaddr), .m_axi_awlen  (cpu_awlen),
         .m_axi_awsize (cpu_awsize), .m_axi_awburst(cpu_awburst),
         .m_axi_awprot (cpu_awprot), .m_axi_awvalid(cpu_awvalid),

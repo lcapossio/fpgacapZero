@@ -7,9 +7,10 @@
 //
 // Identical to arty_a7_top.v except the shared-bus CPU is an open-source
 // VexRiscv (shared examples/common/vexriscv/, board glue in vex/) instead of
-// the proprietary MicroBlaze. The
-// VexRiscv subsystem has no JTAG debug module, so USER3 is left free
-// (USER1=debug-multi, USER2=axi-mon, USER4=ejtag-axi as before).
+// the proprietary MicroBlaze. USER1=debug-multi, USER2=axi-mon,
+// USER4=ejtag-axi as before. USER3 is free in the default (non-debug) build;
+// the DEBUG_EN=1 variant puts the VexRiscv RISC-V JTAG DTM there (see the
+// DEBUG_EN parameter and the CPU-debug block below).
 //
 // The design is intentionally small and self-stimulating so the Python
 // hardware tests can run without external fabric logic:
@@ -40,7 +41,16 @@
 // All vendor TAP plumbing, JTAG register interfaces, and burst engines are
 // contained in the fcapz_*_xilinx7 wrapper instances below.
 
-module arty_a7_vex_top (
+module arty_a7_vex_top #(
+    // DEBUG_EN=0 (default): the historically validated non-debug design --
+    //   VexRiscv_Lite CPU, USER3 free, byte-identical netlist.
+    // DEBUG_EN=1: add real VexRiscv CPU debug that coexists with the fcapz
+    //   cores -- a BSCANE2 on USER3 tunnels the standard RISC-V JTAG DTM of a
+    //   VexRiscv_EmbeddedJtag core, driven by upstream OpenOCD + riscv-gdb,
+    //   while USER1/2/4 keep serving debug-multi / axi-mon / ejtag-axi. The
+    //   build_arty_vex_debug.{py,tcl} variant sets this generic.
+    parameter integer DEBUG_EN = 0
+) (
     input  wire       clk,
     input  wire [3:0] btn,
     output wire [3:0] led
@@ -382,9 +392,59 @@ module arty_a7_vex_top (
     wire        mbus_bvalid, mbus_bready;
     wire        mbus_arvalid, mbus_arready, mbus_rvalid, mbus_rready, mbus_rlast;
 
-    vex_sys u_vex_sys (
+    // ---- VexRiscv CPU debug (USER3), coexisting with the fcapz cores ----
+    // When DEBUG_EN=1 a BSCANE2 on USER3 tunnels the CPU's standard RISC-V
+    // JTAG DTM. The debug reset is a small free-running power-on reset in the
+    // 100 MHz domain, INDEPENDENT of rst_100/btn/ndmreset, so the Debug Module
+    // stays alive across CPU resets (else OpenOCD connects then drops the DM).
+    // ndmreset is captured but deliberately NOT fed back into rst_100 (that
+    // would reset the interconnect/bridge/slave/monitor); system reset via
+    // ndmreset is out of scope for v1.
+    wire dbg_jtag_clk;
+    wire dbg_ji_tdi, dbg_ji_enable, dbg_ji_capture, dbg_ji_shift;
+    wire dbg_ji_update, dbg_ji_reset, dbg_ji_tdo;
+    wire dbg_debug_reset;
+    wire dbg_ndmreset;   // isolated (unused in v1)
+
+    generate
+    if (DEBUG_EN) begin : g_vexdbg
+        vex_jtag_bscan_xilinx7 #(.CHAIN(3)) u_vex_bscan (  // USER3, IR 0x22
+            .jtag_clk  (dbg_jtag_clk),
+            .ji_tdi    (dbg_ji_tdi),
+            .ji_enable (dbg_ji_enable),
+            .ji_capture(dbg_ji_capture),
+            .ji_shift  (dbg_ji_shift),
+            .ji_update (dbg_ji_update),
+            .ji_reset  (dbg_ji_reset),
+            .ji_tdo    (dbg_ji_tdo)
+        );
+        // Free-running debug POR: asserts at configuration, releases a few
+        // clk_100 cycles later, never re-asserted by btn/rst_100/ndmreset.
+        (* ASYNC_REG = "TRUE" *) reg [3:0] dbg_por = 4'hF;
+        always @(posedge clk_100) dbg_por <= {dbg_por[2:0], 1'b0};
+        assign dbg_debug_reset = dbg_por[3];
+    end else begin : g_novexdbg
+        assign dbg_jtag_clk   = 1'b0;
+        assign dbg_ji_tdi     = 1'b0;
+        assign dbg_ji_enable  = 1'b0;
+        assign dbg_ji_capture = 1'b0;
+        assign dbg_ji_shift   = 1'b0;
+        assign dbg_ji_update  = 1'b0;
+        assign dbg_ji_reset   = 1'b0;
+        assign dbg_debug_reset = 1'b0;
+    end
+    endgenerate
+
+    vex_sys #(.DEBUG_EN(DEBUG_EN)) u_vex_sys (
         .Clk   (clk_100),
         .reset (rst_100),
+        // CPU-debug tunnel (inert when DEBUG_EN=0).
+        .jtag_clk   (dbg_jtag_clk),
+        .ji_tdi     (dbg_ji_tdi),   .ji_enable (dbg_ji_enable),
+        .ji_capture (dbg_ji_capture), .ji_shift(dbg_ji_shift),
+        .ji_update  (dbg_ji_update), .ji_reset (dbg_ji_reset),
+        .ji_tdo     (dbg_ji_tdo),
+        .debugReset (dbg_debug_reset), .ndmreset(dbg_ndmreset),
         // EJTAG bridge master -> M_EJTAG slave port of the crossbar.
         // Unused AXI4 qualifiers the bridge does not drive are tied off.
         .M_EJTAG_awaddr (bridge_awaddr), .M_EJTAG_awlen  (bridge_awlen),
