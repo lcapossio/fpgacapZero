@@ -35,3 +35,14 @@ def test_get_deps_pin_matches_provenance() -> None:
     assert gd._CORE_SHA256 == prov["core"]["sha256"], "SHA-256 pin differs"
     assert gd._PIN_COMMIT == prov["source"]["commit"], "upstream commit differs"
     assert gd._CORE_URL == prov["source"]["raw_url"], "raw fetch URL differs"
+
+
+def test_debug_core_pin_matches_provenance() -> None:
+    # The CPU-debug core (EmbeddedRiscvJtag) is regenerated, not downloaded,
+    # so it has only a content hash to keep in sync (no commit/URL).
+    gd = _load_get_deps()
+    prov = tomllib.loads(_PROVENANCE.read_text(encoding="utf-8"))
+    debug = prov["core"]["debug"]
+
+    assert gd._DEBUG_CORE_SHA256 == debug["sha256"], "debug core SHA-256 differs"
+    assert gd._DEBUG_CORE_NAME == debug["file"], "debug core file name differs"

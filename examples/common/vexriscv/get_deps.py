@@ -42,6 +42,19 @@ _CORE_URL = (
     f"{_PIN_COMMIT}/pythondata_cpu_vexriscv/verilog/{_CORE_NAME}"
 )
 
+# Second vendored core: the CPU-debug variant (EmbeddedRiscvJtag / standard
+# RISC-V Debug Module + JTAG DTM), used by the examples' "vex-debug" build
+# variant. It is NOT a LiteX download -- the no-TAP JTAG tunnel postdates the
+# pin above -- but regenerated locally from SpinalHDL/VexRiscv master with the
+# vendored recipe (third_party/vexriscv/GenFcapzVexDebug.scala). There is thus
+# no fetch URL: it is verified offline by SHA-256 only. See PROVENANCE.toml
+# ([core.debug]) for the full regeneration recipe.
+_DEBUG_CORE_NAME = "VexRiscv_EmbeddedJtag.v"
+_DEBUG_CORE_PATH = _VENDOR_DIR / _DEBUG_CORE_NAME
+_DEBUG_CORE_SHA256 = (
+    "42d38244f0c6aeab84c26b39ae3ecc56944401c9b8b42842625a84f2d8c3c6c1"
+)
+
 
 def _sha256(data: bytes) -> str:
     h = hashlib.sha256()
@@ -73,6 +86,31 @@ def fetch_vexriscv() -> Path:
     return _CORE_PATH
 
 
+def fetch_vexriscv_debug() -> Path:
+    """Verify the vendored CPU-debug core (offline) and return its path.
+
+    Hash-only check: this core has no upstream download (it is regenerated,
+    not fetched -- see PROVENANCE.toml [core.debug]). Called by the per-board
+    build launchers for the ``vex-debug`` variant.
+    """
+    if not _DEBUG_CORE_PATH.exists():
+        raise SystemExit(
+            f"fcapz: vendored debug core missing: {_DEBUG_CORE_PATH}\n"
+            "The repository should ship it; regenerate per "
+            "third_party/vexriscv/PROVENANCE.toml ([core.debug])."
+        )
+    got = _sha256(_DEBUG_CORE_PATH.read_bytes())
+    if got != _DEBUG_CORE_SHA256:
+        raise SystemExit(
+            f"fcapz: {_DEBUG_CORE_NAME} SHA-256 mismatch "
+            "(vendored file corrupt or edited)\n"
+            f"  expected {_DEBUG_CORE_SHA256}\n  got      {got}\n"
+            "Restore it from git, or regenerate per PROVENANCE.toml."
+        )
+    print(f"fcapz: {_DEBUG_CORE_NAME} vendored and verified ({_DEBUG_CORE_PATH})")
+    return _DEBUG_CORE_PATH
+
+
 def update_vexriscv() -> Path:
     """Re-fetch the pinned core from upstream and rewrite the vendored file."""
     print(f"fcapz: fetching {_CORE_URL}")
@@ -93,5 +131,8 @@ def update_vexriscv() -> Path:
 if __name__ == "__main__":
     if "--update" in sys.argv[1:]:
         update_vexriscv()
+        # The debug core has no download; only its hash is (re)checked.
+        fetch_vexriscv_debug()
     else:
         fetch_vexriscv()
+        fetch_vexriscv_debug()

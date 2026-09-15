@@ -29,3 +29,38 @@ project        = "https://github.com/SpinalHDL/VexRiscv"
 license_source = "https://github.com/SpinalHDL/VexRiscv/blob/master/LICENSE"
 spinalhdl      = "v1.9.4 (git head 270018552577f3bb8e5339ee2583c9c22d324215)"
 vexriscv_git   = "8542a5786b26857f3ef830ae9e72eec031df42d3"
+
+# ---------------------------------------------------------------------------
+# Second vendored core: the CPU-debug variant. Same bus/microarchitecture
+# profile as VexRiscv_Lite (RV32IM, plain Wishbone iBus/dBus, external reset
+# vector) but built with the OFFICIAL RISC-V debug (EmbeddedRiscvJtag plugin:
+# standard Debug Module + JTAG DTM) in no-TAP tunnel mode, so a vendor JTAG
+# tap (Xilinx BSCANE2 / Intel sld_virtual_jtag) feeds the DTM and upstream
+# OpenOCD + riscv-gdb can halt/step/inspect the core. Used by the board
+# examples' "vex-debug" build variant; rtl/ stays CPU-agnostic.
+#
+# Unlike VexRiscv_Lite this core is NOT a pre-generated LiteX download -- the
+# no-TAP tunnel postdates the litex-hub pin. It is regenerated locally from
+# SpinalHDL/VexRiscv master with the vendored generator recipe and vendored
+# as a SHA-pinned .v; get_deps.py verifies it offline (hash only, no network).
+[core.debug]
+file    = "VexRiscv_EmbeddedJtag.v"
+sha256  = "42d38244f0c6aeab84c26b39ae3ecc56944401c9b8b42842625a84f2d8c3c6c1"
+license = "MIT"                     # see ./LICENSE
+module  = "VexRiscv_EmbeddedJtag"
+variant = "RV32IM + EmbeddedRiscvJtag (standard DM, no-TAP JTAG tunnel)"
+
+# Regeneration recipe (maintainer-only; not run by clean builds). The exact
+# generator is vendored next to the core as GenFcapzVexDebug.scala.
+[core.debug.regen]
+generator      = "GenFcapzVexDebug.scala"  # vendored here; drop into VexRiscv/src/main/scala/vexriscv/demo/
+command        = "sbt \"runMain vexriscv.demo.GenFcapzVexDebug\""
+sbt_version    = "1.9.7"   # VexRiscv master pins 1.6.0, which cannot run on JDK 21; bump project/build.properties
+spinalhdl      = "v1.13.0 (git head d9d72474863badf47d8585d187f3e04ae4749c59)"
+vexriscv_git   = "c4b2a55b22f46afb760446cd69f3ca7c36eef778"
+# Config: iCacheSize=2048, no d$, LightShifter, iterative mul/div, external
+# interrupt array, CsrPluginConfig.small(withPrivilegedDebug=true,
+# debugTriggers=2) -> 2 execute-address HW triggers (hbreak), no watchpoints;
+# EmbeddedRiscvJtag(DTM addressWidth=7 version=1 idle=7, withTunneling=true,
+# withTap=false, jtagCd=ClockDomain.external("jtag")). Wishbone iBus/dBus.
+notes          = "New top ports vs Lite: jtagInstruction_{tdi,enable,capture,shift,update,reset,tdo}, ndmreset, debugReset, jtag_clk, stoptime."
