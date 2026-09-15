@@ -21,7 +21,12 @@
 // host present; it never touches an error/hang address, so it cannot forge an
 // any_err event.
 
-module de25_nano_vex_top (
+module de25_nano_vex_top #(
+    // DEBUG_EN=1 adds VexRiscv CPU debug on a free virtual-JTAG index (6),
+    // tunnelling the EmbeddedRiscvJtag RISC-V DTM via sld_virtual_jtag,
+    // coexisting with the fcapz cores (indices 1-5). Default 0 = unchanged.
+    parameter integer DEBUG_EN = 0
+) (
     input  wire       CLOCK1_50,
     input  wire [1:0] KEY,
     input  wire [3:0] SW,
@@ -33,6 +38,42 @@ module de25_nano_vex_top (
 
     reg [7:0] por_count = 8'hFF;
     wire por_rst = |por_count;
+
+    // ---- CPU-debug tunnel (index 6), coexisting with the fcapz cores ----
+    // debugReset is a free-running POR INDEPENDENT of por_rst so the Debug
+    // Module stays alive across CPU resets; ndmreset is isolated (unused in v1).
+    wire dbg_jtag_clk;
+    wire dbg_ji_tdi, dbg_ji_enable, dbg_ji_capture, dbg_ji_shift;
+    wire dbg_ji_update, dbg_ji_reset, dbg_ji_tdo;
+    wire dbg_debug_reset;
+    wire dbg_ndmreset;
+
+    generate
+    if (DEBUG_EN) begin : g_vexdbg
+        vex_jtag_bscan_intel #(.CHAIN(6)) u_vex_bscan (
+            .jtag_clk  (dbg_jtag_clk),
+            .ji_tdi    (dbg_ji_tdi),
+            .ji_enable (dbg_ji_enable),
+            .ji_capture(dbg_ji_capture),
+            .ji_shift  (dbg_ji_shift),
+            .ji_update (dbg_ji_update),
+            .ji_reset  (dbg_ji_reset),
+            .ji_tdo    (dbg_ji_tdo)
+        );
+        reg [3:0] dbg_por = 4'hF;
+        always @(posedge CLOCK1_50) dbg_por <= {dbg_por[2:0], 1'b0};
+        assign dbg_debug_reset = dbg_por[3];
+    end else begin : g_novexdbg
+        assign dbg_jtag_clk   = 1'b0;
+        assign dbg_ji_tdi     = 1'b0;
+        assign dbg_ji_enable  = 1'b0;
+        assign dbg_ji_capture = 1'b0;
+        assign dbg_ji_shift   = 1'b0;
+        assign dbg_ji_update  = 1'b0;
+        assign dbg_ji_reset   = 1'b0;
+        assign dbg_debug_reset = 1'b0;
+    end
+    endgenerate
     reg [SAMPLE_W-1:0] counter = {SAMPLE_W{1'b0}};
     reg [25:0] heartbeat_div = 26'd0;
     reg heartbeat = 1'b0;
@@ -365,9 +406,17 @@ module de25_nano_vex_top (
     // are unaffected. rst is active-high (VexRiscv reset polarity) = por_rst.
     vex_cpu #(
         .MEM_INIT_FILE("fw.mem"),
-        .RAM_WORDS(16384)
+        .RAM_WORDS(16384),
+        .DEBUG_EN(DEBUG_EN)
     ) u_vex_cpu (
         .clk(CLOCK1_50), .rst(por_rst),
+        // CPU-debug tunnel (inert when DEBUG_EN=0).
+        .jtag_clk(dbg_jtag_clk),
+        .ji_tdi(dbg_ji_tdi), .ji_enable(dbg_ji_enable),
+        .ji_capture(dbg_ji_capture), .ji_shift(dbg_ji_shift),
+        .ji_update(dbg_ji_update), .ji_reset(dbg_ji_reset),
+        .ji_tdo(dbg_ji_tdo),
+        .debugReset(dbg_debug_reset), .ndmreset(dbg_ndmreset),
         .m_axi_awaddr(gen_awaddr), .m_axi_awlen(gen_awlen), .m_axi_awsize(gen_awsize),
         .m_axi_awburst(gen_awburst), .m_axi_awprot(gen_awprot),
         .m_axi_awvalid(gen_awvalid), .m_axi_awready(gen_awready),

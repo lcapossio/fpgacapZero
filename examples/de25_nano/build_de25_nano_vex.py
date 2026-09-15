@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ VEX_DIR = EXAMPLE_DIR / "vex"                       # board-local: main.c
 COMMON_VEX = ROOT / "examples" / "common" / "vexriscv"  # shared CPU subsystem
 BUILD_SCRIPT = EXAMPLE_DIR / "build_de25_nano_vex.tcl"
 BITFILE = EXAMPLE_DIR / "output_files" / "de25_nano_vex_fcapz.sof"
+DEBUG_BITFILE = EXAMPLE_DIR / "output_files" / "de25_nano_vex_debug_fcapz.sof"
 
 
 def _load(name: str, path: Path):
@@ -44,11 +46,14 @@ def _load(name: str, path: Path):
     return module
 
 
-def prepare_sources() -> None:
+def prepare_sources(debug: bool = False) -> None:
     """Verify the vendored VexRiscv core and build the firmware (pre-Quartus)."""
     get_deps = _load("vex_get_deps", COMMON_VEX / "get_deps.py")
     build_fw = _load("vex_build_fw", COMMON_VEX / "fw" / "build_fw.py")
-    get_deps.fetch_vexriscv()
+    if debug:
+        get_deps.fetch_vexriscv_debug()
+    else:
+        get_deps.fetch_vexriscv()
     build_fw.build_firmware(VEX_DIR / "fw")
 
 
@@ -67,27 +72,38 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--quartus-sh", default=None, help="Path to quartus_sh executable")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Build the CPU-debug variant (VexRiscv_EmbeddedJtag + sld_virtual_jtag "
+        "index-6 tunnel, DEBUG_EN=1) -> de25_nano_vex_debug_fcapz.sof",
+    )
     args = parser.parse_args()
+    bitfile = DEBUG_BITFILE if args.debug else BITFILE
 
     # Fetch the core + build fw.mem before Quartus so $readmemh has an image.
-    prepare_sources()
+    prepare_sources(debug=args.debug)
 
     quartus_sh = find_quartus_sh(args.quartus_sh)
+    env = os.environ.copy()
+    if args.debug:
+        env["FCAPZ_VEX_DEBUG"] = "1"
     cmd = [quartus_sh, "-t", str(BUILD_SCRIPT), str(ROOT)]
+    print(f"[build_de25_nano_vex.py] variant:    {'debug' if args.debug else 'default'}")
     print(f"[build_de25_nano_vex.py] quartus_sh: {quartus_sh}")
     print(f"[build_de25_nano_vex.py] cwd:        {ROOT}")
     print(f"[build_de25_nano_vex.py] cmd:        {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, cwd=str(ROOT), check=False)
+    result = subprocess.run(cmd, cwd=str(ROOT), check=False, env=env)
     if result.returncode != 0:
         print(f"[build_de25_nano_vex.py] quartus_sh exited with code {result.returncode}",
               file=sys.stderr)
         return result.returncode
-    if not BITFILE.is_file():
-        print(f"[build_de25_nano_vex.py] build reported success but bitfile missing: {BITFILE}",
+    if not bitfile.is_file():
+        print(f"[build_de25_nano_vex.py] build reported success but bitfile missing: {bitfile}",
               file=sys.stderr)
         return 4
-    print(f"[build_de25_nano_vex.py] success: {BITFILE}")
+    print(f"[build_de25_nano_vex.py] success: {bitfile}")
     return 0
 
 

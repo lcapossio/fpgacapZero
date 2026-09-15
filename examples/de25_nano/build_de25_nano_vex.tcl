@@ -15,9 +15,20 @@ if {$argc < 1} {
 
 set repo_path [lindex $argv 0]
 set example_dir "${repo_path}/examples/de25_nano"
-set project_dir "${example_dir}/de25_nano_vex_quartus"
+
+# DEBUG variant: env FCAPZ_VEX_DEBUG=1 builds the CPU-debug design
+# (EmbeddedRiscvJtag core + sld_virtual_jtag/index-6 tunnel, top DEBUG_EN=1)
+# into its own project, leaving the default non-debug build untouched.
+if {[info exists ::env(FCAPZ_VEX_DEBUG)] && $::env(FCAPZ_VEX_DEBUG) ne "0"} {
+    set vex_debug 1
+    set project_dir "${example_dir}/de25_nano_vex_debug_quartus"
+    set project_name "de25_nano_vex_debug_fcapz"
+} else {
+    set vex_debug 0
+    set project_dir "${example_dir}/de25_nano_vex_quartus"
+    set project_name "de25_nano_vex_fcapz"
+}
 set output_dir "${example_dir}/output_files"
-set project_name "de25_nano_vex_fcapz"
 
 if {[file isdirectory $project_dir]} {
     file delete -force $project_dir
@@ -53,13 +64,27 @@ set verilog_files [list \
     "${repo_path}/rtl/jtag_tap/jtag_tap_intel.v" \
     "${repo_path}/rtl/fcapz_axi_interconnect.v" \
     "${repo_path}/tb/axi4_test_slave.v" \
-    "${repo_path}/third_party/vexriscv/VexRiscv_Lite.v" \
     "${repo_path}/examples/common/vexriscv/vex_cpu.v" \
     "${example_dir}/de25_nano_vex_top.v" \
 ]
 
+# CPU core + (debug only) the sld_virtual_jtag tunnel adapter. Exactly one core
+# file is compiled so the shared InstructionCache module name never collides.
+if {$vex_debug} {
+    lappend verilog_files \
+        "${repo_path}/third_party/vexriscv/VexRiscv_EmbeddedJtag.v" \
+        "${repo_path}/examples/common/vexriscv/vex_jtag_bscan_intel.v"
+} else {
+    lappend verilog_files "${repo_path}/third_party/vexriscv/VexRiscv_Lite.v"
+}
+
 foreach src $verilog_files {
     set_global_assignment -name VERILOG_FILE $src
+}
+
+# DEBUG variant: turn on the CPU-debug path via the top-level parameter.
+if {$vex_debug} {
+    set_parameter -name DEBUG_EN 1
 }
 set_global_assignment -name SDC_FILE "${example_dir}/de25_nano.sdc"
 
