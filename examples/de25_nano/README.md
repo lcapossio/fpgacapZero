@@ -30,6 +30,7 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 | 3 | EIO |
 | 4 | EJTAG-AXI bridge |
 | 5 | AXI monitor (taps the monitored AXI bus) |
+| 6 | VexRiscv RISC-V JTAG DTM (only in the `--debug` build) |
 
 ## VexRiscv variant (open-source CPU)
 
@@ -93,6 +94,15 @@ RISCV_PREFIX=riscv64-unknown-elf- python examples/de25_nano/build_de25_nano_vex.
 Set `RISCV_PREFIX` to your toolchain prefix. The build verifies the vendored
 core, compiles the firmware into `vex/fw/fw.mem`, then runs Quartus and writes
 `examples/de25_nano/output_files/de25_nano_vex_fcapz.sof`.
+
+**CPU debug (`--debug`).** Adding `--debug` builds
+`de25_nano_vex_debug_fcapz.sof`, which swaps in `VexRiscv_EmbeddedJtag`
+(official RISC-V Debug Module + JTAG DTM) and puts an `sld_virtual_jtag` on the
+free virtual-JTAG **index 6**, coexisting with the fcapz cores (indices 1–5), so
+`riscv-gdb` can halt/step/inspect the CPU. This mirrors the Arty A7 `--debug`
+variant. Host-side note: driving it needs the **Altera VIR/VDR** virtual-JTAG
+tunnel path (not the Xilinx SiFive-style `riscv use_bscan_tunnel` used on Arty);
+that OpenOCD path is a hardware bring-up item.
 
 Program the board and run the hardware suite against it. The pytest suite does
 not program the FPGA, so use the runner (it builds, programs, and pytests the
