@@ -10,7 +10,18 @@
 # Usage (from project root):
 #   vivado -mode batch -source examples/arty_a7/build_arty_vex.tcl
 
-set project_name fpgacapZero_arty_vex
+# DEBUG variant: set env FCAPZ_VEX_DEBUG=1 to build the CPU-debug design
+# (VexRiscv_EmbeddedJtag core + BSCANE2/USER3 tunnel, top generic DEBUG_EN=1)
+# into its own project/bitstream, leaving the default non-debug build untouched.
+if {[info exists ::env(FCAPZ_VEX_DEBUG)] && $::env(FCAPZ_VEX_DEBUG) ne "0"} {
+    set vex_debug 1
+    set project_name fpgacapZero_arty_vex_debug
+    set bit_name     arty_a7_vex_debug_top
+} else {
+    set vex_debug 0
+    set project_name fpgacapZero_arty_vex
+    set bit_name     arty_a7_vex_top
+}
 set part         xc7a100tcsg324-1
 set example_dir  [file normalize [file dirname [info script]]]
 set root         [file normalize $example_dir/../..]
@@ -79,11 +90,20 @@ set src_list [list \
     $root/rtl/fcapz_axi_interconnect.v \
     $root/tb/axi4_test_slave.v \
     $example_dir/arty_a7_vex_top.v \
-    $root/third_party/vexriscv/VexRiscv_Lite.v \
     $root/examples/common/vexriscv/vex_cpu.v \
     $example_dir/vex/vex_sys.v \
     $example_dir/vex/fw/fw.mem \
 ]
+
+# CPU core + (debug only) the BSCANE2 tunnel adapter. Exactly one core file is
+# compiled so the shared InstructionCache module name never collides.
+if {$vex_debug} {
+    lappend src_list \
+        $root/third_party/vexriscv/VexRiscv_EmbeddedJtag.v \
+        $root/examples/common/vexriscv/vex_jtag_bscan_xilinx7.v
+} else {
+    lappend src_list $root/third_party/vexriscv/VexRiscv_Lite.v
+}
 
 proc _mark_version_header {root} {
     set_property file_type "Verilog Header" [get_files $root/rtl/fcapz_version.vh]
@@ -114,13 +134,21 @@ if {[file exists $project_xpr]} {
 # vendor block design / SmartConnect is generated any more.
 set_property top arty_a7_vex_top [current_fileset]
 
+# DEBUG variant: turn on the CPU-debug path via the top-level generic (adds the
+# BSCANE2/USER3 tunnel + VexRiscv_EmbeddedJtag core; USER1/2/4 unchanged).
+if {$vex_debug} {
+    set_property generic {DEBUG_EN=1} [current_fileset]
+}
+
 # ── Synthesise + implement + write bitstream ──────────────────
 launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
 # ── Copy bitfile to example directory ─────────────────────────
+# The impl run always writes <top>.bit (arty_a7_vex_top.bit); copy it to the
+# variant-specific name so the two builds' artifacts do not overwrite.
 file copy -force \
     $project_dir/${project_name}.runs/impl_1/arty_a7_vex_top.bit \
-    $example_dir/arty_a7_vex_top.bit
+    $example_dir/${bit_name}.bit
 
-puts "\n=== Build complete: examples/arty_a7/arty_a7_vex_top.bit ==="
+puts "\n=== Build complete: examples/arty_a7/${bit_name}.bit ==="
