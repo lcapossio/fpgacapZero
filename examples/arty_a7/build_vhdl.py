@@ -31,6 +31,7 @@ VEX_DIR = EXAMPLE_DIR / "vex"                       # board-local: main.c, vex_s
 COMMON_VEX = ROOT / "examples" / "common" / "vexriscv"  # shared CPU subsystem
 TCL_SCRIPT = EXAMPLE_DIR / "build_arty_vhdl.tcl"
 BITFILE = EXAMPLE_DIR / "arty_a7_top_vhdl.bit"
+DEBUG_BITFILE = EXAMPLE_DIR / "arty_a7_top_vhdl_debug.bit"
 
 
 def _load(name: str, path: Path):
@@ -41,17 +42,26 @@ def _load(name: str, path: Path):
     return module
 
 
-def prepare_sources(out_dir: Path) -> None:
+def prepare_sources(out_dir: Path, debug: bool = False) -> None:
     """Verify the vendored VexRiscv core and build the firmware (pre-Vivado)."""
     get_deps = _load("vex_get_deps", COMMON_VEX / "get_deps.py")
     build_fw = _load("vex_build_fw", COMMON_VEX / "fw" / "build_fw.py")
-    get_deps.fetch_vexriscv()
+    if debug:
+        get_deps.fetch_vexriscv_debug()
+    else:
+        get_deps.fetch_vexriscv()
     build_fw.build_firmware(VEX_DIR / "fw", out_dir)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vivado", default=None, help="Path to vivado executable")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Build the mixed-language CPU-debug variant (DEBUG_EN=1) -> "
+        "arty_a7_top_vhdl_debug.bit",
+    )
     parser.add_argument(
         "--log-dir",
         default=str(ROOT / "vivado" / "logs"),
@@ -62,14 +72,16 @@ def main() -> int:
     vivado = find_vivado(args.vivado)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    bitfile = DEBUG_BITFILE if args.debug else BITFILE
 
     # Fetch the core + build fw.mem before Vivado so $readmemh has an image.
-    prepare_sources(log_dir)
+    prepare_sources(log_dir, debug=args.debug)
 
     cleanup_orphans()
 
-    log_file = log_dir / "vivado_vhdl_build.log"
-    jou_file = log_dir / "vivado_vhdl_build.jou"
+    tag = "vhdl_debug" if args.debug else "vhdl"
+    log_file = log_dir / f"vivado_{tag}_build.log"
+    jou_file = log_dir / f"vivado_{tag}_build.jou"
 
     cmd = [
         vivado,
@@ -82,12 +94,15 @@ def main() -> int:
         "-journal",
         str(jou_file),
     ]
+    print(f"[build_vhdl.py] variant: {'debug' if args.debug else 'default'}")
     print(f"[build_vhdl.py] vivado: {vivado}")
     print(f"[build_vhdl.py] log:    {log_file}")
     print(f"[build_vhdl.py] cwd:    {ROOT}")
     print(f"[build_vhdl.py] cmd:    {' '.join(cmd)}")
 
     env = os.environ.copy()
+    if args.debug:
+        env["FCAPZ_VEX_DEBUG"] = "1"
     result = subprocess.run(cmd, cwd=str(ROOT), env=env, check=False)
     if result.returncode != 0:
         print(
@@ -96,14 +111,14 @@ def main() -> int:
         )
         return result.returncode
 
-    if not BITFILE.is_file():
+    if not bitfile.is_file():
         print(
-            f"[build_vhdl.py] build reported success but bitfile missing: {BITFILE}",
+            f"[build_vhdl.py] build reported success but bitfile missing: {bitfile}",
             file=sys.stderr,
         )
         return 4
 
-    print(f"[build_vhdl.py] success: {BITFILE}")
+    print(f"[build_vhdl.py] success: {bitfile}")
     return 0
 
 

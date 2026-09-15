@@ -7,7 +7,8 @@
 -- managed EIOs share USER1 through fcapz_debug_multi_xilinx7, an open-source
 -- VexRiscv subsystem (vex_sys, Verilog) and the EJTAG-AXI bridge (USER4) share
 -- one monitored AXI bus merged by fcapz_axi_interconnect, and the AXI monitor
--- observes it on USER2 (USER3 is free -- the CPU has no debug module). The VHDL
+-- observes it on USER2 (USER3 is free by default; the DEBUG_EN=1 generic puts
+-- the VexRiscv RISC-V JTAG DTM there). The VHDL
 -- build omits rtl/fcapz_ela.v and rtl/fcapz_eio.v, so the Verilog wrappers bind
 -- those core instances to the translated VHDL entities in rtl/vhdl/core.
 
@@ -16,6 +17,12 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity arty_a7_top is
+    generic (
+        -- DEBUG_EN=1 adds VexRiscv CPU debug on USER3 (BSCANE2 tunnel to the
+        -- EmbeddedRiscvJtag core), coexisting with the fcapz cores, exactly as
+        -- the Verilog arty_a7_vex_top variant does. Default 0 = unchanged.
+        DEBUG_EN : integer := 0
+    );
     port (
         clk : in  std_logic;
         btn : in  std_logic_vector(3 downto 0);
@@ -238,9 +245,23 @@ architecture rtl of arty_a7_top is
     -- exposed -- the test slave and monitor ignore them -- so those ports are
     -- gone here (mixed-language: Verilog module into this VHDL top).
     component vex_sys is
+        generic (
+            DEBUG_EN : integer := 0
+        );
         port (
             Clk             : in  std_logic;
             reset           : in  std_logic;
+            -- CPU-debug tunnel (used only when DEBUG_EN=1)
+            jtag_clk        : in  std_logic;
+            ji_tdi          : in  std_logic;
+            ji_enable       : in  std_logic;
+            ji_capture      : in  std_logic;
+            ji_shift        : in  std_logic;
+            ji_update       : in  std_logic;
+            ji_reset        : in  std_logic;
+            ji_tdo          : out std_logic;
+            debugReset      : in  std_logic;
+            ndmreset        : out std_logic;
             -- M_EJTAG slave (bridge master -> crossbar)
             M_EJTAG_awaddr  : in  std_logic_vector(31 downto 0);
             M_EJTAG_awlen   : in  std_logic_vector(7 downto 0);
@@ -305,6 +326,36 @@ architecture rtl of arty_a7_top is
             M_BUS_rready    : out std_logic
         );
     end component;
+
+    -- BSCANE2(USER3) -> EmbeddedRiscvJtag tunnel adapter (Verilog).
+    component vex_jtag_bscan_xilinx7 is
+        generic (
+            CHAIN : integer := 3
+        );
+        port (
+            jtag_clk   : out std_logic;
+            ji_tdi     : out std_logic;
+            ji_enable  : out std_logic;
+            ji_capture : out std_logic;
+            ji_shift   : out std_logic;
+            ji_update  : out std_logic;
+            ji_reset   : out std_logic;
+            ji_tdo     : in  std_logic
+        );
+    end component;
+
+    -- CPU-debug tunnel signals (USER3). Driven by the BSCAN adapter + a
+    -- free-running debug POR when DEBUG_EN=1, tied off otherwise.
+    signal dbg_jtag_clk    : std_logic;
+    signal dbg_ji_tdi      : std_logic;
+    signal dbg_ji_enable   : std_logic;
+    signal dbg_ji_capture  : std_logic;
+    signal dbg_ji_shift    : std_logic;
+    signal dbg_ji_update   : std_logic;
+    signal dbg_ji_reset    : std_logic;
+    signal dbg_ji_tdo      : std_logic;
+    signal dbg_debug_reset : std_logic;
+    signal dbg_ndmreset    : std_logic;
 
     signal clk_150        : std_logic;
     signal clk_130        : std_logic;
@@ -689,15 +740,68 @@ begin
     -- VexRiscv subsystem: the CPU's AXI4 master and the EJTAG bridge master
     -- (above) are merged by fcapz_axi_interconnect (inside vex_sys) onto the
     -- shared bus M_BUS, which drives the test slave and is passively tapped by the
-    -- AXI monitor.  The VexRiscv CPU has no JTAG debug module, so USER3 is free.
+    -- AXI monitor.  USER3 is free in the default build; DEBUG_EN=1 puts the
+    -- VexRiscv RISC-V DTM there (see the CPU-debug generate above).
     -- Firmware baked into the CPU BRAM ($readmemh vex/fw/fw.mem) writes a known
     -- pattern to the shared slave when the host raises a go-flag, giving the
     -- monitor real CPU traffic.  The bridge-side qualifiers the EJTAG master does
     -- not drive are tied off; the CPU-side M_BUS master exposes no cache/lock/qos.
+    -- CPU debug on USER3 (mirrors the Verilog arty_a7_vex_top). When DEBUG_EN=1
+    -- a BSCANE2 tunnels the RISC-V DTM and a free-running POR (independent of
+    -- rst_100/btn/ndmreset) keeps the Debug Module alive across CPU resets;
+    -- otherwise the tunnel inputs are tied off. ndmreset is captured but NOT
+    -- fed back into rst_100 (that would reset the shared fabric).
+    g_vexdbg : if DEBUG_EN = 1 generate
+        signal dbg_por : std_logic_vector(3 downto 0) := (others => '1');
+    begin
+        u_vex_bscan : vex_jtag_bscan_xilinx7
+            generic map (CHAIN => 3)   -- USER3, IR 0x22
+            port map (
+                jtag_clk   => dbg_jtag_clk,
+                ji_tdi     => dbg_ji_tdi,
+                ji_enable  => dbg_ji_enable,
+                ji_capture => dbg_ji_capture,
+                ji_shift   => dbg_ji_shift,
+                ji_update  => dbg_ji_update,
+                ji_reset   => dbg_ji_reset,
+                ji_tdo     => dbg_ji_tdo
+            );
+        process (clk_100) begin
+            if rising_edge(clk_100) then
+                dbg_por <= dbg_por(2 downto 0) & '0';
+            end if;
+        end process;
+        dbg_debug_reset <= dbg_por(3);
+    end generate g_vexdbg;
+
+    g_novexdbg : if DEBUG_EN = 0 generate
+        dbg_jtag_clk    <= '0';
+        dbg_ji_tdi      <= '0';
+        dbg_ji_enable   <= '0';
+        dbg_ji_capture  <= '0';
+        dbg_ji_shift    <= '0';
+        dbg_ji_update   <= '0';
+        dbg_ji_reset    <= '0';
+        dbg_debug_reset <= '0';
+    end generate g_novexdbg;
+
     u_vex_sys : vex_sys
+        generic map (
+            DEBUG_EN => DEBUG_EN
+        )
         port map (
             Clk   => clk_100,
             reset => rst_100,
+            jtag_clk   => dbg_jtag_clk,
+            ji_tdi     => dbg_ji_tdi,
+            ji_enable  => dbg_ji_enable,
+            ji_capture => dbg_ji_capture,
+            ji_shift   => dbg_ji_shift,
+            ji_update  => dbg_ji_update,
+            ji_reset   => dbg_ji_reset,
+            ji_tdo     => dbg_ji_tdo,
+            debugReset => dbg_debug_reset,
+            ndmreset   => dbg_ndmreset,
             M_EJTAG_awaddr  => bridge_awaddr,
             M_EJTAG_awlen   => bridge_awlen,
             M_EJTAG_awsize  => bridge_awsize,

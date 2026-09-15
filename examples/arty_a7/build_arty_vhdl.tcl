@@ -12,7 +12,18 @@
 # Usage (from project root, after build_vhdl.py fetched the core + built fw.mem):
 #   vivado -mode batch -source examples/arty_a7/build_arty_vhdl.tcl
 
-set project_name fpgacapZero_arty_vhdl
+# DEBUG variant: env FCAPZ_VEX_DEBUG=1 builds the mixed-language CPU-debug
+# design (EmbeddedRiscvJtag core + BSCANE2/USER3 tunnel, top generic
+# DEBUG_EN=1) into its own project/bitstream; default build untouched.
+if {[info exists ::env(FCAPZ_VEX_DEBUG)] && $::env(FCAPZ_VEX_DEBUG) ne "0"} {
+    set vex_debug 1
+    set project_name fpgacapZero_arty_vhdl_debug
+    set bit_name     arty_a7_top_vhdl_debug
+} else {
+    set vex_debug 0
+    set project_name fpgacapZero_arty_vhdl
+    set bit_name     arty_a7_top_vhdl
+}
 set part         xc7a100tcsg324-1
 set example_dir  [file normalize [file dirname [info script]]]
 set root         [file normalize $example_dir/../..]
@@ -80,11 +91,20 @@ set verilog_sources [list \
     $root/rtl/fcapz_eio_xilinx7.v \
     $root/rtl/fcapz_axi_interconnect.v \
     $root/tb/axi4_test_slave.v \
-    $root/third_party/vexriscv/VexRiscv_Lite.v \
     $root/examples/common/vexriscv/vex_cpu.v \
     $example_dir/vex/vex_sys.v \
     $example_dir/vex/fw/fw.mem \
 ]
+
+# CPU core + (debug only) the BSCANE2 tunnel adapter. Exactly one core file is
+# compiled so the shared InstructionCache module name never collides.
+if {$vex_debug} {
+    lappend verilog_sources \
+        $root/third_party/vexriscv/VexRiscv_EmbeddedJtag.v \
+        $root/examples/common/vexriscv/vex_jtag_bscan_xilinx7.v
+} else {
+    lappend verilog_sources $root/third_party/vexriscv/VexRiscv_Lite.v
+}
 
 proc _vhdl_add_sources {vhdl_sources verilog_sources example_dir} {
     foreach src $vhdl_sources {
@@ -150,6 +170,11 @@ if {[file exists $project_xpr]} {
 }
 set_property top arty_a7_top [current_fileset]
 
+# DEBUG variant: enable the CPU-debug path via the top-level VHDL generic.
+if {$vex_debug} {
+    set_property generic {DEBUG_EN=1} [current_fileset]
+}
+
 # ── VexRiscv shared-bus subsystem (Verilog into the VHDL top) ──
 # arty_a7_top.vhd instantiates the vex_sys component (VexRiscv CPU + EJTAG
 # bridge merged onto the monitored bus by fcapz_axi_interconnect), all added to
@@ -163,6 +188,6 @@ wait_on_run impl_1
 
 file copy -force \
     $project_dir/${project_name}.runs/impl_1/arty_a7_top.bit \
-    $example_dir/arty_a7_top_vhdl.bit
+    $example_dir/${bit_name}.bit
 
-puts "\n=== VHDL build complete: examples/arty_a7/arty_a7_top_vhdl.bit ==="
+puts "\n=== VHDL build complete: examples/arty_a7/${bit_name}.bit ==="
