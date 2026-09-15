@@ -9,6 +9,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **VexRiscv CPU debug coexisting with the fcapz cores (Arty A7).** A new
+  `--debug` build variant (`build_arty_vex.py --debug` →
+  `arty_a7_vex_debug_top.bit`) adds real processor debug — halt/step, GPR/CSR/PC,
+  halted memory, hardware breakpoints — to the VexRiscv reference design while the
+  ELA/EIO, AXI monitor and EJTAG-AXI cores keep running on the same physical JTAG.
+  It uses the **standard** RISC-V flow (upstream OpenOCD + `riscv-gdb`), so the
+  same host workflow will later serve other standard-DM soft cores: a second
+  vendored core `VexRiscv_EmbeddedJtag.v` (official RISC-V Debug Module + JTAG DTM
+  via the `EmbeddedRiscvJtag` plugin, no-TAP tunnel) rides a Xilinx `BSCANE2` on
+  the free **USER3** chain; `USER1/2/4` are untouched. Ships the tunnel adapter
+  (`examples/common/vexriscv/vex_jtag_bscan_xilinx7.v`), a `DEBUG_EN` path through
+  `vex_cpu`/`vex_sys`/`arty_a7_vex_top` (default build byte-identical), the
+  regeneration recipe + offline SHA-pinned provenance, and OpenOCD/GDB scripts
+  (`arty_a7_vex_debug.cfg` / `.gdb`). The debug core is verified offline by
+  `get_deps.py`; a provenance-sync test guards the pin.
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below

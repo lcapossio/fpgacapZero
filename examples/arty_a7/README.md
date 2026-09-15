@@ -40,6 +40,30 @@ pattern (`0xCAFEF00D`/`0x1234ABCD`) to slave words 16/17 while the host raises
 the flag, and otherwise just polls — so the CPU stays write-quiet during the
 other hardware tests, which use slave words 0..15.
 
+### VexRiscv CPU debug (`--debug`)
+
+The `--debug` build (`build_arty_vex.py --debug` → `arty_a7_vex_debug_top.bit`)
+adds **real processor debug** — halt/step, GPR/CSR/PC, halted memory, hardware
+breakpoints — on top of the same design, coexisting with the fcapz cores on one
+JTAG cable. It swaps `VexRiscv_Lite` for `VexRiscv_EmbeddedJtag`
+(`third_party/vexriscv/`), a core built with the **official RISC-V Debug Module
++ JTAG DTM** (`EmbeddedRiscvJtag` plugin, no-TAP tunnel), and puts a `BSCANE2`
+on the free **USER3** chain so upstream OpenOCD + `riscv-gdb` reach it while
+USER1/2/4 keep serving debug-multi / axi-mon / ejtag-axi. The `DEBUG_EN=0`
+default netlist is unchanged.
+
+```bash
+# build + program the debug bitstream, then:
+openocd -f examples/arty_a7/arty_a7_vex_debug.cfg
+riscv64-unknown-elf-gdb -x examples/arty_a7/arty_a7_vex_debug.gdb
+```
+
+One OpenOCD process serves both GDB (`:3333`) and fcapz's raw scans (Tcl
+`:6666`) over the shared TAP — serialize with `poll off`/`poll on` around fcapz
+ops. Needs a recent **upstream** OpenOCD (for `riscv set_bscan_tunnel_ir`). The
+debug core is regenerated, not downloaded — see
+`third_party/vexriscv/PROVENANCE.toml` (`[core.debug]`) and `GenFcapzVexDebug.scala`.
+
 ### Legacy MicroBlaze variant
 
 The original top-level, `arty_a7_top.v`, keeps a small **MicroBlaze** subsystem
