@@ -165,7 +165,7 @@ same still-running worker guard applies.
 | --- | --- | --- |
 | `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
 | `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to an ELA core. `chain` selects the JTAG USER chain (omit to autodetect). |
-| `fcapz_close` | always available | Close the active ELA connection. Idempotent. |
+| `fcapz_close` | always available | Close the **whole board session** — the ELA plus any EIO/AXI/UART controller. Idempotent, and runs even when only a side subsystem is open. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
 | `fcapz_list_cores` | connected ELA | List debug cores on the board (type, JTAG `chain`, identity) so an agent can pick the right chain for side connects. |
 | `fcapz_configure` | capture* | Configure the connected ELA without arming. |
@@ -285,9 +285,26 @@ Large captures stay in memory until the next capture, `fcapz_close`, or
 the byte `next_offset` until it is `null`. Chunks are UTF-8 JSON text and never
 split a multibyte character; callers must pass either `0` or a returned
 `next_offset`, because offsets in the middle of a UTF-8 character are rejected.
+`max_bytes` must leave room for at least one whole character (use `>= 4`); a
+window too small to fit the next character is rejected rather than returning an
+empty chunk that would never advance.
 `fcapz_get_last_capture` has a 1 MiB default guard and returns a compact
 truncation marker for larger captures unless `max_bytes=null` is passed as an
 explicit escape hatch.
+
+## Wide Sample Values
+
+JSON numbers are IEEE-754 doubles in most MCP clients (any JavaScript or
+TypeScript host parses them with `JSON.parse`), so integers above `2**53 - 1`
+are silently rounded. Captures can exceed that: an AXI monitor with
+`DECODE_EN=1` produces 160-bit samples, and rounding would destroy exactly the
+`awaddr`/`wdata`/`wstrb` bits you are trying to read.
+
+When any value in a capture is too wide, every value in that list is returned
+as a `0x…` hex string instead of a number and the payload carries
+`"value_encoding": "hex"` at the top level. The encoding is all-or-nothing per
+list, so a caller never has to handle a mix of integers and strings. Captures
+that fit in 53 bits are unchanged and carry no `value_encoding` key.
 
 ## Status Fields
 

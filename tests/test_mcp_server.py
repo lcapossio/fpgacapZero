@@ -1031,5 +1031,128 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(body[0].content, '{"available":false}')
 
 
+class CloseAllRpc(FakeRpc):
+    """Models the real RpcServer: `close` is _close_all(), not an ELA-only close."""
+
+    def __init__(self):
+        super().__init__()
+        self.open = {"ela": False, "eio": False, "axi": False, "uart": False}
+
+    def handle(self, req):
+        cmd = req["cmd"]
+        if cmd == "connect":
+            self.open["ela"] = True
+        elif cmd == "eio_connect":
+            self.open["eio"] = True
+        elif cmd == "axi_connect":
+            self.open["axi"] = True
+        elif cmd == "uart_connect":
+            self.open["uart"] = True
+        elif cmd == "close":
+            self.open.update(ela=False, eio=False, axi=False, uart=False)
+        return super().handle(req)
+
+
+class RegressionTests(unittest.TestCase):
+    """Bugs found in review; each asserts the specific failure that was fixed."""
+
+    _WIDE = 0xDEADBEEF_CAFEBABE_12345678_9ABCDEF0_11223344  # 160-bit AXI sample
+
+    def test_wide_sample_values_survive_a_json_number_client(self):
+        # JS MCP clients parse JSON numbers as doubles, rounding above 2**53-1.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({
+            "ok": True,
+            "format": "json",
+            "result": {
+                "sample_width": 160,
+                "trigger": {"mode": 1, "value": self._WIDE, "mask": self._WIDE},
+                "samples": [{"index": 0, "value": self._WIDE}, {"index": 1, "value": 7}],
+            },
+        })
+        payload = session.last_capture
+
+        self.assertEqual(payload["value_encoding"], "hex")
+        samples = payload["result"]["samples"]
+        # All-or-nothing per list: no mixing ints and hex strings.
+        self.assertEqual(samples[0]["value"], hex(self._WIDE))
+        self.assertEqual(samples[1]["value"], "0x7")
+        self.assertEqual(payload["result"]["trigger"]["value"], hex(self._WIDE))
+        # The value is exact after a real JSON round-trip.
+        reparsed = json.loads(json.dumps(payload))
+        self.assertEqual(int(reparsed["result"]["samples"][0]["value"], 16), self._WIDE)
+
+    def test_narrow_capture_encoding_is_unchanged(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        samples = [{"index": 0, "value": 123}, {"index": 1, "value": (1 << 53) - 1}]
+        session._store_capture({"ok": True, "result": {"samples": list(samples)}})
+        payload = session.last_capture
+
+        self.assertEqual(payload["result"]["samples"], samples)
+        self.assertNotIn("value_encoding", payload)
+
+    def test_close_clears_every_subsystem_flag(self):
+        # RPC close tears down EIO/AXI/UART too, so the wrapper must not keep
+        # advertising them as connected.
+        rpc = CloseAllRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        session.connect()
+        session.eio_connect()
+        session.axi_connect()
+
+        session.close()
+
+        self.assertFalse(any(rpc.open.values()))
+        self.assertFalse(session.connected)
+        self.assertFalse(session.eio_connected)
+        self.assertFalse(session.axi_connected)
+        self.assertFalse(session.uart_connected)
+
+    def test_close_releases_a_side_only_session(self):
+        # Without an ELA connection, close used to short-circuit and leave the
+        # EIO controller open on the board.
+        rpc = CloseAllRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        session.eio_connect()
+        self.assertTrue(rpc.open["eio"])
+
+        session.close()
+
+        self.assertFalse(rpc.open["eio"])
+        self.assertFalse(session.eio_connected)
+
+    def test_chunk_rejects_a_window_too_small_for_one_character(self):
+        # Returning next_offset == offset here loops the caller forever.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({"ok": True, "note": "µs"})
+        offset = session._capture_cache.json_bytes.index("µ".encode())
+
+        with self.assertRaisesRegex(ValueError, "max_bytes >= 4"):
+            session.get_last_capture_chunk(offset=offset, max_bytes=1)
+
+        # A window that can hold the character still works and advances.
+        chunk = session.get_last_capture_chunk(offset=offset, max_bytes=4)
+        self.assertTrue(chunk["chunk"].startswith("µ"))
+        self.assertNotEqual(chunk["next_offset"], offset)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_tool_annotations_match_real_behavior(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        def tools_for(**caps):
+            server = build_mcp_server(
+                FcapzMcpSession(rpc=FakeRpc(), capabilities=McpCapabilities(**caps))
+            )
+            return {tool.name: tool for tool in asyncio.run(server.list_tools())}
+
+        # Receiving drains the UART RX FIFO, so it is not read-only.
+        self.assertFalse(tools_for()["fcapz_uart_recv"].annotations.readOnlyHint)
+        # connect is destructive exactly when `program=` can reflash the part.
+        self.assertFalse(tools_for()["fcapz_connect"].annotations.destructiveHint)
+        self.assertTrue(
+            tools_for(allow_program=True)["fcapz_connect"].annotations.destructiveHint
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

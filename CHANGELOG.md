@@ -19,7 +19,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   confined to a `--bitfile-root`) — and `--read-only` drops the mutating tools
   at once. Payloads are bounded so a large capture or block read cannot flood
   the agent's context: captures are chunked from an atomic snapshot and AXI
-  block ops are capped. The MCP SDK is an optional dependency:
+  block ops are capped. Sample values wider than 53 bits are returned as hex
+  strings (`"value_encoding": "hex"`) so they survive clients that parse JSON
+  numbers as doubles. The MCP SDK is an optional dependency:
   `pip install fpgacapzero[mcp]`. See [MCP server](docs/20_mcp_server.md).
 
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`

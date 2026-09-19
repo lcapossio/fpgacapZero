@@ -76,6 +76,67 @@ class McpWatchdogTimeout(TimeoutError):
     """
 
 
+# JSON numbers are IEEE-754 doubles in most MCP clients (Claude Code and any
+# other JS/TS host parse with `JSON.parse`), so integers above 2**53-1 are
+# silently rounded. A 160-bit AXI-monitor sample would lose its low bits --
+# exactly the awaddr/wdata/wstrb an agent is trying to read. Encode anything
+# too wide as a hex string instead, and say so in the payload.
+_JSON_SAFE_INT_MAX = (1 << 53) - 1
+_WIDE_VALUE_KEYS = ("samples", "timestamps")
+
+
+def _is_wide_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and (
+        value > _JSON_SAFE_INT_MAX or value < -_JSON_SAFE_INT_MAX
+    )
+
+
+def _hex_int(value: int) -> str:
+    return f"-0x{-value:x}" if value < 0 else f"0x{value:x}"
+
+
+def _encode_wide_ints(obj: Any) -> tuple[Any, bool]:
+    """Recursively hex-encode ints that exceed JSON's exact-integer range.
+
+    Returns ``(converted, changed)``. Within a ``samples``/``timestamps`` list
+    the encoding is all-or-nothing: if any entry is too wide every entry in
+    that list is encoded, so an agent never has to handle a list that mixes
+    ints and hex strings.
+    """
+    if isinstance(obj, dict):
+        out: JsonDict = {}
+        changed = False
+        for key, value in obj.items():
+            if key in _WIDE_VALUE_KEYS and isinstance(value, list):
+                value, sub = _encode_value_list(value)
+            else:
+                value, sub = _encode_wide_ints(value)
+            changed = changed or sub
+            out[key] = value
+        return out, changed
+    if isinstance(obj, list):
+        items = [_encode_wide_ints(item) for item in obj]
+        changed = any(sub for _, sub in items)
+        return [item for item, _ in items], changed
+    if _is_wide_int(obj):
+        return _hex_int(obj), True
+    return obj, False
+
+
+def _encode_value_list(entries: list[Any]) -> tuple[list[Any], bool]:
+    """Hex-encode a samples/timestamps list uniformly if any value is too wide."""
+    if not any(
+        _is_wide_int(e.get("value")) for e in entries if isinstance(e, dict)
+    ):
+        return entries, False
+    out = []
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("value"), int):
+            entry = {**entry, "value": _hex_int(entry["value"])}
+        out.append(entry)
+    return out, True
+
+
 @dataclass(frozen=True)
 class _CaptureCache:
     """Immutable snapshot of the last capture, published by a single assignment.
@@ -268,6 +329,10 @@ class FcapzMcpSession:
         print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
 
     def _reset_session_state_after_cancel(self) -> None:
+        self._reset_session_state()
+
+    def _reset_session_state(self) -> None:
+        """Drop every connection flag and cached readout in one place."""
         self.connected = False
         self.eio_connected = False
         self.axi_connected = False
@@ -428,15 +493,34 @@ class FcapzMcpSession:
         return path
 
     def close(self) -> JsonDict:
-        if not self.connected:
-            self.last_probe = None
-            self._capture_cache = None
+        """Close the whole board session: ELA plus any EIO/AXI/UART controller.
+
+        RPC ``close`` is ``_close_all()`` — it tears down every controller, not
+        just the analyzer. So this must run whenever *any* subsystem is open
+        (not only when the ELA is), and must clear every wrapper flag
+        afterwards; otherwise the session reports subsystems as connected whose
+        hardware handle the RPC layer has already released, or silently leaves
+        a side-only EIO/AXI/UART session open on the board.
+        """
+        if not self._any_subsystem_open():
+            self._reset_session_state()
             return {"ok": True}
-        response = self._rpc_call({"cmd": "close"})
-        self.connected = False
-        self.last_probe = None
-        self._capture_cache = None
+        try:
+            response = self._rpc_call({"cmd": "close"})
+        finally:
+            # RPC close releases everything even if it reports a failure part
+            # way through (each teardown is individually guarded), so the
+            # wrapper must not keep advertising stale connections either way.
+            self._reset_session_state()
         return response
+
+    def _any_subsystem_open(self) -> bool:
+        return (
+            self.connected
+            or self.eio_connected
+            or self.axi_connected
+            or self.uart_connected
+        )
 
     def drop_last_capture(self) -> JsonDict:
         # Captures may contain large sample payloads. Probe and EIO caches are small
@@ -498,7 +582,13 @@ class FcapzMcpSession:
             except UnicodeDecodeError:
                 end -= 1
         else:
-            chunk = ""
+            # No whole character fit in the window. Returning an empty chunk
+            # with next_offset == offset would loop a caller forever, so name
+            # the real requirement instead (a UTF-8 character is <= 4 bytes).
+            raise ValueError(
+                f"max_bytes={max_bytes_i} is too small for the character at "
+                f"offset {start}; use max_bytes >= 4"
+            )
         return {
             "available": True,
             "encoding": "json-utf8",
@@ -538,6 +628,11 @@ class FcapzMcpSession:
 
     def _store_capture(self, response: JsonDict) -> JsonDict:
         """Cache a capture readout as one immutable snapshot; return its summary."""
+        # Make wide sample values survive a JS client's JSON.parse before the
+        # payload is serialized or cached (see _encode_wide_ints).
+        response, encoded = _encode_wide_ints(response)
+        if encoded:
+            response["value_encoding"] = "hex"
         json_text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
         json_bytes = json_text.encode("utf-8")
         summary = self._capture_summary(response)
@@ -1021,7 +1116,15 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return decorate
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    # `program=` can reflash the FPGA, but only when the server was started
+    # with --allow-program. Annotations are static per registration, and the
+    # capability is known here, so advertise the truth for this server rather
+    # than a blanket hint either way.
+    @tool(
+        destructiveHint=session.capabilities.allow_program,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_connect(
         backend: str = "hw_server",
         host: str | None = None,
@@ -1077,8 +1180,9 @@ def build_mcp_server(session: FcapzMcpSession):
         """List debug cores discovered on the connected board.
 
         Read-only orientation: reports each core's type, JTAG USER `chain`, and
-        identity so an agent can pick the right `chain` for the eio/axi/uart
-        connect tools instead of guessing. Requires an active connection.
+        identity. Covers the connected ELA and the EIO if one is discoverable;
+        AXI/UART bridges are not auto-scanned yet, so their `chain` still has
+        to be supplied. Requires an active connection.
         """
 
         return session.list_cores()
@@ -1385,7 +1489,8 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.uart_send(data_base64=data_base64, text=text)
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
+    # Not read-only: receiving consumes bytes from the UART RX FIFO.
+    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_uart_recv(count: int, timeout: float = 1.0) -> JsonDict:
         """Receive up to count bytes from eJTAG-UART; timeout is in seconds."""
 
