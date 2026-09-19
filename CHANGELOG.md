@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP server (`fcapz-mcp`).** A stdio MCP server that exposes the lab
+  controls to coding agents: connect/probe/configure/arm/poll and capture for
+  the ELA, EIO read/write, AXI read/write (single and bounded block), and UART
+  send/receive. Session state is published as `fcapz://` resources (status,
+  last probe, last capture, last EIO read). Every write-side operation is off
+  by default behind an explicit capability flag — `--allow-eio-write`,
+  `--allow-axi-write`, `--allow-uart-send`, and `--allow-program` (which can be
+  confined to a `--bitfile-root`) — and `--read-only` drops the mutating tools
+  at once. Payloads are bounded so a large capture or block read cannot flood
+  the agent's context: captures are chunked from an atomic snapshot and AXI
+  block ops are capped. The MCP SDK is an optional dependency:
+  `pip install fpgacapzero[mcp]`. See [MCP server](docs/20_mcp_server.md).
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
