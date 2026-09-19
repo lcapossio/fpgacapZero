@@ -137,6 +137,32 @@ def _encode_value_list(entries: list[Any]) -> tuple[list[Any], bool]:
     return out, True
 
 
+class _CommandState:
+    """Lifecycle of one hardware command, guarded by the session state lock."""
+
+    PENDING = "pending"    # queued or running
+    COMMITTED = "committed"  # finished and session state updated; reply posted
+    ABANDONED = "abandoned"  # watchdog gave up; owner must recover, not commit
+
+
+@dataclass
+class _HardwareCommand:
+    """One RPC request plus the state commit that must be atomic with it.
+
+    The commit runs on the owner thread while the command still holds the
+    hardware, so a caller can never observe (or interleave with) a completed
+    RPC whose session state has not been written yet.
+    """
+
+    req: JsonDict
+    commit: Callable[[JsonDict], Any]
+    reply: "queue.Queue[tuple[bool, object]]" = field(
+        default_factory=lambda: queue.Queue(maxsize=1)
+    )
+    done: threading.Event = field(default_factory=threading.Event)
+    state: str = _CommandState.PENDING
+
+
 @dataclass(frozen=True)
 class _CaptureCache:
     """Immutable snapshot of the last capture, published by a single assignment.
@@ -169,9 +195,15 @@ class FcapzMcpSession:
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
     _capture_cache: "_CaptureCache | None" = field(default=None, init=False, repr=False)
+    # One lock guards session state, the active-command slot and every command
+    # state transition, so a commit and a watchdog giveup cannot interleave.
     _rpc_lock: RLock = field(default_factory=RLock, init=False, repr=False)
-    _active_rpc_worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _active_rpc_cmd: str | None = field(default=None, init=False, repr=False)
+    _poisoned: bool = field(default=False, init=False, repr=False)
+    _owner: threading.Thread | None = field(default=None, init=False, repr=False)
+    _command_q: "queue.Queue[_HardwareCommand | None]" = field(
+        default_factory=queue.Queue, init=False, repr=False
+    )
 
     _CAPTURE_CONFIG_KEYS = frozenset({
         "pretrigger",
@@ -227,82 +259,166 @@ class FcapzMcpSession:
             return base
         return max(base, wait + base)
 
-    def _rpc_call(self, req: JsonDict) -> JsonDict:
-        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+    # ---- single hardware owner ---------------------------------------
+    #
+    # The JTAG transport is strictly single-threaded, and the RPC call plus the
+    # session-state write that follows it must be one indivisible step. Both
+    # are therefore done on one long-lived owner thread fed by a queue, rather
+    # than on a thread spawned per call: a caller can no longer slip between a
+    # finished RPC and its commit (losing a close, or publishing an older
+    # capture over a newer one), and an abandoned command can be reconciled
+    # instead of silently leaving the wrapper's view of the board wrong.
 
-        def run_call() -> None:
-            try:
-                result_queue.put((True, self.rpc.handle(req)))
-            except BaseException as exc:
-                result_queue.put((False, exc))
+    def _ensure_owner(self) -> None:
+        """Start the owner thread on first use. Caller holds ``_rpc_lock``."""
+        if self._owner is not None and self._owner.is_alive():
+            return
+        self._owner = threading.Thread(
+            target=self._owner_loop, name="fcapz-mcp-hardware", daemon=True
+        )
+        self._owner.start()
 
-        worker = threading.Thread(target=run_call, name="fcapz-mcp-rpc", daemon=True)
+    def _owner_loop(self) -> None:
+        while True:
+            cmd = self._command_q.get()
+            if cmd is None:  # shutdown sentinel
+                return
+            self._run_command(cmd)
+
+    def _run_command(self, cmd: _HardwareCommand) -> None:
+        try:
+            raw: object = self.rpc.handle(cmd.req)
+            failure: BaseException | None = None
+        except BaseException as exc:  # noqa: BLE001 - relayed to the caller
+            raw, failure = None, exc
+
         with self._rpc_lock:
-            if self._active_rpc_worker is not None:
-                if self._active_rpc_worker.is_alive():
-                    raise RuntimeError(
-                        f"previous fcapz RPC call {self._active_rpc_cmd!r} is still "
-                        "running after a timeout; restart the MCP server before "
-                        "issuing more hardware commands"
-                    )
-                self._active_rpc_worker = None
+            if cmd.state == _CommandState.ABANDONED:
+                # The watchdog already gave up and told the caller so. Do not
+                # commit: the session must be reconciled, not quietly advanced.
+                recover = True
+            else:
+                recover = False
+                if failure is not None:
+                    outcome: tuple[bool, object] = (False, failure)
+                else:
+                    try:
+                        checked = self._ok_response(raw)  # type: ignore[arg-type]
+                        outcome = (True, cmd.commit(checked))
+                    except BaseException as exc:  # noqa: BLE001
+                        outcome = (False, exc)
+                cmd.state = _CommandState.COMMITTED
+                cmd.reply.put(outcome)
                 self._active_rpc_cmd = None
-            self._active_rpc_worker = worker
-            self._active_rpc_cmd = str(req.get("cmd"))
-            worker.start()
-        join_timeout = self._worker_join_timeout(req)
-        worker.join(join_timeout)
-        if worker.is_alive():
-            cancel = getattr(self.rpc, "cancel_active", None)
-            cancelled = False
-            if callable(cancel):
+
+        if recover:
+            self._recover_after_abandoned()
+        cmd.done.set()
+
+    def _recover_after_abandoned(self) -> None:
+        """Reconcile after a command the caller stopped waiting for.
+
+        The RPC layer may have connected, closed, or captured in the meantime,
+        so the only safe assumption is that nothing is where the wrapper left
+        it. Tear the board session down for real, wipe wrapper state, and only
+        then accept new commands.
+        """
+        try:
+            self.rpc.handle({"cmd": "close"})
+        except Exception as exc:  # noqa: BLE001 - best effort teardown
+            self._emit_rpc_error("recover_teardown", "close", exc)
+        with self._rpc_lock:
+            self._reset_session_state()
+            self._active_rpc_cmd = None
+            self._poisoned = False
+
+    def _rpc_call(
+        self, req: JsonDict, commit: Callable[[JsonDict], Any] | None = None
+    ) -> Any:
+        """Run one hardware command on the owner thread and commit it atomically.
+
+        ``commit`` runs on the owner thread with the hardware still held, and
+        its return value is what this call returns (default: the response).
+        """
+        cmd = _HardwareCommand(req=req, commit=commit or (lambda response: response))
+        name = str(req.get("cmd"))
+        with self._rpc_lock:
+            if self._poisoned:
+                raise FcapzMcpError(
+                    f"fcapz session is recovering from an abandoned "
+                    f"{self._active_rpc_cmd!r} call and is not accepting hardware "
+                    "commands; retry shortly (fcapz_status shows session_state)"
+                )
+            if self._active_rpc_cmd is not None:
+                raise FcapzMcpError(
+                    f"fcapz is busy running {self._active_rpc_cmd!r}; the JTAG "
+                    "transport takes one command at a time — wait for it to "
+                    "finish (fcapz_status shows session_state)"
+                )
+            self._active_rpc_cmd = name
+            self._ensure_owner()
+        self._command_q.put(cmd)
+
+        timeout = self._worker_join_timeout(req)
+        try:
+            ok, value = cmd.reply.get(timeout=timeout)
+        except queue.Empty:
+            return self._handle_watchdog_timeout(cmd, name, timeout)
+        if not ok:
+            raise value  # type: ignore[misc]
+        return value
+
+    def _handle_watchdog_timeout(
+        self, cmd: _HardwareCommand, name: str, timeout: float
+    ) -> Any:
+        """Decide what to do about a command that outran its watchdog."""
+        cancel = getattr(self.rpc, "cancel_active", None)
+        if callable(cancel):
+            # A transport that can abort: stop it, then give it the grace
+            # window to unwind. The result is not trustworthy either way.
+            with self._rpc_lock:
+                if cmd.state == _CommandState.PENDING:
+                    cmd.state = _CommandState.ABANDONED
+            if cmd.state == _CommandState.ABANDONED:
                 try:
                     cancel()
-                    cancelled = True
-                except Exception as exc:
-                    self._emit_rpc_cancel_error(str(req.get("cmd")), exc)
-            worker.join(self.capabilities.rpc_cancel_grace_sec)
-            if worker.is_alive():
-                # Still running. Leave the slot reserved so the next call refuses
-                # to drive the transport concurrently; it self-heals once this
-                # worker finally exits (the guard at the top reclaims the slot).
-                raise McpWatchdogTimeout(
-                    f"fcapz RPC call {req.get('cmd')!r} timed out after "
-                    f"{join_timeout:g}s and is still running; wait and retry "
-                    "(fcapz_status shows progress) — restart only if it persists"
-                )
-            # The worker finished within the grace window. Reclaim the slot.
-            with self._rpc_lock:
-                if self._active_rpc_worker is worker:
-                    self._active_rpc_worker = None
-                    self._active_rpc_cmd = None
-            if cancelled:
-                # A backend cancel tore the in-flight call down, so the RPC
-                # session may be inconsistent: resync MCP state and surface the
-                # worker's own error (or a timeout if it exited clean anyway).
-                self._reset_session_state_after_cancel()
-                ok, result = result_queue.get_nowait()
-                if not ok:
-                    raise result  # type: ignore[misc]
-                raise McpWatchdogTimeout(
-                    f"fcapz RPC call {req.get('cmd')!r} was cancelled after "
-                    f"{join_timeout:g}s"
-                )
-            # No cancel hook: the worker merely finished a little late (e.g. a
-            # slow readback overran the watchdog). Salvage its completed result
-            # instead of discarding it — often a successful capture — and
-            # desyncing the session. Fall through to normal result handling.
+                except Exception as exc:  # noqa: BLE001
+                    self._emit_rpc_error("cancel_active", name, exc)
+                if cmd.done.wait(self.capabilities.rpc_cancel_grace_sec):
+                    raise McpWatchdogTimeout(
+                        f"fcapz RPC call {name!r} was cancelled after {timeout:g}s; "
+                        "the board session was torn down — reconnect before retrying"
+                    )
+                self._poison(name, timeout)
+            # It committed while we were deciding: fall through and take it.
         else:
-            with self._rpc_lock:
-                # A timed-out worker may finish after a later call has reserved
-                # the slot. Only the owner may clear the active marker.
-                if self._active_rpc_worker is worker:
-                    self._active_rpc_worker = None
-                    self._active_rpc_cmd = None
-        ok, result = result_queue.get_nowait()
+            # No abort hook. The call may simply be a slow readback finishing
+            # late, so allow the grace window and salvage a real result rather
+            # than throwing away a completed capture.
+            try:
+                ok, value = cmd.reply.get(timeout=self.capabilities.rpc_cancel_grace_sec)
+            except queue.Empty:
+                with self._rpc_lock:
+                    if cmd.state == _CommandState.PENDING:
+                        cmd.state = _CommandState.ABANDONED
+                        self._poison(name, timeout)
+            else:
+                if not ok:
+                    raise value  # type: ignore[misc]
+                return value
+        ok, value = cmd.reply.get_nowait()
         if not ok:
-            raise result  # type: ignore[misc]
-        return self._ok_response(result)  # type: ignore[arg-type]
+            raise value  # type: ignore[misc]
+        return value
+
+    def _poison(self, name: str, timeout: float) -> None:
+        """Refuse further hardware commands until the owner has reconciled."""
+        self._poisoned = True
+        raise McpWatchdogTimeout(
+            f"fcapz RPC call {name!r} timed out after {timeout:g}s and is still "
+            "running; the session will be torn down and reset when it returns "
+            "(fcapz_status shows session_state) — reconnect after that"
+        )
 
     def _ok_response(self, response: JsonDict) -> JsonDict:
         if not response.get("ok", False):
@@ -314,12 +430,12 @@ class FcapzMcpSession:
         return response
 
     @staticmethod
-    def _emit_rpc_cancel_error(cmd: str, exc: BaseException) -> None:
+    def _emit_rpc_error(step: str, cmd: str, exc: BaseException) -> None:
         payload = {
             "event": "rpc_cancel_error",
             "errors": [
                 {
-                    "step": "cancel_active",
+                    "step": step,
                     "cmd": cmd,
                     "type": exc.__class__.__name__,
                     "message": str(exc),
@@ -327,6 +443,51 @@ class FcapzMcpSession:
             ],
         }
         print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
+
+    # ---- commits ------------------------------------------------------
+    # Each runs on the owner thread, under the session lock, while the command
+    # still holds the hardware. Keep them small and non-blocking.
+
+    def _commit_connected(self, response: JsonDict) -> JsonDict:
+        self.connected = True
+        return response
+
+    def _commit_closed(self, response: JsonDict) -> JsonDict:
+        self._reset_session_state()
+        return response
+
+    def _commit_probe(self, response: JsonDict) -> JsonDict:
+        self.last_probe = dict(response.get("probe", {}))
+        return response
+
+    def _commit_eio_connected(self, response: JsonDict) -> JsonDict:
+        self.eio_connected = True
+        return response
+
+    def _commit_eio_closed(self, response: JsonDict) -> JsonDict:
+        self.eio_connected = False
+        self.last_eio_read = None
+        return response
+
+    def _commit_eio_read(self, response: JsonDict) -> JsonDict:
+        self.last_eio_read = dict(response)
+        return response
+
+    def _commit_axi_connected(self, response: JsonDict) -> JsonDict:
+        self.axi_connected = True
+        return response
+
+    def _commit_axi_closed(self, response: JsonDict) -> JsonDict:
+        self.axi_connected = False
+        return response
+
+    def _commit_uart_connected(self, response: JsonDict) -> JsonDict:
+        self.uart_connected = True
+        return response
+
+    def _commit_uart_closed(self, response: JsonDict) -> JsonDict:
+        self.uart_connected = False
+        return response
 
     def _reset_session_state_after_cancel(self) -> None:
         self._reset_session_state()
@@ -463,9 +624,7 @@ class FcapzMcpSession:
             raise ValueError(f"single_chain_burst not supported for backend {backend!r}")
         if program_path is not None:
             req["program"] = str(program_path)
-        response = self._rpc_call(req)
-        self.connected = True
-        return response
+        return self._rpc_call(req, commit=self._commit_connected)
 
     def _validated_program_path(self, program: str | None, *, backend: str) -> Path | None:
         if not program:
@@ -502,25 +661,42 @@ class FcapzMcpSession:
         hardware handle the RPC layer has already released, or silently leaves
         a side-only EIO/AXI/UART session open on the board.
         """
-        if not self._any_subsystem_open():
-            self._reset_session_state()
+        if self._nothing_to_close(*self._SUBSYSTEM_FLAGS):
+            with self._rpc_lock:
+                self._reset_session_state()
             return {"ok": True}
         try:
-            response = self._rpc_call({"cmd": "close"})
-        finally:
-            # RPC close releases everything even if it reports a failure part
-            # way through (each teardown is individually guarded), so the
-            # wrapper must not keep advertising stale connections either way.
-            self._reset_session_state()
-        return response
+            return self._rpc_call({"cmd": "close"}, commit=self._commit_closed)
+        except FcapzMcpError:
+            # RPC close releases every controller even when it reports a
+            # failure part way through (each teardown is individually
+            # guarded), so the wrapper must not keep advertising stale
+            # connections on the error path either.
+            with self._rpc_lock:
+                self._reset_session_state()
+            raise
 
-    def _any_subsystem_open(self) -> bool:
-        return (
-            self.connected
-            or self.eio_connected
-            or self.axi_connected
-            or self.uart_connected
-        )
+    def _nothing_to_close(self, *flags: str) -> bool:
+        """True when a close can safely skip the RPC because nothing is open.
+
+        The flags only describe reality while the owner is idle. With a
+        command in flight they describe the *pre-command* world — a connect
+        that has not committed yet still reads as disconnected — so a close
+        must not conclude it has nothing to do. Returning False there sends it
+        to ``_rpc_call``, which arbitrates (busy) instead of silently
+        dropping the close.
+        """
+        with self._rpc_lock:
+            if self._active_rpc_cmd is not None:
+                return False
+            return not any(getattr(self, flag) for flag in flags)
+
+    _SUBSYSTEM_FLAGS = (
+        "connected",
+        "eio_connected",
+        "axi_connected",
+        "uart_connected",
+    )
 
     def drop_last_capture(self) -> JsonDict:
         # Captures may contain large sample payloads. Probe and EIO caches are small
@@ -601,9 +777,7 @@ class FcapzMcpSession:
         }
 
     def probe(self) -> JsonDict:
-        response = self._rpc_call({"cmd": "probe"})
-        self.last_probe = dict(response.get("probe", {}))
-        return response
+        return self._rpc_call({"cmd": "probe"}, commit=self._commit_probe)
 
     @staticmethod
     def _validated_capture_format(fmt: str) -> str:
@@ -673,7 +847,7 @@ class FcapzMcpSession:
             if unknown:
                 raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
             req = {**config, **req}
-        return self._store_capture(self._rpc_call(req))
+        return self._rpc_call(req, commit=self._store_capture)
 
     def capture_wait(
         self,
@@ -691,7 +865,7 @@ class FcapzMcpSession:
             "summarize": bool(include_event_summary),
         }
         try:
-            return self._store_capture(self._rpc_call(req))
+            return self._rpc_call(req, commit=self._store_capture)
         except McpWatchdogTimeout:
             # The watchdog abandoned the worker — a real fault, not "still
             # waiting". Let it propagate so the caller stops polling.
@@ -784,23 +958,16 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
         )
-        response = self._rpc_call(req)
-        self.eio_connected = True
-        return response
+        return self._rpc_call(req, commit=self._commit_eio_connected)
 
     def eio_close(self) -> JsonDict:
-        if not self.eio_connected:
+        if self._nothing_to_close("eio_connected"):
             self.last_eio_read = None
             return {"ok": True}
-        response = self._rpc_call({"cmd": "eio_close"})
-        self.eio_connected = False
-        self.last_eio_read = None
-        return response
+        return self._rpc_call({"cmd": "eio_close"}, commit=self._commit_eio_closed)
 
     def eio_read(self) -> JsonDict:
-        response = self._rpc_call({"cmd": "eio_read"})
-        self.last_eio_read = dict(response)
-        return response
+        return self._rpc_call({"cmd": "eio_read"}, commit=self._commit_eio_read)
 
     def eio_write(self, value: int) -> JsonDict:
         if not self.capabilities.allow_eio_write:
@@ -822,7 +989,7 @@ class FcapzMcpSession:
     ) -> JsonDict:
         if self.axi_connected:
             self.axi_close()
-        response = self._rpc_call(
+        return self._rpc_call(
             self._bridge_connect_req(
                 cmd="axi_connect",
                 backend=backend,
@@ -832,17 +999,14 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
-            )
+            ),
+            commit=self._commit_axi_connected,
         )
-        self.axi_connected = True
-        return response
 
     def axi_close(self) -> JsonDict:
-        if not self.axi_connected:
+        if self._nothing_to_close("axi_connected"):
             return {"ok": True}
-        response = self._rpc_call({"cmd": "axi_close"})
-        self.axi_connected = False
-        return response
+        return self._rpc_call({"cmd": "axi_close"}, commit=self._commit_axi_closed)
 
     def axi_read(self, addr: int) -> JsonDict:
         return self._rpc_call({"cmd": "axi_read", "addr": int(addr)})
@@ -908,7 +1072,7 @@ class FcapzMcpSession:
     ) -> JsonDict:
         if self.uart_connected:
             self.uart_close()
-        response = self._rpc_call(
+        return self._rpc_call(
             self._bridge_connect_req(
                 cmd="uart_connect",
                 backend=backend,
@@ -918,17 +1082,14 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
-            )
+            ),
+            commit=self._commit_uart_connected,
         )
-        self.uart_connected = True
-        return response
 
     def uart_close(self) -> JsonDict:
-        if not self.uart_connected:
+        if self._nothing_to_close("uart_connected"):
             return {"ok": True}
-        response = self._rpc_call({"cmd": "uart_close"})
-        self.uart_connected = False
-        return response
+        return self._rpc_call({"cmd": "uart_close"}, commit=self._commit_uart_closed)
 
     def uart_send(self, data_base64: str | None = None, text: str | None = None) -> JsonDict:
         if not self.capabilities.allow_uart_send:
@@ -968,13 +1129,19 @@ class FcapzMcpSession:
 
     def status(self) -> JsonDict:
         with self._rpc_lock:
-            worker = self._active_rpc_worker
-            rpc_busy = worker is not None and worker.is_alive()
-            active_rpc_cmd = self._active_rpc_cmd if rpc_busy else None
+            active_rpc_cmd = self._active_rpc_cmd
+            rpc_busy = active_rpc_cmd is not None
+            if self._poisoned:
+                session_state = "poisoned"
+            elif rpc_busy:
+                session_state = "busy"
+            else:
+                session_state = "ready"
         cache = self._capture_cache  # one consistent snapshot
         return {
             "mcp_server_version": self._server_version(),
             "rpc_schema_version": self.last_rpc_schema_version,
+            "session_state": session_state,
             "rpc_busy": rpc_busy,
             "active_rpc_cmd": active_rpc_cmd,
             "connected": self.connected,
@@ -1091,6 +1258,19 @@ class FcapzMcpSession:
                 ),
                 file=sys.stderr,
             )
+        self._stop_owner()
+
+    def _stop_owner(self) -> None:
+        """Retire the hardware owner thread after the closes above."""
+        with self._rpc_lock:
+            owner = self._owner
+            self._owner = None
+        if owner is None or not owner.is_alive():
+            return
+        self._command_q.put(None)
+        # Bounded: an abandoned command may still hold the transport, and the
+        # thread is a daemon, so never block process exit on it.
+        owner.join(timeout=self.capabilities.rpc_cancel_grace_sec)
 
 
 def build_mcp_server(session: FcapzMcpSession):

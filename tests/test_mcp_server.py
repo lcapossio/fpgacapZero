@@ -16,7 +16,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fcapz.mcp_server as mcp_server
-from fcapz.mcp_server import FcapzMcpSession, McpCapabilities, main
+from fcapz.mcp_server import (
+    FcapzMcpError,
+    FcapzMcpSession,
+    McpCapabilities,
+    McpWatchdogTimeout,
+    main,
+)
 
 
 class FakeRpc:
@@ -851,23 +857,55 @@ class FcapzMcpSessionTests(unittest.TestCase):
         status["last_probe"]["depth"] = 1
         self.assertEqual(session.last_probe["depth"], 1024)
 
-    def test_rpc_timeout_reports_clean_error(self):
+    def _drain_owner(self, session, rpc, timeout=2.0):
+        """Let a blocked owner finish so its recovery runs before teardown."""
+        rpc.release.set()
+        owner = session._owner
+        if owner is not None:
+            owner.join(timeout=timeout)
+
+    def test_rpc_timeout_poisons_the_session_until_it_reconciles(self):
+        # No cancel hook (the production case): the watchdog cannot stop the
+        # call, so the session refuses work rather than pretending it is fine.
         rpc = BlockingRpc()
         session = FcapzMcpSession(
             rpc=rpc,
-            capabilities=McpCapabilities(rpc_timeout_sec=0.01),
+            capabilities=McpCapabilities(rpc_timeout_sec=0.01, rpc_cancel_grace_sec=0.01),
         )
 
         try:
             with self.assertRaisesRegex(TimeoutError, "timed out"):
                 session.connect()
-            with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
+            self.assertEqual(session.status()["session_state"], "poisoned")
+            with self.assertRaisesRegex(FcapzMcpError, "recovering from an abandoned"):
                 session.probe()
         finally:
-            rpc.release.set()
-            worker = session._active_rpc_worker
-            if worker is not None:
-                worker.join(timeout=1.0)
+            self._drain_owner(session, rpc)
+
+    def test_abandoned_command_is_reconciled_not_committed(self):
+        # The abandoned connect eventually succeeds inside the RPC layer. Its
+        # commit must NOT land: the wrapper tears the board session down and
+        # reports disconnected rather than silently going connected later.
+        rpc = BlockingRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(rpc_timeout_sec=0.01, rpc_cancel_grace_sec=0.01),
+        )
+        with self.assertRaises(McpWatchdogTimeout):
+            session.connect()
+
+        rpc.release.set()
+        deadline = time.time() + 2.0
+        while session.status()["session_state"] != "ready" and time.time() < deadline:
+            time.sleep(0.01)
+
+        status = session.status()
+        self.assertEqual(status["session_state"], "ready")
+        self.assertFalse(status["connected"], "abandoned connect must not commit")
+        self.assertIsNone(status["active_rpc_cmd"])
+        # And the session takes work again once it has reconciled.
+        session.rpc = FakeRpc()
+        self.assertEqual(session.probe()["probe"]["sample_width"], 8)
 
     def test_rpc_timeout_cancels_backend_and_allows_next_call(self):
         rpc = CancellableBlockingRpc()
@@ -880,9 +918,9 @@ class FcapzMcpSessionTests(unittest.TestCase):
             session.connect()
 
         self.assertTrue(rpc.cancelled)
-        self.assertIsNone(session._active_rpc_worker)
         self.assertFalse(session.status()["connected"])
         self.assertEqual(session.status()["last_capture_size_bytes"], None)
+        self.assertEqual(session.status()["session_state"], "ready")
 
         rpc.handle = FakeRpc().handle  # type: ignore[method-assign]
         self.assertEqual(session.probe()["probe"]["sample_width"], 8)
@@ -890,7 +928,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
     def test_late_worker_result_is_salvaged_not_discarded(self):
         # A completed call that overran the watchdog (no cancel hook, finishes
         # within the grace window) must return its result, not raise a spurious
-        # TimeoutError and wipe session state — the finding-1 regression.
+        # TimeoutError and wipe session state.
         rpc = SlowRpc(delay=0.06)
         session = FcapzMcpSession(
             rpc=rpc,
@@ -900,8 +938,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
         result = session.probe()
         self.assertEqual(result["probe"]["sample_width"], 8)
         self.assertEqual(rpc.calls, 1)
-        # Slot reclaimed and no desync reset fired: the next call proceeds.
-        self.assertIsNone(session._active_rpc_worker)
+        self.assertEqual(session.status()["session_state"], "ready")
         self.assertFalse(session.status()["rpc_busy"])
         self.assertEqual(session.probe()["probe"]["depth"], 1024)
 
@@ -926,15 +963,12 @@ class FcapzMcpSessionTests(unittest.TestCase):
             self.assertEqual(payload["errors"][0]["cmd"], "connect")
             self.assertEqual(payload["errors"][0]["type"], "RuntimeError")
             self.assertEqual(payload["errors"][0]["message"], "cancel bad")
-            with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
+            with self.assertRaisesRegex(FcapzMcpError, "recovering from an abandoned"):
                 session.probe()
         finally:
-            rpc.release.set()
-            worker = session._active_rpc_worker
-            if worker is not None:
-                worker.join(timeout=1.0)
+            self._drain_owner(session, rpc)
 
-    def test_rpc_timeout_keeps_slot_when_cancelled_worker_does_not_exit(self):
+    def test_session_stays_poisoned_while_cancelled_call_does_not_exit(self):
         rpc = StubbornCancelRpc()
         session = FcapzMcpSession(
             rpc=rpc,
@@ -948,14 +982,77 @@ class FcapzMcpSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "still running"):
                 session.connect()
             self.assertTrue(rpc.cancelled)
-            self.assertIsNotNone(session._active_rpc_worker)
-            with self.assertRaisesRegex(RuntimeError, "previous fcapz RPC call"):
+            self.assertEqual(session.status()["session_state"], "poisoned")
+            with self.assertRaisesRegex(FcapzMcpError, "recovering from an abandoned"):
+                session.probe()
+        finally:
+            self._drain_owner(session, rpc)
+
+    def test_close_is_not_lost_while_a_connect_is_in_flight(self):
+        # The close guard reads connection flags, which describe the
+        # pre-command world while a connect is still running. It must not
+        # conclude there is nothing to close and silently drop the request.
+        class SlowConnectRpc:
+            def __init__(self):
+                self.log = []
+
+            def handle(self, req):
+                self.log.append(req["cmd"])
+                if req["cmd"] == "connect":
+                    time.sleep(0.15)
+                return {"ok": True, "schema_version": "test"}
+
+        rpc = SlowConnectRpc()
+        session = FcapzMcpSession(
+            rpc=rpc, capabilities=McpCapabilities(rpc_timeout_sec=5.0)
+        )
+        worker = threading.Thread(target=session.connect, daemon=True)
+        worker.start()
+        try:
+            time.sleep(0.05)
+            with self.assertRaisesRegex(FcapzMcpError, "busy running 'connect'"):
+                session.close()
+        finally:
+            worker.join(timeout=2.0)
+
+        self.assertTrue(session.connected)
+        self.assertEqual(rpc.log, ["connect"])
+        # Retrying actually reaches the hardware.
+        session.close()
+        self.assertFalse(session.connected)
+        self.assertEqual(rpc.log, ["connect", "close"])
+
+    def test_uart_close_commits_through_the_owner(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        session.uart_connect()
+        self.assertTrue(session.uart_connected)
+
+        session.uart_close()
+
+        self.assertFalse(session.uart_connected)
+        self.assertIn("uart_close", [r["cmd"] for r in rpc.requests])
+
+    def test_concurrent_call_is_refused_while_hardware_is_busy(self):
+        # The JTAG wire takes one command at a time; a second caller must be
+        # told so rather than queued behind a minutes-long capture.
+        rpc = BlockingRpc()
+        session = FcapzMcpSession(
+            rpc=rpc, capabilities=McpCapabilities(rpc_timeout_sec=5.0)
+        )
+        first = threading.Thread(target=lambda: session.connect(), daemon=True)
+        first.start()
+        try:
+            deadline = time.time() + 2.0
+            while not session.status()["rpc_busy"] and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(session.status()["session_state"], "busy")
+            with self.assertRaisesRegex(FcapzMcpError, "busy running 'connect'"):
                 session.probe()
         finally:
             rpc.release.set()
-            worker = session._active_rpc_worker
-            if worker is not None:
-                worker.join(timeout=1.0)
+            first.join(timeout=2.0)
+        self.assertEqual(session.status()["session_state"], "ready")
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
     def test_build_mcp_server_registers_tools_when_sdk_available(self):

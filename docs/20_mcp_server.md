@@ -138,21 +138,35 @@ trips it. The caller's `timeout` itself is capped at 300 s (the RPC layer's
 ceiling) and rejected above that rather than silently clamped. For all other
 commands the plain `--rpc-timeout` window applies.
 
-If the watchdog does fire, the server asks the RPC layer to cancel any active
-transport when that layer exposes a cancellation hook. If the worker then
-unwinds, the timeout is treated as a session-wide reset (ELA, EIO, AXI, UART,
-cached probe, and cached capture data cleared). If the RPC layer has no
-cancellation hook and the worker simply finished a little late, its completed
-result is returned rather than discarded — a slow-but-successful capture is not
-thrown away. Only a worker still running after the grace window leaves the slot
-reserved; the server then refuses new hardware commands until it exits (**this
-self-heals** — the next call reclaims the slot once the worker finishes; a
-restart is only needed if it never does). This fail-closed guard is what keeps
-a stuck call from corrupting a later one, and `fcapz_status` reports `rpc_busy`
-/ `active_rpc_cmd` so an agent can see the wait instead of guessing.
+Every hardware command runs on a single long-lived **owner thread**. The JTAG
+transport takes one command at a time, and the RPC call plus the session-state
+write that follows it run together on that thread as one indivisible step. A
+second caller arriving mid-command is refused with a `busy` error naming the
+command in flight, rather than queued behind a capture that may run for
+minutes. `fcapz_status` reports `session_state` (`ready` / `busy` /
+`poisoned`) alongside `rpc_busy` and `active_rpc_cmd`.
 
-`--rpc-cancel-grace SEC` controls how long the MCP layer waits for the worker
-to unwind after a cancel attempt before declaring it still active. It must be greater than zero.
+If the watchdog fires, what happens depends on the transport:
+
+- **No cancellation hook** (the usual case) — the call may simply be a slow
+  readback finishing late, so the grace window is allowed to elapse and a
+  completed result is returned rather than discarded. A slow-but-successful
+  capture is not thrown away.
+- **Cancellation hook present** — the transport is aborted and given the grace
+  window to unwind. The board session is torn down; reconnect before retrying.
+
+A command still running after the grace window is **abandoned**, and the
+session becomes `poisoned`: further hardware commands are refused. This is not
+merely a lock being held. When the abandoned command finally returns, its
+result is *not* committed — the RPC layer may have connected, closed, or
+captured in the meantime, so the only safe assumption is that nothing is where
+the wrapper left it. The owner tears the board session down for real, clears
+all wrapper state, and only then returns to `ready`. Watch `session_state` and
+reconnect once it reports `ready`; a restart is needed only if it never does.
+
+`--rpc-cancel-grace SEC` controls both how long a late command may still
+deliver its result and how long the MCP layer waits for a cancelled transport
+to unwind before abandoning it. It must be greater than zero.
 Transport construction is still best-effort: if a backend blocks before a
 transport object exists, cancellation cannot nudge that backend directly and the
 same still-running worker guard applies.
@@ -314,6 +328,9 @@ that fit in 53 bits are unchanged and carry no `value_encoding` key.
 | --- | --- |
 | `mcp_server_version` | The installed fpgacapZero package version. |
 | `rpc_schema_version` | The RPC schema version. It is seeded before the first RPC and updated from successful RPC responses. |
+| `session_state` | `ready` (accepting commands), `busy` (one in flight; a second is refused), or `poisoned` (a command was abandoned after the watchdog; the owner is tearing the session down and will return to `ready`). |
+| `rpc_busy` | Whether a hardware command is in flight. |
+| `active_rpc_cmd` | Name of the command in flight, or `null` when idle. |
 | `connected` | Whether an ELA connection is active. |
 | `eio_connected` | Whether an EIO connection is active. |
 | `axi_connected` | Whether an AXI bridge connection is active. |
