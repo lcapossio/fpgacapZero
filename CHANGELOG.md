@@ -9,6 +9,30 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
+  (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
+  onto one monitored bus as portable RTL, shared by both VexRiscv variants below
+  in place of a vendor block design. Simulated in `tb/` and hardware-validated on
+  both boards.
+- **DE25-Nano — VexRiscv reference variant.** A new `de25_nano_vex_top` is a
+  drop-in for the default design — same debug cores — with an open-source
+  VexRiscv (RV32I) soft CPU in place of the RTL `axi4_traffic_gen`, so the AXI
+  monitor captures real CPU bus traffic. The CPU and the EJTAG-AXI bridge are
+  merged by `fcapz_axi_interconnect` onto one shared `axi4_test_slave` (the CPU
+  uses words 16/17, the host words 0..15), so the host reads CPU writes back over
+  EJTAG-AXI. Free-running firmware keeps the observable bus contract, so the whole
+  `test_hw_integration.py` suite runs unchanged via `FPGACAP_BITSTREAM_VARIANT=vex`.
+  New `vex/` RTL and `build_de25_nano_vex` launcher (Quartus Pro + riscv gcc).
+- **Arty A7 — VexRiscv reference variant.** A new `arty_a7_vex_top` is a drop-in
+  for the MicroBlaze design — same debug cores, same shared-bus wiring — with an
+  open-source VexRiscv (RV32I) soft CPU in place of the proprietary MicroBlaze,
+  so the reference design builds without a MicroBlaze licence or `mb-gcc`. Its
+  firmware presents the identical host-gated bus pattern, so the whole
+  `test_hw_integration.py` suite runs unchanged against it via
+  `FPGACAP_BITSTREAM_VARIANT=vex`. New `vex/` RTL merging the CPU and EJTAG-AXI
+  masters with `fcapz_axi_interconnect` (no vendor block design) and
+  `build_arty_vex` launcher. Hardware-validated on the Arty A7-100T (Vivado
+  2025.2 + Vitis riscv gcc 13.4): full suite green on the vex bitstream.
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
@@ -26,6 +50,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
+  a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with
+  `--variant microblaze`/`--variant vhdl` for the others; `test_hw_integration.py`
+  defaults to the vex bitstream. The Arty VHDL top (`arty_a7_top.vhd`) is now a
+  mixed-language design instantiating the Verilog VexRiscv subsystem in place of
+  the MicroBlaze block design.
+- **VexRiscv core vendored + subsystem shared across boards.** The pinned core is
+  vendored under `third_party/vexriscv/` (MIT licence + provenance, hash-verified
+  offline — clean builds need no network), and the duplicated per-board CPU glue,
+  firmware boot/link/build, and dependency check now live once in
+  `examples/common/vexriscv/`. Only each board's `main.c` workload (and Arty's
+  `vex_sys` bus adapter) stay board-local.
 - **Transport — fast wide-core readback over USB-Blaster.** Wide, single-chain
   cores (the 160-bit AXI monitor) now stream their samples **and** timestamps via
   a single-chain burst on the core's own BSCAN instance — one 256-bit DR scan per
@@ -48,6 +84,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `vid_pid` for any driver (`ch347 vid_pid`, `cmsis_dap vid_pid`, a bare
   `vid_pid`), not just `ftdi vid_pid`, so non-FTDI adapters are recognised
   instead of always probed.
+
+### Deprecated
+
+- **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
+  (`arty_a7_top.v`, block design moved to `examples/arty_a7/legacy-microblaze/`)
+  is deprecated in favour of the VexRiscv default, but retained — it proves the
+  fcapz cores drop into a proprietary-CPU design. Build it with
+  `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
 

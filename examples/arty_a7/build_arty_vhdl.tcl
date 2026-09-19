@@ -2,13 +2,14 @@
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
 # Vivado build script for the Arty A7-100T mixed-language reference design.
-# Verilog vendor wrappers/TAP plumbing instantiate the VHDL fcapz_ela/fcapz_eio
-# core entities.  Topology mirrors the Verilog build (build_arty.tcl) exactly,
-# including the MicroBlaze subsystem: a project flow is used so the MicroBlaze
-# block design plus its firmware ELF (baked into the LMB BRAM) can drive real
-# CPU traffic on the monitored shared bus.
+# The top and the fcapz_ela/fcapz_eio/fcapz_axi_mon cores are VHDL; the Verilog
+# vendor wrappers/TAP plumbing bind to those entities, and the shared-bus CPU is
+# the open-source Verilog VexRiscv subsystem (vex_sys + fcapz_axi_interconnect),
+# mixed-language into the VHDL top exactly where the MicroBlaze wrapper used to
+# sit. The firmware image (vex/fw/fw.mem, $readmemh into the CPU BRAM) is built
+# by build_vhdl.py before Vivado, so no MicroBlaze block design / mb-gcc.
 #
-# Usage (from project root):
+# Usage (from project root, after build_vhdl.py fetched the core + built fw.mem):
 #   vivado -mode batch -source examples/arty_a7/build_arty_vhdl.tcl
 
 set project_name fpgacapZero_arty_vhdl
@@ -57,9 +58,10 @@ set vhdl_sources [list \
     $example_dir/arty_a7_top.vhd \
 ]
 
-# Verilog TAP plumbing, vendor wrappers, bridge, monitor wrapper and test
-# slave.  Same set as the Verilog build minus fcapz_ela.v/fcapz_eio.v/
-# fcapz_axi_mon.v (the VHDL cores above) and arty_a7_top.v (the VHDL top above).
+# Verilog TAP plumbing, vendor wrappers, bridge, monitor wrapper, test slave,
+# and the VexRiscv shared-bus subsystem (interconnect + vendored core + shared
+# vex_cpu + board vex_sys + firmware image).  The fcapz_ela.v/fcapz_eio.v/
+# fcapz_axi_mon.v cores and arty_a7_top.v are replaced by their VHDL versions.
 set verilog_sources [list \
     $root/rtl/reset_sync.v \
     $root/rtl/dpram.v \
@@ -76,7 +78,12 @@ set verilog_sources [list \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
     $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
+    $root/rtl/fcapz_axi_interconnect.v \
     $root/tb/axi4_test_slave.v \
+    $root/third_party/vexriscv/VexRiscv_Lite.v \
+    $root/examples/common/vexriscv/vex_cpu.v \
+    $example_dir/vex/vex_sys.v \
+    $example_dir/vex/fw/fw.mem \
 ]
 
 proc _vhdl_add_sources {vhdl_sources verilog_sources example_dir} {
@@ -143,25 +150,12 @@ if {[file exists $project_xpr]} {
 }
 set_property top arty_a7_top [current_fileset]
 
-# ── MicroBlaze block design + HDL wrapper ─────────────────────
-# arty_a7_top instantiates mb_sys_wrapper (microblaze_0 M_AXI_DP + the EJTAG
-# bridge master merged onto the monitored shared bus; MDM on USER3).  Same BD as
-# the Verilog build.  Generated fresh into the project if not already present.
-source $example_dir/mb/create_mb_bd.tcl
-source $example_dir/mb/build_fw.tcl
-if {[llength [get_files -quiet mb_sys.bd]] == 0} {
-    fcapz_build_mb_bd mb_sys
-    make_wrapper -files [get_files mb_sys.bd] -top -import
-}
-set_property top arty_a7_top [current_fileset]
-
-# ── Firmware ELF baked into the LMB BRAM ──────────────────────
-set fw_elf [fcapz_build_fw $project_dir]
-if {[llength [get_files -quiet mb_fw.elf]] == 0} {
-    add_files -norecurse $fw_elf
-}
-set_property SCOPED_TO_REF   mb_sys       [get_files -quiet mb_fw.elf]
-set_property SCOPED_TO_CELLS microblaze_0 [get_files -quiet mb_fw.elf]
+# ── VexRiscv shared-bus subsystem (Verilog into the VHDL top) ──
+# arty_a7_top.vhd instantiates the vex_sys component (VexRiscv CPU + EJTAG
+# bridge merged onto the monitored bus by fcapz_axi_interconnect), all added to
+# verilog_sources above. The firmware lives in the CPU BRAM via $readmemh of
+# vex/fw/fw.mem (built by build_vhdl.py before Vivado) -- no block design, no
+# LMB ELF to scope. USER3 is left free (the CPU has no JTAG debug module).
 
 # ── Synthesise + implement + write bitstream ──────────────────
 launch_runs impl_1 -to_step write_bitstream -jobs 4

@@ -2,15 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Launch a Vivado batch build of the Arty A7 mixed-language VHDL-core design.
+"""Launch a Vivado batch build of the Arty A7 VexRiscv design.
 
-The VHDL top now instantiates the open-source VexRiscv shared-bus subsystem
-(Verilog) where the MicroBlaze wrapper used to sit, so -- like build_arty_vex.py
--- this verifies the vendored core and builds the firmware image (vex/fw/fw.mem,
-$readmemh into the CPU BRAM) before Vivado. Needs a RISC-V GCC toolchain on PATH
-(or $RISCV_PREFIX).
+Before Vivado runs, this verifies the vendored VexRiscv core (checked in under
+third_party/vexriscv/, no network needed) and compiles the firmware into
+examples/arty_a7/vex/fw/fw.mem (loaded by vex_cpu.v via $readmemh). Requires a
+RISC-V GCC toolchain on PATH (or $RISCV_PREFIX).
 
-    RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build_vhdl.py
+    RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build_arty_vex.py
 """
 
 from __future__ import annotations
@@ -24,13 +23,12 @@ from pathlib import Path
 
 from build import cleanup_orphans, find_vivado
 
-
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_DIR = ROOT / "examples" / "arty_a7"
 VEX_DIR = EXAMPLE_DIR / "vex"                       # board-local: main.c, vex_sys.v
 COMMON_VEX = ROOT / "examples" / "common" / "vexriscv"  # shared CPU subsystem
-TCL_SCRIPT = EXAMPLE_DIR / "build_arty_vhdl.tcl"
-BITFILE = EXAMPLE_DIR / "arty_a7_top_vhdl.bit"
+TCL_SCRIPT = EXAMPLE_DIR / "build_arty_vex.tcl"
+BITFILE = EXAMPLE_DIR / "arty_a7_vex_top.bit"
 
 
 def _load(name: str, path: Path):
@@ -55,7 +53,7 @@ def main() -> int:
     parser.add_argument(
         "--log-dir",
         default=str(ROOT / "vivado" / "logs"),
-        help="Directory for vivado_vhdl_build.log and vivado_vhdl_build.jou",
+        help="Directory for vivado_vex_build.log and vivado_vex_build.jou",
     )
     args = parser.parse_args()
 
@@ -68,42 +66,37 @@ def main() -> int:
 
     cleanup_orphans()
 
-    log_file = log_dir / "vivado_vhdl_build.log"
-    jou_file = log_dir / "vivado_vhdl_build.jou"
+    log_file = log_dir / "vivado_vex_build.log"
+    jou_file = log_dir / "vivado_vex_build.jou"
 
     cmd = [
-        vivado,
-        "-mode",
-        "batch",
-        "-source",
-        str(TCL_SCRIPT),
-        "-log",
-        str(log_file),
-        "-journal",
-        str(jou_file),
+        vivado, "-mode", "batch",
+        "-source", str(TCL_SCRIPT),
+        "-log", str(log_file),
+        "-journal", str(jou_file),
     ]
-    print(f"[build_vhdl.py] vivado: {vivado}")
-    print(f"[build_vhdl.py] log:    {log_file}")
-    print(f"[build_vhdl.py] cwd:    {ROOT}")
-    print(f"[build_vhdl.py] cmd:    {' '.join(cmd)}")
+    print(f"[build_arty_vex.py] vivado: {vivado}")
+    print(f"[build_arty_vex.py] log:    {log_file}")
+    print(f"[build_arty_vex.py] cwd:    {ROOT}")
 
     env = os.environ.copy()
     result = subprocess.run(cmd, cwd=str(ROOT), env=env, check=False)
     if result.returncode != 0:
         print(
-            f"[build_vhdl.py] vivado exited with code {result.returncode}; see {log_file}",
+            f"[build_arty_vex.py] vivado exited with code {result.returncode}; "
+            f"see {log_file}",
             file=sys.stderr,
         )
         return result.returncode
 
     if not BITFILE.is_file():
         print(
-            f"[build_vhdl.py] build reported success but bitfile missing: {BITFILE}",
+            f"[build_arty_vex.py] build reported success but bitfile missing: {BITFILE}",
             file=sys.stderr,
         )
         return 4
 
-    print(f"[build_vhdl.py] success: {BITFILE}")
+    print(f"[build_arty_vex.py] success: {BITFILE}")
     return 0
 
 

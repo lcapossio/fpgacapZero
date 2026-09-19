@@ -99,7 +99,7 @@ Prefer the command line? Build the Arty A7 reference bitstream (see
 
 ```bash
 fcapz --backend hw_server --port 3121 \
-  --program examples/arty_a7/arty_a7_top.bit \
+  --program examples/arty_a7/arty_a7_vex_top.bit \
   capture --trigger-value 0 --trigger-mask 0xFF --out capture.vcd --format vcd
 ```
 
