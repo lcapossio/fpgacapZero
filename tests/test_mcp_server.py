@@ -1086,6 +1086,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_axi_write",
                 "fcapz_axi_write_block",
                 "fcapz_axi_dump",
+                "fcapz_axi_transactions",
                 "fcapz_uart_connect",
                 "fcapz_uart_close",
                 "fcapz_uart_send",
@@ -1249,6 +1250,132 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(
             tools_for(allow_program=True)["fcapz_connect"].annotations.destructiveHint
         )
+
+
+def _axi_capture_payload(count=5, anomalies=(1, 3)):
+    """A capture payload shaped like one the RPC layer decodes."""
+    txns = []
+    for i in range(count):
+        txn = {
+            "index": i,
+            "kind": "write" if i % 2 == 0 else "read",
+            "addr": f"0x{0x1000 + i * 4:08x}",
+            "data": f"0x{0xAA00 + i:08x}",
+            "resp": "SLVERR" if i in anomalies else "OKAY",
+            "cycles": {"resp": i * 4},
+        }
+        if i in anomalies:
+            txn["flags"] = ["error_response"]
+        txns.append(txn)
+    return {
+        "ok": True,
+        "format": "json",
+        "sample_count": 64,
+        "result": {"samples": [{"index": 0, "value": 0}]},
+        "axi": {
+            "protocol": "axi4lite",
+            "addr_width": 32,
+            "data_width": 32,
+            "transaction_count": count,
+            "write_count": sum(1 for t in txns if t["kind"] == "write"),
+            "read_count": sum(1 for t in txns if t["kind"] == "read"),
+            "error_count": len(anomalies),
+            "anomaly_count": len(anomalies),
+            "max_latency": 7,
+            "transactions": txns,
+        },
+    }
+
+
+class AxiTransactionToolTests(unittest.TestCase):
+    def _session(self, payload=None):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture(payload if payload is not None else _axi_capture_payload())
+        return session
+
+    def test_capture_summary_keeps_only_the_axi_headline(self):
+        session = self._session()
+        summary = session._capture_cache.summary
+
+        self.assertNotIn("transactions", summary["axi"])
+        self.assertEqual(summary["axi"]["transaction_count"], 5)
+        self.assertEqual(summary["axi"]["error_count"], 2)
+        self.assertIn("fcapz_axi_transactions", summary["axi"]["hint"])
+        # The full decode is still cached for the paging tool.
+        self.assertEqual(len(session.last_capture["axi"]["transactions"]), 5)
+
+    def test_pages_transactions_with_a_cursor(self):
+        session = self._session()
+
+        first = session.axi_transactions(start=0, count=2)
+        self.assertTrue(first["available"])
+        self.assertEqual(first["total"], 5)
+        self.assertEqual([t["index"] for t in first["transactions"]], [0, 1])
+        self.assertEqual(first["next_start"], 2)
+
+        last = session.axi_transactions(start=4, count=2)
+        self.assertEqual([t["index"] for t in last["transactions"]], [4])
+        self.assertIsNone(last["next_start"], "cursor must terminate")
+
+    def test_each_page_is_valid_json_on_its_own(self):
+        # The point of paging transactions rather than bytes.
+        page = self._session().axi_transactions(start=1, count=2)
+        self.assertEqual(json.loads(json.dumps(page))["count"], 2)
+
+    def test_only_anomalies_filters_to_flagged_transactions(self):
+        page = self._session().axi_transactions(only_anomalies=True)
+
+        self.assertEqual(page["total"], 2)
+        self.assertEqual([t["index"] for t in page["transactions"]], [1, 3])
+        self.assertTrue(all(t["flags"] for t in page["transactions"]))
+
+    def test_kind_filters_reads_and_writes(self):
+        session = self._session()
+        self.assertEqual(session.axi_transactions(kind="write")["total"], 3)
+        self.assertEqual(session.axi_transactions(kind="read")["total"], 2)
+        with self.assertRaisesRegex(ValueError, "kind must be"):
+            session.axi_transactions(kind="burst")
+
+    def test_page_size_is_capped(self):
+        payload = _axi_capture_payload(count=400, anomalies=())
+        page = self._session(payload).axi_transactions(count=10_000)
+        self.assertEqual(page["count"], FcapzMcpSession._AXI_MAX_PAGE)
+
+    def test_rejects_nonsense_paging_arguments(self):
+        session = self._session()
+        with self.assertRaisesRegex(ValueError, "start must be >= 0"):
+            session.axi_transactions(start=-1)
+        with self.assertRaisesRegex(ValueError, "count must be > 0"):
+            session.axi_transactions(count=0)
+
+    def test_reports_unavailable_without_a_capture(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        self.assertEqual(session.axi_transactions(), {"available": False})
+
+    def test_explains_itself_when_the_capture_is_not_axi(self):
+        session = self._session({"ok": True, "result": {"samples": []}})
+        result = session.axi_transactions()
+
+        self.assertFalse(result["available"])
+        self.assertIn("AXI monitor probe map", result["reason"])
+
+    def test_segmented_captures_are_merged_and_tagged(self):
+        payload = {
+            "ok": True,
+            "segments": [
+                {"segment": 0, "axi": _axi_capture_payload(2, ())["axi"]},
+                {"segment": 1, "axi": _axi_capture_payload(2, ())["axi"]},
+            ],
+        }
+        page = self._session(payload).axi_transactions()
+
+        self.assertEqual(page["total"], 4)
+        self.assertEqual([t["segment"] for t in page["transactions"]], [0, 0, 1, 1])
+
+    def test_capture_requests_the_decode_from_rpc(self):
+        rpc = FakeRpc()
+        FcapzMcpSession(rpc=rpc).capture()
+        self.assertTrue(rpc.requests[-1]["decode_axi"])
 
 
 if __name__ == "__main__":

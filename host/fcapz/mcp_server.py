@@ -730,6 +730,66 @@ class FcapzMcpSession:
         response.setdefault("size_bytes", size_bytes)
         return response
 
+    _AXI_MAX_PAGE = 256
+
+    def axi_transactions(
+        self,
+        *,
+        start: int = 0,
+        count: int = 64,
+        only_anomalies: bool = False,
+        kind: str | None = None,
+    ) -> JsonDict:
+        """Page the decoded AXI transactions of the cached capture.
+
+        Returns whole transactions, so every page is valid on its own — unlike
+        the byte-chunked raw payload, which has to be concatenated before it
+        parses.
+        """
+        cache = self._capture_cache  # one consistent snapshot for this call
+        if cache is None:
+            return {"available": False}
+        sections = self._axi_sections(cache.payload)
+        if not sections:
+            return {
+                "available": False,
+                "reason": (
+                    "the cached capture carries no AXI decode; capture with an "
+                    "AXI monitor probe map (fcapz_list_cores shows the monitor)"
+                ),
+            }
+        if kind not in (None, "read", "write"):
+            raise ValueError(f"kind must be 'read' or 'write'; got {kind!r}")
+        start_i, count_i = int(start), int(count)
+        if start_i < 0:
+            raise ValueError("start must be >= 0")
+        if count_i <= 0:
+            raise ValueError("count must be > 0")
+        count_i = min(count_i, self._AXI_MAX_PAGE)
+
+        selected: list[JsonDict] = []
+        for segment, section in sections:
+            for txn in section.get("transactions") or []:
+                if only_anomalies and not txn.get("flags"):
+                    continue
+                if kind is not None and txn.get("kind") != kind:
+                    continue
+                if segment is not None:
+                    txn = {**txn, "segment": segment}
+                selected.append(txn)
+
+        page = selected[start_i : start_i + count_i]
+        next_start = start_i + len(page)
+        return {
+            "available": True,
+            "total": len(selected),
+            "start": start_i,
+            "count": len(page),
+            "next_start": next_start if next_start < len(selected) else None,
+            "filters": {"only_anomalies": only_anomalies, "kind": kind},
+            "transactions": page,
+        }
+
     def get_last_capture_chunk(
         self,
         *,
@@ -835,6 +895,8 @@ class FcapzMcpSession:
         req: JsonDict = {
             "cmd": "capture",
             "timeout": self._validated_wait_timeout(timeout),
+            # Harmless when the capture is not an AXI monitor's.
+            "decode_axi": True,
             "format": self._validated_capture_format(fmt),
             # MCP names this by intent; RPC still uses its historical field.
             "summarize": bool(include_event_summary),
@@ -861,6 +923,8 @@ class FcapzMcpSession:
         req: JsonDict = {
             "cmd": "capture_wait",
             "timeout": self._validated_wait_timeout(timeout),
+            # Harmless when the capture is not an AXI monitor's.
+            "decode_axi": True,
             "format": self._validated_capture_format(fmt),
             "summarize": bool(include_event_summary),
         }
@@ -1202,12 +1266,56 @@ class FcapzMcpSession:
             "timestamps",
             "vcd",
             "words",
+            "axi",
         }
         summary: JsonDict = {
             key: value for key, value in payload.items() if key not in bulky_keys
         }
+        axi = FcapzMcpSession._axi_headline(payload)
+        if axi is not None:
+            summary["axi"] = axi
         summary.setdefault("ok", True)
         return summary
+
+    @staticmethod
+    def _axi_sections(payload: JsonDict) -> list[tuple[int | None, JsonDict]]:
+        """Every decoded AXI section in a capture, with its segment index.
+
+        A plain capture carries one at the top level; a segmented capture
+        carries one per segment.
+        """
+        section = payload.get("axi")
+        if isinstance(section, dict):
+            return [(None, section)]
+        out: list[tuple[int | None, JsonDict]] = []
+        for index, segment in enumerate(payload.get("segments") or []):
+            if isinstance(segment, dict) and isinstance(segment.get("axi"), dict):
+                out.append((segment.get("segment", index), segment["axi"]))
+        return out
+
+    @staticmethod
+    def _axi_headline(payload: JsonDict) -> JsonDict | None:
+        """Counts only — the transactions themselves are paged separately."""
+        sections = FcapzMcpSession._axi_sections(payload)
+        if not sections:
+            return None
+        totals: JsonDict = {"protocol": sections[0][1].get("protocol")}
+        for key in (
+            "transaction_count",
+            "write_count",
+            "read_count",
+            "error_count",
+            "anomaly_count",
+        ):
+            totals[key] = sum(int(sec.get(key) or 0) for _, sec in sections)
+        latencies = [
+            sec.get("max_latency") for _, sec in sections if sec.get("max_latency") is not None
+        ]
+        totals["max_latency"] = max(latencies) if latencies else None
+        totals["hint"] = (
+            "decoded AXI transactions are available via fcapz_axi_transactions"
+        )
+        return totals
 
     def _bounded_capture_summary(self, summary: JsonDict, max_bytes: int = 8192) -> JsonDict:
         summary = dict(summary)
@@ -1418,6 +1526,39 @@ def build_mcp_server(session: FcapzMcpSession):
         """
 
         return session.get_last_capture(max_bytes=max_bytes)
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_axi_transactions(
+        start: int = 0,
+        count: int = 64,
+        only_anomalies: bool = False,
+        kind: str | None = None,
+    ) -> JsonDict:
+        """Read the cached capture as AXI transactions instead of raw samples.
+
+        Reassembles the per-cycle AXI4-Lite bus trace into whole transactions:
+        address, data, byte strobes, response, the cycle each beat landed on,
+        latency, stall counts, and protocol anomaly `flags`. Available
+        whenever the capture used an AXI monitor probe map.
+
+        Prefer this over paging raw samples when debugging bus behaviour: it
+        is orders of magnitude smaller and each page is valid JSON on its own.
+        `only_anomalies=true` returns just the flagged transactions — start
+        there. `kind` filters to "read" or "write". Page with the returned
+        `next_start` until it is null; `count` is capped at 256.
+
+        Flags worth knowing: `error_response` (SLVERR/DECERR), `partial_write`
+        / `write_strobe_zero` (byte strobes), `data_before_address`,
+        `write_missing_data` / `write_missing_address` (a half-formed write —
+        the shape a dropped or scrambled command leaves), `unaligned_address`,
+        and the benign window-edge cases `request_before_window` /
+        `no_response_in_window`, which mean the transaction straddled the
+        start or end of the capture rather than that anything went wrong.
+        """
+
+        return session.axi_transactions(
+            start=start, count=count, only_anomalies=only_anomalies, kind=kind
+        )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
     def fcapz_get_last_capture_chunk(

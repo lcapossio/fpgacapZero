@@ -189,6 +189,7 @@ same still-running worker guard applies.
 | `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
+| `fcapz_axi_transactions` | always available | Decoded AXI4-Lite transactions of the cached capture — paged, filterable by anomaly or read/write. See [AXI Transactions](#axi-transactions). |
 | `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
 
@@ -306,6 +307,49 @@ empty chunk that would never advance.
 truncation marker for larger captures unless `max_bytes=null` is passed as an
 explicit escape hatch.
 
+## AXI Transactions
+
+When a capture uses an AXI monitor probe map, the server reassembles the
+per-cycle bus trace into whole AXI4-Lite transactions and
+`fcapz_axi_transactions` pages them. This is the tool to reach for when
+debugging bus behaviour — a raw sample dump makes an agent rebuild the
+protocol structure itself, from data that mostly will not fit in context.
+
+Each transaction carries its address, data, byte strobes, response, the cycle
+each beat landed on, latency, per-channel stall counts, and `flags`:
+
+```json
+{"index": 12, "kind": "write", "addr": "0x00001000", "data": "0xcafebabe",
+ "strb": "0xf", "resp": "SLVERR", "cycles": {"addr": 40, "data": 42, "resp": 47},
+ "latency": 7, "stall_cycles": {"addr": 2}, "flags": ["error_response"]}
+```
+
+`only_anomalies=true` returns just the flagged transactions — usually the
+right first call. `kind` filters to `"read"` or `"write"`. Page with the
+returned `next_start` until it is `null`; `count` is capped at 256, and every
+page is valid JSON on its own.
+
+| Flag | Meaning |
+| --- | --- |
+| `error_response` | `SLVERR` or `DECERR` on B/R. |
+| `partial_write` | `wstrb` enables some byte lanes but not all. |
+| `write_strobe_zero` | A write beat with no byte lanes enabled. |
+| `data_before_address` | The W beat preceded its AW. Legal AXI, but a common symptom when a bridge enqueues a command before its payload has settled. |
+| `write_missing_data` / `write_missing_address` | A half-formed write — the shape a dropped or scrambled command leaves behind. |
+| `unaligned_address` | Address is not a multiple of the data-bus width. |
+| `request_before_window` | The response matched no request because the request predates the capture. Benign. |
+| `no_response_in_window` | The capture ended before the response arrived. Benign. |
+
+The last two are artefacts of watching the bus through a finite window, not
+protocol violations; they are reported so their absence from the other flags
+is meaningful.
+
+The capture summary carries only the headline counts (`transaction_count`,
+`error_count`, `anomaly_count`, `max_latency`); the transactions themselves
+are only ever returned through this tool. Decoding is AXI4-Lite only, matching
+the monitor RTL (`proto_code` 1, no IDs, no bursts), and works on both
+`DECODE_EN` builds and plain ones. Non-AXI captures are unaffected.
+
 ## Wide Sample Values
 
 JSON numbers are IEEE-754 doubles in most MCP clients (any JavaScript or
@@ -374,6 +418,20 @@ fcapz_capture(config={"pretrigger": 64, "posttrigger": 4096}, timeout=10.0)
 fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)
 repeat with next_offset until null
 fcapz_drop_last_capture()
+fcapz_close()
+```
+
+Debug a bus fault with the AXI monitor — anomalies first, then their context:
+
+```text
+fcapz_connect(backend="hw_server")
+fcapz_list_cores()                       # find the AXI monitor's chain
+fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
+                      "posttrigger": 3584}, timeout=10.0)
+                                         # summary carries the AXI headline counts
+fcapz_axi_transactions(only_anomalies=True)
+                                         # then widen around what it found
+fcapz_axi_transactions(start=0, count=64)
 fcapz_close()
 ```
 

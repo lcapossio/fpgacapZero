@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **AXI transaction decoding.** A host-side pass (`fcapz.decode_axi`)
+  reassembles an AXI monitor capture from per-cycle samples into whole
+  AXI4-Lite transactions: address, data, byte strobes, response, the cycle
+  each beat landed on, latency, per-channel stall counts, and protocol
+  anomaly flags (`error_response`, `partial_write`, `data_before_address`,
+  half-formed writes, unaligned addresses). Transactions straddling the
+  capture window are marked as such rather than reported as violations. Works
+  on both `DECODE_EN` and plain monitor builds, since a beat is `VALID &
+  READY` either way. RPC `capture` attaches it on request (`decode_axi`), and
+  the MCP server exposes `fcapz_axi_transactions` to page and filter it —
+  answering "why is this write corrupt?" directly instead of returning a
+  sample dump to interpret.
+
 - **MCP server (`fcapz-mcp`).** A stdio MCP server that exposes the lab
   controls to coding agents: connect/probe/configure/arm/poll and capture for
   the ELA, EIO read/write, AXI read/write (single and bounded block), and UART

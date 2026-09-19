@@ -17,6 +17,7 @@ from .analyzer import (
     _infer_ir_table_name,
     discover_boards,
 )
+from .axi_decode import decode_axi, looks_like_axi
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
@@ -279,6 +280,7 @@ class RpcServer:
                         r,
                         fmt=fmt,
                         include_summary=bool(req.get("summarize", False)),
+                        decode_axi_txns=bool(req.get("decode_axi", False)),
                     )
                     for r in results
                 ],
@@ -308,6 +310,7 @@ class RpcServer:
             result,
             fmt=str(req.get("format", "json")),
             include_summary=bool(req.get("summarize", False)),
+            decode_axi_txns=bool(req.get("decode_axi", False)),
         )
         # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
         # produced by the same exporter the CLI/GUI use.
@@ -639,6 +642,7 @@ class RpcServer:
         result,
         fmt: str,
         include_summary: bool,
+        decode_axi_txns: bool = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "format": fmt,
@@ -657,6 +661,12 @@ class RpcServer:
 
         if include_summary:
             payload["summary"] = summarize(result, self._probe_defs(config))
+        if decode_axi_txns:
+            # Only meaningful when the capture is actually an AXI monitor's;
+            # the caller can ask unconditionally and get it when it applies.
+            probe_defs = self._probe_defs(config)
+            if probe_defs and looks_like_axi(p.name for p in probe_defs):
+                payload["axi"] = decode_axi(result.samples, probe_defs)
         return payload
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
