@@ -2095,7 +2095,12 @@ class ProbeFileConfinementTests(unittest.TestCase):
                 self._swap_in_a_link(swapped)
             return fd
 
-        with mock.patch.object(os, "open", open_then_swap):
+        # The branch is chosen by `os.open in os.supports_dir_fd`, so
+        # replacing os.open alone sends the code down the *other* branch and
+        # the swap never happens. Declare the stand-in as dir_fd-capable too.
+        with mock.patch.object(os, "open", open_then_swap), mock.patch.object(
+            os, "supports_dir_fd", frozenset({open_then_swap})
+        ):
             with self.assertRaisesRegex(PermissionError, "link"):
                 self.session._read_confined(self.root, "ok.prob")
         self.assertTrue(swapped, "the test did not actually perform the swap")
