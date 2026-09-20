@@ -616,25 +616,51 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _axi_probes_for_capture(sample_width: int | None, probe_file: str | None):
+def _axi_probes_for_capture(data: dict, probe_file: str | None):
     """The probe map to read a saved AXI capture with.
 
-    An exported capture carries samples but no probe map, so either the user
-    names one or it is inferred: each bundled AXI geometry has a distinct
-    flattened width, which is exactly what the export does record.
+    In order of trust: the map the user named, the map the capture itself
+    records, and only then one guessed from the flattened sample width.
+    Guessing is a last resort because the width does not identify a geometry:
+    a 32/32 monitor with the decode word is 160 bits, and so is a 36/32 one
+    without it. Captures written before the exporter recorded its probe map
+    still land here, so the guess stays -- but it says so on stderr.
     """
     if probe_file:
         return load_probe_file(probe_file).probes
+    recorded = data.get("probes")
+    if recorded:
+        return [
+            ProbeSpec(
+                name=str(entry["name"]),
+                width=int(entry["width"]),
+                lsb=int(entry.get("lsb", 0)),
+            )
+            for entry in recorded
+        ]
+    sample_width = data.get("sample_width")
     for (addr_w, data_w, decode) in PROBE_MAPS:
         if axi_sample_width(addr_w, data_w, decode) == sample_width:
+            print(
+                "warning: this capture records no probe map; assuming the "
+                f"bundled addr_w={addr_w} data_w={data_w} "
+                f"decode={'on' if decode else 'off'} geometry from its "
+                f"{sample_width}-bit samples. Other geometries share that "
+                "width -- pass --probe-file if the fields look shifted.",
+                file=sys.stderr,
+            )
             return axi_probes(addr_w, data_w, decode)
     raise ValueError(
-        f"no bundled AXI probe map has sample_width={sample_width}; "
-        "pass --probe-file (fcapz axi-mon --write-probe-file writes one)"
+        f"the capture records no probe map and no bundled AXI geometry has "
+        f"sample_width={sample_width}; pass --probe-file "
+        "(fcapz axi-mon --write-probe-file writes one)"
     )
 
 
 def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit: int) -> None:
+    if not decoded.get("decoded", True):
+        print(f"cannot decode: {decoded['unavailable_reason']}", file=sys.stderr)
+        return
     rows = [
         txn
         for txn in decoded["transactions"]
@@ -647,14 +673,25 @@ def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit:
         f"{decoded['transaction_count']} transactions "
         f"({decoded['write_count']} write, {decoded['read_count']} read), "
         f"{decoded['error_count']} error responses, "
-        f"{decoded['anomaly_count']} anomalies"
+        f"{decoded['anomaly_count']} bus faults, "
+        f"{decoded['flagged_count']} flagged"
     )
     pre_window = decoded["pairing"]["pre_window_traffic_observed"]
     if pre_window:
         print(
             "warning: the capture opened with "
             f"{'/'.join(pre_window)} transactions already outstanding, so "
-            "responses may be paired with the wrong request",
+            "responses are paired with the wrong request from that point on",
+            file=sys.stderr,
+        )
+    else:
+        # Printed even when nothing looks wrong. An in-order pairing that
+        # started misaligned produces rows that read perfectly; the only
+        # place the reader can learn that is here.
+        print(
+            "note: addresses assume the bus was idle when the window opened "
+            "(AXI4-Lite has no IDs, so responses pair first-in-first-out); "
+            "a finite capture cannot prove it",
             file=sys.stderr,
         )
     if not shown:
@@ -692,8 +729,16 @@ def _run_axi_decode(args: argparse.Namespace) -> int:
         print(f"error: {args.capture} carries no samples", file=sys.stderr)
         return 1
     try:
-        probes = _axi_probes_for_capture(data.get("sample_width"), args.probe_file)
-        decoded = decode_axi(samples, probes)
+        probes = _axi_probes_for_capture(data, args.probe_file)
+        decoded = decode_axi(
+            samples,
+            probes,
+            # Recorded by the exporter. An older capture that predates that
+            # records neither, and reads as contiguous -- which is what it
+            # was, for every capture the previous default produced.
+            decimation=int(data.get("decimation") or 0),
+            storage_qualified=bool(data.get("stor_qual_mode") or 0),
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -952,7 +997,12 @@ def main() -> int:
                 )
                 return 2
             _print_axi_transactions(
-                decode_axi(result.samples, cfg.probes),
+                decode_axi(
+                    result.samples,
+                    cfg.probes,
+                    decimation=cfg.decimation,
+                    storage_qualified=bool(cfg.stor_qual_mode),
+                ),
                 only_anomalies=False,
                 kind=None,
                 limit=0,

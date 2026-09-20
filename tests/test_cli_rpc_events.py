@@ -346,7 +346,7 @@ class CliAxiDecodeTests(unittest.TestCase):
         self._cycle(wvalid=1, wready=1, wdata=data, wstrb=strb)
         self._cycle(bvalid=1, bready=1, bresp=resp)
 
-    def _capture_file(self, sample_width=None):
+    def _capture_file(self, sample_width=None, **extra):
         from fcapz import axi_layout
 
         path = Path(self._dir.name) / "cap.json"
@@ -361,10 +361,17 @@ class CliAxiDecodeTests(unittest.TestCase):
                 "samples": [
                     {"index": i, "value": v} for i, v in enumerate(self.samples)
                 ],
+                **extra,
             }),
             encoding="utf-8",
         )
         return str(path)
+
+    def _recorded_probes(self):
+        return [
+            {"name": probe.name, "width": probe.width, "lsb": probe.lsb}
+            for probe in self.probes
+        ]
 
     def _run(self, *argv):
         from unittest.mock import patch
@@ -388,12 +395,26 @@ class CliAxiDecodeTests(unittest.TestCase):
         self.assertIn("0x00001000", out)
         self.assertIn("SLVERR", out)
 
-    def test_the_probe_map_is_inferred_from_the_sample_width(self):
-        # An exported capture records its width but not its probe map.
+    def test_a_recorded_probe_map_is_used_as_is(self):
+        # The exporter records the map, so nothing has to be guessed.
         self._write(0x40, 0x5)
-        code, out, _ = self._run("axi-decode", self._capture_file())
+        code, out, err = self._run(
+            "axi-decode", self._capture_file(probes=self._recorded_probes())
+        )
         self.assertEqual(code, 0)
         self.assertIn("0x00000040", out)
+        self.assertNotIn("assuming", err)
+
+    def test_inference_from_the_width_alone_says_it_is_a_guess(self):
+        # A width does not identify a geometry -- 32/32 with the decode word
+        # and 36/32 without it are both 160 bits -- so the fallback has to
+        # name what it assumed instead of shifting every field in silence.
+        self._write(0x40, 0x5)
+        code, out, err = self._run("axi-decode", self._capture_file())
+        self.assertEqual(code, 0)
+        self.assertIn("0x00000040", out)
+        self.assertIn("records no probe map", err)
+        self.assertIn("--probe-file", err)
 
     def test_an_unknown_width_asks_for_a_probe_file(self):
         self._write(0x40, 0x5)
@@ -442,6 +463,50 @@ class CliAxiDecodeTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("already outstanding", err)
+
+    def test_a_decimated_capture_is_refused_not_misread(self):
+        # Only selected cycles were stored, so handshakes are missing and
+        # in-order pairing would put data at the wrong address.
+        self._write(0x1000, 0xCAFEBABE)
+        code, out, err = self._run("axi-decode", self._capture_file(decimation=3))
+
+        self.assertEqual(code, 0)
+        self.assertIn("cannot decode", err)
+        self.assertNotIn("0x00001000", out)
+
+    def test_a_storage_qualified_capture_is_refused_too(self):
+        self._write(0x1000, 0xCAFEBABE)
+        code, _, err = self._run("axi-decode", self._capture_file(stor_qual_mode=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("storage qualification", err)
+
+    def test_the_pairing_assumption_is_stated_even_when_nothing_looks_wrong(self):
+        # The dangerous case: a window that opened mid-transaction yields
+        # rows that read perfectly and carry the wrong address. Nothing in
+        # the trace marks them, so the note cannot be conditional on
+        # evidence.
+        self._write(0x1000, 0xCAFEBABE)
+        code, _, err = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("assume the bus was idle", err)
+
+    def test_window_edges_are_not_counted_as_bus_faults(self):
+        # A write whose W beat falls past the end of the window is legal.
+        self._cycle(awvalid=1, awready=1, awaddr=0x40)
+        code, out, _ = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("0 bus faults", out)
+        self.assertIn("1 flagged", out)
+
+    def test_only_anomalies_does_not_surface_a_window_edge(self):
+        self._cycle(awvalid=1, awready=1, awaddr=0x40)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--only-anomalies")
+
+        self.assertEqual(code, 0)
+        self.assertIn("no matching transactions", out)
 
 
 class CliTriggerSequenceTests(unittest.TestCase):

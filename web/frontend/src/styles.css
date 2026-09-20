@@ -1005,3 +1005,17 @@ body.dv-dragging-tabs iframe {
   padding: 0.3rem 0.5rem;
   margin: 0.4rem 0;
 }
+
+/* The pairing caveat is always shown. Styled as a quiet note when it is the
+   standing assumption, and as a warning only when the trace disproved it. */
+.axitxn-note {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  border-left: 3px solid rgba(128, 128, 128, 0.6);
+  padding: 0.3rem 0.5rem;
+  margin: 0.4rem 0;
+}
+/* A transaction clipped by an edge of the window: legal, but incomplete. */
+.axitxn-edge td {
+  background: rgba(150, 150, 150, 0.1);
+}

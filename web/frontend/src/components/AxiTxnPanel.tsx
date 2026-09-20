@@ -4,7 +4,10 @@ import {
   filterTransactions,
   headline,
   isFault,
+  isWindowEdge,
+  pairingBroken,
   pairingWarning,
+  undecodableReason,
 } from "../axiTxn";
 import type { KindFilter } from "../axiTxn";
 import { useSession } from "../session";
@@ -46,12 +49,21 @@ export function AxiTxnPanel() {
     );
   }
 
-  const warning = pairingWarning(decode);
+  const undecodable = undecodableReason(decode);
+  if (undecodable) {
+    return (
+      <section className="panel">
+        <p className="axitxn-warn">{undecodable}</p>
+      </section>
+    );
+  }
 
   return (
     <section className="panel">
       <p className="muted">{headline(decode)}</p>
-      {warning && <p className="axitxn-warn">{warning}</p>}
+      <p className={pairingBroken(decode) ? "axitxn-warn" : "axitxn-note"}>
+        {pairingWarning(decode)}
+      </p>
 
       <div className="btnrow">
         <label className="inline">
@@ -95,7 +107,16 @@ export function AxiTxnPanel() {
             </thead>
             <tbody>
               {rows.map((txn) => (
-                <tr key={txn.index} className={isFault(txn) ? "axitxn-fault" : undefined}>
+                <tr
+                  key={txn.index}
+                  className={
+                    isFault(txn)
+                      ? "axitxn-fault"
+                      : isWindowEdge(txn)
+                        ? "axitxn-edge"
+                        : undefined
+                  }
+                >
                   <td>{txn.index}</td>
                   <td>{txn.kind}</td>
                   <td className="mono">{cell(txn.addr)}</td>

@@ -2,14 +2,19 @@
 // fcapz.axi_decode). Types plus the pure helpers the AXI Txn panel uses, kept
 // out of the component so they can be tested without rendering.
 
-/** Flags that mean the bus misbehaved, as opposed to legal-but-notable
- *  behaviour. Mirrors FAULT_FLAGS in host/fcapz/axi_decode.py. */
-export const FAULT_FLAGS = [
-  "error_response",
+/** Flags that mean the bus misbehaved. Mirrors FAULT_FLAGS in
+ *  host/fcapz/axi_decode.py: only what a finite window can actually prove. */
+export const FAULT_FLAGS = ["error_response", "unaligned_address"] as const;
+
+/** Flags that describe the capture window, not the bus. Legal traffic seen
+ *  through a keyhole — worth showing, never worth calling a fault. Mirrors
+ *  WINDOW_EDGE_FLAGS in host/fcapz/axi_decode.py. */
+export const WINDOW_EDGE_FLAGS = [
   "request_not_observed",
-  "unaligned_address",
+  "no_response_in_window",
   "write_missing_address",
   "write_missing_data",
+  "pairing_suspect",
 ] as const;
 
 export interface AxiTransaction {
@@ -26,10 +31,29 @@ export interface AxiTransaction {
   flags?: string[];
 }
 
+export interface AxiPairing {
+  method: string;
+  assumes: string;
+  pre_window_traffic_observed: string[];
+  /** True only when the trace *proved* the assumption false. False is not
+   *  proof that it holds. */
+  pre_window_traffic_proven?: boolean;
+}
+
+export interface AxiSampling {
+  decimation: number;
+  storage_qualified: boolean;
+  contiguous: boolean;
+}
+
 export interface AxiDecode {
   protocol: string;
   addr_width: number;
   data_width: number;
+  /** False when the capture cannot be read as transactions at all. */
+  decoded?: boolean;
+  unavailable_reason?: string | null;
+  sampling?: AxiSampling;
   transaction_count: number;
   write_count: number;
   read_count: number;
@@ -37,11 +61,7 @@ export interface AxiDecode {
   anomaly_count: number;
   flagged_count: number;
   max_latency: number | null;
-  pairing: {
-    method: string;
-    assumes: string;
-    pre_window_traffic_observed: string[];
-  };
+  pairing: AxiPairing;
   transactions: AxiTransaction[];
 }
 
@@ -50,6 +70,13 @@ export type KindFilter = "all" | "read" | "write";
 /** True when the transaction carries a flag that means a real fault. */
 export function isFault(txn: AxiTransaction): boolean {
   return (txn.flags ?? []).some((f) => (FAULT_FLAGS as readonly string[]).includes(f));
+}
+
+/** True when the transaction is clipped by an edge of the capture window. */
+export function isWindowEdge(txn: AxiTransaction): boolean {
+  return (txn.flags ?? []).some((f) =>
+    (WINDOW_EDGE_FLAGS as readonly string[]).includes(f),
+  );
 }
 
 /** Apply the panel's two filters. Order is the trace order the decoder used. */
@@ -74,18 +101,44 @@ export function asAxiDecode(value: unknown): AxiDecode | undefined {
   return candidate as AxiDecode;
 }
 
-/** The warning to show when the capture window opened mid-flight, or "".
- *  Pairing is first-in-first-out, so an unmatched response means every later
- *  pairing in that direction may sit on the wrong request. */
+/** Why this capture carries no transactions, or "". Decimation and storage
+ *  qualification store only selected cycles, and reassembly needs every one:
+ *  a handshake that was never stored cannot be told from one that never
+ *  happened, so the decoder refuses rather than reporting wrong addresses. */
+export function undecodableReason(decode: AxiDecode): string {
+  if (decode.decoded === false) {
+    return decode.unavailable_reason ?? "this capture cannot be read as AXI.";
+  }
+  return "";
+}
+
+/** The pairing caveat, always. AXI4-Lite has no transaction IDs, so responses
+ *  are matched first-in-first-out; if the window opened mid-transaction every
+ *  pairing in that direction sits on the wrong request — and those rows look
+ *  entirely ordinary. Returned even when nothing was detected, because a
+ *  finite trace cannot prove the assumption holds: only disprove it. */
 export function pairingWarning(decode: AxiDecode): string {
   const seen = decode.pairing?.pre_window_traffic_observed ?? [];
-  if (seen.length === 0) return "";
+  if (seen.length === 0) {
+    return (
+      "Addresses assume the bus was idle when the capture window opened. " +
+      "AXI4-Lite has no transaction IDs, so responses are paired with " +
+      "requests in order; a finite capture cannot prove nothing was already " +
+      "outstanding."
+    );
+  }
   return (
     `The capture opened with ${seen.join(" and ")} transactions already ` +
-    "outstanding, so responses may be paired with the wrong request. " +
-    "Trigger on the first AW/AR, or capture from an idle bus, when exact " +
-    "addresses matter."
+    "outstanding, so responses are paired with the wrong request from that " +
+    "point on. Trigger on the first AW/AR, or capture from an idle bus, " +
+    "when exact addresses matter."
   );
+}
+
+/** True when the pairing caveat is a detected problem rather than the
+ *  standing assumption — the panel styles the two differently. */
+export function pairingBroken(decode: AxiDecode): boolean {
+  return (decode.pairing?.pre_window_traffic_observed ?? []).length > 0;
 }
 
 /** One-line headline for the panel header. */
@@ -94,7 +147,8 @@ export function headline(decode: AxiDecode): string {
     `${decode.transaction_count} transactions ` +
     `(${decode.write_count} write, ${decode.read_count} read) · ` +
     `${decode.error_count} error responses · ` +
-    `${decode.anomaly_count} anomalies`
+    `${decode.anomaly_count} bus faults · ` +
+    `${decode.flagged_count} flagged`
   );
 }
 
