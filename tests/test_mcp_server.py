@@ -1358,6 +1358,7 @@ def _sample_capture(count=6, width=9, pretrigger=2, probes=True):
         "result": {
             "sample_width": width,
             "pretrigger": pretrigger,
+            "posttrigger": max(count - pretrigger - 1, 0),
             "samples": [
                 {"index": i, "value": (i & 0xFF) | ((i % 2) << 8)} for i in range(count)
             ],
@@ -1467,6 +1468,25 @@ class CaptureSamplePagingTests(unittest.TestCase):
         # Valid JSON on its own - the whole point versus byte chunks.
         self.assertEqual(json.loads(json.dumps(page))["count"], 3)
 
+    def test_trigger_index_is_withheld_for_a_short_capture(self):
+        # The analyzer takes the real length from hardware CAPTURE_LEN, which
+        # can be shorter than pretrigger+posttrigger+1; the pretrigger count
+        # then no longer locates the trigger, so reporting it would point at
+        # the wrong sample.
+        full = self._session(_sample_capture(count=6, pretrigger=2))
+        self.assertEqual(full.capture_samples(count=1)["trigger_index"], 2)
+
+        payload = _sample_capture(count=6, pretrigger=2)
+        payload["result"]["posttrigger"] = 99  # length no longer consistent
+        short = self._session(payload)
+        self.assertIsNone(short.capture_samples(count=1)["trigger_index"])
+
+    def test_trigger_index_is_null_without_the_window_fields(self):
+        payload = _sample_capture()
+        payload["result"].pop("posttrigger", None)
+        session = self._session(payload)
+        self.assertIsNone(session.capture_samples(count=1)["trigger_index"])
+
     def test_cursor_terminates_at_the_end(self):
         page = self._session().capture_samples(start=4, count=10)
         self.assertEqual(page["count"], 2)
@@ -1545,6 +1565,33 @@ class CaptureSamplePagingTests(unittest.TestCase):
 
         self.assertFalse(result["available"])
         self.assertIn('format="json"', result["reason"])
+
+    def test_segmented_captures_page_every_segment(self):
+        # Reading only segment 0 would silently hide the rest of the capture.
+        def seg(index, base):
+            return {
+                "segment": index,
+                "sample_width": 8,
+                "pretrigger": 0,
+                "posttrigger": 1,
+                "samples": [{"index": i, "value": base + i} for i in range(2)],
+            }
+
+        session = self._session({
+            "ok": True,
+            "result": {"segments": [seg(0, 0x10), seg(1, 0x20)]},
+        })
+        page = session.capture_samples(count=10)
+
+        self.assertEqual(page["total"], 4)
+        self.assertEqual(page["segments"], 2)
+        self.assertEqual([s["segment"] for s in page["samples"]], [0, 0, 1, 1])
+        self.assertEqual(
+            [s["value"] for s in page["samples"]],
+            ["0x10", "0x11", "0x20", "0x21"],
+        )
+        # A concatenated index cannot locate the trigger.
+        self.assertIsNone(page["trigger_index"])
 
     def test_reads_hex_encoded_wide_samples_back(self):
         # _store_capture hex-encodes wide values; paging must still slice them.

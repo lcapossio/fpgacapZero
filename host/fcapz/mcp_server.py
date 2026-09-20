@@ -795,16 +795,24 @@ class FcapzMcpSession:
     _SAMPLES_MAX_PAGE = 512
 
     @staticmethod
-    def _capture_result(payload: JsonDict) -> JsonDict | None:
-        """The per-capture result block, for plain and segmented captures."""
+    def _capture_results(payload: JsonDict) -> list[JsonDict]:
+        """Every result block in a capture, in order.
+
+        A plain capture has one; a segmented capture has one per segment.
+        Returning only the first would silently hide the rest.
+        """
         result = payload.get("result")
-        if isinstance(result, dict) and "samples" in result:
-            return result
-        if isinstance(result, dict):
-            segments = result.get("segments")
-            if isinstance(segments, list) and segments:
-                return segments[0] if isinstance(segments[0], dict) else None
-        return None
+        if not isinstance(result, dict):
+            return []
+        if isinstance(result.get("samples"), list):
+            return [result]
+        segments = result.get("segments")
+        if isinstance(segments, list):
+            return [
+                seg for seg in segments
+                if isinstance(seg, dict) and isinstance(seg.get("samples"), list)
+            ]
+        return []
 
     @staticmethod
     def _as_int(value: Any) -> int | None:
@@ -838,8 +846,8 @@ class FcapzMcpSession:
         cache = self._capture_cache  # one consistent snapshot for this call
         if cache is None:
             return {"available": False}
-        result = self._capture_result(cache.payload)
-        if result is None or not isinstance(result.get("samples"), list):
+        results = self._capture_results(cache.payload)
+        if not results:
             return {
                 "available": False,
                 "reason": (
@@ -855,10 +863,22 @@ class FcapzMcpSession:
         count_i = min(count_i, self._SAMPLES_MAX_PAGE)
 
         probes = self._selected_probes(cache.payload, fields)
-        entries = result["samples"]
+        multi = len(results) > 1
+        entries: list[tuple[int | None, Any]] = []
+        for position, result in enumerate(results):
+            segment = result.get("segment", position) if multi else None
+            entries.extend((segment, entry) for entry in result["samples"])
+
         page = entries[start_i : start_i + count_i]
         next_start = start_i + len(page)
-        sample_width = result.get("sample_width")
+        rendered = []
+        for segment, entry in page:
+            sample = self._render_sample(entry, probes, radix)
+            if segment is not None:
+                sample["segment"] = segment
+            rendered.append(sample)
+
+        first = results[0]
         out: JsonDict = {
             "available": True,
             "total": len(entries),
@@ -866,14 +886,38 @@ class FcapzMcpSession:
             "count": len(page),
             "next_start": next_start if next_start < len(entries) else None,
             "radix": radix,
-            "sample_width": sample_width,
-            # Index of the trigger sample: the pretrigger samples precede it.
-            "trigger_index": result.get("pretrigger"),
-            "samples": [self._render_sample(e, probes, radix) for e in page],
+            "sample_width": first.get("sample_width"),
+            # Index of the trigger sample, or null when it cannot be trusted.
+            # Meaningless once segments are concatenated, so withheld there.
+            "trigger_index": (
+                None if multi else self._trigger_index(first, len(entries))
+            ),
+            "samples": rendered,
         }
+        if multi:
+            out["segments"] = len(results)
         if probes is not None:
             out["fields"] = [name for name, _, _ in probes]
         return out
+
+    @staticmethod
+    def _trigger_index(result: JsonDict, sample_count: int) -> int | None:
+        """Index of the trigger sample, or None when the layout is unknown.
+
+        The trigger sits after the pretrigger samples — but only in a
+        full-length capture. The analyzer takes the real length from the
+        hardware CAPTURE_LEN register, which can come back short (a truncated
+        capture, storage qualification dropping samples), and then the
+        pretrigger count no longer locates the trigger. Return None rather
+        than a number that points at the wrong sample.
+        """
+        pre = result.get("pretrigger")
+        post = result.get("posttrigger")
+        if not isinstance(pre, int) or not isinstance(post, int):
+            return None
+        if sample_count != pre + post + 1:
+            return None
+        return pre
 
     def _selected_probes(
         self, payload: JsonDict, fields: list[str] | None
