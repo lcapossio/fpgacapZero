@@ -2058,39 +2058,72 @@ class ProbeFileConfinementTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "hard link"):
             self.session._read_confined(self.root, "hard.prob")
 
-    def test_a_swap_between_the_check_and_the_open_is_caught(self):
-        """The race the previous implementation lost.
+    def _swap_in_a_link(self, swapped):
+        """Replace the approved file with a link to one outside the root."""
+        if swapped:
+            return
+        target = self.root / "ok.prob"
+        target.unlink()
+        try:
+            os.symlink(self.outside, target)
+        except (OSError, NotImplementedError) as exc:
+            raise unittest.SkipTest(f"cannot create a symlink here: {exc}") from None
+        swapped.append(True)
+
+    @unittest.skipUnless(
+        os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"),
+        "needs openat/O_NOFOLLOW",
+    )
+    def test_a_link_planted_after_the_root_is_opened_is_refused(self):
+        """The race the previous implementation lost, on the openat path.
 
         It approved a resolved path, opened it, then re-stat'ed the *same
-        path* to confirm. A name swapped for a link in between made both the
-        open and the re-stat land on the outside file, so the two agreed and
-        the read was accepted. The check now compares what was opened
-        against what was inspected, not a path against itself.
+        path* to confirm -- and a name swapped for a link in between sent
+        both the open and the re-stat to the outside file, where they agreed
+        with each other and the read was accepted.
+
+        The swap is planted between the two opens: after the root directory
+        is opened, before the file is. O_NOFOLLOW then refuses it outright,
+        so there is no window left for an identity check to have to cover.
+        """
+        real_open = os.open
+        swapped: list[bool] = []
+
+        def open_then_swap(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if not swapped and Path(str(path)) == self.root:
+                self._swap_in_a_link(swapped)
+            return fd
+
+        with mock.patch.object(os, "open", open_then_swap):
+            with self.assertRaisesRegex(PermissionError, "link"):
+                self.session._read_confined(self.root, "ok.prob")
+        self.assertTrue(swapped, "the test did not actually perform the swap")
+
+    @unittest.skipIf(
+        os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"),
+        "exercises the no-openat fallback",
+    )
+    def test_a_link_planted_after_the_check_is_caught_by_identity(self):
+        """The same race on the platform with no directory handles.
+
+        Nothing can stop the open from following a link planted in the gap,
+        so the open is verified instead: the identity of what was opened is
+        compared against the identity of what was inspected, and a swap
+        makes them disagree. Re-stat'ing the path -- what the old code did
+        -- would follow the same new link and agree with itself.
         """
         target = self.root / "ok.prob"
         real_lstat = os.lstat
-        swapped = []
+        swapped: list[bool] = []
 
         def lstat_then_swap(path, *args, **kwargs):
             info = real_lstat(path, *args, **kwargs)
-            if not swapped and Path(path) == target:
-                swapped.append(True)
-                target.unlink()
-                try:
-                    os.symlink(self.outside, target)
-                except (OSError, NotImplementedError) as exc:
-                    raise unittest.SkipTest(
-                        f"cannot create a symlink here: {exc}"
-                    ) from None
+            if not swapped and Path(str(path)) == target:
+                self._swap_in_a_link(swapped)
             return info
 
         with mock.patch.object(os, "lstat", lstat_then_swap):
-            if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
-                # O_NOFOLLOW refuses the swapped-in link outright; there is
-                # no window for the identity check to have to cover.
-                with self.assertRaises(PermissionError):
-                    self.session._read_confined(self.root, "ok.prob")
-                return
             with self.assertRaisesRegex(PermissionError, "changed identity"):
                 self.session._read_confined(self.root, "ok.prob")
         self.assertTrue(swapped, "the test did not actually perform the swap")
