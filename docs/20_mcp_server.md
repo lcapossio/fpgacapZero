@@ -93,13 +93,30 @@ also disables capture-side actions that change ELA state.
 
 | Flag | Effect |
 | --- | --- |
-| `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, and all write/send/program enable flags. |
+| `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_capture_wait`, `fcapz_disarm`, and all write/send/program enable flags. |
 | `--allow-eio-write` | `fcapz_eio_write` |
 | `--allow-axi-write` | `fcapz_axi_write`, `fcapz_axi_write_block` |
 | `--allow-uart-send` | `fcapz_uart_send` |
 | `--allow-program --bitfile-root DIR` | `fcapz_connect(program=...)` for `.bit` files under `DIR` |
+| `--probe-root DIR` | Capture config `probe_file` may read probe maps under `DIR` |
+| `--allow-host HOST` | A backend may connect to `HOST` as well as loopback (repeatable) |
 
 `--read-only` cannot be combined with any write/program enable flag.
+
+Two fields reach past the JTAG cable and are therefore confined by default:
+
+- **`probe_file`** names a path the server opens. Without `--probe-root` it is
+  rejected outright, because it would otherwise be an arbitrary file read on
+  the machine running `fcapz-mcp`. Pass probe definitions inline via `probes`
+  when you do not want to open a directory to the agent.
+- **`host`** is handed to a network client (hw_server or OpenOCD), so without
+  `--allow-host` only `127.0.0.1`, `localhost`, and `::1` are accepted —
+  otherwise an agent could point the server at any such daemon on the
+  network.
+
+Both appear in `fcapz_status` under `capabilities` (`probe_root`,
+`allowed_hosts`) so an agent can see the policy rather than discover it by
+being refused.
 
 Programming is intentionally `hw_server`-only in the MCP layer.
 

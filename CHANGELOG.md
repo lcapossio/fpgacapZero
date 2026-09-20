@@ -9,6 +9,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Two MCP fields that reached past the JTAG cable are now confined.**
+  `probe_file` opened any path on the server's filesystem; it now requires
+  `--probe-root DIR` and must stay inside it. `host` accepted any network
+  target for hw_server/OpenOCD; it is now loopback-only unless a host is
+  named with `--allow-host`. Both policies are reported in `fcapz_status`.
+
 - **The MCP tool list now tracks the safety flags.** A tool whose capability
   is disabled is no longer advertised and then refused — it is left out of the
   list, so an agent neither plans around it nor pays for its schema in every

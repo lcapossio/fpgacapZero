@@ -8,6 +8,7 @@ import io
 import importlib.util
 import json
 import tempfile
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -1369,6 +1370,84 @@ def _sample_capture(count=6, width=9, pretrigger=2, probes=True):
             {"name": "flag", "width": 1, "lsb": 8},
         ]
     return payload
+
+
+class HostAllowlistTests(unittest.TestCase):
+    """`host` reaches a network client, so it must not be wide open."""
+
+    def test_defaults_to_loopback(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.connect(backend="hw_server")
+        self.assertEqual(session.rpc.requests[-1]["host"], "127.0.0.1")
+
+    def test_loopback_spellings_are_accepted(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        for host in ("127.0.0.1", "localhost", "::1"):
+            self.assertEqual(session._validated_host(host), host)
+
+    def test_other_hosts_are_refused(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(PermissionError, "loopback only"):
+            session.connect(backend="hw_server", host="192.168.1.50")
+
+    def test_an_allowlisted_host_is_permitted(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(),
+            capabilities=McpCapabilities(allowed_hosts=("192.168.1.50",)),
+        )
+        session.connect(backend="hw_server", host="192.168.1.50")
+        self.assertEqual(session.rpc.requests[-1]["host"], "192.168.1.50")
+
+    def test_status_reports_the_allowlist(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allowed_hosts=("h1",))
+        )
+        self.assertEqual(session.status()["capabilities"]["allowed_hosts"], ["h1"])
+
+
+class ProbeFileRootTests(unittest.TestCase):
+    """`probe_file` opens a path on the server, so it needs a root."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name)
+        self.probe = self.root / "axi.prob"
+        self.probe.write_text("{}", encoding="utf-8")
+        self.addCleanup(self._dir.cleanup)
+
+    def _session(self, **caps):
+        return FcapzMcpSession(rpc=FakeRpc(), capabilities=McpCapabilities(**caps))
+
+    def test_rejected_without_a_root(self):
+        with self.assertRaisesRegex(PermissionError, "--probe-root"):
+            self._session().capture(config={"probe_file": str(self.probe)})
+
+    def test_allowed_inside_the_root(self):
+        session = self._session(probe_root=self.root)
+        session.capture(config={"probe_file": "axi.prob"})
+        self.assertEqual(
+            Path(session.rpc.requests[-1]["probe_file"]).resolve(),
+            self.probe.resolve(),
+        )
+
+    def test_escaping_the_root_is_refused(self):
+        session = self._session(probe_root=self.root)
+        with self.assertRaises(PermissionError):
+            session.capture(config={"probe_file": "../outside.prob"})
+
+    def test_a_missing_file_is_reported_clearly(self):
+        session = self._session(probe_root=self.root)
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            session.capture(config={"probe_file": "nope.prob"})
+
+    def test_configure_is_guarded_too(self):
+        with self.assertRaisesRegex(PermissionError, "--probe-root"):
+            self._session().configure(config={"probe_file": str(self.probe)})
+
+    def test_captures_without_a_probe_file_are_unaffected(self):
+        session = self._session()
+        session.capture(config={"pretrigger": 8})
+        self.assertEqual(session.rpc.requests[-1]["pretrigger"], 8)
 
 
 class CaptureSamplePagingTests(unittest.TestCase):

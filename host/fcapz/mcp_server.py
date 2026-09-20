@@ -54,6 +54,10 @@ class McpCapabilities:
     allow_uart_send: bool = False
     allow_program: bool = False
     bitfile_root: Path | None = None
+    probe_root: Path | None = None
+    # Hosts the agent may point a backend at. Empty means loopback only:
+    # `host` otherwise lets an agent reach any hw_server/OpenOCD on the LAN.
+    allowed_hosts: tuple[str, ...] = ()
     rpc_timeout_sec: float = 30.0
     rpc_cancel_grace_sec: float = _RPC_CANCEL_GRACE_SEC
 
@@ -553,7 +557,7 @@ class FcapzMcpSession:
                     "quartus_stp": quartus_stp,
                 },
             )
-            req["host"] = host or "127.0.0.1"
+            req["host"] = self._validated_host(host)
             req["tap"] = tap or self._default_tap(backend)
             if port is not None:
                 req["port"] = self._validated_port(port)
@@ -625,6 +629,63 @@ class FcapzMcpSession:
         if program_path is not None:
             req["program"] = str(program_path)
         return self._rpc_call(req, commit=self._commit_connected)
+
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def _validated_host(self, host: str | None) -> str:
+        """Confine backend connections to loopback unless told otherwise.
+
+        `host` reaches a network client (hw_server / OpenOCD), so without this
+        an agent could point the server at any such daemon on the network.
+        """
+        if not host:
+            return "127.0.0.1"
+        host = str(host)
+        if host in self._LOOPBACK_HOSTS or host in self.capabilities.allowed_hosts:
+            return host
+        allowed = ", ".join(sorted(self.capabilities.allowed_hosts))
+        raise PermissionError(
+            f"host {host!r} is not allowed; this MCP server connects to "
+            "loopback only"
+            + (f" plus: {allowed}" if allowed else "")
+            + " (start it with --allow-host HOST to permit another)"
+        )
+
+    def _validated_probe_file(self, probe_file: object) -> str:
+        """Keep `probe_file` from becoming an arbitrary server-side file read.
+
+        The RPC layer opens whatever path it is handed. Require an explicit
+        --probe-root, and keep the path inside it.
+        """
+        path = Path(str(probe_file)).expanduser()
+        root = self.capabilities.probe_root
+        if root is None:
+            raise PermissionError(
+                "probe_file reads a file on the MCP server's filesystem and is "
+                "disabled; start fcapz-mcp with --probe-root DIR to allow it, "
+                "or pass the probe definitions inline via `probes`"
+            )
+        root_resolved = root.expanduser().resolve()
+        if not path.is_absolute():
+            path = root_resolved / path
+        resolved = path.resolve()
+        if resolved != root_resolved and root_resolved not in resolved.parents:
+            raise PermissionError(
+                f"probe file {resolved} is outside allowed root {root_resolved}"
+            )
+        if not resolved.is_file():
+            raise ValueError(f"probe file {resolved} does not exist")
+        return str(resolved)
+
+    def _validated_capture_config(self, config: JsonDict | None) -> JsonDict | None:
+        if not config:
+            return config
+        unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
+        if unknown:
+            raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
+        if config.get("probe_file") is not None:
+            config = {**config, "probe_file": self._validated_probe_file(config["probe_file"])}
+        return config
 
     def _validated_program_path(self, program: str | None, *, backend: str) -> Path | None:
         if not program:
@@ -1039,10 +1100,8 @@ class FcapzMcpSession:
         if immediate:
             # RPC rewrites the config to an always-true trigger and fires now.
             req["immediate"] = True
+        config = self._validated_capture_config(config)
         if config:
-            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
-            if unknown:
-                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
             req = {**config, **req}
         return self._rpc_call(req, commit=self._store_capture)
 
@@ -1082,10 +1141,8 @@ class FcapzMcpSession:
         if not self.capabilities.allow_capture:
             raise PermissionError("configure tools are disabled for this MCP server")
         req: JsonDict = {"cmd": "configure"}
+        config = self._validated_capture_config(config)
         if config:
-            unknown = sorted(set(config) - self._CAPTURE_CONFIG_KEYS)
-            if unknown:
-                raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
             req.update(config)
         return self._rpc_call(req)
 
@@ -1355,6 +1412,12 @@ class FcapzMcpSession:
                 "allow_program": self.capabilities.allow_program,
                 "rpc_timeout_sec": self.capabilities.rpc_timeout_sec,
                 "rpc_cancel_grace_sec": self.capabilities.rpc_cancel_grace_sec,
+                "probe_root": (
+                    str(self.capabilities.probe_root)
+                    if self.capabilities.probe_root is not None
+                    else None
+                ),
+                "allowed_hosts": list(self.capabilities.allowed_hosts),
                 "bitfile_root": (
                     str(self.capabilities.bitfile_root)
                     if self.capabilities.bitfile_root is not None
@@ -2121,6 +2184,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--probe-root",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Allow capture config `probe_file` to read probe maps under this "
+            "directory. Without it probe_file is rejected: it would read an "
+            "arbitrary file on this machine (pass `probes` inline instead)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        dest="allow_host",
+        help=(
+            "Permit connecting a backend to this host as well as loopback. "
+            "Repeatable; without it only 127.0.0.1/localhost/::1 are allowed"
+        ),
+    )
+    parser.add_argument(
         "--bitfile-root",
         type=Path,
         default=None,
@@ -2169,6 +2254,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--rpc-cancel-grace must be > 0")
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
+        probe_root=args.probe_root,
+        allowed_hosts=tuple(args.allow_host),
         allow_eio_write=bool(args.allow_eio_write),
         allow_axi_write=bool(args.allow_axi_write),
         allow_uart_send=bool(args.allow_uart_send),
