@@ -473,6 +473,41 @@ never disagree with `value_hex`. On the way down, `fcapz_eio_write` accepts a
 base-prefixed string as well as a number, which is the only way a JavaScript
 client can drive a wide output vector exactly.
 
+## Errors
+
+MCP has no structured error channel — a failed tool call reaches the agent as
+text and nothing else — so every failure is rendered as one JSON object
+rather than as prose to pattern-match:
+
+```json
+{"code": "busy",
+ "message": "fcapz is busy running 'capture'; the JTAG transport takes one command at a time",
+ "retryable": true,
+ "action": "wait for the running command to finish (fcapz_status shows active_rpc_cmd); JTAG runs one command at a time"}
+```
+
+`retryable` says whether repeating the identical call could ever succeed;
+`action` says what to do first when it could not. An RPC refusal also carries
+the backend's own error object as `detail`.
+
+| Code | Means | Retryable |
+| --- | --- | --- |
+| `busy` | Another hardware command is running; JTAG takes one at a time. | yes |
+| `session_recovering` | The watchdog abandoned a command and the session is tearing it down. | yes |
+| `watchdog_timeout` | A command outran the watchdog; the board session was torn down. | yes, after reconnecting |
+| `timeout` | A wait expired without the hardware finishing. | yes |
+| `not_connected` | No connection for that subsystem yet. | yes, after connecting |
+| `not_permitted` | The capability is switched off; only the operator can enable it. | no |
+| `invalid_argument` | An argument was rejected. | no |
+| `not_found` | A path does not exist on the server. | no |
+| `hardware_error` | The board or backend rejected the command. | yes |
+| `internal` | A bug in `fcapz-mcp`. | no |
+
+`busy` and `session_recovering` are tagged where they are raised, not matched
+by wording, so rephrasing a message cannot reclassify it. Arguments rejected
+by the tool schema itself never reach the server and surface as the client's
+own validation error instead.
+
 ## Status Fields
 
 `fcapz_status` and `fcapz://status` include:

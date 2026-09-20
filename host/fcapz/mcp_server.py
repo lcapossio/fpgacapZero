@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import functools
 import importlib.metadata
 import math
 import os
@@ -203,9 +204,59 @@ class McpCapabilities:
 class FcapzMcpError(RuntimeError):
     """Error raised for structured MCP/session failures."""
 
-    def __init__(self, message: str, *, payload: JsonDict | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        payload: JsonDict | None = None,
+        code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.payload = dict(payload or {"error": message})
+        self.code = code
+
+
+# What a caller should do about each failure. MCP has no structured error
+# channel -- a tool error reaches the agent as text -- so every failure is
+# rendered as one compact JSON object instead of prose the agent has to
+# pattern-match. `retryable` says whether repeating the identical call could
+# ever work; `action` says what to do first when it could not.
+_ERROR_ACTIONS: dict[str, tuple[bool, str]] = {
+    "busy": (
+        True,
+        "wait for the running command to finish (fcapz_status shows "
+        "active_rpc_cmd); JTAG runs one command at a time",
+    ),
+    "session_recovering": (
+        True,
+        "wait for the session to finish tearing down the abandoned command "
+        "(fcapz_status shows session_state), then reconnect",
+    ),
+    "watchdog_timeout": (
+        True,
+        "the board session was torn down; call fcapz_connect again before "
+        "retrying",
+    ),
+    "timeout": (
+        True,
+        "the wait expired without the hardware finishing; retry with a larger "
+        "timeout, or check that the trigger can fire",
+    ),
+    "not_connected": (True, "call the matching connect tool first"),
+    "not_permitted": (
+        False,
+        "the operator must restart fcapz-mcp with the capability flag named "
+        "in the message; no call can enable it",
+    ),
+    "invalid_argument": (False, "fix the argument named in the message"),
+    "not_found": (False, "check the path; it does not exist on the server"),
+    "hardware_error": (
+        True,
+        "the board or backend rejected the command; check the connection and "
+        "the core's state (fcapz_status, fcapz_probe)",
+    ),
+    "internal": (False, "report this; it is a bug in fcapz-mcp"),
+}
 
 
 class McpWatchdogTimeout(TimeoutError):
@@ -326,6 +377,65 @@ class _CaptureCache:
     json_bytes: bytes
     size_bytes: int
     summary: JsonDict
+
+
+def _error_code(exc: BaseException) -> str:
+    """Classify a failure into one of the codes callers can act on."""
+    if isinstance(exc, PermissionError):
+        return "not_permitted"
+    if isinstance(exc, FileNotFoundError):
+        return "not_found"
+    if isinstance(exc, McpWatchdogTimeout):
+        return "watchdog_timeout"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, FcapzMcpError):
+        if exc.code:
+            return exc.code
+        # An RPC refusal. "not connected" is the one worth separating: it is
+        # the common first-call mistake and has an obvious remedy.
+        if "not connected" in str(exc).lower():
+            return "not_connected"
+        return "hardware_error"
+    if isinstance(exc, ValueError):
+        return "invalid_argument"
+    return "internal"
+
+
+def _coded_error(exc: BaseException) -> Exception:
+    """Re-render a failure as one machine-readable JSON object.
+
+    A tool error reaches the agent as the exception's text and nothing else,
+    so the code, whether a retry could help, and what to do instead all have
+    to travel in it.
+    """
+    code = _error_code(exc)
+    retryable, action = _ERROR_ACTIONS.get(code, _ERROR_ACTIONS["internal"])
+    body: JsonDict = {
+        "code": code,
+        "message": str(exc),
+        "retryable": retryable,
+        "action": action,
+    }
+    detail = getattr(exc, "payload", None)
+    if isinstance(detail, dict):
+        rpc_error = detail.get("error")
+        if rpc_error is not None:
+            body["detail"] = rpc_error
+    return type(exc)(json.dumps(body, ensure_ascii=False, sort_keys=True))
+
+
+def _coded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Give a tool's failures a code and retry guidance."""
+
+    @functools.wraps(fn)
+    def guarded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            raise _coded_error(exc) from exc
+
+    return guarded
 
 
 @dataclass
@@ -531,13 +641,15 @@ class FcapzMcpSession:
                 raise FcapzMcpError(
                     f"fcapz session is recovering from an abandoned "
                     f"{self._active_rpc_cmd!r} call and is not accepting hardware "
-                    "commands; retry shortly (fcapz_status shows session_state)"
+                    "commands; retry shortly (fcapz_status shows session_state)",
+                    code="session_recovering",
                 )
             if self._active_rpc_cmd is not None:
                 raise FcapzMcpError(
                     f"fcapz is busy running {self._active_rpc_cmd!r}; the JTAG "
                     "transport takes one command at a time — wait for it to "
-                    "finish (fcapz_status shows session_state)"
+                    "finish (fcapz_status shows session_state)",
+                    code="busy",
                 )
             self._active_rpc_cmd = name
             self._ensure_owner()
@@ -624,7 +736,14 @@ class FcapzMcpSession:
     def _ok_response(self, response: JsonDict) -> JsonDict:
         if not response.get("ok", False):
             error = response.get("error", response)
-            message = error if isinstance(error, str) else json.dumps(error, sort_keys=True)
+            if isinstance(error, str):
+                message = error
+            elif isinstance(error, dict) and isinstance(error.get("message"), str):
+                # Prefer the sentence over a dump of the whole error object;
+                # the object still travels as `detail` (see _coded_error).
+                message = error["message"]
+            else:
+                message = json.dumps(error, sort_keys=True)
             raise FcapzMcpError(message, payload=response)
         if "schema_version" in response:
             self.last_rpc_schema_version = str(response["schema_version"])
@@ -2032,7 +2151,7 @@ def build_mcp_server(session: FcapzMcpSession):
         def decorate(fn: Callable[..., Any]):
             if not requires:
                 return fn
-            return mcp.tool(annotations=annotations)(fn)
+            return mcp.tool(annotations=annotations)(_coded(fn))
 
         return decorate
 

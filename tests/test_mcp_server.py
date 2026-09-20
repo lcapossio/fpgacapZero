@@ -17,6 +17,9 @@ from unittest.mock import patch
 
 import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
+    _ERROR_ACTIONS,
+    _coded_error,
+    _error_code,
     CaptureConfigDict,
     FcapzMcpError,
     SessionStatus,
@@ -1697,6 +1700,106 @@ class OutputSchemaTests(unittest.TestCase):
                 self.assertTrue(
                     tool.outputSchema.get("additionalProperties"), name
                 )
+
+
+class ErrorCodeTests(unittest.TestCase):
+    """MCP has no structured error channel, so the text has to carry it."""
+
+    class _FailingRpc:
+        def __init__(self, error):
+            self.error = error
+            self.requests = []
+
+        def handle(self, req):
+            self.requests.append(dict(req))
+            return {"ok": False, "error": self.error}
+
+    def test_every_code_says_whether_a_retry_could_help(self):
+        for code, (retryable, action) in _ERROR_ACTIONS.items():
+            with self.subTest(code=code):
+                self.assertIsInstance(retryable, bool)
+                self.assertTrue(action.strip())
+
+    def test_failures_are_classified(self):
+        cases = [
+            (PermissionError("nope"), "not_permitted"),
+            (FileNotFoundError("gone"), "not_found"),
+            (McpWatchdogTimeout("abandoned"), "watchdog_timeout"),
+            (TimeoutError("slow"), "timeout"),
+            (ValueError("bad arg"), "invalid_argument"),
+            (FcapzMcpError("ela not connected"), "not_connected"),
+            (FcapzMcpError("readback mismatch"), "hardware_error"),
+            (FcapzMcpError("busy", code="busy"), "busy"),
+            (KeyError("oops"), "internal"),
+        ]
+        for exc, expected in cases:
+            with self.subTest(exc=type(exc).__name__, expected=expected):
+                self.assertEqual(_error_code(exc), expected)
+
+    def test_a_watchdog_timeout_is_not_just_a_timeout(self):
+        # They need different remedies: one says retry, the other says
+        # reconnect first because the session was torn down.
+        self.assertNotEqual(
+            _ERROR_ACTIONS["timeout"], _ERROR_ACTIONS["watchdog_timeout"]
+        )
+
+    def test_the_rendered_error_is_one_json_object(self):
+        body = json.loads(str(_coded_error(PermissionError("EIO writes are disabled"))))
+
+        self.assertEqual(body["code"], "not_permitted")
+        self.assertEqual(body["message"], "EIO writes are disabled")
+        self.assertFalse(body["retryable"])
+        self.assertIn("restart", body["action"])
+
+    def test_the_rendered_error_keeps_its_exception_type(self):
+        # Callers inside the process still branch on the type; only the text
+        # changes shape.
+        self.assertIsInstance(_coded_error(PermissionError("x")), PermissionError)
+        self.assertIsInstance(_coded_error(McpWatchdogTimeout("x")), TimeoutError)
+
+    def test_an_rpc_refusal_keeps_its_sentence_and_its_detail(self):
+        session = FcapzMcpSession(
+            rpc=self._FailingRpc({"type": "RuntimeError", "message": "eio not connected"})
+        )
+        with self.assertRaises(FcapzMcpError) as caught:
+            session.eio_read()
+        body = json.loads(str(_coded_error(caught.exception)))
+
+        self.assertEqual(body["code"], "not_connected")
+        self.assertEqual(body["message"], "eio not connected")
+        self.assertEqual(body["detail"]["type"], "RuntimeError")
+        self.assertTrue(body["retryable"])
+
+    def test_busy_and_recovering_are_not_matched_by_prose(self):
+        # Both are FcapzMcpError; their codes are set at the raise site so a
+        # reworded message cannot silently reclassify them.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._active_rpc_cmd = "capture"
+        try:
+            with self.assertRaises(FcapzMcpError) as caught:
+                session.probe()
+        finally:
+            session._active_rpc_cmd = None
+        self.assertEqual(_error_code(caught.exception), "busy")
+        self.assertTrue(json.loads(str(_coded_error(caught.exception)))["retryable"])
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_a_tool_failure_reaches_the_client_coded(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        app = build_mcp_server(
+            FcapzMcpSession(
+                rpc=self._FailingRpc({"type": "RuntimeError", "message": "no such tap"})
+            )
+        )
+        with self.assertRaises(Exception) as caught:
+            asyncio.run(app.call_tool("fcapz_connect", {}))
+
+        text = str(caught.exception)
+        body = json.loads(text[text.index("{"):])
+        self.assertEqual(body["code"], "hardware_error")
+        self.assertEqual(body["message"], "no such tap")
+        self.assertIn("action", body)
 
 
 class HostAllowlistTests(unittest.TestCase):

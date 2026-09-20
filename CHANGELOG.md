@@ -37,6 +37,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   an `outputSchema` does not name, so declaring a subset of a response whose
   keys vary by backend and core would silently delete the rest.
 
+- **MCP failures carry a code and a remedy.** A failed tool call reaches an
+  agent as text and nothing else, so every failure is now rendered as one
+  JSON object — `code`, `message`, `retryable`, `action`, plus the backend's
+  own error as `detail` — instead of prose to pattern-match. Ten codes, with
+  `busy` and `session_recovering` tagged where they are raised so a reworded
+  message cannot reclassify them, and `watchdog_timeout` kept distinct from
+  `timeout` because only one of them requires reconnecting first.
+
 ### Fixed
 
 - **`probe_file` is read once, where it is checked.** The MCP layer validated
