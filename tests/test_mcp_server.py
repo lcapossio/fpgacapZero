@@ -18,6 +18,7 @@ from unittest.mock import patch
 import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
     _ERROR_ACTIONS,
+    _with_progress,
     _coded_error,
     _error_code,
     CaptureConfigDict,
@@ -1800,6 +1801,105 @@ class ErrorCodeTests(unittest.TestCase):
         self.assertEqual(body["code"], "hardware_error")
         self.assertEqual(body["message"], "no such tap")
         self.assertIn("action", body)
+
+
+class ProgressTests(unittest.TestCase):
+    """A long capture must not silence the server, nor look like a hang."""
+
+    class _Recorder:
+        def __init__(self):
+            self.calls = []
+
+        async def report_progress(self, progress, total, message):
+            self.calls.append((progress, total, message))
+
+    class _Hostile:
+        async def report_progress(self, *args):
+            raise RuntimeError("no progress token")
+
+    def test_progress_ticks_while_the_call_runs(self):
+        ctx = self._Recorder()
+
+        result = asyncio.run(
+            _with_progress(ctx, "capture", lambda: time.sleep(2.2) or "done", 10.0)
+        )
+
+        self.assertEqual(result, "done")
+        self.assertGreaterEqual(len(ctx.calls), 2)
+        progress, total, message = ctx.calls[0]
+        self.assertEqual(total, 10.0)
+        self.assertLessEqual(progress, total)
+        self.assertIn("capture", message)
+
+    def test_a_quick_call_reports_nothing(self):
+        ctx = self._Recorder()
+        self.assertEqual(asyncio.run(_with_progress(ctx, "capture", lambda: 7, 10.0)), 7)
+        self.assertEqual(ctx.calls, [])
+
+    def test_progress_never_reports_past_the_budget(self):
+        ctx = self._Recorder()
+        # Timeout smaller than the call: elapsed must clamp, not overshoot.
+        asyncio.run(_with_progress(ctx, "capture", lambda: time.sleep(2.2), 1.0))
+        self.assertTrue(all(p <= t for p, t, _ in ctx.calls), ctx.calls)
+
+    def test_the_failure_is_the_call_s_own(self):
+        # The task group must not turn it into an ExceptionGroup, or the
+        # error-code layer would classify every failure as "internal".
+        with self.assertRaisesRegex(ValueError, "bad"):
+            asyncio.run(
+                _with_progress(
+                    self._Recorder(), "capture", self._raise_value_error, 1.0
+                )
+            )
+
+    @staticmethod
+    def _raise_value_error():
+        raise ValueError("bad")
+
+    def test_a_client_that_refuses_progress_still_gets_its_capture(self):
+        result = asyncio.run(
+            _with_progress(self._Hostile(), "capture", lambda: time.sleep(1.2) or 5, 9.0)
+        )
+        self.assertEqual(result, 5)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_a_blocking_tool_does_not_freeze_the_server(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        class SlowRpc:
+            def handle(self, req):
+                time.sleep(0.6)
+                return {"ok": True}
+
+        app = build_mcp_server(FcapzMcpSession(rpc=SlowRpc()))
+
+        async def go():
+            ticks = []
+
+            async def heartbeat():
+                while True:
+                    await asyncio.sleep(0.05)
+                    ticks.append(1)
+
+            beat = asyncio.create_task(heartbeat())
+            await app.call_tool("fcapz_probe", {})
+            beat.cancel()
+            return ticks
+
+        # FastMCP awaits a sync tool on the event loop, so without the
+        # offload every JTAG round trip stopped the server answering
+        # anything at all -- a 300 s capture for five minutes.
+        self.assertGreater(len(asyncio.run(go())), 2)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_the_progress_context_is_not_an_argument_the_agent_sees(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        app = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        tools = {tool.name: tool for tool in asyncio.run(app.list_tools())}
+        for name in ("fcapz_capture", "fcapz_capture_wait"):
+            with self.subTest(tool=name):
+                self.assertNotIn("ctx", tools[name].inputSchema["properties"])
 
 
 class HostAllowlistTests(unittest.TestCase):

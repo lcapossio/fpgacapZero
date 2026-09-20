@@ -45,7 +45,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   message cannot reclassify them, and `watchdog_timeout` kept distinct from
   `timeout` because only one of them requires reconnecting first.
 
+- **Long captures report progress.** `fcapz_capture` and
+  `fcapz_capture_wait` emit an MCP progress notification once a second while
+  they wait — elapsed time against the caller's timeout, which is the only
+  honest measure available from inside a JTAG readout. Clients that do not
+  send a progress token are unaffected.
+
 ### Fixed
+
+- **Hardware tools no longer freeze the MCP server.** FastMCP awaits a
+  synchronous tool directly on the event loop, so every JTAG round trip
+  stopped the server answering anything at all for its duration — a 300 s
+  capture blocked even `fcapz_status` for five minutes. Tools now run in a
+  worker thread; hardware access is still serialized by the owner thread.
 
 - **`probe_file` is read once, where it is checked.** The MCP layer validated
   the path and the RPC layer opened it a queue hop later, so anyone able to

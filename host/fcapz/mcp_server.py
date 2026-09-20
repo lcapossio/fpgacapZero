@@ -14,6 +14,7 @@ import base64
 import binascii
 import functools
 import importlib.metadata
+import inspect
 import math
 import os
 import stat
@@ -21,6 +22,7 @@ import queue
 import json
 import sys
 import threading
+import time
 from threading import RLock
 import traceback
 from dataclasses import dataclass, field
@@ -177,6 +179,10 @@ _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
 # a dump landing straight in model context; larger transfers must be chunked.
 _MAX_AXI_WORDS = 4096
 _RPC_CANCEL_GRACE_SEC = 1.0
+# How often a still-running hardware call reports that it is still running.
+# Short enough that a client's progress bar moves, long enough that a 300 s
+# capture does not produce a notification storm.
+_PROGRESS_INTERVAL_SEC = 1.0
 # The RPC layer caps every wait-bearing command at this many seconds
 # (rpc._MAX_WAIT_SEC); callers are rejected above it rather than silently
 # clamped, so the watchdog and the docstrings stay honest.
@@ -428,6 +434,17 @@ def _coded_error(exc: BaseException) -> Exception:
 def _coded(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Give a tool's failures a code and retry guidance."""
 
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def guarded_async(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:
+                raise _coded_error(exc) from exc
+
+        return guarded_async
+
     @functools.wraps(fn)
     def guarded(*args: Any, **kwargs: Any) -> Any:
         try:
@@ -436,6 +453,73 @@ def _coded(fn: Callable[..., Any]) -> Callable[..., Any]:
             raise _coded_error(exc) from exc
 
     return guarded
+
+
+def _offloaded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a blocking tool in a worker thread.
+
+    FastMCP awaits a sync tool directly on the event loop, so every JTAG
+    round trip froze the whole server -- a 300 s capture made it answer
+    nothing at all, not even a status poll, for five minutes. Hardware access
+    is still serialized by the owner thread; this only keeps the loop free to
+    serve the calls that do not need hardware.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return fn
+
+    @functools.wraps(fn)
+    async def offloaded(*args: Any, **kwargs: Any) -> Any:
+        import anyio.to_thread
+
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    return offloaded
+
+
+async def _with_progress(ctx: Any, label: str, call: Callable[[], Any], total: float):
+    """Run a blocking call, saying it is still running while it runs.
+
+    There is no progress to report from inside a JTAG readout, so the honest
+    measure is elapsed time against the timeout the caller set -- enough for a
+    client to show that the server is alive and how much of the budget is
+    gone.
+    """
+    import anyio
+
+    outcome: dict[str, Any] = {}
+
+    async with anyio.create_task_group() as tg:
+
+        async def worker() -> None:
+            try:
+                outcome["value"] = await anyio.to_thread.run_sync(call)
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                outcome["error"] = exc
+            finally:
+                tg.cancel_scope.cancel()
+
+        async def ticker() -> None:
+            started = time.monotonic()
+            while True:
+                await anyio.sleep(_PROGRESS_INTERVAL_SEC)
+                elapsed = time.monotonic() - started
+                try:
+                    await ctx.report_progress(
+                        min(elapsed, total),
+                        total,
+                        f"{label}: {elapsed:.0f}s elapsed of up to {total:.0f}s",
+                    )
+                except Exception:  # noqa: BLE001
+                    # No progress token, or a client that will not take one.
+                    # Saying so is optional; finishing the capture is not.
+                    return
+
+        tg.start_soon(worker)
+        tg.start_soon(ticker)
+
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 @dataclass
@@ -2151,7 +2235,7 @@ def build_mcp_server(session: FcapzMcpSession):
         def decorate(fn: Callable[..., Any]):
             if not requires:
                 return fn
-            return mcp.tool(annotations=annotations)(_coded(fn))
+            return mcp.tool(annotations=annotations)(_offloaded(_coded(fn)))
 
         return decorate
 
@@ -2234,7 +2318,7 @@ def build_mcp_server(session: FcapzMcpSession):
         idempotentHint=False,
         readOnlyHint=False,
     )
-    def fcapz_capture(
+    async def fcapz_capture(
         config: CaptureConfigDict | None = None,
         timeout: float = 10.0,
         format: CaptureFormat = "json",
@@ -2255,13 +2339,18 @@ def build_mcp_server(session: FcapzMcpSession):
         fcapz://last-capture for full payloads.
         """
 
-        return session.capture(
-            config=config,
-            timeout=timeout,
-            fmt=format,
-            include_event_summary=include_event_summary,
-            immediate=immediate,
-            segments=segments,
+        return await _with_progress(
+            mcp.get_context(),
+            "capture",
+            lambda: session.capture(
+                config=config,
+                timeout=timeout,
+                fmt=format,
+                include_event_summary=include_event_summary,
+                immediate=immediate,
+                segments=segments,
+            ),
+            timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -2396,7 +2485,7 @@ def build_mcp_server(session: FcapzMcpSession):
         idempotentHint=False,
         readOnlyHint=False,
     )
-    def fcapz_capture_wait(
+    async def fcapz_capture_wait(
         timeout: float = 10.0,
         format: CaptureFormat = "json",
         include_event_summary: bool = False,
@@ -2413,11 +2502,16 @@ def build_mcp_server(session: FcapzMcpSession):
         fcapz://last-capture for the full payload.
         """
 
-        return session.capture_wait(
-            timeout=timeout,
-            fmt=format,
-            include_event_summary=include_event_summary,
-            segments=segments,
+        return await _with_progress(
+            mcp.get_context(),
+            "capture_wait",
+            lambda: session.capture_wait(
+                timeout=timeout,
+                fmt=format,
+                include_event_summary=include_event_summary,
+                segments=segments,
+            ),
+            timeout,
         )
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)

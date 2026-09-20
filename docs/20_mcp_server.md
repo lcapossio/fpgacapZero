@@ -473,6 +473,21 @@ never disagree with `value_hex`. On the way down, `fcapz_eio_write` accepts a
 base-prefixed string as well as a number, which is the only way a JavaScript
 client can drive a wide output vector exactly.
 
+## Long Calls
+
+Every hardware tool runs in a worker thread. FastMCP awaits a synchronous
+tool on the event loop, so before this a JTAG round trip stopped the server
+answering anything at all for its duration — a 300 s capture froze even
+`fcapz_status` for five minutes. Hardware access is still serialized by the
+owner thread; only the loop is freed.
+
+`fcapz_capture` and `fcapz_capture_wait` also emit MCP progress
+notifications once a second while they wait, when the client sends a progress
+token. There is no progress to read from inside a JTAG readout, so what is
+reported is elapsed time against the timeout the caller set — enough to show
+the server is alive and how much of the budget is gone. A client that does
+not take progress notifications is unaffected: the capture still completes.
+
 ## Errors
 
 MCP has no structured error channel — a failed tool call reaches the agent as
