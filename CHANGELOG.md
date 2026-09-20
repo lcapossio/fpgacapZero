@@ -9,6 +9,38 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Segmented captures are reachable from MCP.** `fcapz_capture` and
+  `fcapz_capture_wait` take `segments=true` to read back every segment
+  instead of segment 0; sample paging concatenates them, tags each sample
+  with its segment, and resolves named fields from the per-segment probe map.
+
+- **Wide EIO vectors survive a JavaScript MCP client.** `fcapz_eio_read`
+  returns `value` as a hex string past 53 bits so it cannot disagree with
+  `value_hex`, and `fcapz_eio_write` accepts a base-prefixed string, which is
+  the only way such a client can drive a wide output exactly.
+
+### Fixed
+
+- **AXI decoding no longer invents pairings it cannot justify.** A response
+  is never matched to a request handshaking on the same sampled cycle (AXI
+  forbids a combinational VALID-to-VALID path, so it belongs to an earlier
+  request), an unmatched response reads the same wherever it lands in the
+  window rather than being excused by a cycle-number heuristic, and the
+  leftover transactions at the end of a window are numbered in trace order.
+
+- **Two races in the MCP hardware owner.** A close that found nothing open
+  decided and acted in two separate holds of the lock, so a connect could
+  commit in between and leave the board connected with the wrapper reporting
+  otherwise. And a watchdog whose grace window expired just as recovery
+  finished poisoned the session with nothing left to clear the flag, refusing
+  every later hardware command for the life of the process. A stalled
+  recovery teardown now also gets a second abort attempt rather than wedging
+  the owner thread.
+
+- **Non-finite watchdog and tool timeouts are rejected.** `nan` passed every
+  ordered comparison and then made the wait spin instead of expiring,
+  disabling the watchdog it was meant to configure.
+
 - **Two MCP fields that reached past the JTAG cable are now confined.**
   `probe_file` opened any path on the server's filesystem; it now requires
   `--probe-root DIR` and must stay inside it. `host` accepted any network
@@ -35,8 +67,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   AXI4-Lite transactions: address, data, byte strobes, response, the cycle
   each beat landed on, latency, per-channel stall counts, and protocol
   anomaly flags (`error_response`, `partial_write`, `data_before_address`,
-  half-formed writes, unaligned addresses). Transactions straddling the
-  capture window are marked as such rather than reported as violations. Works
+  half-formed writes, unaligned addresses). AXI4-Lite has no IDs, so
+  responses are paired first-in-first-out; the result states that assumption
+  and flags every transaction whose pairing a mid-flight capture window could
+  have shifted. Legal-but-notable behaviour is reported separately from
+  protocol faults. Works
   on both `DECODE_EN` and plain monitor builds, since a beat is `VALID &
   READY` either way. RPC `capture` attaches it on request (`decode_axi`), and
   the MCP server exposes `fcapz_axi_transactions` to page and filter it —

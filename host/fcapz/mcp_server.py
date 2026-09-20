@@ -13,6 +13,7 @@ import argparse
 import base64
 import binascii
 import importlib.metadata
+import math
 import os
 import queue
 import json
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ._version import __version__
+from .axi_decode import FAULT_FLAGS
 from .rpc import _SCHEMA_VERSION, RpcServer
 
 
@@ -147,6 +149,7 @@ class _CommandState:
     PENDING = "pending"    # queued or running
     COMMITTED = "committed"  # finished and session state updated; reply posted
     ABANDONED = "abandoned"  # watchdog gave up; owner must recover, not commit
+    RECONCILED = "reconciled"  # owner finished tearing the abandoned call down
 
 
 @dataclass
@@ -316,10 +319,10 @@ class FcapzMcpSession:
                 self._active_rpc_cmd = None
 
         if recover:
-            self._recover_after_abandoned()
+            self._recover_after_abandoned(cmd)
         cmd.done.set()
 
-    def _recover_after_abandoned(self) -> None:
+    def _recover_after_abandoned(self, cmd: _HardwareCommand) -> None:
         """Reconcile after a command the caller stopped waiting for.
 
         The RPC layer may have connected, closed, or captured in the meantime,
@@ -327,14 +330,43 @@ class FcapzMcpSession:
         it. Tear the board session down for real, wipe wrapper state, and only
         then accept new commands.
         """
+        # Teardown runs on this thread, so a transport that blocks here would
+        # wedge the owner for good. Give the abort hook a second chance from a
+        # timer thread rather than trusting the close to return on its own.
+        nudge = self._recovery_nudge()
         try:
             self.rpc.handle({"cmd": "close"})
         except Exception as exc:  # noqa: BLE001 - best effort teardown
             self._emit_rpc_error("recover_teardown", "close", exc)
+        finally:
+            if nudge is not None:
+                nudge.cancel()
         with self._rpc_lock:
+            # Ordering matters: whichever of this and _poison() takes the lock
+            # first, the session ends up usable. Taking it second clears the
+            # flag; taking it first marks the command reconciled so _poison()
+            # knows not to set one.
             self._reset_session_state()
             self._active_rpc_cmd = None
             self._poisoned = False
+            cmd.state = _CommandState.RECONCILED
+
+    def _recovery_nudge(self) -> "threading.Timer | None":
+        """Arm a delayed second abort in case the teardown close hangs."""
+        cancel = getattr(self.rpc, "cancel_active", None)
+        if not callable(cancel):
+            return None
+
+        def _again() -> None:
+            try:
+                cancel()
+            except Exception as exc:  # noqa: BLE001
+                self._emit_rpc_error("recover_nudge", "close", exc)
+
+        timer = threading.Timer(self.capabilities.rpc_cancel_grace_sec, _again)
+        timer.daemon = True
+        timer.start()
+        return timer
 
     def _rpc_call(
         self, req: JsonDict, commit: Callable[[JsonDict], Any] | None = None
@@ -388,12 +420,13 @@ class FcapzMcpSession:
                     cancel()
                 except Exception as exc:  # noqa: BLE001
                     self._emit_rpc_error("cancel_active", name, exc)
-                if cmd.done.wait(self.capabilities.rpc_cancel_grace_sec):
+                cmd.done.wait(self.capabilities.rpc_cancel_grace_sec)
+                if self._reconciled(cmd):
                     raise McpWatchdogTimeout(
                         f"fcapz RPC call {name!r} was cancelled after {timeout:g}s; "
                         "the board session was torn down — reconnect before retrying"
                     )
-                self._poison(name, timeout)
+                self._poison(cmd, name, timeout)
             # It committed while we were deciding: fall through and take it.
         else:
             # No abort hook. The call may simply be a slow readback finishing
@@ -405,7 +438,7 @@ class FcapzMcpSession:
                 with self._rpc_lock:
                     if cmd.state == _CommandState.PENDING:
                         cmd.state = _CommandState.ABANDONED
-                        self._poison(name, timeout)
+                        self._poison(cmd, name, timeout)
             else:
                 if not ok:
                     raise value  # type: ignore[misc]
@@ -415,9 +448,25 @@ class FcapzMcpSession:
             raise value  # type: ignore[misc]
         return value
 
-    def _poison(self, name: str, timeout: float) -> None:
-        """Refuse further hardware commands until the owner has reconciled."""
-        self._poisoned = True
+    def _reconciled(self, cmd: _HardwareCommand) -> bool:
+        with self._rpc_lock:
+            return cmd.state == _CommandState.RECONCILED
+
+    def _poison(self, cmd: _HardwareCommand, name: str, timeout: float) -> None:
+        """Refuse further hardware commands until the owner has reconciled.
+
+        ``done.wait()`` can miss its deadline by a hair while recovery is
+        finishing, so the flag is only raised for a command the owner has not
+        already reconciled — otherwise nothing would ever clear it again and
+        the session would refuse hardware for the rest of its life.
+        """
+        with self._rpc_lock:
+            if cmd.state == _CommandState.RECONCILED:
+                raise McpWatchdogTimeout(
+                    f"fcapz RPC call {name!r} was cancelled after {timeout:g}s; "
+                    "the board session was torn down — reconnect before retrying"
+                )
+            self._poisoned = True
         raise McpWatchdogTimeout(
             f"fcapz RPC call {name!r} timed out after {timeout:g}s and is still "
             "running; the session will be torn down and reset when it returns "
@@ -474,6 +523,15 @@ class FcapzMcpSession:
         return response
 
     def _commit_eio_read(self, response: JsonDict) -> JsonDict:
+        response = dict(response)
+        value = response.get("value")
+        if _is_wide_int(value):
+            # RPC sends both `value` (a JSON number) and `value_hex`. Past 53
+            # bits a JS client rounds the number, so the same register would
+            # read two different ways in one response. Hand over the exact
+            # one and say so.
+            response["value"] = _hex_int(value)
+            response["value_encoding"] = "hex"
         self.last_eio_read = dict(response)
         return response
 
@@ -722,9 +780,9 @@ class FcapzMcpSession:
         hardware handle the RPC layer has already released, or silently leaves
         a side-only EIO/AXI/UART session open on the board.
         """
-        if self._nothing_to_close(*self._SUBSYSTEM_FLAGS):
-            with self._rpc_lock:
-                self._reset_session_state()
+        if self._closed_locally(
+            *self._SUBSYSTEM_FLAGS, reset=self._reset_session_state
+        ):
             return {"ok": True}
         try:
             return self._rpc_call({"cmd": "close"}, commit=self._commit_closed)
@@ -737,20 +795,28 @@ class FcapzMcpSession:
                 self._reset_session_state()
             raise
 
-    def _nothing_to_close(self, *flags: str) -> bool:
-        """True when a close can safely skip the RPC because nothing is open.
+    def _closed_locally(self, *flags: str, reset: Callable[[], None]) -> bool:
+        """Settle a close with no RPC when nothing is open — atomically.
 
         The flags only describe reality while the owner is idle. With a
         command in flight they describe the *pre-command* world — a connect
         that has not committed yet still reads as disconnected — so a close
-        must not conclude it has nothing to do. Returning False there sends it
-        to ``_rpc_call``, which arbitrates (busy) instead of silently
-        dropping the close.
+        must not conclude it has nothing to do; returning False sends it to
+        ``_rpc_call``, which arbitrates (busy) instead of silently dropping
+        it.
+
+        The decision and ``reset`` run under one hold of the lock. Splitting
+        them let a connect commit in between, leaving the board connected and
+        the wrapper reporting otherwise — a state no serial ordering of the
+        two calls could produce.
         """
         with self._rpc_lock:
             if self._active_rpc_cmd is not None:
                 return False
-            return not any(getattr(self, flag) for flag in flags)
+            if any(getattr(self, flag) for flag in flags):
+                return False
+            reset()
+            return True
 
     _SUBSYSTEM_FLAGS = (
         "connected",
@@ -919,6 +985,25 @@ class FcapzMcpSession:
             return None
         return pre
 
+    @staticmethod
+    def _capture_probe_map(payload: JsonDict) -> list[Any]:
+        """The capture's probe map, plain or segmented.
+
+        A segmented capture has no top-level `probes`: RPC attaches one map
+        per segment (they all come from the same config). Reading only the
+        top level made named fields vanish on exactly the captures that need
+        paging most.
+        """
+        probes = payload.get("probes")
+        if isinstance(probes, list) and probes:
+            return probes
+        for segment in payload.get("segments") or []:
+            if isinstance(segment, dict):
+                probes = segment.get("probes")
+                if isinstance(probes, list) and probes:
+                    return probes
+        return []
+
     def _selected_probes(
         self, payload: JsonDict, fields: list[str] | None
     ) -> list[tuple[str, int, int]] | None:
@@ -926,8 +1011,8 @@ class FcapzMcpSession:
         if fields is not None and not fields:
             # Explicitly empty: the caller wants the packed value, not fields.
             return None
-        available = payload.get("probes")
-        if not isinstance(available, list) or not available:
+        available = self._capture_probe_map(payload)
+        if not available:
             if fields:
                 raise ValueError(
                     "this capture carries no probe map, so named fields are "
@@ -1010,7 +1095,9 @@ class FcapzMcpSession:
         selected: list[JsonDict] = []
         for segment, section in sections:
             for txn in section.get("transactions") or []:
-                if only_anomalies and not txn.get("flags"):
+                if only_anomalies and not FAULT_FLAGS.intersection(
+                    txn.get("flags") or ()
+                ):
                     continue
                 if kind is not None and txn.get("kind") != kind:
                     continue
@@ -1091,6 +1178,10 @@ class FcapzMcpSession:
         # generic "did not complete" long before a large caller value elapsed.
         # Reject up front so the failure names the real ceiling.
         seconds = float(timeout)
+        # NaN slips past every comparison below and then makes Queue.get()
+        # busy-wait forever instead of expiring, so reject it explicitly.
+        if not math.isfinite(seconds):
+            raise ValueError(f"timeout must be a finite number, got {timeout!r}")
         if seconds < 0:
             raise ValueError(f"timeout must be >= 0, got {seconds:g}")
         if seconds > _MAX_WAIT_SEC:
@@ -1129,6 +1220,7 @@ class FcapzMcpSession:
         fmt: str = "json",
         include_event_summary: bool = False,
         immediate: bool = False,
+        segments: bool = False,
     ) -> JsonDict:
         if not self.capabilities.allow_capture:
             raise PermissionError("capture tools are disabled for this MCP server")
@@ -1144,6 +1236,10 @@ class FcapzMcpSession:
         if immediate:
             # RPC rewrites the config to an always-true trigger and fires now.
             req["immediate"] = True
+        if segments:
+            # Without this RPC reads segment 0 only, so a segmented core
+            # silently loses every other segment's samples.
+            req["segments"] = True
         config = self._validated_capture_config(config)
         if config:
             req = {**config, **req}
@@ -1155,6 +1251,7 @@ class FcapzMcpSession:
         timeout: float = 10.0,
         fmt: str = "json",
         include_event_summary: bool = False,
+        segments: bool = False,
     ) -> JsonDict:
         if not self.capabilities.allow_capture:
             raise PermissionError("capture tools are disabled for this MCP server")
@@ -1166,6 +1263,8 @@ class FcapzMcpSession:
             "format": self._validated_capture_format(fmt),
             "summarize": bool(include_event_summary),
         }
+        if segments:
+            req["segments"] = True
         try:
             return self._rpc_call(req, commit=self._store_capture)
         except McpWatchdogTimeout:
@@ -1261,20 +1360,40 @@ class FcapzMcpSession:
         return self._rpc_call(req, commit=self._commit_eio_connected)
 
     def eio_close(self) -> JsonDict:
-        if self._nothing_to_close("eio_connected"):
+        def _forget() -> None:
             self.last_eio_read = None
+
+        if self._closed_locally("eio_connected", reset=_forget):
             return {"ok": True}
         return self._rpc_call({"cmd": "eio_close"}, commit=self._commit_eio_closed)
 
     def eio_read(self) -> JsonDict:
         return self._rpc_call({"cmd": "eio_read"}, commit=self._commit_eio_read)
 
-    def eio_write(self, value: int) -> JsonDict:
+    def eio_write(self, value: int | str) -> JsonDict:
         if not self.capabilities.allow_eio_write:
             raise PermissionError(
                 "EIO writes are disabled; restart with --allow-eio-write to enable them"
             )
-        return self._rpc_call({"cmd": "eio_write", "value": int(value)})
+        return self._rpc_call({"cmd": "eio_write", "value": self._eio_value(value)})
+
+    @staticmethod
+    def _eio_value(value: int | str) -> int | str:
+        """Keep an output vector exact on the way down as well as up.
+
+        RPC already parses base-prefixed strings; typing this `int` only meant
+        a JS client could not express an output wider than 53 bits at all.
+        """
+        if isinstance(value, str):
+            try:
+                int(value, 0)
+            except ValueError as exc:
+                raise ValueError(
+                    f"value must be an integer or a base-prefixed string "
+                    f"(e.g. \"0xdeadbeef\"), got {value!r}"
+                ) from exc
+            return value
+        return int(value)
 
     def axi_connect(
         self,
@@ -1304,7 +1423,7 @@ class FcapzMcpSession:
         )
 
     def axi_close(self) -> JsonDict:
-        if self._nothing_to_close("axi_connected"):
+        if self._closed_locally("axi_connected", reset=lambda: None):
             return {"ok": True}
         return self._rpc_call({"cmd": "axi_close"}, commit=self._commit_axi_closed)
 
@@ -1387,7 +1506,7 @@ class FcapzMcpSession:
         )
 
     def uart_close(self) -> JsonDict:
-        if self._nothing_to_close("uart_connected"):
+        if self._closed_locally("uart_connected", reset=lambda: None):
             return {"ok": True}
         return self._rpc_call({"cmd": "uart_close"}, commit=self._commit_uart_closed)
 
@@ -1505,6 +1624,7 @@ class FcapzMcpSession:
             "raw_dump",
             "result",
             "samples",
+            "segments",
             "timestamps",
             "vcd",
             "words",
@@ -1742,6 +1862,7 @@ def build_mcp_server(session: FcapzMcpSession):
         format: str = "json",
         include_event_summary: bool = False,
         immediate: bool = False,
+        segments: bool = False,
     ) -> JsonDict:
         """Configure, arm, and capture samples from the ELA.
 
@@ -1755,6 +1876,8 @@ def build_mcp_server(session: FcapzMcpSession):
         trigger_value, trigger_mask, sample_width, depth, sample_clock_hz,
         probes, probe_file, channel, decimation, ext_trigger_mode,
         stor_qual_mode/value/mask, startup_arm, trigger_holdoff, trigger_delay.
+        segments=true reads back every segment of a segmented core instead of
+        segment 0 alone (fcapz_probe reports num_segments).
         The tool returns summary metadata only; use fcapz_get_last_capture or
         fcapz://last-capture for full payloads.
         """
@@ -1765,6 +1888,7 @@ def build_mcp_server(session: FcapzMcpSession):
             fmt=format,
             include_event_summary=include_event_summary,
             immediate=immediate,
+            segments=segments,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -1903,6 +2027,7 @@ def build_mcp_server(session: FcapzMcpSession):
         timeout: float = 10.0,
         format: str = "json",
         include_event_summary: bool = False,
+        segments: bool = False,
     ) -> JsonDict:
         """Read out an already-armed capture without reconfiguring or re-arming.
 
@@ -1919,6 +2044,7 @@ def build_mcp_server(session: FcapzMcpSession):
             timeout=timeout,
             fmt=format,
             include_event_summary=include_event_summary,
+            segments=segments,
         )
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
@@ -1983,7 +2109,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
     def fcapz_eio_read() -> JsonDict:
-        """Read the current EIO input vector."""
+        """Read the current EIO input vector.
+
+        `value` is a hex string instead of a number when the vector is wider
+        than 53 bits; `value_encoding` says which, and `value_hex` is always
+        exact.
+        """
 
         return session.eio_read()
 
@@ -1993,8 +2124,12 @@ def build_mcp_server(session: FcapzMcpSession):
         idempotentHint=False,
         readOnlyHint=False,
     )
-    def fcapz_eio_write(value: int) -> JsonDict:
-        """Write the EIO output vector when write access is enabled."""
+    def fcapz_eio_write(value: int | str) -> JsonDict:
+        """Write the EIO output vector when write access is enabled.
+
+        Pass a hex string (`"0x1122334455667788"`) for vectors wider than 53
+        bits — a JSON number cannot carry them exactly.
+        """
 
         return session.eio_write(value)
 
@@ -2292,10 +2427,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.bitfile_root is not None and not args.allow_program:
         parser.error("--bitfile-root requires --allow-program")
-    if args.rpc_timeout <= 0:
-        parser.error("--rpc-timeout must be > 0")
-    if args.rpc_cancel_grace <= 0:
-        parser.error("--rpc-cancel-grace must be > 0")
+    # `not > 0` rather than `<= 0`: NaN compares false both ways, and a NaN
+    # watchdog disables the watchdog and spins a core doing it.
+    if not args.rpc_timeout > 0 or not math.isfinite(args.rpc_timeout):
+        parser.error("--rpc-timeout must be a finite number > 0")
+    if not args.rpc_cancel_grace > 0 or not math.isfinite(args.rpc_cancel_grace):
+        parser.error("--rpc-cancel-grace must be a finite number > 0")
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
         probe_root=args.probe_root,

@@ -118,6 +118,11 @@ Both appear in `fcapz_status` under `capabilities` (`probe_root`,
 `allowed_hosts`) so an agent can see the policy rather than discover it by
 being refused.
 
+`--probe-root` confines the path, not the bytes: the server checks the
+resolved path and the RPC layer opens it a moment later, so anyone who can
+write inside the directory can swap the file (or an ancestor) for a symlink in
+between. Point `--probe-root` at a directory the agent cannot write to.
+
 Programming is intentionally `hw_server`-only in the MCP layer.
 
 If `program` is passed while programming is disabled, the server reports the
@@ -241,6 +246,12 @@ with no waiting.
 `fcapz_capture` takes `include_event_summary` to ask the RPC layer for decoded
 event metadata. The MCP name is deliberately more explicit than the RPC field
 name (`summarize`).
+
+Both `fcapz_capture` and `fcapz_capture_wait` take `segments=true`, which
+reads back every segment of a segmented core rather than segment 0 alone
+(`fcapz_probe` reports `num_segments`). Sample paging concatenates the
+segments and tags each sample with its `segment`; `trigger_index` is withheld,
+because a flattened index no longer locates the trigger.
 
 Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 
@@ -388,12 +399,33 @@ page is valid JSON on its own.
 | `data_before_address` | The W beat preceded its AW. Legal AXI, but a common symptom when a bridge enqueues a command before its payload has settled. |
 | `write_missing_data` / `write_missing_address` | A half-formed write — the shape a dropped or scrambled command leaves behind. |
 | `unaligned_address` | Address is not a multiple of the data-bus width. |
-| `request_before_window` | The response matched no request because the request predates the capture. Benign. |
+| `request_not_observed` | A response arrived with no matching request in the capture. |
+| `pairing_suspect` | Another transaction in the same direction had no visible request, so this one's pairing may be shifted. |
 | `no_response_in_window` | The capture ended before the response arrived. Benign. |
 
-The last two are artefacts of watching the bus through a finite window, not
-protocol violations; they are reported so their absence from the other flags
-is meaningful.
+`no_response_in_window`, `partial_write`, `write_strobe_zero` and
+`data_before_address` are legal AXI; they are reported as observations and do
+not count towards `anomaly_count` or `only_anomalies` (use `flagged_count` for
+the total with any flag at all).
+
+### What in-order pairing assumes
+
+AXI4-Lite has no transaction IDs, so a single implicit ID applies and the
+protocol requires responses in issue order. The decoder therefore pairs each
+B/R with the oldest outstanding AW+W/AR — correct, *provided nothing was
+already outstanding when the capture window opened*. A trace cannot prove
+that: a read issued before the trigger and answered inside the window looks
+exactly like an answer to the first address the capture happened to see.
+
+So the decode result carries a `pairing` block naming the assumption, and
+`pre_window_traffic_observed` lists the directions where a response arrived
+with an empty queue — proof that the window opened mid-flight. Every other
+transaction in such a direction is flagged `pairing_suspect`. Capture from a
+quiet bus (or trigger on the first AW/AR) when exact addresses matter.
+
+A response is never paired with a request handshaking on the same sampled
+cycle: AXI forbids a combinational VALID-to-VALID path, so such a response
+belongs to an earlier request.
 
 The capture summary carries only the headline counts (`transaction_count`,
 `error_count`, `anomaly_count`, `max_latency`); the transactions themselves
@@ -414,6 +446,12 @@ as a `0x…` hex string instead of a number and the payload carries
 `"value_encoding": "hex"` at the top level. The encoding is all-or-nothing per
 list, so a caller never has to handle a mix of integers and strings. Captures
 that fit in 53 bits are unchanged and carry no `value_encoding` key.
+
+The same applies to EIO: `fcapz_eio_read` returns `value` as a hex string
+(with `value_encoding`) once the input vector is wider than 53 bits, so it can
+never disagree with `value_hex`. On the way down, `fcapz_eio_write` accepts a
+base-prefixed string as well as a number, which is the only way a JavaScript
+client can drive a wide output vector exactly.
 
 ## Status Fields
 

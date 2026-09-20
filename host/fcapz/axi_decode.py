@@ -40,9 +40,16 @@ REQUIRED_FIELDS = frozenset(name for pair in _CHANNELS.values() for name in pair
 _RESP_NAMES = {0: "OKAY", 1: "EXOKAY", 2: "SLVERR", 3: "DECERR"}
 _ERROR_RESPONSES = ("SLVERR", "DECERR")
 
-# A response landing this early in the capture most likely belongs to a
-# request that happened before the window opened.
-_WINDOW_EDGE = 4
+# Flags that mean "the bus misbehaved", as opposed to observations that are
+# legal AXI but worth reporting (partial strobes, data before address, a
+# transaction straddling the end of the window).
+FAULT_FLAGS = frozenset({
+    "error_response",
+    "request_not_observed",
+    "unaligned_address",
+    "write_missing_address",
+    "write_missing_data",
+})
 
 
 def looks_like_axi(probe_names: Iterable[str]) -> bool:
@@ -144,6 +151,11 @@ class _Decoder:
         return bool(self.field(sample, valid)) and not self.field(sample, ready)
 
     def decode(self, samples: Sequence[int]) -> list[AxiTransaction]:
+        # Set when a response arrived with nothing queued to match it, which
+        # proves the window opened with transactions already outstanding --
+        # and therefore that every in-order pairing in that direction may be
+        # shifted onto the wrong request.
+        self.pre_window = {"write": False, "read": False}
         aw: list[_Pending] = []
         w: list[_Pending] = []
         ar: list[_Pending] = []
@@ -154,6 +166,37 @@ class _Decoder:
             for channel in _CHANNELS:
                 if self._stalled(sample, channel):
                     stalls[channel] += 1
+
+            # Responses are matched *before* this cycle's requests are queued.
+            # AXI forbids a combinational VALID-to-VALID path, so a response
+            # sampled on the same edge as a request can never belong to it;
+            # popping first keeps a same-cycle request out of reach and lets
+            # an empty queue report the truth (the request was not observed)
+            # instead of inventing a zero-latency pairing.
+            if self._hs(sample, "b"):
+                transactions.append(
+                    self._write(
+                        len(transactions),
+                        aw.pop(0) if aw else None,
+                        w.pop(0) if w else None,
+                        cycle,
+                        self.field(sample, "bresp"),
+                        stalls["b"],
+                    )
+                )
+                stalls["b"] = 0
+            if self._hs(sample, "r"):
+                transactions.append(
+                    self._read(
+                        len(transactions),
+                        ar.pop(0) if ar else None,
+                        cycle,
+                        self.field(sample, "rdata"),
+                        self.field(sample, "rresp"),
+                        stalls["r"],
+                    )
+                )
+                stalls["r"] = 0
 
             if self._hs(sample, "aw"):
                 aw.append(
@@ -192,33 +235,13 @@ class _Decoder:
                 )
                 stalls["ar"] = 0
 
-            # AXI4-Lite has no IDs, so responses pair with requests in order.
-            if self._hs(sample, "b"):
-                transactions.append(
-                    self._write(
-                        len(transactions),
-                        aw.pop(0) if aw else None,
-                        w.pop(0) if w else None,
-                        cycle,
-                        self.field(sample, "bresp"),
-                        stalls["b"],
-                    )
-                )
-                stalls["b"] = 0
-            if self._hs(sample, "r"):
-                transactions.append(
-                    self._read(
-                        len(transactions),
-                        ar.pop(0) if ar else None,
-                        cycle,
-                        self.field(sample, "rdata"),
-                        self.field(sample, "rresp"),
-                        stalls["r"],
-                    )
-                )
-                stalls["r"] = 0
-
         transactions.extend(self._unfinished(len(transactions), aw, w, ar))
+        for tx in transactions:
+            if "request_not_observed" in tx.flags:
+                self.pre_window[tx.kind] = True
+        for tx in transactions:
+            if self.pre_window[tx.kind] and "request_not_observed" not in tx.flags:
+                tx.flags.append("pairing_suspect")
         return transactions
 
     def _write(
@@ -280,6 +303,10 @@ class _Decoder:
         def _emit(tx: AxiTransaction) -> None:
             out.append(tx)
 
+        def _first_cycle(tx: AxiTransaction) -> int:
+            cycles = [c for c in (tx.addr_cycle, tx.data_cycle) if c is not None]
+            return min(cycles) if cycles else 0
+
         for addr_beat, data_beat in zip(aw, w):
             tx = AxiTransaction(
                 index=next_index + len(out),
@@ -331,6 +358,11 @@ class _Decoder:
             )
             self._flag(tx, no_response=True)
             _emit(tx)
+        # Emitted per channel above; renumber so indexes still follow the
+        # trace rather than the order the leftover queues were drained in.
+        out.sort(key=_first_cycle)
+        for offset, tx in enumerate(out):
+            tx.index = next_index + offset
         return out
 
     def _flag(
@@ -351,11 +383,11 @@ class _Decoder:
         if tx.resp in _ERROR_RESPONSES:
             tx.flags.append("error_response")
         if missing_request:
-            tx.flags.append(
-                "request_before_window"
-                if tx.resp_cycle is not None and tx.resp_cycle < _WINDOW_EDGE
-                else "unmatched_response"
-            )
+            # Deliberately says only what was observed. Whether the request
+            # predates the window or was genuinely dropped cannot be told
+            # apart from a finite trace, and guessing from the cycle number
+            # produced both false alarms and false reassurance.
+            tx.flags.append("request_not_observed")
         if no_response:
             tx.flags.append("no_response_in_window")
         if half_write:
@@ -406,7 +438,21 @@ def decode_axi(samples: Sequence[int], probes: Sequence[Any]) -> dict[str, Any]:
         "write_count": sum(1 for tx in transactions if tx.kind == "write"),
         "read_count": sum(1 for tx in transactions if tx.kind == "read"),
         "error_count": sum(1 for tx in transactions if "error_response" in tx.flags),
-        "anomaly_count": sum(1 for tx in transactions if tx.flags),
+        "anomaly_count": sum(
+            1 for tx in transactions if FAULT_FLAGS.intersection(tx.flags)
+        ),
+        "flagged_count": sum(1 for tx in transactions if tx.flags),
+        "pairing": {
+            "method": "in-order",
+            "assumes": (
+                "no AXI4-Lite transaction was outstanding when the capture "
+                "window opened; the protocol has no IDs, so responses are "
+                "matched to requests first-in-first-out"
+            ),
+            "pre_window_traffic_observed": sorted(
+                kind for kind, seen in decoder.pre_window.items() if seen
+            ),
+        },
         "max_latency": max(latencies) if latencies else None,
         "transactions": [tx.to_json(addr_digits, data_digits) for tx in transactions],
     }

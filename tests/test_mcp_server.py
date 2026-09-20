@@ -18,6 +18,8 @@ from unittest.mock import patch
 import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
     FcapzMcpError,
+    _CommandState,
+    _HardwareCommand,
     FcapzMcpSession,
     McpCapabilities,
     McpWatchdogTimeout,
@@ -1370,6 +1372,187 @@ def _sample_capture(count=6, width=9, pretrigger=2, probes=True):
             {"name": "flag", "width": 1, "lsb": 8},
         ]
     return payload
+
+
+class SegmentedCaptureTests(unittest.TestCase):
+    """A segmented core must not be silently reduced to segment 0."""
+
+    @staticmethod
+    def _payload():
+        probes = [
+            {"name": "addr", "width": 8, "lsb": 0},
+            {"name": "flag", "width": 1, "lsb": 8},
+        ]
+        def _seg(tag, base):
+            return {
+                "segment": tag,
+                "probes": probes,
+                "samples": [
+                    {"index": i, "value": base + i} for i in range(3)
+                ],
+            }
+        return {
+            "ok": True,
+            "format": "json",
+            "segments": [_seg(0, 0x00), _seg(1, 0x10)],
+            "result": {
+                "segments": [
+                    {"samples": [{"index": i, "value": 0x00 + i} for i in range(3)]},
+                    {"samples": [{"index": i, "value": 0x10 + i} for i in range(3)]},
+                ]
+            },
+        }
+
+    def test_capture_can_ask_for_every_segment(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.capture(segments=True)
+        self.assertTrue(session.rpc.requests[-1]["segments"])
+
+        session.capture()
+        self.assertNotIn("segments", session.rpc.requests[-1])
+
+    def test_capture_wait_can_ask_for_every_segment(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.capture_wait(segments=True)
+        self.assertTrue(session.rpc.requests[-1]["segments"])
+
+    def test_named_fields_resolve_against_a_per_segment_probe_map(self):
+        # A segmented payload has no top-level `probes`; reading only there
+        # made named fields disappear on exactly these captures.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture(self._payload())
+
+        page = session.capture_samples(start=0, count=6, fields=["addr"])
+
+        self.assertEqual(page["total"], 6)
+        self.assertEqual([s["segment"] for s in page["samples"]], [0, 0, 0, 1, 1, 1])
+        self.assertEqual(page["samples"][3]["addr"], "0x10")
+
+    def test_the_summary_does_not_inline_every_segment(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        summary = session._store_capture(self._payload())
+
+        # Neither the per-segment serializations nor the raw sample lists.
+        self.assertNotIn("segments", summary)
+        self.assertNotIn("result", summary)
+
+
+class WideEioValueTests(unittest.TestCase):
+    """EIO vectors can be wider than a JSON number, in both directions."""
+
+    class _WideEioRpc(FakeRpc):
+        def handle(self, req):
+            self.requests.append(dict(req))
+            if req["cmd"] == "eio_read":
+                value = (1 << 80) | 0x1234
+                return {"ok": True, "value": value, "value_hex": hex(value)}
+            return {"ok": True}
+
+    def test_a_wide_read_is_handed_over_exactly(self):
+        session = FcapzMcpSession(rpc=self._WideEioRpc())
+        out = session.eio_read()
+
+        self.assertEqual(out["value_encoding"], "hex")
+        self.assertEqual(int(out["value"], 16), (1 << 80) | 0x1234)
+        # The number and the hex string must not disagree after a JS client
+        # has rounded one of them.
+        self.assertEqual(int(out["value"], 16), int(out["value_hex"], 16))
+
+    def test_a_narrow_read_stays_a_number(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session.eio_connect()
+        out = session.eio_read()
+        self.assertNotIn("value_encoding", out)
+
+    def test_a_wide_write_can_be_expressed_as_a_string(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_eio_write=True)
+        )
+        session.eio_write("0x1" + "0" * 20)
+        self.assertEqual(session.rpc.requests[-1]["value"], "0x1" + "0" * 20)
+
+    def test_a_write_string_must_actually_be_a_number(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_eio_write=True)
+        )
+        with self.assertRaisesRegex(ValueError, "base-prefixed"):
+            session.eio_write("wide")
+
+
+class NonFiniteTimeoutTests(unittest.TestCase):
+    """NaN slips past every ordered comparison and then never expires."""
+
+    def test_a_nan_tool_timeout_is_rejected(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(ValueError, "finite"):
+            session.capture(timeout=float("nan"))
+
+    def test_an_infinite_tool_timeout_is_rejected(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaises(ValueError):
+            session.capture(timeout=float("inf"))
+
+
+class OwnerRecoveryRaceTests(unittest.TestCase):
+    """The watchdog and the owner's recovery race for the same session."""
+
+    def test_a_late_poison_does_not_wedge_a_reconciled_session(self):
+        # done.wait() can miss its deadline by a hair while recovery is
+        # finishing. Poisoning unconditionally after that leaves a flag with
+        # nothing left to clear it, and every later call is refused forever.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        cmd = _HardwareCommand(req={"cmd": "connect"}, commit=lambda r: r)
+        cmd.state = _CommandState.RECONCILED
+
+        with self.assertRaisesRegex(McpWatchdogTimeout, "torn down"):
+            session._poison(cmd, "connect", 0.01)
+
+        self.assertFalse(session._poisoned)
+        session.connect()
+        self.assertTrue(session.connected)
+
+    def test_a_cancelled_call_always_leaves_the_session_usable(self):
+        # Zero grace makes done.wait() give up while recovery is still in
+        # flight -- the exact interleaving that used to poison permanently.
+        rpc = CancellableBlockingRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(rpc_timeout_sec=0.01, rpc_cancel_grace_sec=0.0),
+        )
+        with self.assertRaises(McpWatchdogTimeout):
+            session.connect()
+
+        owner = session._owner
+        if owner is not None:
+            owner.join(timeout=2.0)
+        self.assertFalse(session._poisoned)
+        self.assertFalse(session.connected)
+
+    def test_a_local_close_resets_while_it_still_holds_the_lock(self):
+        # Deciding "nothing is open" and then acting on it in a second hold
+        # let a connect commit in between, leaving the board connected and
+        # the wrapper saying otherwise.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        held = []
+
+        settled = session._closed_locally(
+            "connected", reset=lambda: held.append(session._rpc_lock._is_owned())
+        )
+
+        self.assertTrue(settled)
+        self.assertEqual(held, [True])
+
+    def test_a_local_close_defers_to_a_command_in_flight(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._active_rpc_cmd = "connect"
+        called = []
+        try:
+            self.assertFalse(
+                session._closed_locally("connected", reset=lambda: called.append(1))
+            )
+        finally:
+            session._active_rpc_cmd = None
+        self.assertEqual(called, [])
 
 
 class HostAllowlistTests(unittest.TestCase):

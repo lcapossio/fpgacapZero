@@ -112,6 +112,57 @@ class TransactionReassemblyTests(unittest.TestCase):
         self.assertEqual((second["addr"], second["data"], second["resp"]),
                          ("0x000000b0", "0x000000bb", "SLVERR"))
 
+    def test_a_response_never_pairs_with_a_same_cycle_request(self):
+        # AXI forbids a combinational VALID-to-VALID path, so a B sampled on
+        # the same edge as an AW/W belongs to an earlier, pre-window request.
+        # Pairing them would report someone else's response at this address.
+        trace = _Trace().idle()
+        trace.cycle(
+            awvalid=1, awready=1, awaddr=0x1000,
+            wvalid=1, wready=1, wdata=0xABCD, wstrb=0xF,
+            bvalid=1, bready=1, bresp=0,
+        )
+        out = trace.decode()
+
+        self.assertEqual(out["transaction_count"], 2)
+        orphan, pending = out["transactions"]
+        self.assertIn("request_not_observed", orphan["flags"])
+        self.assertNotIn("addr", orphan)
+        self.assertEqual(pending["addr"], "0x00001000")
+        self.assertIn("no_response_in_window", pending["flags"])
+
+    def test_pre_window_traffic_marks_later_pairings_suspect(self):
+        # One unmatched response proves the window opened mid-flight, so the
+        # in-order pairing of everything else in that direction is unsound.
+        trace = _Trace().idle()
+        trace.cycle(bvalid=1, bready=1, bresp=0)
+        trace.write(0x2000, 0x22)
+        trace.read(0x3000, 0x33)
+        out = trace.decode()
+
+        self.assertEqual(out["pairing"]["pre_window_traffic_observed"], ["write"])
+        writes = [t for t in out["transactions"] if t["kind"] == "write"]
+        reads = [t for t in out["transactions"] if t["kind"] == "read"]
+        self.assertIn("pairing_suspect", writes[-1]["flags"])
+        self.assertNotIn("pairing_suspect", reads[-1].get("flags", []))
+
+    def test_a_request_may_share_a_cycle_with_an_earlier_response(self):
+        # Pipelined slave: the second AW lands on the same cycle as the first
+        # transaction's B. The two must not get crossed.
+        trace = _Trace()
+        trace.cycle(awvalid=1, awready=1, awaddr=0xA0)
+        trace.cycle(wvalid=1, wready=1, wdata=0xAA, wstrb=0xF)
+        trace.cycle(awvalid=1, awready=1, awaddr=0xB0, bvalid=1, bready=1, bresp=0)
+        trace.cycle(wvalid=1, wready=1, wdata=0xBB, wstrb=0xF)
+        trace.cycle(bvalid=1, bready=1, bresp=0)
+        out = trace.decode()
+
+        self.assertEqual(
+            [(t["addr"], t["data"]) for t in out["transactions"]],
+            [("0x000000a0", "0x000000aa"), ("0x000000b0", "0x000000bb")],
+        )
+        self.assertEqual(out["anomaly_count"], 0)
+
     def test_counts_stall_cycles_before_each_handshake(self):
         trace = _Trace()
         trace.cycle(awvalid=1, awready=0, awaddr=0x10)
@@ -166,22 +217,16 @@ class AnomalyTests(unittest.TestCase):
         out = _Trace().idle().write(0x1002, 0x1).decode()
         self.assertIn("unaligned_address", out["transactions"][0]["flags"])
 
-    def test_a_response_at_the_window_start_is_not_called_a_violation(self):
-        # The request happened before the capture opened; that is the window's
-        # fault, not the bus's, and must not be reported as an error.
-        trace = _Trace()
-        trace.cycle(bvalid=1, bready=1, bresp=0)
-        txn = trace.decode()["transactions"][0]
+    def test_an_unmatched_response_reads_the_same_wherever_it_lands(self):
+        # A finite window cannot tell a pre-window request from a dropped
+        # one, so the cycle number must not change the verdict.
+        for lead in (0, 20):
+            with self.subTest(lead=lead):
+                trace = _Trace().idle(lead) if lead else _Trace()
+                trace.cycle(bvalid=1, bready=1, bresp=0)
+                txn = trace.decode()["transactions"][0]
 
-        self.assertIn("request_before_window", txn["flags"])
-        self.assertNotIn("unmatched_response", txn["flags"])
-
-    def test_a_response_mid_capture_with_no_request_is_a_violation(self):
-        trace = _Trace().idle(20)
-        trace.cycle(bvalid=1, bready=1, bresp=0)
-        txn = trace.decode()["transactions"][0]
-
-        self.assertIn("unmatched_response", txn["flags"])
+                self.assertEqual(txn["flags"], ["request_not_observed"])
 
     def test_clean_traffic_produces_no_anomalies(self):
         trace = _Trace().idle()
