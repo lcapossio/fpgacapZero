@@ -659,12 +659,18 @@ class RpcServer:
         else:
             raise ValueError(f"unsupported rpc format: {fmt}")
 
+        probe_defs = self._probe_defs(config)
+        if probe_defs:
+            # Echo the field map so consumers can slice samples without
+            # re-deriving it (the MCP sample pager names fields from this).
+            payload["probes"] = [
+                {"name": p.name, "width": p.width, "lsb": p.lsb} for p in probe_defs
+            ]
         if include_summary:
-            payload["summary"] = summarize(result, self._probe_defs(config))
+            payload["summary"] = summarize(result, probe_defs)
         if decode_axi_txns:
             # Only meaningful when the capture is actually an AXI monitor's;
             # the caller can ask unconditionally and get it when it applies.
-            probe_defs = self._probe_defs(config)
             if probe_defs and looks_like_axi(p.name for p in probe_defs):
                 payload["axi"] = decode_axi(result.samples, probe_defs)
         return payload

@@ -1087,6 +1087,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_axi_write_block",
                 "fcapz_axi_dump",
                 "fcapz_axi_transactions",
+                "fcapz_get_capture_samples",
                 "fcapz_uart_connect",
                 "fcapz_uart_close",
                 "fcapz_uart_send",
@@ -1285,6 +1286,137 @@ def _axi_capture_payload(count=5, anomalies=(1, 3)):
             "transactions": txns,
         },
     }
+
+
+def _sample_capture(count=6, width=9, pretrigger=2, probes=True):
+    payload = {
+        "ok": True,
+        "format": "json",
+        "result": {
+            "sample_width": width,
+            "pretrigger": pretrigger,
+            "samples": [
+                {"index": i, "value": (i & 0xFF) | ((i % 2) << 8)} for i in range(count)
+            ],
+        },
+    }
+    if probes:
+        payload["probes"] = [
+            {"name": "addr", "width": 8, "lsb": 0},
+            {"name": "flag", "width": 1, "lsb": 8},
+        ]
+    return payload
+
+
+class CaptureSamplePagingTests(unittest.TestCase):
+    def _session(self, payload=None):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture(payload if payload is not None else _sample_capture())
+        return session
+
+    def test_page_carries_the_context_needed_to_read_it(self):
+        page = self._session().capture_samples(start=0, count=3)
+
+        self.assertTrue(page["available"])
+        self.assertEqual(page["total"], 6)
+        self.assertEqual(page["count"], 3)
+        self.assertEqual(page["trigger_index"], 2)
+        self.assertEqual(page["sample_width"], 9)
+        self.assertEqual(page["next_start"], 3)
+        # Valid JSON on its own - the whole point versus byte chunks.
+        self.assertEqual(json.loads(json.dumps(page))["count"], 3)
+
+    def test_cursor_terminates_at_the_end(self):
+        page = self._session().capture_samples(start=4, count=10)
+        self.assertEqual(page["count"], 2)
+        self.assertIsNone(page["next_start"])
+
+    def test_named_fields_come_from_the_probe_map(self):
+        session = self._session()
+        page = session.capture_samples(count=2)
+
+        self.assertEqual(page["fields"], ["addr", "flag"])
+        self.assertEqual(page["samples"][1], {"index": 1, "addr": "0x1", "flag": "0x1"})
+
+    def test_fields_can_be_narrowed(self):
+        page = self._session().capture_samples(count=2, fields=["flag"])
+        self.assertEqual(page["fields"], ["flag"])
+        self.assertEqual(page["samples"][1], {"index": 1, "flag": "0x1"})
+
+    def test_empty_fields_returns_the_packed_value(self):
+        page = self._session().capture_samples(count=1, fields=[])
+        self.assertEqual(page["samples"][0], {"index": 0, "value": "0x0"})
+        self.assertNotIn("fields", page)
+
+    def test_unknown_field_names_are_rejected_with_the_available_set(self):
+        with self.assertRaisesRegex(ValueError, "unknown field.*nope"):
+            self._session().capture_samples(fields=["nope"])
+
+    def test_named_fields_without_a_probe_map_explain_themselves(self):
+        session = self._session(_sample_capture(probes=False))
+        with self.assertRaisesRegex(ValueError, "no probe map"):
+            session.capture_samples(fields=["addr"])
+        # But raw values still page fine.
+        self.assertEqual(session.capture_samples(count=1)["samples"][0]["value"], "0x0")
+
+    def test_radix_int_is_honoured_but_never_for_wide_values(self):
+        session = self._session()
+        self.assertEqual(
+            session.capture_samples(count=1, fields=[], radix="int")["samples"][0],
+            {"index": 0, "value": 0},
+        )
+        wide = (1 << 60) | 1
+        session._store_capture({
+            "ok": True,
+            "result": {"sample_width": 64, "pretrigger": 0,
+                       "samples": [{"index": 0, "value": wide}]},
+        })
+        # Requested int, but an exact JSON number is impossible here.
+        self.assertEqual(
+            session.capture_samples(count=1, radix="int")["samples"][0]["value"],
+            hex(wide),
+        )
+
+    def test_rejects_nonsense_arguments(self):
+        session = self._session()
+        with self.assertRaisesRegex(ValueError, "radix must be"):
+            session.capture_samples(radix="octal")
+        with self.assertRaisesRegex(ValueError, "start must be >= 0"):
+            session.capture_samples(start=-1)
+        with self.assertRaisesRegex(ValueError, "count must be > 0"):
+            session.capture_samples(count=0)
+
+    def test_page_size_is_capped(self):
+        session = self._session(_sample_capture(count=2000))
+        self.assertEqual(
+            session.capture_samples(count=10_000)["count"],
+            FcapzMcpSession._SAMPLES_MAX_PAGE,
+        )
+
+    def test_reports_unavailable_without_a_capture(self):
+        self.assertEqual(
+            FcapzMcpSession(rpc=FakeRpc()).capture_samples(), {"available": False}
+        )
+
+    def test_explains_itself_for_a_non_json_capture(self):
+        session = self._session({"ok": True, "format": "csv", "content": "1,2"})
+        result = session.capture_samples()
+
+        self.assertFalse(result["available"])
+        self.assertIn('format="json"', result["reason"])
+
+    def test_reads_hex_encoded_wide_samples_back(self):
+        # _store_capture hex-encodes wide values; paging must still slice them.
+        wide = 0xDEADBEEF_CAFEBABE_12345678_9ABCDEF0_11223344
+        session = self._session({
+            "ok": True,
+            "probes": [{"name": "low", "width": 32, "lsb": 0}],
+            "result": {"sample_width": 160, "pretrigger": 0,
+                       "samples": [{"index": 0, "value": wide}]},
+        })
+        page = session.capture_samples(count=1)
+
+        self.assertEqual(page["samples"][0]["low"], "0x11223344")
 
 
 class AxiTransactionToolTests(unittest.TestCase):

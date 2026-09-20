@@ -731,6 +731,141 @@ class FcapzMcpSession:
         return response
 
     _AXI_MAX_PAGE = 256
+    _SAMPLES_MAX_PAGE = 512
+
+    @staticmethod
+    def _capture_result(payload: JsonDict) -> JsonDict | None:
+        """The per-capture result block, for plain and segmented captures."""
+        result = payload.get("result")
+        if isinstance(result, dict) and "samples" in result:
+            return result
+        if isinstance(result, dict):
+            segments = result.get("segments")
+            if isinstance(segments, list) and segments:
+                return segments[0] if isinstance(segments[0], dict) else None
+        return None
+
+    @staticmethod
+    def _as_int(value: Any) -> int | None:
+        """Sample values are ints, or hex strings when too wide for JSON."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value, 16 if value.lower().startswith(("0x", "-0x")) else 10)
+            except ValueError:
+                return None
+        return None
+
+    def capture_samples(
+        self,
+        *,
+        start: int = 0,
+        count: int = 128,
+        fields: list[str] | None = None,
+        radix: str = "hex",
+    ) -> JsonDict:
+        """Page the cached capture's samples as whole, self-contained records.
+
+        Unlike the byte-chunked payload, each page is valid JSON on its own
+        and carries the context needed to read it (total, trigger_index).
+        """
+        if radix not in ("hex", "int"):
+            raise ValueError(f"radix must be 'hex' or 'int'; got {radix!r}")
+        cache = self._capture_cache  # one consistent snapshot for this call
+        if cache is None:
+            return {"available": False}
+        result = self._capture_result(cache.payload)
+        if result is None or not isinstance(result.get("samples"), list):
+            return {
+                "available": False,
+                "reason": (
+                    "the cached capture has no JSON sample list; capture with "
+                    'format="json" to page samples'
+                ),
+            }
+        start_i, count_i = int(start), int(count)
+        if start_i < 0:
+            raise ValueError("start must be >= 0")
+        if count_i <= 0:
+            raise ValueError("count must be > 0")
+        count_i = min(count_i, self._SAMPLES_MAX_PAGE)
+
+        probes = self._selected_probes(cache.payload, fields)
+        entries = result["samples"]
+        page = entries[start_i : start_i + count_i]
+        next_start = start_i + len(page)
+        sample_width = result.get("sample_width")
+        out: JsonDict = {
+            "available": True,
+            "total": len(entries),
+            "start": start_i,
+            "count": len(page),
+            "next_start": next_start if next_start < len(entries) else None,
+            "radix": radix,
+            "sample_width": sample_width,
+            # Index of the trigger sample: the pretrigger samples precede it.
+            "trigger_index": result.get("pretrigger"),
+            "samples": [self._render_sample(e, probes, radix) for e in page],
+        }
+        if probes is not None:
+            out["fields"] = [name for name, _, _ in probes]
+        return out
+
+    def _selected_probes(
+        self, payload: JsonDict, fields: list[str] | None
+    ) -> list[tuple[str, int, int]] | None:
+        """Resolve requested field names against the capture's probe map."""
+        if fields is not None and not fields:
+            # Explicitly empty: the caller wants the packed value, not fields.
+            return None
+        available = payload.get("probes")
+        if not isinstance(available, list) or not available:
+            if fields:
+                raise ValueError(
+                    "this capture carries no probe map, so named fields are "
+                    "unavailable; omit `fields` to read raw sample values"
+                )
+            return None
+        specs = {
+            str(p["name"]): (int(p["lsb"]), int(p["width"]))
+            for p in available
+            if isinstance(p, dict) and {"name", "lsb", "width"} <= set(p)
+        }
+        names = list(fields) if fields else list(specs)
+        unknown = [n for n in names if n not in specs]
+        if unknown:
+            raise ValueError(
+                f"unknown field(s): {', '.join(sorted(unknown))}; "
+                f"this capture has {', '.join(sorted(specs))}"
+            )
+        return [(n, specs[n][0], specs[n][1]) for n in names]
+
+    def _render_sample(
+        self, entry: Any, probes: list[tuple[str, int, int]] | None, radix: str
+    ) -> JsonDict:
+        if not isinstance(entry, dict):
+            return {"value": entry}
+        value = self._as_int(entry.get("value"))
+        out: JsonDict = {"index": entry.get("index")}
+        if value is None:
+            out["value"] = entry.get("value")
+            return out
+        if probes is None:
+            out["value"] = self._fmt(value, radix)
+            return out
+        for name, lsb, width in probes:
+            out[name] = self._fmt((value >> lsb) & ((1 << width) - 1), radix)
+        return out
+
+    @staticmethod
+    def _fmt(value: int, radix: str) -> Any:
+        # Wide values always go out as hex: a JSON number would round.
+        if radix == "int" and not _is_wide_int(value):
+            return value
+        return _hex_int(value)
 
     def axi_transactions(
         self,
@@ -1526,6 +1661,34 @@ def build_mcp_server(session: FcapzMcpSession):
         """
 
         return session.get_last_capture(max_bytes=max_bytes)
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_get_capture_samples(
+        start: int = 0,
+        count: int = 128,
+        fields: list[str] | None = None,
+        radix: str = "hex",
+    ) -> JsonDict:
+        """Page the cached capture's samples as whole records.
+
+        Prefer this over fcapz_get_last_capture_chunk for inspecting sample
+        data: each page is valid JSON on its own and carries `total` and
+        `trigger_index` (the index of the trigger sample), so a page can be
+        read without reassembling anything. The chunk tool remains for
+        exporting a whole payload verbatim, or for csv/vcd captures.
+
+        `fields` selects named signals from the capture's probe map (all of
+        them by default when the capture has one); omit the probe map and you
+        get the packed `value` instead. `radix` is "hex" (default) or "int" —
+        values too wide for an exact JSON number are always hex regardless.
+        Page with the returned `next_start` until it is null; `count` is
+        capped at 512. For an AXI monitor capture, prefer
+        fcapz_axi_transactions — transactions beat cycles for bus debugging.
+        """
+
+        return session.capture_samples(
+            start=start, count=count, fields=fields, radix=radix
+        )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
     def fcapz_axi_transactions(

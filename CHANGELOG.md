@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Structured capture paging.** `fcapz_get_capture_samples` returns whole
+  sample records — sliced into named fields from the capture's probe map, with
+  `total` and `trigger_index` on every page — so each page is valid JSON on
+  its own. The byte-chunk tool stays for verbatim export and csv/vcd
+  captures, where its chunks must be concatenated before any of it parses.
+  RPC `capture` now echoes the probe map alongside the samples, so any
+  consumer can slice fields without re-deriving the layout.
+
 - **AXI transaction decoding.** A host-side pass (`fcapz.decode_axi`)
   reassembles an AXI monitor capture from per-cycle samples into whole
   AXI4-Lite transactions: address, data, byte strobes, response, the cycle

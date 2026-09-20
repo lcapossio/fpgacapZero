@@ -189,6 +189,7 @@ same still-running worker guard applies.
 | `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
+| `fcapz_get_capture_samples` | always available | Page the cached capture's samples as whole records, with named fields from the probe map. See [Reading a Capture](#reading-a-capture). |
 | `fcapz_axi_transactions` | always available | Decoded AXI4-Lite transactions of the cached capture — paged, filterable by anomaly or read/write. See [AXI Transactions](#axi-transactions). |
 | `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
@@ -293,19 +294,44 @@ UTF-8 text. Passing both is rejected.
 Resource JSON is compact. MCP clients that display resources can pretty-print it
 locally.
 
+## Reading a Capture
+
 Large captures stay in memory until the next capture, `fcapz_close`, or
-`fcapz_drop_last_capture`. Resource-aware clients should prefer
-`fcapz://last-capture`; tool-only clients should prefer
-`fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow
-the byte `next_offset` until it is `null`. Chunks are UTF-8 JSON text and never
-split a multibyte character; callers must pass either `0` or a returned
-`next_offset`, because offsets in the middle of a UTF-8 character are rejected.
-`max_bytes` must leave room for at least one whole character (use `>= 4`); a
-window too small to fit the next character is rejected rather than returning an
-empty chunk that would never advance.
-`fcapz_get_last_capture` has a 1 MiB default guard and returns a compact
-truncation marker for larger captures unless `max_bytes=null` is passed as an
-explicit escape hatch.
+`fcapz_drop_last_capture`. There are three ways to read one, in order of
+preference:
+
+1. **`fcapz_axi_transactions`** — for an AXI monitor capture. Transactions
+   beat cycles for bus debugging; see [AXI Transactions](#axi-transactions).
+2. **`fcapz_get_capture_samples`** — for everything else. Returns whole
+   sample records, sliced into named fields from the capture's probe map,
+   with `total` and `trigger_index` on every page so a page can be read on
+   its own. Page with `next_start` until it is `null` (`count` caps at 512).
+   `fields` narrows the signals returned; `fields=[]` gives the packed value
+   instead. `radix` is `"hex"` (default) or `"int"`, and values too wide for
+   an exact JSON number stay hex either way.
+3. **`fcapz_get_last_capture_chunk`** — raw bytes of the whole payload. Use
+   it to export a capture verbatim, or for `csv`/`vcd` captures. It is a
+   transfer mechanism, not a reading one: chunks are not independently
+   parseable, so a caller must concatenate every chunk before any of it is
+   valid JSON, and the 64 KiB default is roughly 16k tokens of one capture.
+
+For scale, on a 4096-sample AXI capture: one byte chunk is ~18k tokens and
+covers under a quarter of the payload, while a 128-sample page with four
+named fields is ~2.7k tokens and complete in itself.
+
+Resource-aware clients may also read `fcapz://last-capture`, which injects
+the entire payload — fine for a small capture, not for a deep one.
+
+Chunking mechanics, when you do need the raw payload: call
+`fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow the byte
+`next_offset` until it is `null`. Chunks are UTF-8 JSON text and never split a
+multibyte character; pass either `0` or a returned `next_offset`, because
+offsets in the middle of a character are rejected. `max_bytes` must leave room
+for at least one whole character (use `>= 4`); a window too small to fit the
+next one is rejected rather than returning an empty chunk that would never
+advance. `fcapz_get_last_capture` has a 1 MiB default guard and returns a
+compact truncation marker for larger captures unless `max_bytes=null` is
+passed as an explicit escape hatch.
 
 ## AXI Transactions
 
@@ -415,8 +441,8 @@ Capture and then explicitly release the large payload:
 
 ```text
 fcapz_capture(config={"pretrigger": 64, "posttrigger": 4096}, timeout=10.0)
-fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)
-repeat with next_offset until null
+fcapz_get_capture_samples(start=0, count=128)
+repeat with next_start until null
 fcapz_drop_last_capture()
 fcapz_close()
 ```
