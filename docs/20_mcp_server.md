@@ -118,10 +118,11 @@ Both appear in `fcapz_status` under `capabilities` (`probe_root`,
 `allowed_hosts`) so an agent can see the policy rather than discover it by
 being refused.
 
-`--probe-root` confines the path, not the bytes: the server checks the
-resolved path and the RPC layer opens it a moment later, so anyone who can
-write inside the directory can swap the file (or an ancestor) for a symlink in
-between. Point `--probe-root` at a directory the agent cannot write to.
+`probe_file` is read once, by the MCP layer, and the probe map it contains
+is sent to the RPC layer inline as `probes` — the path itself never travels.
+So there is no second open to race: what was checked against `--probe-root` is
+what gets loaded. Values the file carries (`sample_width`, `sample_clock_hz`)
+remain defaults the caller's own `config` overrides, as before.
 
 Programming is intentionally `hw_server`-only in the MCP layer.
 

@@ -15,6 +15,7 @@ import binascii
 import importlib.metadata
 import math
 import os
+import stat
 import queue
 import json
 import sys
@@ -27,6 +28,7 @@ from typing import Any, Callable
 
 from ._version import __version__
 from .axi_decode import FAULT_FLAGS
+from .probes import load_probe_text
 from .rpc import _SCHEMA_VERSION, RpcServer
 
 
@@ -162,7 +164,11 @@ class _HardwareCommand:
     """
 
     req: JsonDict
-    commit: Callable[[JsonDict], Any]
+    commit: Callable[..., Any]
+    # Optional heavy derivation from the response (a capture's JSON snapshot),
+    # run on the owner thread *before* the lock is taken. Its result is handed
+    # to ``commit`` as a second argument.
+    prepare: Callable[[JsonDict], Any] | None = None
     reply: "queue.Queue[tuple[bool, object]]" = field(
         default_factory=lambda: queue.Queue(maxsize=1)
     )
@@ -299,6 +305,20 @@ class FcapzMcpSession:
         except BaseException as exc:  # noqa: BLE001 - relayed to the caller
             raw, failure = None, exc
 
+        # Response checking and any heavy derivation happen off the lock: they
+        # read only this response, and holding the hardware lock through a
+        # megabyte of json.dumps would stall fcapz_status and delay a
+        # concurrent caller's "busy" reply for exactly as long.
+        checked: JsonDict | None = None
+        prepared: Any = None
+        if failure is None:
+            try:
+                checked = self._ok_response(raw)  # type: ignore[arg-type]
+                if cmd.prepare is not None:
+                    prepared = cmd.prepare(checked)
+            except BaseException as exc:  # noqa: BLE001
+                failure = exc
+
         with self._rpc_lock:
             if cmd.state == _CommandState.ABANDONED:
                 # The watchdog already gave up and told the caller so. Do not
@@ -310,8 +330,12 @@ class FcapzMcpSession:
                     outcome: tuple[bool, object] = (False, failure)
                 else:
                     try:
-                        checked = self._ok_response(raw)  # type: ignore[arg-type]
-                        outcome = (True, cmd.commit(checked))
+                        outcome = (
+                            True,
+                            cmd.commit(checked, prepared)
+                            if cmd.prepare is not None
+                            else cmd.commit(checked),
+                        )
                     except BaseException as exc:  # noqa: BLE001
                         outcome = (False, exc)
                 cmd.state = _CommandState.COMMITTED
@@ -369,14 +393,23 @@ class FcapzMcpSession:
         return timer
 
     def _rpc_call(
-        self, req: JsonDict, commit: Callable[[JsonDict], Any] | None = None
+        self,
+        req: JsonDict,
+        commit: Callable[..., Any] | None = None,
+        prepare: Callable[[JsonDict], Any] | None = None,
     ) -> Any:
         """Run one hardware command on the owner thread and commit it atomically.
 
         ``commit`` runs on the owner thread with the hardware still held, and
         its return value is what this call returns (default: the response).
+        ``prepare`` runs first, without the lock, for work too expensive to do
+        under it; its result becomes ``commit``'s second argument.
         """
-        cmd = _HardwareCommand(req=req, commit=commit or (lambda response: response))
+        cmd = _HardwareCommand(
+            req=req,
+            commit=commit or (lambda response: response),
+            prepare=prepare,
+        )
         name = str(req.get("cmd"))
         with self._rpc_lock:
             if self._poisoned:
@@ -709,11 +742,10 @@ class FcapzMcpSession:
             + " (start it with --allow-host HOST to permit another)"
         )
 
-    def _validated_probe_file(self, probe_file: object) -> str:
+    def _confined_probe_path(self, probe_file: object) -> Path:
         """Keep `probe_file` from becoming an arbitrary server-side file read.
 
-        The RPC layer opens whatever path it is handed. Require an explicit
-        --probe-root, and keep the path inside it.
+        Require an explicit --probe-root, and keep the path inside it.
         """
         path = Path(str(probe_file)).expanduser()
         root = self.capabilities.probe_root
@@ -733,7 +765,55 @@ class FcapzMcpSession:
             )
         if not resolved.is_file():
             raise ValueError(f"probe file {resolved} does not exist")
-        return str(resolved)
+        return resolved
+
+    def _inlined_probe_file(self, config: JsonDict) -> JsonDict:
+        """Replace `probe_file` with the probe map it names.
+
+        Handing the RPC layer a path meant the file was checked here and
+        opened there, a queue hop and a thread handoff later: anyone able to
+        write inside --probe-root could swap the file, or an ancestor, in
+        between and have different content loaded than was approved. Reading
+        it once, here, removes the second open altogether.
+        """
+        if config.get("probes") is not None:
+            raise ValueError("probes and probe_file are mutually exclusive")
+        resolved = self._confined_probe_path(config["probe_file"])
+        parsed = load_probe_text(self._read_confined(resolved), source=resolved)
+
+        inlined = {k: v for k, v in config.items() if k != "probe_file"}
+        inlined["probes"] = [
+            {"name": spec.name, "width": spec.width, "lsb": spec.lsb}
+            for spec in parsed.probes
+        ]
+        # The file's values are defaults the caller may override, which is
+        # what RPC did when it loaded the file itself.
+        if parsed.sample_width is not None and "sample_width" not in config:
+            inlined["sample_width"] = parsed.sample_width
+        if parsed.sample_clock_hz is not None and "sample_clock_hz" not in config:
+            inlined["sample_clock_hz"] = parsed.sample_clock_hz
+        return inlined
+
+    @staticmethod
+    def _read_confined(resolved: Path) -> str:
+        """Read an already-approved path, and check it stayed the same file.
+
+        ``resolved`` carries no symlink components as of the check above, so a
+        swap has to land in the microseconds before this open. Comparing the
+        opened file's identity against the path afterwards catches that.
+        """
+        with open(resolved, encoding="utf-8") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError(f"probe file {resolved} is not a regular file")
+            text = handle.read()
+        after = os.stat(resolved)
+        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+            raise PermissionError(
+                f"probe file {resolved} was replaced while it was being read; "
+                "refusing to use it"
+            )
+        return text
 
     def _validated_capture_config(self, config: JsonDict | None) -> JsonDict | None:
         if not config:
@@ -742,7 +822,7 @@ class FcapzMcpSession:
         if unknown:
             raise ValueError(f"unsupported capture config field(s): {', '.join(unknown)}")
         if config.get("probe_file") is not None:
-            config = {**config, "probe_file": self._validated_probe_file(config["probe_file"])}
+            config = self._inlined_probe_file(config)
         return config
 
     def _validated_program_path(self, program: str | None, *, backend: str) -> Path | None:
@@ -1191,8 +1271,14 @@ class FcapzMcpSession:
             )
         return seconds
 
-    def _store_capture(self, response: JsonDict) -> JsonDict:
-        """Cache a capture readout as one immutable snapshot; return its summary."""
+    @classmethod
+    def _prepare_capture(cls, response: JsonDict) -> _CaptureCache:
+        """Build the capture snapshot. Expensive, and needs no lock.
+
+        Runs on the owner thread before the hardware lock is taken, so a
+        multi-megabyte capture does not serialize with everyone else's status
+        polls or delay a concurrent caller's "busy" reply.
+        """
         # Make wide sample values survive a JS client's JSON.parse before the
         # payload is serialized or cached (see _encode_wide_ints).
         response, encoded = _encode_wide_ints(response)
@@ -1200,17 +1286,22 @@ class FcapzMcpSession:
             response["value_encoding"] = "hex"
         json_text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
         json_bytes = json_text.encode("utf-8")
-        summary = self._capture_summary(response)
-        # Publish every derived view at once with a single assignment so a
-        # concurrent reader never sees a half-updated cache (see _CaptureCache).
-        self._capture_cache = _CaptureCache(
+        return _CaptureCache(
             payload=response,
             json_text=json_text,
             json_bytes=json_bytes,
             size_bytes=len(json_bytes),
-            summary=summary,
+            summary=cls._capture_summary(response),
         )
-        return dict(summary)
+
+    def _commit_capture(self, _response: JsonDict, cache: _CaptureCache) -> JsonDict:
+        """Publish a prepared snapshot with one assignment (see _CaptureCache)."""
+        self._capture_cache = cache
+        return dict(cache.summary)
+
+    def _store_capture(self, response: JsonDict) -> JsonDict:
+        """Prepare and publish in one step, for callers outside the owner."""
+        return self._commit_capture(response, self._prepare_capture(response))
 
     def capture(
         self,
@@ -1243,7 +1334,9 @@ class FcapzMcpSession:
         config = self._validated_capture_config(config)
         if config:
             req = {**config, **req}
-        return self._rpc_call(req, commit=self._store_capture)
+        return self._rpc_call(
+            req, commit=self._commit_capture, prepare=self._prepare_capture
+        )
 
     def capture_wait(
         self,
@@ -1266,7 +1359,9 @@ class FcapzMcpSession:
         if segments:
             req["segments"] = True
         try:
-            return self._rpc_call(req, commit=self._store_capture)
+            return self._rpc_call(
+                req, commit=self._commit_capture, prepare=self._prepare_capture
+            )
         except McpWatchdogTimeout:
             # The watchdog abandoned the worker — a real fault, not "still
             # waiting". Let it propagate so the caller stops polling.
@@ -1547,6 +1642,10 @@ class FcapzMcpSession:
         return self._rpc_call({"cmd": "uart_status"})
 
     def status(self) -> JsonDict:
+        # Everything is read under one hold of the lock. Commits run under it
+        # too, so this cannot straddle one and report a busy slot alongside
+        # the connection flags from after that command landed -- a state the
+        # session was never actually in.
         with self._rpc_lock:
             active_rpc_cmd = self._active_rpc_cmd
             rpc_busy = active_rpc_cmd is not None
@@ -1556,7 +1655,13 @@ class FcapzMcpSession:
                 session_state = "busy"
             else:
                 session_state = "ready"
-        cache = self._capture_cache  # one consistent snapshot
+            return self._status_snapshot(session_state, rpc_busy, active_rpc_cmd)
+
+    def _status_snapshot(
+        self, session_state: str, rpc_busy: bool, active_rpc_cmd: str | None
+    ) -> JsonDict:
+        """Render the status body. Caller holds ``_rpc_lock``."""
+        cache = self._capture_cache
         return {
             "mcp_server_version": self._server_version(),
             "rpc_schema_version": self.last_rpc_schema_version,

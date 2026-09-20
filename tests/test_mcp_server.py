@@ -1591,11 +1591,21 @@ class HostAllowlistTests(unittest.TestCase):
 class ProbeFileRootTests(unittest.TestCase):
     """`probe_file` opens a path on the server, so it needs a root."""
 
+    PROBE_JSON = json.dumps({
+        "format": "fpgacapzero.probes.v1",
+        "sample_width": 12,
+        "sample_clock_hz": 50_000_000,
+        "probes": [
+            {"name": "addr", "width": 8, "lsb": 0},
+            {"name": "flag", "width": 1, "lsb": 8},
+        ],
+    })
+
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.root = Path(self._dir.name)
         self.probe = self.root / "axi.prob"
-        self.probe.write_text("{}", encoding="utf-8")
+        self.probe.write_text(self.PROBE_JSON, encoding="utf-8")
         self.addCleanup(self._dir.cleanup)
 
     def _session(self, **caps):
@@ -1605,13 +1615,42 @@ class ProbeFileRootTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "--probe-root"):
             self._session().capture(config={"probe_file": str(self.probe)})
 
-    def test_allowed_inside_the_root(self):
+    def test_the_probe_map_is_sent_inline_not_as_a_path(self):
+        # RPC used to re-open the path a queue hop later, so what was checked
+        # here and what was loaded there could differ.
         session = self._session(probe_root=self.root)
         session.capture(config={"probe_file": "axi.prob"})
+        req = session.rpc.requests[-1]
+
+        self.assertNotIn("probe_file", req)
         self.assertEqual(
-            Path(session.rpc.requests[-1]["probe_file"]).resolve(),
-            self.probe.resolve(),
+            req["probes"],
+            [
+                {"name": "addr", "width": 8, "lsb": 0},
+                {"name": "flag", "width": 1, "lsb": 8},
+            ],
         )
+        self.assertEqual(req["sample_width"], 12)
+        self.assertEqual(req["sample_clock_hz"], 50_000_000)
+
+    def test_the_caller_still_overrides_the_file(self):
+        session = self._session(probe_root=self.root)
+        session.capture(config={"probe_file": "axi.prob", "sample_width": 16})
+        self.assertEqual(session.rpc.requests[-1]["sample_width"], 16)
+
+    def test_probes_and_probe_file_cannot_both_be_given(self):
+        session = self._session(probe_root=self.root)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            session.capture(config={
+                "probe_file": "axi.prob",
+                "probes": [{"name": "a", "width": 1, "lsb": 0}],
+            })
+
+    def test_a_file_that_is_not_a_probe_map_is_refused_here(self):
+        (self.root / "junk.prob").write_text("{}", encoding="utf-8")
+        session = self._session(probe_root=self.root)
+        with self.assertRaisesRegex(ValueError, "unsupported probe file format"):
+            session.capture(config={"probe_file": "junk.prob"})
 
     def test_escaping_the_root_is_refused(self):
         session = self._session(probe_root=self.root)

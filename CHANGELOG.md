@@ -21,6 +21,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`probe_file` is read once, where it is checked.** The MCP layer validated
+  the path and the RPC layer opened it a queue hop later, so anyone able to
+  write inside `--probe-root` could swap the file — or an ancestor — in
+  between and have different content loaded than was approved. The probe map
+  is now read in the MCP layer and passed inline as `probes`; there is no
+  second open to race.
+
+- **Capture snapshots are built off the hardware lock.** A multi-megabyte
+  capture ran its `json.dumps` while holding the lock every other caller
+  needs, delaying `fcapz_status` and a concurrent caller's `busy` reply for
+  as long as it took. Commands may now carry a `prepare` step that runs
+  before the lock is taken; only the single publishing assignment is inside
+  it. `fcapz_status` likewise reads its whole body under one hold, so it can
+  no longer report a busy slot beside connection flags from after that
+  command committed.
+
 - **AXI decoding no longer invents pairings it cannot justify.** A response
   is never matched to a request handshaking on the same sampled cycle (AXI
   forbids a combinational VALID-to-VALID path, so it belongs to an earlier
