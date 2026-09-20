@@ -54,6 +54,90 @@ class ProbeEntry(TypedDict):
     lsb: int
 
 
+# ---------------------------------------------------------------------------
+# Result shapes.
+#
+# A declared outputSchema is not documentation: FastMCP validates the return
+# against it and drops anything the schema does not name from
+# `structuredContent`. So only the payloads this module builds end to end are
+# typed here. Everything else is an RPC response passed through verbatim --
+# its keys vary with backend and core revision, and naming a subset would
+# quietly delete the rest for any client reading structured output. Those
+# tools keep an open `JsonDict` on purpose.
+# ---------------------------------------------------------------------------
+
+
+# Every field of these is always present. An optional TypedDict field is not
+# actually optional on the wire: FastMCP dumps the validated model, so an
+# absent field comes back as an injected null anyway -- and is advertised with
+# a `"default": null` that contradicts its own declared type. One complete
+# shape is both honest and easier to consume than two.
+
+
+class SamplePage(TypedDict):
+    """One page of `fcapz_get_capture_samples`."""
+
+    available: bool
+    reason: str | None
+    total: int
+    start: int
+    count: int
+    next_start: int | None
+    radix: SampleRadix
+    sample_width: int | None
+    trigger_index: int | None
+    # Sample records are shaped by the capture's probe map, so they stay open.
+    samples: list[dict[str, Any]]
+    segments: int | None
+    fields: list[str] | None
+
+
+class AxiTransactionPage(TypedDict):
+    """One page of `fcapz_axi_transactions`."""
+
+    available: bool
+    reason: str | None
+    total: int
+    start: int
+    count: int
+    next_start: int | None
+    filters: dict[str, Any] | None
+    transactions: list[dict[str, Any]]
+
+
+class CaptureChunk(TypedDict):
+    """One byte window of `fcapz_get_last_capture_chunk`."""
+
+    available: bool
+    reason: str | None
+    encoding: str | None
+    offset: int
+    max_bytes: int | None
+    size_bytes: int
+    chunk: str
+    next_offset: int | None
+    eof: bool
+
+
+class SessionStatus(TypedDict):
+    """Everything `fcapz_status` reports. Every field is always present."""
+
+    mcp_server_version: str | None
+    rpc_schema_version: str | None
+    session_state: Literal["ready", "busy", "poisoned"]
+    rpc_busy: bool
+    active_rpc_cmd: str | None
+    connected: bool
+    eio_connected: bool
+    axi_connected: bool
+    uart_connected: bool
+    capabilities: dict[str, Any]
+    last_probe: dict[str, Any] | None
+    last_capture_summary: dict[str, Any] | None
+    last_capture_size_bytes: int | None
+    last_eio_read: dict[str, Any] | None
+
+
 class CaptureConfigDict(TypedDict, total=False):
     """Capture fields an agent may set.
 
@@ -1012,7 +1096,7 @@ class FcapzMcpSession:
         count: int = 128,
         fields: list[str] | None = None,
         radix: SampleRadix = "hex",
-    ) -> JsonDict:
+    ) -> SamplePage:
         """Page the cached capture's samples as whole, self-contained records.
 
         Unlike the byte-chunked payload, each page is valid JSON on its own
@@ -1022,16 +1106,14 @@ class FcapzMcpSession:
             raise ValueError(f"radix must be 'hex' or 'int'; got {radix!r}")
         cache = self._capture_cache  # one consistent snapshot for this call
         if cache is None:
-            return {"available": False}
+            return self._empty_sample_page(radix, None)
         results = self._capture_results(cache.payload)
         if not results:
-            return {
-                "available": False,
-                "reason": (
-                    "the cached capture has no JSON sample list; capture with "
-                    'format="json" to page samples'
-                ),
-            }
+            return self._empty_sample_page(
+                radix,
+                "the cached capture has no JSON sample list; capture with "
+                'format="json" to page samples',
+            )
         start_i, count_i = int(start), int(count)
         if start_i < 0:
             raise ValueError("start must be >= 0")
@@ -1056,7 +1138,7 @@ class FcapzMcpSession:
             rendered.append(sample)
 
         first = results[0]
-        out: JsonDict = {
+        out: SamplePage = {
             "available": True,
             "total": len(entries),
             "start": start_i,
@@ -1070,12 +1152,29 @@ class FcapzMcpSession:
                 None if multi else self._trigger_index(first, len(entries))
             ),
             "samples": rendered,
+            "reason": None,
+            "segments": len(results) if multi else None,
+            "fields": [name for name, _, _ in probes] if probes is not None else None,
         }
-        if multi:
-            out["segments"] = len(results)
-        if probes is not None:
-            out["fields"] = [name for name, _, _ in probes]
         return out
+
+    @staticmethod
+    def _empty_sample_page(radix: SampleRadix, reason: str | None) -> SamplePage:
+        """A page with nothing in it, in the same shape as a full one."""
+        return {
+            "available": False,
+            "reason": reason,
+            "total": 0,
+            "start": 0,
+            "count": 0,
+            "next_start": None,
+            "radix": radix,
+            "sample_width": None,
+            "trigger_index": None,
+            "samples": [],
+            "segments": None,
+            "fields": None,
+        }
 
     @staticmethod
     def _trigger_index(result: JsonDict, sample_count: int) -> int | None:
@@ -1175,7 +1274,7 @@ class FcapzMcpSession:
         count: int = 64,
         only_anomalies: bool = False,
         kind: TransactionKind | None = None,
-    ) -> JsonDict:
+    ) -> AxiTransactionPage:
         """Page the decoded AXI transactions of the cached capture.
 
         Returns whole transactions, so every page is valid on its own — unlike
@@ -1184,16 +1283,13 @@ class FcapzMcpSession:
         """
         cache = self._capture_cache  # one consistent snapshot for this call
         if cache is None:
-            return {"available": False}
+            return self._empty_axi_page(None)
         sections = self._axi_sections(cache.payload)
         if not sections:
-            return {
-                "available": False,
-                "reason": (
-                    "the cached capture carries no AXI decode; capture with an "
-                    "AXI monitor probe map (fcapz_list_cores shows the monitor)"
-                ),
-            }
+            return self._empty_axi_page(
+                "the cached capture carries no AXI decode; capture with an "
+                "AXI monitor probe map (fcapz_list_cores shows the monitor)"
+            )
         if kind not in (None, "read", "write"):
             raise ValueError(f"kind must be 'read' or 'write'; got {kind!r}")
         start_i, count_i = int(start), int(count)
@@ -1220,6 +1316,7 @@ class FcapzMcpSession:
         next_start = start_i + len(page)
         return {
             "available": True,
+            "reason": None,
             "total": len(selected),
             "start": start_i,
             "count": len(page),
@@ -1228,15 +1325,40 @@ class FcapzMcpSession:
             "transactions": page,
         }
 
+    @staticmethod
+    def _empty_axi_page(reason: str | None) -> AxiTransactionPage:
+        """A page with nothing in it, in the same shape as a full one."""
+        return {
+            "available": False,
+            "reason": reason,
+            "total": 0,
+            "start": 0,
+            "count": 0,
+            "next_start": None,
+            "filters": None,
+            "transactions": [],
+        }
+
     def get_last_capture_chunk(
         self,
         *,
         offset: int = 0,
         max_bytes: int = _DEFAULT_CAPTURE_CHUNK_BYTES,
-    ) -> JsonDict:
+    ) -> CaptureChunk:
         cache = self._capture_cache  # one consistent snapshot for this call
         if cache is None:
-            return {"available": False}
+            return {
+                "available": False,
+                "reason": "no capture is cached",
+                "encoding": None,
+                "offset": 0,
+                "max_bytes": None,
+                "size_bytes": 0,
+                "chunk": "",
+                "next_offset": None,
+                # True so a paging loop stops rather than retrying forever.
+                "eof": True,
+            }
         offset_i = int(offset)
         max_bytes_i = int(max_bytes)
         if offset_i < 0:
@@ -1265,6 +1387,7 @@ class FcapzMcpSession:
             )
         return {
             "available": True,
+            "reason": None,
             "encoding": "json-utf8",
             "offset": start,
             "max_bytes": max_bytes_i,
@@ -1672,7 +1795,7 @@ class FcapzMcpSession:
     def uart_status(self) -> JsonDict:
         return self._rpc_call({"cmd": "uart_status"})
 
-    def status(self) -> JsonDict:
+    def status(self) -> SessionStatus:
         # Everything is read under one hold of the lock. Commits run under it
         # too, so this cannot straddle one and report a busy slot alongside
         # the connection flags from after that command landed -- a state the
@@ -1690,7 +1813,7 @@ class FcapzMcpSession:
 
     def _status_snapshot(
         self, session_state: str, rpc_busy: bool, active_rpc_cmd: str | None
-    ) -> JsonDict:
+    ) -> SessionStatus:
         """Render the status body. Caller holds ``_rpc_lock``."""
         cache = self._capture_cache
         return {
@@ -2048,7 +2171,7 @@ def build_mcp_server(session: FcapzMcpSession):
         count: int = 128,
         fields: list[str] | None = None,
         radix: SampleRadix = "hex",
-    ) -> JsonDict:
+    ) -> SamplePage:
         """Page the cached capture's samples as whole records.
 
         Prefer this over fcapz_get_last_capture_chunk for inspecting sample
@@ -2076,7 +2199,7 @@ def build_mcp_server(session: FcapzMcpSession):
         count: int = 64,
         only_anomalies: bool = False,
         kind: TransactionKind | None = None,
-    ) -> JsonDict:
+    ) -> AxiTransactionPage:
         """Read the cached capture as AXI transactions instead of raw samples.
 
         Reassembles the per-cycle AXI4-Lite bus trace into whole transactions:
@@ -2107,7 +2230,7 @@ def build_mcp_server(session: FcapzMcpSession):
     def fcapz_get_last_capture_chunk(
         offset: int = 0,
         max_bytes: int = _DEFAULT_CAPTURE_CHUNK_BYTES,
-    ) -> JsonDict:
+    ) -> CaptureChunk:
         """Return a bounded JSON text chunk of the cached capture payload.
 
         Use this for large captures when the client has no MCP resource support.
@@ -2418,7 +2541,7 @@ def build_mcp_server(session: FcapzMcpSession):
         return session.uart_status()
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
-    def fcapz_status() -> JsonDict:
+    def fcapz_status() -> SessionStatus:
         """Return current MCP server session status."""
 
         return session.status()

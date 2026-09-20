@@ -263,6 +263,16 @@ an integer, because a value wider than 53 bits cannot survive a JSON number.
 The session still validates everything it is given — the schema is the
 client's contract, not the server's guarantee.
 
+Four tools declare an `outputSchema` as well: `fcapz_get_capture_samples`,
+`fcapz_axi_transactions`, `fcapz_get_last_capture_chunk`, and `fcapz_status`.
+Those are the payloads this server builds end to end, and each returns one
+fixed shape — every field is always present, `null` where it does not apply,
+so a caller never has to branch on which keys exist. Everything else is an
+RPC response passed through verbatim and stays deliberately open: a declared
+schema is not documentation, it is a filter, and MCP drops any field the
+schema does not name from `structuredContent`. Naming a subset of an RPC
+response would silently delete the rest.
+
 Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 
 | Key | Meaning |

@@ -27,6 +27,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   of tool surface in the default profile, and buys client-side rejection of
   values that previously needed a round trip to refuse.
 
+- **Four MCP tools declare a real `outputSchema`.**
+  `fcapz_get_capture_samples`, `fcapz_axi_transactions`,
+  `fcapz_get_last_capture_chunk` and `fcapz_status` now publish their result
+  shape instead of `{"additionalProperties": true}`, and each returns one
+  fixed shape — every field always present, `null` where it does not apply —
+  so a caller never branches on which keys exist. The remaining tools pass an
+  RPC response through verbatim and stay open on purpose: MCP drops any field
+  an `outputSchema` does not name, so declaring a subset of a response whose
+  keys vary by backend and core would silently delete the rest.
+
 ### Fixed
 
 - **`probe_file` is read once, where it is checked.** The MCP layer validated

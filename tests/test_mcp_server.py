@@ -19,6 +19,7 @@ import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
     CaptureConfigDict,
     FcapzMcpError,
+    SessionStatus,
     _CommandState,
     _HardwareCommand,
     FcapzMcpSession,
@@ -1609,6 +1610,95 @@ class TypedToolSchemaTests(unittest.TestCase):
         )
 
 
+class OutputSchemaTests(unittest.TestCase):
+    """A declared outputSchema deletes whatever it does not name."""
+
+    @staticmethod
+    def _loaded_session():
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({
+            "ok": True,
+            "format": "json",
+            "probes": [{"name": "awaddr", "width": 8, "lsb": 0}],
+            "result": {
+                "sample_width": 9,
+                "pretrigger": 1,
+                "posttrigger": 1,
+                "samples": [{"index": i, "value": i} for i in range(3)],
+            },
+            "axi": {
+                "transactions": [
+                    {"index": 0, "kind": "write", "addr": "0x4", "flags": []}
+                ]
+            },
+        })
+        return session
+
+    def test_status_reports_exactly_what_its_schema_declares(self):
+        # Add a status field without adding it here and FastMCP would drop it
+        # from structuredContent, silently, for every client.
+        session = FcapzMcpSession(rpc=FakeRpc())
+        self.assertEqual(
+            set(session.status()), set(SessionStatus.__annotations__)
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_typed_tools_lose_nothing_on_the_way_out(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        app = build_mcp_server(self._loaded_session())
+        calls = [
+            ("fcapz_get_capture_samples", {"count": 2}),
+            ("fcapz_get_capture_samples", {"count": 2, "fields": ["awaddr"]}),
+            ("fcapz_axi_transactions", {}),
+            ("fcapz_get_last_capture_chunk", {"max_bytes": 40}),
+            ("fcapz_status", {}),
+        ]
+        for name, args in calls:
+            with self.subTest(tool=name, args=args):
+                content, structured = asyncio.run(app.call_tool(name, args))
+                self.assertEqual(json.loads(content[0].text), structured)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_the_empty_shapes_survive_too(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        # Nothing cached: these return {"available": false} alone.
+        app = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        for name in (
+            "fcapz_get_capture_samples",
+            "fcapz_axi_transactions",
+            "fcapz_get_last_capture_chunk",
+        ):
+            with self.subTest(tool=name):
+                content, structured = asyncio.run(app.call_tool(name, {}))
+                self.assertEqual(json.loads(content[0].text), structured)
+                self.assertIs(structured["available"], False)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_rpc_passthrough_tools_stay_open(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        # Their keys vary with backend and core revision. Naming a subset
+        # would delete the rest from structuredContent, so they must not be
+        # narrowed -- this guards against someone "finishing the job".
+        app = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        tools = {tool.name: tool for tool in asyncio.run(app.list_tools())}
+        typed = {
+            "fcapz_get_capture_samples",
+            "fcapz_axi_transactions",
+            "fcapz_get_last_capture_chunk",
+            "fcapz_status",
+        }
+        for name, tool in tools.items():
+            if name in typed:
+                self.assertNotIn("additionalProperties", tool.outputSchema, name)
+            else:
+                self.assertTrue(
+                    tool.outputSchema.get("additionalProperties"), name
+                )
+
+
 class HostAllowlistTests(unittest.TestCase):
     """`host` reaches a network client, so it must not be wide open."""
 
@@ -1783,7 +1873,7 @@ class CaptureSamplePagingTests(unittest.TestCase):
     def test_empty_fields_returns_the_packed_value(self):
         page = self._session().capture_samples(count=1, fields=[])
         self.assertEqual(page["samples"][0], {"index": 0, "value": "0x0"})
-        self.assertNotIn("fields", page)
+        self.assertIsNone(page["fields"])
 
     def test_unknown_field_names_are_rejected_with_the_available_set(self):
         with self.assertRaisesRegex(ValueError, "unknown field.*nope"):
@@ -1832,7 +1922,21 @@ class CaptureSamplePagingTests(unittest.TestCase):
 
     def test_reports_unavailable_without_a_capture(self):
         self.assertEqual(
-            FcapzMcpSession(rpc=FakeRpc()).capture_samples(), {"available": False}
+            FcapzMcpSession(rpc=FakeRpc()).capture_samples(),
+            {
+                "available": False,
+                "reason": None,
+                "total": 0,
+                "start": 0,
+                "count": 0,
+                "next_start": None,
+                "radix": "hex",
+                "sample_width": None,
+                "trigger_index": None,
+                "samples": [],
+                "segments": None,
+                "fields": None,
+            },
         )
 
     def test_explains_itself_for_a_non_json_capture(self):
@@ -1946,7 +2050,19 @@ class AxiTransactionToolTests(unittest.TestCase):
 
     def test_reports_unavailable_without_a_capture(self):
         session = FcapzMcpSession(rpc=FakeRpc())
-        self.assertEqual(session.axi_transactions(), {"available": False})
+        self.assertEqual(
+            session.axi_transactions(),
+            {
+                "available": False,
+                "reason": None,
+                "total": 0,
+                "start": 0,
+                "count": 0,
+                "next_start": None,
+                "filters": None,
+                "transactions": [],
+            },
+        )
 
     def test_explains_itself_when_the_capture_is_not_axi(self):
         session = self._session({"ok": True, "result": {"samples": []}})
