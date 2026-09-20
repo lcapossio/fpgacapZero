@@ -63,6 +63,39 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A wedged backend no longer kills the MCP session for the rest of the
+  process.** The JTAG owner is a single thread, and `RpcServer` published no
+  abort hook, so the watchdog could only mark a call abandoned and hope the
+  backend returned. When it never did — `xsdb` staying alive but silent left
+  `_send` in a `readline()` with no deadline — the owner stayed in that call
+  forever, nothing was left to clear the poison flag, and every later
+  hardware command was refused. `RpcServer.cancel_active` now aborts the
+  transports the session holds, and the XSDB transport reads its responses
+  through a queued reader with a deadline (`FCAPZ_XSDB_TIMEOUT`, default
+  60 s; `fpga -file` gets its own) that kills the process rather than
+  waiting on it, the same shape `quartus_stp` already used. Measured against
+  a backend that never returns: previously poisoned indefinitely, now ready
+  again in ~0.3 s.
+
+- **A cancel can no longer abort the wrong command.** `cancel_active` stops
+  whatever the session currently holds, so a watchdog past its grace window
+  or a recovery nudge firing as reconciliation completes could reach through
+  a finished command into the next one. The check and the abort now happen
+  together under the session lock. The same window made the watchdog re-read
+  a command's state outside the lock, fall through when the owner had
+  reconciled in between, and surface a bare `queue.Empty` instead of the
+  watchdog error.
+
+- **`probe_file` confinement no longer loses the swap race.** A path was
+  approved, opened, then re-checked by stat'ing the *same path* — which
+  follows the same newly planted link and agrees with itself, so a name
+  swapped for a link between the two was accepted. The file must now sit
+  directly in `--probe-root`, which makes the lookup verifiable: `openat`
+  with `O_NOFOLLOW` where the platform has it, and otherwise an identity
+  comparison between what was inspected and what was opened. Hard links and
+  files over 1 MiB are refused, and a missing file now reports `not_found`
+  rather than `invalid_argument`.
+
 - **A capture that stored only some cycles is no longer read as AXI.**
   Reassembly treats a sample's position as its bus cycle and pairs each
   response with the oldest queued request; decimation and storage

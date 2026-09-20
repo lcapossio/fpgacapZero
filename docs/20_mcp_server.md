@@ -98,7 +98,7 @@ also disables capture-side actions that change ELA state.
 | `--allow-axi-write` | `fcapz_axi_write`, `fcapz_axi_write_block` |
 | `--allow-uart-send` | `fcapz_uart_send` |
 | `--allow-program --bitfile-root DIR` | `fcapz_connect(program=...)` for `.bit` files under `DIR` |
-| `--probe-root DIR` | Capture config `probe_file` may read probe maps under `DIR` |
+| `--probe-root DIR` | Capture config `probe_file` may read a probe map sitting directly in `DIR` |
 | `--allow-host HOST` | A backend may connect to `HOST` as well as loopback (repeatable) |
 
 `--read-only` cannot be combined with any write/program enable flag.
@@ -123,6 +123,26 @@ is sent to the RPC layer inline as `probes` — the path itself never travels.
 So there is no second open to race: what was checked against `--probe-root` is
 what gets loaded. Values the file carries (`sample_width`, `sample_clock_hz`)
 remain defaults the caller's own `config` overrides, as before.
+
+The name must be a **file directly inside `--probe-root`** — not a
+subdirectory, not a path climbing out of it, and not a link. This is a
+security boundary, not housekeeping. Whoever can write inside the root is
+trusted with the *contents* of a probe map and nothing more, so they must
+not be able to turn it into a read of anything else, and checking a path
+before opening it does not achieve that: a name swapped for a link in
+between is followed by the open and by any re-check of the same path, which
+then agree with each other and approve it.
+
+With one component the lookup is verifiable. Where the platform has
+`openat`/`O_NOFOLLOW` the file is opened relative to a descriptor already
+held for the root, so nothing about the path can be reinterpreted and a link
+fails the open outright. Elsewhere (Windows, which has no directory handles
+to open relative to) the file is inspected and then opened, and the two
+identities are compared — a link already in place is refused, and a swap in
+between makes them disagree. A file with more than one hard link is refused
+either way: its entry looks ordinary and its identity is stable, but the
+bytes can belong to a file outside the root. Probe files are also capped at
+1 MiB.
 
 Programming is intentionally `hw_server`-only in the MCP layer.
 
@@ -286,7 +306,7 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `depth` | Capture depth in samples. |
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
-| `probe_file` | Path to a probe definition file. |
+| `probe_file` | Name of a probe definition file directly inside `--probe-root`. |
 | `channel` | Capture channel or runtime probe mux channel. |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
