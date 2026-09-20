@@ -8,7 +8,6 @@ import io
 import importlib.util
 import json
 import tempfile
-from pathlib import Path
 import threading
 import time
 import unittest
