@@ -16,6 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fcapz.mcp_server as mcp_server
+from fcapz.analyzer import CaptureNotReady
+from fcapz.axi_decode import PAIRING_ASSUMPTION
+from fcapz.rpc import NotConnectedError, NotEnabledError, RpcError
 from fcapz.mcp_server import (
     AxiTransactionPage,
     CaptureChunk,
@@ -400,14 +403,28 @@ class FcapzMcpSessionTests(unittest.TestCase):
     def test_capture_wait_timeout_returns_still_armed(self):
         class ArmedWaitingRpc:
             def handle(self, req):
-                # The RPC-side wait expired but returned control cleanly.
-                raise TimeoutError("capture did not complete within timeout")
+                # The one expected timeout: the trigger has not fired and the
+                # core is still armed.
+                raise CaptureNotReady("capture did not complete within timeout")
 
         session = FcapzMcpSession(rpc=ArmedWaitingRpc())
         result = session.capture_wait(timeout=0.5)
         self.assertEqual(
             result, {"ok": True, "triggered": False, "still_armed": True}
         )
+
+    def test_a_transport_timeout_is_not_reported_as_still_armed(self):
+        # A readback that timed out may have left the link wedged. Calling
+        # that "still armed" sends the caller into a poll loop against a
+        # session that will never answer, so only CaptureNotReady -- the
+        # analyzer's "trigger has not fired" -- is treated as data.
+        class WedgedRpc:
+            def handle(self, req):
+                raise TimeoutError("hw_server read timed out")
+
+        session = FcapzMcpSession(rpc=WedgedRpc())
+        with self.assertRaisesRegex(TimeoutError, "hw_server read timed out"):
+            session.capture_wait(timeout=0.5)
 
     def test_uart_send_rejects_invalid_base64(self):
         session = FcapzMcpSession(
@@ -1749,11 +1766,20 @@ class ErrorCodeTests(unittest.TestCase):
             (PermissionError("nope"), "not_permitted"),
             (FileNotFoundError("gone"), "not_found"),
             (McpWatchdogTimeout("abandoned"), "watchdog_timeout"),
+            (CaptureNotReady("trigger has not fired"), "capture_not_ready"),
             (TimeoutError("slow"), "timeout"),
             (ValueError("bad arg"), "invalid_argument"),
             (FcapzMcpError("ela not connected"), "not_connected"),
             (FcapzMcpError("readback mismatch"), "hardware_error"),
             (FcapzMcpError("busy", code="busy"), "busy"),
+            # Raised by RpcServer.handle, which the MCP layer calls in
+            # process: these arrive as themselves, not as an {"ok": false}
+            # envelope, and used to be classified "internal" -- telling the
+            # agent its own first-call mistake was a bug in this server.
+            (NotConnectedError("not connected"), "not_connected"),
+            (NotEnabledError("OpenOCD launching is not enabled"), "not_permitted"),
+            (RpcError("not configured"), "hardware_error"),
+            (ConnectionError("hw_server went away"), "hardware_error"),
             (KeyError("oops"), "internal"),
         ]
         for exc, expected in cases:
@@ -2286,6 +2312,8 @@ class AxiTransactionToolTests(unittest.TestCase):
                 "count": 0,
                 "next_start": None,
                 "filters": None,
+                "pairing": None,
+                "sampling": None,
                 "transactions": [],
             },
         )
@@ -2314,6 +2342,167 @@ class AxiTransactionToolTests(unittest.TestCase):
         rpc = FakeRpc()
         FcapzMcpSession(rpc=rpc).capture()
         self.assertTrue(rpc.requests[-1]["decode_axi"])
+
+
+@unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+class ToolCallGuardTests(unittest.TestCase):
+    """Everything that can fail a tool call arrives as one coded object.
+
+    Two failures never reach a tool body: a misspelled argument and a value
+    the schema rejects. Both are validated by FastMCP before the function
+    runs, so the per-tool `_coded` wrapper cannot see them.
+    """
+
+    class _RecordingRpc:
+        def __init__(self):
+            self.requests = []
+
+        def handle(self, req):
+            self.requests.append(dict(req))
+            return {"ok": True}
+
+    def _app(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        self.rpc = self._RecordingRpc()
+        return build_mcp_server(FcapzMcpSession(rpc=self.rpc))
+
+    def _failure(self, tool, arguments):
+        app = self._app()
+        with self.assertRaises(Exception) as caught:
+            asyncio.run(app.call_tool(tool, arguments))
+        return json.loads(str(caught.exception))
+
+    def test_a_misspelled_config_field_is_rejected_not_dropped(self):
+        # Pydantic validates a TypedDict by filtering, so without
+        # extra="forbid" this ran a default capture and reported success.
+        body = self._failure(
+            "fcapz_capture", {"config": {"pretrigger": 3, "posttriger": 9}}
+        )
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertIn("posttriger", body["message"])
+        self.assertEqual(self.rpc.requests, [], "the capture must not have run")
+
+    def test_a_misspelled_tool_argument_is_rejected_not_dropped(self):
+        body = self._failure("fcapz_capture", {"formatt": "csv"})
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertIn("formatt", body["message"])
+        self.assertEqual(self.rpc.requests, [])
+
+    def test_a_value_outside_the_schema_is_coded(self):
+        body = self._failure("fcapz_connect", {"backend": "nonsense"})
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertFalse(body["retryable"])
+        self.assertIn("action", body)
+
+    def test_an_unpublished_tool_is_coded(self):
+        body = self._failure("fcapz_no_such_tool", {})
+
+        self.assertEqual(body["code"], "unknown_tool")
+        self.assertIn("list the tools again", body["action"])
+
+    def test_every_failure_body_carries_the_tool_name(self):
+        for tool, args in (
+            ("fcapz_capture", {"formatt": "csv"}),
+            ("fcapz_connect", {"backend": "nonsense"}),
+        ):
+            with self.subTest(tool=tool, args=args):
+                self.assertEqual(self._failure(tool, args)["tool"], tool)
+
+    def test_a_good_call_is_untouched(self):
+        app = self._app()
+        asyncio.run(app.call_tool("fcapz_capture", {"format": "csv", "timeout": 1.0}))
+        self.assertEqual(self.rpc.requests[0]["format"], "csv")
+
+    def test_a_real_rpc_refusal_is_not_reported_as_an_internal_bug(self):
+        # RpcServer raises its own exceptions rather than returning an
+        # envelope, which is the path production actually takes.
+        from fcapz.mcp_server import build_mcp_server
+        from fcapz.rpc import RpcServer
+
+        app = build_mcp_server(FcapzMcpSession(rpc=RpcServer()))
+        with self.assertRaises(Exception) as caught:
+            asyncio.run(app.call_tool("fcapz_probe", {}))
+        body = json.loads(str(caught.exception))
+
+        self.assertEqual(body["code"], "not_connected")
+        self.assertTrue(body["retryable"])
+        self.assertNotIn("bug", body["action"])
+
+
+class AxiPairingDisclosureTests(unittest.TestCase):
+    """Every page of transactions carries the caveat, not just the first."""
+
+    def _session_with(self, axi):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({"ok": True, "axi": axi})
+        return session
+
+    @staticmethod
+    def _axi(transactions, pre_window=(), sampling=None):
+        return {
+            "protocol": "axi4lite",
+            "addr_width": 32,
+            "data_width": 32,
+            "decoded": True,
+            "unavailable_reason": None,
+            "sampling": sampling
+            or {"decimation": 0, "storage_qualified": False, "contiguous": True},
+            "transaction_count": len(transactions),
+            "write_count": len(transactions),
+            "read_count": 0,
+            "error_count": 0,
+            "anomaly_count": 0,
+            "flagged_count": 0,
+            "max_latency": None,
+            "pairing": {
+                "method": "in-order",
+                "assumes": PAIRING_ASSUMPTION,
+                "pre_window_traffic_observed": list(pre_window),
+                "pre_window_traffic_proven": bool(pre_window),
+            },
+            "transactions": transactions,
+        }
+
+    def _rows(self, n):
+        return [{"index": i, "kind": "write", "addr": f"0x{i:08x}"} for i in range(n)]
+
+    def test_a_clean_decode_still_states_the_assumption(self):
+        session = self._session_with(self._axi(self._rows(3)))
+        page = session.axi_transactions()
+
+        self.assertEqual(page["pairing"]["assumes"], PAIRING_ASSUMPTION)
+        self.assertFalse(page["pairing"]["pre_window_traffic_proven"])
+
+    def test_the_caveat_is_on_the_last_page_too(self):
+        session = self._session_with(self._axi(self._rows(5)))
+        last = session.axi_transactions(start=4, count=2)
+
+        self.assertEqual(last["count"], 1)
+        self.assertEqual(last["pairing"]["assumes"], PAIRING_ASSUMPTION)
+
+    def test_detected_pre_window_traffic_reaches_the_page(self):
+        session = self._session_with(self._axi(self._rows(2), pre_window=["read"]))
+        page = session.axi_transactions()
+
+        self.assertEqual(page["pairing"]["pre_window_traffic_observed"], ["read"])
+        self.assertTrue(page["pairing"]["pre_window_traffic_proven"])
+
+    def test_the_sampling_provenance_reaches_the_page(self):
+        sampling = {"decimation": 4, "storage_qualified": False, "contiguous": False}
+        session = self._session_with(self._axi(self._rows(1), sampling=sampling))
+
+        self.assertEqual(session.axi_transactions()["sampling"], sampling)
+
+    def test_the_headline_carries_it_as_well(self):
+        session = self._session_with(self._axi(self._rows(2), pre_window=["write"]))
+        summary = session.status()["last_capture_summary"]
+
+        self.assertEqual(summary["axi"]["pairing"]["pre_window_traffic_observed"],
+                         ["write"])
 
 
 if __name__ == "__main__":

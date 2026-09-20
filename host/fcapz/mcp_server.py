@@ -27,21 +27,44 @@ from threading import RLock
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Optional
+
+try:
+    from pydantic import ConfigDict, ValidationError
+except ImportError:  # pragma: no cover - no SDK installed
+    ConfigDict = dict  # type: ignore[assignment,misc]
+
+    class ValidationError(Exception):  # type: ignore[no-redef]
+        pass
 
 try:
     # pydantic -- and so the MCP tool schema -- refuses typing.TypedDict on
     # Python < 3.12, and the project supports 3.10. typing_extensions ships
     # with pydantic, so it is there whenever a schema is actually built; the
     # fallback only keeps this module importable without the MCP extra.
-    from typing_extensions import TypedDict
+    from typing_extensions import NotRequired, TypedDict
 except ImportError:  # pragma: no cover - no SDK installed
     from typing import TypedDict
 
+    # typing.NotRequired is 3.11+, and this branch has to stay importable on
+    # 3.10. Nothing evaluates the annotation without pydantic, so the name
+    # only has to exist.
+    try:
+        from typing import NotRequired  # type: ignore[attr-defined]
+    except ImportError:
+        NotRequired = Optional  # type: ignore[assignment,misc]
+
 from ._version import __version__
-from .axi_decode import FAULT_FLAGS
+from .analyzer import CaptureNotReady
+from .axi_decode import FAULT_FLAGS, PAIRING_ASSUMPTION
 from .probes import load_probe_text
-from .rpc import _SCHEMA_VERSION, RpcServer
+from .rpc import (
+    _SCHEMA_VERSION,
+    NotConnectedError,
+    NotEnabledError,
+    RpcError,
+    RpcServer,
+)
 
 
 JsonDict = dict[str, Any]
@@ -63,7 +86,9 @@ class ProbeEntry(TypedDict):
 
     name: str
     width: int
-    lsb: int
+    # Optional: the probe parser defaults it to 0 (rpc._parse_probes).
+    # Declaring it required would reject a map the CLI and web UI accept.
+    lsb: NotRequired[int]
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +139,16 @@ class AxiTransactionPage(TypedDict):
     count: int
     next_start: int | None
     filters: dict[str, Any] | None
+    # On every page, not just the first, and not only when the trace happened
+    # to prove the assumption false. AXI4-Lite has no transaction IDs, so a
+    # window that opened mid-transaction yields addresses that look perfectly
+    # ordinary and are wrong. A reader who is shown the rows without the
+    # caveat has no way to know that.
+    pairing: dict[str, Any] | None
+    # How the capture was taken, when it decides what can be reconstructed
+    # (decimation and storage qualification drop cycles, and with them
+    # handshakes). Null when no decode is cached.
+    sampling: dict[str, Any] | None
     transactions: list[dict[str, Any]]
 
 
@@ -158,7 +193,16 @@ class CaptureConfigDict(TypedDict, total=False):
     rejection afterwards. Bit vectors accept a base-prefixed string as well as
     an integer, because a value wider than 53 bits cannot survive a JSON
     number in a JavaScript client.
+
+    `extra="forbid"` is load-bearing, not tidiness. Pydantic validates a
+    TypedDict by *filtering*: without it `{"posttriger": 9}` is dropped before
+    the call is made, the capture runs with the default posttrigger, the
+    session's own unknown-key check never sees the typo, and the agent is
+    told it succeeded. Forbidding extras puts `additionalProperties: false`
+    in the published schema and names the offending field instead.
     """
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
 
     pretrigger: int
     posttrigger: int
@@ -252,6 +296,11 @@ _ERROR_ACTIONS: dict[str, tuple[bool, str]] = {
         "the board session was torn down; call fcapz_connect again before "
         "retrying",
     ),
+    "capture_not_ready": (
+        True,
+        "the trigger has not fired yet and the core is still armed; keep "
+        "polling with fcapz_capture_wait, or widen the trigger",
+    ),
     "timeout": (
         True,
         "the wait expired without the hardware finishing; retry with a larger "
@@ -265,6 +314,11 @@ _ERROR_ACTIONS: dict[str, tuple[bool, str]] = {
     ),
     "invalid_argument": (False, "fix the argument named in the message"),
     "not_found": (False, "check the path; it does not exist on the server"),
+    "unknown_tool": (
+        False,
+        "this server does not publish that tool; list the tools again -- the "
+        "surface depends on which capability flags the operator enabled",
+    ),
     "hardware_error": (
         True,
         "the board or backend rejected the command; check the connection and "
@@ -272,6 +326,10 @@ _ERROR_ACTIONS: dict[str, tuple[bool, str]] = {
     ),
     "internal": (False, "report this; it is a bug in fcapz-mcp"),
 }
+
+
+class UnknownToolError(LookupError):
+    """A call for a tool this server does not publish."""
 
 
 class McpWatchdogTimeout(TimeoutError):
@@ -395,26 +453,54 @@ class _CaptureCache:
 
 
 def _error_code(exc: BaseException) -> str:
-    """Classify a failure into one of the codes callers can act on."""
+    """Classify a failure into one of the codes callers can act on.
+
+    The RPC layer is called in-process, so its exceptions arrive as
+    themselves rather than as an ``{"ok": false}`` envelope. Both routes are
+    classified here: an ordinary "not connected" must read the same whichever
+    way it came, and must never be reported as an internal bug.
+    """
     if isinstance(exc, PermissionError):
         return "not_permitted"
     if isinstance(exc, FileNotFoundError):
         return "not_found"
+    if isinstance(exc, UnknownToolError):
+        return "unknown_tool"
+    if isinstance(exc, NotEnabledError):
+        return "not_permitted"
+    if isinstance(exc, NotConnectedError):
+        return "not_connected"
     if isinstance(exc, McpWatchdogTimeout):
         return "watchdog_timeout"
+    if isinstance(exc, CaptureNotReady):
+        return "capture_not_ready"
     if isinstance(exc, TimeoutError):
         return "timeout"
     if isinstance(exc, FcapzMcpError):
         if exc.code:
             return exc.code
-        # An RPC refusal. "not connected" is the one worth separating: it is
-        # the common first-call mistake and has an obvious remedy.
-        if "not connected" in str(exc).lower():
+        # An RPC refusal relayed as an envelope. "not connected" is the one
+        # worth separating: the common first-call mistake, obvious remedy.
+        if _reads_as_not_connected(exc):
             return "not_connected"
         return "hardware_error"
+    if isinstance(exc, ValidationError):
+        # Argument validation, raised by the schema before the tool ran.
+        return "invalid_argument"
     if isinstance(exc, ValueError):
         return "invalid_argument"
+    if isinstance(exc, (RpcError, ConnectionError, OSError)):
+        # The board or the backend refused, or the link failed. Not a bug in
+        # this server, and retrying after a reconnect can work.
+        return "hardware_error"
+    if _reads_as_not_connected(exc):
+        return "not_connected"
     return "internal"
+
+
+def _reads_as_not_connected(exc: BaseException) -> bool:
+    """Last-resort match for a backend that reports it in prose only."""
+    return "not connected" in str(exc).lower()
 
 
 def _coded_error(exc: BaseException) -> Exception:
@@ -437,7 +523,47 @@ def _coded_error(exc: BaseException) -> Exception:
         rpc_error = detail.get("error")
         if rpc_error is not None:
             body["detail"] = rpc_error
-    return type(exc)(json.dumps(body, ensure_ascii=False, sort_keys=True))
+    text = json.dumps(body, ensure_ascii=False, sort_keys=True)
+    try:
+        # Preserve the class where we can: callers (and tests) catch by type.
+        coded = type(exc)(text)
+    except Exception:  # noqa: BLE001
+        # Not every exception takes a single message argument -- pydantic's
+        # ValidationError does not. The body is what has to survive.
+        coded = FcapzMcpError(text)
+    # So the call_tool seam can tell an already-coded failure from one that
+    # never reached a tool body, and pass the former through untouched.
+    coded._fcapz_coded = body  # type: ignore[attr-defined]
+    return coded
+
+
+def _coded_body(exc: BaseException) -> JsonDict | None:
+    """The coded body already attached somewhere in this exception's chain."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        body = getattr(cur, "_fcapz_coded", None)
+        if isinstance(body, dict):
+            return body
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _coded_call_failure(name: str, exc: BaseException) -> JsonDict:
+    """One coded body for any failure of a tool call, however it arose.
+
+    Two things can fail: the tool body, already coded by :func:`_coded`, and
+    argument validation, which runs *before* the body and would otherwise
+    reach the agent as pydantic prose with no code, no ``retryable`` and no
+    remedy. Both end up here so a client can parse one shape unconditionally.
+    """
+    body = _coded_body(exc)
+    if body is None:
+        cause = exc.__cause__ or exc.__context__ or exc
+        coded = _coded_error(cause)
+        body = getattr(coded, "_fcapz_coded")
+    return {**body, "tool": name}
 
 
 def _coded(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -1492,6 +1618,14 @@ class FcapzMcpSession:
         Returns whole transactions, so every page is valid on its own — unlike
         the byte-chunked raw payload, which has to be concatenated before it
         parses.
+
+        Read `pairing` on every page before trusting an address. AXI4-Lite has
+        no transaction IDs, so responses are matched to requests in order;
+        that is only right if nothing was already outstanding when the window
+        opened, which a finite trace cannot prove. `only_anomalies` keeps the
+        transactions the bus got wrong (an error response, a misaligned
+        address) -- not the ones clipped by the window's edges, which are
+        flagged but legal.
         """
         cache = self._capture_cache  # one consistent snapshot for this call
         if cache is None:
@@ -1534,8 +1668,37 @@ class FcapzMcpSession:
             "count": len(page),
             "next_start": next_start if next_start < len(selected) else None,
             "filters": {"only_anomalies": only_anomalies, "kind": kind},
+            "pairing": self._merged_pairing(sections),
+            "sampling": self._merged_sampling(sections),
             "transactions": page,
         }
+
+    @staticmethod
+    def _merged_pairing(
+        sections: list[tuple[int | None, JsonDict]],
+    ) -> dict[str, Any]:
+        """The pairing caveat for a page, across every segment it drew from."""
+        observed: set[str] = set()
+        for _, section in sections:
+            pairing = section.get("pairing")
+            if isinstance(pairing, dict):
+                observed.update(pairing.get("pre_window_traffic_observed") or ())
+        return {
+            "method": "in-order",
+            "assumes": PAIRING_ASSUMPTION,
+            "pre_window_traffic_observed": sorted(observed),
+            "pre_window_traffic_proven": bool(observed),
+        }
+
+    @staticmethod
+    def _merged_sampling(
+        sections: list[tuple[int | None, JsonDict]],
+    ) -> dict[str, Any] | None:
+        for _, section in sections:
+            sampling = section.get("sampling")
+            if isinstance(sampling, dict):
+                return dict(sampling)
+        return None
 
     @staticmethod
     def _empty_axi_page(reason: str | None) -> AxiTransactionPage:
@@ -1548,6 +1711,8 @@ class FcapzMcpSession:
             "count": 0,
             "next_start": None,
             "filters": None,
+            "pairing": None,
+            "sampling": None,
             "transactions": [],
         }
 
@@ -1732,10 +1897,15 @@ class FcapzMcpSession:
             # The watchdog abandoned the worker — a real fault, not "still
             # waiting". Let it propagate so the caller stops polling.
             raise
-        except TimeoutError:
-            # The RPC-side wait expired but returned cleanly: the trigger simply
-            # has not fired and the core is still armed. The documented poll
-            # loop treats this as normal, so report it as data, not an error.
+        except CaptureNotReady:
+            # The one expected timeout: the trigger has not fired and the core
+            # is still armed. The documented poll loop treats this as normal,
+            # so report it as data, not an error.
+            #
+            # Deliberately NOT `except TimeoutError`. A timeout raised by the
+            # transport while reading status or sample data means the link may
+            # be wedged; calling that "still armed" sends the agent into a
+            # poll loop against a session that will never answer.
             return {"ok": True, "triggered": False, "still_armed": True}
 
     def capture_status(self) -> JsonDict:
@@ -2145,6 +2315,21 @@ class FcapzMcpSession:
             sec.get("max_latency") for _, sec in sections if sec.get("max_latency") is not None
         ]
         totals["max_latency"] = max(latencies) if latencies else None
+        totals["flagged_count"] = sum(
+            int(sec.get("flagged_count") or 0) for _, sec in sections
+        )
+        # The counts above are the first thing an agent reads about a
+        # capture, so the caveat travels with them rather than waiting for
+        # the first page of transactions.
+        totals["pairing"] = FcapzMcpSession._merged_pairing(sections)
+        totals["sampling"] = FcapzMcpSession._merged_sampling(sections)
+        undecodable = [
+            sec.get("unavailable_reason")
+            for _, sec in sections
+            if sec.get("decoded") is False and sec.get("unavailable_reason")
+        ]
+        if undecodable:
+            totals["unavailable_reason"] = undecodable[0]
         totals["hint"] = (
             "decoded AXI transactions are available via fcapz_axi_transactions"
         )
@@ -2223,13 +2408,71 @@ def build_mcp_server(session: FcapzMcpSession):
 
     try:
         from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp.exceptions import ToolError
     except ImportError as exc:
         raise RuntimeError(
             "The MCP SDK is required for `fcapz-mcp`. Install with "
             "`pip install fpgacapzero[mcp]` or `pip install mcp`."
         ) from exc
 
-    mcp = FastMCP("fpgacapZero")
+    class _CodedFastMCP(FastMCP):
+        """FastMCP whose every tool failure is one machine-readable object.
+
+        Each tool body is already wrapped in :func:`_coded`, but two things
+        happen outside it. Argument validation runs *before* the body, so a
+        wrong enum or an unknown config field failed as pydantic prose with
+        no code and no remedy. And FastMCP prefixes whatever the body raised
+        with "Error executing tool <name>: ", so even a coded failure did not
+        arrive as parseable JSON. Overriding the one seam above validation
+        and below the protocol fixes both, and adds the tool's name to the
+        body where it is a field rather than a prefix.
+
+        The handler is bound at construction, so this has to be a subclass;
+        rebinding `call_tool` on the instance afterwards would not be seen.
+        """
+
+        # Accepted argument names per tool, read once from the published
+        # schema. Registration is done before the first call, so this never
+        # goes stale.
+        _accepted: dict[str, frozenset[str]] = {}
+
+        def _reject_unknown_arguments(
+            self, name: str, arguments: dict[str, Any] | None
+        ) -> None:
+            """Fail a misspelled argument instead of running without it.
+
+            Pydantic ignores unknown keys when validating a tool's argument
+            model, so `fcapz_capture(formatt="csv")` used to run a default
+            capture and report success. The nested config has
+            `extra="forbid"`, but the model FastMCP generates from the
+            function signature is not ours to configure, so the check lives
+            here.
+            """
+            known = self._accepted.get(name)
+            if known is None:
+                tool = self._tool_manager.get_tool(name)
+                if tool is None:
+                    raise UnknownToolError(f"unknown tool: {name}")
+                known = frozenset(tool.parameters.get("properties") or ())
+                self._accepted[name] = known
+            unknown = sorted(set(arguments or ()) - known)
+            if unknown:
+                raise ValueError(
+                    f"{name} has no argument(s) {', '.join(unknown)}; "
+                    f"it accepts: {', '.join(sorted(known)) or '(none)'}"
+                )
+
+        async def call_tool(self, name, arguments):  # type: ignore[override]
+            try:
+                self._reject_unknown_arguments(name, arguments)
+                return await super().call_tool(name, arguments)
+            except Exception as exc:
+                body = _coded_call_failure(name, exc)
+                raise ToolError(
+                    json.dumps(body, ensure_ascii=False, sort_keys=True)
+                ) from exc
+
+    mcp = _CodedFastMCP("fpgacapZero")
 
     def tool(*, requires: bool = True, **annotations: Any):
         """Register a tool, unless its capability is switched off.
