@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import functools
 import importlib.metadata
 import inspect
@@ -696,9 +697,8 @@ class FcapzMcpSession:
         Wait-bearing commands (``capture``/``capture_wait``/``uart_recv``) carry
         their own ``timeout``; the watchdog must outlast it. Otherwise a caller
         that legitimately waits longer than ``rpc_timeout_sec`` for a trigger
-        would trip the watchdog, orphan the still-running worker, and — because
-        the real RPC layer has no ``cancel_active`` — wedge the whole session
-        behind the "previous call still running" guard until it self-heals.
+        would trip the watchdog, orphan the still-running worker, and force a
+        teardown-and-reconnect on a call that was only ever going to be slow.
 
         The extra headroom on top of the caller's own ``timeout`` is a full
         ``rpc_timeout_sec`` window, not a small constant: the RPC call also has
@@ -801,7 +801,7 @@ class FcapzMcpSession:
         # Teardown runs on this thread, so a transport that blocks here would
         # wedge the owner for good. Give the abort hook a second chance from a
         # timer thread rather than trusting the close to return on its own.
-        nudge = self._recovery_nudge()
+        nudge = self._recovery_nudge(cmd)
         try:
             self.rpc.handle({"cmd": "close"})
         except Exception as exc:  # noqa: BLE001 - best effort teardown
@@ -819,19 +819,46 @@ class FcapzMcpSession:
             self._poisoned = False
             cmd.state = _CommandState.RECONCILED
 
-    def _recovery_nudge(self) -> "threading.Timer | None":
-        """Arm a delayed second abort in case the teardown close hangs."""
+    def _cancel_for(self, cmd: _HardwareCommand, name: str, step: str) -> None:
+        """Abort the backend, but only while ``cmd`` still owns the hardware.
+
+        ``cancel_active`` is not command-scoped -- it aborts whatever the RPC
+        session currently holds. Called a moment too late it reaches straight
+        through a finished command and kills the one that started after it,
+        which for a watchdog whose grace window has expired, or for a nudge
+        timer that fires just as recovery completes, is a real ordering.
+
+        The check and the abort are therefore one step under ``_rpc_lock``:
+        while it is held the owner cannot advance this command and
+        ``_rpc_call`` cannot admit the next one. Holding it across the abort
+        is safe and deliberate -- the blocked owner thread does not take this
+        lock until its RPC call returns, and a transport's ``cancel`` only
+        closes a handle or kills a child. It can hold the lock for as long as
+        that takes (a second or two at worst), which is the price of not
+        cancelling the wrong command.
+        """
         cancel = getattr(self.rpc, "cancel_active", None)
         if not callable(cancel):
-            return None
-
-        def _again() -> None:
+            return
+        with self._rpc_lock:
+            if cmd.state not in (_CommandState.PENDING, _CommandState.ABANDONED):
+                # Committed or reconciled: whatever is on the hardware now is
+                # not ours to abort.
+                return
             try:
                 cancel()
             except Exception as exc:  # noqa: BLE001
-                self._emit_rpc_error("recover_nudge", "close", exc)
+                self._emit_rpc_error(step, name, exc)
 
-        timer = threading.Timer(self.capabilities.rpc_cancel_grace_sec, _again)
+    def _recovery_nudge(self, cmd: _HardwareCommand) -> "threading.Timer | None":
+        """Arm a delayed second abort in case the teardown close hangs."""
+        if not callable(getattr(self.rpc, "cancel_active", None)):
+            return None
+        timer = threading.Timer(
+            self.capabilities.rpc_cancel_grace_sec,
+            self._cancel_for,
+            args=(cmd, "close", "recover_nudge"),
+        )
         timer.daemon = True
         timer.start()
         return timer
@@ -887,18 +914,23 @@ class FcapzMcpSession:
         self, cmd: _HardwareCommand, name: str, timeout: float
     ) -> Any:
         """Decide what to do about a command that outran its watchdog."""
-        cancel = getattr(self.rpc, "cancel_active", None)
-        if callable(cancel):
+        if callable(getattr(self.rpc, "cancel_active", None)):
             # A transport that can abort: stop it, then give it the grace
             # window to unwind. The result is not trustworthy either way.
+            #
+            # The decision is taken once, under the lock, from the state this
+            # thread just wrote. Re-reading `cmd.state` outside it was a race:
+            # the owner can reconcile an abandoned command in between, and the
+            # reader would then see neither PENDING nor ABANDONED, fall
+            # through, and call `reply.get_nowait()` on a command that
+            # reconciliation never posts a reply for -- surfacing as a bare
+            # queue.Empty instead of the watchdog error.
             with self._rpc_lock:
-                if cmd.state == _CommandState.PENDING:
+                abandoned = cmd.state == _CommandState.PENDING
+                if abandoned:
                     cmd.state = _CommandState.ABANDONED
-            if cmd.state == _CommandState.ABANDONED:
-                try:
-                    cancel()
-                except Exception as exc:  # noqa: BLE001
-                    self._emit_rpc_error("cancel_active", name, exc)
+            if abandoned:
+                self._cancel_for(cmd, name, "cancel_active")
                 cmd.done.wait(self.capabilities.rpc_cancel_grace_sec)
                 if self._reconciled(cmd):
                     raise McpWatchdogTimeout(
@@ -922,7 +954,17 @@ class FcapzMcpSession:
                 if not ok:
                     raise value  # type: ignore[misc]
                 return value
-        ok, value = cmd.reply.get_nowait()
+        try:
+            ok, value = cmd.reply.get_nowait()
+        except queue.Empty:
+            # Belt and braces. Every path above either raises or leaves a
+            # reply behind, but an empty queue here must still read as the
+            # watchdog firing rather than as an internal error.
+            raise McpWatchdogTimeout(
+                f"fcapz RPC call {name!r} timed out after {timeout:g}s and left "
+                "no result; the board session was torn down — reconnect before "
+                "retrying"
+            ) from None
         if not ok:
             raise value  # type: ignore[misc]
         return value
@@ -1195,12 +1237,24 @@ class FcapzMcpSession:
             + " (start it with --allow-host HOST to permit another)"
         )
 
-    def _confined_probe_path(self, probe_file: object) -> Path:
-        """Keep `probe_file` from becoming an arbitrary server-side file read.
+    def _confined_probe_path(self, probe_file: object) -> tuple[Path, str]:
+        """Split `probe_file` into the allowed root and one name inside it.
 
-        Require an explicit --probe-root, and keep the path inside it.
+        Purely lexical -- nothing here touches the filesystem. Resolving the
+        path would follow links, and a check made on a followed path is a
+        check on whatever that path named at that instant, which is exactly
+        what the opener then has to re-establish. :meth:`_open_confined`
+        does the lookup itself, refusing to follow rather than trusting.
+
+        `--probe-root` names a directory of probe maps, not a tree: the file
+        has to sit directly in it. That is not tidiness. With one component
+        the only name an attacker can swap is the file's own, and an open
+        that refuses links plus an identity check closes that completely --
+        on every platform. Allow a subdirectory and the check has to walk,
+        and a walk without directory handles (Windows has none to give) can
+        be redirected between two of its own steps, which is precisely the
+        hole this replaces.
         """
-        path = Path(str(probe_file)).expanduser()
         root = self.capabilities.probe_root
         if root is None:
             raise PermissionError(
@@ -1208,17 +1262,26 @@ class FcapzMcpSession:
                 "disabled; start fcapz-mcp with --probe-root DIR to allow it, "
                 "or pass the probe definitions inline via `probes`"
             )
+        # The root is the operator's own command-line argument, not a
+        # caller's, so resolving it once is safe and lets an absolute
+        # argument be compared against it.
         root_resolved = root.expanduser().resolve()
-        if not path.is_absolute():
-            path = root_resolved / path
-        resolved = path.resolve()
-        if resolved != root_resolved and root_resolved not in resolved.parents:
+        path = Path(str(probe_file)).expanduser()
+        parent, name = (path.parent, path.name)
+        if not name or name in (".", ".."):
+            raise ValueError(f"probe_file {path} names no file")
+        if path.is_absolute():
+            if parent != root_resolved:
+                raise PermissionError(
+                    f"probe file {path} is not directly inside the allowed "
+                    f"root {root_resolved}"
+                )
+        elif str(parent) not in ("", "."):
             raise PermissionError(
-                f"probe file {resolved} is outside allowed root {root_resolved}"
+                f"probe file {path} names a subdirectory; --probe-root "
+                f"{root_resolved} holds probe files directly"
             )
-        if not resolved.is_file():
-            raise ValueError(f"probe file {resolved} does not exist")
-        return resolved
+        return root_resolved, name
 
     def _inlined_probe_file(self, config: JsonDict) -> JsonDict:
         """Replace `probe_file` with the probe map it names.
@@ -1231,8 +1294,10 @@ class FcapzMcpSession:
         """
         if config.get("probes") is not None:
             raise ValueError("probes and probe_file are mutually exclusive")
-        resolved = self._confined_probe_path(config["probe_file"])
-        parsed = load_probe_text(self._read_confined(resolved), source=resolved)
+        root, name = self._confined_probe_path(config["probe_file"])
+        parsed = load_probe_text(
+            self._read_confined(root, name), source=root / name
+        )
 
         inlined = {k: v for k, v in config.items() if k != "probe_file"}
         inlined["probes"] = [
@@ -1247,26 +1312,113 @@ class FcapzMcpSession:
             inlined["sample_clock_hz"] = parsed.sample_clock_hz
         return inlined
 
-    @staticmethod
-    def _read_confined(resolved: Path) -> str:
-        """Read an already-approved path, and check it stayed the same file.
+    # A probe map is a small text file. The cap is here so a hostile or
+    # mistaken --probe-root entry cannot pull an arbitrary amount of the
+    # server's memory through a capture config.
+    _MAX_PROBE_FILE_BYTES = 1 << 20
 
-        ``resolved`` carries no symlink components as of the check above, so a
-        swap has to land in the microseconds before this open. Comparing the
-        opened file's identity against the path afterwards catches that.
+    @classmethod
+    def _open_confined(cls, root: Path, name: str) -> int:
+        """Open ``root/name`` without ever following a link, and prove it.
+
+        Anyone who can write inside `--probe-root` can replace a name with a
+        link to somewhere else. Checking the path and then opening it does
+        not stop them, and neither does re-checking the same path
+        afterwards: the second look follows the same new link and cheerfully
+        agrees with the first.
         """
-        with open(resolved, encoding="utf-8") as handle:
-            opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode):
-                raise ValueError(f"probe file {resolved} is not a regular file")
-            text = handle.read()
-        after = os.stat(resolved)
-        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            # Race-free by construction: the name is resolved relative to a
+            # descriptor already held for the root, so nothing about the
+            # path can be reinterpreted, and O_NOFOLLOW fails the open
+            # outright rather than following a link that appeared.
+            root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            except OSError as exc:
+                raise cls._confinement_error(root / name, exc) from None
+            finally:
+                os.close(root_fd)
+
+        # No descriptor to open relative to (Windows). With a single
+        # component the only thing that can change is the file itself, so
+        # the open is verified instead of prevented: a link already in place
+        # is refused, and a swap in the gap between the check and the open
+        # makes the two identities disagree. A swap after the open cannot
+        # reach the descriptor.
+        target = root / name
+        try:
+            before = os.lstat(target)
+        except OSError as exc:
+            raise cls._confinement_error(target, exc) from None
+        if stat.S_ISLNK(before.st_mode) or cls._is_reparse_point(before):
             raise PermissionError(
-                f"probe file {resolved} was replaced while it was being read; "
-                "refusing to use it"
+                f"probe file {target} is a link; links are not followed out "
+                "of the probe root"
             )
-        return text
+        try:
+            handle = os.open(target, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError as exc:
+            raise cls._confinement_error(target, exc) from None
+        if (os.fstat(handle).st_dev, os.fstat(handle).st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            os.close(handle)
+            raise PermissionError(
+                f"probe file {target} changed identity between the check and "
+                "the open; refusing to use it"
+            )
+        return handle
+
+    @staticmethod
+    def _is_reparse_point(info: os.stat_result) -> bool:
+        """True for a Windows symlink or junction (a POSIX stat has neither)."""
+        attributes = getattr(info, "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+    @staticmethod
+    def _confinement_error(target: Path, exc: OSError) -> Exception:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            return PermissionError(
+                f"probe file {target} is a link; links are not followed out "
+                "of the probe root"
+            )
+        if exc.errno == errno.ENOENT:
+            return FileNotFoundError(f"probe file {target} does not exist")
+        if exc.errno in (errno.EISDIR, errno.ENOTDIR, errno.EACCES):
+            return ValueError(f"probe file {target} is not a readable file: {exc}")
+        return ValueError(f"cannot read probe file {target}: {exc}")
+
+    @classmethod
+    def _read_confined(cls, root: Path, name: str) -> str:
+        """Read the probe file ``name`` from inside ``root``."""
+        target = root / name
+        handle = cls._open_confined(root, name)
+        try:
+            info = os.fstat(handle)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"probe file {target} is not a regular file")
+            if info.st_nlink > 1:
+                # A second name for one inode is a way in that no link check
+                # sees: the entry is an ordinary file and its identity
+                # matches every time it is looked at, but the bytes belong
+                # to a file outside the root. A probe map has one name.
+                raise PermissionError(
+                    f"probe file {target} has more than one hard link; "
+                    "refusing to use it"
+                )
+            if info.st_size > cls._MAX_PROBE_FILE_BYTES:
+                raise ValueError(
+                    f"probe file {target} is {info.st_size} bytes; the limit "
+                    f"is {cls._MAX_PROBE_FILE_BYTES}"
+                )
+            stream = open(handle, encoding="utf-8", closefd=True)
+        except BaseException:
+            os.close(handle)
+            raise
+        with stream:
+            return stream.read(cls._MAX_PROBE_FILE_BYTES + 1)
 
     def _validated_capture_config(self, config: JsonDict | None) -> JsonDict | None:
         if not config:

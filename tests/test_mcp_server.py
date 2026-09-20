@@ -7,10 +7,12 @@ import asyncio
 import io
 import importlib.util
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
@@ -1984,6 +1986,127 @@ class HostAllowlistTests(unittest.TestCase):
         self.assertEqual(session.status()["capabilities"]["allowed_hosts"], ["h1"])
 
 
+class ProbeFileConfinementTests(unittest.TestCase):
+    """`probe_file` must not become a way to read the rest of the disk.
+
+    The attacker here is someone who can write inside `--probe-root` -- the
+    only person the root is meant to trust with the *contents* of a probe
+    map, and the one who must not be able to widen it into a read of
+    anything else.
+    """
+
+    PROBE = json.dumps({
+        "format": "fpgacapzero.probes.v1",
+        "sample_width": 8,
+        "probes": [{"name": "alpha", "width": 8, "lsb": 0}],
+    })
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        base = Path(self._dir.name)
+        self.root = base / "root"
+        self.root.mkdir()
+        (self.root / "ok.prob").write_text(self.PROBE, encoding="utf-8")
+        self.outside_dir = base / "secret"
+        self.outside_dir.mkdir()
+        self.outside = self.outside_dir / "ok.prob"
+        self.outside.write_text(self.PROBE, encoding="utf-8")
+        self.session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(probe_root=self.root)
+        )
+
+    def test_a_file_in_the_root_still_reads(self):
+        self.assertIn("alpha", self.session._read_confined(self.root, "ok.prob"))
+
+    def test_paths_that_leave_the_root_are_refused(self):
+        for label, argument in (
+            ("parent", os.path.join("..", "secret", "ok.prob")),
+            ("absolute outside", str(self.outside)),
+            ("subdirectory", os.path.join("sub", "ok.prob")),
+            ("absolute subdirectory", str(self.root / "sub" / "ok.prob")),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(PermissionError):
+                    self.session._confined_probe_path(argument)
+
+    def test_a_subdirectory_is_refused_even_though_it_is_inside_the_root(self):
+        # Deliberate: one component is what makes the open verifiable on a
+        # platform with no directory handles. A walk can be redirected
+        # between two of its own steps.
+        with self.assertRaisesRegex(PermissionError, "subdirectory"):
+            self.session._confined_probe_path("sub/ok.prob")
+
+    def test_a_link_out_of_the_root_is_not_followed(self):
+        link = self.root / "link.prob"
+        try:
+            os.symlink(self.outside, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create a symlink here: {exc}")
+        with self.assertRaisesRegex(PermissionError, "link"):
+            self.session._read_confined(self.root, "link.prob")
+
+    def test_a_hard_link_out_of_the_root_is_refused(self):
+        # No link check sees this one: the entry is an ordinary file and its
+        # identity matches however often it is looked at, but the bytes
+        # belong to a file outside the root.
+        hard = self.root / "hard.prob"
+        try:
+            os.link(self.outside, hard)
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            self.skipTest(f"cannot create a hard link here: {exc}")
+        with self.assertRaisesRegex(PermissionError, "hard link"):
+            self.session._read_confined(self.root, "hard.prob")
+
+    def test_a_swap_between_the_check_and_the_open_is_caught(self):
+        """The race the previous implementation lost.
+
+        It approved a resolved path, opened it, then re-stat'ed the *same
+        path* to confirm. A name swapped for a link in between made both the
+        open and the re-stat land on the outside file, so the two agreed and
+        the read was accepted. The check now compares what was opened
+        against what was inspected, not a path against itself.
+        """
+        target = self.root / "ok.prob"
+        real_lstat = os.lstat
+        swapped = []
+
+        def lstat_then_swap(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if not swapped and Path(path) == target:
+                swapped.append(True)
+                target.unlink()
+                try:
+                    os.symlink(self.outside, target)
+                except (OSError, NotImplementedError) as exc:
+                    raise unittest.SkipTest(
+                        f"cannot create a symlink here: {exc}"
+                    ) from None
+            return info
+
+        with mock.patch.object(os, "lstat", lstat_then_swap):
+            if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+                # O_NOFOLLOW refuses the swapped-in link outright; there is
+                # no window for the identity check to have to cover.
+                with self.assertRaises(PermissionError):
+                    self.session._read_confined(self.root, "ok.prob")
+                return
+            with self.assertRaisesRegex(PermissionError, "changed identity"):
+                self.session._read_confined(self.root, "ok.prob")
+        self.assertTrue(swapped, "the test did not actually perform the swap")
+
+    def test_an_oversized_probe_file_is_refused(self):
+        big = self.root / "big.prob"
+        big.write_text("x" * (FcapzMcpSession._MAX_PROBE_FILE_BYTES + 1), "utf-8")
+        with self.assertRaisesRegex(ValueError, "limit"):
+            self.session._read_confined(self.root, "big.prob")
+
+    def test_a_directory_is_not_a_probe_file(self):
+        (self.root / "adir").mkdir()
+        with self.assertRaises((ValueError, PermissionError, IsADirectoryError)):
+            self.session._read_confined(self.root, "adir")
+
+
 class ProbeFileRootTests(unittest.TestCase):
     """`probe_file` opens a path on the server, so it needs a root."""
 
@@ -2055,7 +2178,9 @@ class ProbeFileRootTests(unittest.TestCase):
 
     def test_a_missing_file_is_reported_clearly(self):
         session = self._session(probe_root=self.root)
-        with self.assertRaisesRegex(ValueError, "does not exist"):
+        # FileNotFoundError, so the coded error reads "not_found" rather
+        # than blaming the argument's shape.
+        with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
             session.capture(config={"probe_file": "nope.prob"})
 
     def test_configure_is_guarded_too(self):
@@ -2503,6 +2628,175 @@ class AxiPairingDisclosureTests(unittest.TestCase):
 
         self.assertEqual(summary["axi"]["pairing"]["pre_window_traffic_observed"],
                          ["write"])
+
+
+class WedgedBackendTests(unittest.TestCase):
+    """A backend that never returns must not kill the session for good.
+
+    The JTAG owner is a single thread. If an RPC call never comes back it
+    takes that thread with it: the watchdog tells the caller, poisons the
+    session, and then nothing is left to clear the flag, so every later
+    hardware command is refused for the life of the process. Only an abort
+    hook that reaches the blocked transport can end it.
+    """
+
+    class _Wedged:
+        """Blocks until cancelled, the way a silent xsdb pipe does."""
+
+        def __init__(self, *, cancellable: bool):
+            self.released = threading.Event()
+            self.entered = threading.Event()
+            self.cancels = 0
+            self.cmds: list[str] = []
+            if cancellable:
+                self.cancel_active = self._cancel
+
+        def _cancel(self) -> None:
+            self.cancels += 1
+            # What a transport's cancel() achieves: close the socket or kill
+            # the child, so the blocked read returns.
+            self.released.set()
+
+        def handle(self, req):
+            self.cmds.append(req["cmd"])
+            if req["cmd"] == "close":
+                return {"ok": True}
+            self.entered.set()
+            if not self.released.wait(30.0):  # pragma: no cover - test hang
+                raise AssertionError("never released")
+            raise ConnectionError("backend was torn down")
+
+    def _session(self, rpc):
+        return FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(
+                rpc_timeout_sec=0.2, rpc_cancel_grace_sec=0.4
+            ),
+        )
+
+    def _wait_ready(self, session, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if session.status()["session_state"] == "ready":
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_a_cancellable_backend_lets_the_session_recover(self):
+        rpc = self._Wedged(cancellable=True)
+        session = self._session(rpc)
+        with self.assertRaises(McpWatchdogTimeout):
+            session.probe()
+
+        self.assertTrue(
+            self._wait_ready(session),
+            "the session stayed poisoned even though the backend was abortable",
+        )
+        self.assertGreaterEqual(rpc.cancels, 1)
+        # And it really is usable again, not merely reporting that it is.
+        rpc.released.set()
+        with self.assertRaises(Exception):
+            session.probe()
+        self.assertEqual(session.status()["session_state"], "ready")
+
+    def test_without_an_abort_hook_the_session_cannot_come_back(self):
+        # Documents why `cancel_active` has to exist: with no way to reach
+        # the blocked call, the owner never returns and the poison flag has
+        # nobody to clear it. Kept as a test so that if the hook is ever
+        # dropped, the consequence is visible rather than theoretical.
+        rpc = self._Wedged(cancellable=False)
+        self.assertFalse(hasattr(rpc, "cancel_active"))
+        session = self._session(rpc)
+        with self.assertRaises(McpWatchdogTimeout):
+            session.probe()
+        self.addCleanup(rpc.released.set)
+
+        self.assertFalse(self._wait_ready(session, timeout=1.0))
+        self.assertEqual(session.status()["session_state"], "poisoned")
+
+    def test_the_real_rpc_server_offers_an_abort_hook(self):
+        # The watchdog picks its path with getattr, so a rename here would
+        # silently return production to the unrecoverable branch above.
+        from fcapz.rpc import RpcServer
+
+        self.assertTrue(callable(getattr(RpcServer(), "cancel_active", None)))
+
+
+class CancelScopeTests(unittest.TestCase):
+    """`cancel_active` aborts the whole session, so it must be aimed."""
+
+    class _Rpc:
+        def __init__(self):
+            self.cancels = 0
+
+        def cancel_active(self):
+            self.cancels += 1
+
+        def handle(self, req):
+            return {"ok": True}
+
+    def _session(self):
+        return FcapzMcpSession(
+            rpc=self._Rpc(),
+            capabilities=McpCapabilities(
+                rpc_timeout_sec=0.2, rpc_cancel_grace_sec=0.2
+            ),
+        )
+
+    def test_a_cancel_for_a_finished_command_does_not_fire(self):
+        # A nudge timer that fires just as recovery completes, or a watchdog
+        # whose grace window expired, would otherwise reach through and kill
+        # whatever command started next.
+        session = self._session()
+        cmd = _HardwareCommand(req={"cmd": "probe"}, commit=lambda r: r)
+        for state in (_CommandState.COMMITTED, _CommandState.RECONCILED):
+            with self.subTest(state=state):
+                cmd.state = state
+                session._cancel_for(cmd, "probe", "test")
+                self.assertEqual(session.rpc.cancels, 0)
+
+    def test_a_cancel_for_the_command_in_flight_does_fire(self):
+        session = self._session()
+        cmd = _HardwareCommand(req={"cmd": "probe"}, commit=lambda r: r)
+        for state in (_CommandState.PENDING, _CommandState.ABANDONED):
+            with self.subTest(state=state):
+                before = session.rpc.cancels
+                cmd.state = state
+                session._cancel_for(cmd, "probe", "test")
+                self.assertEqual(session.rpc.cancels, before + 1)
+
+    def test_reconciling_during_the_watchdog_window_is_not_an_internal_error(self):
+        """The owner can reconcile while the watchdog is still deciding.
+
+        Reading `cmd.state` again outside the lock made that window visible:
+        the command was neither PENDING nor ABANDONED any more, so the code
+        fell through to `reply.get_nowait()` on a command reconciliation
+        never posts a reply for, and the caller saw a bare queue.Empty
+        instead of the watchdog error.
+        """
+        session = self._session()
+        reconciled = []
+
+        def reconcile_on_cancel(cmd, name, step):
+            with session._rpc_lock:
+                cmd.state = _CommandState.RECONCILED
+            reconciled.append(cmd)
+
+        cmd = _HardwareCommand(req={"cmd": "probe"}, commit=lambda r: r)
+        with mock.patch.object(session, "_cancel_for", reconcile_on_cancel):
+            with self.assertRaises(McpWatchdogTimeout) as caught:
+                session._handle_watchdog_timeout(cmd, "probe", 0.2)
+
+        self.assertTrue(reconciled)
+        self.assertIn("torn down", str(caught.exception))
+
+    def test_a_watchdog_with_no_reply_still_reads_as_a_watchdog(self):
+        # Belt and braces for the fall-through: never an internal error.
+        session = self._session()
+        cmd = _HardwareCommand(req={"cmd": "probe"}, commit=lambda r: r)
+        cmd.state = _CommandState.COMMITTED  # committed, but nothing enqueued
+        with self.assertRaises(McpWatchdogTimeout):
+            session._handle_watchdog_timeout(cmd, "probe", 0.2)
 
 
 if __name__ == "__main__":
