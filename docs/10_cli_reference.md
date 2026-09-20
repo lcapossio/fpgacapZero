@@ -83,6 +83,7 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 | `axi-dump` | Read a block of AXI words (auto-inc or burst) |
 | `axi-fill` | Fill a block of AXI memory with a pattern |
 | `axi-load` | Load a binary file into AXI memory |
+| `axi-decode` | Read a saved AXI monitor capture as AXI4-Lite transactions (offline) |
 | `uart-send` | Send data to UART TX via JTAG-to-UART bridge |
 | `uart-recv` | Receive data from UART RX |
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |
@@ -175,6 +176,7 @@ setup.  Both take the same options.
 | `--format FMT` | `json` | `json`, `csv`, or `vcd` |
 | `--timeout SEC` | `10.0` | Wait this long for the trigger to fire |
 | `--summarize` | off | Print LLM-friendly capture summary to stdout after the capture |
+| `--decode-axi` | off | Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only) |
 
 ### Examples
 
@@ -443,6 +445,30 @@ loaded 4096 words @ 0x10000000
 
 The file is read as little-endian 32-bit words.  Trailing partial
 words are zero-padded.
+
+### `axi-decode CAPTURE [--probe-file P] [--only-anomalies] [--kind K] [--limit N] [--json]`
+
+Reassembles a capture JSON (written by `capture --format json`) into whole
+AXI4-Lite transactions — address, data, byte strobes, response, latency and
+protocol flags — instead of a per-cycle sample dump. Reads a file and touches
+no hardware, so it needs no connection and no board.
+
+```console
+$ fcapz axi-decode cap.json --only-anomalies
+3 transactions (2 write, 1 read), 1 error responses, 1 anomalies
+   #  kind  addr         data         strb  resp    lat  flags
+--------------------------------------------------------------
+   2  write 0x00002000   0x00000011   0x3   SLVERR    2  error_response,partial_write
+```
+
+An exported capture records its sample width but not its probe map, so the
+map is inferred from that width; pass `--probe-file` for a geometry that is
+not one of the bundled ones (`fcapz axi-mon --write-probe-file P` writes it).
+`--only-anomalies` keeps only transactions with a fault flag, `--kind` keeps
+reads or writes, `--limit` caps the rows, and `--json` emits the decode
+itself. When the capture opened with transactions already outstanding, a
+warning goes to stderr: pairing is first-in-first-out, so a response with no
+visible request means later pairings may sit on the wrong address.
 
 ## UART subcommands
 

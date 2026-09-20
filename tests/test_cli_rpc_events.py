@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -316,6 +319,129 @@ class SummarizeSchemaTests(unittest.TestCase):
         self.assertIsNone(sig["longest_burst"])
         self.assertIsNone(sig["first_edge"])
         self.assertIsNone(sig["last_edge"])
+
+
+class CliAxiDecodeTests(unittest.TestCase):
+    """`fcapz axi-decode` reads a saved capture; it must not need a board."""
+
+    def setUp(self):
+        from fcapz import axi_layout
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.probes = axi_layout.axi_probes(32, 32, True)
+        self.by_name = {probe.name: probe for probe in self.probes}
+        self.samples = []
+
+    def _cycle(self, **fields):
+        word = 0
+        for name, value in fields.items():
+            probe = self.by_name[name]
+            word |= (value & ((1 << probe.width) - 1)) << probe.lsb
+        self.samples.append(word)
+
+    def _write(self, addr, data, resp=0, strb=0xF):
+        self._cycle()
+        self._cycle(awvalid=1, awready=1, awaddr=addr)
+        self._cycle(wvalid=1, wready=1, wdata=data, wstrb=strb)
+        self._cycle(bvalid=1, bready=1, bresp=resp)
+
+    def _capture_file(self, sample_width=None):
+        from fcapz import axi_layout
+
+        path = Path(self._dir.name) / "cap.json"
+        path.write_text(
+            json.dumps({
+                "version": "1.0",
+                "sample_width": (
+                    axi_layout.sample_width(32, 32, True)
+                    if sample_width is None
+                    else sample_width
+                ),
+                "samples": [
+                    {"index": i, "value": v} for i, v in enumerate(self.samples)
+                ],
+            }),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def _run(self, *argv):
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["fcapz", *argv]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def test_it_decodes_a_saved_capture_without_a_transport(self):
+        self._write(0x1000, 0xCAFEBABE)
+        self._write(0x2000, 0x11, resp=2, strb=0x3)
+
+        code, out, _ = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("2 transactions", out)
+        self.assertIn("0x00001000", out)
+        self.assertIn("SLVERR", out)
+
+    def test_the_probe_map_is_inferred_from_the_sample_width(self):
+        # An exported capture records its width but not its probe map.
+        self._write(0x40, 0x5)
+        code, out, _ = self._run("axi-decode", self._capture_file())
+        self.assertEqual(code, 0)
+        self.assertIn("0x00000040", out)
+
+    def test_an_unknown_width_asks_for_a_probe_file(self):
+        self._write(0x40, 0x5)
+        code, _, err = self._run("axi-decode", self._capture_file(sample_width=999))
+        self.assertEqual(code, 2)
+        self.assertIn("--probe-file", err)
+
+    def test_only_anomalies_filters(self):
+        self._write(0x1000, 0xCAFEBABE)
+        self._write(0x2000, 0x11, resp=2)
+
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--only-anomalies")
+
+        self.assertEqual(code, 0)
+        self.assertIn("0x00002000", out)
+        self.assertNotIn("0x00001000", out)
+
+    def test_json_output_is_the_decode_itself(self):
+        self._write(0x1000, 0xCAFEBABE)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--json")
+
+        self.assertEqual(code, 0)
+        decoded = json.loads(out)
+        self.assertEqual(decoded["protocol"], "axi4lite")
+        self.assertEqual(decoded["transactions"][0]["addr"], "0x00001000")
+
+    def test_a_capture_with_no_samples_is_reported(self):
+        code, _, err = self._run("axi-decode", self._capture_file())
+        self.assertEqual(code, 1)
+        self.assertIn("no samples", err)
+
+    def test_a_missing_file_is_reported(self):
+        code, _, err = self._run(
+            "axi-decode", str(Path(self._dir.name) / "nope.json")
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("error:"))
+
+    def test_pre_window_traffic_is_warned_about_not_hidden(self):
+        # A response with no visible request means the pairing of everything
+        # after it may be shifted; the user has to be told.
+        self._cycle(bvalid=1, bready=1, bresp=0)
+        self._write(0x1000, 0xCAFEBABE)
+
+        code, _, err = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("already outstanding", err)
 
 
 class CliTriggerSequenceTests(unittest.TestCase):

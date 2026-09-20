@@ -51,6 +51,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   honest measure available from inside a JTAG readout. Clients that do not
   send a progress token are unaffected.
 
+- **The AXI decoder is reachable from the CLI and the web UI.**
+  `fcapz axi-decode CAPTURE` reassembles a saved capture JSON into AXI4-Lite
+  transactions offline — no board, no connection — with `--only-anomalies`,
+  `--kind`, `--limit` and `--json`; the probe map is inferred from the
+  capture's recorded sample width. `fcapz capture --decode-axi` prints the
+  same table straight after a live capture, and the web UI gains an **AXI
+  Txn** tab showing the last capture as transactions with faulty rows
+  highlighted. Previously the decoder had exactly one consumer, the MCP
+  server.
+
 ### Fixed
 
 - **Hardware tools no longer freeze the MCP server.** FastMCP awaits a
