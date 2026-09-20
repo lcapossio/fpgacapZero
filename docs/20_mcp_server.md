@@ -196,6 +196,14 @@ same still-running worker guard applies.
 
 `capture*` tools are enabled by default and blocked by `--read-only`.
 
+**Disabled tools are not advertised.** A tool whose capability is off is left
+out of the tool list entirely, rather than offered and then refused: the agent
+would otherwise plan around it, spend a call discovering the refusal, and pay
+for its schema in every request. So the advertised surface tracks the flags —
+22 tools under `--read-only`, 27 by default, 31 with every write enabled. The
+session-level permission checks remain as the actual enforcement; the gating
+is about what the agent is told exists.
+
 Two capture flows are available. `fcapz_capture` is the one-shot path: it
 configures, arms, and reads out in a single call, re-arming every time. For a
 long wait on a real hardware event, use the manual flow instead —

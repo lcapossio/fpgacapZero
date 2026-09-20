@@ -1533,11 +1533,24 @@ def build_mcp_server(session: FcapzMcpSession):
 
     mcp = FastMCP("fpgacapZero")
 
-    def tool(**annotations: Any):
+    def tool(*, requires: bool = True, **annotations: Any):
+        """Register a tool, unless its capability is switched off.
+
+        A tool that can only ever answer PermissionError is worse than absent:
+        the agent plans around it, spends a call discovering the refusal, and
+        pays for its schema in every request's context. Gate registration on
+        the capability so the advertised surface is what this server can
+        actually do. The session-level checks stay as the real enforcement.
+        """
+
         def decorate(fn: Callable[..., Any]):
+            if not requires:
+                return fn
             return mcp.tool(annotations=annotations)(fn)
 
         return decorate
+
+    caps = session.capabilities
 
     # `program=` can reflash the FPGA, but only when the server was started
     # with --allow-program. Annotations are static per registration, and the
@@ -1610,7 +1623,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.list_cores()
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_capture,
+        destructiveHint=False,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_capture(
         config: JsonDict | None = None,
         timeout: float = 10.0,
@@ -1736,7 +1754,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.get_last_capture_chunk(offset=offset, max_bytes=max_bytes)
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_capture,
+        destructiveHint=False,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
         """Configure the connected ELA without arming it.
 
@@ -1749,7 +1772,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.configure(config=config)
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_capture,
+        destructiveHint=False,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_arm() -> JsonDict:
         """Arm the connected ELA using the current hardware configuration.
 
@@ -1758,7 +1786,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.arm()
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_capture,
+        destructiveHint=False,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_capture_wait(
         timeout: float = 10.0,
         format: str = "json",
@@ -1791,7 +1824,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.capture_status()
 
-    @tool(destructiveHint=True, idempotentHint=True, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_capture,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
+    )
     def fcapz_disarm() -> JsonDict:
         """Soft-reset the ELA capture FSM to idle, discarding any in-flight arm.
 
@@ -1842,7 +1880,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.eio_read()
 
-    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_eio_write,
+        destructiveHint=True,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_eio_write(value: int) -> JsonDict:
         """Write the EIO output vector when write access is enabled."""
 
@@ -1890,7 +1933,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.axi_read(addr)
 
-    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_axi_write,
+        destructiveHint=True,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_axi_write(
         addr: int,
         data: int,
@@ -1904,7 +1952,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.axi_write(addr, data, wstrb)
 
-    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_axi_write,
+        destructiveHint=True,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_axi_write_block(
         addr: int,
         data: list[int],
@@ -1961,7 +2014,12 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.uart_close()
 
-    @tool(destructiveHint=True, idempotentHint=False, readOnlyHint=False)
+    @tool(
+        requires=caps.allow_uart_send,
+        destructiveHint=True,
+        idempotentHint=False,
+        readOnlyHint=False,
+    )
     def fcapz_uart_send(
         data_base64: str | None = None,
         text: str | None = None,

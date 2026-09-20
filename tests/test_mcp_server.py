@@ -1055,10 +1055,73 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(session.status()["session_state"], "ready")
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_disabled_tools_are_not_advertised(self):
+        # A tool that can only answer PermissionError is worse than absent:
+        # the agent plans around it and pays for its schema every request.
+        from fcapz.mcp_server import build_mcp_server
+
+        def names(**caps):
+            server = build_mcp_server(
+                FcapzMcpSession(rpc=FakeRpc(), capabilities=McpCapabilities(**caps))
+            )
+            return {tool.name for tool in asyncio.run(server.list_tools())}
+
+        writes = {
+            "fcapz_eio_write",
+            "fcapz_axi_write",
+            "fcapz_axi_write_block",
+            "fcapz_uart_send",
+        }
+        capture = {
+            "fcapz_capture",
+            "fcapz_capture_wait",
+            "fcapz_configure",
+            "fcapz_arm",
+            "fcapz_disarm",
+        }
+
+        default = names()
+        self.assertFalse(writes & default, "write tools are off by default")
+        self.assertTrue(capture <= default, "capture is on by default")
+
+        read_only = names(allow_capture=False)
+        self.assertFalse((writes | capture) & read_only)
+        # Read-only still exposes the read side.
+        self.assertIn("fcapz_probe", read_only)
+        self.assertIn("fcapz_axi_read", read_only)
+        self.assertIn("fcapz_capture_status", read_only)
+
+        self.assertTrue(writes <= names(
+            allow_eio_write=True, allow_axi_write=True, allow_uart_send=True
+        ))
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_gating_does_not_replace_enforcement(self):
+        # The session must still refuse a disabled operation even if some
+        # caller reaches it directly.
+        session = FcapzMcpSession(rpc=FakeRpc(), capabilities=McpCapabilities())
+        with self.assertRaises(PermissionError):
+            session.eio_write(1)
+        with self.assertRaises(PermissionError):
+            session.axi_write(0, 1)
+        with self.assertRaises(PermissionError):
+            session.uart_send(text="x")
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
     def test_build_mcp_server_registers_tools_when_sdk_available(self):
         from fcapz.mcp_server import build_mcp_server
 
-        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        # Every write capability on, so the full surface is advertised.
+        server = build_mcp_server(
+            FcapzMcpSession(
+                rpc=FakeRpc(),
+                capabilities=McpCapabilities(
+                    allow_eio_write=True,
+                    allow_axi_write=True,
+                    allow_uart_send=True,
+                ),
+            )
+        )
         tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
         self.assertEqual(
             set(tools),

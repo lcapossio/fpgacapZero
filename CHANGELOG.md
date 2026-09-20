@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **The MCP tool list now tracks the safety flags.** A tool whose capability
+  is disabled is no longer advertised and then refused — it is left out of the
+  list, so an agent neither plans around it nor pays for its schema in every
+  request (22 tools under `--read-only`, 27 by default, 31 with all writes
+  enabled). The session-level permission checks are unchanged and remain the
+  enforcement.
+
 - **Structured capture paging.** `fcapz_get_capture_samples` returns whole
   sample records — sliced into named fields from the capture's probe map, with
   `total` and `trigger_index` on every page — so each page is valid JSON on
