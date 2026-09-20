@@ -178,7 +178,10 @@ fcapz axi-decode cap.json --only-anomalies             # decode a saved capture
 
 `--decode-axi` and `axi-decode` reassemble the per-cycle trace into whole
 AXI4-Lite transactions (address, data, strobes, response, latency, protocol
-flags), which is usually what you actually wanted to read. See
+flags), which is usually what you actually wanted to read. Capture with
+`--decimation 0` and no storage qualification: reassembly needs every bus
+cycle, and a capture that stored only some of them is refused rather than
+decoded onto the wrong addresses. See
 [`axi-decode`](10_cli_reference.md#axi-decode-capture---probe-file-p---only-anomalies---kind-k---limit-n---json).
 
 ## From the web UI
@@ -203,7 +206,8 @@ on. If a monitor exists anywhere on the target:
   rather than as a waveform — one row per transaction with address, data,
   strobes, response and latency, faulty rows highlighted and one checkbox
   away. The server attaches the decode to the capture, so the tab does no
-  bus work of its own;
+  bus work of its own. The pairing caveat is shown above the table on every
+  capture, not only when something looked wrong;
 - once the monitor is the session's core, its probe map is **auto-applied**
   to the ELA tab's named signals, so captures render `awaddr`, `wdata`,
   `bresp`, … in the monitor's **own viewer tab** ("Viewer: AXI Mon") — every

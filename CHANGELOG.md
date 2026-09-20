@@ -63,6 +63,69 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A capture that stored only some cycles is no longer read as AXI.**
+  Reassembly treats a sample's position as its bus cycle and pairs each
+  response with the oldest queued request; decimation and storage
+  qualification break both, because a handshake that was never stored cannot
+  be told apart from one that never happened. A single dropped response
+  silently shifted every later pairing onto the wrong address, and "latency"
+  counted stored samples rather than cycles. `decode_axi` now takes the
+  capture's sampling provenance and refuses such a trace with
+  `decoded: false` and a reason, keeping its full result shape. The capture
+  exporter records `stor_qual_mode` (and the probe map) so an offline
+  `fcapz axi-decode` knows the same thing.
+
+- **The AXI pairing caveat reaches the reader.** The assumption that nothing
+  was outstanding when the window opened is now stated on every page of
+  `fcapz_axi_transactions`, on the capture summary, in the CLI and in the
+  web panel — unconditionally, not only when a response happened to arrive
+  with an empty queue. That evidence can disprove the assumption; nothing
+  can confirm it. `AR(A)` before the window, then `AR(B)` and `R(A)` inside
+  it, yields a clean-looking row with A's data at address B and no flag of
+  any kind, so silence on a tidy decode was the dangerous case.
+
+- **Window edges are no longer counted as bus faults.** A response whose
+  request handshook before the capture, or a write whose second beat falls
+  after it, is legal traffic seen through a keyhole. Both were in
+  `FAULT_FLAGS`, so `anomaly_count`, `--only-anomalies` and the web "Faults
+  only" filter presented boundary effects as failures. Only `error_response`
+  and `unaligned_address` — what a finite window can actually prove — count
+  now; the rest are reported as observations via `flagged_count`.
+
+- **`fcapz_capture_wait` no longer reports a wedged link as "still armed".**
+  Every `TimeoutError` was treated as "the trigger has not fired", including
+  one raised by the transport while reading status or samples, which sent
+  the caller into a poll loop against a session that would never answer. The
+  analyzer now raises `CaptureNotReady` for the expected case and only that
+  is turned into `{"triggered": false, "still_armed": true}`.
+
+- **An ordinary RPC refusal is no longer reported as a bug in this server.**
+  The MCP layer calls `RpcServer.handle` in process, so its exceptions
+  arrive as themselves rather than as an `{"ok": false}` envelope — and a
+  bare `RuntimeError("not connected")` was classified `internal`,
+  `retryable: false`, "report this bug". `fcapz_probe` while disconnected
+  was the common case. The RPC layer now raises typed refusals
+  (`NotConnectedError`, `NotEnabledError`, `RpcError`) and the classifier
+  reads both routes the same way.
+
+- **Every tool-call failure is one coded JSON object.** Argument validation
+  runs before the tool body, so a rejected enum or an unknown field used to
+  reach the agent as pydantic prose with no code, no `retryable` and no
+  remedy; a coded failure also arrived behind FastMCP's "Error executing
+  tool X:" prefix. Both are handled at one seam above validation, and the
+  body names the failing `tool`. New codes: `capture_not_ready`,
+  `unknown_tool`.
+
+- **A misspelled argument is rejected instead of dropped.** Pydantic
+  validates a TypedDict by filtering, so `config={"posttriger": 9}` was
+  discarded before the call, the capture ran with the default posttrigger,
+  and the agent was told it succeeded — the server's own unknown-key check
+  never saw it. The same held for misspelled tool arguments, which pydantic
+  ignores. The capture config now publishes `additionalProperties: false`,
+  and top-level arguments are checked against the published schema.
+  `ProbeEntry.lsb` became optional to match the parser, which defaults it
+  to 0.
+
 - **Hardware tools no longer freeze the MCP server.** FastMCP awaits a
   synchronous tool directly on the event loop, so every JTAG round trip
   stopped the server answering anything at all for its duration — a 300 s

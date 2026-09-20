@@ -419,14 +419,18 @@ page is valid JSON on its own.
 | `data_before_address` | The W beat preceded its AW. Legal AXI, but a common symptom when a bridge enqueues a command before its payload has settled. |
 | `write_missing_data` / `write_missing_address` | A half-formed write — the shape a dropped or scrambled command leaves behind. |
 | `unaligned_address` | Address is not a multiple of the data-bus width. |
-| `request_not_observed` | A response arrived with no matching request in the capture. |
+| `request_not_observed` | A response arrived with no matching request in the capture — its request handshook before the window opened. |
 | `pairing_suspect` | Another transaction in the same direction had no visible request, so this one's pairing may be shifted. |
 | `no_response_in_window` | The capture ended before the response arrived. Benign. |
 
-`no_response_in_window`, `partial_write`, `write_strobe_zero` and
-`data_before_address` are legal AXI; they are reported as observations and do
-not count towards `anomaly_count` or `only_anomalies` (use `flagged_count` for
-the total with any flag at all).
+Only `error_response` and `unaligned_address` count as **bus faults**
+(`anomaly_count`, and what `only_anomalies` keeps): they are the two a finite
+capture can actually prove. Everything else is either legal AXI
+(`partial_write`, `write_strobe_zero`, `data_before_address`) or an artefact
+of the window's own edges (`request_not_observed`, `no_response_in_window`,
+`write_missing_*`, `pairing_suspect`) — a transaction clipped at the start or
+the end of a capture is ordinary traffic seen through a keyhole, not a
+violation. `flagged_count` is the total with any flag at all.
 
 ### What in-order pairing assumes
 
@@ -437,18 +441,46 @@ already outstanding when the capture window opened*. A trace cannot prove
 that: a read issued before the trigger and answered inside the window looks
 exactly like an answer to the first address the capture happened to see.
 
-So the decode result carries a `pairing` block naming the assumption, and
-`pre_window_traffic_observed` lists the directions where a response arrived
-with an empty queue — proof that the window opened mid-flight. Every other
-transaction in such a direction is flagged `pairing_suspect`. Capture from a
-quiet bus (or trigger on the first AW/AR) when exact addresses matter.
+So the `pairing` block travels on the decode, on the capture summary, **and
+on every page of `fcapz_axi_transactions`** — not only the first, and not
+only when something looked wrong. `pre_window_traffic_observed` lists the
+directions where a response arrived with an empty queue, and
+`pre_window_traffic_proven` is true only then: it is evidence the assumption
+is *false*, never evidence that it holds. The undetectable case is the
+dangerous one — `AR(A)` before the window, `AR(B)` and then `R(A)` inside it
+yields a clean-looking row reporting A's data at address B, with nothing in
+the trace to mark it. Every other transaction in a direction with proven
+pre-window traffic is flagged `pairing_suspect`. Capture from a quiet bus (or
+trigger on the first AW/AR) when exact addresses matter.
 
 A response is never paired with a request handshaking on the same sampled
 cycle: AXI forbids a combinational VALID-to-VALID path, so such a response
 belongs to an earlier request.
 
+### Captures that cannot be decoded at all
+
+Reassembly reads a sample's position as its bus cycle and pairs each response
+with the oldest queued request. **Decimation and storage qualification break
+both.** They store only selected cycles, so a handshake that was never stored
+cannot be told apart from one that never happened: a dropped response shifts
+every later pairing onto the wrong address, and "latency" becomes a count of
+stored samples. Nothing can recover the missing beats afterwards, so such a
+capture is refused rather than misread —
+
+```json
+{"decoded": false,
+ "unavailable_reason": "the capture stored only selected cycles (decimation=3), ...",
+ "sampling": {"decimation": 3, "storage_qualified": false, "contiguous": false},
+ "transactions": []}
+```
+
+The result keeps its full shape, so one code path reads both. `sampling` is
+reported either way, and travels with every transaction page. Re-capture with
+`decimation` 0 and `stor_qual_mode` 0 to decode.
+
 The capture summary carries only the headline counts (`transaction_count`,
-`error_count`, `anomaly_count`, `max_latency`); the transactions themselves
+`error_count`, `anomaly_count`, `flagged_count`, `max_latency`) plus
+`pairing` and `sampling`; the transactions themselves
 are only ever returned through this tool. Decoding is AXI4-Lite only, matching
 the monitor RTL (`proto_code` 1, no IDs, no bursts), and works on both
 `DECODE_EN` builds and plain ones. Non-AXI captures are unaffected.
@@ -510,18 +542,33 @@ the backend's own error object as `detail`.
 | `busy` | Another hardware command is running; JTAG takes one at a time. | yes |
 | `session_recovering` | The watchdog abandoned a command and the session is tearing it down. | yes |
 | `watchdog_timeout` | A command outran the watchdog; the board session was torn down. | yes, after reconnecting |
+| `capture_not_ready` | The trigger has not fired; the core is still armed. | yes, keep polling |
 | `timeout` | A wait expired without the hardware finishing. | yes |
 | `not_connected` | No connection for that subsystem yet. | yes, after connecting |
 | `not_permitted` | The capability is switched off; only the operator can enable it. | no |
 | `invalid_argument` | An argument was rejected. | no |
 | `not_found` | A path does not exist on the server. | no |
+| `unknown_tool` | This server does not publish that tool. | no |
 | `hardware_error` | The board or backend rejected the command. | yes |
 | `internal` | A bug in `fcapz-mcp`. | no |
 
+Every failure of a tool call is coded, including the two that never reach the
+tool body: a misspelled argument and a value the schema rejects, both caught
+by validation beforehand. The body also names the failing `tool`.
+
 `busy` and `session_recovering` are tagged where they are raised, not matched
-by wording, so rephrasing a message cannot reclassify it. Arguments rejected
-by the tool schema itself never reach the server and surface as the client's
-own validation error instead.
+by wording, so rephrasing a message cannot reclassify it.
+
+A misspelled argument is **rejected, never dropped**. Both the tool's own
+arguments and the fields of `config` are checked against the published
+schema, so `{"posttriger": 9}` fails with `invalid_argument` naming the field
+instead of quietly running a capture with the default posttrigger.
+
+`capture_not_ready` is distinct from `timeout` on purpose. `fcapz_capture_wait`
+returns `{"triggered": false, "still_armed": true}` only for the former — the
+analyzer's own "the trigger has not fired". A timeout from the transport
+while reading status or samples may mean the link is wedged, and is reported
+as a failure rather than as another poll.
 
 ## Status Fields
 

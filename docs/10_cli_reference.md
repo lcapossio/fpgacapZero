@@ -455,20 +455,30 @@ no hardware, so it needs no connection and no board.
 
 ```console
 $ fcapz axi-decode cap.json --only-anomalies
-3 transactions (2 write, 1 read), 1 error responses, 1 anomalies
+3 transactions (2 write, 1 read), 1 error responses, 1 bus faults, 2 flagged
    #  kind  addr         data         strb  resp    lat  flags
 --------------------------------------------------------------
    2  write 0x00002000   0x00000011   0x3   SLVERR    2  error_response,partial_write
 ```
 
-An exported capture records its sample width but not its probe map, so the
-map is inferred from that width; pass `--probe-file` for a geometry that is
-not one of the bundled ones (`fcapz axi-mon --write-probe-file P` writes it).
-`--only-anomalies` keeps only transactions with a fault flag, `--kind` keeps
-reads or writes, `--limit` caps the rows, and `--json` emits the decode
-itself. When the capture opened with transactions already outstanding, a
-warning goes to stderr: pairing is first-in-first-out, so a response with no
-visible request means later pairings may sit on the wrong address.
+The probe map comes from `--probe-file` if given, otherwise from the map the
+capture records, otherwise it is guessed from the flattened sample width —
+and the guess says so on stderr, because a width does not identify a
+geometry (32/32 with the decode word is 160 bits, and so is 36/32 without
+it). `fcapz axi-mon --write-probe-file P` writes a map.
+
+`--only-anomalies` keeps only transactions the bus got wrong — an error
+response or a misaligned address — not the ones clipped by the edges of the
+capture window, which are flagged but legal. `--kind` keeps reads or writes,
+`--limit` caps the rows, and `--json` emits the decode itself.
+
+Two caveats go to stderr on every run. Pairing is first-in-first-out, so
+addresses are only right if nothing was outstanding when the window opened;
+a finite capture cannot prove that, and a window that opened mid-transaction
+produces rows that read perfectly and are wrong. When a response *did* arrive
+with no visible request, that assumption is disproved and the note becomes a
+warning. A capture taken with decimation or storage qualification is refused
+outright: it stored only selected cycles, and reassembly needs every one.
 
 ## UART subcommands
 
