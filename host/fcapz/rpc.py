@@ -127,6 +127,70 @@ class RpcServer:
             raise NotConnectedError("not connected")
         return self._analyzer
 
+    # Where each held object keeps its transport. A controller is asked for
+    # its own attribute rather than being closed directly, because cancelling
+    # has to reach the thing that is actually blocked -- the socket or the
+    # child process -- not the wrapper around it.
+    _TRANSPORT_ATTRS = ("transport", "_t", "_transport")
+
+    def _live_transports(self) -> list[Transport]:
+        """Every transport this session currently holds, deduplicated.
+
+        Several controllers can share one transport (an EIO session opened on
+        the analyzer's), and cancelling the same one twice is pointless at
+        best.
+        """
+        found: list[Transport] = []
+        seen: set[int] = set()
+        for holder in (
+            self._analyzer,
+            self._eio,
+            self._axi,
+            self._axi_transport,
+            self._uart,
+            self._uart_transport,
+        ):
+            if holder is None:
+                continue
+            transport = holder
+            if not hasattr(holder, "cancel"):
+                for attr in self._TRANSPORT_ATTRS:
+                    candidate = getattr(holder, attr, None)
+                    if candidate is not None:
+                        transport = candidate
+                        break
+            if transport is None or id(transport) in seen:
+                continue
+            seen.add(id(transport))
+            found.append(transport)
+        return found
+
+    def cancel_active(self) -> None:
+        """Abort whatever hardware call is in flight. Called from elsewhere.
+
+        Without this the MCP watchdog has nothing to pull: it can only mark a
+        command abandoned and hope the backend returns by itself, and a
+        backend that never does takes the single hardware owner thread with
+        it, refusing every later command for the life of the process.
+
+        Cancelling destroys the session -- that is the point. Each transport's
+        ``cancel`` closes its socket or kills its child process, which is what
+        makes a blocked read return. The caller is told to reconnect, and the
+        owner reconciles by tearing the rest down.
+
+        Runs on a different thread from the call it is aborting, so it must
+        not take any lock that call might hold: it only closes handles, and
+        every ``cancel`` is documented idempotent. One failure must not stop
+        the others, so each is guarded.
+        """
+        for transport in self._live_transports():
+            try:
+                transport.cancel()
+            except Exception:
+                # Best effort by definition -- we are already past the point
+                # where anything about this session is trustworthy.
+                pass
+
     def _close_all(self) -> None:
         """Full session teardown: analyzer plus any EIO/AXI/UART transports.
 

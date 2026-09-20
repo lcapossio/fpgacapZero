@@ -1400,6 +1400,8 @@ class XilinxHwServerTransport(Transport):
     BURST_DR_BITS = 256
     ADDR_BURST_PTR = 0x002C
     READ_IDLE_CYCLES = 20
+    # `fpga -file` on a large device is minutes, not seconds.
+    PROGRAM_TIMEOUT_SEC = 600.0
     RAW_DR_IDLE_CYCLES = 8
     USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
@@ -1426,6 +1428,7 @@ class XilinxHwServerTransport(Transport):
         ir_table: dict[int, int] | None = None,
         ready_probe_addr: int | None = 0x0000,
         ready_probe_timeout: float = 2.0,
+        read_timeout_sec: float | None = None,
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
@@ -1466,6 +1469,18 @@ class XilinxHwServerTransport(Transport):
         self._stderr_thread: threading.Thread | None = None
         self._stderr_lines: list[str] = []
         self._xsdb_io_lock = threading.Lock()
+        # Every response is read from this queue, filled by a reader thread,
+        # never straight from the pipe. A blocking readline() on a live
+        # process that has stopped answering returns *never*, which wedges
+        # whatever thread is driving the transport -- for the MCP server that
+        # is the single hardware owner, and losing it kills the session for
+        # the life of the process. A queue read has a deadline.
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
+        self._poisoned = False
+        if read_timeout_sec is None:
+            read_timeout_sec = float(os.environ.get("FCAPZ_XSDB_TIMEOUT", "60"))
+        self.read_timeout_sec = float(read_timeout_sec)
         # Chain-shape parameters.  All TCL emission and bit-string parsing
         # use these — never the literal 6 / 49 / 256 — so a Zynq US+ MPSoC
         # session (ir_length=16, dr_extra_bits=1) and a 7-series session
@@ -1514,10 +1529,17 @@ class XilinxHwServerTransport(Transport):
             text=True,
             bufsize=1,
         )
+        self._poisoned = False
+        self._stdout_lines = queue.Queue()
+        self._stderr_lines = []
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, daemon=True
         )
         self._stderr_thread.start()
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stdout, daemon=True
+        )
+        self._stdout_thread.start()
         mark("xsdb_spawned")
 
         self._send(f"connect -url tcp:{self.host}:{self.port}")
@@ -1657,7 +1679,13 @@ class XilinxHwServerTransport(Transport):
                 f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
             )
         self._send(f'targets -set -filter {{name =~ "{self.fpga_name}"}}')
-        self._send(f"fpga -file {{{bitfile}}}")
+        # A large bitstream takes far longer than a register read, so this
+        # one call gets its own budget rather than forcing the interactive
+        # default up for everything.
+        self._send(
+            f"fpga -file {{{bitfile}}}",
+            timeout_sec=max(self.read_timeout_sec, self.PROGRAM_TIMEOUT_SEC),
+        )
         self._send(f"after {int(self.post_program_delay_ms)}")
 
     def close(self) -> None:
@@ -1672,11 +1700,16 @@ class XilinxHwServerTransport(Transport):
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+        # Release anyone waiting on a response the dead process will never
+        # send. Without this a concurrent _send sits out its whole budget
+        # before noticing, which is the delay cancelling was meant to avoid.
+        self._stdout_lines.put(None)
 
     def close_fast(self) -> None:
         """Kill ``xsdb`` quickly for console interrupt; normal :meth:`close` may wait 5s."""
         proc = self._proc
         if proc is None:
+            self._stdout_lines.put(None)
             return
         try:
             if proc.stdin is not None:
@@ -1696,8 +1729,13 @@ class XilinxHwServerTransport(Transport):
         except subprocess.TimeoutExpired:
             pass
         self._proc = None
+        self._stdout_lines.put(None)
 
     def cancel(self) -> None:
+        # Called from another thread while a _send may be waiting. Killing
+        # the process is what makes that wait end early; the sentinel below
+        # (pushed by close_fast) is what makes it end immediately.
+        self._poisoned = True
         self.close_fast()
 
     # -- chain selection -----------------------------------------------------
@@ -2359,8 +2397,13 @@ class XilinxHwServerTransport(Transport):
 
     # -- process I/O ---------------------------------------------------------
 
-    def _send(self, tcl: str) -> str:
+    def _send(self, tcl: str, *, timeout_sec: float | None = None) -> str:
         """Send *tcl* to the persistent xsdb process and return output.
+
+        Bounded by ``read_timeout_sec`` (or ``timeout_sec`` for one call).
+        Waiting forever is not an option: xsdb can stay alive and stop
+        answering, and the caller is often a thread that owns the only
+        hardware session there is.
 
         Set environment variable ``FCAPZ_LOG_XSDB=1`` to log every TCL
         request and every xsdb response to ``stderr`` — use this for
@@ -2370,7 +2413,13 @@ class XilinxHwServerTransport(Transport):
         per response.
         """
         log = os.environ.get("FCAPZ_LOG_XSDB") == "1"
+        budget = self.read_timeout_sec if timeout_sec is None else float(timeout_sec)
         with self._xsdb_io_lock:
+            if self._poisoned:
+                raise RuntimeError(
+                    "xsdb transport was torn down after a timeout or cancel; "
+                    "reconnect before using it again"
+                )
             if not self._proc or not self._proc.stdin or not self._proc.stdout:
                 raise RuntimeError("not connected — call connect() first")
             if log:
@@ -2381,9 +2430,24 @@ class XilinxHwServerTransport(Transport):
             self._proc.stdin.flush()
 
             lines: list[str] = []
+            # One deadline for the whole exchange, not per line: a process
+            # dribbling one line per interval would otherwise reset the
+            # timeout forever and never finish.
+            deadline = time.monotonic() + budget
             while True:
-                raw = self._proc.stdout.readline()
-                if not raw:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._poison_after_timeout()
+                    raise TimeoutError(
+                        "timed out waiting for the xsdb response sentinel "
+                        f"after {budget:.1f}s; the session was torn down and "
+                        "must be reconnected"
+                    )
+                try:
+                    raw = self._stdout_lines.get(timeout=remaining)
+                except queue.Empty:
+                    continue
+                if raw is None:
                     stderr = "\n".join(self._stderr_lines[-20:])
                     raise ConnectionError(
                         f"xsdb process exited unexpectedly. stderr:\n{stderr}"
@@ -2398,11 +2462,35 @@ class XilinxHwServerTransport(Transport):
                 sys.stderr.flush()
             return out
 
+    def _poison_after_timeout(self) -> None:
+        """Kill the process so the next caller fails fast instead of hanging.
+
+        A process that missed its deadline has an unread reply in flight;
+        reusing the pipe would pair that reply with the next request. Killing
+        it also releases whatever the reader thread is blocked on.
+        """
+        self._poisoned = True
+        self.close_fast()
+
     def _drain_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:
             raise RuntimeError("xsdb process not initialized")
         for raw in self._proc.stderr:
             self._stderr_lines.append(raw.rstrip("\n\r"))
+
+    def _drain_stdout(self) -> None:
+        """Move stdout into the queue so no caller ever blocks on the pipe."""
+        proc = self._proc
+        if not proc or not proc.stdout:
+            return
+        sink = self._stdout_lines
+        try:
+            for raw in proc.stdout:
+                sink.put(raw)
+        except (ValueError, OSError):
+            # The pipe was closed under us by close()/cancel(). Expected.
+            pass
+        sink.put(None)
 
 
 class VendorStubTransport(Transport):
