@@ -27,7 +27,16 @@ from threading import RLock
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, TypedDict
+from typing import Any, Callable, Literal
+
+try:
+    # pydantic -- and so the MCP tool schema -- refuses typing.TypedDict on
+    # Python < 3.12, and the project supports 3.10. typing_extensions ships
+    # with pydantic, so it is there whenever a schema is actually built; the
+    # fallback only keeps this module importable without the MCP extra.
+    from typing_extensions import TypedDict
+except ImportError:  # pragma: no cover - no SDK installed
+    from typing import TypedDict
 
 from ._version import __version__
 from .axi_decode import FAULT_FLAGS

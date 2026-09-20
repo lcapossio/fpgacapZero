@@ -17,6 +17,10 @@ from unittest.mock import patch
 
 import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
+    AxiTransactionPage,
+    CaptureChunk,
+    ProbeEntry,
+    SamplePage,
     _ERROR_ACTIONS,
     _with_progress,
     _coded_error,
@@ -1563,6 +1567,25 @@ class OwnerRecoveryRaceTests(unittest.TestCase):
 
 class TypedToolSchemaTests(unittest.TestCase):
     """Closed value sets belong in the schema, not only in the error path."""
+
+    def test_the_schema_types_are_ones_pydantic_will_accept(self):
+        # pydantic refuses typing.TypedDict on Python < 3.12 and this project
+        # supports 3.10, so every schema type has to come from
+        # typing_extensions. On 3.12 both work, which is exactly why this
+        # needs asserting rather than leaving to the schema tests: a
+        # developer on 3.12 cannot otherwise see the breakage.
+        import typing_extensions
+
+        for shape in (
+            CaptureConfigDict,
+            ProbeEntry,
+            SamplePage,
+            AxiTransactionPage,
+            CaptureChunk,
+            SessionStatus,
+        ):
+            with self.subTest(shape=shape.__name__):
+                self.assertIn(typing_extensions.TypedDict, shape.__orig_bases__)
 
     def test_the_accepted_config_keys_come_from_the_published_schema(self):
         # Two hand-maintained lists would drift, and the drift would show up
