@@ -17,6 +17,19 @@ from .transport import OpenOcdTransport, Transport, list_openocd_taps
 
 _log = logging.getLogger(__name__)
 
+
+class CaptureNotReady(TimeoutError):
+    """The armed capture has not completed yet.
+
+    A ``TimeoutError`` subclass so every existing ``except TimeoutError``
+    still catches it, but a distinct type because it is the one timeout that
+    is *expected*: the trigger simply has not fired, the core is still armed,
+    and the right response is to wait longer. A timeout from the transport
+    while reading status or sample data means something else entirely -- the
+    link may be wedged -- and must not be mistaken for it.
+    """
+
+
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
 # identity magic.  Hosts must reject any bitstream that does not present
@@ -797,7 +810,7 @@ class Analyzer:
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
-            raise TimeoutError("capture did not complete within timeout")
+            raise CaptureNotReady("capture did not complete within timeout")
 
         with self.transport.transaction_lock():
             self._select_instance()
@@ -894,6 +907,10 @@ class Analyzer:
             "posttrigger": cfg.posttrigger,
             "channel": cfg.channel,
             "decimation": cfg.decimation,
+            # Recorded so an offline reader knows whether the samples are
+            # consecutive cycles. AXI reassembly, for one, is only sound when
+            # they are (see axi_decode.decode_axi).
+            "stor_qual_mode": cfg.stor_qual_mode,
             "ext_trigger_mode": cfg.ext_trigger_mode,
             "trigger": {
                 "mode": cfg.trigger.mode,
@@ -904,6 +921,13 @@ class Analyzer:
             "segment": result.segment,
             "samples": [{"index": i, "value": v} for i, v in enumerate(result.samples)],
         }
+        if cfg.probes:
+            # The field map, so a reader does not have to guess it back from
+            # the flattened width -- several geometries share one width.
+            d["probes"] = [
+                {"name": pr.name, "width": pr.width, "lsb": pr.lsb}
+                for pr in cfg.probes
+            ]
         if result.timestamps:
             d["timestamps"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)

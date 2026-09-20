@@ -40,15 +40,27 @@ REQUIRED_FIELDS = frozenset(name for pair in _CHANNELS.values() for name in pair
 _RESP_NAMES = {0: "OKAY", 1: "EXOKAY", 2: "SLVERR", 3: "DECERR"}
 _ERROR_RESPONSES = ("SLVERR", "DECERR")
 
-# Flags that mean "the bus misbehaved", as opposed to observations that are
-# legal AXI but worth reporting (partial strobes, data before address, a
-# transaction straddling the end of the window).
+# Flags that mean "the bus misbehaved". A finite capture window can only
+# prove misbehaviour for what it saw whole: an error response is a fault
+# wherever it lands, and a misaligned address is one on sight. Everything
+# else this decoder reports is either legal AXI (partial strobes, data before
+# address) or an artefact of the window's own edges -- see WINDOW_EDGE_FLAGS.
 FAULT_FLAGS = frozenset({
     "error_response",
-    "request_not_observed",
     "unaligned_address",
+})
+
+# Flags that describe the capture window rather than the bus. A response whose
+# request handshook before the window, or a write whose second beat falls
+# after it, is perfectly legal traffic seen through a keyhole. They are
+# reported because they bound what the decode can claim -- counting them as
+# faults would make "faults only" a list of boundary effects.
+WINDOW_EDGE_FLAGS = frozenset({
+    "request_not_observed",
+    "no_response_in_window",
     "write_missing_address",
     "write_missing_data",
+    "pairing_suspect",
 })
 
 
@@ -412,11 +424,81 @@ class _Decoder:
             tx.flags.append("unaligned_address")
 
 
-def decode_axi(samples: Sequence[int], probes: Sequence[Any]) -> dict[str, Any]:
+# The one thing an in-order decode cannot check for itself. Stated on every
+# result, and on every page of transactions, because a reader who never sees
+# it will read a wrong address as a right one.
+PAIRING_ASSUMPTION = (
+    "no AXI4-Lite transaction was outstanding when the capture window opened. "
+    "AXI4-Lite has no transaction IDs, so responses are matched to requests "
+    "first-in-first-out; if the window opened mid-transaction, every pairing "
+    "in that direction is shifted onto the wrong request. A finite trace "
+    "cannot disprove this -- check the addresses against what you expect."
+)
+
+
+def _pairing_block(pre_window: Sequence[str] = ()) -> dict[str, Any]:
+    return {
+        "method": "in-order",
+        "assumes": PAIRING_ASSUMPTION,
+        "pre_window_traffic_observed": list(pre_window),
+        # True only when the trace itself proved the assumption false. False
+        # is *not* proof that it holds.
+        "pre_window_traffic_proven": bool(pre_window),
+    }
+
+
+def _sampling_block(decimation: int, storage_qualified: bool) -> dict[str, Any]:
+    return {
+        "decimation": int(decimation),
+        "storage_qualified": bool(storage_qualified),
+        "contiguous": not decimation and not storage_qualified,
+    }
+
+
+def _undecodable(
+    addr_w: int, data_w: int, reason: str, sampling: dict[str, Any]
+) -> dict[str, Any]:
+    """The full result shape with nothing decoded, and why."""
+    return {
+        "protocol": "axi4lite",
+        "addr_width": addr_w,
+        "data_width": data_w,
+        "decoded": False,
+        "unavailable_reason": reason,
+        "sampling": sampling,
+        "transaction_count": 0,
+        "write_count": 0,
+        "read_count": 0,
+        "error_count": 0,
+        "anomaly_count": 0,
+        "flagged_count": 0,
+        "pairing": _pairing_block(),
+        "max_latency": None,
+        "transactions": [],
+    }
+
+
+def decode_axi(
+    samples: Sequence[int],
+    probes: Sequence[Any],
+    *,
+    decimation: int = 0,
+    storage_qualified: bool = False,
+) -> dict[str, Any]:
     """Reconstruct AXI4-Lite transactions from a capture's samples.
 
     ``probes`` is the monitor's probe map (objects with ``name``/``width``/
     ``lsb``). Raises :class:`ValueError` if the map is not an AXI one.
+
+    ``decimation`` and ``storage_qualified`` describe how the capture was
+    taken. Reassembly reads the sample stream as consecutive bus cycles: a
+    beat's position *is* its cycle, and a response pairs with the oldest
+    request still queued. Decimation and storage qualification both break
+    that -- a handshake that was never stored cannot be distinguished from
+    one that never happened, so a dropped response silently shifts every
+    later pairing onto the wrong address, and "latency" becomes a count of
+    stored samples. There is no way to recover the missing beats after the
+    fact, so such a capture is refused rather than misread.
     """
     names = [p.name for p in probes]
     if not looks_like_axi(names):
@@ -426,6 +508,24 @@ def decode_axi(samples: Sequence[int], probes: Sequence[Any]) -> dict[str, Any]:
             + ", ".join(missing)
         )
     decoder = _Decoder(probes)
+    sampling = _sampling_block(decimation, storage_qualified)
+    if not sampling["contiguous"]:
+        how = " and ".join(
+            part
+            for part in (
+                f"decimation={int(decimation)}" if decimation else "",
+                "storage qualification" if storage_qualified else "",
+            )
+            if part
+        )
+        return _undecodable(
+            decoder.addr_w,
+            decoder.data_w,
+            f"the capture stored only selected cycles ({how}), so handshakes "
+            "are missing from the trace; AXI reassembly needs every cycle. "
+            "Re-capture with decimation 0 and storage qualification off.",
+            sampling,
+        )
     transactions = decoder.decode(samples)
     addr_digits = max(1, (decoder.addr_w + 3) // 4)
     data_digits = max(1, (decoder.data_w + 3) // 4)
@@ -434,6 +534,9 @@ def decode_axi(samples: Sequence[int], probes: Sequence[Any]) -> dict[str, Any]:
         "protocol": "axi4lite",
         "addr_width": decoder.addr_w,
         "data_width": decoder.data_w,
+        "decoded": True,
+        "unavailable_reason": None,
+        "sampling": sampling,
         "transaction_count": len(transactions),
         "write_count": sum(1 for tx in transactions if tx.kind == "write"),
         "read_count": sum(1 for tx in transactions if tx.kind == "read"),
@@ -442,17 +545,9 @@ def decode_axi(samples: Sequence[int], probes: Sequence[Any]) -> dict[str, Any]:
             1 for tx in transactions if FAULT_FLAGS.intersection(tx.flags)
         ),
         "flagged_count": sum(1 for tx in transactions if tx.flags),
-        "pairing": {
-            "method": "in-order",
-            "assumes": (
-                "no AXI4-Lite transaction was outstanding when the capture "
-                "window opened; the protocol has no IDs, so responses are "
-                "matched to requests first-in-first-out"
-            ),
-            "pre_window_traffic_observed": sorted(
-                kind for kind, seen in decoder.pre_window.items() if seen
-            ),
-        },
+        "pairing": _pairing_block(
+            sorted(kind for kind, seen in decoder.pre_window.items() if seen)
+        ),
         "max_latency": max(latencies) if latencies else None,
         "transactions": [tx.to_json(addr_digits, data_digits) for tx in transactions],
     }

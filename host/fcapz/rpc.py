@@ -11,6 +11,7 @@ from typing import Any, Dict
 from .analyzer import (
     Analyzer,
     CaptureConfig,
+    CaptureNotReady,
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
@@ -35,6 +36,24 @@ from .transport import (
 )
 
 _SCHEMA_VERSION = "1.1"
+
+
+class RpcError(RuntimeError):
+    """A request the session cannot serve in its current state.
+
+    A distinct type so a caller can tell "you asked for the wrong thing" from
+    "this server has a bug". Both used to arrive as a bare ``RuntimeError``,
+    which left the MCP layer classifying an ordinary "not connected" as an
+    internal error and telling the agent to report a bug.
+    """
+
+
+class NotConnectedError(RpcError):
+    """No session is open for the core the request names."""
+
+
+class NotEnabledError(RpcError):
+    """The feature exists but this server was not started with it turned on."""
 
 # Upper bound on how many TCL ports discover_boards will sweep in one request,
 # so an over-large port_span / ports list can't trigger a huge scan.
@@ -105,7 +124,7 @@ class RpcServer:
 
     def _ensure_analyzer(self) -> Analyzer:
         if self._analyzer is None:
-            raise RuntimeError("not connected")
+            raise NotConnectedError("not connected")
         return self._analyzer
 
     def _close_all(self) -> None:
@@ -263,7 +282,9 @@ class RpcServer:
         timeout = _wait_sec(req, "timeout", 10.0)
         if req.get("segments"):
             if not analyzer.wait_all_segments_done(timeout=timeout):
-                raise TimeoutError("segmented capture did not complete within timeout")
+                raise CaptureNotReady(
+                    "segmented capture did not complete within timeout"
+                )
             probe_info = analyzer.probe()
             nseg = max(1, int(probe_info.get("num_segments", 1)))
             results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
@@ -672,7 +693,14 @@ class RpcServer:
             # Only meaningful when the capture is actually an AXI monitor's;
             # the caller can ask unconditionally and get it when it applies.
             if probe_defs and looks_like_axi(p.name for p in probe_defs):
-                payload["axi"] = decode_axi(result.samples, probe_defs)
+                # How the capture was taken decides whether it can be read as
+                # transactions at all: reassembly needs consecutive cycles.
+                payload["axi"] = decode_axi(
+                    result.samples,
+                    probe_defs,
+                    decimation=config.decimation,
+                    storage_qualified=bool(config.stor_qual_mode),
+                )
         return payload
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
@@ -789,7 +817,7 @@ class RpcServer:
             # config that reached them and a running TCL port to connect to.
             # Spawns processes, so it is loopback-gated by the web layer.
             if self._openocd_launcher is None:
-                raise RuntimeError(
+                raise NotEnabledError(
                     "OpenOCD launching is not enabled on this server; start "
                     "fcapz-web with --openocd <exe> and --openocd-cfg/-cfg-dir"
                 )
@@ -810,7 +838,7 @@ class RpcServer:
             if self._openocd_launcher is None:
                 if cmd == "openocd_status":
                     return self._ok(enabled=False, configs=[], running=[])
-                raise RuntimeError(
+                raise NotEnabledError(
                     "OpenOCD launching is not enabled on this server; start "
                     "fcapz-web with --openocd <exe> and --openocd-cfg <cfg>"
                 )
@@ -905,7 +933,7 @@ class RpcServer:
             # here just means "still waiting" and leaves the core armed.
             cfg = analyzer._config  # noqa: SLF001 - the session's active config
             if cfg is None:
-                raise RuntimeError("not configured - send `configure` and `arm` first")
+                raise RpcError("not configured - send `configure` and `arm` first")
             return self._capture_readout(analyzer, cfg, req)
 
         if cmd == "capture_status":
@@ -960,7 +988,7 @@ class RpcServer:
                 )
                 eio = discover_eio(transport, chains=chains)
                 if eio is None:
-                    raise RuntimeError("no EIO core found on the target")
+                    raise RpcError("no EIO core found on the target")
                 self._eio = eio
                 return self._ok(
                     discovered=True,
@@ -984,7 +1012,7 @@ class RpcServer:
 
         if cmd == "eio_read":
             if self._eio is None:
-                raise RuntimeError("eio not connected")
+                raise NotConnectedError("eio not connected")
             v = self._eio.read_inputs()
             # value stays a JSON number for back-compat; value_hex carries the
             # full width so wide (multiword) EIO survives a 53-bit JS client.
@@ -992,7 +1020,7 @@ class RpcServer:
 
         if cmd == "eio_write":
             if self._eio is None:
-                raise RuntimeError("eio not connected")
+                raise NotConnectedError("eio not connected")
             # Accept a base-prefixed string so wide output words don't round.
             self._eio.write_outputs(self._parse_int(req["value"]))
             return self._ok()
@@ -1039,14 +1067,14 @@ class RpcServer:
 
         if cmd == "axi_read":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             val = self._axi.axi_read(addr)
             return self._ok(value=f"0x{val:08X}")
 
         if cmd == "axi_write":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data = int(req["data"], 16) if isinstance(req["data"], str) else int(req["data"])
             wstrb_raw = req.get("wstrb", "0xF")
@@ -1056,7 +1084,7 @@ class RpcServer:
 
         if cmd == "axi_write_block":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data_raw = req["data"]
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
@@ -1069,7 +1097,7 @@ class RpcServer:
 
         if cmd == "axi_dump":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             count = int(req["count"])
             burst = bool(req.get("burst", False))
@@ -1120,7 +1148,7 @@ class RpcServer:
 
         if cmd == "uart_send":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             raw = req.get("data", "")
             data = base64.b64decode(raw)
             self._uart.send(data)
@@ -1128,7 +1156,7 @@ class RpcServer:
 
         if cmd == "uart_recv":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             count = int(req.get("count", 0))
             timeout = _wait_sec(req, "timeout", 1.0)
             data = self._uart.recv(count=count, timeout=timeout)
@@ -1137,7 +1165,7 @@ class RpcServer:
 
         if cmd == "uart_status":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             return self._ok(**self._uart.status())
 
         raise ValueError(f"unknown cmd: {cmd}")

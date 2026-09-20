@@ -6,7 +6,14 @@ from __future__ import annotations
 import unittest
 
 from fcapz import axi_layout
-from fcapz.axi_decode import REQUIRED_FIELDS, decode_axi, looks_like_axi
+from fcapz.axi_decode import (
+    FAULT_FLAGS,
+    PAIRING_ASSUMPTION,
+    REQUIRED_FIELDS,
+    WINDOW_EDGE_FLAGS,
+    decode_axi,
+    looks_like_axi,
+)
 
 
 class _Trace:
@@ -320,6 +327,164 @@ class RpcIntegrationTests(unittest.TestCase):
         )
 
         self.assertNotIn("axi", payload)
+
+
+class SamplingProvenanceTests(unittest.TestCase):
+    """A capture that stored only some cycles cannot be read as AXI.
+
+    Reassembly reads sample position as bus cycle and pairs responses with
+    the oldest queued request. Decimation and storage qualification drop
+    cycles, so a handshake that was never stored is indistinguishable from
+    one that never happened -- and a dropped response silently shifts every
+    later pairing onto the wrong address. There is no way to recover it after
+    the fact, so the decoder refuses.
+    """
+
+    def _trace(self):
+        return _Trace().idle().write(0x1000, 0xCAFEBABE).read(0x2000, 0xDEADBEEF)
+
+    def test_a_dense_capture_still_decodes(self):
+        out = decode_axi(self._trace().samples, self._trace().probes)
+        self.assertTrue(out["decoded"])
+        self.assertIsNone(out["unavailable_reason"])
+        self.assertTrue(out["sampling"]["contiguous"])
+        self.assertEqual(out["transaction_count"], 2)
+
+    def test_decimation_refuses_rather_than_misreads(self):
+        t = self._trace()
+        out = decode_axi(t.samples, t.probes, decimation=3)
+
+        self.assertFalse(out["decoded"])
+        self.assertIn("decimation=3", out["unavailable_reason"])
+        self.assertEqual(out["transactions"], [])
+        self.assertEqual(out["transaction_count"], 0)
+        self.assertFalse(out["sampling"]["contiguous"])
+        self.assertEqual(out["sampling"]["decimation"], 3)
+
+    def test_storage_qualification_refuses_too(self):
+        t = self._trace()
+        out = decode_axi(t.samples, t.probes, storage_qualified=True)
+
+        self.assertFalse(out["decoded"])
+        self.assertIn("storage qualification", out["unavailable_reason"])
+        self.assertTrue(out["sampling"]["storage_qualified"])
+
+    def test_the_refusal_keeps_the_full_result_shape(self):
+        t = self._trace()
+        dense = decode_axi(t.samples, t.probes)
+        sparse = decode_axi(t.samples, t.probes, decimation=1)
+        # A consumer must not need two code paths to read the two.
+        self.assertEqual(set(dense), set(sparse))
+
+    def test_a_bad_probe_map_still_raises_before_the_sampling_check(self):
+        # Wrong probe map is the caller's mistake and stays an exception;
+        # a legitimately undecodable capture is data.
+        with self.assertRaisesRegex(ValueError, "awvalid"):
+            decode_axi([0, 0], [], decimation=4)
+
+
+class FaultClassificationTests(unittest.TestCase):
+    """What a finite window can prove is a fault, and what it cannot."""
+
+    def test_only_provable_misbehaviour_counts_as_a_fault(self):
+        self.assertEqual(FAULT_FLAGS, frozenset({"error_response", "unaligned_address"}))
+        self.assertFalse(FAULT_FLAGS & WINDOW_EDGE_FLAGS)
+
+    def test_a_response_whose_request_predates_the_window_is_not_a_fault(self):
+        # Entirely legal: the AR handshook before the capture started.
+        out = _Trace().cycle(rvalid=1, rready=1, rdata=0x11, rresp=0).decode()
+
+        (txn,) = out["transactions"]
+        self.assertIn("request_not_observed", txn["flags"])
+        self.assertEqual(out["anomaly_count"], 0, "a window edge is not a bus fault")
+        self.assertEqual(out["flagged_count"], 1, "but it is still reported")
+
+    def test_a_write_clipped_by_the_end_of_the_window_is_not_a_fault(self):
+        # AW on the last stored cycle; its W beat falls just outside.
+        out = _Trace().idle().cycle(awvalid=1, awready=1, awaddr=0x40).decode()
+
+        (txn,) = out["transactions"]
+        self.assertIn("write_missing_data", txn["flags"])
+        self.assertEqual(out["anomaly_count"], 0)
+        self.assertEqual(out["flagged_count"], 1)
+
+    def test_an_error_response_is_a_fault_wherever_it_lands(self):
+        out = _Trace().idle().write(0x1000, 0x1, resp=2).decode()
+        self.assertEqual(out["anomaly_count"], 1)
+
+
+class PairingDisclosureTests(unittest.TestCase):
+    """The assumption is stated whether or not the trace disproved it.
+
+    A window that opened mid-transaction produces rows that read perfectly
+    and carry the wrong address. Nothing in the trace marks them, so silence
+    on a clean-looking decode is exactly the dangerous case.
+    """
+
+    def test_a_clean_decode_still_carries_the_assumption(self):
+        out = _Trace().idle().write(0x1000, 0xABCD).decode()
+
+        self.assertEqual(out["pairing"]["assumes"], PAIRING_ASSUMPTION)
+        self.assertEqual(out["pairing"]["pre_window_traffic_observed"], [])
+        self.assertFalse(out["pairing"]["pre_window_traffic_proven"])
+
+    def test_detected_pre_window_traffic_is_marked_as_proven(self):
+        out = (
+            _Trace()
+            .cycle(rvalid=1, rready=1, rdata=0x11)
+            .read(0x2000, 0x22)
+            .decode()
+        )
+
+        self.assertEqual(out["pairing"]["pre_window_traffic_observed"], ["read"])
+        self.assertTrue(out["pairing"]["pre_window_traffic_proven"])
+
+    def test_the_undetectable_misalignment_is_not_claimed_to_be_clean(self):
+        # AR(A) handshook before the window. Inside it: AR(B), then R(A).
+        # The decoder pairs R(A)'s data onto address B and there is no
+        # evidence in the trace that it is wrong -- which is why the
+        # assumption has to be stated unconditionally.
+        out = (
+            _Trace()
+            .cycle(arvalid=1, arready=1, araddr=0xB000)
+            .cycle(rvalid=1, rready=1, rdata=0xAAAA)
+            .decode()
+        )
+
+        (txn,) = out["transactions"]
+        self.assertEqual(txn["addr"], "0x0000b000")
+        self.assertEqual(out["anomaly_count"], 0)
+        self.assertFalse(out["pairing"]["pre_window_traffic_proven"])
+        # The only defence: the caveat travels with the result.
+        self.assertIn("cannot disprove", out["pairing"]["assumes"])
+
+
+class CaptureProvenanceReachesTheDecoderTests(unittest.TestCase):
+    def test_the_serializer_passes_the_capture_config_through(self):
+        from fcapz.analyzer import CaptureConfig, CaptureResult, TriggerConfig
+        from fcapz.rpc import RpcServer
+
+        trace = _Trace().idle().write(0x1000, 0xCAFE)
+        config = CaptureConfig(
+            pretrigger=0,
+            posttrigger=len(trace.samples) - 1,
+            trigger=TriggerConfig(mode=0, value=0, mask=0),
+            sample_width=sum(p.width for p in trace.probes),
+            depth=len(trace.samples),
+            probes=list(trace.probes),
+            decimation=2,
+        )
+        payload = RpcServer()._serialize_capture(
+            analyzer=_StubAnalyzer(),
+            config=config,
+            result=CaptureResult(config=config, samples=trace.samples),
+            fmt="csv",
+            include_summary=False,
+            decode_axi_txns=True,
+        )
+
+        self.assertFalse(payload["axi"]["decoded"])
+        self.assertEqual(payload["axi"]["sampling"]["decimation"], 2)
 
 
 if __name__ == "__main__":
