@@ -24,7 +24,7 @@ from threading import RLock
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal, TypedDict
 
 from ._version import __version__
 from .axi_decode import FAULT_FLAGS
@@ -33,6 +33,56 @@ from .rpc import _SCHEMA_VERSION, RpcServer
 
 
 JsonDict = dict[str, Any]
+
+# Closed sets, spelled so the MCP client sees them as `enum` in the tool
+# schema and can reject a bad value before spending a round trip on it. The
+# session still validates: a schema is the client's contract, not the
+# server's guarantee.
+Backend = Literal["hw_server", "openocd", "usb_blaster"]
+CaptureFormat = Literal["json", "csv", "vcd"]
+SampleRadix = Literal["hex", "int"]
+TransactionKind = Literal["read", "write"]
+TriggerMode = Literal["value_match", "edge_detect", "both"]
+ExtTriggerMode = Literal[0, 1, 2]  # 0=disabled, 1=OR, 2=AND
+
+
+class ProbeEntry(TypedDict):
+    """One named sub-signal of the packed sample word."""
+
+    name: str
+    width: int
+    lsb: int
+
+
+class CaptureConfigDict(TypedDict, total=False):
+    """Capture fields an agent may set.
+
+    A TypedDict rather than `dict[str, Any]` so the tool schema names every
+    field and its type instead of accepting anything and explaining the
+    rejection afterwards. Bit vectors accept a base-prefixed string as well as
+    an integer, because a value wider than 53 bits cannot survive a JSON
+    number in a JavaScript client.
+    """
+
+    pretrigger: int
+    posttrigger: int
+    trigger_mode: TriggerMode
+    trigger_value: int | str
+    trigger_mask: int | str
+    sample_width: int
+    depth: int
+    sample_clock_hz: int
+    probes: list[ProbeEntry] | str
+    probe_file: str
+    channel: int
+    decimation: int
+    ext_trigger_mode: ExtTriggerMode
+    stor_qual_mode: int
+    stor_qual_value: int | str
+    stor_qual_mask: int | str
+    startup_arm: bool
+    trigger_holdoff: int
+    trigger_delay: int
 
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
@@ -218,27 +268,8 @@ class FcapzMcpSession:
         default_factory=queue.Queue, init=False, repr=False
     )
 
-    _CAPTURE_CONFIG_KEYS = frozenset({
-        "pretrigger",
-        "posttrigger",
-        "trigger_mode",
-        "trigger_value",
-        "trigger_mask",
-        "sample_width",
-        "depth",
-        "sample_clock_hz",
-        "probes",
-        "probe_file",
-        "channel",
-        "decimation",
-        "ext_trigger_mode",
-        "stor_qual_mode",
-        "stor_qual_value",
-        "stor_qual_mask",
-        "startup_arm",
-        "trigger_holdoff",
-        "trigger_delay",
-    })
+    # Derived from the schema the agent is shown, so the two cannot drift.
+    _CAPTURE_CONFIG_KEYS = frozenset(CaptureConfigDict.__annotations__)
 
     @property
     def last_capture(self) -> JsonDict | None:
@@ -685,7 +716,7 @@ class FcapzMcpSession:
     def connect(
         self,
         *,
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -980,7 +1011,7 @@ class FcapzMcpSession:
         start: int = 0,
         count: int = 128,
         fields: list[str] | None = None,
-        radix: str = "hex",
+        radix: SampleRadix = "hex",
     ) -> JsonDict:
         """Page the cached capture's samples as whole, self-contained records.
 
@@ -1143,7 +1174,7 @@ class FcapzMcpSession:
         start: int = 0,
         count: int = 64,
         only_anomalies: bool = False,
-        kind: str | None = None,
+        kind: TransactionKind | None = None,
     ) -> JsonDict:
         """Page the decoded AXI transactions of the cached capture.
 
@@ -1306,7 +1337,7 @@ class FcapzMcpSession:
     def capture(
         self,
         *,
-        config: JsonDict | None = None,
+        config: CaptureConfigDict | None = None,
         timeout: float = 10.0,
         fmt: str = "json",
         include_event_summary: bool = False,
@@ -1428,7 +1459,7 @@ class FcapzMcpSession:
     def eio_connect(
         self,
         *,
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -1493,7 +1524,7 @@ class FcapzMcpSession:
     def axi_connect(
         self,
         *,
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -1576,7 +1607,7 @@ class FcapzMcpSession:
     def uart_connect(
         self,
         *,
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -1894,7 +1925,7 @@ def build_mcp_server(session: FcapzMcpSession):
         readOnlyHint=False,
     )
     def fcapz_connect(
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -1962,9 +1993,9 @@ def build_mcp_server(session: FcapzMcpSession):
         readOnlyHint=False,
     )
     def fcapz_capture(
-        config: JsonDict | None = None,
+        config: CaptureConfigDict | None = None,
         timeout: float = 10.0,
-        format: str = "json",
+        format: CaptureFormat = "json",
         include_event_summary: bool = False,
         immediate: bool = False,
         segments: bool = False,
@@ -1972,15 +2003,10 @@ def build_mcp_server(session: FcapzMcpSession):
         """Configure, arm, and capture samples from the ELA.
 
         timeout is in seconds and may exceed the server's --rpc-timeout (up to a
-        300 s server cap) — the watchdog waits out the capture. format is
-        "json", "csv", or "vcd".
+        300 s server cap) — the watchdog waits out the capture.
         immediate=true rewrites the trigger to fire now (no waiting), for a
         snapshot of current state. include_event_summary asks the RPC layer to
-        add decoded event metadata to the capture result. config may contain
-        capture fields only: pretrigger, posttrigger, trigger_mode,
-        trigger_value, trigger_mask, sample_width, depth, sample_clock_hz,
-        probes, probe_file, channel, decimation, ext_trigger_mode,
-        stor_qual_mode/value/mask, startup_arm, trigger_holdoff, trigger_delay.
+        add decoded event metadata to the capture result.
         segments=true reads back every segment of a segmented core instead of
         segment 0 alone (fcapz_probe reports num_segments).
         The tool returns summary metadata only; use fcapz_get_last_capture or
@@ -2021,7 +2047,7 @@ def build_mcp_server(session: FcapzMcpSession):
         start: int = 0,
         count: int = 128,
         fields: list[str] | None = None,
-        radix: str = "hex",
+        radix: SampleRadix = "hex",
     ) -> JsonDict:
         """Page the cached capture's samples as whole records.
 
@@ -2049,7 +2075,7 @@ def build_mcp_server(session: FcapzMcpSession):
         start: int = 0,
         count: int = 64,
         only_anomalies: bool = False,
-        kind: str | None = None,
+        kind: TransactionKind | None = None,
     ) -> JsonDict:
         """Read the cached capture as AXI transactions instead of raw samples.
 
@@ -2096,7 +2122,7 @@ def build_mcp_server(session: FcapzMcpSession):
         idempotentHint=False,
         readOnlyHint=False,
     )
-    def fcapz_configure(config: JsonDict | None = None) -> JsonDict:
+    def fcapz_configure(config: CaptureConfigDict | None = None) -> JsonDict:
         """Configure the connected ELA without arming it.
 
         config accepts the same capture fields as fcapz_capture. Use this to
@@ -2130,7 +2156,7 @@ def build_mcp_server(session: FcapzMcpSession):
     )
     def fcapz_capture_wait(
         timeout: float = 10.0,
-        format: str = "json",
+        format: CaptureFormat = "json",
         include_event_summary: bool = False,
         segments: bool = False,
     ) -> JsonDict:
@@ -2179,7 +2205,7 @@ def build_mcp_server(session: FcapzMcpSession):
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_eio_connect(
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -2240,7 +2266,7 @@ def build_mcp_server(session: FcapzMcpSession):
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_axi_connect(
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,
@@ -2331,7 +2357,7 @@ def build_mcp_server(session: FcapzMcpSession):
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
     def fcapz_uart_connect(
-        backend: str = "hw_server",
+        backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
         tap: str | None = None,

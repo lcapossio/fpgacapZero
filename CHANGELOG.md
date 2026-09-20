@@ -19,6 +19,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `value_hex`, and `fcapz_eio_write` accepts a base-prefixed string, which is
   the only way such a client can drive a wide output exactly.
 
+- **The MCP tool schema is typed.** `backend`, `format`, `radix`, `kind` and
+  `trigger_mode` are `enum`s in the published schema instead of strings
+  validated after the call, and capture `config` is a named object with a
+  type per field instead of an open dictionary. The accepted key set is
+  derived from that schema, so the two cannot drift. Costs roughly 2k tokens
+  of tool surface in the default profile, and buys client-side rejection of
+  values that previously needed a round trip to refuse.
+
 ### Fixed
 
 - **`probe_file` is read once, where it is checked.** The MCP layer validated

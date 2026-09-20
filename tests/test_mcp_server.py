@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import fcapz.mcp_server as mcp_server
 from fcapz.mcp_server import (
+    CaptureConfigDict,
     FcapzMcpError,
     _CommandState,
     _HardwareCommand,
@@ -1553,6 +1554,59 @@ class OwnerRecoveryRaceTests(unittest.TestCase):
         finally:
             session._active_rpc_cmd = None
         self.assertEqual(called, [])
+
+
+class TypedToolSchemaTests(unittest.TestCase):
+    """Closed value sets belong in the schema, not only in the error path."""
+
+    def test_the_accepted_config_keys_come_from_the_published_schema(self):
+        # Two hand-maintained lists would drift, and the drift would show up
+        # as a field the schema advertises and the session rejects.
+        self.assertEqual(
+            FcapzMcpSession._CAPTURE_CONFIG_KEYS,
+            frozenset(CaptureConfigDict.__annotations__),
+        )
+
+    def test_an_unknown_config_field_is_still_refused(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self.assertRaisesRegex(ValueError, "unsupported capture config"):
+            session.capture(config={"nonsense": 1})
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_enums_reach_the_client_as_enums(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+
+        connect = tools["fcapz_connect"].inputSchema["properties"]["backend"]
+        self.assertEqual(connect["enum"], ["hw_server", "openocd", "usb_blaster"])
+
+        capture = tools["fcapz_capture"].inputSchema
+        self.assertEqual(
+            capture["properties"]["format"]["enum"], ["json", "csv", "vcd"]
+        )
+        config = capture["$defs"]["CaptureConfigDict"]["properties"]
+        self.assertEqual(
+            config["trigger_mode"]["enum"], ["value_match", "edge_detect", "both"]
+        )
+        # Bit vectors must still accept a base-prefixed string: a value wider
+        # than 53 bits cannot survive a JSON number.
+        self.assertIn(
+            {"type": "string"}, config["trigger_value"]["anyOf"]
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_the_config_schema_names_every_accepted_field(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+        config = tools["fcapz_capture"].inputSchema["$defs"]["CaptureConfigDict"]
+
+        self.assertEqual(
+            set(config["properties"]), FcapzMcpSession._CAPTURE_CONFIG_KEYS
+        )
 
 
 class HostAllowlistTests(unittest.TestCase):

@@ -254,6 +254,15 @@ reads back every segment of a segmented core rather than segment 0 alone
 segments and tags each sample with its `segment`; `trigger_index` is withheld,
 because a flattened index no longer locates the trigger.
 
+The tool schema is typed, not free-form: `backend`, `format`, `radix`,
+`kind` and `trigger_mode` are enums, and `config` is a named object rather
+than an open dictionary, so a client rejects a bad value before spending a
+round trip on it. Bit-vector fields (`trigger_value`, `trigger_mask`,
+`stor_qual_value`, `stor_qual_mask`) accept a base-prefixed string as well as
+an integer, because a value wider than 53 bits cannot survive a JSON number.
+The session still validates everything it is given — the schema is the
+client's contract, not the server's guarantee.
+
 Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 
 | Key | Meaning |
