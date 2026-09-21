@@ -195,6 +195,15 @@ TARGETS = (
         sources=(RTL / "fcapz_uart_tap.v",),
     ),
     LintTarget(
+        name="fcapz_ela_uart",
+        top="fcapz_ela_uart",
+        sources=(
+            *ELA_WRAPPER_SOURCES,
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_ela_uart.v",
+        ),
+    ),
+    LintTarget(
         name="jtag_tap_xilinx7",
         top="jtag_tap_xilinx7",
         sources=(SIM / "bscane2_stub.v", RTL / "jtag_tap" / "jtag_tap_xilinx7.v"),
