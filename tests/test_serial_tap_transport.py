@@ -27,7 +27,7 @@ class FakeTapPort:
     """Minimal stand-in for ``serial.Serial`` speaking the bridge protocol."""
 
     def __init__(self, *, num_chains=4, max_dr_bits=256, magic=b"FCZU",
-                 version=1, extra=0, burst_chain=2):
+                 version=2, extra=0, burst_chain=2):
         self.num_chains = num_chains
         self.burst_chain = burst_chain
         self.max_dr_bits = max_dr_bits
@@ -52,6 +52,7 @@ class FakeTapPort:
         self.timestamps: list[int] = []
         self.timestamp_width = 32
         self._burst_queue: list[int] = []
+        self.breads: list[tuple[int, int, int]] = []   # (chain, width, count)
 
     # -- serial.Serial surface ---------------------------------------------
     def write(self, data):
@@ -101,6 +102,30 @@ class FakeTapPort:
                 self.idle_calls.append(int.from_bytes(self._rx[2:4], "little"))
                 del self._rx[:4]
                 self._reply(0x00)
+            elif cmd == 0x04:                # BREAD
+                if self.version < 2:
+                    del self._rx[:2]
+                    self._reply(0x01)            # BAD_FRAME on a v1 bridge
+                    continue
+                if len(self._rx) < 7:
+                    return
+                chain = self._rx[2]
+                width = int.from_bytes(self._rx[3:5], "little")
+                count = int.from_bytes(self._rx[5:7], "little")
+                del self._rx[:7]
+                if width == 0 or width > self.max_dr_bits:
+                    self._reply(0x03)
+                    continue
+                if chain == 0 or chain > self.num_chains:
+                    self._reply(0x02)
+                    continue
+                nb = (width + 7) // 8
+                out = bytearray()
+                for _ in range(count):
+                    self.scans.append((chain, width))
+                    out += self._do_scan(chain, width, bytes(nb), nb)
+                self.breads.append((chain, width, count))
+                self._reply(0x00, bytes(out))
             elif cmd == 0x01:                # SCAN
                 if len(self._rx) < 5:
                     return
@@ -201,7 +226,7 @@ def _connect(fake_serial, **kwargs):
 
 def test_connect_reads_identity(fake_serial):
     t, _ = _connect(fake_serial)
-    assert t.proto_version == 1
+    assert t.proto_version == 2
     assert t.num_chains == 4
     assert t.max_dr_bits == 256
     assert fake_serial["port"] == "COM_TEST"
@@ -216,7 +241,7 @@ def test_connect_rejects_wrong_magic(fake_serial):
 
 
 def test_connect_rejects_future_protocol(fake_serial):
-    fake_serial["obj"] = FakeTapPort(version=2)
+    fake_serial["obj"] = FakeTapPort(version=99)
     t = SerialTapTransport("COM_TEST")
     with pytest.raises(RuntimeError, match="unsupported fcapz TAP bridge protocol version"):
         t.connect()
@@ -280,6 +305,46 @@ def test_read_block_uses_the_burst_chain_for_the_data_window(fake_serial):
     wide = [s for s in port.scans if s == (2, 256)]
     assert len(wide) == 5
     assert port.mem[ADDR_BURST_PTR] == 0
+
+
+def test_burst_takes_all_its_scans_in_one_command(fake_serial):
+    """One round trip for the whole readback, not one per scan."""
+    t, port = _connect(fake_serial)
+    port.samples = [(i * 3) & 0xFF for i in range(100)]
+    port.breads.clear()
+
+    assert t.read_block(ADDR_DATA_BASE, 100) == port.samples
+    # 4 data scans + 1 priming scan, asked for together.
+    assert port.breads == [(2, 256, 5)]
+
+
+def test_batched_scans_match_one_at_a_time_scans(fake_serial):
+    """CMD_BREAD must be exactly N zero-payload CMD_SCANs, nothing subtler."""
+    t, port = _connect(fake_serial)
+    batched = t.batched_dr_scans(3, 256, chain=3)
+    one_at_a_time = [t.raw_dr_scan(0, 256, chain=3) for _ in range(3)]
+    assert batched == one_at_a_time
+
+
+def test_batched_scans_reject_an_impossible_count(fake_serial):
+    t, _ = _connect(fake_serial)
+    with pytest.raises(ValueError, match="exceeds the 16-bit field"):
+        t.batched_dr_scans(0x10000, 256)
+    assert t.batched_dr_scans(0, 256) == []
+
+
+def test_a_version_1_bridge_still_bursts_one_scan_at_a_time(fake_serial):
+    """Older bridges predate CMD_BREAD; the readback must still work."""
+    fake_serial["obj"] = FakeTapPort(version=1)
+    t, port = _connect(fake_serial)
+    assert t.proto_version == 1
+    port.samples = [(i * 5) & 0xFF for i in range(64)]
+    port.breads.clear()
+    port.scans.clear()
+
+    assert t.read_block(ADDR_DATA_BASE, 64) == port.samples
+    assert port.breads == []
+    assert len([s for s in port.scans if s == (2, 256)]) == 3
 
 
 def test_burst_moves_far_fewer_bytes_than_per_word_reads(fake_serial):

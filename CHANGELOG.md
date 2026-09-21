@@ -33,7 +33,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   side. `fcapz_ela_uart` wraps it (chain 1 = control, chain 2 = burst), and
   `read_block()`/`read_timestamp_block()` use that burst chain the same way the
   Xilinx and Intel transports do — 32 8-bit samples per 256-bit scan, ~2.2
-  bytes per sample on the wire against ~48 for per-word reads.
+  bytes per sample on the wire against ~48 for per-word reads. Bridge protocol
+  2 adds `CMD_BREAD`, which runs a whole burst's worth of scans under one
+  command and one reply, removing a USB round trip per scan.
   pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
   by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
   lint targets.

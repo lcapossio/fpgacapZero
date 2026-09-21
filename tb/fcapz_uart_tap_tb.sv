@@ -93,7 +93,7 @@ module fcapz_uart_tap_tb;
         host_tx = 1'b1; #(BIT_NS);
     endtask
 
-    logic [7:0] rxbuf [0:63];
+    logic [7:0] rxbuf [0:255];   // a CMD_BREAD reply is 2 + count*32 bytes
     int         rxn = 0;
 
     initial forever begin
@@ -153,7 +153,7 @@ module fcapz_uart_tap_tb;
         check("SOF",        rxbuf[0] == 8'hA5);
         check("status OK",  rxbuf[1] == 8'h00);
         check("magic FCZU", {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
-        check("version",    rxbuf[6] == 8'h01);
+        check("version",    rxbuf[6] == 8'h02);
         check("num chains", rxbuf[7] == NCH);
         check("max dr",     {rxbuf[9],rxbuf[8]} == MAX_DR_BITS);
         check("phy extra",  rxbuf[10] == 8'h00);
@@ -230,6 +230,40 @@ module fcapz_uart_tap_tb;
         send_byte(8'h00); send_byte(8'h00);
         await_reply(2, "bad width");
         check("bad width status", rxbuf[1] == 8'h03);
+
+        // ---- Test 6b: CMD_BREAD streams several scans per command ----------
+        // The burst chain is a plain shift register in this bench, so loading
+        // it once and then reading N times must return the loaded word first
+        // and zeros after: enough to prove the scans really are consecutive
+        // and that one header covers all of them.
+        $display("\n=== Test 6b: CMD_BREAD ===");
+        burst_payload = {8'h77, 120'h0, 8'h11, 112'h0, 8'hEE};
+        rxn = 0;
+        send_scan(8'd2, 16'd256, burst_payload);
+        await_reply(2 + 32, "bread preload");
+
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h04);       // SOF, CMD_BREAD
+        send_byte(8'd2);                          // chain
+        send_byte(8'd0); send_byte(8'd1);         // width = 256
+        send_byte(8'd3); send_byte(8'd0);         // count = 3
+        await_reply(2 + 3*32, "bread");
+        check("bread status OK", rxbuf[1] == 8'h00);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + i];
+        check("bread scan 1 is the preloaded word", burst_got == burst_payload);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + 32 + i];
+        check("bread scan 2 shifted in zeros", burst_got == '0);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + 64 + i];
+        check("bread scan 3 shifted in zeros", burst_got == '0);
+
+        // ---- Test 6c: CMD_BREAD rejects a bad chain without a payload ------
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h04);
+        send_byte(8'd9);                          // no such chain
+        send_byte(8'd0); send_byte(8'd1);
+        send_byte(8'd2); send_byte(8'd0);
+        await_reply(2, "bread bad chain");
+        check("bread bad chain status", rxbuf[1] == 8'h02);
 
         // ---- Test 7: still usable after the error paths --------------------
         $display("\n=== Test 7: recovery after errors ===");

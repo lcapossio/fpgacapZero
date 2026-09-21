@@ -289,6 +289,12 @@ discarded, then one wide scan per group of samples.  With a 256-bit DR and an
 8-bit core that is 32 samples per scan instead of one 32-bit word per *two*
 49-bit scans — about 2.2 bytes per sample on the wire against ~48.
 
+All of those wide scans travel as **one** `CMD_BREAD` command and one reply
+(bridge protocol 2 and later).  That is not mainly a byte saving — it removes a
+USB CDC round trip per scan, and a 1024-sample readback is ~33 of them, which
+costs about as much as the bytes do.  A protocol-1 bridge is driven one scan at
+a time instead; the result is identical either way.
+
 The burst width defaults to the bridge's `MAX_DR_BITS`, since `fcapz_ela_uart`
 ties the two together (`MAX_DR_BITS(BURST_W)`); pass `burst_dr_bits` if a
 wrapper sizes them apart.  The path disables itself and falls back to per-word

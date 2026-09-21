@@ -535,10 +535,13 @@ class TapBridgeTransport(Transport):
     CMD_SCAN = 0x01
     CMD_IDLE = 0x02
     CMD_INFO = 0x03
+    CMD_BREAD = 0x04      # protocol 2 and later
     CMD_RST = 0x0F
 
     INFO_BYTES = 9
-    SUPPORTED_PROTO = (1,)
+    SUPPORTED_PROTO = (1, 2)
+    # First protocol version that understands CMD_BREAD.
+    PROTO_BATCHED_SCANS = 2
 
     _STATUS_TEXT = {
         0x00: "ok",
@@ -730,6 +733,55 @@ class TapBridgeTransport(Transport):
         captured = int.from_bytes(payload, "little")
         return captured & ((1 << width) - 1)
 
+    def batched_dr_scans(
+        self, count: int, width: int, *, chain: int | None = None
+    ) -> List[int]:
+        """Run *count* zero-payload scans in one command; return the TDO words.
+
+        Identical in effect to calling :meth:`raw_dr_scan` *count* times with
+        zero data -- same TAP sequence, same trailing clocks -- but one command
+        and one reply instead of ``count`` of each.  That matters more than the
+        byte count: on a USB CDC link every transaction costs a round trip of
+        its own, and a burst readback is dozens of them.
+
+        Requires bridge protocol >= 2; callers check
+        :attr:`_supports_batched_scans` first.
+        """
+        count = int(count)
+        width = int(width)
+        if count < 1:
+            return []
+        if width < 1:
+            raise ValueError(f"DR width must be >= 1, got {width}")
+        if self.max_dr_bits is not None and width > self.max_dr_bits:
+            raise ValueError(
+                f"DR width {width} exceeds the bridge's MAX_DR_BITS "
+                f"({self.max_dr_bits})"
+            )
+        if count > 0xFFFF:
+            raise ValueError(f"scan count {count} exceeds the 16-bit field")
+
+        target = self._active_chain if chain is None else int(chain)
+        nbytes = (width + 7) // 8
+        cmd = (
+            bytes([self.SOF_CMD, self.CMD_BREAD, target & 0xFF])
+            + width.to_bytes(2, "little")
+            + count.to_bytes(2, "little")
+        )
+        payload = self._txn(cmd, nbytes * count)
+        mask = (1 << width) - 1
+        return [
+            int.from_bytes(payload[i * nbytes:(i + 1) * nbytes], "little") & mask
+            for i in range(count)
+        ]
+
+    @property
+    def _supports_batched_scans(self) -> bool:
+        return (
+            self.proto_version is not None
+            and self.proto_version >= self.PROTO_BATCHED_SCANS
+        )
+
     def _runtest(self, cycles: int) -> None:
         cmd = bytes([self.SOF_CMD, self.CMD_IDLE]) + int(cycles).to_bytes(2, "little")
         self._txn(cmd, 0)
@@ -858,12 +910,21 @@ class TapBridgeTransport(Transport):
         self._runtest(self.BURST_PREFILL_IDLE_CYCLES)
 
         # 3. One priming scan (staging is not loaded yet, so its CAPTURE is
-        #    meaningless), then the real ones.
+        #    meaningless), then the real ones.  A version-2 bridge takes all of
+        #    them as a single command, which is what removes the per-scan round
+        #    trip; older ones are driven one scan at a time.
+        if self._supports_batched_scans:
+            scans = self.batched_dr_scans(
+                n_scans + 1, dr_bits, chain=self.burst_data_chain
+            )
+        else:
+            scans = [
+                self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
+                for _ in range(n_scans + 1)
+            ]
+
         values: list[int] = []
-        for scan_idx in range(n_scans + 1):
-            scan_value = self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
-            if scan_idx == 0:
-                continue
+        for scan_value in scans[1:]:
             for sample_idx in range(per_scan):
                 if len(values) >= words:
                     break

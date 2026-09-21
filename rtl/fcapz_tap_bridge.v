@@ -42,13 +42,25 @@
 //                    equivalent of OpenOCD's "runtest N".  Lets a read settle
 //                    between the address scan and the data scan.
 //   CMD_INFO (0x03): no payload.  Reply is the identity block below.
+//   CMD_BREAD(0x04): chain[7:0], width[15:0], count[15:0], no payload.
+//                    Runs `count` back-to-back scans that shift in zeros and
+//                    returns their captured TDO words concatenated, one after
+//                    another, under a single reply header.  Semantically it is
+//                    `count` CMD_SCANs with an all-zero payload -- same TAP
+//                    sequence, same trailing clocks -- but it removes the
+//                    per-scan round trip, which dominates a burst readback
+//                    over USB CDC, and the all-zero request payload with it.
+//                    Protocol version 2 and later.
 //   CMD_RST  (0x0F): no payload.  Returns all chains to an idle TAP state.
 //
 // Replies are framed the same way with SOF 0xA5:
 //   SOF 0xA5, STATUS, payload...
-// STATUS is 0x00 on success, or one of the STAT_* codes below.  A framing
-// error resynchronises on the next SOF, so a half-written command cannot
-// wedge the link -- the host just sees STAT_BAD_FRAME and retries.
+// STATUS is 0x00 on success, or one of the STAT_* codes below.  Between
+// commands the parser hunts for SOF, so leading junk -- the handover noise a
+// configuration-pin bridge leaves behind, say -- is skipped.  It is NOT a
+// self-recovering protocol: there is no length, checksum or inter-byte
+// timeout, so a command truncated mid-field leaves the parser waiting for the
+// bytes it is still owed.
 //
 // Parameters
 //   NUM_CHAINS  - number of user chains exposed via sel[]
@@ -91,6 +103,7 @@ module fcapz_tap_bridge #(
     localparam [7:0] CMD_SCAN  = 8'h01;
     localparam [7:0] CMD_IDLE  = 8'h02;
     localparam [7:0] CMD_INFO  = 8'h03;
+    localparam [7:0] CMD_BREAD = 8'h04;
     localparam [7:0] CMD_RST   = 8'h0F;
 
     localparam [7:0] STAT_OK        = 8'h00;
@@ -105,7 +118,9 @@ module fcapz_tap_bridge #(
     //   byte 5    : NUM_CHAINS
     //   byte 6..7 : MAX_DR_BITS, little-endian
     //   byte 8    : PROTO_EXTRA (PHY-defined, 0 when unused)
-    localparam [7:0] PROTO_VERSION = 8'h01;
+    // 2 added CMD_BREAD.  A version-1 host still works against a version-2
+    // bridge: every earlier command is unchanged.
+    localparam [7:0] PROTO_VERSION = 8'h02;
     localparam INFO_BYTES = 9;
 
     localparam MAX_DR_BYTES = (MAX_DR_BITS + 7) / 8;
@@ -204,10 +219,21 @@ module fcapz_tap_bridge #(
     localparam [4:0] S_RSP_STAT   = 5'd17;
     localparam [4:0] S_RSP_PAY    = 5'd18;
     localparam [4:0] S_RSP_WAIT   = 5'd19;
+    localparam [4:0] S_BR_C0      = 5'd20;
+    localparam [4:0] S_BR_C1      = 5'd21;
+    localparam [4:0] S_BR_NEXT    = 5'd22;
 
     reg [4:0] state;
     reg [4:0] rsp_next;      // state to enter once the reply has drained
+    reg [4:0] idle_next;     // state to enter once the tck idle run finishes
     reg       rsp_is_info;
+
+    // CMD_BREAD: `scans_left` counts the scans still owed, and br_hdr_sent
+    // records that the single reply header has already gone out, so the
+    // second and later scans stream straight into S_RSP_PAY.
+    reg        br_active;
+    reg        br_hdr_sent;
+    reg [15:0] scans_left;
 
     // INFO payload, indexed byte-wise during the reply.
     reg [7:0] info_byte;
@@ -245,14 +271,19 @@ module fcapz_tap_bridge #(
             tx_start       <= 1'b0;
             tx_data        <= 8'h0;
             rsp_next       <= S_SOF;
+            idle_next      <= S_RSP_SOF;
             rsp_is_info    <= 1'b0;
+            br_active      <= 1'b0;
+            br_hdr_sent    <= 1'b0;
+            scans_left     <= 16'd0;
         end else begin
             tx_start <= 1'b0;
 
             case (state)
             // ---- command parse -------------------------------------------
             S_SOF: begin
-                sel_r <= {NUM_CHAINS{1'b0}};
+                sel_r     <= {NUM_CHAINS{1'b0}};
+                br_active <= 1'b0;
                 if (rx_valid && rx_data == SOF_CMD) state <= S_CMD;
             end
 
@@ -261,8 +292,15 @@ module fcapz_tap_bridge #(
                     status      <= STAT_OK;
                     byte_index  <= 16'd0;
                     rsp_is_info <= 1'b0;
+                    br_hdr_sent <= 1'b0;
                     case (rx_data)
                     CMD_SCAN: state <= S_SCAN_CHAIN;
+                    CMD_BREAD: begin
+                        // Shares the chain/width parse with CMD_SCAN; the
+                        // branch back out is in S_SCAN_W1.
+                        br_active <= 1'b1;
+                        state     <= S_SCAN_CHAIN;
+                    end
                     CMD_IDLE: state <= S_IDLE_C0;
                     CMD_INFO: begin
                         rsp_is_info <= 1'b1;
@@ -316,7 +354,7 @@ module fcapz_tap_bridge #(
                         byte_count <= 16'd0;
                         state      <= S_RSP_SOF;
                     end else begin
-                        state <= S_SCAN_PAY;
+                        state <= br_active ? S_BR_C0 : S_SCAN_PAY;
                     end
                 end
             end
@@ -349,6 +387,49 @@ module fcapz_tap_bridge #(
                         end
                     end
                 end
+            end
+
+            // ---- burst read: count, then back-to-back scans --------------
+            S_BR_C0: begin
+                if (rx_valid) begin
+                    scans_left[7:0] <= rx_data;
+                    state           <= S_BR_C1;
+                end
+            end
+
+            S_BR_C1: begin
+                if (rx_valid) begin
+                    scans_left[15:8] <= rx_data;
+                    byte_count       <= (scan_width + 16'd7) >> 3;
+                    byte_index       <= 16'd0;
+                    scan_bits_left   <= scan_width;
+                    scan_buf         <= {BUF_W{1'b0}};
+                    // The chain is checked here rather than after a payload
+                    // drain: CMD_BREAD has no payload, so there is nothing to
+                    // drain and nothing untrustworthy about the length.
+                    if (chain_bad) begin
+                        status     <= STAT_BAD_CHAIN;
+                        byte_count <= 16'd0;
+                        state      <= S_RSP_SOF;
+                    end else if ({rx_data, scans_left[7:0]} == 16'd0) begin
+                        // Zero scans is well defined: an empty reply.
+                        byte_count <= 16'd0;
+                        state      <= S_RSP_SOF;
+                    end else begin
+                        sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                        state <= S_CAP_LO;
+                    end
+                end
+            end
+
+            S_BR_NEXT: begin
+                // One scan's worth of payload has drained; set up the next.
+                scans_left     <= scans_left - 1'b1;
+                scan_buf       <= {BUF_W{1'b0}};
+                scan_bits_left <= scan_width;
+                byte_index     <= 16'd0;
+                sel_r          <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                state          <= S_CAP_LO;
             end
 
             // ---- DR scan: capture, shift x width, update -----------------
@@ -408,6 +489,9 @@ module fcapz_tap_bridge #(
                 // stop the clock the instant update deasserts and strand the
                 // write until the next scan.  Four gives margin.
                 idle_cycles <= 16'd4;
+                // Scans after the first in a CMD_BREAD stream have already had
+                // their reply header sent, so they resume mid-reply.
+                idle_next   <= (br_active && br_hdr_sent) ? S_RSP_PAY : S_RSP_SOF;
                 state       <= S_IDLE_RUN_L;
             end
 
@@ -423,13 +507,14 @@ module fcapz_tap_bridge #(
                 if (rx_valid) begin
                     idle_cycles[15:8] <= rx_data;
                     byte_count        <= 16'd0;
+                    idle_next         <= S_RSP_SOF;
                     state             <= S_IDLE_RUN_L;
                 end
             end
 
             S_IDLE_RUN_L: begin
                 tck_r <= 1'b0;
-                if (idle_cycles == 16'd0) state <= S_RSP_SOF;
+                if (idle_cycles == 16'd0) state <= idle_next;
                 else                      state <= S_IDLE_RUN_H;
             end
 
@@ -450,9 +535,10 @@ module fcapz_tap_bridge #(
 
             S_RSP_STAT: begin
                 if (!tx_busy && !tx_start) begin
-                    tx_data  <= status;
-                    tx_start <= 1'b1;
-                    rsp_next <= (byte_count == 16'd0) ? S_SOF : S_RSP_PAY;
+                    tx_data     <= status;
+                    tx_start    <= 1'b1;
+                    br_hdr_sent <= 1'b1;
+                    rsp_next    <= (byte_count == 16'd0) ? S_SOF : S_RSP_PAY;
                     state    <= S_RSP_WAIT;
                 end
             end
@@ -467,8 +553,12 @@ module fcapz_tap_bridge #(
                     tx_start <= 1'b1;
                     if (!rsp_is_info) scan_buf <= scan_buf >> 8;
                     byte_index <= byte_index + 1'b1;
-                    rsp_next   <= (byte_index + 1'b1 >= byte_count)
-                                  ? S_SOF : S_RSP_PAY;
+                    if (byte_index + 1'b1 < byte_count)
+                        rsp_next <= S_RSP_PAY;
+                    else if (br_active && scans_left > 16'd1)
+                        rsp_next <= S_BR_NEXT;
+                    else
+                        rsp_next <= S_SOF;
                     state      <= S_RSP_WAIT;
                 end
             end
