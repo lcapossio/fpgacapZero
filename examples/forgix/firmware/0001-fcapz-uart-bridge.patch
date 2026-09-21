@@ -1,0 +1,148 @@
+diff --git a/firmware/pico/CMakeLists.txt b/firmware/pico/CMakeLists.txt
+index 741309e..474db3e 100644
+--- a/firmware/pico/CMakeLists.txt
++++ b/firmware/pico/CMakeLists.txt
+@@ -34,6 +34,7 @@ target_compile_definitions(forge_fpga_loader PRIVATE
+ target_link_libraries(forge_fpga_loader
+     pico_stdlib
+     hardware_spi
++    hardware_uart
+ )
+ 
+ pico_enable_stdio_usb(forge_fpga_loader 1)
+@@ -59,6 +60,11 @@ foreach(name IN ITEMS
+     FPGA_RESET_RELEASE_MS
+     FPGA_DONE_TIMEOUT_MS
+     FPGA_EXTRA_CLOCK_BYTES
++    FCAPZ_BRIDGE_ENABLE
++    FCAPZ_BRIDGE_UART
++    FCAPZ_BRIDGE_PIN_TX
++    FCAPZ_BRIDGE_PIN_RX
++    FCAPZ_BRIDGE_BAUD_HZ
+ )
+     if(DEFINED ${name})
+         target_compile_definitions(forge_fpga_loader PRIVATE ${name}=${${name}})
+diff --git a/firmware/pico/include/board_config.h b/firmware/pico/include/board_config.h
+index cc47002..be6e0c2 100644
+--- a/firmware/pico/include/board_config.h
++++ b/firmware/pico/include/board_config.h
+@@ -75,4 +75,43 @@
+ #define FPGA_EXTRA_CLOCK_BYTES 32
+ #endif
+ 
++/* ---------------------------------------------------------------------------
++ * fpgacapZero UART bridge
++ *
++ * After the FPGA is configured the RP2354 stops being a bitstream loader and
++ * becomes a transparent pipe between USB CDC and the FPGA fabric, so the host
++ * can reach an fcapz_uart_tap instance over the board's single USB-C cable.
++ *
++ * The Trion T8's own pins are not wired to the RP2354 for anything but the
++ * write-only configuration SPI, so the bridge runs over two header pins that
++ * must be jumpered to fabric pins:
++ *
++ *   header pin 7  = RP.UART0_TX (GPIO12)  ->  fabric uart_rxd
++ *   header pin 8  = RP.UART0_RX (GPIO13)  <-  fabric uart_txd
++ *
++ * GPIO12/13 are UART0 TX/RX in RP2350 silicon and are the only RP2354 UART
++ * pins on the header that are not also used by the configuration SPI.
++ * ------------------------------------------------------------------------ */
++
++#ifndef FCAPZ_BRIDGE_ENABLE
++#define FCAPZ_BRIDGE_ENABLE 1
++#endif
++
++#ifndef FCAPZ_BRIDGE_UART
++#define FCAPZ_BRIDGE_UART uart0
++#endif
++
++#ifndef FCAPZ_BRIDGE_PIN_TX
++#define FCAPZ_BRIDGE_PIN_TX 12
++#endif
++
++#ifndef FCAPZ_BRIDGE_PIN_RX
++#define FCAPZ_BRIDGE_PIN_RX 13
++#endif
++
++/* Must match the BAUD_RATE parameter of the fcapz_uart_tap instance. */
++#ifndef FCAPZ_BRIDGE_BAUD_HZ
++#define FCAPZ_BRIDGE_BAUD_HZ 1000000u
++#endif
++
+ #endif
+diff --git a/firmware/pico/src/main.c b/firmware/pico/src/main.c
+index ac87d06..a0d12fe 100644
+--- a/firmware/pico/src/main.c
++++ b/firmware/pico/src/main.c
+@@ -1,8 +1,10 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
++#include "board_config.h"
+ #include "crc32.h"
+ #include "fpga_config.h"
++#include "hardware/uart.h"
+ #include "pico/stdio_usb.h"
+ #include "pico/stdlib.h"
+ #include "protocol.h"
+@@ -213,7 +215,60 @@ static void handle_end(const struct forge_frame *frame, struct loader_context *c
+                            fpga_config_pin_state(),
+                            bytes_written_low(ctx),
+                            "fpga programmed");
++
++#if FCAPZ_BRIDGE_ENABLE
++    /* The ACK above is the last framed message: hand the CDC port to the
++     * fabric so fcapz can talk to it.  Flushed first, or the reply would be
++     * stranded in the USB buffer when framing stops. */
++    stdio_flush();
++    fcapz_bridge_run();
++#endif
++}
++
++
++#if FCAPZ_BRIDGE_ENABLE
++/*
++ * Transparent USB-CDC <-> UART bridge for fpgacapZero.
++ *
++ * Entered once the FPGA reports DONE, and never left: the T8 has no
++ * configuration flash, so every power-up has to run the loader again anyway.
++ * A reset therefore returns the board to loader mode, which makes an escape
++ * sequence unnecessary -- and, more importantly, keeps arbitrary fcapz scan
++ * payloads from ever being mistaken for one.
++ *
++ * Bytes are moved without interpretation in either direction; the framing is
++ * entirely between the host transport and the fcapz_uart_tap core in fabric.
++ */
++static void fcapz_bridge_run(void) {
++    uart_init(FCAPZ_BRIDGE_UART, FCAPZ_BRIDGE_BAUD_HZ);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_TX, GPIO_FUNC_UART);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_RX, GPIO_FUNC_UART);
++    uart_set_hw_flow(FCAPZ_BRIDGE_UART, false, false);
++    uart_set_format(FCAPZ_BRIDGE_UART, 8, 1, UART_PARITY_NONE);
++    uart_set_fifo_enabled(FCAPZ_BRIDGE_UART, true);
++
++    for (;;) {
++        /* Host -> fabric.  getchar_timeout_us(0) polls without blocking, so
++         * neither direction can starve the other. */
++        int c = getchar_timeout_us(0);
++        while (c != PICO_ERROR_TIMEOUT) {
++            if (uart_is_writable(FCAPZ_BRIDGE_UART)) {
++                uart_putc_raw(FCAPZ_BRIDGE_UART, (char)c);
++                c = getchar_timeout_us(0);
++            } else {
++                break;      /* let the UART drain before taking more */
++            }
++        }
++
++        /* Fabric -> host. */
++        while (uart_is_readable(FCAPZ_BRIDGE_UART)) {
++            putchar_raw(uart_getc(FCAPZ_BRIDGE_UART));
++        }
++
++        tight_loop_contents();
++    }
+ }
++#endif
+ 
+ static void handle_abort(const struct forge_frame *frame, struct loader_context *ctx) {
+     fpga_config_abort();
