@@ -128,8 +128,14 @@ module fcapz_tap_bridge #(
     // payload write can never run off the end of the vector, whatever
     // MAX_DR_BITS is; the rotation maths below uses BUF_W throughout.
     localparam BUF_W        = MAX_DR_BYTES * 8;
-    // $clog2(n) bits address 0..n-1, which is exactly the payload range.
-    localparam IDX_W        = (MAX_DR_BYTES <= 1) ? 1 : $clog2(MAX_DR_BYTES);
+    // Byte counters only ever address a payload or the identity block, so
+    // size them for that.  A 16-bit counter plus compare was the critical
+    // path on a Trion T8 once the wide shifters were gone.
+    localparam CNT_MAX      = (MAX_DR_BYTES > INFO_BYTES) ? MAX_DR_BYTES
+                                                          : INFO_BYTES;
+    localparam CNT_W        = $clog2(CNT_MAX + 1);
+    // S_ALIGN counts bits, not bytes.
+    localparam SHF_W        = $clog2(BUF_W + 1);
 
     // synthesis translate_off
     initial begin
@@ -153,9 +159,17 @@ module fcapz_tap_bridge #(
     // ------------------------------------------------------------------
     reg [BUF_W-1:0]            scan_buf;
     reg [15:0]                 scan_width;
+    // ceil(scan_width/8), registered once the width is known.  Recomputing
+    // it inside the payload loop put an add, a shift and a 16-bit compare
+    // on the enable of every counter bit, which was the critical path on a
+    // Trion T8 once the barrel shifters were gone.
+    reg [CNT_W-1:0]            scan_bytes;
     reg [15:0]                 scan_bits_left;
-    reg [15:0]                 byte_count;   // payload bytes in/out
-    reg [15:0]                 byte_index;
+    reg [CNT_W-1:0]            byte_count;   // payload bytes in/out
+    reg [CNT_W-1:0]            byte_index;
+    // Counts the filler shifts that replace the two variable-width shifts
+    // this module used to do (see S_SCAN_PAD and S_ALIGN).
+    reg [SHF_W-1:0]            shift_left;
     reg [7:0]                  chain_sel;
     reg [15:0]                 idle_cycles;
     reg [7:0]                  status;
@@ -222,6 +236,8 @@ module fcapz_tap_bridge #(
     localparam [4:0] S_BR_C0      = 5'd20;
     localparam [4:0] S_BR_C1      = 5'd21;
     localparam [4:0] S_BR_NEXT    = 5'd22;
+    localparam [4:0] S_SCAN_PAD   = 5'd23;
+    localparam [4:0] S_ALIGN      = 5'd24;
 
     reg [4:0] state;
     reg [4:0] rsp_next;      // state to enter once the reply has drained
@@ -262,9 +278,11 @@ module fcapz_tap_bridge #(
             sel_r          <= {NUM_CHAINS{1'b0}};
             scan_buf       <= {BUF_W{1'b0}};
             scan_width     <= 16'd0;
+            scan_bytes     <= {CNT_W{1'b0}};
             scan_bits_left <= 16'd0;
-            byte_count     <= 16'd0;
-            byte_index     <= 16'd0;
+            byte_count     <= {CNT_W{1'b0}};
+            byte_index     <= {CNT_W{1'b0}};
+            shift_left     <= {SHF_W{1'b0}};
             chain_sel      <= 8'd0;
             idle_cycles    <= 16'd0;
             status         <= STAT_OK;
@@ -290,7 +308,7 @@ module fcapz_tap_bridge #(
             S_CMD: begin
                 if (rx_valid) begin
                     status      <= STAT_OK;
-                    byte_index  <= 16'd0;
+                    byte_index <= {CNT_W{1'b0}};
                     rsp_is_info <= 1'b0;
                     br_hdr_sent <= 1'b0;
                     case (rx_data)
@@ -304,19 +322,19 @@ module fcapz_tap_bridge #(
                     CMD_IDLE: state <= S_IDLE_C0;
                     CMD_INFO: begin
                         rsp_is_info <= 1'b1;
-                        byte_count  <= INFO_BYTES[15:0];
+                        byte_count  <= INFO_BYTES[CNT_W-1:0];
                         state       <= S_RSP_SOF;
                     end
                     CMD_RST: begin
                         scan_buf   <= {BUF_W{1'b0}};
-                        byte_count <= 16'd0;
+                        byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end
                     default: begin
                         // Unknown opcode: report it rather than silently
                         // consuming an unknown-length payload.
                         status     <= STAT_BAD_FRAME;
-                        byte_count <= 16'd0;
+                        byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end
                     endcase
@@ -340,7 +358,8 @@ module fcapz_tap_bridge #(
             S_SCAN_W1: begin
                 if (rx_valid) begin
                     scan_width[15:8] <= rx_data;
-                    byte_index       <= 16'd0;
+                    scan_bytes       <= (({rx_data, scan_width[7:0]} + 16'd7) >> 3);
+                    byte_index <= {CNT_W{1'b0}};
                     scan_buf         <= {BUF_W{1'b0}};
                     // Validate the width *before* the payload phase.  A bad
                     // width makes the payload length itself untrustworthy, so
@@ -351,7 +370,7 @@ module fcapz_tap_bridge #(
                     if ({rx_data, scan_width[7:0]} == 16'd0 ||
                         {rx_data, scan_width[7:0]} > MAX_DR_BITS[15:0]) begin
                         status     <= STAT_BAD_WIDTH;
-                        byte_count <= 16'd0;
+                        byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end else begin
                         state <= br_active ? S_BR_C0 : S_SCAN_PAY;
@@ -368,24 +387,43 @@ module fcapz_tap_bridge #(
                     status <= STAT_BAD_CHAIN;
 
                 if (rx_valid) begin
-                    // Place each byte at its final offset -- byte 0 is DR
-                    // bits [7:0].  The buffer was zeroed on entry, so a
-                    // payload whose width is not a byte multiple leaves the
-                    // unused top bits clear.
-                    scan_buf[byte_index[IDX_W-1:0]*8 +: 8] <= rx_data;
+                    // Shift each byte in at the top.  Byte 0 therefore ends up
+                    // at bits [7:0] once MAX_DR_BYTES byte-slots have gone
+                    // past, which S_SCAN_PAD finishes off.
+                    //
+                    // The obvious alternative -- writing each byte straight to
+                    // its final offset with a variable part-select -- costs a
+                    // MAX_DR_BYTES-way byte-wide demux in front of every bit
+                    // of the buffer.  On a Trion T8 that alone measured in the
+                    // thousands of LUT4s.  A shift register and a handful of
+                    // filler cycles are free by comparison.
+                    scan_buf   <= {rx_data, scan_buf[BUF_W-1:8]};
                     byte_index <= byte_index + 1'b1;
-                    if (byte_index + 1'b1 >= ((scan_width + 16'd7) >> 3)) begin
-                        byte_count     <= (scan_width + 16'd7) >> 3;
-                        byte_index     <= 16'd0;
+                    if (byte_index + 1'b1 >= scan_bytes) begin
+                        byte_count     <= scan_bytes;
+                        byte_index <= {CNT_W{1'b0}};
                         scan_bits_left <= scan_width;
+                        shift_left     <= {(MAX_DR_BYTES[SHF_W-1:0] - {{(SHF_W-CNT_W){1'b0}}, scan_bytes})};
                         if (chain_bad || status != STAT_OK) begin
-                            byte_count <= 16'd0;
+                            byte_count <= {CNT_W{1'b0}};
                             state      <= S_RSP_SOF;
                         end else begin
-                            sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
-                            state <= S_CAP_LO;
+                            state <= S_SCAN_PAD;
                         end
                     end
+                end
+            end
+
+            S_SCAN_PAD: begin
+                // Push the payload down to bit 0, one byte-slot per cycle.
+                // At most MAX_DR_BYTES-1 cycles, against tens of microseconds
+                // spent receiving the payload itself.
+                if (shift_left == {SHF_W{1'b0}}) begin
+                    sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                    state <= S_CAP_LO;
+                end else begin
+                    scan_buf   <= {8'h00, scan_buf[BUF_W-1:8]};
+                    shift_left <= shift_left - 1'b1;
                 end
             end
 
@@ -400,8 +438,8 @@ module fcapz_tap_bridge #(
             S_BR_C1: begin
                 if (rx_valid) begin
                     scans_left[15:8] <= rx_data;
-                    byte_count       <= (scan_width + 16'd7) >> 3;
-                    byte_index       <= 16'd0;
+                    byte_count       <= scan_bytes;
+                    byte_index <= {CNT_W{1'b0}};
                     scan_bits_left   <= scan_width;
                     scan_buf         <= {BUF_W{1'b0}};
                     // The chain is checked here rather than after a payload
@@ -409,11 +447,11 @@ module fcapz_tap_bridge #(
                     // drain and nothing untrustworthy about the length.
                     if (chain_bad) begin
                         status     <= STAT_BAD_CHAIN;
-                        byte_count <= 16'd0;
+                        byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end else if ({rx_data, scans_left[7:0]} == 16'd0) begin
                         // Zero scans is well defined: an empty reply.
-                        byte_count <= 16'd0;
+                        byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end else begin
                         sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
@@ -427,7 +465,7 @@ module fcapz_tap_bridge #(
                 scans_left     <= scans_left - 1'b1;
                 scan_buf       <= {BUF_W{1'b0}};
                 scan_bits_left <= scan_width;
-                byte_index     <= 16'd0;
+                byte_index <= {CNT_W{1'b0}};
                 sel_r          <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
                 state          <= S_CAP_LO;
             end
@@ -478,21 +516,39 @@ module fcapz_tap_bridge #(
                 tck_r <= 1'b0;
                 upd_r <= 1'b0;
                 sel_r <= {NUM_CHAINS{1'b0}};
-                // The TDO word sits in the high bits after the rotation;
-                // bring it back down so byte 0 is DR bits [7:0].
-                scan_buf   <= scan_buf >> (BUF_W[15:0] - scan_width);
-                byte_index <= 16'd0;
-                // Trailing clocks.  jtag_reg_iface registers reg_wr_en/rd_en
-                // *on* the update edge, so the register bus needs at least one
-                // further tck edge to latch the access -- a hard TAP gets that
-                // for free from free-running TCK, but this FSM would otherwise
-                // stop the clock the instant update deasserts and strand the
-                // write until the next scan.  Four gives margin.
-                idle_cycles <= 16'd4;
-                // Scans after the first in a CMD_BREAD stream have already had
-                // their reply header sent, so they resume mid-reply.
-                idle_next   <= (br_active && br_hdr_sent) ? S_RSP_PAY : S_RSP_SOF;
-                state       <= S_IDLE_RUN_L;
+                // The TDO word sits in the high bits after `scan_width`
+                // rotations; S_ALIGN brings it back down so byte 0 is DR bits
+                // [7:0].
+                byte_index <= {CNT_W{1'b0}};
+                shift_left <= BUF_W[SHF_W-1:0] - scan_width[SHF_W-1:0];
+                state      <= S_ALIGN;
+            end
+
+            S_ALIGN: begin
+                // Keep rotating, one bit per cycle, until the captured word is
+                // bit-0 aligned.  Doing it in one step -- `scan_buf >> (BUF_W -
+                // scan_width)` -- reads better but infers a full BUF_W-wide
+                // barrel shifter: on a Trion T8 that was the single largest
+                // block in the design and set the critical path.  A scan is
+                // hundreds of cycles long already; at most BUF_W more is noise.
+                if (shift_left == {SHF_W{1'b0}}) begin
+                    // Trailing clocks.  jtag_reg_iface registers reg_wr_en/rd_en
+                    // *on* the update edge, so the register bus needs at least
+                    // one further tck edge to latch the access -- a hard TAP
+                    // gets that for free from free-running TCK, but this FSM
+                    // would otherwise stop the clock the instant update
+                    // deasserts and strand the write until the next scan.
+                    // Four gives margin.
+                    idle_cycles <= 16'd4;
+                    // Scans after the first in a CMD_BREAD stream have already
+                    // had their reply header sent, so they resume mid-reply.
+                    idle_next   <= (br_active && br_hdr_sent) ? S_RSP_PAY
+                                                              : S_RSP_SOF;
+                    state       <= S_IDLE_RUN_L;
+                end else begin
+                    scan_buf   <= {1'b0, scan_buf[BUF_W-1:1]};
+                    shift_left <= shift_left - 1'b1;
+                end
             end
 
             // ---- idle / runtest ------------------------------------------
@@ -506,7 +562,7 @@ module fcapz_tap_bridge #(
             S_IDLE_C1: begin
                 if (rx_valid) begin
                     idle_cycles[15:8] <= rx_data;
-                    byte_count        <= 16'd0;
+                    byte_count <= {CNT_W{1'b0}};
                     idle_next         <= S_RSP_SOF;
                     state             <= S_IDLE_RUN_L;
                 end
@@ -538,7 +594,7 @@ module fcapz_tap_bridge #(
                     tx_data     <= status;
                     tx_start    <= 1'b1;
                     br_hdr_sent <= 1'b1;
-                    rsp_next    <= (byte_count == 16'd0) ? S_SOF : S_RSP_PAY;
+                    rsp_next    <= (byte_count == {CNT_W{1'b0}}) ? S_SOF : S_RSP_PAY;
                     state    <= S_RSP_WAIT;
                 end
             end

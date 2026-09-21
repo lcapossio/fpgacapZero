@@ -99,8 +99,15 @@ build the stock loader.
 [`forgix_top.v`](forgix_top.v) instantiates `fcapz_ela_uart` with a
 free-running counter as the probe source, so a capture should read back a ramp.
 
-Build it in Efinity for the **T8F49I2X**, assigning `uart_rxd`/`uart_txd` to
-the CCK/CDI pins, then load the resulting SPI-passive `.hex`.
+Build it in Efinity for the **T8F49**, assigning `uart_rxd`/`uart_txd` to the
+CCK/CDI pins in the Interface Designer, then load the resulting SPI-passive
+`.hex`.
+
+Add [`forgix.sdc`](forgix.sdc) as the project's constraint file. It is not
+optional: `tap_tck` is generated inside the fabric, and Efinity does not infer
+a clock for it — without the `create_generated_clock` in there, that domain
+(roughly 940 flops plus both sample-RAM ports) is placed and routed but never
+timed, and the report looks clean because it only covers `clk_in`.
 
 > **Set `CLK_HZ` to your board's actual oscillator frequency.** The baud divider
 > is derived from it. The Forgix oscillator (ECS-2520MV) is a family rather than
@@ -125,25 +132,42 @@ returning garbage.
 
 ## Fitting the core in a T8
 
-The T8F49 has 7,384 LEs, 25 × 5-kbit BRAMs and 8 DSPs. Converting the
-canonical xc7a100t figures in
-[`docs/specs/architecture.md`](../../docs/specs/architecture.md#resource-usage-xc7a100t)
-to Trion LUT4 logic elements (roughly ×1.8, since a slice LUT is a LUT6):
+Measured, not estimated — Efinity 2025.1, T8F49, C2 timing model,
+`optimization_level=TIMING_3`, with [`forgix.sdc`](forgix.sdc) and the defaults
+in [`forgix_top.v`](forgix_top.v) (8-bit x 1024, `DUAL_COMPARE=0`):
 
-| Config | xc7a100t | Estimated T8 LEs | Share of T8 |
-|---|---|---:|---:|
-| EIO 8/8 | ~30 LUT / 24 FF | ~60 | <1 % |
-| ELA 8b × 1024, A-only, smallest | 596 LUT / 779 FF | ~1,100 | ~15 % |
-| ELA 8b × 1024, dual comparator | 2,021 LUT / 1,725 FF | ~3,600 | ~50 % |
-| ELA 32b × 1024, dual comparator | 2,472 LUT / 2,099 FF | ~4,400 | ~60 % |
+| | Used | Available | Share |
+|---|---:|---:|---:|
+| Logic elements | 3,510 | 7,384 | 47.5 % |
+| — LUTs/adders | 3,041 | 7,384 | 41.2 % |
+| — registers | 1,726 | 5,280 | 32.7 % |
+| Memory blocks | 2 | 24 | 8.3 % |
+| Multipliers | 0 | 8 | 0 % |
 
-EIO is free in practice. A modest ELA leaves room for a real user design; the
-wide dual-comparator configs take most of the part. `forgix_top.v` therefore
-defaults to `DUAL_COMPARE=0`.
+The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes at
+50 MHz: `clk_in` reaches 52.4 MHz (setup +0.906 ns), and the `tap_tck` domain
+34.9 MHz against the 25 MHz it needs.
 
-These are **estimates by conversion, not Efinity results** — the published rows
-also include JTAG TAP plumbing that the UART TAP replaces (a UART plus framing
-and scan FSM, roughly a wash). Treat the first Efinity run as the real number.
+Where it goes:
+
+| Block | LUTs | FFs |
+|---|---:|---:|
+| `fcapz_tap_bridge` | 1,361 | 384 |
+| `jtag_burst_read` | 573 | 544 |
+| `fcapz_ela` | 545 | 639 |
+| `jtag_reg_iface` | 69 | 99 |
+
+The bridge is the largest block, and that is the price of the 256-bit scan
+buffer plus its UART framing — the ELA core itself is small. Two constructs
+used to make it far worse: justifying the captured word with a variable shift
+(`scan_buf >> (BUF_W - scan_width)`) inferred a full 256-bit barrel shifter,
+and writing the payload through a variable part-select inferred a 32-way byte
+demux. Together they cost ~2,400 extra LUTs and held Fmax to 31 MHz. Both are
+now plain shift registers with a few filler cycles, which is why the numbers
+above are what they are.
+
+Turning `DUAL_COMPARE` back on, or widening `SAMPLE_W`, adds to the `fcapz_ela`
+row; the other three are fixed cost.
 
 ## Throughput
 
@@ -161,7 +185,10 @@ The RTL and host transport are covered by simulation and unit tests
 ([`tb/fcapz_uart_tap_tb.sv`](../../tb/fcapz_uart_tap_tb.sv),
 [`tests/test_serial_tap_transport.py`](../../tests/test_serial_tap_transport.py)).
 
-**Hardware validation is pending**, as is the firmware patch — it is generated
-against the pinned upstream and verified to apply, but has not been compiled
-with the Pico SDK or run on a board. The oscillator frequency, the Efinity pin
-assignment, and achievable `Fmax` on Trion all need a real build to confirm.
+The design has been built through Efinity synthesis and place-and-route (see
+the numbers above), so the fit and `Fmax` questions are answered.
+
+**Hardware validation is still pending**, as is the firmware patch — it is
+generated against the pinned upstream and verified to apply, but has not been
+compiled with the Pico SDK or run on a board. The oscillator frequency and the
+Interface Designer pin assignment still need a real board to confirm.
