@@ -149,13 +149,14 @@ module fcapz_uart_tap_tb;
         $display("\n=== Test 1: CMD_INFO ===");
         rxn = 0;
         send_byte(8'h5A); send_byte(8'h03);
-        await_reply(10, "info");
+        await_reply(11, "info");
         check("SOF",        rxbuf[0] == 8'hA5);
         check("status OK",  rxbuf[1] == 8'h00);
         check("magic FCZU", {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
         check("version",    rxbuf[6] == 8'h01);
         check("num chains", rxbuf[7] == NCH);
         check("max dr",     {rxbuf[9],rxbuf[8]} == MAX_DR_BITS);
+        check("phy extra",  rxbuf[10] == 8'h00);
 
         // ---- Test 2: register write ----------------------------------------
         $display("\n=== Test 2: register write ===");

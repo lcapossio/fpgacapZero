@@ -96,6 +96,7 @@ TESTBENCHES = {
         TB / "fcapz_uart_tap_tb.sv",
         [
             RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_tap_bridge.v",
             RTL / "jtag_reg_iface.v",
         ],
     ),

@@ -190,15 +190,21 @@ TARGETS = (
         sources=EJTAG_UART_CORE,
     ),
     LintTarget(
+        name="fcapz_tap_bridge",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+    ),
+    LintTarget(
         name="fcapz_uart_tap",
         top="fcapz_uart_tap",
-        sources=(RTL / "fcapz_uart_tap.v",),
+        sources=(RTL / "fcapz_tap_bridge.v", RTL / "fcapz_uart_tap.v"),
     ),
     LintTarget(
         name="fcapz_ela_uart",
         top="fcapz_ela_uart",
         sources=(
             *ELA_WRAPPER_SOURCES,
+            RTL / "fcapz_tap_bridge.v",
             RTL / "fcapz_uart_tap.v",
             RTL / "fcapz_ela_uart.v",
         ),
