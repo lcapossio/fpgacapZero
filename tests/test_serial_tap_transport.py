@@ -16,17 +16,19 @@ import types
 
 import pytest
 
-from fcapz.transport import SerialTapTransport
+from fcapz.transport import SerialTapTransport, TapBridgeTransport
 
 
 class FakeTapPort:
     """Minimal stand-in for ``serial.Serial`` speaking the bridge protocol."""
 
-    def __init__(self, *, num_chains=4, max_dr_bits=256, magic=b"FCZU", version=1):
+    def __init__(self, *, num_chains=4, max_dr_bits=256, magic=b"FCZU",
+                 version=1, extra=0):
         self.num_chains = num_chains
         self.max_dr_bits = max_dr_bits
         self.magic = magic
         self.version = version
+        self.extra = extra
 
         self._rx = bytearray()      # bytes the host has written
         self._tx = bytearray()      # bytes waiting to be read back
@@ -79,7 +81,8 @@ class FakeTapPort:
                 del self._rx[:2]
                 self._reply(0x00, self.magic
                             + bytes([self.version, self.num_chains])
-                            + self.max_dr_bits.to_bytes(2, "little"))
+                            + self.max_dr_bits.to_bytes(2, "little")
+                            + bytes([self.extra]))
             elif cmd == 0x02:                # IDLE
                 if len(self._rx) < 4:
                     return
@@ -168,14 +171,14 @@ def test_connect_reads_identity(fake_serial):
 def test_connect_rejects_wrong_magic(fake_serial):
     fake_serial["obj"] = FakeTapPort(magic=b"XXXX")
     t = SerialTapTransport("COM_TEST")
-    with pytest.raises(RuntimeError, match="no fcapz UART TAP"):
+    with pytest.raises(RuntimeError, match="no fcapz TAP bridge"):
         t.connect()
 
 
 def test_connect_rejects_future_protocol(fake_serial):
     fake_serial["obj"] = FakeTapPort(version=2)
     t = SerialTapTransport("COM_TEST")
-    with pytest.raises(RuntimeError, match="unsupported .* protocol version"):
+    with pytest.raises(RuntimeError, match="unsupported fcapz TAP bridge protocol version"):
         t.connect()
 
 
@@ -298,3 +301,54 @@ def test_short_reply_raises(fake_serial):
     port.write = _silent          # bridge stops answering
     with pytest.raises(RuntimeError, match="did not reply"):
         t.read_reg(0)
+
+
+# -- the protocol engine is PHY-agnostic ------------------------------------
+
+class MemoryTapTransport(TapBridgeTransport):
+    """A TapBridgeTransport over a plain in-memory byte channel.
+
+    Stands in for any non-serial PHY (SPI, USB-FIFO, TCP). It exists to pin the
+    split: if protocol logic ever leaks back into the serial subclass, this
+    stops working.
+    """
+
+    def __init__(self, device, **kwargs):
+        super().__init__(**kwargs)
+        self.device = device
+
+    def _open(self):
+        pass
+
+    def _close(self):
+        pass
+
+    def _write_bytes(self, data):
+        self.device.write(data)
+
+    def _read_bytes(self, count):
+        return self.device.read(count)
+
+
+def test_non_serial_phy_drives_the_same_engine():
+    """No pyserial, no port, no serial module -- same protocol and semantics."""
+    device = FakeTapPort()
+    t = MemoryTapTransport(device)
+    t.connect()
+
+    assert t.num_chains == 4
+    assert t.max_dr_bits == 256
+
+    t.write_reg(0x0030, 0xFEEDFACE)
+    assert device.mem[0x0030] == 0xFEEDFACE
+    assert t.read_reg(0x0030) == 0xFEEDFACE
+
+    value = (0xA5 << 248) | 0x5A
+    assert t.raw_dr_scan(value, 256, chain=2) == value
+
+
+def test_base_class_reports_its_own_channel_name():
+    device = FakeTapPort(magic=b"NOPE")
+    t = MemoryTapTransport(device)
+    with pytest.raises(RuntimeError, match="MemoryTapTransport"):
+        t.connect()

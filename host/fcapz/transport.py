@@ -499,24 +499,26 @@ class OpenOcdTransport(Transport):
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
-class SerialTapTransport(Transport):
-    """Register access over a UART-driven virtual JTAG TAP.
+class TapBridgeTransport(Transport):
+    """Register access over an ``fcapz_tap_bridge`` virtual JTAG TAP.
 
-    Talks to the ``fcapz_uart_tap`` RTL front-end (see
-    ``rtl/fcapz_uart_tap.v``), which reproduces the fpgacapZero TAP contract
-    from a serial byte stream.  Every core behind it -- ELA, EIO, the burst
-    readout chain -- is bit-identical to the JTAG case; only the way DR scans
-    reach the fabric differs.
+    The RTL front-end (``rtl/fcapz_tap_bridge.v``) reproduces the fpgacapZero
+    TAP contract from a stream of bytes, so every core behind it -- ELA, EIO,
+    the burst readout chain -- is bit-identical to the JTAG case.  Only the way
+    DR scans reach the fabric differs.
 
-    This exists for boards that expose no JTAG to the fabric at all.  The
-    reference target is the Forgix board (Efinix Trion T8F49 + RP2354), whose
-    T8 is configured over a write-only passive SPI link and whose JTAG pins are
-    bonded out nowhere.  Nothing here is board- or vendor-specific, though: any
-    design that instantiates ``fcapz_uart_tap`` can use this transport.
+    This class owns the *protocol* and knows nothing about how bytes travel.
+    Subclasses supply the byte channel by implementing :meth:`_open`,
+    :meth:`_close`, :meth:`_write_bytes` and :meth:`_read_bytes`; the wire
+    format, identity probe and register semantics are shared.  See
+    :class:`SerialTapTransport` for a UART channel.  An SPI, USB-FIFO or TCP
+    channel subclasses this the same way and pairs with the matching RTL PHY.
 
-    Chain numbers are the ``sel[]`` index of the RTL front-end (1-based), so
-    unlike the JTAG transports there is no IR table to configure -- the chain
-    number travels in the command itself.
+    Use it for any board whose fabric has no usable JTAG -- nothing here is
+    board- or vendor-specific.
+
+    Chain numbers are the RTL front-end's ``sel[]`` index (1-based), so unlike
+    the JTAG transports there is no IR table: the chain travels in the command.
 
     Protocol recap (49-bit DR, LSB-first) -- identical to every other
     transport, since the register interface behind the TAP is unchanged:
@@ -534,6 +536,9 @@ class SerialTapTransport(Transport):
     CMD_INFO = 0x03
     CMD_RST = 0x0F
 
+    INFO_BYTES = 9
+    SUPPORTED_PROTO = (1,)
+
     _STATUS_TEXT = {
         0x00: "ok",
         0x01: "bad frame / unknown command",
@@ -546,133 +551,119 @@ class SerialTapTransport(Transport):
     # across transports.
     READ_IDLE_CYCLES = 8
 
-    # A reply is at most SOF + status + ceil(MAX_DR_BITS/8) bytes; the bridge
-    # answers as fast as the UART drains, so a short timeout is plenty and
-    # keeps a dead link from stalling a capture.
-    DEFAULT_TIMEOUT = 2.0
-
-    def __init__(
-        self,
-        port: str,
-        baudrate: int = 1_000_000,
-        *,
-        timeout: float = DEFAULT_TIMEOUT,
-        chain: int = 1,
-    ) -> None:
-        self.port = port
-        self.baudrate = int(baudrate)
-        self.timeout = float(timeout)
+    def __init__(self, *, chain: int = 1) -> None:
         self._active_chain = int(chain)
-        self._ser = None
+        self._open_channel = False
         self.num_chains: int | None = None
         self.max_dr_bits: int | None = None
         self.proto_version: int | None = None
+        self.proto_extra: int | None = None
+
+    # -- byte channel: subclass responsibility ------------------------------
+    def _open(self) -> None:
+        """Open the byte channel.  Raise ``RuntimeError`` if unavailable."""
+        raise NotImplementedError
+
+    def _close(self) -> None:
+        """Close the byte channel.  Must be idempotent."""
+        raise NotImplementedError
+
+    def _write_bytes(self, data: bytes) -> None:
+        """Send every byte of *data*."""
+        raise NotImplementedError
+
+    def _read_bytes(self, count: int) -> bytes:
+        """Read up to *count* bytes, returning fewer only on timeout."""
+        raise NotImplementedError
+
+    def _channel_name(self) -> str:
+        """Short identifier for error messages (a port name, say)."""
+        return type(self).__name__
 
     # -- lifecycle ----------------------------------------------------------
     def connect(self) -> None:
-        try:
-            import serial  # type: ignore
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise RuntimeError(
-                "SerialTapTransport needs pyserial. "
-                "Install it with: pip install 'fpgacapzero[serial]'"
-            ) from exc
-
-        try:
-            self._ser = serial.Serial(
-                self.port, self.baudrate, timeout=self.timeout
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"cannot open serial port {self.port!r} at {self.baudrate} baud: {exc}"
-            ) from exc
-
-        # Drop anything the previous session (or the bitstream loader) left in
-        # the buffers, so the first INFO reply is not read out of stale bytes.
-        try:
-            self._ser.reset_input_buffer()
-            self._ser.reset_output_buffer()
-        except Exception:  # pragma: no cover - not all backends implement it
-            pass
-
+        self._open()
+        self._open_channel = True
         self._identify()
 
     def close(self) -> None:
-        if self._ser is not None:
+        if self._open_channel:
             try:
-                self._ser.close()
+                self._close()
             except Exception:  # pragma: no cover - best effort
                 pass
-            self._ser = None
+            self._open_channel = False
 
-    def _require_port(self):
-        if self._ser is None:
-            raise RuntimeError("SerialTapTransport: not connected (call connect())")
-        return self._ser
+    def _require_open(self) -> None:
+        if not self._open_channel:
+            raise RuntimeError(
+                f"{type(self).__name__}: not connected (call connect())"
+            )
 
     # -- framing ------------------------------------------------------------
     def _identify(self) -> None:
         """Probe the bridge itself before probing the core behind it.
 
-        A mismatched magic almost always means the port is not the bridge at
-        all (a bitstream loader, a console, another board), which is worth
-        saying plainly rather than letting register reads return garbage.
+        A mismatched magic almost always means the channel is not the bridge at
+        all (a bootloader, a console, another board), which is worth saying
+        plainly rather than letting register reads return garbage.
         """
-        payload = self._txn(bytes([self.SOF_CMD, self.CMD_INFO]), 8)
+        payload = self._txn(bytes([self.SOF_CMD, self.CMD_INFO]), self.INFO_BYTES)
         if payload[:4] != self.MAGIC:
             raise RuntimeError(
-                f"no fcapz UART TAP on {self.port!r}: expected magic "
+                f"no fcapz TAP bridge on {self._channel_name()}: expected magic "
                 f"{self.MAGIC!r}, got {payload[:4]!r}"
             )
         self.proto_version = payload[4]
         self.num_chains = payload[5]
         self.max_dr_bits = int.from_bytes(payload[6:8], "little")
-        if self.proto_version != 1:
+        self.proto_extra = payload[8]
+        if self.proto_version not in self.SUPPORTED_PROTO:
             raise RuntimeError(
-                f"unsupported fcapz UART TAP protocol version "
-                f"{self.proto_version} on {self.port!r} (host supports 1)"
+                f"unsupported fcapz TAP bridge protocol version "
+                f"{self.proto_version} on {self._channel_name()} "
+                f"(host supports {sorted(self.SUPPORTED_PROTO)})"
             )
 
     def _txn(self, command: bytes, resp_bytes: int) -> bytes:
         """Send one command and return its reply payload.
 
         Raises ``RuntimeError`` on a bridge-reported error status or a short
-        read, and ``ConnectionError`` if the port disappears mid-transaction.
+        read, and ``ConnectionError`` if the channel fails mid-transaction.
         """
-        ser = self._require_port()
+        self._require_open()
         try:
-            ser.write(command)
-            ser.flush()
-            header = ser.read(2)
+            self._write_bytes(command)
+            header = self._read_bytes(2)
         except OSError as exc:
             raise ConnectionError(
-                f"serial link to {self.port!r} failed mid-transaction: {exc}"
+                f"link to {self._channel_name()} failed mid-transaction: {exc}"
             ) from exc
 
         if len(header) < 2:
             raise RuntimeError(
-                f"fcapz UART TAP on {self.port!r} did not reply within "
-                f"{self.timeout}s (got {len(header)} of 2 header bytes)"
+                f"fcapz TAP bridge on {self._channel_name()} did not reply "
+                f"(got {len(header)} of 2 header bytes)"
             )
         if header[0] != self.SOF_RSP:
             raise RuntimeError(
-                f"fcapz UART TAP on {self.port!r}: bad reply framing "
+                f"fcapz TAP bridge on {self._channel_name()}: bad reply framing "
                 f"(expected SOF 0x{self.SOF_RSP:02X}, got 0x{header[0]:02X})"
             )
         status = header[1]
         if status != 0:
             text = self._STATUS_TEXT.get(status, "unknown error")
             raise RuntimeError(
-                f"fcapz UART TAP on {self.port!r} rejected the command: "
-                f"{text} (status 0x{status:02X})"
+                f"fcapz TAP bridge on {self._channel_name()} rejected the "
+                f"command: {text} (status 0x{status:02X})"
             )
 
         if resp_bytes == 0:
             return b""
-        payload = ser.read(resp_bytes)
+        payload = self._read_bytes(resp_bytes)
         if len(payload) < resp_bytes:
             raise RuntimeError(
-                f"fcapz UART TAP on {self.port!r}: short reply "
+                f"fcapz TAP bridge on {self._channel_name()}: short reply "
                 f"({len(payload)} of {resp_bytes} bytes)"
             )
         return payload
@@ -699,9 +690,11 @@ class SerialTapTransport(Transport):
             )
         target = self._active_chain if chain is None else int(chain)
         nbytes = (width + 7) // 8
-        cmd = bytes([self.SOF_CMD, self.CMD_SCAN, target & 0xFF]) \
-            + int(width).to_bytes(2, "little") \
+        cmd = (
+            bytes([self.SOF_CMD, self.CMD_SCAN, target & 0xFF])
+            + int(width).to_bytes(2, "little")
             + (int(bits) & ((1 << width) - 1)).to_bytes(nbytes, "little")
+        )
         payload = self._txn(cmd, nbytes)
         captured = int.from_bytes(payload, "little")
         return captured & ((1 << width) - 1)
@@ -725,6 +718,77 @@ class SerialTapTransport(Transport):
 
     def read_block(self, addr: int, words: int) -> List[int]:
         return [self.read_reg(addr + i * 4) for i in range(words)]
+
+
+class SerialTapTransport(TapBridgeTransport):
+    """:class:`TapBridgeTransport` over a serial port (pyserial).
+
+    Pairs with ``rtl/fcapz_uart_tap.v``.  The port can be a USB-serial cable
+    wired straight to two fabric pins, or a CDC port on a companion MCU that
+    bridges through to the fabric -- the transport does not care which.
+    """
+
+    # A reply is at most SOF + status + ceil(MAX_DR_BITS/8) bytes; the bridge
+    # answers as fast as the link drains, so a short timeout is plenty and
+    # keeps a dead link from stalling a capture.
+    DEFAULT_TIMEOUT = 2.0
+
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = 1_000_000,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        chain: int = 1,
+    ) -> None:
+        super().__init__(chain=chain)
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.timeout = float(timeout)
+        self._ser = None
+
+    def _channel_name(self) -> str:
+        return repr(self.port)
+
+    def _open(self) -> None:
+        try:
+            import serial  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise RuntimeError(
+                "SerialTapTransport needs pyserial. "
+                "Install it with: pip install 'fpgacapzero[serial]'"
+            ) from exc
+
+        try:
+            self._ser = serial.Serial(
+                self.port, self.baudrate, timeout=self.timeout
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"cannot open serial port {self.port!r} at {self.baudrate} baud: {exc}"
+            ) from exc
+
+        # Drop anything the previous session (or a bitstream loader) left in
+        # the buffers, so the first INFO reply is not read out of stale bytes.
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+        except Exception:  # pragma: no cover - not all backends implement it
+            pass
+
+    def _close(self) -> None:
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            finally:
+                self._ser = None
+
+    def _write_bytes(self, data: bytes) -> None:
+        self._ser.write(data)
+        self._ser.flush()
+
+    def _read_bytes(self, count: int) -> bytes:
+        return self._ser.read(count)
 
 
 def find_quartus_stp(explicit: str | None = None) -> str | None:
