@@ -170,10 +170,13 @@ use external loopback (TX→RX wire) which is unaffected.
 
 ## Capture / runtime
 
-### `Analyzer.capture()` raises `TimeoutError`
+### `Analyzer.capture()` raises `CaptureNotReady`
 
 **Cause**: the trigger condition never fired.  The core is still
-armed, waiting.
+armed, waiting.  `CaptureNotReady` subclasses `TimeoutError`, so older
+`except TimeoutError` code still catches it — but a *plain* `TimeoutError`
+here means something different (see the next entry), and only this one is
+safe to retry against the still-armed core.
 
 **Fix**:
 - Check your `trigger_value` and `trigger_mask` actually match
@@ -181,6 +184,27 @@ armed, waiting.
 - Try `mode="value_match"` with `mask=0` (matches everything) to
   prove the capture path works end-to-end.
 - Bump the `timeout=` argument if your trigger is genuinely rare.
+
+### A plain `TimeoutError`, or every command afterwards refused
+
+**Cause**: the transport stopped answering — not the trigger.  `xsdb` can
+stay alive and go silent (hw_server losing the cable is the usual reason),
+and a read with no deadline on that never returns, taking the thread
+driving it with it.  The XSDB transport therefore reads through a queue
+with a deadline (`$FCAPZ_XSDB_TIMEOUT`, default 60 s; `fpga -file` gets a
+much longer one).  When it expires the `xsdb` process is killed and the
+transport refuses further use, because the unread reply would otherwise be
+paired with the next request.
+
+Under `fcapz-mcp` the same event shows as `watchdog_timeout` followed by
+`session_state: poisoned`; the session aborts the stuck transport and
+returns to `ready` on its own, typically within a second.  Reconnect before
+retrying.
+
+**Fix**: reconnect.  If it recurs, unplug/replug the JTAG cable and restart
+`hw_server`.  Raise `FCAPZ_XSDB_TIMEOUT` only if a legitimate command on
+your board genuinely takes longer than the default — a large bitstream is
+already excluded from it.
 
 ### Capture returns all zeros
 

@@ -427,9 +427,11 @@ wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 
 Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
 the same result shape and options as `capture`, but without re-configuring or
-re-arming. A `TimeoutError` here just means "still waiting" and leaves the
-core armed, so clients can hold one hardware arm across many short polls
-(this is how the web UI waits for a trigger with no deadline).
+re-arming. A `CaptureNotReady` here just means "still waiting" and leaves
+the core armed, so clients can hold one hardware arm across many short polls
+(this is how the web UI waits for a trigger with no deadline). It subclasses
+`TimeoutError`, so it is distinguishable from a transport that stopped
+answering — which is *not* safe to retry against a still-armed core.
 
 ```json
 {"cmd": "capture_wait", "timeout": 4.0, "include_vcd": true}
@@ -762,14 +764,28 @@ errors back to the calling language.
 
 Common error types you should expect:
 
-- `RuntimeError` — `"not connected"`, `"ELA core identity check failed"`,
-  `"xsdb not found"`, `"xsdb: no bit string in output"`
+- `NotConnectedError` — `"not connected"`, for every subsystem
+- `NotEnabledError` — the subsystem exists but was not enabled for this
+  server
+- `RpcError` — the base class of both, for refusals that are neither
+- `RuntimeError` — `"ELA core identity check failed"`, `"xsdb not found"`,
+  `"xsdb: no bit string in output"`
 - `ConnectionError` — `"FPGA did not become ready within 2.0s"`,
   `"OpenOCD closed the connection"`
 - `ValueError` — argument validation, FIFO_DEPTH overflow, sequencer
   bound violations, probe overlaps
-- `TimeoutError` — capture didn't complete within timeout
+- `CaptureNotReady` — the trigger has not fired; the core is still armed
+- `TimeoutError` — a wait expired for any other reason, including a
+  transport that stopped answering
 - `AXIError` — AXI slave returned SLVERR or DECERR
+
+The first three subclass `RuntimeError` and `CaptureNotReady` subclasses
+`TimeoutError`, so a handler that catches the base class is unaffected. A
+client that compares the `type` **string** is not: refusals that used to
+report `"RuntimeError"` now report `"NotConnectedError"` or
+`"NotEnabledError"`, and a capture still waiting reports `"CaptureNotReady"`
+instead of `"TimeoutError"`. Match on the base classes, or accept both
+spellings.
 
 ## Worked example: a Tcl test harness
 

@@ -40,7 +40,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **MCP failures carry a code and a remedy.** A failed tool call reaches an
   agent as text and nothing else, so every failure is now rendered as one
   JSON object — `code`, `message`, `retryable`, `action`, plus the backend's
-  own error as `detail` — instead of prose to pattern-match. Ten codes, with
+  own error as `detail` — instead of prose to pattern-match. Twelve codes, with
   `busy` and `session_recovering` tagged where they are raised so a reworded
   message cannot reclassify them, and `watchdog_timeout` kept distinct from
   `timeout` because only one of them requires reconnecting first.
@@ -312,6 +312,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   manual vendor matrices — support pending, wrapper not yet implemented.
 
 ### Changed
+
+- **RPC — some refusals report a narrower `type` string.** The error
+  envelope carries `exc.__class__.__name__`, and refusals that were bare
+  `RuntimeError`s are now `NotConnectedError` / `NotEnabledError` (both
+  subclass `RpcError`, which subclasses `RuntimeError`), while a capture
+  still waiting for its trigger is `CaptureNotReady` (a `TimeoutError`
+  subclass) rather than a bare `TimeoutError` — the distinction the MCP
+  layer needs to tell "still armed, poll again" from "the transport stopped
+  answering". Catching the base classes is unaffected; **migration:** a
+  client comparing the `type` string should match the base classes or
+  accept both spellings.
 
 - **MCP — `--probe-root` is a flat directory.** `probe_file` must name a file
   sitting directly in the root; a subdirectory, a path climbing out of it, a
