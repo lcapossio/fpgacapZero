@@ -109,6 +109,12 @@ module fcapz_tap_bridge #(
     localparam INFO_BYTES = 9;
 
     localparam MAX_DR_BYTES = (MAX_DR_BITS + 7) / 8;
+    // The buffer is rounded up to whole bytes so that the byte-indexed
+    // payload write can never run off the end of the vector, whatever
+    // MAX_DR_BITS is; the rotation maths below uses BUF_W throughout.
+    localparam BUF_W        = MAX_DR_BYTES * 8;
+    // $clog2(n) bits address 0..n-1, which is exactly the payload range.
+    localparam IDX_W        = (MAX_DR_BYTES <= 1) ? 1 : $clog2(MAX_DR_BYTES);
 
     // synthesis translate_off
     initial begin
@@ -116,6 +122,9 @@ module fcapz_tap_bridge #(
             $error("NUM_CHAINS must be >= 1");
         if (MAX_DR_BITS < 8)
             $error("MAX_DR_BITS must be >= 8");
+        // scan_width and the identity block both carry the width in 16 bits.
+        if (MAX_DR_BITS > 65535)
+            $error("MAX_DR_BITS must be <= 65535");
     end
     // synthesis translate_on
 
@@ -127,7 +136,7 @@ module fcapz_tap_bridge #(
     //  during the scan, and the result is streamed straight back out.  That
     //  keeps a 256-bit burst scan down to a single register bank.
     // ------------------------------------------------------------------
-    reg [MAX_DR_BITS-1:0]      scan_buf;
+    reg [BUF_W-1:0]            scan_buf;
     reg [15:0]                 scan_width;
     reg [15:0]                 scan_bits_left;
     reg [15:0]                 byte_count;   // payload bytes in/out
@@ -135,6 +144,15 @@ module fcapz_tap_bridge #(
     reg [7:0]                  chain_sel;
     reg [15:0]                 idle_cycles;
     reg [7:0]                  status;
+
+    // Combinational, deliberately: S_SCAN_PAY both latches this into
+    // status and branches on it, and with a one-byte payload both happen
+    // on the same cycle.  Reading the register there would see the stale
+    // STAT_OK, run a zero-selected scan, and emit BAD_CHAIN followed by a
+    // payload byte the host never drains -- desyncing the link.  A UART
+    // PHY leaves enough slack to hide that; a PHY that delivers bytes
+    // back to back does not.
+    wire chain_bad = (chain_sel == 8'd0) || (chain_sel > NUM_CHAINS[7:0]);
 
     // ------------------------------------------------------------------
     //  TAP drive
@@ -216,7 +234,7 @@ module fcapz_tap_bridge #(
             shf_r          <= 1'b0;
             upd_r          <= 1'b0;
             sel_r          <= {NUM_CHAINS{1'b0}};
-            scan_buf       <= {MAX_DR_BITS{1'b0}};
+            scan_buf       <= {BUF_W{1'b0}};
             scan_width     <= 16'd0;
             scan_bits_left <= 16'd0;
             byte_count     <= 16'd0;
@@ -252,7 +270,7 @@ module fcapz_tap_bridge #(
                         state       <= S_RSP_SOF;
                     end
                     CMD_RST: begin
-                        scan_buf   <= {MAX_DR_BITS{1'b0}};
+                        scan_buf   <= {BUF_W{1'b0}};
                         byte_count <= 16'd0;
                         state      <= S_RSP_SOF;
                     end
@@ -285,7 +303,7 @@ module fcapz_tap_bridge #(
                 if (rx_valid) begin
                     scan_width[15:8] <= rx_data;
                     byte_index       <= 16'd0;
-                    scan_buf         <= {MAX_DR_BITS{1'b0}};
+                    scan_buf         <= {BUF_W{1'b0}};
                     // Validate the width *before* the payload phase.  A bad
                     // width makes the payload length itself untrustworthy, so
                     // there is no safe number of bytes to drain -- reply at
@@ -308,7 +326,7 @@ module fcapz_tap_bridge #(
                 // trustworthy: drain it before replying, or the next command
                 // would be parsed out of this one's leftover bytes.  A bad
                 // chain is latched now and reported after the drain.
-                if (chain_sel == 8'd0 || chain_sel > NUM_CHAINS[7:0])
+                if (chain_bad)
                     status <= STAT_BAD_CHAIN;
 
                 if (rx_valid) begin
@@ -316,13 +334,13 @@ module fcapz_tap_bridge #(
                     // bits [7:0].  The buffer was zeroed on entry, so a
                     // payload whose width is not a byte multiple leaves the
                     // unused top bits clear.
-                    scan_buf[byte_index[4:0]*8 +: 8] <= rx_data;
+                    scan_buf[byte_index[IDX_W-1:0]*8 +: 8] <= rx_data;
                     byte_index <= byte_index + 1'b1;
                     if (byte_index + 1'b1 >= ((scan_width + 16'd7) >> 3)) begin
                         byte_count     <= (scan_width + 16'd7) >> 3;
                         byte_index     <= 16'd0;
                         scan_bits_left <= scan_width;
-                        if (status != STAT_OK) begin
+                        if (chain_bad || status != STAT_OK) begin
                             byte_count <= 16'd0;
                             state      <= S_RSP_SOF;
                         end else begin
@@ -365,7 +383,7 @@ module fcapz_tap_bridge #(
                 tck_r <= 1'b1;
                 // Rotate the captured bit into the top: after `scan_width`
                 // shifts the buffer holds the TDO word, LSB-first.
-                scan_buf       <= {tdo_mux, scan_buf[MAX_DR_BITS-1:1]};
+                scan_buf       <= {tdo_mux, scan_buf[BUF_W-1:1]};
                 scan_bits_left <= scan_bits_left - 1'b1;
                 state          <= S_SHF_LO;
             end
@@ -381,7 +399,7 @@ module fcapz_tap_bridge #(
                 sel_r <= {NUM_CHAINS{1'b0}};
                 // The TDO word sits in the high bits after the rotation;
                 // bring it back down so byte 0 is DR bits [7:0].
-                scan_buf   <= scan_buf >> (MAX_DR_BITS[15:0] - scan_width);
+                scan_buf   <= scan_buf >> (BUF_W[15:0] - scan_width);
                 byte_index <= 16'd0;
                 // Trailing clocks.  jtag_reg_iface registers reg_wr_en/rd_en
                 // *on* the update edge, so the register bus needs at least one

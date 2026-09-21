@@ -206,6 +206,21 @@ module fcapz_uart_tap_tb;
         await_reply(2, "bad chain");
         check("bad chain status", rxbuf[1] == 8'h02);
 
+        // A one-byte payload is the tight case: the bridge latches the chain
+        // error and decides the payload is complete on the same byte, so a
+        // registered chain check would still read STAT_OK and emit a payload
+        // byte after the status.  Prove the reply is exactly two bytes by
+        // showing the next reply starts where it should.
+        rxn = 0;
+        send_scan(8'd9, 16'd8, {{(MAX_DR_BITS-8){1'b0}}, 8'h5A});
+        await_reply(2, "bad chain, one-byte payload");
+        check("narrow bad chain status", rxbuf[1] == 8'h02);
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h03);
+        await_reply(11, "info after narrow bad chain");
+        check("no stray payload byte", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00 &&
+                                       {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
+
         // ---- Test 6: bad width must not deadlock ---------------------------
         // A zero width implies a zero-byte payload; the parser must not sit
         // waiting for a byte the host will never send.

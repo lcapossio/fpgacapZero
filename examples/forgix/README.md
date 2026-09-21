@@ -54,11 +54,13 @@ Interface Designer.
 > to UART0's **CTS/RTS** on these two pads, so using it yields a dead link
 > rather than a build error. The patch handles this.
 
-> **Contention window.** During configuration the RP2354 drives CDI; afterwards
-> the fabric does. The firmware releases the SPI block and switches the pad
-> before entering the bridge loop, but the changeover is not instantaneous on
-> both ends — expect a few junk bytes right after programming. The host's
-> framing resynchronises on a start-of-frame byte, so this is harmless.
+> **Contention window.** During configuration the RP2354 drives CDI; once the
+> T8 enters user mode the fabric drives it too. That is an output-vs-output
+> conflict, not just noise, so the firmware calls `spi_deinit()` and reassigns
+> the pads **the instant `DONE` is confirmed** — before the ACK is sent and
+> before the USB flush, either of which can block. The changeover is still not
+> simultaneous at both ends, so expect a few junk bytes right after
+> programming; send a `CMD_INFO` first and discard what precedes its reply.
 
 ## Firmware: the RP2354 has to become a bridge
 

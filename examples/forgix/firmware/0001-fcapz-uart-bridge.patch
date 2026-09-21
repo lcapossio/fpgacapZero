@@ -78,7 +78,7 @@ index cc47002..55fcc9d 100644
 +
  #endif
 diff --git a/firmware/pico/src/main.c b/firmware/pico/src/main.c
-index ac87d06..e280c48 100644
+index ac87d06..4d16bf6 100644
 --- a/firmware/pico/src/main.c
 +++ b/firmware/pico/src/main.c
 @@ -1,8 +1,11 @@
@@ -93,21 +93,10 @@ index ac87d06..e280c48 100644
  #include "pico/stdio_usb.h"
  #include "pico/stdlib.h"
  #include "protocol.h"
-@@ -213,7 +216,77 @@ static void handle_end(const struct forge_frame *frame, struct loader_context *c
-                            fpga_config_pin_state(),
-                            bytes_written_low(ctx),
-                            "fpga programmed");
-+
-+#if FCAPZ_BRIDGE_ENABLE
-+    /* The ACK above is the last framed message: hand the CDC port to the
-+     * fabric so fcapz can talk to it.  Flushed first, or the reply would be
-+     * stranded in the USB buffer when framing stops. */
-+    stdio_flush();
-+    fcapz_bridge_run();
-+#endif
-+}
-+
-+
+@@ -148,6 +151,76 @@ static void handle_data(const struct forge_frame *frame, struct loader_context *
+                            "data");
+ }
+ 
 +#if FCAPZ_BRIDGE_ENABLE
 +/*
 + * GPIO2/GPIO3 reach UART0 TX/RX only through pad function 11 (UART_AUX);
@@ -123,6 +112,26 @@ index ac87d06..e280c48 100644
 +#endif
 +
 +/*
++ * Take the configuration SPI pins over for the UART.
++ *
++ * Called the instant DONE is confirmed, and deliberately not later: the fabric
++ * starts driving its UART TX pin (the FPGA's CDI) as soon as it enters user
++ * mode, while the RP2354's SPI TX pad still drives the same net.  That is an
++ * output-output conflict, so the window has to be closed before any call that
++ * might block -- sending the ACK, or flushing USB.
++ */
++static void fcapz_bridge_claim_pins(void) {
++    spi_deinit(FPGA_SPI_INSTANCE);
++
++    uart_init(FCAPZ_BRIDGE_UART, FCAPZ_BRIDGE_BAUD_HZ);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_TX, FCAPZ_BRIDGE_PAD_FUNC);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_RX, FCAPZ_BRIDGE_PAD_FUNC);
++    uart_set_hw_flow(FCAPZ_BRIDGE_UART, false, false);
++    uart_set_format(FCAPZ_BRIDGE_UART, 8, 1, UART_PARITY_NONE);
++    uart_set_fifo_enabled(FCAPZ_BRIDGE_UART, true);
++}
++
++/*
 + * Transparent USB-CDC <-> UART bridge for fpgacapZero.
 + *
 + * Entered once the FPGA reports DONE, and never left: the T8 has no
@@ -135,28 +144,17 @@ index ac87d06..e280c48 100644
 + * entirely between the host transport and the fcapz_uart_tap core in fabric.
 + */
 +static void fcapz_bridge_run(void) {
-+    /* Release the configuration SPI before handing the pads to the UART, so
-+     * the SPI block cannot keep driving CCK/CDI. */
-+    spi_deinit(FPGA_SPI_INSTANCE);
-+
-+    uart_init(FCAPZ_BRIDGE_UART, FCAPZ_BRIDGE_BAUD_HZ);
-+    gpio_set_function(FCAPZ_BRIDGE_PIN_TX, FCAPZ_BRIDGE_PAD_FUNC);
-+    gpio_set_function(FCAPZ_BRIDGE_PIN_RX, FCAPZ_BRIDGE_PAD_FUNC);
-+    uart_set_hw_flow(FCAPZ_BRIDGE_UART, false, false);
-+    uart_set_format(FCAPZ_BRIDGE_UART, 8, 1, UART_PARITY_NONE);
-+    uart_set_fifo_enabled(FCAPZ_BRIDGE_UART, true);
-+
 +    for (;;) {
 +        /* Host -> fabric.  getchar_timeout_us(0) polls without blocking, so
-+         * neither direction can starve the other. */
++         * an idle host cannot stall the other direction.  Once a byte has been
++         * taken out of the CDC buffer it must be handed on: uart_putc_raw()
++         * spins until the TX FIFO has room, which is the only way to apply
++         * backpressure without dropping it.  A 256-bit scan is 37 contiguous
++         * bytes, so a full FIFO is routine, not a corner case. */
 +        int c = getchar_timeout_us(0);
 +        while (c != PICO_ERROR_TIMEOUT) {
-+            if (uart_is_writable(FCAPZ_BRIDGE_UART)) {
-+                uart_putc_raw(FCAPZ_BRIDGE_UART, (char)c);
-+                c = getchar_timeout_us(0);
-+            } else {
-+                break;      /* let the UART drain before taking more */
-+            }
++            uart_putc_raw(FCAPZ_BRIDGE_UART, (char)c);
++            c = getchar_timeout_us(0);
 +        }
 +
 +        /* Fabric -> host. */
@@ -166,8 +164,38 @@ index ac87d06..e280c48 100644
 +
 +        tight_loop_contents();
 +    }
- }
++}
 +#endif
++
+ static void handle_end(const struct forge_frame *frame, struct loader_context *ctx) {
+     if (ctx->state != LOADER_PROGRAMMING) {
+         protocol_send_response(FORGE_RESP_NACK,
+@@ -207,12 +280,28 @@ static void handle_end(const struct forge_frame *frame, struct loader_context *c
+     }
+ 
+     ctx->state = LOADER_DONE;
++
++#if FCAPZ_BRIDGE_ENABLE
++    /* DONE is high, so configuration is over: hand CCK/CDI to the UART now,
++     * before anything that can block on USB.  Until spi_deinit() runs, the
++     * SPI TX pad and the fabric's UART TX are both driving CDI. */
++    fcapz_bridge_claim_pins();
++#endif
++
+     protocol_send_response(FORGE_RESP_ACK,
+                            frame->sequence,
+                            FORGE_OK,
+                            fpga_config_pin_state(),
+                            bytes_written_low(ctx),
+                            "fpga programmed");
++
++#if FCAPZ_BRIDGE_ENABLE
++    /* The ACK above is the last framed message: hand the CDC port to the
++     * fabric so fcapz can talk to it.  Flushed first, or the reply would be
++     * stranded in the USB buffer when framing stops. */
++    stdio_flush();
++    fcapz_bridge_run();
++#endif
+ }
  
  static void handle_abort(const struct forge_frame *frame, struct loader_context *ctx) {
-     fpga_config_abort();
