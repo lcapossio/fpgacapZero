@@ -4,10 +4,10 @@
 # Efinity timing constraints for forgix_top (Trion T8F49).
 #
 # Verified with Efinity 2025.1, T8F49 / C2, optimization_level TIMING_3:
-#   Logic elements   3510 / 7384  (47.5%)
+#   Logic elements   2744 / 7384  (37.2%)
 #   Memory blocks       2 / 24    (EFX_RAM_5K, not LUT memory)
-#   clk_in           52.4 MHz     (setup +0.906 ns, hold +0.643 ns at 50 MHz)
-#   tap_tck          34.9 MHz     (setup +11.4 ns against its 25 MHz need)
+#   clk_in           51.3 MHz     (meets the 50 MHz constraint)
+#   tap_tck          37.3 MHz     (against its 25 MHz need)
 #
 # Set the clk_in period to your board's actual oscillator, and keep it in step
 # with the CLK_HZ parameter of forgix_top.

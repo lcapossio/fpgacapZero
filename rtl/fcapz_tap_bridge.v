@@ -158,6 +158,18 @@ module fcapz_tap_bridge #(
     //  keeps a 256-bit burst scan down to a single register bank.
     // ------------------------------------------------------------------
     reg [BUF_W-1:0]            scan_buf;
+
+    // scan_buf is written from ten places in the FSM below, but only ever in
+    // three shapes: clear, shift right one byte, shift right one bit.  Written
+    // inline, each of those is a distinct next-state function and the tool
+    // builds a wide mux in front of all BUF_W bits -- on a Trion T8 that was
+    // the largest single LUT consumer left in this module.  Decoding the shape
+    // once, here, collapses it to one 3:1 mux per bit plus a shared fill.
+    reg                        sb_clear;
+    reg                        sb_sh8;    // shift right by one byte
+    reg                        sb_sh1;    // shift right by one bit
+    reg [7:0]                  sb_fill8;  // byte shifted in at the top
+    reg                        sb_fill1;  // bit shifted in at the top
     reg [15:0]                 scan_width;
     // ceil(scan_width/8), registered once the width is known.  Recomputing
     // it inside the payload loop put an add, a shift and a 16-bit compare
@@ -267,6 +279,41 @@ module fcapz_tap_bridge #(
         endcase
     end
 
+    // Which shape is scan_buf written in this cycle?  One arm per FSM state
+    // that touches it; every other state holds.
+    always @(*) begin
+        sb_clear = 1'b0;
+        sb_sh8   = 1'b0;
+        sb_sh1   = 1'b0;
+        sb_fill8 = 8'h00;
+        sb_fill1 = 1'b0;
+        case (state)
+            S_CMD:      sb_clear = rx_valid && (rx_data == CMD_RST);
+            S_SCAN_W1:  sb_clear = rx_valid;
+            S_BR_C1:    sb_clear = rx_valid;
+            S_BR_NEXT:  sb_clear = 1'b1;
+            S_SCAN_PAY: begin
+                sb_sh8   = rx_valid;
+                sb_fill8 = rx_data;
+            end
+            S_SCAN_PAD: sb_sh8 = (shift_left != {SHF_W{1'b0}});
+            S_RSP_PAY:  sb_sh8 = (!tx_busy && !tx_start && !rsp_is_info);
+            S_SHF_HI:   begin
+                sb_sh1   = 1'b1;
+                sb_fill1 = tdo_mux;
+            end
+            S_ALIGN:    sb_sh1 = (shift_left != {SHF_W{1'b0}});
+            default: ;
+        endcase
+    end
+
+    always @(posedge clk or posedge arst) begin
+        if (arst)          scan_buf <= {BUF_W{1'b0}};
+        else if (sb_clear) scan_buf <= {BUF_W{1'b0}};
+        else if (sb_sh8)   scan_buf <= {sb_fill8, scan_buf[BUF_W-1:8]};
+        else if (sb_sh1)   scan_buf <= {sb_fill1, scan_buf[BUF_W-1:1]};
+    end
+
     always @(posedge clk or posedge arst) begin
         if (arst) begin
             state          <= S_SOF;
@@ -276,7 +323,6 @@ module fcapz_tap_bridge #(
             shf_r          <= 1'b0;
             upd_r          <= 1'b0;
             sel_r          <= {NUM_CHAINS{1'b0}};
-            scan_buf       <= {BUF_W{1'b0}};
             scan_width     <= 16'd0;
             scan_bytes     <= {CNT_W{1'b0}};
             scan_bits_left <= 16'd0;
@@ -326,7 +372,6 @@ module fcapz_tap_bridge #(
                         state       <= S_RSP_SOF;
                     end
                     CMD_RST: begin
-                        scan_buf   <= {BUF_W{1'b0}};
                         byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
                     end
@@ -360,7 +405,6 @@ module fcapz_tap_bridge #(
                     scan_width[15:8] <= rx_data;
                     scan_bytes       <= (({rx_data, scan_width[7:0]} + 16'd7) >> 3);
                     byte_index <= {CNT_W{1'b0}};
-                    scan_buf         <= {BUF_W{1'b0}};
                     // Validate the width *before* the payload phase.  A bad
                     // width makes the payload length itself untrustworthy, so
                     // there is no safe number of bytes to drain -- reply at
@@ -397,7 +441,6 @@ module fcapz_tap_bridge #(
                     // of the buffer.  On a Trion T8 that alone measured in the
                     // thousands of LUT4s.  A shift register and a handful of
                     // filler cycles are free by comparison.
-                    scan_buf   <= {rx_data, scan_buf[BUF_W-1:8]};
                     byte_index <= byte_index + 1'b1;
                     if (byte_index + 1'b1 >= scan_bytes) begin
                         byte_count     <= scan_bytes;
@@ -422,7 +465,6 @@ module fcapz_tap_bridge #(
                     sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
                     state <= S_CAP_LO;
                 end else begin
-                    scan_buf   <= {8'h00, scan_buf[BUF_W-1:8]};
                     shift_left <= shift_left - 1'b1;
                 end
             end
@@ -441,7 +483,6 @@ module fcapz_tap_bridge #(
                     byte_count       <= scan_bytes;
                     byte_index <= {CNT_W{1'b0}};
                     scan_bits_left   <= scan_width;
-                    scan_buf         <= {BUF_W{1'b0}};
                     // The chain is checked here rather than after a payload
                     // drain: CMD_BREAD has no payload, so there is nothing to
                     // drain and nothing untrustworthy about the length.
@@ -463,7 +504,6 @@ module fcapz_tap_bridge #(
             S_BR_NEXT: begin
                 // One scan's worth of payload has drained; set up the next.
                 scans_left     <= scans_left - 1'b1;
-                scan_buf       <= {BUF_W{1'b0}};
                 scan_bits_left <= scan_width;
                 byte_index <= {CNT_W{1'b0}};
                 sel_r          <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
@@ -502,7 +542,6 @@ module fcapz_tap_bridge #(
                 tck_r <= 1'b1;
                 // Rotate the captured bit into the top: after `scan_width`
                 // shifts the buffer holds the TDO word, LSB-first.
-                scan_buf       <= {tdo_mux, scan_buf[BUF_W-1:1]};
                 scan_bits_left <= scan_bits_left - 1'b1;
                 state          <= S_SHF_LO;
             end
@@ -546,7 +585,6 @@ module fcapz_tap_bridge #(
                                                               : S_RSP_SOF;
                     state       <= S_IDLE_RUN_L;
                 end else begin
-                    scan_buf   <= {1'b0, scan_buf[BUF_W-1:1]};
                     shift_left <= shift_left - 1'b1;
                 end
             end
@@ -607,7 +645,6 @@ module fcapz_tap_bridge #(
                 if (!tx_busy && !tx_start) begin
                     tx_data  <= rsp_is_info ? info_byte : scan_buf[7:0];
                     tx_start <= 1'b1;
-                    if (!rsp_is_info) scan_buf <= scan_buf >> 8;
                     byte_index <= byte_index + 1'b1;
                     if (byte_index + 1'b1 < byte_count)
                         rsp_next <= S_RSP_PAY;

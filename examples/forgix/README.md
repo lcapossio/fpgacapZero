@@ -138,33 +138,40 @@ in [`forgix_top.v`](forgix_top.v) (8-bit x 1024, `DUAL_COMPARE=0`):
 
 | | Used | Available | Share |
 |---|---:|---:|---:|
-| Logic elements | 3,510 | 7,384 | 47.5 % |
-| — LUTs/adders | 3,041 | 7,384 | 41.2 % |
+| Logic elements | 2,744 | 7,384 | 37.2 % |
+| — LUTs/adders | 2,110 | 7,384 | 28.6 % |
 | — registers | 1,726 | 5,280 | 32.7 % |
 | Memory blocks | 2 | 24 | 8.3 % |
 | Multipliers | 0 | 8 | 0 % |
 
 The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes at
-50 MHz: `clk_in` reaches 52.4 MHz (setup +0.906 ns), and the `tap_tck` domain
-34.9 MHz against the 25 MHz it needs.
+50 MHz: `clk_in` reaches 51.3 MHz, and the `tap_tck` domain 37.3 MHz against
+the 25 MHz it needs.
 
 Where it goes:
 
 | Block | LUTs | FFs |
 |---|---:|---:|
-| `fcapz_tap_bridge` | 1,361 | 384 |
+| `fcapz_tap_bridge` | 595 | 384 |
 | `jtag_burst_read` | 573 | 544 |
 | `fcapz_ela` | 545 | 639 |
 | `jtag_reg_iface` | 69 | 99 |
 
-The bridge is the largest block, and that is the price of the 256-bit scan
-buffer plus its UART framing — the ELA core itself is small. Two constructs
-used to make it far worse: justifying the captured word with a variable shift
-(`scan_buf >> (BUF_W - scan_width)`) inferred a full 256-bit barrel shifter,
-and writing the payload through a variable part-select inferred a 32-way byte
-demux. Together they cost ~2,400 extra LUTs and held Fmax to 31 MHz. Both are
-now plain shift registers with a few filler cycles, which is why the numbers
-above are what they are.
+Getting there took three rounds against the real tool, and every one of them
+was a wide structure in front of the 256-bit scan buffer that reads innocently
+in Verilog:
+
+- `scan_buf >> (BUF_W - scan_width)`, to justify the captured word, inferred a
+  full 256-bit **barrel shifter**.
+- `scan_buf[byte_index*8 +: 8] <= rx_data`, to place a payload byte, inferred a
+  **32-way byte demux** across all 256 bits.
+- Writing `scan_buf` from ten places in the FSM gave every bit a **wide
+  next-state mux**, since each write site is a separate function of the buffer.
+
+The first two are now shift registers with a few filler cycles; the third is
+one decoded datapath with a 3:1 mux and a shared fill value. Together they were
+**5,901 LE and Fmax 31 MHz** versus the 2,744 LE and 51 MHz above — the ELA
+core never moved.
 
 Turning `DUAL_COMPARE` back on, or widening `SAMPLE_W`, adds to the `fcapz_ela`
 row; the other three are fixed cost.
