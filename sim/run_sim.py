@@ -92,6 +92,13 @@ TESTBENCHES = {
             RTL / "fcapz_eio.v",
         ],
     ),
+    "fcapz_uart_tap": (
+        TB / "fcapz_uart_tap_tb.sv",
+        [
+            RTL / "fcapz_uart_tap.v",
+            RTL / "jtag_reg_iface.v",
+        ],
+    ),
     "fcapz_core_manager": (
         TB / "fcapz_core_manager_tb.sv",
         [

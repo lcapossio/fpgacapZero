@@ -190,6 +190,11 @@ TARGETS = (
         sources=EJTAG_UART_CORE,
     ),
     LintTarget(
+        name="fcapz_uart_tap",
+        top="fcapz_uart_tap",
+        sources=(RTL / "fcapz_uart_tap.v",),
+    ),
+    LintTarget(
         name="jtag_tap_xilinx7",
         top="jtag_tap_xilinx7",
         sources=(SIM / "bscane2_stub.v", RTL / "jtag_tap" / "jtag_tap_xilinx7.v"),
