@@ -1,0 +1,49 @@
+<efx:project xmlns:efx="http://www.efinixinc.com/enf_proj" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="forgix" description="" last_change="1790003119" sw_version="2025.1.110" last_run_state="pass" last_run_flow="bitstream" config_result_in_sync="sync" design_ood="sync" place_ood="sync" route_ood="sync" xsi:schemaLocation="http://www.efinixinc.com/enf_proj enf_proj.xsd">
+    <efx:device_info>
+        <efx:family name="Trion" />
+        <efx:device name="T8F49" />
+        <efx:timing_model name="C2" />
+    </efx:device_info>
+    <efx:design_info def_veri_version="verilog_2k" def_vhdl_version="vhdl_2008">
+        <efx:top_module name="forgix_top" />
+        <efx:design_file name="../forgix_top.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/fcapz_ela_uart.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/fcapz_uart_tap.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/fcapz_tap_bridge.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/fcapz_ela.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/jtag_reg_iface.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/jtag_burst_read.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/trig_compare.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/dpram.v" version="default" library="default" />
+        <efx:design_file name="../../../rtl/reset_sync.v" version="default" library="default" />
+        <efx:top_vhdl_arch name="" />
+    </efx:design_info>
+    <efx:constraint_info>
+        <efx:sdc_file name="../forgix.sdc" />
+        <efx:inter_file name="" />
+    </efx:constraint_info>
+    <efx:sim_info />
+    <efx:misc_info />
+    <efx:ip_info />
+    <efx:synthesis tool_name="efx_map">
+        <efx:param name="work_dir" value="work_syn" value_type="e_string" />
+        <efx:param name="write_efx_verilog" value="on" value_type="e_bool" />
+        <efx:param name="mode" value="speed" value_type="e_option" />
+        <efx:param name="max_ram" value="-1" value_type="e_integer" />
+        <efx:param name="max_mult" value="-1" value_type="e_integer" />
+        <efx:param name="blackbox-error" value="1" value_type="e_option" />
+    </efx:synthesis>
+    <efx:place_and_route tool_name="efx_pnr">
+        <efx:param name="work_dir" value="work_pnr" value_type="e_string" />
+        <efx:param name="verbose" value="off" value_type="e_bool" />
+        <efx:param name="load_delaym" value="on" value_type="e_bool" />
+        <efx:param name="optimization_level" value="TIMING_3" value_type="e_option" />
+        <efx:param name="seed" value="5" value_type="e_integer" />
+        <efx:param name="max_threads" value="-1" value_type="e_integer" />
+    </efx:place_and_route>
+    <efx:bitstream_generation tool_name="efx_pgm">
+        <efx:param name="mode" value="passive" value_type="e_option" />
+        <efx:param name="width" value="1" value_type="e_option" />
+        <efx:param name="generate_hex" value="on" value_type="e_bool" />
+    </efx:bitstream_generation>
+</efx:project>

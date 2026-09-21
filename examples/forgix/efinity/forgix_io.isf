@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+# Efinity Interface Configuration for the fpgacapZero Forgix example.
+#
+# Device: T8F49, 49-ball FBGA, timing model C2.
+#
+# Pin identities come from Efinity's own device database
+# (pt/db/resource/T8F49.db) and were cross-checked against the vendor's
+# reference design (Example_Designs/plasm_led in the forgix_public repo),
+# which assigns GPIOL_20 -> B4, GPIOL_06 -> F1 and GPIOL_10 -> E1.
+#
+#   clk_in       GPIOL_20_PLLIN  B4   32 MHz board oscillator
+#   uart_rxd     GPIOL_02_CCK    F3   <- RP2354 GPIO2, UART0 TX after DONE
+#   uart_txd     GPIOL_04_CDI0   F2   -> RP2354 GPIO3, UART0 RX after DONE
+#   led_armed_n  GPIOL_05_CDI5   G1   red LED, active low
+#
+# CCK and CDI0 carry the configuration bitstream and are then free (Efinix
+# AN006 Table 3).  The vendor's own design drives LEDs from CDI1/CDI5/CDI7,
+# which is independent confirmation.
+
+# Device setting
+design.set_device_property("1A","VOLTAGE","3.3","IOBANK")
+design.set_device_property("1B","VOLTAGE","3.3","IOBANK")
+design.set_device_property("1C","VOLTAGE","1.1","IOBANK")
+design.set_device_property("2A","VOLTAGE","3.3","IOBANK")
+design.set_device_property("2B","VOLTAGE","3.3","IOBANK")
+
+# Create instance
+design.create_input_gpio("clk_in")
+design.create_input_gpio("uart_rxd")
+design.create_output_gpio("uart_txd")
+design.create_output_gpio("led_armed_n")
+
+# Set resource assignment
+design.assign_pkg_pin("clk_in","B4")
+design.assign_pkg_pin("uart_rxd","F3")
+design.assign_pkg_pin("uart_txd","F2")
+design.assign_pkg_pin("led_armed_n","G1")

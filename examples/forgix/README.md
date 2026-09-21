@@ -46,8 +46,18 @@ Table 3 states they may be used as general I/O in user mode. Note that
 **CDONE is a _dedicated_ pin** (Table 2) and cannot be reused — which is why
 the return path is CDI rather than DONE.
 
-Assign `uart_rxd` to the CCK pin and `uart_txd` to the CDI pin in the Efinity
-Interface Designer.
+These are the assignments, confirmed by Efinity's own pinout report (it labels
+both balls "User IO/Configuration"):
+
+| Signal | GPIO resource | Ball |
+|---|---|---:|
+| `clk_in` (32 MHz) | `GPIOL_20_PLLIN` | B4 |
+| `uart_rxd` | `GPIOL_02_CCK` | F3 |
+| `uart_txd` | `GPIOL_04_CDI0` | F2 |
+| `led_armed_n` | `GPIOL_05_CDI5` | G1 |
+
+They are already made for you in [`efinity/`](efinity/) — you do not need to
+open the Interface Designer.
 
 > **Pad function gotcha.** GPIO2/GPIO3 reach UART0 TX/RX only through pad
 > function **11** (`UART_AUX`). The ordinary `GPIO_FUNC_UART` (function 2) maps
@@ -85,6 +95,23 @@ cmake -S <dest>/firmware/pico -B <dest>/firmware/pico/build \
 cmake --build <dest>/firmware/pico/build
 ```
 
+Flash it with `picotool`, which can force BOOTSEL over USB so you do not have
+to hold the button (take a backup first — this replaces the stock loader):
+
+```sh
+picotool save -a stock_loader_backup.uf2 -f     # keep the original
+picotool load forge_fpga_loader.uf2 -f -x       # flash and run
+```
+
+Then program the FPGA with the upstream host loader, which accepts the Efinity
+`.hex` directly:
+
+```sh
+python -m forge_loader.cli --port COM16 --file efinity/outflow/forgix.hex
+# ... fpga programmed
+# FPGA pins: DONE=high, STATUS=high
+```
+
 Bridge mode is entered after a successful programming cycle and left only by
 resetting the board. That is deliberate: the T8 has to be reprogrammed at every
 power-up anyway, so a reset naturally returns you to loader mode — and it means
@@ -99,20 +126,36 @@ build the stock loader.
 [`forgix_top.v`](forgix_top.v) instantiates `fcapz_ela_uart` with a
 free-running counter as the probe source, so a capture should read back a ramp.
 
-Build it in Efinity for the **T8F49**, assigning `uart_rxd`/`uart_txd` to the
-CCK/CDI pins in the Interface Designer, then load the resulting SPI-passive
-`.hex`.
+A complete Efinity project is in [`efinity/`](efinity/) — pin assignments,
+constraints and bitstream settings included. Build it with:
 
-Add [`forgix.sdc`](forgix.sdc) as the project's constraint file. It is not
-optional: `tap_tck` is generated inside the fabric, and Efinity does not infer
-a clock for it — without the `create_generated_clock` in there, that domain
-(roughly 940 flops plus both sample-RAM ports) is placed and routed but never
-timed, and the report looks clean because it only covers `clk_in`.
+```sh
+efx_run.bat efinity/forgix.xml --flow interface
+efx_run.bat efinity/forgix.xml --flow map
+efx_run.bat efinity/forgix.xml --flow pnr
+efx_run.bat efinity/forgix.xml --flow pgm     # -> outflow/forgix.hex
+```
 
-> **Set `CLK_HZ` to your board's actual oscillator frequency.** The baud divider
-> is derived from it. The Forgix oscillator (ECS-2520MV) is a family rather than
-> one frequency, and a wrong value produces a garbled link rather than a build
-> error. `BAUD_RATE` must match `FCAPZ_BRIDGE_BAUD_HZ` in the firmware.
+The `pgm` flow emits an SPI **passive x1** `.hex`, which is what the RP2354
+loader sends (it is the SPI master; the FPGA is the passive target).
+
+[`forgix.sdc`](forgix.sdc) is not optional: `tap_tck` is generated inside the
+fabric, and Efinity does not infer a clock for it — without the
+`create_generated_clock` in there, that domain (roughly 940 flops plus both
+sample-RAM ports) is placed and routed but never timed, and the report looks
+clean because it only covers `clk_in`.
+
+> **`CLK_HZ` is 32 MHz**, matching the `clk_32m` signal in the vendor's own
+> reference design. The oscillator (ECS-2520MV) is a stocked family rather than
+> one frequency, so check your board if the link comes up garbled — a wrong
+> value produces noise, not a build error. `BAUD_RATE` must match
+> `FCAPZ_BRIDGE_BAUD_HZ` in the firmware; 32 MHz / 1 Mbaud divides exactly, so
+> there is no baud error at all.
+
+> **There is no user reset pin.** CRESET_N is a dedicated configuration pin
+> owned by the RP2354 and the JTAG pins are not bonded out, so nothing external
+> can reach the fabric. `forgix_top` generates its own short power-on reset
+> instead.
 
 ## Connecting from the host
 
@@ -211,14 +254,22 @@ grows too. Width is a pure area decision on this transport, which is why it is
 
 ## Status
 
-The RTL and host transport are covered by simulation and unit tests
+**Validated on real hardware.** On a Forgix board with the patched RP2354
+firmware and the bitstream from [`efinity/`](efinity/):
+
+- the FPGA configures over the RP2354 loader (`DONE=high, STATUS=high`);
+- `connect()` reads the bridge identity — 2 chains, 64-bit DRs, protocol 2;
+- the ELA identity registers read back correctly (core id `0x4C41` "LA",
+  8-bit x 1024, one trigger stage);
+- a 1024-sample capture returns a clean mod-256 ramp from the counter probe,
+  with **zero discontinuities**, over the burst chain;
+- ten consecutive captures were all clean, averaging **16 ms** per readback —
+  against ~11 ms of ideal wire time for 1,068 bytes at 1 Mbaud.
+
+Timing and fit, measured: 2,118 LE (28.7 %), `clk_in` 45.2 MHz against the
+32 MHz it needs and `tap_tck` 30.5 MHz against 16 MHz.
+
+The firmware patch compiles with the Pico SDK (2.3.1, `PICO_BOARD=pico2`) and
+runs. The RTL and host transport are also covered by simulation and unit tests
 ([`tb/fcapz_uart_tap_tb.sv`](../../tb/fcapz_uart_tap_tb.sv),
 [`tests/test_serial_tap_transport.py`](../../tests/test_serial_tap_transport.py)).
-
-The design has been built through Efinity synthesis and place-and-route (see
-the numbers above), so the fit and `Fmax` questions are answered.
-
-**Hardware validation is still pending**, as is the firmware patch — it is
-generated against the pinned upstream and verified to apply, but has not been
-compiled with the Pico SDK or run on a board. The oscillator frequency and the
-Interface Designer pin assignment still need a real board to confirm.

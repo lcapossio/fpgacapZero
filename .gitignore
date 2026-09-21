@@ -60,5 +60,11 @@ examples/de25_nano/de25_nano_quartus/
 examples/de25_nano/output_files/
 examples/de25_nano/captures/
 
+# Efinity build outputs (examples/forgix/efinity ships only the project files)
+examples/forgix/efinity/outflow/
+examples/forgix/efinity/work_syn/
+examples/forgix/efinity/work_pnr/
+examples/forgix/efinity/work_pt/
+
 # Local-only working notes (per PROJECTS.md no_commit/ convention)
 no_commit/

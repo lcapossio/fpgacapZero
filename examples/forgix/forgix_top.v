@@ -22,31 +22,53 @@
 module forgix_top #(
     // Frequency of the board oscillator feeding clk_in.
     //
-    // NOTE: the Forgix oscillator part (ECS-2520MV) is a stocked family rather
-    // than a single frequency, so this MUST be set to what your board is
-    // fitted with -- the UART baud divider is derived from it, and a wrong
-    // value shows up as garbage on the link rather than as a build error.
-    parameter CLK_HZ    = 50_000_000,
+    // 32 MHz on the Forgix boards seen so far: the vendor's own reference
+    // design (Example_Designs/plasm_led in the forgix_public repository) names
+    // the signal `clk_32m` and assigns it to ball B4, which is the pin this
+    // design uses.  The oscillator part (ECS-2520MV) is a stocked family
+    // rather than a single frequency, so check your board if the link comes up
+    // garbled -- the baud divider is derived from this, and a wrong value
+    // shows up as noise on the wire rather than as a build error.
+    //
+    // 32 MHz / 1 Mbaud is an exact divide, so there is no baud error at all.
+    parameter CLK_HZ    = 32_000_000,
     parameter BAUD_RATE = 1_000_000,
     parameter SAMPLE_W  = 8,
     parameter DEPTH     = 1024
 ) (
     input  wire clk_in,
-    input  wire rst_n_in,
 
     // No board wiring needed -- these ride the configuration SPI pins, which
     // sit idle once DONE is high:
-    //   uart_rxd  = the FPGA's CCK pin  <- RP2354 GPIO2 (UART0 TX)
-    //   uart_txd  = the FPGA's CDI pin  -> RP2354 GPIO3 (UART0 RX)
+    //   uart_rxd  = the FPGA's CCK pin  (ball F3)  <- RP2354 GPIO2 (UART0 TX)
+    //   uart_txd  = the FPGA's CDI0 pin (ball F2)  -> RP2354 GPIO3 (UART0 RX)
     // CCK and CDI are dual-purpose pins, usable as general I/O in user mode
-    // (Efinix AN006, Table 3).  Assign them in the Efinity Interface Designer.
+    // (Efinix AN006, Table 3).  The vendor's own reference design puts the
+    // board LEDs on CDI1/CDI5/CDI7, which is independent confirmation that
+    // these pins are free once configuration is done.
     input  wire uart_rxd,
     output wire uart_txd,
 
-    output wire led_armed
+    // Board LED, active low.
+    output wire led_armed_n
 );
 
-    wire rst = ~rst_n_in;
+    // ---- Power-on reset ----
+    //
+    // There is no user reset pin to bring in.  The board's only reset is
+    // CRESET_N, a dedicated configuration pin driven by the RP2354, and the
+    // T8's JTAG pins are not bonded out either -- so nothing external can
+    // reach the fabric.  Hold reset for a short window after configuration
+    // instead; the FPGA enters user mode with its registers already in the
+    // state the bitstream set, so this only has to cover the first cycles.
+    reg [3:0] por = 4'd0;
+    always @(posedge clk_in) begin
+        if (!por[3]) por <= por + 1'b1;
+    end
+    wire rst = ~por[3];
+
+    wire armed;
+    assign led_armed_n = ~armed;   // board LED is active low
 
     // ---- Probe source: a free-running counter ----
     reg [SAMPLE_W-1:0] counter;
@@ -73,7 +95,7 @@ module forgix_top #(
         .probe_in(counter),
         .trigger_in(1'b0),
         .trigger_out(),
-        .armed_out(led_armed),
+        .armed_out(armed),
         .uart_rxd(uart_rxd),
         .uart_txd(uart_txd)
     );
