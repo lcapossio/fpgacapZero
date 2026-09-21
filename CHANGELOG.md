@@ -313,6 +313,30 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **MCP — `--probe-root` is a flat directory.** `probe_file` must name a file
+  sitting directly in the root; a subdirectory, a path climbing out of it, a
+  symlink/junction, or a file with a second hard link are all refused. Nesting
+  used to be allowed. It went because the lookup could not be made verifiable
+  on every platform: Windows has no directory handles to open relative to, so
+  a multi-component path can be reinterpreted between the check and the open,
+  and a check that cannot be trusted is worse than a narrower rule. With one
+  component the open is provable — `openat`/`O_NOFOLLOW` where the platform
+  has it, an identity comparison otherwise. **Migration:** move probe maps to
+  the top level of the root, or point `--probe-root` at the subdirectory in
+  use. Probe files are also capped at 1 MiB, and a missing one now reports
+  `not_found` instead of `invalid_argument`.
+
+- **MCP — `fcapz_get_last_capture(max_bytes=null)` means 8 MiB, not
+  unlimited.** `max_bytes` may lower the bound but no longer raise it past
+  that ceiling, so `null` stopped being an escape hatch for forcing an
+  arbitrarily large payload: the result is serialized back on the event loop
+  after the offloaded call returns, at roughly 5 ms of whole-server stall per
+  MB, and nothing bounded it. A capture over the ceiling returns the compact
+  truncation marker, now carrying `ceiling_bytes` so a caller can tell the
+  server's bound from its own. **Migration:** read `fcapz://last-capture` for
+  the whole payload — it serves an already-built string, costs 0 ms of stall,
+  and has no ceiling — or page it with `fcapz_get_last_capture_chunk`.
+
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
   a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with
   `--variant microblaze`/`--variant vhdl` for the others; `test_hw_integration.py`
