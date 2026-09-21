@@ -150,6 +150,11 @@ and scan FSM, roughly a wash). Treat the first Efinity run as the real number.
 The UART is not the bottleneck it looks like. The T8's entire 122.88 kbit of
 BRAM is ~15 kB, so a full capture readback at 1 Mbaud takes well under a second.
 
+Readback goes through the ELA's burst chain (chain 2), which returns 32 8-bit
+samples per 256-bit scan — about 2.2 bytes per sample on the wire, against ~48
+for the per-word control-chain path. A 1024-sample capture is ~2.3 kB rather
+than ~49 kB.
+
 ## Status
 
 The RTL and host transport are covered by simulation and unit tests

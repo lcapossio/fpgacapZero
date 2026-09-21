@@ -41,6 +41,7 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
+_tap_log = logging.getLogger("fcapz.transport.tap_bridge")
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
 QUARTUS_AUTO_DEVICE_TAPS = frozenset(("", "auto", "xc7a100t", "xc7a100t.tap"))
 
@@ -551,13 +552,42 @@ class TapBridgeTransport(Transport):
     # across transports.
     READ_IDLE_CYCLES = 8
 
-    def __init__(self, *, chain: int = 1) -> None:
+    # Burst readback.  These are properties of the fpgacapZero core behind the
+    # bridge, not of the bridge, so they match every other transport.
+    ADDR_SAMPLE_W = 0x000C
+    ADDR_BURST_PTR = 0x002C
+    ADDR_DATA_BASE = 0x0100
+
+    # Enough tck for the BURST_PTR update to cross into the burst reader and
+    # for the first wide staging word to fill before the next CAPTURE samples
+    # it.  The raw memory-fill latency is ~33 tck; the rest is margin, and on
+    # this link it costs one four-byte command either way.
+    BURST_PREFILL_IDLE_CYCLES = 160
+
+    def __init__(
+        self,
+        *,
+        chain: int = 1,
+        burst: bool = True,
+        burst_data_chain: int = 2,
+        burst_dr_bits: int | None = None,
+    ) -> None:
         self._active_chain = int(chain)
         self._open_channel = False
         self.num_chains: int | None = None
         self.max_dr_bits: int | None = None
         self.proto_version: int | None = None
         self.proto_extra: int | None = None
+        # burst_dr_bits defaults to the bridge's MAX_DR_BITS: fcapz_ela_uart
+        # ties the two together (MAX_DR_BITS(BURST_W)), because the widest DR
+        # the bridge must carry *is* the burst chain's.  A wrapper that sizes
+        # them apart passes the burst width explicitly.
+        self.burst_data_chain = int(burst_data_chain)
+        self._burst_dr_bits_override = (
+            None if burst_dr_bits is None else int(burst_dr_bits)
+        )
+        self._has_burst = bool(burst)
+        self._cached_sps: int | None = None
 
     # -- byte channel: subclass responsibility ------------------------------
     def _open(self) -> None:
@@ -584,6 +614,7 @@ class TapBridgeTransport(Transport):
     def connect(self) -> None:
         self._open()
         self._open_channel = True
+        self._cached_sps = None
         self._identify()
 
     def close(self) -> None:
@@ -717,7 +748,132 @@ class TapBridgeTransport(Transport):
         return shifted_out & 0xFFFFFFFF
 
     def read_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
+        if addr == self.ADDR_DATA_BASE and self._burst_available:
+            try:
+                return self._read_block_burst(words)
+            except (ConnectionError, RuntimeError, ValueError) as exc:
+                _tap_log.warning(
+                    "TAP bridge burst readback failed (%s); falling back to "
+                    "per-word control-chain DATA reads",
+                    exc,
+                )
+                self._has_burst = False
         return [self.read_reg(addr + i * 4) for i in range(words)]
+
+    def read_timestamp_block(
+        self, addr: int, words: int, timestamp_width: int
+    ) -> List[int]:
+        """Read *words* timestamps, through the burst chain when it is usable."""
+        if words <= 0:
+            return []
+        if self._burst_available and timestamp_width > 0:
+            try:
+                return self._read_block_burst(
+                    words, timestamp=True, element_width=timestamp_width
+                )
+            except (ConnectionError, RuntimeError, ValueError) as exc:
+                _tap_log.warning(
+                    "TAP bridge timestamp burst failed (%s); falling back to "
+                    "per-word timestamp reads",
+                    exc,
+                )
+                self._has_burst = False
+        return [self.read_reg(addr + i * 4) for i in range(words)]
+
+    # -- burst readback -----------------------------------------------------
+    #
+    # The ELA's burst chain (rtl/jtag_burst_read.v; chain 2 in
+    # rtl/fcapz_ela_uart.v) hands back a whole DR full of samples per scan,
+    # instead of one 32-bit word per *two* 49-bit scans.  On a byte-stream link
+    # that is the difference between ~48 bytes per sample and ~2.2, so a 1024
+    # x 8-bit capture goes from ~49 kB to ~2.3 kB on the wire.
+    #
+    # The sequence is the same one the JTAG transports run -- the fabric is
+    # identical, only the way scans arrive differs.  Unlike hw_server and
+    # quartus_stp there is no read-until-stable retry: those guard against a
+    # stale first transaction from the probe stack, which has no analogue here
+    # (the bridge acknowledges every scan and holds no pipeline of its own).
+
+    @property
+    def _burst_dr_bits(self) -> int:
+        if self._burst_dr_bits_override is not None:
+            return self._burst_dr_bits_override
+        if self.max_dr_bits is None:
+            raise RuntimeError("burst width unknown: connect() first")
+        return self.max_dr_bits
+
+    @property
+    def _burst_available(self) -> bool:
+        """True when a burst chain is reachable and wide enough to pay off."""
+        if not self._has_burst:
+            return False
+        if self.num_chains is None or self.num_chains < self.burst_data_chain:
+            return False
+        return self._burst_dr_bits >= 32
+
+    @property
+    def _burst_samples_per_scan(self) -> int:
+        """Samples per wide scan, from the core's hardware SAMPLE_W."""
+        if self._cached_sps is None:
+            sw = self.read_reg(self.ADDR_SAMPLE_W)
+            if sw < 1:
+                sw = 8
+            self._cached_sps = max(1, self._burst_dr_bits // sw)
+        return self._cached_sps
+
+    def _read_block_burst(
+        self,
+        words: int,
+        *,
+        timestamp: bool = False,
+        element_width: int | None = None,
+    ) -> List[int]:
+        dr_bits = self._burst_dr_bits
+        if timestamp:
+            if element_width is None:
+                element_width = 32
+            per_scan = max(1, dr_bits // element_width)
+        else:
+            per_scan = self._burst_samples_per_scan
+            element_width = dr_bits // per_scan
+        if element_width < 1:
+            raise ValueError(f"burst element width {element_width} is not usable")
+
+        n_scans = (words + per_scan - 1) // per_scan
+        mask = (1 << element_width) - 1
+
+        # 1. Arm the burst reader on the control chain.  Bit 31 asks for
+        #    timestamps rather than samples.
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
+        )
+        self.raw_dr_scan(burst_frame, 49, chain=self._active_chain)
+
+        # 2. Let the update cross into the reader and the first staging word
+        #    fill before the next CAPTURE samples it.
+        self._runtest(self.BURST_PREFILL_IDLE_CYCLES)
+
+        # 3. One priming scan (staging is not loaded yet, so its CAPTURE is
+        #    meaningless), then the real ones.
+        values: list[int] = []
+        for scan_idx in range(n_scans + 1):
+            scan_value = self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
+            if scan_idx == 0:
+                continue
+            for sample_idx in range(per_scan):
+                if len(values) >= words:
+                    break
+                values.append((scan_value >> (sample_idx * element_width)) & mask)
+
+        if len(values) != words:
+            raise RuntimeError(
+                f"TAP bridge burst returned {len(values)} values, expected {words}"
+            )
+        return values
 
 
 class SerialTapTransport(TapBridgeTransport):
@@ -740,8 +896,16 @@ class SerialTapTransport(TapBridgeTransport):
         *,
         timeout: float = DEFAULT_TIMEOUT,
         chain: int = 1,
+        burst: bool = True,
+        burst_data_chain: int = 2,
+        burst_dr_bits: int | None = None,
     ) -> None:
-        super().__init__(chain=chain)
+        super().__init__(
+            chain=chain,
+            burst=burst,
+            burst_data_chain=burst_data_chain,
+            burst_dr_bits=burst_dr_bits,
+        )
         self.port = port
         self.baudrate = int(baudrate)
         self.timeout = float(timeout)

@@ -273,13 +273,33 @@ fails with a clear message rather than returning garbage.  `num_chains` and
 before a scan is sent.
 
 The wire protocol is documented in the header of `rtl/fcapz_tap_bridge.v`.  It
-is framed and status-coded, and resynchronises on a start-of-frame byte, so a
-truncated command cannot wedge the link.
+is framed and status-coded, and the parser hunts for a start-of-frame byte
+between commands, which is what lets the link survive the junk a
+configuration-pin handover leaves behind.  It is **not** a self-recovering
+protocol: there is no frame length, checksum or inter-byte timeout, so a
+command truncated mid-field leaves the parser waiting for the bytes it is
+still owed.  Reset the board to recover.
+
+#### Burst readback
+
+`read_block()` on the DATA window (`0x0100`) uses the ELA's burst chain, the
+same way the Xilinx and Intel transports do: one control-chain write to
+`BURST_PTR`, an idle for the staging word to fill, one priming scan that is
+discarded, then one wide scan per group of samples.  With a 256-bit DR and an
+8-bit core that is 32 samples per scan instead of one 32-bit word per *two*
+49-bit scans — about 2.2 bytes per sample on the wire against ~48.
+
+The burst width defaults to the bridge's `MAX_DR_BITS`, since `fcapz_ela_uart`
+ties the two together (`MAX_DR_BITS(BURST_W)`); pass `burst_dr_bits` if a
+wrapper sizes them apart.  The path disables itself and falls back to per-word
+reads if the bridge advertises fewer chains than `burst_data_chain`, if a wide
+scan is rejected, or if `burst=False` is passed to the constructor.  Timestamps
+take the same path through `read_timestamp_block()`.
 
 > **Bandwidth.** A capture readback is bounded by the sample buffer, not the
-> link: a 15 kB buffer at 1 Mbaud drains in well under a second.  Small parts
-> — the usual reason a board has no spare JTAG — are exactly where this matters
-> least.
+> link: a 15 kB buffer at 1 Mbaud drains in well under a second with burst
+> readback, and in roughly ten times that without it.  Small parts — the usual
+> reason a board has no spare JTAG — are exactly where this matters least.
 
 The two pins need not be a dedicated UART header.  On boards configured by a
 companion MCU they are often the **configuration pins themselves**, which go

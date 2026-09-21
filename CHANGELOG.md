@@ -30,7 +30,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `SerialTapTransport` is a pyserial backend over a generic
   `TapBridgeTransport` that owns the wire format, identity probe and register
   semantics. A new link type (SPI, USB-FIFO, TCP) needs only a PHY on each
-  side. `fcapz_ela_uart` wraps it (chain 1 = control, chain 2 = burst).
+  side. `fcapz_ela_uart` wraps it (chain 1 = control, chain 2 = burst), and
+  `read_block()`/`read_timestamp_block()` use that burst chain the same way the
+  Xilinx and Intel transports do — 32 8-bit samples per 256-bit scan, ~2.2
+  bytes per sample on the wire against ~48 for per-word reads.
   pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
   by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
   lint targets.

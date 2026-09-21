@@ -18,13 +18,18 @@ import pytest
 
 from fcapz.transport import SerialTapTransport, TapBridgeTransport
 
+ADDR_SAMPLE_W = TapBridgeTransport.ADDR_SAMPLE_W
+ADDR_BURST_PTR = TapBridgeTransport.ADDR_BURST_PTR
+ADDR_DATA_BASE = TapBridgeTransport.ADDR_DATA_BASE
+
 
 class FakeTapPort:
     """Minimal stand-in for ``serial.Serial`` speaking the bridge protocol."""
 
     def __init__(self, *, num_chains=4, max_dr_bits=256, magic=b"FCZU",
-                 version=1, extra=0):
+                 version=1, extra=0, burst_chain=2):
         self.num_chains = num_chains
+        self.burst_chain = burst_chain
         self.max_dr_bits = max_dr_bits
         self.magic = magic
         self.version = version
@@ -35,11 +40,18 @@ class FakeTapPort:
         self.closed = False
 
         # Modelled register file behind jtag_reg_iface.
-        self.mem: dict[int, int] = {}
+        self.mem: dict[int, int] = {ADDR_SAMPLE_W: 8}
         self._cur_addr = 0
         self._sr = 0
         self.idle_calls: list[int] = []
         self.scans: list[tuple[int, int]] = []   # (chain, width)
+
+        # Modelled burst chain behind jtag_burst_read: capture RAM plus the
+        # queue of wide scan values a BURST_PTR write leaves behind.
+        self.samples: list[int] = []
+        self.timestamps: list[int] = []
+        self.timestamp_width = 32
+        self._burst_queue: list[int] = []
 
     # -- serial.Serial surface ---------------------------------------------
     def write(self, data):
@@ -112,8 +124,34 @@ class FakeTapPort:
                 del self._rx[:2]
                 self._reply(0x01)
 
+    def _arm_burst(self, timestamp):
+        """Pack the capture RAM into wide scan values, as jtag_burst_read does.
+
+        The first entry is the priming scan: staging has not been loaded when
+        the host's first wide CAPTURE happens, so the RTL returns junk there
+        and the host must discard it.  Returning a deliberately wrong value
+        makes a host that forgets to skip it fail loudly.
+        """
+        if timestamp:
+            source, elem = self.timestamps, self.timestamp_width
+        else:
+            source, elem = self.samples, max(1, self.mem.get(ADDR_SAMPLE_W, 8))
+        per_scan = max(1, self.max_dr_bits // elem)
+        mask = (1 << elem) - 1
+
+        self._burst_queue = [(1 << self.max_dr_bits) - 1]     # priming junk
+        for base in range(0, len(source), per_scan):
+            word = 0
+            for i, value in enumerate(source[base:base + per_scan]):
+                word |= (value & mask) << (i * elem)
+            self._burst_queue.append(word)
+
     def _do_scan(self, chain, width, payload, nb):
         shifted_in = int.from_bytes(payload, "little") & ((1 << width) - 1)
+        if chain == self.burst_chain and width == self.max_dr_bits                 and self._burst_queue:
+            # Armed: hand back staged capture data.  Unarmed, the burst chain
+            # is just a shift register, which is what the raw-scan tests use.
+            return self._burst_queue.pop(0).to_bytes(nb, "little")
         if chain != 1 or width != 49:
             # Non-register chains just echo, like a plain shift register.
             return shifted_in.to_bytes(nb, "little")
@@ -130,6 +168,8 @@ class FakeTapPort:
         self._cur_addr = addr
         if rnw:
             self.mem[addr] = data
+            if addr == ADDR_BURST_PTR:
+                self._arm_burst(bool(data & 0x80000000))
 
         return (captured & ((1 << width) - 1)).to_bytes(nb, "little")
 
@@ -217,10 +257,106 @@ def test_write_reg_masks_to_32_bits(fake_serial):
 
 
 def test_read_block_reads_consecutive_word_addresses(fake_serial):
+    """Outside the DATA window read_block is still plain per-word reads."""
     t, port = _connect(fake_serial)
     for i in range(4):
-        port.mem[0x0100 + i * 4] = 0xA0 + i
-    assert t.read_block(0x0100, 4) == [0xA0, 0xA1, 0xA2, 0xA3]
+        port.mem[0x0200 + i * 4] = 0xA0 + i
+    assert t.read_block(0x0200, 4) == [0xA0, 0xA1, 0xA2, 0xA3]
+    assert all(width == 49 for _chain, width in port.scans)
+
+
+# -- burst readback ---------------------------------------------------------
+
+def test_read_block_uses_the_burst_chain_for_the_data_window(fake_serial):
+    t, port = _connect(fake_serial)
+    port.samples = [(i * 7) & 0xFF for i in range(100)]
+    port.scans.clear()
+
+    assert t.read_block(ADDR_DATA_BASE, 100) == port.samples
+
+    # One control scan arms BURST_PTR; the rest are wide scans on chain 2.
+    # 100 samples at 8 bits is 32 per 256-bit scan -> 4 scans, plus the
+    # priming scan the host must discard.
+    wide = [s for s in port.scans if s == (2, 256)]
+    assert len(wide) == 5
+    assert port.mem[ADDR_BURST_PTR] == 0
+
+
+def test_burst_moves_far_fewer_bytes_than_per_word_reads(fake_serial):
+    """The whole point: a wide scan carries 32 samples, a read_reg pair one."""
+    t, port = _connect(fake_serial)
+    port.samples = list(range(64))
+    port.scans.clear()
+    t.read_block(ADDR_DATA_BASE, 64)
+    burst_scans = len(port.scans)
+
+    port.scans.clear()
+    t.read_block(0x0200, 64)
+    assert len(port.scans) > 10 * burst_scans
+
+
+def test_burst_discards_the_priming_scan(fake_serial):
+    """The first wide CAPTURE happens before staging is loaded."""
+    t, port = _connect(fake_serial)
+    port.samples = [0x11] * 32
+    assert t.read_block(ADDR_DATA_BASE, 32) == [0x11] * 32
+
+
+def test_burst_respects_the_hardware_sample_width(fake_serial):
+    t, port = _connect(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = 16          # 16 samples per 256-bit scan
+    port.samples = [(i * 1234) & 0xFFFF for i in range(48)]
+    assert t.read_block(ADDR_DATA_BASE, 48) == port.samples
+
+
+def test_read_timestamp_block_uses_the_burst_chain(fake_serial):
+    t, port = _connect(fake_serial)
+    port.timestamp_width = 32
+    port.timestamps = [i * 3 for i in range(24)]
+    port.scans.clear()
+
+    assert t.read_timestamp_block(0x0180, 24, 32) == port.timestamps
+    assert port.mem[ADDR_BURST_PTR] == 0x80000000       # timestamp select
+    assert any(s == (2, 256) for s in port.scans)
+
+
+def test_no_burst_chain_falls_back_to_per_word_reads(fake_serial):
+    """A single-chain bridge has no chain 2 to shift on."""
+    fake_serial["obj"] = FakeTapPort(num_chains=1)
+    t, port = _connect(fake_serial)
+    for i in range(4):
+        port.mem[ADDR_DATA_BASE + i * 4] = 0xB0 + i
+    assert t.read_block(ADDR_DATA_BASE, 4) == [0xB0, 0xB1, 0xB2, 0xB3]
+    assert all(chain == 1 for chain, _width in port.scans)
+
+
+def test_burst_can_be_disabled(fake_serial):
+    t = SerialTapTransport("COM_TEST", burst=False)
+    t.connect()
+    port = fake_serial["obj"]
+    for i in range(4):
+        port.mem[ADDR_DATA_BASE + i * 4] = 0xC0 + i
+    assert t.read_block(ADDR_DATA_BASE, 4) == [0xC0, 0xC1, 0xC2, 0xC3]
+
+
+def test_a_failed_burst_falls_back_and_stays_disabled(fake_serial):
+    """A rejected wide scan must cost throughput, not the capture."""
+    t, port = _connect(fake_serial)
+    port.samples = list(range(32))
+    for i in range(2):
+        port.mem[ADDR_DATA_BASE + i * 4] = 0xD0 + i
+
+    # The bridge now refuses chain 2 -- e.g. a bitstream whose ELA was built
+    # without the burst chain, behind a bridge that still advertises it.
+    port.num_chains = 1
+
+    assert t.read_block(ADDR_DATA_BASE, 2) == [0xD0, 0xD1]
+    assert t._has_burst is False
+
+    # Still disabled on the next call: no retry storm per block.
+    port.scans.clear()
+    assert t.read_block(ADDR_DATA_BASE, 2) == [0xD0, 0xD1]
+    assert all(chain == 1 for chain, _width in port.scans)
 
 
 # -- raw scans --------------------------------------------------------------
