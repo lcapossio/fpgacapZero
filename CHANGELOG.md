@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web GUI — `serial` backend.** The byte-stream TAP bridge is now selectable
+  in the browser, not just from the Python API. It takes a serial port and baud
+  rate in place of host/port/tap, and skips JTAG discovery entirely — the
+  bridge's own identity probe reports a wrong port instead of returning
+  garbage. Verified end to end against a Forgix board: `connect` -> `probe` ->
+  `capture` returns a clean 1,024-sample ramp.
+
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer

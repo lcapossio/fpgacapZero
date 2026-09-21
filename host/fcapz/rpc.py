@@ -27,6 +27,7 @@ from .probes import load_probe_file
 from .transport import (
     OpenOcdTransport,
     QuartusStpTransport,
+    SerialTapTransport,
     Transport,
     XilinxHwServerTransport,
     list_openocd_taps,
@@ -357,6 +358,11 @@ class RpcServer:
         # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
         if req.get("backend") == "usb_blaster":
             return "intel"
+        # The byte-stream TAP bridge has no IR at all -- it addresses chains
+        # directly -- so there is no preset to infer and no tap name to infer
+        # it from.  Label the session by the link instead.
+        if req.get("backend") == "serial":
+            return "serial"
         return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
@@ -431,6 +437,19 @@ class RpcServer:
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
+        if backend == "serial":
+            # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port
+            # instead of a JTAG probe, so there is no host/port/tap here.  The
+            # bridge's identity probe runs inside connect(), so pointing this
+            # at the wrong port fails with a clear message rather than
+            # returning garbage.
+            name = str(req.get("serial_port", "") or "").strip()
+            if not name:
+                raise ValueError("serial backend needs a serial_port")
+            return SerialTapTransport(
+                name,
+                baudrate=int(req.get("baudrate", 1_000_000)),
+            )
         ir = self._ir_table(self._resolved_ir_name(req))
         if backend == "openocd":
             return OpenOcdTransport(
