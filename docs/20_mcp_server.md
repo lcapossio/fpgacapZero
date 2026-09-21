@@ -231,7 +231,7 @@ same still-running worker guard applies.
 | `fcapz_capture_wait` | capture* | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. Returns `{triggered: false, still_armed: true}` (not an error) if the trigger has not fired yet. |
 | `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
-| `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard. |
+| `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard, capped at 8 MiB. |
 | `fcapz_get_capture_samples` | always available | Page the cached capture's samples as whole records, with named fields from the probe map. See [Reading a Capture](#reading-a-capture). |
 | `fcapz_axi_transactions` | always available | Decoded AXI4-Lite transactions of the cached capture — paged, filterable by anomaly or read/write. See [AXI Transactions](#axi-transactions). |
 | `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
@@ -396,7 +396,9 @@ covers under a quarter of the payload, while a 128-sample page with four
 named fields is ~2.7k tokens and complete in itself.
 
 Resource-aware clients may also read `fcapz://last-capture`, which injects
-the entire payload — fine for a small capture, not for a deep one.
+the entire payload — fine for a small capture, not for a deep one. It is the
+cheapest route on the server side (the payload is already serialized) and the
+only one with no size ceiling, but it still lands in full in model context.
 
 Chunking mechanics, when you do need the raw payload: call
 `fcapz_get_last_capture_chunk(offset=0, max_bytes=65536)` and follow the byte
@@ -406,8 +408,20 @@ offsets in the middle of a character are rejected. `max_bytes` must leave room
 for at least one whole character (use `>= 4`); a window too small to fit the
 next one is rejected rather than returning an empty chunk that would never
 advance. `fcapz_get_last_capture` has a 1 MiB default guard and returns a
-compact truncation marker for larger captures unless `max_bytes=null` is
-passed as an explicit escape hatch.
+compact truncation marker for larger captures. `max_bytes` may lower that
+bound but not raise it past an **8 MiB ceiling**, and `max_bytes=null` means
+that ceiling rather than "unlimited": a tool result is turned back into JSON
+on the event loop *after* the offloaded call returns, so the payload costs
+the whole server a stall of roughly 5 ms per MB that nothing else can
+interleave with — 125 ms for a 24 MB capture, and more for a deep segmented
+one. A marker returned because of the ceiling carries `ceiling_bytes`, so a
+caller can tell the server's bound from its own.
+
+Nothing is unreachable as a result: `fcapz://last-capture` still serves the
+entire payload, and does it from a string that is already built, so it
+measures 0 ms of loop stall for the same 24 MB the tool needed 125 ms for.
+Prefer the resource for a whole payload, and the chunk tool where the client
+has no resource support.
 
 ## AXI Transactions
 

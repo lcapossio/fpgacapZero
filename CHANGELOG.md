@@ -63,6 +63,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A full-capture tool result can no longer stall the server for an
+  unbounded time.** FastMCP turns a tool result back into JSON on the event
+  loop *after* the offloaded call returns, so the payload
+  `fcapz_get_last_capture` hands over is a stall nothing else can interleave
+  with — measured against the real call path at roughly 5 ms per MB, with a
+  concurrent heartbeat seeing a gap exactly as long as the whole call
+  (125 ms for a 24 MB capture). `max_bytes=null` meant "no limit", so a deep
+  capture had nothing bounding it. `max_bytes` may now lower the bound but
+  not raise it past an 8 MiB ceiling, and `null` means that ceiling; a
+  marker returned because of it carries `ceiling_bytes` so a caller can tell
+  the server's bound from its own. The whole payload stays available from
+  `fcapz://last-capture`, which serves an already-built string and measured
+  0 ms of stall for that same 24 MB capture.
+
 - **A wedged backend no longer kills the MCP session for the rest of the
   process.** The JTAG owner is a single thread, and `RpcServer` published no
   abort hook, so the watchdog could only mark a call abandoned and hope the
