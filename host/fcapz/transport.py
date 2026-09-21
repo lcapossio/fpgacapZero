@@ -499,6 +499,234 @@ class OpenOcdTransport(Transport):
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
+class SerialTapTransport(Transport):
+    """Register access over a UART-driven virtual JTAG TAP.
+
+    Talks to the ``fcapz_uart_tap`` RTL front-end (see
+    ``rtl/fcapz_uart_tap.v``), which reproduces the fpgacapZero TAP contract
+    from a serial byte stream.  Every core behind it -- ELA, EIO, the burst
+    readout chain -- is bit-identical to the JTAG case; only the way DR scans
+    reach the fabric differs.
+
+    This exists for boards that expose no JTAG to the fabric at all.  The
+    reference target is the Forgix board (Efinix Trion T8F49 + RP2354), whose
+    T8 is configured over a write-only passive SPI link and whose JTAG pins are
+    bonded out nowhere.  Nothing here is board- or vendor-specific, though: any
+    design that instantiates ``fcapz_uart_tap`` can use this transport.
+
+    Chain numbers are the ``sel[]`` index of the RTL front-end (1-based), so
+    unlike the JTAG transports there is no IR table to configure -- the chain
+    number travels in the command itself.
+
+    Protocol recap (49-bit DR, LSB-first) -- identical to every other
+    transport, since the register interface behind the TAP is unchanged:
+        bits[31:0]  = wdata / rdata
+        bits[47:32] = addr[15:0]
+        bits[48]    = rnw (1=write, 0=read)
+    """
+
+    MAGIC = b"FCZU"
+    SOF_CMD = 0x5A
+    SOF_RSP = 0xA5
+
+    CMD_SCAN = 0x01
+    CMD_IDLE = 0x02
+    CMD_INFO = 0x03
+    CMD_RST = 0x0F
+
+    _STATUS_TEXT = {
+        0x00: "ok",
+        0x01: "bad frame / unknown command",
+        0x02: "chain out of range",
+        0x03: "DR width out of range",
+    }
+
+    # Cycles of `runtest` between a read's address scan and its data scan,
+    # matching OpenOcdTransport.READ_IDLE_CYCLES so read timing is consistent
+    # across transports.
+    READ_IDLE_CYCLES = 8
+
+    # A reply is at most SOF + status + ceil(MAX_DR_BITS/8) bytes; the bridge
+    # answers as fast as the UART drains, so a short timeout is plenty and
+    # keeps a dead link from stalling a capture.
+    DEFAULT_TIMEOUT = 2.0
+
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = 1_000_000,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        chain: int = 1,
+    ) -> None:
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.timeout = float(timeout)
+        self._active_chain = int(chain)
+        self._ser = None
+        self.num_chains: int | None = None
+        self.max_dr_bits: int | None = None
+        self.proto_version: int | None = None
+
+    # -- lifecycle ----------------------------------------------------------
+    def connect(self) -> None:
+        try:
+            import serial  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise RuntimeError(
+                "SerialTapTransport needs pyserial. "
+                "Install it with: pip install 'fpgacapzero[serial]'"
+            ) from exc
+
+        try:
+            self._ser = serial.Serial(
+                self.port, self.baudrate, timeout=self.timeout
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"cannot open serial port {self.port!r} at {self.baudrate} baud: {exc}"
+            ) from exc
+
+        # Drop anything the previous session (or the bitstream loader) left in
+        # the buffers, so the first INFO reply is not read out of stale bytes.
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+        except Exception:  # pragma: no cover - not all backends implement it
+            pass
+
+        self._identify()
+
+    def close(self) -> None:
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            self._ser = None
+
+    def _require_port(self):
+        if self._ser is None:
+            raise RuntimeError("SerialTapTransport: not connected (call connect())")
+        return self._ser
+
+    # -- framing ------------------------------------------------------------
+    def _identify(self) -> None:
+        """Probe the bridge itself before probing the core behind it.
+
+        A mismatched magic almost always means the port is not the bridge at
+        all (a bitstream loader, a console, another board), which is worth
+        saying plainly rather than letting register reads return garbage.
+        """
+        payload = self._txn(bytes([self.SOF_CMD, self.CMD_INFO]), 8)
+        if payload[:4] != self.MAGIC:
+            raise RuntimeError(
+                f"no fcapz UART TAP on {self.port!r}: expected magic "
+                f"{self.MAGIC!r}, got {payload[:4]!r}"
+            )
+        self.proto_version = payload[4]
+        self.num_chains = payload[5]
+        self.max_dr_bits = int.from_bytes(payload[6:8], "little")
+        if self.proto_version != 1:
+            raise RuntimeError(
+                f"unsupported fcapz UART TAP protocol version "
+                f"{self.proto_version} on {self.port!r} (host supports 1)"
+            )
+
+    def _txn(self, command: bytes, resp_bytes: int) -> bytes:
+        """Send one command and return its reply payload.
+
+        Raises ``RuntimeError`` on a bridge-reported error status or a short
+        read, and ``ConnectionError`` if the port disappears mid-transaction.
+        """
+        ser = self._require_port()
+        try:
+            ser.write(command)
+            ser.flush()
+            header = ser.read(2)
+        except OSError as exc:
+            raise ConnectionError(
+                f"serial link to {self.port!r} failed mid-transaction: {exc}"
+            ) from exc
+
+        if len(header) < 2:
+            raise RuntimeError(
+                f"fcapz UART TAP on {self.port!r} did not reply within "
+                f"{self.timeout}s (got {len(header)} of 2 header bytes)"
+            )
+        if header[0] != self.SOF_RSP:
+            raise RuntimeError(
+                f"fcapz UART TAP on {self.port!r}: bad reply framing "
+                f"(expected SOF 0x{self.SOF_RSP:02X}, got 0x{header[0]:02X})"
+            )
+        status = header[1]
+        if status != 0:
+            text = self._STATUS_TEXT.get(status, "unknown error")
+            raise RuntimeError(
+                f"fcapz UART TAP on {self.port!r} rejected the command: "
+                f"{text} (status 0x{status:02X})"
+            )
+
+        if resp_bytes == 0:
+            return b""
+        payload = ser.read(resp_bytes)
+        if len(payload) < resp_bytes:
+            raise RuntimeError(
+                f"fcapz UART TAP on {self.port!r}: short reply "
+                f"({len(payload)} of {resp_bytes} bytes)"
+            )
+        return payload
+
+    # -- Transport API ------------------------------------------------------
+    def select_chain(self, chain: int) -> None:
+        """Select the RTL front-end ``sel[]`` index for later accesses."""
+        chain = int(chain)
+        if chain < 1 or (self.num_chains is not None and chain > self.num_chains):
+            raise ValueError(
+                f"chain {chain} out of range 1..{self.num_chains or '?'}"
+            )
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        """Shift *width* bits through the selected chain, return captured TDO."""
+        width = int(width)
+        if width < 1:
+            raise ValueError(f"DR width must be >= 1, got {width}")
+        if self.max_dr_bits is not None and width > self.max_dr_bits:
+            raise ValueError(
+                f"DR width {width} exceeds the bridge's MAX_DR_BITS "
+                f"({self.max_dr_bits})"
+            )
+        target = self._active_chain if chain is None else int(chain)
+        nbytes = (width + 7) // 8
+        cmd = bytes([self.SOF_CMD, self.CMD_SCAN, target & 0xFF]) \
+            + int(width).to_bytes(2, "little") \
+            + (int(bits) & ((1 << width) - 1)).to_bytes(nbytes, "little")
+        payload = self._txn(cmd, nbytes)
+        captured = int.from_bytes(payload, "little")
+        return captured & ((1 << width) - 1)
+
+    def _runtest(self, cycles: int) -> None:
+        cmd = bytes([self.SOF_CMD, self.CMD_IDLE]) + int(cycles).to_bytes(2, "little")
+        self._txn(cmd, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+        self.raw_dr_scan(frame, 49)
+
+    def read_reg(self, addr: int) -> int:
+        # Same two-scan shape as the JTAG transports: the first scan presents
+        # the address, the second shifts out what CAPTURE latched.
+        read_frame = (addr & 0xFFFF) << 32
+        self.raw_dr_scan(read_frame, 49)
+        self._runtest(self.READ_IDLE_CYCLES)
+        shifted_out = self.raw_dr_scan(read_frame, 49)
+        return shifted_out & 0xFFFFFFFF
+
+    def read_block(self, addr: int, words: int) -> List[int]:
+        return [self.read_reg(addr + i * 4) for i in range(words)]
+
+
 def find_quartus_stp(explicit: str | None = None) -> str | None:
     """Locate the ``quartus_stp`` executable for the USB-Blaster transport.
 

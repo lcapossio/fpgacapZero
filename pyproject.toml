@@ -56,6 +56,7 @@ gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 hdl = ["cocotb>=2", "cocotb-tools>=0.1.0", "cocotbext-axi>=0.1.26"]
 litex = ["litex"]
+serial = ["pyserial>=3.5"]
 web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [tool.pytest.ini_options]
