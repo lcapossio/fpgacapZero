@@ -8,11 +8,14 @@ Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 fpgacapZero on the [Forgix board](https://forgix.tech/) — a Teensy-footprint
 board pairing an Efinix Trion T8F49 with a Raspberry Pi RP2354.
 
-## Why this board is different
+This is a worked example of the generic UART TAP path, not a special case: the
+RTL and the host transport it uses are board- and vendor-agnostic. See
+[`docs/14_transports.md`](../../docs/14_transports.md#tapbridgetransport) for
+the general mechanism.
 
-**The Forgix board gives the FPGA fabric no JTAG whatsoever.** Every other
-fpgacapZero target reaches the core through a hard JTAG TAP; here there is
-nothing to reach:
+## Why this board needs it
+
+**The Forgix board gives the FPGA fabric no JTAG whatsoever.**
 
 - The Trion T8 has no configuration flash. The RP2354 reconfigures it from
   scratch at every power-up over a **passive SPI** link that is **write-only** —
@@ -25,36 +28,37 @@ So [`rtl/fcapz_ela_efinix.v`](../../rtl/fcapz_ela_efinix.v), which binds the
 T8's hard JTAG User TAP blocks, **cannot be used on this board** — those TAPs
 are unreachable. This example uses
 [`rtl/fcapz_ela_uart.v`](../../rtl/fcapz_ela_uart.v) instead, which drives the
-identical ELA core from
-[`fcapz_uart_tap`](../../rtl/fcapz_uart_tap.v), a virtual TAP fed by a serial
-byte stream. Host side is
-`fcapz.transport.SerialTapTransport`.
+identical ELA core from a virtual TAP fed by a byte stream.
 
-Nothing about that path is Forgix- or Efinix-specific; any JTAG-less board can
-use it.
+## Wiring: none
 
-## Wiring: two jumpers required
+The bridge **reuses the configuration SPI pins**, which sit idle once `DONE`
+is high. No jumpers, no extra cable — just the USB-C lead.
 
-Of the 24 header pins, 18 go straight to the Trion fabric (`PIN.4`–`PIN.6`,
-`PIN.9`–`PIN.23`, where the label number is the header pin number) and 6 go to
-the RP2354. **The RP2354 and the FPGA are not connected to each other except by
-the configuration SPI**, so the UART link has to be closed at the header with
-two jumper wires:
+| Pin | During configuration | After `DONE` | Fabric signal |
+|---|---|---|---|
+| RP2354 GPIO2 → FPGA **CCK** | SPI clock | UART0 TX | `uart_rxd` |
+| RP2354 GPIO3 → FPGA **CDI** | SPI data in | UART0 RX | `uart_txd` |
 
-| From (RP2354) | Header pin | To (FPGA fabric) | Signal |
-|---|---:|---|---|
-| `RP.UART0_TX` (GPIO12) | 7 | any fabric pin, e.g. `PIN.9` | `uart_rxd` |
-| `RP.UART0_RX` (GPIO13) | 8 | any fabric pin, e.g. `PIN.10` | `uart_txd` |
+This works because **CCK and CDI are dual-purpose configuration pins**: Efinix
+[AN006](https://www.efinixinc.com/docs/an006-configuring-trion-fpgas-v6.6.pdf)
+Table 3 states they may be used as general I/O in user mode. Note that
+**CDONE is a _dedicated_ pin** (Table 2) and cannot be reused — which is why
+the return path is CDI rather than DONE.
 
-Pins 9 and 10 sit next to 7 and 8, so the jumpers are short. Any other fabric
-pin works — just keep the Efinity pin assignment and the firmware defines in
-agreement.
+Assign `uart_rxd` to the CCK pin and `uart_txd` to the CDI pin in the Efinity
+Interface Designer.
 
-> GPIO12/13 are UART0 TX/RX in RP2350 silicon and are the only RP2354 UART pins
-> on the header not already taken by the configuration SPI (which uses GPIO1–6
-> and GPIO19). The header's other UART pair is labelled `RP.UART1_RX/TX` at
-> GPIO8/9, where the schematic labels read inverted with respect to the silicon
-> function map — avoid it unless you have checked it on your board.
+> **Pad function gotcha.** GPIO2/GPIO3 reach UART0 TX/RX only through pad
+> function **11** (`UART_AUX`). The ordinary `GPIO_FUNC_UART` (function 2) maps
+> to UART0's **CTS/RTS** on these two pads, so using it yields a dead link
+> rather than a build error. The patch handles this.
+
+> **Contention window.** During configuration the RP2354 drives CDI; afterwards
+> the fabric does. The firmware releases the SPI block and switches the pad
+> before entering the bridge loop, but the changeover is not instantaneous on
+> both ends — expect a few junk bytes right after programming. The host's
+> framing resynchronises on a start-of-frame byte, so this is harmless.
 
 ## Firmware: the RP2354 has to become a bridge
 
@@ -84,17 +88,17 @@ resetting the board. That is deliberate: the T8 has to be reprogrammed at every
 power-up anyway, so a reset naturally returns you to loader mode — and it means
 no escape sequence exists that an fcapz scan payload could accidentally spell.
 
-Override the defaults at configure time if you wire the jumpers elsewhere:
-`FCAPZ_BRIDGE_PIN_TX`, `FCAPZ_BRIDGE_PIN_RX`, `FCAPZ_BRIDGE_BAUD_HZ`,
-`FCAPZ_BRIDGE_ENABLE=0` to build the stock loader.
+Override the defaults at configure time: `FCAPZ_BRIDGE_PIN_TX`,
+`FCAPZ_BRIDGE_PIN_RX`, `FCAPZ_BRIDGE_BAUD_HZ`, or `FCAPZ_BRIDGE_ENABLE=0` to
+build the stock loader.
 
 ## Building the FPGA design
 
 [`forgix_top.v`](forgix_top.v) instantiates `fcapz_ela_uart` with a
 free-running counter as the probe source, so a capture should read back a ramp.
 
-Build it in Efinity for the **T8F49I2X**, assigning `uart_rxd` / `uart_txd` to
-the fabric pins you jumpered, then load the resulting SPI-passive `.hex`.
+Build it in Efinity for the **T8F49I2X**, assigning `uart_rxd`/`uart_txd` to
+the CCK/CDI pins, then load the resulting SPI-passive `.hex`.
 
 > **Set `CLK_HZ` to your board's actual oscillator frequency.** The baud divider
 > is derived from it. The Forgix oscillator (ECS-2520MV) is a family rather than
@@ -105,7 +109,6 @@ the fabric pins you jumpered, then load the resulting SPI-passive `.hex`.
 
 ```python
 from fcapz.transport import SerialTapTransport
-from fcapz.analyzer import Analyzer
 
 t = SerialTapTransport("COM16", baudrate=1_000_000)   # /dev/ttyACM0 on Linux
 t.connect()
@@ -137,9 +140,8 @@ wide dual-comparator configs take most of the part. `forgix_top.v` therefore
 defaults to `DUAL_COMPARE=0`.
 
 These are **estimates by conversion, not Efinity results** — the published rows
-also include JTAG TAP plumbing that `fcapz_uart_tap` replaces (a UART plus
-framing and scan FSM, roughly a wash). Treat the first Efinity run as the real
-number.
+also include JTAG TAP plumbing that the UART TAP replaces (a UART plus framing
+and scan FSM, roughly a wash). Treat the first Efinity run as the real number.
 
 ## Throughput
 

@@ -10,10 +10,11 @@
 // configured by the RP2354 over a write-only passive SPI link and its JTAG
 // pins are not bonded out to a header, a test point, or the Tag-Connect
 // footprint (which is ARM SWD for the RP2354).  So this design reaches the
-// host through fcapz_ela_uart / fcapz_uart_tap over two header pins instead.
+// host through fcapz_ela_uart / fcapz_uart_tap instead, over the two
+// configuration SPI pins, which are free once configuration finishes.
 //
-// See README.md in this folder for the jumper wiring, the RP2354 firmware
-// patch, and how to connect from the host.
+// See README.md in this folder for the pin reuse, the RP2354 firmware patch,
+// and how to connect from the host.
 //
 // The probe source here is a free-running counter, so the design is useful on
 // its own as a bring-up check: arm a capture, and you should read back a ramp.
@@ -33,9 +34,12 @@ module forgix_top #(
     input  wire clk_in,
     input  wire rst_n_in,
 
-    // Jumper these two to the RP2354's UART0 on the header:
-    //   uart_rxd <- header pin 7  (RP.UART0_TX, RP2354 GPIO12)
-    //   uart_txd -> header pin 8  (RP.UART0_RX, RP2354 GPIO13)
+    // No board wiring needed -- these ride the configuration SPI pins, which
+    // sit idle once DONE is high:
+    //   uart_rxd  = the FPGA's CCK pin  <- RP2354 GPIO2 (UART0 TX)
+    //   uart_txd  = the FPGA's CDI pin  -> RP2354 GPIO3 (UART0 RX)
+    // CCK and CDI are dual-purpose pins, usable as general I/O in user mode
+    // (Efinix AN006, Table 3).  Assign them in the Efinity Interface Designer.
     input  wire uart_rxd,
     output wire uart_txd,
 

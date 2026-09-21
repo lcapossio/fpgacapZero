@@ -228,16 +228,29 @@ and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.
 > Trion T20 hard-TAP opcodes must be confirmed against the device BSDL /
 > hardware before this path is claimed as validated.
 
-### `SerialTapTransport`
+### `TapBridgeTransport` (and `SerialTapTransport`)
 
 For boards that expose **no JTAG to the fabric at all**.  Instead of a hard TAP
-block, the design instantiates
-[`fcapz_uart_tap`](../rtl/fcapz_uart_tap.v), which reproduces the fpgacapZero
-TAP contract (`tck`, `tdi`, `tdo`, `capture`, `shift`, `update`, `sel`) from a
-UART byte stream.  Everything behind it — `jtag_reg_iface`, `jtag_burst_read`,
-`fcapz_ela`, `fcapz_eio` — is bit-identical to the JTAG case, so this is a
-change of delivery, not of protocol.  Wrap it with
-[`fcapz_ela_uart`](../rtl/fcapz_ela_uart.v).
+block the design instantiates
+[`fcapz_tap_bridge`](../rtl/fcapz_tap_bridge.v), which reproduces the
+fpgacapZero TAP contract (`tck`, `tdi`, `tdo`, `capture`, `shift`, `update`,
+`sel`) from a stream of bytes.  Everything behind it — `jtag_reg_iface`,
+`jtag_burst_read`, `fcapz_ela`, `fcapz_eio` — is bit-identical to the JTAG
+case, so this is a change of delivery, not of protocol.
+
+**Protocol and physical layer are separate on both sides**, so a new link type
+does not mean a new protocol:
+
+| Layer | RTL | Host |
+|---|---|---|
+| Protocol + TAP | `fcapz_tap_bridge.v` | `TapBridgeTransport` |
+| UART PHY | `fcapz_uart_tap.v` | `SerialTapTransport` |
+| ELA wrapper | `fcapz_ela_uart.v` | — |
+
+To add an SPI, USB-FIFO or TCP link, write the PHY on each side — an RTL module
+that produces the byte interface, and a `TapBridgeTransport` subclass
+implementing `_open`, `_close`, `_write_bytes` and `_read_bytes`.  The wire
+format, identity probe and register semantics come for free.
 
 ```python
 from fcapz.transport import SerialTapTransport
@@ -254,12 +267,13 @@ itself.  `fcapz_ela_uart` maps chain 1 to the control registers and chain 2 to
 the burst readout.
 
 `connect()` first asks the bridge for its identity (magic `FCZU`, protocol
-version, chain count, `MAX_DR_BITS`), so a wrong port fails with a clear
-message rather than returning garbage.  `num_chains` and `max_dr_bits` are then
-available on the transport and are enforced host-side before a scan is sent.
+version, chain count, `MAX_DR_BITS`, and a PHY-defined byte), so a wrong port
+fails with a clear message rather than returning garbage.  `num_chains` and
+`max_dr_bits` are then available on the transport and enforced host-side
+before a scan is sent.
 
-The wire protocol is documented in the header of `rtl/fcapz_uart_tap.v`.  It is
-framed and status-coded, and resynchronises on a start-of-frame byte, so a
+The wire protocol is documented in the header of `rtl/fcapz_tap_bridge.v`.  It
+is framed and status-coded, and resynchronises on a start-of-frame byte, so a
 truncated command cannot wedge the link.
 
 > **Bandwidth.** A capture readback is bounded by the sample buffer, not the
@@ -267,10 +281,11 @@ truncated command cannot wedge the link.
 > — the usual reason a board has no spare JTAG — are exactly where this matters
 > least.
 
-The reference target is the Forgix board (Efinix Trion T8F49 + RP2354), whose
-FPGA JTAG pins are bonded out nowhere and which reaches the host through the
-RP2354's USB CDC; see [`examples/forgix/`](../examples/forgix/README.md) for
-the wiring, the firmware bridge patch, and the hardware-validation status.
+The two pins need not be a dedicated UART header.  On boards configured by a
+companion MCU they are often the **configuration pins themselves**, which go
+idle once configuration finishes;
+[`examples/forgix/`](../examples/forgix/README.md) is a worked example that
+reuses an Efinix Trion's CCK/CDI pins and needs no extra wiring at all.
 
 ### `QuartusStpTransport`
 

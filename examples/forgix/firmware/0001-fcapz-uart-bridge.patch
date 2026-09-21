@@ -1,16 +1,17 @@
 diff --git a/firmware/pico/CMakeLists.txt b/firmware/pico/CMakeLists.txt
-index 741309e..474db3e 100644
+index 741309e..009470b 100644
 --- a/firmware/pico/CMakeLists.txt
 +++ b/firmware/pico/CMakeLists.txt
-@@ -34,6 +34,7 @@ target_compile_definitions(forge_fpga_loader PRIVATE
+@@ -34,6 +34,8 @@ target_compile_definitions(forge_fpga_loader PRIVATE
  target_link_libraries(forge_fpga_loader
      pico_stdlib
      hardware_spi
 +    hardware_uart
++    hardware_gpio
  )
  
  pico_enable_stdio_usb(forge_fpga_loader 1)
-@@ -59,6 +60,11 @@ foreach(name IN ITEMS
+@@ -59,6 +61,11 @@ foreach(name IN ITEMS
      FPGA_RESET_RELEASE_MS
      FPGA_DONE_TIMEOUT_MS
      FPGA_EXTRA_CLOCK_BYTES
@@ -23,10 +24,10 @@ index 741309e..474db3e 100644
      if(DEFINED ${name})
          target_compile_definitions(forge_fpga_loader PRIVATE ${name}=${${name}})
 diff --git a/firmware/pico/include/board_config.h b/firmware/pico/include/board_config.h
-index cc47002..be6e0c2 100644
+index cc47002..55fcc9d 100644
 --- a/firmware/pico/include/board_config.h
 +++ b/firmware/pico/include/board_config.h
-@@ -75,4 +75,43 @@
+@@ -75,4 +75,49 @@
  #define FPGA_EXTRA_CLOCK_BYTES 32
  #endif
  
@@ -37,15 +38,19 @@ index cc47002..be6e0c2 100644
 + * becomes a transparent pipe between USB CDC and the FPGA fabric, so the host
 + * can reach an fcapz_uart_tap instance over the board's single USB-C cable.
 + *
-+ * The Trion T8's own pins are not wired to the RP2354 for anything but the
-+ * write-only configuration SPI, so the bridge runs over two header pins that
-+ * must be jumpered to fabric pins:
++ * No extra wiring is needed: the bridge reuses the configuration SPI pins,
++ * which are idle once DONE is high.
 + *
-+ *   header pin 7  = RP.UART0_TX (GPIO12)  ->  fabric uart_rxd
-+ *   header pin 8  = RP.UART0_RX (GPIO13)  <-  fabric uart_txd
++ *   GPIO2 (was SPI CCK, FPGA CCK pin)  ->  UART0 TX  ->  fabric uart_rxd
++ *   GPIO3 (was SPI CDI, FPGA CDI pin)  <-  UART0 RX  <-  fabric uart_txd
 + *
-+ * GPIO12/13 are UART0 TX/RX in RP2350 silicon and are the only RP2354 UART
-+ * pins on the header that are not also used by the configuration SPI.
++ * CCK and CDI are dual-purpose Trion configuration pins: Efinix AN006 Table 3
++ * says they may be used as general I/O in user mode.  (CDONE is a *dedicated*
++ * pin and cannot be, which is why the return path is CDI and not DONE.)
++ *
++ * GPIO2/GPIO3 need pad function 11, UART_AUX.  The ordinary GPIO_FUNC_UART
++ * (function 2) maps to UART0 CTS/RTS on these two pads, not TX/RX, so using it
++ * here produces a dead link rather than a build error.
 + * ------------------------------------------------------------------------ */
 +
 +#ifndef FCAPZ_BRIDGE_ENABLE
@@ -56,12 +61,14 @@ index cc47002..be6e0c2 100644
 +#define FCAPZ_BRIDGE_UART uart0
 +#endif
 +
++/* FPGA CCK pin: RP2354 -> fabric. */
 +#ifndef FCAPZ_BRIDGE_PIN_TX
-+#define FCAPZ_BRIDGE_PIN_TX 12
++#define FCAPZ_BRIDGE_PIN_TX 2
 +#endif
 +
++/* FPGA CDI pin: fabric -> RP2354. */
 +#ifndef FCAPZ_BRIDGE_PIN_RX
-+#define FCAPZ_BRIDGE_PIN_RX 13
++#define FCAPZ_BRIDGE_PIN_RX 3
 +#endif
 +
 +/* Must match the BAUD_RATE parameter of the fcapz_uart_tap instance. */
@@ -71,21 +78,22 @@ index cc47002..be6e0c2 100644
 +
  #endif
 diff --git a/firmware/pico/src/main.c b/firmware/pico/src/main.c
-index ac87d06..a0d12fe 100644
+index ac87d06..e280c48 100644
 --- a/firmware/pico/src/main.c
 +++ b/firmware/pico/src/main.c
-@@ -1,8 +1,10 @@
+@@ -1,8 +1,11 @@
  #include <stdbool.h>
  #include <stdint.h>
  
 +#include "board_config.h"
  #include "crc32.h"
  #include "fpga_config.h"
++#include "hardware/gpio.h"
 +#include "hardware/uart.h"
  #include "pico/stdio_usb.h"
  #include "pico/stdlib.h"
  #include "protocol.h"
-@@ -213,7 +215,60 @@ static void handle_end(const struct forge_frame *frame, struct loader_context *c
+@@ -213,7 +216,77 @@ static void handle_end(const struct forge_frame *frame, struct loader_context *c
                             fpga_config_pin_state(),
                             bytes_written_low(ctx),
                             "fpga programmed");
@@ -102,6 +110,19 @@ index ac87d06..a0d12fe 100644
 +
 +#if FCAPZ_BRIDGE_ENABLE
 +/*
++ * GPIO2/GPIO3 reach UART0 TX/RX only through pad function 11 (UART_AUX);
++ * function 2 is CTS/RTS on these pads.  Named GPIO_FUNC_UART_AUX in recent
++ * Pico SDKs; fall back to the raw value so an older SDK still builds.
++ */
++#ifndef FCAPZ_BRIDGE_PAD_FUNC
++#ifdef GPIO_FUNC_UART_AUX
++#define FCAPZ_BRIDGE_PAD_FUNC GPIO_FUNC_UART_AUX
++#else
++#define FCAPZ_BRIDGE_PAD_FUNC ((gpio_function_t)11)
++#endif
++#endif
++
++/*
 + * Transparent USB-CDC <-> UART bridge for fpgacapZero.
 + *
 + * Entered once the FPGA reports DONE, and never left: the T8 has no
@@ -114,9 +135,13 @@ index ac87d06..a0d12fe 100644
 + * entirely between the host transport and the fcapz_uart_tap core in fabric.
 + */
 +static void fcapz_bridge_run(void) {
++    /* Release the configuration SPI before handing the pads to the UART, so
++     * the SPI block cannot keep driving CCK/CDI. */
++    spi_deinit(FPGA_SPI_INSTANCE);
++
 +    uart_init(FCAPZ_BRIDGE_UART, FCAPZ_BRIDGE_BAUD_HZ);
-+    gpio_set_function(FCAPZ_BRIDGE_PIN_TX, GPIO_FUNC_UART);
-+    gpio_set_function(FCAPZ_BRIDGE_PIN_RX, GPIO_FUNC_UART);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_TX, FCAPZ_BRIDGE_PAD_FUNC);
++    gpio_set_function(FCAPZ_BRIDGE_PIN_RX, FCAPZ_BRIDGE_PAD_FUNC);
 +    uart_set_hw_flow(FCAPZ_BRIDGE_UART, false, false);
 +    uart_set_format(FCAPZ_BRIDGE_UART, 8, 1, UART_PARITY_NONE);
 +    uart_set_fifo_enabled(FCAPZ_BRIDGE_UART, true);
