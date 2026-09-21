@@ -83,6 +83,7 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 | `axi-dump` | Read a block of AXI words (auto-inc or burst) |
 | `axi-fill` | Fill a block of AXI memory with a pattern |
 | `axi-load` | Load a binary file into AXI memory |
+| `axi-decode` | Read a saved AXI monitor capture as AXI4-Lite transactions (offline) |
 | `uart-send` | Send data to UART TX via JTAG-to-UART bridge |
 | `uart-recv` | Receive data from UART RX |
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |
@@ -175,6 +176,7 @@ setup.  Both take the same options.
 | `--format FMT` | `json` | `json`, `csv`, or `vcd` |
 | `--timeout SEC` | `10.0` | Wait this long for the trigger to fire |
 | `--summarize` | off | Print LLM-friendly capture summary to stdout after the capture |
+| `--decode-axi` | off | Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only) |
 
 ### Examples
 
@@ -443,6 +445,40 @@ loaded 4096 words @ 0x10000000
 
 The file is read as little-endian 32-bit words.  Trailing partial
 words are zero-padded.
+
+### `axi-decode CAPTURE [--probe-file P] [--only-anomalies] [--kind K] [--limit N] [--json]`
+
+Reassembles a capture JSON (written by `capture --format json`) into whole
+AXI4-Lite transactions — address, data, byte strobes, response, latency and
+protocol flags — instead of a per-cycle sample dump. Reads a file and touches
+no hardware, so it needs no connection and no board.
+
+```console
+$ fcapz axi-decode cap.json --only-anomalies
+3 transactions (2 write, 1 read), 1 error responses, 1 bus faults, 2 flagged
+   #  kind  addr         data         strb  resp    lat  flags
+--------------------------------------------------------------
+   2  write 0x00002000   0x00000011   0x3   SLVERR    2  error_response,partial_write
+```
+
+The probe map comes from `--probe-file` if given, otherwise from the map the
+capture records, otherwise it is guessed from the flattened sample width —
+and the guess says so on stderr, because a width does not identify a
+geometry (32/32 with the decode word is 160 bits, and so is 36/32 without
+it). `fcapz axi-mon --write-probe-file P` writes a map.
+
+`--only-anomalies` keeps only transactions the bus got wrong — an error
+response or a misaligned address — not the ones clipped by the edges of the
+capture window, which are flagged but legal. `--kind` keeps reads or writes,
+`--limit` caps the rows, and `--json` emits the decode itself.
+
+Two caveats go to stderr on every run. Pairing is first-in-first-out, so
+addresses are only right if nothing was outstanding when the window opened;
+a finite capture cannot prove that, and a window that opened mid-transaction
+produces rows that read perfectly and are wrong. When a response *did* arrive
+with no visible request, that assumption is disproved and the note becomes a
+warning. A capture taken with decimation or storage qualification is refused
+outright: it stored only selected cycles, and reassembly needs every one.
 
 ## UART subcommands
 

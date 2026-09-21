@@ -9,6 +9,269 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Segmented captures are reachable from MCP.** `fcapz_capture` and
+  `fcapz_capture_wait` take `segments=true` to read back every segment
+  instead of segment 0; sample paging concatenates them, tags each sample
+  with its segment, and resolves named fields from the per-segment probe map.
+
+- **Wide EIO vectors survive a JavaScript MCP client.** `fcapz_eio_read`
+  returns `value` as a hex string past 53 bits so it cannot disagree with
+  `value_hex`, and `fcapz_eio_write` accepts a base-prefixed string, which is
+  the only way such a client can drive a wide output exactly.
+
+- **The MCP tool schema is typed.** `backend`, `format`, `radix`, `kind` and
+  `trigger_mode` are `enum`s in the published schema instead of strings
+  validated after the call, and capture `config` is a named object with a
+  type per field instead of an open dictionary. The accepted key set is
+  derived from that schema, so the two cannot drift. Costs roughly 2k tokens
+  of tool surface in the default profile, and buys client-side rejection of
+  values that previously needed a round trip to refuse.
+
+- **Four MCP tools declare a real `outputSchema`.**
+  `fcapz_get_capture_samples`, `fcapz_axi_transactions`,
+  `fcapz_get_last_capture_chunk` and `fcapz_status` now publish their result
+  shape instead of `{"additionalProperties": true}`, and each returns one
+  fixed shape — every field always present, `null` where it does not apply —
+  so a caller never branches on which keys exist. The remaining tools pass an
+  RPC response through verbatim and stay open on purpose: MCP drops any field
+  an `outputSchema` does not name, so declaring a subset of a response whose
+  keys vary by backend and core would silently delete the rest.
+
+- **MCP failures carry a code and a remedy.** A failed tool call reaches an
+  agent as text and nothing else, so every failure is now rendered as one
+  JSON object — `code`, `message`, `retryable`, `action`, plus the backend's
+  own error as `detail` — instead of prose to pattern-match. Twelve codes, with
+  `busy` and `session_recovering` tagged where they are raised so a reworded
+  message cannot reclassify them, and `watchdog_timeout` kept distinct from
+  `timeout` because only one of them requires reconnecting first.
+
+- **Long captures report progress.** `fcapz_capture` and
+  `fcapz_capture_wait` emit an MCP progress notification once a second while
+  they wait — elapsed time against the caller's timeout, which is the only
+  honest measure available from inside a JTAG readout. Clients that do not
+  send a progress token are unaffected.
+
+- **The AXI decoder is reachable from the CLI and the web UI.**
+  `fcapz axi-decode CAPTURE` reassembles a saved capture JSON into AXI4-Lite
+  transactions offline — no board, no connection — with `--only-anomalies`,
+  `--kind`, `--limit` and `--json`; the probe map is inferred from the
+  capture's recorded sample width. `fcapz capture --decode-axi` prints the
+  same table straight after a live capture, and the web UI gains an **AXI
+  Txn** tab showing the last capture as transactions with faulty rows
+  highlighted. Previously the decoder had exactly one consumer, the MCP
+  server.
+
+### Fixed
+
+- **A full-capture tool result can no longer stall the server for an
+  unbounded time.** FastMCP turns a tool result back into JSON on the event
+  loop *after* the offloaded call returns, so the payload
+  `fcapz_get_last_capture` hands over is a stall nothing else can interleave
+  with — measured against the real call path at roughly 5 ms per MB, with a
+  concurrent heartbeat seeing a gap exactly as long as the whole call
+  (125 ms for a 24 MB capture). `max_bytes=null` meant "no limit", so a deep
+  capture had nothing bounding it. `max_bytes` may now lower the bound but
+  not raise it past an 8 MiB ceiling, and `null` means that ceiling; a
+  marker returned because of it carries `ceiling_bytes` so a caller can tell
+  the server's bound from its own. The whole payload stays available from
+  `fcapz://last-capture`, which serves an already-built string and measured
+  0 ms of stall for that same 24 MB capture.
+
+- **A wedged backend no longer kills the MCP session for the rest of the
+  process.** The JTAG owner is a single thread, and `RpcServer` published no
+  abort hook, so the watchdog could only mark a call abandoned and hope the
+  backend returned. When it never did — `xsdb` staying alive but silent left
+  `_send` in a `readline()` with no deadline — the owner stayed in that call
+  forever, nothing was left to clear the poison flag, and every later
+  hardware command was refused. `RpcServer.cancel_active` now aborts the
+  transports the session holds, and the XSDB transport reads its responses
+  through a queued reader with a deadline (`FCAPZ_XSDB_TIMEOUT`, default
+  60 s; `fpga -file` gets its own) that kills the process rather than
+  waiting on it, the same shape `quartus_stp` already used. Measured against
+  a backend that never returns: previously poisoned indefinitely, now ready
+  again in ~0.3 s.
+
+- **A cancel can no longer abort the wrong command.** `cancel_active` stops
+  whatever the session currently holds, so a watchdog past its grace window
+  or a recovery nudge firing as reconciliation completes could reach through
+  a finished command into the next one. The check and the abort now happen
+  together under the session lock. The same window made the watchdog re-read
+  a command's state outside the lock, fall through when the owner had
+  reconciled in between, and surface a bare `queue.Empty` instead of the
+  watchdog error.
+
+- **`probe_file` confinement no longer loses the swap race.** A path was
+  approved, opened, then re-checked by stat'ing the *same path* — which
+  follows the same newly planted link and agrees with itself, so a name
+  swapped for a link between the two was accepted. The file must now sit
+  directly in `--probe-root`, which makes the lookup verifiable: `openat`
+  with `O_NOFOLLOW` where the platform has it, and otherwise an identity
+  comparison between what was inspected and what was opened. Hard links and
+  files over 1 MiB are refused, and a missing file now reports `not_found`
+  rather than `invalid_argument`.
+
+- **A capture that stored only some cycles is no longer read as AXI.**
+  Reassembly treats a sample's position as its bus cycle and pairs each
+  response with the oldest queued request; decimation and storage
+  qualification break both, because a handshake that was never stored cannot
+  be told apart from one that never happened. A single dropped response
+  silently shifted every later pairing onto the wrong address, and "latency"
+  counted stored samples rather than cycles. `decode_axi` now takes the
+  capture's sampling provenance and refuses such a trace with
+  `decoded: false` and a reason, keeping its full result shape. The capture
+  exporter records `stor_qual_mode` (and the probe map) so an offline
+  `fcapz axi-decode` knows the same thing.
+
+- **The AXI pairing caveat reaches the reader.** The assumption that nothing
+  was outstanding when the window opened is now stated on every page of
+  `fcapz_axi_transactions`, on the capture summary, in the CLI and in the
+  web panel — unconditionally, not only when a response happened to arrive
+  with an empty queue. That evidence can disprove the assumption; nothing
+  can confirm it. `AR(A)` before the window, then `AR(B)` and `R(A)` inside
+  it, yields a clean-looking row with A's data at address B and no flag of
+  any kind, so silence on a tidy decode was the dangerous case.
+
+- **Window edges are no longer counted as bus faults.** A response whose
+  request handshook before the capture, or a write whose second beat falls
+  after it, is legal traffic seen through a keyhole. Both were in
+  `FAULT_FLAGS`, so `anomaly_count`, `--only-anomalies` and the web "Faults
+  only" filter presented boundary effects as failures. Only `error_response`
+  and `unaligned_address` — what a finite window can actually prove — count
+  now; the rest are reported as observations via `flagged_count`.
+
+- **`fcapz_capture_wait` no longer reports a wedged link as "still armed".**
+  Every `TimeoutError` was treated as "the trigger has not fired", including
+  one raised by the transport while reading status or samples, which sent
+  the caller into a poll loop against a session that would never answer. The
+  analyzer now raises `CaptureNotReady` for the expected case and only that
+  is turned into `{"triggered": false, "still_armed": true}`.
+
+- **An ordinary RPC refusal is no longer reported as a bug in this server.**
+  The MCP layer calls `RpcServer.handle` in process, so its exceptions
+  arrive as themselves rather than as an `{"ok": false}` envelope — and a
+  bare `RuntimeError("not connected")` was classified `internal`,
+  `retryable: false`, "report this bug". `fcapz_probe` while disconnected
+  was the common case. The RPC layer now raises typed refusals
+  (`NotConnectedError`, `NotEnabledError`, `RpcError`) and the classifier
+  reads both routes the same way.
+
+- **Every tool-call failure is one coded JSON object.** Argument validation
+  runs before the tool body, so a rejected enum or an unknown field used to
+  reach the agent as pydantic prose with no code, no `retryable` and no
+  remedy; a coded failure also arrived behind FastMCP's "Error executing
+  tool X:" prefix. Both are handled at one seam above validation, and the
+  body names the failing `tool`. New codes: `capture_not_ready`,
+  `unknown_tool`.
+
+- **A misspelled argument is rejected instead of dropped.** Pydantic
+  validates a TypedDict by filtering, so `config={"posttriger": 9}` was
+  discarded before the call, the capture ran with the default posttrigger,
+  and the agent was told it succeeded — the server's own unknown-key check
+  never saw it. The same held for misspelled tool arguments, which pydantic
+  ignores. The capture config now publishes `additionalProperties: false`,
+  and top-level arguments are checked against the published schema.
+  `ProbeEntry.lsb` became optional to match the parser, which defaults it
+  to 0.
+
+- **Hardware tools no longer freeze the MCP server.** FastMCP awaits a
+  synchronous tool directly on the event loop, so every JTAG round trip
+  stopped the server answering anything at all for its duration — a 300 s
+  capture blocked even `fcapz_status` for five minutes. Tools now run in a
+  worker thread; hardware access is still serialized by the owner thread.
+
+- **`probe_file` is read once, where it is checked.** The MCP layer validated
+  the path and the RPC layer opened it a queue hop later, so anyone able to
+  write inside `--probe-root` could swap the file — or an ancestor — in
+  between and have different content loaded than was approved. The probe map
+  is now read in the MCP layer and passed inline as `probes`; there is no
+  second open to race.
+
+- **Capture snapshots are built off the hardware lock.** A multi-megabyte
+  capture ran its `json.dumps` while holding the lock every other caller
+  needs, delaying `fcapz_status` and a concurrent caller's `busy` reply for
+  as long as it took. Commands may now carry a `prepare` step that runs
+  before the lock is taken; only the single publishing assignment is inside
+  it. `fcapz_status` likewise reads its whole body under one hold, so it can
+  no longer report a busy slot beside connection flags from after that
+  command committed.
+
+- **AXI decoding no longer invents pairings it cannot justify.** A response
+  is never matched to a request handshaking on the same sampled cycle (AXI
+  forbids a combinational VALID-to-VALID path, so it belongs to an earlier
+  request), an unmatched response reads the same wherever it lands in the
+  window rather than being excused by a cycle-number heuristic, and the
+  leftover transactions at the end of a window are numbered in trace order.
+
+- **Two races in the MCP hardware owner.** A close that found nothing open
+  decided and acted in two separate holds of the lock, so a connect could
+  commit in between and leave the board connected with the wrapper reporting
+  otherwise. And a watchdog whose grace window expired just as recovery
+  finished poisoned the session with nothing left to clear the flag, refusing
+  every later hardware command for the life of the process. A stalled
+  recovery teardown now also gets a second abort attempt rather than wedging
+  the owner thread.
+
+- **Non-finite watchdog and tool timeouts are rejected.** `nan` passed every
+  ordered comparison and then made the wait spin instead of expiring,
+  disabling the watchdog it was meant to configure.
+
+- **Two MCP fields that reached past the JTAG cable are now confined.**
+  `probe_file` opened any path on the server's filesystem; it now requires
+  `--probe-root DIR` and must stay inside it. `host` accepted any network
+  target for hw_server/OpenOCD; it is now loopback-only unless a host is
+  named with `--allow-host`. Both policies are reported in `fcapz_status`.
+
+- **The MCP tool list now tracks the safety flags.** A tool whose capability
+  is disabled is no longer advertised and then refused — it is left out of the
+  list, so an agent neither plans around it nor pays for its schema in every
+  request (22 tools under `--read-only`, 27 by default, 31 with all writes
+  enabled). The session-level permission checks are unchanged and remain the
+  enforcement.
+
+- **Structured capture paging.** `fcapz_get_capture_samples` returns whole
+  sample records — sliced into named fields from the capture's probe map, with
+  `total` and `trigger_index` on every page — so each page is valid JSON on
+  its own. The byte-chunk tool stays for verbatim export and csv/vcd
+  captures, where its chunks must be concatenated before any of it parses.
+  RPC `capture` now echoes the probe map alongside the samples, so any
+  consumer can slice fields without re-deriving the layout.
+
+- **AXI transaction decoding.** A host-side pass (`fcapz.decode_axi`)
+  reassembles an AXI monitor capture from per-cycle samples into whole
+  AXI4-Lite transactions: address, data, byte strobes, response, the cycle
+  each beat landed on, latency, per-channel stall counts, and protocol
+  anomaly flags (`error_response`, `partial_write`, `data_before_address`,
+  half-formed writes, unaligned addresses). AXI4-Lite has no IDs, so
+  responses are paired first-in-first-out; the result states that assumption
+  and flags every transaction whose pairing a mid-flight capture window could
+  have shifted. Legal-but-notable behaviour is reported separately from
+  protocol faults. Works
+  on both `DECODE_EN` and plain monitor builds, since a beat is `VALID &
+  READY` either way. RPC `capture` attaches it on request (`decode_axi`), and
+  the MCP server exposes `fcapz_axi_transactions` to page and filter it —
+  answering "why is this write corrupt?" directly instead of returning a
+  sample dump to interpret.
+
+- **MCP server (`fcapz-mcp`).** A stdio MCP server that exposes the lab
+  controls to coding agents: connect/probe/configure/arm/poll and capture for
+  the ELA, EIO read/write, AXI read/write (single and bounded block), and UART
+  send/receive. Session state is published as `fcapz://` resources (status,
+  last probe, last capture, last EIO read). Every write-side operation is off
+  by default behind an explicit capability flag — `--allow-eio-write`,
+  `--allow-axi-write`, `--allow-uart-send`, and `--allow-program` (which can be
+  confined to a `--bitfile-root`) — and `--read-only` drops the mutating tools
+  at once. Payloads are bounded so a large capture or block read cannot flood
+  the agent's context: captures are chunked from an atomic snapshot and AXI
+  block ops are capped. All hardware commands run on a single owner thread
+  that performs each RPC and its session-state update as one step, so a
+  concurrent caller is refused with a `busy` error rather than interleaving,
+  and a command abandoned after the watchdog tears the session down instead of
+  committing late (`session_state` reports `ready`/`busy`/`poisoned`).
+  Sample values wider than 53 bits are returned as hex
+  strings (`"value_encoding": "hex"`) so they survive clients that parse JSON
+  numbers as doubles. The MCP SDK is an optional dependency:
+  `pip install fpgacapzero[mcp]`. See [MCP server](docs/20_mcp_server.md).
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -49,6 +312,41 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   manual vendor matrices — support pending, wrapper not yet implemented.
 
 ### Changed
+
+- **RPC — some refusals report a narrower `type` string.** The error
+  envelope carries `exc.__class__.__name__`, and refusals that were bare
+  `RuntimeError`s are now `NotConnectedError` / `NotEnabledError` (both
+  subclass `RpcError`, which subclasses `RuntimeError`), while a capture
+  still waiting for its trigger is `CaptureNotReady` (a `TimeoutError`
+  subclass) rather than a bare `TimeoutError` — the distinction the MCP
+  layer needs to tell "still armed, poll again" from "the transport stopped
+  answering". Catching the base classes is unaffected; **migration:** a
+  client comparing the `type` string should match the base classes or
+  accept both spellings.
+
+- **MCP — `--probe-root` is a flat directory.** `probe_file` must name a file
+  sitting directly in the root; a subdirectory, a path climbing out of it, a
+  symlink/junction, or a file with a second hard link are all refused. Nesting
+  used to be allowed. It went because the lookup could not be made verifiable
+  on every platform: Windows has no directory handles to open relative to, so
+  a multi-component path can be reinterpreted between the check and the open,
+  and a check that cannot be trusted is worse than a narrower rule. With one
+  component the open is provable — `openat`/`O_NOFOLLOW` where the platform
+  has it, an identity comparison otherwise. **Migration:** move probe maps to
+  the top level of the root, or point `--probe-root` at the subdirectory in
+  use. Probe files are also capped at 1 MiB, and a missing one now reports
+  `not_found` instead of `invalid_argument`.
+
+- **MCP — `fcapz_get_last_capture(max_bytes=null)` means 8 MiB, not
+  unlimited.** `max_bytes` may lower the bound but no longer raise it past
+  that ceiling, so `null` stopped being an escape hatch for forcing an
+  arbitrarily large payload: the result is serialized back on the event loop
+  after the offloaded call returns, at roughly 5 ms of whole-server stall per
+  MB, and nothing bounded it. A capture over the ceiling returns the compact
+  truncation marker, now carrying `ceiling_bytes` so a caller can tell the
+  server's bound from its own. **Migration:** read `fcapz://last-capture` for
+  the whole payload — it serves an already-built string, costs 0 ms of stall,
+  and has no ceiling — or page it with `fcapz_get_last_capture_chunk`.
 
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
   a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with

@@ -93,9 +93,20 @@ t = XilinxHwServerTransport(
     ir_table=None,                        # default = 7-series IR codes
     ready_probe_addr=0x0000,              # ELA VERSION register
     ready_probe_timeout=2.0,              # seconds
+    read_timeout_sec=None,                # None = $FCAPZ_XSDB_TIMEOUT or 60 s
 )
 t.connect()
 ```
+
+Responses are read through a reader thread and a queue, never straight
+from the pipe, so every call has a deadline. `xsdb` can stay alive and
+stop answering, and a bare `readline()` on that returns never — which
+wedges whatever thread is driving the transport. When the deadline
+passes the process is killed and the transport refuses further use until
+reconnected, because the unread reply would otherwise be paired with the
+next request. `cancel()` (used by the MCP watchdog) does the same from
+another thread, ending a wait immediately. `fpga -file` gets its own,
+much longer budget — a large bitstream is minutes, not seconds.
 
 What `connect()` does:
 

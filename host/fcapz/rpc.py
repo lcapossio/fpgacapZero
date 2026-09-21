@@ -11,12 +11,14 @@ from typing import Any, Dict
 from .analyzer import (
     Analyzer,
     CaptureConfig,
+    CaptureNotReady,
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
     _infer_ir_table_name,
     discover_boards,
 )
+from .axi_decode import decode_axi, looks_like_axi
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
@@ -34,6 +36,24 @@ from .transport import (
 )
 
 _SCHEMA_VERSION = "1.1"
+
+
+class RpcError(RuntimeError):
+    """A request the session cannot serve in its current state.
+
+    A distinct type so a caller can tell "you asked for the wrong thing" from
+    "this server has a bug". Both used to arrive as a bare ``RuntimeError``,
+    which left the MCP layer classifying an ordinary "not connected" as an
+    internal error and telling the agent to report a bug.
+    """
+
+
+class NotConnectedError(RpcError):
+    """No session is open for the core the request names."""
+
+
+class NotEnabledError(RpcError):
+    """The feature exists but this server was not started with it turned on."""
 
 # Upper bound on how many TCL ports discover_boards will sweep in one request,
 # so an over-large port_span / ports list can't trigger a huge scan.
@@ -104,8 +124,72 @@ class RpcServer:
 
     def _ensure_analyzer(self) -> Analyzer:
         if self._analyzer is None:
-            raise RuntimeError("not connected")
+            raise NotConnectedError("not connected")
         return self._analyzer
+
+    # Where each held object keeps its transport. A controller is asked for
+    # its own attribute rather than being closed directly, because cancelling
+    # has to reach the thing that is actually blocked -- the socket or the
+    # child process -- not the wrapper around it.
+    _TRANSPORT_ATTRS = ("transport", "_t", "_transport")
+
+    def _live_transports(self) -> list[Transport]:
+        """Every transport this session currently holds, deduplicated.
+
+        Several controllers can share one transport (an EIO session opened on
+        the analyzer's), and cancelling the same one twice is pointless at
+        best.
+        """
+        found: list[Transport] = []
+        seen: set[int] = set()
+        for holder in (
+            self._analyzer,
+            self._eio,
+            self._axi,
+            self._axi_transport,
+            self._uart,
+            self._uart_transport,
+        ):
+            if holder is None:
+                continue
+            transport = holder
+            if not hasattr(holder, "cancel"):
+                for attr in self._TRANSPORT_ATTRS:
+                    candidate = getattr(holder, attr, None)
+                    if candidate is not None:
+                        transport = candidate
+                        break
+            if transport is None or id(transport) in seen:
+                continue
+            seen.add(id(transport))
+            found.append(transport)
+        return found
+
+    def cancel_active(self) -> None:
+        """Abort whatever hardware call is in flight. Called from elsewhere.
+
+        Without this the MCP watchdog has nothing to pull: it can only mark a
+        command abandoned and hope the backend returns by itself, and a
+        backend that never does takes the single hardware owner thread with
+        it, refusing every later command for the life of the process.
+
+        Cancelling destroys the session -- that is the point. Each transport's
+        ``cancel`` closes its socket or kills its child process, which is what
+        makes a blocked read return. The caller is told to reconnect, and the
+        owner reconciles by tearing the rest down.
+
+        Runs on a different thread from the call it is aborting, so it must
+        not take any lock that call might hold: it only closes handles, and
+        every ``cancel`` is documented idempotent. One failure must not stop
+        the others, so each is guarded.
+        """
+        for transport in self._live_transports():
+            try:
+                transport.cancel()
+            except Exception:
+                # Best effort by definition -- we are already past the point
+                # where anything about this session is trustworthy.
+                pass
 
     def _close_all(self) -> None:
         """Full session teardown: analyzer plus any EIO/AXI/UART transports.
@@ -262,7 +346,9 @@ class RpcServer:
         timeout = _wait_sec(req, "timeout", 10.0)
         if req.get("segments"):
             if not analyzer.wait_all_segments_done(timeout=timeout):
-                raise TimeoutError("segmented capture did not complete within timeout")
+                raise CaptureNotReady(
+                    "segmented capture did not complete within timeout"
+                )
             probe_info = analyzer.probe()
             nseg = max(1, int(probe_info.get("num_segments", 1)))
             results = [analyzer.capture_segment(i, timeout=timeout) for i in range(nseg)]
@@ -279,6 +365,7 @@ class RpcServer:
                         r,
                         fmt=fmt,
                         include_summary=bool(req.get("summarize", False)),
+                        decode_axi_txns=bool(req.get("decode_axi", False)),
                     )
                     for r in results
                 ],
@@ -308,6 +395,7 @@ class RpcServer:
             result,
             fmt=str(req.get("format", "json")),
             include_summary=bool(req.get("summarize", False)),
+            decode_axi_txns=bool(req.get("decode_axi", False)),
         )
         # Optional VCD text for embedded viewers (e.g. the web Surfer iframe),
         # produced by the same exporter the CLI/GUI use.
@@ -639,6 +727,7 @@ class RpcServer:
         result,
         fmt: str,
         include_summary: bool,
+        decode_axi_txns: bool = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "format": fmt,
@@ -655,8 +744,27 @@ class RpcServer:
         else:
             raise ValueError(f"unsupported rpc format: {fmt}")
 
+        probe_defs = self._probe_defs(config)
+        if probe_defs:
+            # Echo the field map so consumers can slice samples without
+            # re-deriving it (the MCP sample pager names fields from this).
+            payload["probes"] = [
+                {"name": p.name, "width": p.width, "lsb": p.lsb} for p in probe_defs
+            ]
         if include_summary:
-            payload["summary"] = summarize(result, self._probe_defs(config))
+            payload["summary"] = summarize(result, probe_defs)
+        if decode_axi_txns:
+            # Only meaningful when the capture is actually an AXI monitor's;
+            # the caller can ask unconditionally and get it when it applies.
+            if probe_defs and looks_like_axi(p.name for p in probe_defs):
+                # How the capture was taken decides whether it can be read as
+                # transactions at all: reassembly needs consecutive cycles.
+                payload["axi"] = decode_axi(
+                    result.samples,
+                    probe_defs,
+                    decimation=config.decimation,
+                    storage_qualified=bool(config.stor_qual_mode),
+                )
         return payload
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
@@ -668,11 +776,21 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
+            transport = self._build_transport(req)
             analyzer = Analyzer(
-                self._build_transport(req),
+                transport,
                 chain=int(requested) if requested is not None else 1,
             )
-            analyzer.connect()
+            try:
+                analyzer.connect()
+            except Exception:
+                # Don't leak the transport's child process / socket on a failed
+                # connect (hw_server down, wrong tap, program failure, ...).
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
             if requested is None and analyzer.probe_optional() is None:
                 # No chain given and no ELA on the default chain: autodetect on
                 # the conservative scan set (USER1/2 — bridges on 3/4 speak a
@@ -763,7 +881,7 @@ class RpcServer:
             # config that reached them and a running TCL port to connect to.
             # Spawns processes, so it is loopback-gated by the web layer.
             if self._openocd_launcher is None:
-                raise RuntimeError(
+                raise NotEnabledError(
                     "OpenOCD launching is not enabled on this server; start "
                     "fcapz-web with --openocd <exe> and --openocd-cfg/-cfg-dir"
                 )
@@ -784,7 +902,7 @@ class RpcServer:
             if self._openocd_launcher is None:
                 if cmd == "openocd_status":
                     return self._ok(enabled=False, configs=[], running=[])
-                raise RuntimeError(
+                raise NotEnabledError(
                     "OpenOCD launching is not enabled on this server; start "
                     "fcapz-web with --openocd <exe> and --openocd-cfg <cfg>"
                 )
@@ -879,7 +997,7 @@ class RpcServer:
             # here just means "still waiting" and leaves the core armed.
             cfg = analyzer._config  # noqa: SLF001 - the session's active config
             if cfg is None:
-                raise RuntimeError("not configured - send `configure` and `arm` first")
+                raise RpcError("not configured - send `configure` and `arm` first")
             return self._capture_readout(analyzer, cfg, req)
 
         if cmd == "capture_status":
@@ -894,16 +1012,27 @@ class RpcServer:
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            self._eio = EioController(
-                self._build_transport(req),
+            transport = self._build_transport(req)
+            eio = EioController(
+                transport,
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
             )
-            self._eio.connect()
+            try:
+                eio.connect()
+            except Exception:
+                # Mirror axi_connect / eio_discover: close the transport and
+                # leave self._eio unset rather than leaking a half-open session.
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
+            self._eio = eio
             return self._ok(
-                in_w=self._eio.in_w,
-                out_w=self._eio.out_w,
+                in_w=eio.in_w,
+                out_w=eio.out_w,
                 chain=chain,
                 base_addr=base_addr,
             )
@@ -923,7 +1052,7 @@ class RpcServer:
                 )
                 eio = discover_eio(transport, chains=chains)
                 if eio is None:
-                    raise RuntimeError("no EIO core found on the target")
+                    raise RpcError("no EIO core found on the target")
                 self._eio = eio
                 return self._ok(
                     discovered=True,
@@ -947,7 +1076,7 @@ class RpcServer:
 
         if cmd == "eio_read":
             if self._eio is None:
-                raise RuntimeError("eio not connected")
+                raise NotConnectedError("eio not connected")
             v = self._eio.read_inputs()
             # value stays a JSON number for back-compat; value_hex carries the
             # full width so wide (multiword) EIO survives a 53-bit JS client.
@@ -955,7 +1084,7 @@ class RpcServer:
 
         if cmd == "eio_write":
             if self._eio is None:
-                raise RuntimeError("eio not connected")
+                raise NotConnectedError("eio not connected")
             # Accept a base-prefixed string so wide output words don't round.
             self._eio.write_outputs(self._parse_int(req["value"]))
             return self._ok()
@@ -1002,14 +1131,14 @@ class RpcServer:
 
         if cmd == "axi_read":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             val = self._axi.axi_read(addr)
             return self._ok(value=f"0x{val:08X}")
 
         if cmd == "axi_write":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data = int(req["data"], 16) if isinstance(req["data"], str) else int(req["data"])
             wstrb_raw = req.get("wstrb", "0xF")
@@ -1019,7 +1148,7 @@ class RpcServer:
 
         if cmd == "axi_write_block":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             data_raw = req["data"]
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
@@ -1032,7 +1161,7 @@ class RpcServer:
 
         if cmd == "axi_dump":
             if self._axi is None:
-                raise RuntimeError("axi not connected")
+                raise NotConnectedError("axi not connected")
             addr = int(req["addr"], 16) if isinstance(req["addr"], str) else int(req["addr"])
             count = int(req["count"])
             burst = bool(req.get("burst", False))
@@ -1083,7 +1212,7 @@ class RpcServer:
 
         if cmd == "uart_send":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             raw = req.get("data", "")
             data = base64.b64decode(raw)
             self._uart.send(data)
@@ -1091,7 +1220,7 @@ class RpcServer:
 
         if cmd == "uart_recv":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             count = int(req.get("count", 0))
             timeout = _wait_sec(req, "timeout", 1.0)
             data = self._uart.recv(count=count, timeout=timeout)
@@ -1100,7 +1229,7 @@ class RpcServer:
 
         if cmd == "uart_status":
             if self._uart is None:
-                raise RuntimeError("uart not connected")
+                raise NotConnectedError("uart not connected")
             return self._ok(**self._uart.status())
 
         raise ValueError(f"unknown cmd: {cmd}")

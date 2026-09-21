@@ -47,6 +47,7 @@ sample array, and timestamps if present.
   "posttrigger": 16,
   "channel": 0,
   "decimation": 0,
+  "stor_qual_mode": 0,
   "ext_trigger_mode": 0,
   "trigger": {
     "mode": "value_match",
@@ -72,7 +73,13 @@ sample array, and timestamps if present.
 ```
 
 `samples` is always present.  `timestamps` is present **only** if
-the bitstream was built with `TIMESTAMP_W > 0`.
+the bitstream was built with `TIMESTAMP_W > 0`.  `probes` is present only
+when the capture had a probe map, and lists `{name, width, lsb}` per lane.
+
+`decimation` and `stor_qual_mode` record how the capture was sampled, which
+is what tells a later reader whether consecutive samples are consecutive
+cycles.  They are not decoration: the AXI decoder refuses a capture that
+stored only some cycles rather than reading gaps as bus behaviour.
 
 ### When to use it
 

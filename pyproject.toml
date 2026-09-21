@@ -36,6 +36,7 @@ Changelog = "https://github.com/lcapossio/fpgacapZero/blob/main/CHANGELOG.md"
 [project.scripts]
 fcapz = "fcapz.cli:main"
 fcapz-gui = "fcapz.gui.main:main"
+fcapz-mcp = "fcapz.mcp_server:main"
 fcapz-web = "fcapz.web.__main__:main"
 
 [tool.setuptools.dynamic]
@@ -56,6 +57,7 @@ gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 hdl = ["cocotb>=2", "cocotb-tools>=0.1.0", "cocotbext-axi>=0.1.26"]
 litex = ["litex"]
+mcp = ["mcp>=1.26.0,<1.27.0"]
 web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [tool.pytest.ini_options]

@@ -10,6 +10,8 @@ hardware or network connection required.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -916,14 +918,98 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
-        mock_proc.stdout.readline.return_value = ""  # EOF = process exited
 
         t = XilinxHwServerTransport()
         t._proc = mock_proc
         t._stderr_lines = ["error: hw_server unreachable"]
+        # What the reader thread pushes when the pipe reaches EOF.
+        t._stdout_lines.put(None)
 
         with self.assertRaises(ConnectionError):
             t._send("puts hello")
+
+    def test_send_times_out_instead_of_waiting_forever(self):
+        """A live xsdb that stops answering must not wedge its caller.
+
+        `readline()` on a process that is still running but will never emit
+        the sentinel returns never. For the MCP server that call is made by
+        the single hardware owner thread, so losing it would refuse every
+        later command for the life of the process.
+        """
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None  # still alive, just silent
+
+        t = XilinxHwServerTransport(read_timeout_sec=0.05)
+        t._proc = proc
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "sentinel"):
+            t._send("puts hello")
+        self.assertLess(time.monotonic() - started, 5.0)
+        proc.kill.assert_called_once()
+
+        # The stale reply is still in flight, so the transport refuses to be
+        # reused rather than pairing it with the next request.
+        with self.assertRaisesRegex(RuntimeError, "reconnect"):
+            t._send("puts again")
+
+    def test_a_deadline_is_not_reset_by_a_dribble_of_output(self):
+        # Per-line timeouts would let a process that emits one line per
+        # interval hold the caller forever without ever finishing.
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+
+        t = XilinxHwServerTransport(read_timeout_sec=0.3)
+        t._proc = proc
+        stop = threading.Event()
+
+        def dribble():
+            while not stop.wait(0.02):
+                t._stdout_lines.put("noise\n")
+
+        feeder = threading.Thread(target=dribble, daemon=True)
+        feeder.start()
+        self.addCleanup(stop.set)
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            t._send("puts hello")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_cancel_releases_a_send_that_is_still_waiting(self):
+        """cancel() from another thread must end the wait promptly.
+
+        This is the hook the MCP watchdog uses; if it only killed the
+        process and left the reader blocked, the owner thread would still
+        sit out the full read budget.
+        """
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+
+        t = XilinxHwServerTransport(read_timeout_sec=30.0)
+        t._proc = proc
+        outcome = []
+
+        def call():
+            try:
+                t._send("puts hello")
+            except BaseException as exc:
+                outcome.append(exc)
+
+        caller = threading.Thread(target=call, daemon=True)
+        caller.start()
+        time.sleep(0.1)
+        t.cancel()
+        caller.join(timeout=5.0)
+
+        self.assertFalse(caller.is_alive(), "cancel() did not release the caller")
+        self.assertTrue(outcome, "the call should have failed, not returned")
+        self.assertIsInstance(outcome[0], (ConnectionError, RuntimeError))
 
     def test_close_when_not_connected_is_safe(self):
         """close() is idempotent when called before connect()."""

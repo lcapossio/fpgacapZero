@@ -16,6 +16,9 @@ from .analyzer import (
     SequencerStage,
     TriggerConfig,
 )
+from .axi_decode import FAULT_FLAGS, decode_axi, looks_like_axi
+from .axi_layout import PROBE_MAPS, axi_probes
+from .axi_layout import sample_width as axi_sample_width
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -323,8 +326,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the matching .prob probe map to PATH (use with capture --probe-file)",
     )
 
+    axi_decode = sub.add_parser(
+        "axi-decode",
+        help="Reassemble a saved AXI monitor capture into AXI4-Lite transactions",
+    )
+    axi_decode.add_argument("capture", help="Capture JSON written by `capture --format json`")
+    axi_decode.add_argument(
+        "--probe-file",
+        help="Probe map for the capture; inferred from its sample width when omitted",
+    )
+    axi_decode.add_argument(
+        "--only-anomalies", action="store_true", help="Show only transactions with a fault flag"
+    )
+    axi_decode.add_argument("--kind", choices=["read", "write"], help="Show only reads or writes")
+    axi_decode.add_argument(
+        "--limit", type=int, default=0, help="Show at most N transactions (0 = all)"
+    )
+    axi_decode.add_argument("--json", action="store_true", help="Emit the decode as JSON")
+
     cfg = sub.add_parser("configure", help="Write capture configuration")
     cap = sub.add_parser("capture", help="Configure, arm, capture, export")
+    cap.add_argument(
+        "--decode-axi",
+        action="store_true",
+        help="Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only)",
+    )
 
     for parser in [cfg, cap]:
         parser.add_argument("--pretrigger", type=int, default=8)
@@ -590,8 +616,150 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _axi_probes_for_capture(data: dict, probe_file: str | None):
+    """The probe map to read a saved AXI capture with.
+
+    In order of trust: the map the user named, the map the capture itself
+    records, and only then one guessed from the flattened sample width.
+    Guessing is a last resort because the width does not identify a geometry:
+    a 32/32 monitor with the decode word is 160 bits, and so is a 36/32 one
+    without it. Captures written before the exporter recorded its probe map
+    still land here, so the guess stays -- but it says so on stderr.
+    """
+    if probe_file:
+        return load_probe_file(probe_file).probes
+    recorded = data.get("probes")
+    if recorded:
+        return [
+            ProbeSpec(
+                name=str(entry["name"]),
+                width=int(entry["width"]),
+                lsb=int(entry.get("lsb", 0)),
+            )
+            for entry in recorded
+        ]
+    sample_width = data.get("sample_width")
+    for (addr_w, data_w, decode) in PROBE_MAPS:
+        if axi_sample_width(addr_w, data_w, decode) == sample_width:
+            print(
+                "warning: this capture records no probe map; assuming the "
+                f"bundled addr_w={addr_w} data_w={data_w} "
+                f"decode={'on' if decode else 'off'} geometry from its "
+                f"{sample_width}-bit samples. Other geometries share that "
+                "width -- pass --probe-file if the fields look shifted.",
+                file=sys.stderr,
+            )
+            return axi_probes(addr_w, data_w, decode)
+    raise ValueError(
+        f"the capture records no probe map and no bundled AXI geometry has "
+        f"sample_width={sample_width}; pass --probe-file "
+        "(fcapz axi-mon --write-probe-file writes one)"
+    )
+
+
+def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit: int) -> None:
+    if not decoded.get("decoded", True):
+        print(f"cannot decode: {decoded['unavailable_reason']}", file=sys.stderr)
+        return
+    rows = [
+        txn
+        for txn in decoded["transactions"]
+        if (not only_anomalies or FAULT_FLAGS.intersection(txn.get("flags") or ()))
+        and (kind is None or txn["kind"] == kind)
+    ]
+    shown = rows[:limit] if limit > 0 else rows
+
+    print(
+        f"{decoded['transaction_count']} transactions "
+        f"({decoded['write_count']} write, {decoded['read_count']} read), "
+        f"{decoded['error_count']} error responses, "
+        f"{decoded['anomaly_count']} bus faults, "
+        f"{decoded['flagged_count']} flagged"
+    )
+    pre_window = decoded["pairing"]["pre_window_traffic_observed"]
+    if pre_window:
+        print(
+            "warning: the capture opened with "
+            f"{'/'.join(pre_window)} transactions already outstanding, so "
+            "responses are paired with the wrong request from that point on",
+            file=sys.stderr,
+        )
+    else:
+        # Printed even when nothing looks wrong. An in-order pairing that
+        # started misaligned produces rows that read perfectly; the only
+        # place the reader can learn that is here.
+        print(
+            "note: addresses assume the bus was idle when the window opened "
+            "(AXI4-Lite has no IDs, so responses pair first-in-first-out); "
+            "a finite capture cannot prove it",
+            file=sys.stderr,
+        )
+    if not shown:
+        print("(no matching transactions)")
+        return
+
+    header = (
+        f"{'#':>4}  {'kind':<5} {'addr':<12} {'data':<12} "
+        f"{'strb':<5} {'resp':<6} {'lat':>4}  flags"
+    )
+    print(header)
+    print("-" * len(header))
+    for txn in shown:
+        latency = txn.get("latency")
+        print(
+            f"{txn['index']:>4}  {txn['kind']:<5} "
+            f"{txn.get('addr') or '-':<12} {txn.get('data') or '-':<12} "
+            f"{txn.get('strb') or '-':<5} {txn.get('resp') or '-':<6} "
+            f"{('-' if latency is None else latency):>4}  "
+            f"{','.join(txn.get('flags') or []) or '-'}"
+        )
+    if len(shown) < len(rows):
+        print(f"... {len(rows) - len(shown)} more (raise --limit)")
+
+
+def _run_axi_decode(args: argparse.Namespace) -> int:
+    """Decode a saved capture. Touches no hardware."""
+    try:
+        data = json.loads(Path(args.capture).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    samples = [entry["value"] for entry in data.get("samples", [])]
+    if not samples:
+        print(f"error: {args.capture} carries no samples", file=sys.stderr)
+        return 1
+    try:
+        probes = _axi_probes_for_capture(data, args.probe_file)
+        decoded = decode_axi(
+            samples,
+            probes,
+            # Recorded by the exporter. An older capture that predates that
+            # records neither, and reads as contiguous -- which is what it
+            # was, for every capture the previous default produced.
+            decimation=int(data.get("decimation") or 0),
+            storage_qualified=bool(data.get("stor_qual_mode") or 0),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(decoded, indent=2))
+    else:
+        _print_axi_transactions(
+            decoded,
+            only_anomalies=args.only_anomalies,
+            kind=args.kind,
+            limit=args.limit,
+        )
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    if args.cmd == "axi-decode":
+        # Offline: no transport, no board.
+        return _run_axi_decode(args)
     transport = _make_transport(args)
 
     # -- EIO commands ------------------------------------------------------
@@ -818,6 +986,27 @@ def main() -> int:
                     for probe in cfg.probes
                 ]
             print(json.dumps(summarize(result, probe_defs), indent=2))
+
+        if getattr(args, "decode_axi", False):
+            if not looks_like_axi(probe.name for probe in cfg.probes):
+                print(
+                    "error: --decode-axi needs an AXI monitor probe map; run "
+                    "`fcapz axi-mon --write-probe-file P` and capture with "
+                    "--probe-file P",
+                    file=sys.stderr,
+                )
+                return 2
+            _print_axi_transactions(
+                decode_axi(
+                    result.samples,
+                    cfg.probes,
+                    decimation=cfg.decimation,
+                    storage_qualified=bool(cfg.stor_qual_mode),
+                ),
+                only_anomalies=False,
+                kind=None,
+                limit=0,
+            )
 
         open_in = getattr(args, "open_in", None)
         if open_in:

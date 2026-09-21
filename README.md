@@ -34,7 +34,9 @@ Four small RTL cores, all driven over JTAG:
 Plus a host stack: a **browser-based web interface** (`fcapz-web`) with an
 embedded **Surfer** waveform viewer that you can reach from the local machine or
 across the network, a **Python API**, the **`fcapz` command-line tool**, a
-**JSON-RPC server**, and an optional **PySide6 desktop GUI** (`fcapz-gui`).
+**JSON-RPC server**, an **MCP server** (`fcapz-mcp`) that exposes the lab
+controls to coding agents, and an optional **PySide6 desktop GUI**
+(`fcapz-gui`).
 
 ## Why fpgacapZero
 
@@ -105,6 +107,7 @@ The end-to-end walkthrough lives in
 **[First capture in 10 minutes](https://github.com/lcapossio/fpgacapZero/blob/main/docs/03_first_capture.md)**. For every command
 and flag, see the [CLI reference](https://github.com/lcapossio/fpgacapZero/blob/main/docs/10_cli_reference.md); for scripting, the
 [Python API](https://github.com/lcapossio/fpgacapZero/blob/main/docs/09_python_api.md) and [JSON-RPC server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/11_rpc_server.md).
+For driving fpgacapZero from a coding agent, see the [MCP server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/20_mcp_server.md).
 
 ## Add it to your design
 

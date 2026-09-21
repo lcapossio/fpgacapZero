@@ -239,8 +239,11 @@ calls it for you.
 
 The full pipeline: `wait_done()`, read back the captured samples
 (via the configured burst path when available), read back timestamps if enabled, return a
-`CaptureResult`.  Raises `TimeoutError` if the trigger never fires
-within `timeout` seconds.
+`CaptureResult`.  Raises `CaptureNotReady` (a `TimeoutError` subclass,
+importable from `fcapz.analyzer`) if the trigger never fires within
+`timeout` seconds — the core is left armed and the call is safe to repeat.
+A plain `TimeoutError` from the transport means something else stopped
+answering, and is not.
 
 When `TIMESTAMP_W > 0`, timestamps are read via
 `transport.read_timestamp_block()` if the transport implements that

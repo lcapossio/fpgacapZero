@@ -39,6 +39,7 @@ back to individual chapters as you need them.
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
 | 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
 | 19 | [AXI monitor](19_axi_monitor.md) | Capture and trigger on an AXI4-Lite interface over JTAG — a portable, vendor-agnostic AXI bus monitor. Passive tap over the ELA, named AXI fields, and a decode layer for triggering on transaction events (handshakes, error responses). |
+| 20 | [MCP server](20_mcp_server.md) | Agent-facing stdio MCP server (`fcapz-mcp`): the ELA/EIO/AXI/UART tools, resources, safety flags, backend fields, and large-capture handling. |
 
 ## Reference specs
 
