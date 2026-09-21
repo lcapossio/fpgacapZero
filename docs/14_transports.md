@@ -285,9 +285,16 @@ still owed.  Reset the board to recover.
 `read_block()` on the DATA window (`0x0100`) uses the ELA's burst chain, the
 same way the Xilinx and Intel transports do: one control-chain write to
 `BURST_PTR`, an idle for the staging word to fill, one priming scan that is
-discarded, then one wide scan per group of samples.  With a 256-bit DR and an
-8-bit core that is 32 samples per scan instead of one 32-bit word per *two*
-49-bit scans — about 2.2 bytes per sample on the wire against ~48.
+discarded, then one wide scan per group of samples.  With a 64-bit DR and an
+8-bit core that is 8 samples per scan instead of one 32-bit word per *two*
+49-bit scans — about 1.05 bytes per sample on the wire against ~48.
+
+The scan width barely matters to that figure: a batched reply carries one
+packed DR per scan under a single header, so widening the DR mostly just moves
+the same bytes in bigger groups.  It does grow the discarded priming scan, so
+wider is fractionally *worse* on the wire as well as costing buffer in the
+fabric.  `fcapz_ela_uart` therefore defaults `BURST_W` to 64; the hard-TAP
+wrappers keep 256, where the scan engine is free silicon.
 
 All of those wide scans travel as **one** `CMD_BREAD` command and one reply
 (bridge protocol 2 and later).  That is not mainly a byte saving — it removes a

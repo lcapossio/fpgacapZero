@@ -133,29 +133,38 @@ returning garbage.
 ## Fitting the core in a T8
 
 Measured, not estimated — Efinity 2025.1, T8F49, C2 timing model,
-`optimization_level=TIMING_3`, with [`forgix.sdc`](forgix.sdc) and the defaults
-in [`forgix_top.v`](forgix_top.v) (8-bit x 1024, `DUAL_COMPARE=0`):
+`optimization_level=TIMING_3`, placer seed 5, with [`forgix.sdc`](forgix.sdc)
+and the defaults in [`forgix_top.v`](forgix_top.v) (8-bit x 1024,
+`DUAL_COMPARE=0`, `BURST_W=64`):
 
 | | Used | Available | Share |
 |---|---:|---:|---:|
-| Logic elements | 2,744 | 7,384 | 37.2 % |
-| — LUTs/adders | 2,110 | 7,384 | 28.6 % |
-| — registers | 1,726 | 5,280 | 32.7 % |
+| Logic elements | 2,174 | 7,384 | 29.4 % |
+| — LUTs/adders | 1,542 | 7,384 | 20.9 % |
+| — registers | 1,140 | 5,280 | 21.6 % |
 | Memory blocks | 2 | 24 | 8.3 % |
 | Multipliers | 0 | 8 | 0 % |
 
 The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes at
-50 MHz: `clk_in` reaches 51.3 MHz, and the `tap_tck` domain 37.3 MHz against
+50 MHz: `clk_in` reaches 51.8 MHz, and the `tap_tck` domain 36.6 MHz against
 the 25 MHz it needs.
+
+> **The placer seed matters here.** The critical path is inside `fcapz_ela`,
+> and across seeds 1/3/5/9/12 `clk_in` lands anywhere between 49.4 and
+> 51.8 MHz — so some seeds miss 50 MHz by well under 1 %. If a build fails
+> timing by a tenth of a nanosecond, try another seed before changing the
+> design.
 
 Where it goes:
 
 | Block | LUTs | FFs |
 |---|---:|---:|
-| `fcapz_tap_bridge` | 595 | 384 |
-| `jtag_burst_read` | 573 | 544 |
-| `fcapz_ela` | 545 | 639 |
-| `jtag_reg_iface` | 69 | 99 |
+| `fcapz_ela` | 552 | 639 |
+| `fcapz_tap_bridge` | 388 | 184 |
+| `jtag_burst_read` | 188 | 158 |
+| `jtag_reg_iface` | 81 | 99 |
+
+The transport used to cost more than the analyser it serves. It no longer does.
 
 Getting there took three rounds against the real tool, and every one of them
 was a wide structure in front of the 256-bit scan buffer that reads innocently
@@ -170,8 +179,15 @@ in Verilog:
 
 The first two are now shift registers with a few filler cycles; the third is
 one decoded datapath with a 3:1 mux and a shared fill value. Together they were
-**5,901 LE and Fmax 31 MHz** versus the 2,744 LE and 51 MHz above — the ELA
-core never moved.
+**5,901 LE and Fmax 31 MHz** versus 2,744 LE and 51 MHz — the ELA core never
+moved.
+
+The fourth round was not a structure at all but a parameter. `BURST_W` was 256,
+copied from the hard-TAP wrappers, and it sets both this module's scan buffer
+and `jtag_burst_read`'s `sr`/`staging` pair. Once `CMD_BREAD` existed a wide DR
+stopped buying throughput (see below), so it went to 64 — the floor set by the
+49-bit control frame. That alone was **2,744 -> 2,174 LE and 1,726 -> 1,140
+registers**, most of it out of the burst engine.
 
 Turning `DUAL_COMPARE` back on, or widening `SAMPLE_W`, adds to the `fcapz_ela`
 row; the other three are fixed cost.
@@ -181,10 +197,17 @@ row; the other three are fixed cost.
 The UART is not the bottleneck it looks like. The T8's entire 122.88 kbit of
 BRAM is ~15 kB, so a full capture readback at 1 Mbaud takes well under a second.
 
-Readback goes through the ELA's burst chain (chain 2), which returns 32 8-bit
-samples per 256-bit scan — about 2.2 bytes per sample on the wire, against ~48
-for the per-word control-chain path. A 1024-sample capture is ~2.3 kB rather
-than ~49 kB.
+Readback goes through the ELA's burst chain (chain 2), which returns 8 8-bit
+samples per 64-bit scan — about **1.05 bytes per sample** on the wire, against
+~48 for the per-word control-chain path. A 1024-sample capture is ~1.07 kB
+rather than ~49 kB, or about 11 ms at 1 Mbaud.
+
+Widening the scan does not improve that. Every scan in a `CMD_BREAD` batch is
+packed samples under a single shared header, so the per-sample cost is
+essentially the sample itself at any width; going to 256 bits would cost
+~1,092 bytes rather than ~1,068, because the priming scan that gets discarded
+grows too. Width is a pure area decision on this transport, which is why it is
+64 here and 256 on the hard-TAP wrappers.
 
 ## Status
 

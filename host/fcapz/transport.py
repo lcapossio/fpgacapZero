@@ -839,8 +839,15 @@ class TapBridgeTransport(Transport):
     # The ELA's burst chain (rtl/jtag_burst_read.v; chain 2 in
     # rtl/fcapz_ela_uart.v) hands back a whole DR full of samples per scan,
     # instead of one 32-bit word per *two* 49-bit scans.  On a byte-stream link
-    # that is the difference between ~48 bytes per sample and ~2.2, so a 1024
-    # x 8-bit capture goes from ~49 kB to ~2.3 kB on the wire.
+    # that is the difference between ~48 bytes per sample and ~1.05, so a 1024
+    # x 8-bit capture goes from ~49 kB to ~1.07 kB on the wire.
+    #
+    # Batched into one CMD_BREAD (protocol 2) the reply is one packed DR per
+    # scan with a single header, so the per-sample cost is essentially the
+    # sample itself and barely depends on the scan width -- a wider DR is in
+    # fact marginally worse, because the priming scan that gets discarded grows
+    # with it.  That is why the UART wrapper defaults BURST_W to 64 and not to
+    # the 256 the hard-TAP wrappers use.
     #
     # The sequence is the same one the JTAG transports run -- the fabric is
     # identical, only the way scans arrive differs.  Unlike hw_server and

@@ -66,7 +66,7 @@ module forgix_top #(
         // spare the logic.
         .DUAL_COMPARE(0),
         .TRIG_STAGES(1),
-        .BURST_W(256)
+        .BURST_W(64)
     ) u_fcapz (
         .sample_clk(clk_in),
         .sample_rst(rst),

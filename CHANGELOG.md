@@ -32,10 +32,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   semantics. A new link type (SPI, USB-FIFO, TCP) needs only a PHY on each
   side. `fcapz_ela_uart` wraps it (chain 1 = control, chain 2 = burst), and
   `read_block()`/`read_timestamp_block()` use that burst chain the same way the
-  Xilinx and Intel transports do — 32 8-bit samples per 256-bit scan, ~2.2
+  Xilinx and Intel transports do — 8 8-bit samples per 64-bit scan, ~1.05
   bytes per sample on the wire against ~48 for per-word reads. Bridge protocol
   2 adds `CMD_BREAD`, which runs a whole burst's worth of scans under one
-  command and one reply, removing a USB round trip per scan.
+  command and one reply, removing a USB round trip per scan — and with it the
+  reason to scan wide, since a batched reply packs samples under one shared
+  header at any width. `fcapz_ela_uart` therefore defaults `BURST_W` to 64
+  rather than the 256 the hard-TAP wrappers use, which on a Trion T8F49 is
+  ~620 fewer logic cells and ~590 fewer registers for a marginally *smaller*
+  byte count on the wire.
   pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
   by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
   lint targets.

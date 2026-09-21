@@ -40,7 +40,16 @@ module fcapz_ela_uart #(
     parameter PROBE_MUX_W = 0,
     parameter STARTUP_ARM = 0,
     parameter DEFAULT_TRIG_EXT = 0,
-    parameter BURST_W     = 256,
+    // Width of one burst-chain scan, and therefore the bridge's widest DR.
+    // 64 rather than the 256 the hard-TAP wrappers use: on a byte-stream
+    // link CMD_BREAD returns one byte per 8-bit sample whatever the scan
+    // width, so a wider DR buys no throughput -- it is very slightly worse,
+    // because the discarded priming scan grows with it.  It does cost
+    // buffer: measured on a Trion T8F49, 256 rather than 64 is ~620 extra
+    // logic cells and ~590 extra flops, split between this module's scan
+    // buffer and jtag_burst_read's sr/staging pair.  Raise it only if a
+    // probe or timestamp is wider than 64 bits.
+    parameter BURST_W     = 64,
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1
@@ -64,6 +73,20 @@ module fcapz_ela_uart #(
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
 
     localparam NUM_CHAINS = 2;
+
+    // BURST_W is shared by the burst chain and the bridge's scan buffer, so it
+    // has to hold the widest thing either of them ever carries: a burst element
+    // on one side, the 49-bit control frame (32 data + 16 addr + 1 rnw) on the
+    // other.  Getting this wrong truncates silently rather than failing, so
+    // check it at elaboration.
+    initial begin
+        if (BURST_W < 49)
+            $error("BURST_W must be >= 49 to carry the control-chain DR");
+        if (BURST_W < SAMPLE_W)
+            $error("BURST_W must be >= SAMPLE_W");
+        if (BURST_W < TIMESTAMP_W)
+            $error("BURST_W must be >= TIMESTAMP_W");
+    end
 
     // TAP signals -- shared strobes, per-chain select, exactly as a real TAP
     // presents them.
@@ -90,7 +113,8 @@ module fcapz_ela_uart #(
 
     // ---- UART virtual TAP ----
     // BURST_W sets the widest DR the burst chain will ever scan, so it is also
-    // the bridge's MAX_DR_BITS; the control chain's 49 bits fit inside it.
+    // the bridge's MAX_DR_BITS; the control chain's 49 bits fit inside it,
+    // which is what puts the floor under BURST_W (see the guard above).
     fcapz_uart_tap #(
         .CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD_RATE),
         .NUM_CHAINS(NUM_CHAINS), .MAX_DR_BITS(BURST_W)

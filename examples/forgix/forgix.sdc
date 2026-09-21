@@ -3,11 +3,17 @@
 #
 # Efinity timing constraints for forgix_top (Trion T8F49).
 #
-# Verified with Efinity 2025.1, T8F49 / C2, optimization_level TIMING_3:
-#   Logic elements   2744 / 7384  (37.2%)
+# Verified with Efinity 2025.1, T8F49 / C2, optimization_level TIMING_3,
+# placer seed 5:
+#   Logic elements   2174 / 7384  (29.4%)
 #   Memory blocks       2 / 24    (EFX_RAM_5K, not LUT memory)
-#   clk_in           51.3 MHz     (meets the 50 MHz constraint)
-#   tap_tck          37.3 MHz     (against its 25 MHz need)
+#   clk_in           51.8 MHz     (meets the 50 MHz constraint)
+#   tap_tck          36.6 MHz     (against its 25 MHz need)
+#
+# The seed matters: the critical path is inside fcapz_ela (post_count ->
+# wr_ptr enable), and across seeds 1/3/5/9/12 clk_in lands between 49.4 and
+# 51.8 MHz -- so some seeds miss 50 MHz by under 1%.  If a build fails timing
+# by a tenth of a nanosecond, try another seed before changing anything.
 #
 # Set the clk_in period to your board's actual oscillator, and keep it in step
 # with the CLK_HZ parameter of forgix_top.
