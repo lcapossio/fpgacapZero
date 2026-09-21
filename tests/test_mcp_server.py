@@ -2837,5 +2837,96 @@ class CancelScopeTests(unittest.TestCase):
             session._handle_watchdog_timeout(cmd, "probe", 0.2)
 
 
+class FullCaptureCeilingTests(unittest.TestCase):
+    """`max_bytes=null` used to mean "no limit", and it was not free.
+
+    A tool result is turned back into JSON on the event loop *after* the
+    offloaded call returns, so whatever this hands over is a stall nothing
+    else can interleave with -- measured at roughly 5 ms per MB against the
+    real FastMCP call path, with a heartbeat that saw a gap exactly as long
+    as the whole call. A deep capture is tens of MB, and nothing bounded it.
+    """
+
+    CEILING = 4096
+
+    def _session_with(self, n_samples):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({
+            "ok": True,
+            "result": {
+                "sample_width": 64,
+                "pretrigger": 0,
+                "samples": [
+                    {"index": i, "value": 0xDEADBEEFCAFEBABE} for i in range(n_samples)
+                ],
+            },
+        })
+        return session
+
+    def test_null_max_bytes_means_the_ceiling_not_unlimited(self):
+        session = self._session_with(400)
+        self.assertGreater(session._capture_cache.size_bytes, self.CEILING)
+
+        with mock.patch("fcapz.mcp_server._MAX_FULL_CAPTURE_BYTES", self.CEILING):
+            response = session.get_last_capture(max_bytes=None)
+
+        self.assertTrue(response["truncated"])
+        self.assertNotIn("result", response)
+        self.assertEqual(response["max_bytes"], self.CEILING)
+        # The bound was the server's, not the caller's: an agent that asked
+        # for everything must be able to tell those two cases apart.
+        self.assertEqual(response["ceiling_bytes"], self.CEILING)
+        self.assertIn("fcapz://last-capture", response["message"])
+
+    def test_a_caller_may_lower_the_bound_but_not_raise_it(self):
+        session = self._session_with(400)
+        size = session._capture_cache.size_bytes
+
+        with mock.patch("fcapz.mcp_server._MAX_FULL_CAPTURE_BYTES", self.CEILING):
+            raised = session.get_last_capture(max_bytes=size * 10)
+            lowered = session.get_last_capture(max_bytes=16)
+
+        self.assertEqual(raised["max_bytes"], self.CEILING)
+        self.assertEqual(raised["ceiling_bytes"], self.CEILING)
+        # A caller-chosen bound is still the caller's; no ceiling note.
+        self.assertEqual(lowered["max_bytes"], 16)
+        self.assertNotIn("ceiling_bytes", lowered)
+
+    def test_a_payload_under_the_ceiling_is_still_returned_whole(self):
+        session = self._session_with(2)
+        self.assertLess(session._capture_cache.size_bytes, self.CEILING)
+
+        with mock.patch("fcapz.mcp_server._MAX_FULL_CAPTURE_BYTES", self.CEILING):
+            response = session.get_last_capture(max_bytes=None)
+
+        self.assertFalse(response["truncated"])
+        self.assertEqual(len(response["result"]["samples"]), 2)
+
+    def test_the_whole_payload_is_still_reachable_over_the_resource(self):
+        # The ceiling would be a data loss rather than a bound if the full
+        # payload had no route out. The resource hands back a string that is
+        # already built, so it costs nothing to serialize -- measured at 0 ms
+        # of loop stall for a 24 MB capture, against 125 ms for the tool.
+        session = self._session_with(400)
+
+        with mock.patch("fcapz.mcp_server._MAX_FULL_CAPTURE_BYTES", self.CEILING):
+            text = session.last_capture_json_text()
+
+        self.assertEqual(len(text.encode("utf-8")), session._capture_cache.size_bytes)
+        self.assertEqual(len(json.loads(text)["result"]["samples"]), 400)
+
+    def test_the_shipped_ceiling_leaves_the_default_reachable(self):
+        # Guards the constants against drifting past each other: a ceiling at
+        # or below the default would make the default unreachable, and an
+        # enormous one would put the stall back.
+        from fcapz.mcp_server import (
+            _DEFAULT_FULL_CAPTURE_MAX_BYTES,
+            _MAX_FULL_CAPTURE_BYTES,
+        )
+
+        self.assertGreater(_MAX_FULL_CAPTURE_BYTES, _DEFAULT_FULL_CAPTURE_MAX_BYTES)
+        self.assertLessEqual(_MAX_FULL_CAPTURE_BYTES, 16 * 1024 * 1024)
+
+
 if __name__ == "__main__":
     unittest.main()

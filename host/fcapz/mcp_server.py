@@ -228,6 +228,16 @@ class CaptureConfigDict(TypedDict, total=False):
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
 _DEFAULT_FULL_CAPTURE_MAX_BYTES = 1024 * 1024
+# Hard ceiling on a single full-capture tool result. A tool result is turned
+# back into JSON on the event loop after the offloaded call returns, so the
+# payload handed over here is a stall nothing else can interleave with --
+# measured at roughly 5 ms per MB, and unbounded while `max_bytes=null` meant
+# "no limit" (a 24 MB capture froze the loop for 125 ms and a deep segmented
+# one for far longer). A caller may still ask for less, never for more: the
+# whole payload is available from fcapz://last-capture, which serves a string
+# that is already built and so costs nothing to serialize, or in pieces from
+# fcapz_get_last_capture_chunk.
+_MAX_FULL_CAPTURE_BYTES = 8 * 1024 * 1024
 # Ceiling on AXI block ops: a single tool call reads/writes at most this many
 # 32-bit words. Bounds both the JTAG round-trip time (watchdog) and the size of
 # a dump landing straight in model context; larger transfers must be chunked.
@@ -1524,18 +1534,38 @@ class FcapzMcpSession:
         if max_bytes is not None and int(max_bytes) < 0:
             raise ValueError("max_bytes must be >= 0 or null")
         size_bytes = cache.size_bytes
-        if max_bytes is not None and size_bytes > int(max_bytes):
-            return {
+        # The caller sets the bound, but only downwards: see
+        # _MAX_FULL_CAPTURE_BYTES for why there has to be a ceiling at all.
+        asked_for_more = max_bytes is None or int(max_bytes) > _MAX_FULL_CAPTURE_BYTES
+        limit = (
+            _MAX_FULL_CAPTURE_BYTES
+            if max_bytes is None
+            else min(int(max_bytes), _MAX_FULL_CAPTURE_BYTES)
+        )
+        if size_bytes > limit:
+            body: JsonDict = {
                 "available": True,
                 "truncated": True,
                 "size_bytes": size_bytes,
-                "max_bytes": int(max_bytes),
+                "max_bytes": limit,
                 "summary": self._bounded_capture_summary(cache.summary),
                 "message": (
                     "cached capture is larger than max_bytes; use "
                     "fcapz_get_last_capture_chunk for bounded retrieval"
                 ),
             }
+            if asked_for_more:
+                # Say plainly that the server, not the caller, set this bound
+                # -- an agent that asked for everything and got a marker back
+                # should not conclude the capture is unavailable.
+                body["ceiling_bytes"] = _MAX_FULL_CAPTURE_BYTES
+                body["message"] = (
+                    f"cached capture is {size_bytes} bytes, over the server's "
+                    f"{_MAX_FULL_CAPTURE_BYTES}-byte ceiling for one tool "
+                    "result; read fcapz://last-capture for the whole payload "
+                    "or fcapz_get_last_capture_chunk for bounded retrieval"
+                )
+            return body
         response = dict(cache.payload)
         response.setdefault("available", True)
         response.setdefault("truncated", False)
@@ -2769,10 +2799,12 @@ def build_mcp_server(session: FcapzMcpSession):
     ) -> JsonDict:
         """Return the cached full capture payload for clients without resource support.
 
-        max_bytes defaults to 1 MiB. Larger captures return a compact truncated
-        marker plus summary metadata instead of flooding model context. Pass
-        max_bytes=null to force the full payload, or prefer
-        fcapz_get_last_capture_chunk / fcapz://last-capture for large captures.
+        max_bytes defaults to 1 MiB and is capped at 8 MiB: larger captures
+        return a compact truncated marker plus summary metadata instead of
+        flooding model context and stalling the server. max_bytes=null means
+        that 8 MiB ceiling, not "unlimited". For a capture above it, read the
+        fcapz://last-capture resource for the whole payload in one go, or
+        fcapz_get_last_capture_chunk to page through it.
         """
 
         return session.get_last_capture(max_bytes=max_bytes)
