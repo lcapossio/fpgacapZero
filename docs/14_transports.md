@@ -228,6 +228,50 @@ and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.
 > Trion T20 hard-TAP opcodes must be confirmed against the device BSDL /
 > hardware before this path is claimed as validated.
 
+### `SerialTapTransport`
+
+For boards that expose **no JTAG to the fabric at all**.  Instead of a hard TAP
+block, the design instantiates
+[`fcapz_uart_tap`](../rtl/fcapz_uart_tap.v), which reproduces the fpgacapZero
+TAP contract (`tck`, `tdi`, `tdo`, `capture`, `shift`, `update`, `sel`) from a
+UART byte stream.  Everything behind it — `jtag_reg_iface`, `jtag_burst_read`,
+`fcapz_ela`, `fcapz_eio` — is bit-identical to the JTAG case, so this is a
+change of delivery, not of protocol.  Wrap it with
+[`fcapz_ela_uart`](../rtl/fcapz_ela_uart.v).
+
+```python
+from fcapz.transport import SerialTapTransport
+
+t = SerialTapTransport("COM16", baudrate=1_000_000)   # /dev/ttyACM0 on Linux
+t.connect()
+```
+
+Requires pyserial: `pip install 'fpgacapzero[serial]'`.
+
+Chain numbers are the RTL front-end's `sel[]` index (1-based), so unlike the
+JTAG transports there is **no IR table** — the chain travels in the command
+itself.  `fcapz_ela_uart` maps chain 1 to the control registers and chain 2 to
+the burst readout.
+
+`connect()` first asks the bridge for its identity (magic `FCZU`, protocol
+version, chain count, `MAX_DR_BITS`), so a wrong port fails with a clear
+message rather than returning garbage.  `num_chains` and `max_dr_bits` are then
+available on the transport and are enforced host-side before a scan is sent.
+
+The wire protocol is documented in the header of `rtl/fcapz_uart_tap.v`.  It is
+framed and status-coded, and resynchronises on a start-of-frame byte, so a
+truncated command cannot wedge the link.
+
+> **Bandwidth.** A capture readback is bounded by the sample buffer, not the
+> link: a 15 kB buffer at 1 Mbaud drains in well under a second.  Small parts
+> — the usual reason a board has no spare JTAG — are exactly where this matters
+> least.
+
+The reference target is the Forgix board (Efinix Trion T8F49 + RP2354), whose
+FPGA JTAG pins are bonded out nowhere and which reaches the host through the
+RP2354's USB CDC; see [`examples/forgix/`](../examples/forgix/README.md) for
+the wiring, the firmware bridge patch, and the hardware-validation status.
+
 ### `QuartusStpTransport`
 
 Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus

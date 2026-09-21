@@ -21,6 +21,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Web — connected FPGA shown on the Connection panel.** The status line now
   leads with the actual device the backend opened (family/part + IDCODE), not
   just the vendor.
+- **UART virtual JTAG TAP — support for boards with no fabric JTAG.** New
+  `fcapz_uart_tap` reproduces the fpgacapZero TAP contract (`tck`/`tdi`/`tdo`/
+  `capture`/`shift`/`update`/`sel`) from a framed serial byte stream, so
+  `jtag_reg_iface`, `jtag_burst_read`, `fcapz_ela` and `fcapz_eio` run
+  unchanged with no hard TAP block. `fcapz_ela_uart` wraps it (chain 1 =
+  control, chain 2 = burst), and the host side is a new `SerialTapTransport`
+  (`pip install 'fpgacapzero[serial]'`) that probes the bridge's identity
+  before any register access. Covered by `tb/fcapz_uart_tap_tb.sv` and
+  `tests/test_serial_tap_transport.py`, plus lint targets.
+- **Forgix board example (Efinix Trion T8F49 + RP2354).** The board exposes no
+  JTAG to the fabric at all — the T8 is configured over a write-only passive
+  SPI link and its JTAG pins are bonded out nowhere — so `fcapz_ela_efinix`
+  cannot reach it. `examples/forgix/` builds on the UART TAP instead, with a
+  reference top, the two-jumper header wiring, and a locally vendored patch
+  (pinned upstream revision, applied to a local copy) that turns the RP2354
+  bitstream loader into a transparent USB-CDC bridge after configuration.
+  Hardware validation pending; the firmware patch is verified to apply but has
+  not been compiled or run on a board.
 - **Efinix (Trion / Titanium) ELA wrapper.** New `fcapz_ela_efinix` (Verilog +
   VHDL) maps the two hard JTAG User TAP blocks a Trion device exposes onto the
   control and burst chains. Because the Efinix JTAG User TAP is an Efinity
