@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { RpcCancelled, getToken, rpc, setToken } from "../api";
-import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
+import type { Board, ConnectionParams, Core, Identity, ProbeSpec, SerialPort } from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
 import { defaultElaForDepth, useSession } from "../session";
@@ -66,6 +66,9 @@ export function ConnectionPanel({
   // baud rate in place of host/port/tap.
   const [serialPort, setSerialPort] = useState("");
   const [baud, setBaud] = useState("1000000");
+  // Ports the server can see. Enumeration only — nothing is opened, so this
+  // never resets a board or disturbs an unrelated probe.
+  const [serialPorts, setSerialPorts] = useState<SerialPort[]>([]);
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
@@ -189,10 +192,25 @@ export function ConnectionPanel({
     setEjtagAxi(null);
   }
 
+  /** Ask the server which serial ports exist, and preselect one if we can. */
+  async function refreshSerialPorts() {
+    try {
+      const r = await rpc("list_serial_ports", {}, CONNECT_TIMEOUT);
+      const found = (r.ports as SerialPort[]) ?? [];
+      setSerialPorts(found);
+      // Only fill a blank box, so a refresh never overwrites a chosen port.
+      if (!serialPort.trim() && found.length === 1) setSerialPort(found[0].device);
+    } catch {
+      // Enumeration is a convenience; the port can always be typed instead.
+      setSerialPorts([]);
+    }
+  }
+
   function changeBackend(b: string) {
     setBackend(b);
     setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
     resetScan(); // drop a stale picker from the previous backend
+    if (b === "serial") void refreshSerialPorts();
   }
 
   function handleError(e: unknown) {
@@ -682,11 +700,31 @@ export function ConnectionPanel({
           <>
             <label>
               Serial port
-              <input
-                value={serialPort}
-                onChange={(e) => setSerialPort(e.target.value)}
-                placeholder="COM16, or /dev/ttyACM0"
-              />
+              {serialPorts.length > 0 ? (
+                <select
+                  value={serialPorts.some((p) => p.device === serialPort) ? serialPort : ""}
+                  onChange={(e) => setSerialPort(e.target.value)}
+                >
+                  <option value="">select a port…</option>
+                  {serialPorts.map((p) => (
+                    <option key={p.device} value={p.device}>
+                      {p.description || p.device}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={serialPort}
+                  onChange={(e) => setSerialPort(e.target.value)}
+                  placeholder="COM16, or /dev/ttyACM0"
+                />
+              )}
+            </label>
+            <label>
+              &nbsp;
+              <button className="secondary" onClick={() => void refreshSerialPorts()} disabled={busy}>
+                Rescan ports
+              </button>
             </label>
             <label>
               Baud

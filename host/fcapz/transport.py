@@ -135,6 +135,39 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+def list_serial_ports() -> list[dict[str, str]]:
+    """Enumerate the machine's serial ports, without opening any of them.
+
+    Deliberately identification-only.  The obvious next step -- open each port
+    and see which one answers the bridge's identity probe -- is not safe here:
+    opening a port asserts DTR/RTS, which resets an RP2040/RP2350 board, and a
+    developer machine typically also has FTDI JTAG cables and vendor debug
+    probes enumerated as serial ports.  Auto-probing would reset or disturb
+    hardware the user never pointed us at.  So this lists what exists and the
+    user picks; a wrong choice is caught by the bridge's identity check inside
+    :meth:`TapBridgeTransport.connect`.
+
+    Returns one dict per port with ``device`` (what to connect to),
+    ``description`` and ``hwid``.  Returns ``[]`` when pyserial is missing,
+    rather than raising -- the caller is usually populating a UI list.
+    """
+    try:
+        from serial.tools import list_ports  # type: ignore
+    except ImportError:  # pragma: no cover - depends on env
+        return []
+    out: list[dict[str, str]] = []
+    for p in list_ports.comports():
+        out.append(
+            {
+                "device": str(p.device),
+                "description": str(p.description or ""),
+                "hwid": str(p.hwid or ""),
+            }
+        )
+    out.sort(key=lambda d: d["device"])
+    return out
+
+
 def list_openocd_taps(
     *,
     host: str = "127.0.0.1",

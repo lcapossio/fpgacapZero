@@ -31,6 +31,7 @@ from .transport import (
     Transport,
     XilinxHwServerTransport,
     list_openocd_taps,
+    list_serial_ports,
     list_xilinx_hw_server_targets,
 )
 
@@ -737,6 +738,11 @@ class RpcServer:
         if cmd == "close":
             self._close_all()
             return self._ok()
+
+        if cmd == "list_serial_ports":
+            # Identification only -- nothing is opened, so this cannot reset a
+            # board or disturb an unrelated debug probe.  Needs no connection.
+            return self._ok(ports=list_serial_ports())
 
         if cmd == "scan_targets":
             backend = req.get("backend", "hw_server")

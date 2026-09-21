@@ -14,7 +14,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   rate in place of host/port/tap, and skips JTAG discovery entirely — the
   bridge's own identity probe reports a wrong port instead of returning
   garbage. Verified end to end against a Forgix board: `connect` -> `probe` ->
-  `capture` returns a clean 1,024-sample ramp.
+  `capture` returns a clean 1,024-sample ramp. The port is picked from a list
+  the server enumerates (`list_serial_ports`), which identifies ports without
+  opening any of them — opening one asserts DTR and resets an RP2040/RP2350,
+  and a developer machine usually has unrelated JTAG cables and vendor probes
+  enumerated as serial ports too.
 
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the

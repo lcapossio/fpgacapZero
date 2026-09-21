@@ -16,7 +16,11 @@ import types
 
 import pytest
 
-from fcapz.transport import SerialTapTransport, TapBridgeTransport
+from fcapz.transport import (
+    SerialTapTransport,
+    TapBridgeTransport,
+    list_serial_ports,
+)
 
 ADDR_SAMPLE_W = TapBridgeTransport.ADDR_SAMPLE_W
 ADDR_BURST_PTR = TapBridgeTransport.ADDR_BURST_PTR
@@ -553,3 +557,52 @@ def test_base_class_reports_its_own_channel_name():
     t = MemoryTapTransport(device)
     with pytest.raises(RuntimeError, match="MemoryTapTransport"):
         t.connect()
+
+
+# -- port enumeration -------------------------------------------------------
+
+
+class _FakePort:
+    def __init__(self, device, description, hwid):
+        self.device = device
+        self.description = description
+        self.hwid = hwid
+
+
+def _install_fake_comports(monkeypatch, ports):
+    """Plant a fake serial.tools.list_ports that list_serial_ports will import."""
+    tools = types.ModuleType("serial.tools")
+    mod = types.ModuleType("serial.tools.list_ports")
+    mod.comports = lambda: ports  # type: ignore[attr-defined]
+    tools.list_ports = mod  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "serial.tools", tools)
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", mod)
+
+
+def test_list_serial_ports_reports_and_sorts_without_opening(monkeypatch):
+    opened = []
+
+    ports = [
+        _FakePort("COM7", "USB Serial Port (COM7)", "USB VID:PID=0403:6011"),
+        _FakePort("COM16", "USB Serial Device (COM16)", "USB VID:PID=2E8A:0009"),
+    ]
+    _install_fake_comports(monkeypatch, ports)
+    # If enumeration ever opened a port it would reset an RP2350 board, so make
+    # any attempt to do so loud rather than silent.
+    fake_serial = types.ModuleType("serial")
+    fake_serial.Serial = lambda *a, **k: opened.append(a)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "serial", fake_serial)
+
+    got = list_serial_ports()
+
+    assert [p["device"] for p in got] == ["COM16", "COM7"]
+    assert got[0]["description"] == "USB Serial Device (COM16)"
+    assert got[0]["hwid"] == "USB VID:PID=2E8A:0009"
+    assert opened == []
+
+
+def test_list_serial_ports_is_empty_without_pyserial(monkeypatch):
+    monkeypatch.setitem(sys.modules, "serial.tools", None)
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", None)
+    # A missing pyserial must not raise: the caller is populating a UI list.
+    assert list_serial_ports() == []

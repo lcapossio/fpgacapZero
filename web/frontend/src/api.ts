@@ -54,6 +54,13 @@ export interface Core {
 }
 
 /** A discovered fpgacapZero-compatible board (one OpenOCD tap that probed as an ELA). */
+/** One serial port as the server enumerated it (never opened). */
+export interface SerialPort {
+  device: string;
+  description: string;
+  hwid: string;
+}
+
 export interface Board {
   backend: string;
   host: string;
