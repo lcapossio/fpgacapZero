@@ -895,6 +895,34 @@ class QuartusStpTransportTests(unittest.TestCase):
 # XilinxHwServerTransport failure modes
 # ---------------------------------------------------------------------------
 
+class _FakeXsdbProc:
+    """Minimal stand-in for the piped xsdb process.
+
+    ``_send`` only needs a stdin to write to and a stdout to read lines from,
+    so a canned list of reply lines is enough to exercise the framing and the
+    ``check=True`` error path without launching Vivado.
+    """
+
+    def __init__(self, reply_lines):
+        self.written = []
+        self._replies = list(reply_lines)
+        self.stdin = self
+        self.stdout = self
+
+    # stdin side
+    def write(self, data):
+        self.written.append(data)
+
+    def flush(self):
+        return None
+
+    # stdout side
+    def readline(self):
+        if not self._replies:
+            return ""
+        return self._replies.pop(0) + "\n"
+
+
 class XilinxHwServerConnectFailureTests(unittest.TestCase):
     """XilinxHwServerTransport failure modes — subprocess mocks."""
 
@@ -962,6 +990,124 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport()
         with self.assertRaises(RuntimeError):
             t._parse_bits_u32("some garbage output without bit string")
+
+    # -- fpga -file target selection (debug-target namespace) ----------------
+    #
+    # Ground truth for these comes from a real chain with an Arty A7 (xc7a100t),
+    # a KV260 (xck26) and a ZCU-class board (xczu7) attached at once, xsdb
+    # 2025.2.  `targets` there is:
+    #     1  xc7a100t                <- standalone FPGA: named for the part
+    #     2  PS TAP  / 3 PMU / 4 PL  <- xck26
+    #     5  PSU / 6 RPU / 9 APU ...
+    #    14  PS TAP  / 15 PMU / 16 PL <- xczu7
+    # There is no node named `xck26` anywhere in it.
+
+    def _fake_mpsoc_send(self, calls, part="xck26"):
+        """A _send that accepts only the MPSoC-shaped configuration filter."""
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            calls.append(tcl)
+            if tcl.startswith("targets -set -filter"):
+                ok = f'jtag_device_name =~ "{part}"' in tcl and 'name =~ "PS TAP"' in tcl
+                if not ok:
+                    raise RuntimeError(f'xsdb rejected {tcl!r}: no targets found')
+            return ""
+
+        return fake_send
+
+    def test_config_target_on_mpsoc_selects_ps_tap_not_the_part_name(self):
+        """On MPSoC the part name matches no debug target; PS TAP is the one.
+
+        Regression: program() used to filter `targets` by the part name, which
+        matches nothing on ZynqMP.  xsdb printed an error, _send swallowed it,
+        `fpga -file` then programmed nothing, and the session carried on
+        against whatever was already in the FPGA -- wrong data, no error.
+        """
+        t = XilinxHwServerTransport(fpga_name="xck26")
+        calls: list[str] = []
+        t._send = self._fake_mpsoc_send(calls)  # type: ignore[method-assign]
+        t._select_config_target()
+        sel = [c for c in calls if c.startswith("targets -set -filter")]
+        self.assertTrue(sel)
+        self.assertIn('name =~ "PS TAP"', sel[-1])
+        # Scoped to the board: two MPSoC boards each contribute a "PS TAP".
+        self.assertIn('jtag_device_name =~ "xck26"', sel[-1])
+
+    def test_config_target_on_standalone_fpga_uses_the_part_name(self):
+        """7-series/UltraScale: the device node IS named for the part."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        calls: list[str] = []
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            calls.append(tcl)
+            if tcl.startswith("targets -set -filter") and 'name =~ "PS TAP"' in tcl:
+                raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._select_config_target()
+        sel = [c for c in calls if c.startswith("targets -set -filter")]
+        # Tried the MPSoC shape first, then fell back to the part name.
+        self.assertEqual(len(sel), 2)
+        self.assertIn('name =~ "xc7a100t"', sel[-1])
+
+    def test_config_target_absent_raises_instead_of_programming_nothing(self):
+        """No match on either shape must fail loudly, never silently."""
+        t = XilinxHwServerTransport(fpga_name="xcvu9p")
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            if tcl.startswith("targets -set -filter"):
+                raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(ConnectionError) as caught:
+            t._select_config_target()
+        self.assertIn("nothing", str(caught.exception))
+        self.assertIn("xcvu9p", str(caught.exception))
+
+    def test_program_checks_both_the_selection_and_the_load(self):
+        """program() must run its two xsdb commands with check=True.
+
+        Both fail by *printing* a message; unchecked, a bad bitstream looks
+        exactly like a good one.
+        """
+        t = XilinxHwServerTransport(fpga_name="xck26")
+        seen: list[tuple[str, bool]] = []
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            seen.append((tcl, check))
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t.program("C:/tmp/design.bit")
+        checked = {tcl: chk for tcl, chk in seen}
+        self.assertTrue(
+            all(chk for tcl, chk in seen if tcl.startswith(("targets -set", "fpga -file")))
+        )
+        self.assertIn("fpga -file {C:/tmp/design.bit}", checked)
+
+    def test_send_check_raises_on_an_xsdb_error_line(self):
+        """check=True turns a printed xsdb error into an exception."""
+        t = XilinxHwServerTransport()
+        t._proc = _FakeXsdbProc(
+            [f"{t._ERR_MARKER} no targets found", t._SENTINEL]
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            t._send("targets -set -filter {name =~ \"nope\"}", check=True)
+        self.assertIn("no targets found", str(caught.exception))
+
+    def test_send_check_is_quiet_on_success(self):
+        """A successful checked command returns empty and raises nothing."""
+        t = XilinxHwServerTransport()
+        t._proc = _FakeXsdbProc([t._SENTINEL])
+        self.assertEqual(t._send("targets -set -filter {x}", check=True), "")
+
+    def test_send_without_check_keeps_swallowing(self):
+        """Default behaviour is unchanged: output is returned, not inspected."""
+        t = XilinxHwServerTransport()
+        t._proc = _FakeXsdbProc(["some output", t._SENTINEL])
+        self.assertEqual(t._send("puts [jtag targets]"), "some output")
 
     def test_select_fpga_target_selects_present_target(self):
         """_select_fpga_target() sets the filter when the target is present."""

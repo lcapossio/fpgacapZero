@@ -1386,6 +1386,8 @@ class XilinxHwServerTransport(Transport):
     RAW_DR_IDLE_CYCLES = 8
     USER1_PIPE_PRIME_READS = 3
     _SENTINEL = "<<XSDB_DONE>>"
+    # Prefix that ``_send(check=True)`` prints when the command raised in Tcl.
+    _ERR_MARKER = "<<XSDB_ERR>>"
 
     # Default chain shape: single-device 6-bit IR (Xilinx 7-series, standalone
     # UltraScale / UltraScale+).  Override per-instance for chains with extra
@@ -1633,14 +1635,61 @@ class XilinxHwServerTransport(Transport):
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
 
+    def _select_config_target(self) -> None:
+        """Select the debug target that ``fpga -file`` configures.
+
+        This is a *different* namespace from ``_select_fpga_target``.  That one
+        picks a device in the JTAG scan chain (``jtag targets``), where the
+        part name is the node name.  ``fpga`` works on the debug-target tree
+        (``targets``), and the two only coincide on standalone FPGAs:
+
+          * 7-series / UltraScale(+): ``targets`` has one node per device,
+            named for the part (``xc7a100t``) — the part name works.
+          * Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*): ``targets``
+            has no node named for the part at all.  The tree is
+            ``PS TAP`` -> ``PMU``/``PL``, plus ``PSU`` -> ``RPU``/``APU``, and
+            configuration is done from ``PS TAP``.  Filtering on the part name
+            selects **nothing**, and ``fpga -file`` then programs nothing.
+            (``PL`` is not it either: xsdb answers "Multiple FPGA devices
+            found, please use targets command to select one of ..." — verified
+            on xck26 / KV260 with xsdb 2025.2.)
+
+        Both filters are scoped by ``jtag_device_name`` so the right board is
+        picked when several are attached — two MPSoC boards both contribute a
+        node named ``PS TAP``, and the part name is the only thing that tells
+        them apart.
+        """
+        attempts = (
+            # MPSoC/Versal: configuration hangs off the PS TAP node.
+            f'{{jtag_device_name =~ "{self.fpga_name}" && name =~ "PS TAP"}}',
+            # Standalone FPGA: the device node is named for the part.
+            f'{{jtag_device_name =~ "{self.fpga_name}" && name =~ "{self.fpga_name}"}}',
+        )
+        errors: list[str] = []
+        for flt in attempts:
+            try:
+                self._send(f"targets -set -filter {flt}", check=True)
+                return
+            except RuntimeError as exc:
+                errors.append(str(exc))
+        detail = " | ".join(errors)
+        raise ConnectionError(
+            f"no configuration target for {self.fpga_name!r} -- nothing "
+            f"would be programmed. Tried {attempts[0]} then {attempts[1]}. "
+            f"xsdb said: {detail}"
+        )
+
     def program(self, bitfile: str) -> None:
         """Program the FPGA with *bitfile* using the current XSDB session."""
         if not _TCL_PATH_RE.match(bitfile):
             raise ValueError(
                 f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
             )
-        self._send(f'targets -set -filter {{name =~ "{self.fpga_name}"}}')
-        self._send(f"fpga -file {{{bitfile}}}")
+        self._select_config_target()
+        # check=True: a failed load prints a message and returns normally, so
+        # without it a bad/incompatible bitstream looks like a success and the
+        # session runs on against the old configuration.
+        self._send(f"fpga -file {{{bitfile}}}", check=True)
         self._send(f"after {int(self.post_program_delay_ms)}")
 
     def close(self) -> None:
@@ -2339,8 +2388,20 @@ class XilinxHwServerTransport(Transport):
 
     # -- process I/O ---------------------------------------------------------
 
-    def _send(self, tcl: str) -> str:
+    def _send(self, tcl: str, *, check: bool = False) -> str:
         """Send *tcl* to the persistent xsdb process and return output.
+
+        xsdb reports a failure by *printing* a message and carrying on — a
+        piped session has no per-command exit status — so by default this
+        returns whatever was printed and the caller decides what it means.
+        That suits the read commands, whose output is parsed anyway.
+
+        Pass ``check=True`` for commands whose only failure signal IS that
+        message (``targets -set``, ``fpga -file``): the command then runs
+        inside a Tcl ``catch`` and a failure raises ``RuntimeError`` instead
+        of being swallowed.  Without it a target filter that matches nothing
+        programs nothing, the session continues against whatever was already
+        in the FPGA, and the user gets wrong data rather than an error.
 
         Set environment variable ``FCAPZ_LOG_XSDB=1`` to log every TCL
         request and every xsdb response to ``stderr`` — use this for
@@ -2350,13 +2411,29 @@ class XilinxHwServerTransport(Transport):
         per response.
         """
         log = os.environ.get("FCAPZ_LOG_XSDB") == "1"
+        if check:
+            if "\n" in tcl:
+                raise ValueError("check=True needs a single-line TCL command")
+            if self._ERR_MARKER in tcl:
+                raise ValueError("TCL command contains the error marker")
+            # Nothing is printed on success, so a caller that ignores the
+            # return value sees exactly what it saw before.  On failure the
+            # marker is followed by xsdb's own message, which can run to many
+            # lines (a rejected target filter prints the whole target tree),
+            # so everything up to the sentinel belongs to it.
+            wire = (
+                "if {[catch {" + tcl + "} __fcapz_err]} { "
+                'puts "' + self._ERR_MARKER + ' $__fcapz_err" }'
+            )
+        else:
+            wire = tcl
         with self._xsdb_io_lock:
             if not self._proc or not self._proc.stdin or not self._proc.stdout:
                 raise RuntimeError("not connected — call connect() first")
             if log:
-                sys.stderr.write(f"[fcapz xsdb] tcl> {tcl}\n")
+                sys.stderr.write(f"[fcapz xsdb] tcl> {wire}\n")
                 sys.stderr.flush()
-            self._proc.stdin.write(tcl + "\n")
+            self._proc.stdin.write(wire + "\n")
             self._proc.stdin.write(f'puts "{self._SENTINEL}"\n')
             self._proc.stdin.flush()
 
@@ -2376,6 +2453,9 @@ class XilinxHwServerTransport(Transport):
             if log:
                 sys.stderr.write(f"[fcapz xsdb] tdo> {out!r}\n")
                 sys.stderr.flush()
+            if check and out.lstrip().startswith(self._ERR_MARKER):
+                detail = out.lstrip()[len(self._ERR_MARKER):].strip()
+                raise RuntimeError(f"xsdb rejected {tcl!r}: {detail}")
             return out
 
     def _drain_stderr(self) -> None:
