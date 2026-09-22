@@ -388,9 +388,16 @@ class RpcServer:
         return dict(table) if table is not None else None
 
     @staticmethod
-    def _resolved_ir_name(req: Dict[str, Any]) -> str:
+    def _resolved_ir_name(req: Dict[str, Any]) -> str | None:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
+        # The byte-stream TAP bridge has no IR at all -- it addresses chains
+        # directly by index -- so there is no preset to resolve and nothing a
+        # client could sensibly pass.  Answer null rather than inventing a
+        # sentinel preset name, and do it before honouring an explicit value so
+        # an arbitrary string cannot be echoed back unvalidated.
+        if req.get("backend") == "serial":
+            return None
         name = req.get("ir_table")
         if name is not None and str(name).strip():
             return str(name)
@@ -399,11 +406,6 @@ class RpcServer:
         # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
         if req.get("backend") == "usb_blaster":
             return "intel"
-        # The byte-stream TAP bridge has no IR at all -- it addresses chains
-        # directly -- so there is no preset to infer and no tap name to infer
-        # it from.  Label the session by the link instead.
-        if req.get("backend") == "serial":
-            return "serial"
         return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
@@ -776,8 +778,19 @@ class RpcServer:
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
             # shows the connected device, not just the vendor.
+            # ``link`` describes what we are talking *through* (the byte-stream
+            # bridge negotiates a protocol version, chain count and DR width on
+            # connect); a plain JTAG probe has nothing to report and answers
+            # null.  ``transport_kind`` says whether IR-table semantics apply at
+            # all, so a client does not have to infer that from the backend name.
+            try:
+                link = analyzer.transport.link_info()
+            except Exception:  # noqa: BLE001 - a third-party transport may not have it
+                link = None
             return self._ok(
                 ir_table=self._resolved_ir_name(req),
+                transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
+                link=link,
                 chain=analyzer.bscan_chain,
                 device=getattr(analyzer.transport, "opened_device", None),
             )

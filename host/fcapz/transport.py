@@ -215,6 +215,23 @@ class Transport(ABC):
       during :meth:`connect`.
     """
 
+    #: What kind of link this is, for clients that must label a session or
+    #: decide whether IR-table semantics apply at all.  ``"jtag"`` transports
+    #: reach the fabric through a real TAP and take an IR table; a
+    #: ``"bytestream"`` transport addresses chains directly by index and has no
+    #: IR, so an IR-table preset is not merely unused there -- it is meaningless.
+    transport_kind: str = "jtag"
+
+    def link_info(self) -> dict | None:
+        """Facts about the link itself, or ``None`` when there are none.
+
+        Distinct from the core identity a ``probe`` returns: this describes what
+        the host is talking *through*, which for a byte-stream bridge is a real
+        negotiated thing (protocol version, chain count, DR width) rather than a
+        constant of the wire.
+        """
+        return None
+
     def transaction_lock(self) -> threading.RLock:
         """Return the shared host-side lock for multi-register transactions.
 
@@ -632,6 +649,23 @@ class TapBridgeTransport(Transport):
         self._has_burst = bool(burst)
         self._cached_sps: int | None = None
 
+    transport_kind = "bytestream"
+
+    def link_info(self) -> dict | None:
+        """The bridge's own identity, as reported by ``CMD_INFO``.
+
+        ``None`` before connect(), when nothing has been negotiated yet.
+        """
+        if self.proto_version is None:
+            return None
+        return {
+            "kind": self.transport_kind,
+            "channel": self._channel_name(),
+            "proto_version": self.proto_version,
+            "num_chains": self.num_chains,
+            "max_dr_bits": self.max_dr_bits,
+        }
+
     @property
     def unprobeable_chains(self) -> tuple[int, ...]:
         """Chains a generic core sweep must leave alone.
@@ -1046,6 +1080,15 @@ class SerialTapTransport(TapBridgeTransport):
 
     def _channel_name(self) -> str:
         return repr(self.port)
+
+    def link_info(self) -> dict | None:
+        info = super().link_info()
+        if info is not None:
+            # The bare port name and the rate actually in use -- _channel_name
+            # is quoted for error messages, which is not what a UI wants.
+            info["channel"] = self.port
+            info["baudrate"] = self.baudrate
+        return info
 
     def _open(self) -> None:
         try:

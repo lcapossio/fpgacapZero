@@ -182,7 +182,17 @@ transport alongside the analyzer's — are refused on this backend and report so
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1}`
+
+`transport_kind` is `"jtag"` for a link that reaches the fabric through a real
+TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
+semantics apply only to the former, which is why `ir_table` is **null** on a
+`serial` session — there is no IR there to preset.
+
+`link` describes what the session talks *through*, when the transport has
+something to report: `{"kind", "channel", "proto_version", "num_chains",
+"max_dr_bits"}` for the byte-stream bridge (plus `baudrate` over serial), and
+`null` for a JTAG probe, which negotiates nothing.
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
 server infers the preset from the tap name (`gw*` → `gowin`,

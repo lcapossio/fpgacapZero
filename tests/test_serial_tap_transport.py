@@ -670,6 +670,31 @@ def test_rpc_defaults_the_baudrate_when_blank():
         assert t.baudrate == 1_000_000
 
 
+def test_serial_session_has_no_ir_table_and_is_labelled_bytestream():
+    # "serial" was a sentinel in an IR-preset field, which is not a preset and
+    # could not be validated.  The field is null now, and the kind says why.
+    srv = _rpc_server()
+    assert srv._resolved_ir_name({"backend": "serial", "serial_port": "COM16"}) is None
+    # An explicit value cannot smuggle itself back out through the echo either.
+    assert srv._resolved_ir_name({"backend": "serial", "ir_table": "nonsense"}) is None
+    assert SerialTapTransport("COM_TEST").transport_kind == "bytestream"
+
+
+def test_link_info_reports_the_negotiated_bridge(fake_serial):
+    t = SerialTapTransport("COM_TEST", baudrate=2_000_000)
+    assert t.link_info() is None  # nothing negotiated before connect
+    t.connect()
+    info = t.link_info()
+    assert info == {
+        "kind": "bytestream",
+        "channel": "COM_TEST",
+        "baudrate": 2_000_000,
+        "proto_version": t.proto_version,
+        "num_chains": t.num_chains,
+        "max_dr_bits": t.max_dr_bits,
+    }
+
+
 def test_rpc_refuses_serial_side_connections():
     # EIO/AXI/UART each build a SECOND transport; the analyzer already owns the
     # port exclusively, so this must fail with our message, not the OS's.

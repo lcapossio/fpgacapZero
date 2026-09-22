@@ -263,7 +263,8 @@ Requires pyserial: `pip install 'fpgacapzero[serial]'`.
 
 Chain numbers are the RTL front-end's `sel[]` index (1-based), so unlike the
 JTAG transports there is **no IR table** — the chain travels in the command
-itself.  `fcapz_ela_uart` maps chain 1 to the control registers and chain 2 to
+itself.  RPC sessions on this transport report `ir_table: null` rather than a
+preset name, for the same reason.  `fcapz_ela_uart` maps chain 1 to the control registers and chain 2 to
 the burst readout.
 
 `connect()` first asks the bridge for its identity (magic `FCZU`, protocol
@@ -273,6 +274,12 @@ fails with a clear message rather than returning garbage.  `num_chains` and
 before a scan is sent.  A failed identity probe **closes the port** — the wrong
 port on a development machine is usually a JTAG probe or a programmer, which is
 not hardware to keep an exclusive handle on.
+
+`link_info()` returns the negotiated bridge identity as a dict once connected
+(`kind`, `channel`, `proto_version`, `num_chains`, `max_dr_bits`, and `baudrate`
+over serial); the RPC `connect` reply carries it as `link`, so a UI can show
+what it is actually attached to.  JTAG transports negotiate nothing and return
+`None`.  `transport_kind` is `"bytestream"` here and `"jtag"` elsewhere.
 
 The burst chain is a streaming DR, not a register interface, so the transport
 reports it in `unprobeable_chains` and the generic core sweeps skip it.  A scan
