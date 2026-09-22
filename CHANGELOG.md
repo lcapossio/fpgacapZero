@@ -42,6 +42,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   it was occupying an IR-preset field with a value that is not a preset, and an
   arbitrary one supplied by a client was echoed back unvalidated.
 
+- **CLI — `serial` backend and `fcapz list-ports`.** `--backend serial
+  --serial-port COM16 [--baud N]` drives the byte-stream TAP bridge from the
+  command line, and `list-ports` names the machine's serial ports without
+  opening any of them. One CLI run builds one transport, so `eio-*`, `axi-*`
+  and `uart-*` work over serial here even though the web session refuses them.
+  Baud validation is now shared by every front end
+  (`transport.validate_baudrate`).
+
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
