@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -549,6 +550,57 @@ class RpcBooleanValidationTests(unittest.TestCase):
         for raw in (2, "maybe", object()):
             with self.assertRaises(ValueError):
                 RpcServer._build_config({"startup_arm": raw})
+
+
+class CliSerialTests(unittest.TestCase):
+    def test_serial_backend_builds_the_bridge_transport(self):
+        from fcapz.cli import _make_transport
+        from fcapz.transport import SerialTapTransport
+
+        args = build_parser().parse_args(
+            ["--backend", "serial", "--serial-port", "COM16", "--baud", "2000000", "probe"]
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, SerialTapTransport)
+        self.assertEqual(t.port, "COM16")
+        self.assertEqual(t.baudrate, 2_000_000)
+
+    def test_serial_backend_without_a_port_is_actionable(self):
+        from fcapz.cli import _make_transport
+
+        args = build_parser().parse_args(["--backend", "serial", "probe"])
+        with self.assertRaises(SystemExit) as caught:
+            _make_transport(args)
+        self.assertIn("--serial-port", str(caught.exception))
+
+    def test_baud_is_validated_at_parse_time(self):
+        parser = build_parser()
+        for bad in ("0", "-1", "1.5", "abc", "99000000"):
+            with self.subTest(baud=bad), self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["--backend", "serial", "--serial-port", "COM16", "--baud", bad, "probe"]
+                )
+        self.assertEqual(parser.parse_args(["list-ports"]).baud, 1_000_000)
+
+    def test_list_ports_needs_no_transport(self):
+        # The subcommand must be reachable without a board attached, and must
+        # never open a port -- opening asserts DTR and resets an RP2350.
+        import fcapz.cli as cli
+
+        calls = []
+        orig_list, orig_make = cli.list_serial_ports, cli._make_transport
+        cli.list_serial_ports = lambda: [
+            {"device": "COM16", "description": "USB Serial Device", "hwid": "x"}
+        ]
+        cli._make_transport = lambda args: calls.append(args)
+        sys_argv = sys.argv
+        try:
+            sys.argv = ["fcapz", "list-ports"]
+            self.assertEqual(cli.main(), 0)
+        finally:
+            sys.argv = sys_argv
+            cli.list_serial_ports, cli._make_transport = orig_list, orig_make
+        self.assertEqual(calls, [])
 
 
 class CliTests(unittest.TestCase):

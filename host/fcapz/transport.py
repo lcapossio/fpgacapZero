@@ -135,6 +135,40 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+# Generous bounds rather than a list of "standard" rates: the bridge's divider
+# is set in RTL and unusual rates (a 32 MHz clock divided to an exact value) are
+# normal here.  This only rejects input that cannot be a baud rate at all --
+# blank fields arriving as 0, JavaScript's non-finite numbers, fractions that
+# int() would silently truncate.
+BAUD_MIN = 300
+BAUD_MAX = 20_000_000
+BAUD_DEFAULT = 1_000_000
+
+
+def validate_baudrate(value) -> int:
+    """Validate a requested serial baud rate, or raise ``ValueError``.
+
+    Shared by every front end (RPC, CLI, GUI) so one bad rate is rejected the
+    same way and with the same message wherever it is typed.  ``None`` and the
+    empty string mean "unspecified", which is the default rate -- a cleared
+    field must not become 0 baud.
+    """
+    if value is None or value == "":
+        return BAUD_DEFAULT
+    if isinstance(value, bool):
+        raise ValueError(f"baudrate must be an integer, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        # Also catches NaN/Infinity, which is_integer() reports as False.
+        raise ValueError(f"baudrate must be a whole number, got {value!r}")
+    try:
+        baud = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"baudrate must be an integer, got {value!r}") from None
+    if not BAUD_MIN <= baud <= BAUD_MAX:
+        raise ValueError(f"baudrate {baud} out of range ({BAUD_MIN}..{BAUD_MAX})")
+    return baud
+
+
 def list_serial_ports() -> list[dict[str, str]]:
     """Enumerate the machine's serial ports, without opening any of them.
 

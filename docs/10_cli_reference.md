@@ -27,12 +27,14 @@ subcommand follows:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--backend {openocd,hw_server,usb_blaster}` | `openocd` | JTAG transport to use |
+| `--backend {openocd,hw_server,usb_blaster,serial}` | `openocd` | Transport to use (`serial` is the byte-stream TAP bridge, not a JTAG probe) |
 | `--host HOST` | `127.0.0.1` | Transport host |
 | `--port PORT` | `6666` (openocd) or `3121` (hw_server) | Transport TCP port; ignored by `usb_blaster` |
 | `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target name, or Quartus device name (`auto`, empty, or the default AMD/Xilinx value auto-selects the first `@1` device for `usb_blaster`) |
 | `--hardware HARDWARE` | auto | Quartus hardware name for `usb_blaster`; required if more than one Quartus JTAG cable is connected |
 | `--quartus-stp PATH` | PATH lookup | Path to `quartus_stp` for `usb_blaster` |
+| `--serial-port PORT` | none | Port of the TAP bridge for `serial`, e.g. `COM16` or `/dev/ttyACM0`; required by that backend |
+| `--baud RATE` | `1000000` | Baud rate for `serial`; must match the RTL's divider |
 | `--program BITFILE` | none | Program the FPGA with this bitfile before running the subcommand (hw_server only) |
 | `--chain N` | `1` | ELA control BSCAN USER chain for `probe`, `arm`, `configure`, and `capture` |
 | `--ela-instance N` | none | Core-manager ELA slot on the selected chain; omit for legacy single-ELA bitstreams or the current active slot |
@@ -66,10 +68,32 @@ name starts with `@1`. The default AMD/Xilinx TAP values (`xc7a100t` and
 settings do not get passed to Quartus as literal device names. If the FPGA is
 elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 
+### Serial (byte-stream TAP bridge)
+
+Boards with no JTAG path to the fabric reach the host over a byte stream
+instead ([chapter 14](14_transports.md)). There is no probe daemon, so
+`--host`, `--port` and `--tap` do not apply and there is no IR table — chains
+are addressed by index.
+
+```bash
+fcapz list-ports                       # what is attached (opens nothing)
+fcapz --backend serial --serial-port COM16 probe
+fcapz --backend serial --serial-port /dev/ttyACM0 --baud 2000000       capture --out ramp.vcd
+```
+
+`list-ports` deliberately never opens a port: opening one asserts DTR/RTS,
+which resets an RP2040/RP2350 and disturbs the JTAG probes and programmers that
+also enumerate as serial ports.
+
+Unlike the long-lived web session — where the analyzer holds the port and the
+EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
+`eio-*`, `axi-*` and `uart-*` work over `serial` too.
+
 ## Subcommands at a glance
 
 | Subcommand | What it does |
 |---|---|
+| `list-ports` | List this machine's serial ports (no board or connection needed) |
 | `probe` | Read core identity registers (version, sample width, depth, features) |
 | `ela-list` | Read the core manager and probe every ELA slot on the selected chain |
 | `arm` | Arm capture without configuring (advanced) |

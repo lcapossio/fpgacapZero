@@ -25,7 +25,10 @@ from .transport import (
     QUARTUS_AUTO_DEVICE_TAPS,
     OpenOcdTransport,
     QuartusStpTransport,
+    SerialTapTransport,
     XilinxHwServerTransport,
+    list_serial_ports,
+    validate_baudrate,
 )
 
 
@@ -51,6 +54,14 @@ def _positive_float(value: str) -> float:
     if f <= 0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {f}")
     return f
+
+
+def _baud(value: str) -> int:
+    """argparse type: a usable serial baud rate."""
+    try:
+        return validate_baudrate(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _tcp_port(value: str) -> int:
@@ -227,6 +238,18 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 
 
 def _make_transport(args: argparse.Namespace):
+    if args.backend == "serial":
+        # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port in place
+        # of a probe daemon, so no host/port/tap and no IR table -- chains are
+        # addressed by index.  Unlike the long-lived web session, one CLI run
+        # builds exactly one transport, so eio-*/axi-*/uart-* work here: nothing
+        # else is holding the port.
+        if not args.serial_port:
+            raise SystemExit(
+                "error: --backend serial needs --serial-port "
+                "(run 'fcapz list-ports' to see what is attached)"
+            )
+        return SerialTapTransport(args.serial_port, baudrate=args.baud)
     if args.backend == "openocd":
         tap_name = args.tap.removesuffix(".tap")
         tap_lc = tap_name.lower()
@@ -267,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--backend",
-        choices=["openocd", "hw_server", "usb_blaster"],
+        choices=["openocd", "hw_server", "usb_blaster", "serial"],
         default="hw_server",
     )
     p.add_argument("--host", default="127.0.0.1")
@@ -282,6 +305,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--quartus-stp",
         default=None,
         help="usb_blaster only: path to quartus_stp executable",
+    )
+    p.add_argument(
+        "--serial-port",
+        default=None,
+        metavar="PORT",
+        help="serial only: port of the TAP bridge, e.g. COM16 or /dev/ttyACM0",
+    )
+    p.add_argument(
+        "--baud",
+        type=_baud,
+        default=1_000_000,
+        help="serial only: baud rate of the TAP bridge (default 1000000)",
     )
     p.add_argument(
         "--two-chain-burst",
@@ -312,6 +347,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser(
+        "list-ports",
+        help="List this machine's serial ports (for --backend serial)",
+    )
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     sub.add_parser("arm", help="Arm capture")
@@ -594,6 +633,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # Needs no transport, and deliberately opens nothing: opening a port
+    # asserts DTR/RTS, which resets an RP2040/RP2350 and disturbs the JTAG
+    # probes and programmers that also enumerate as serial ports.
+    if args.cmd == "list-ports":
+        ports = list_serial_ports()
+        if not ports:
+            print(
+                "no serial ports found "
+                "(pyserial installed? pip install 'fpgacapzero[serial]')",
+                file=sys.stderr,
+            )
+            return 1
+        for p in ports:
+            detail = p["description"] or p["hwid"]
+            print(f"{p['device']}	{detail}" if detail else p["device"])
+        return 0
+
     transport = _make_transport(args)
 
     # -- EIO commands ------------------------------------------------------

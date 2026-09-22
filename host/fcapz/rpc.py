@@ -33,6 +33,7 @@ from .transport import (
     list_openocd_taps,
     list_serial_ports,
     list_xilinx_hw_server_targets,
+    validate_baudrate,
 )
 
 _SCHEMA_VERSION = "1.1"
@@ -78,35 +79,6 @@ _CORE_NAMES = {
 # speaks a different DR protocol and is deliberately excluded so it never sees a
 # stray ELA read frame.
 _ELA_SCAN_CHAINS = (1, 2, 5)
-
-
-# Generous bounds rather than a list of "standard" rates: the bridge's divider
-# is set in RTL and unusual rates (a 32 MHz clock divided to an exact value) are
-# normal here.  This only rejects input that cannot be a baud rate at all --
-# blank fields arriving as 0, JavaScript's non-finite numbers serialising to
-# null, fractions silently truncated by int().
-_BAUD_MIN = 300
-_BAUD_MAX = 20_000_000
-
-
-def _baudrate(value: Any) -> int:
-    """Validate a requested serial baud rate, or raise ``ValueError``."""
-    if value is None or value == "":
-        return 1_000_000
-    if isinstance(value, bool):
-        raise ValueError(f"baudrate must be an integer, got {value!r}")
-    if isinstance(value, float) and not value.is_integer():
-        # Also catches NaN/Infinity, which is_integer() reports as False.
-        raise ValueError(f"baudrate must be a whole number, got {value!r}")
-    try:
-        baud = int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"baudrate must be an integer, got {value!r}") from None
-    if not _BAUD_MIN <= baud <= _BAUD_MAX:
-        raise ValueError(
-            f"baudrate {baud} out of range ({_BAUD_MIN}..{_BAUD_MAX})"
-        )
-    return baud
 
 
 def _scan_chains(transport, chains=_ELA_SCAN_CHAINS) -> tuple[int, ...]:
@@ -503,7 +475,7 @@ class RpcServer:
             name = str(req.get("serial_port", "") or "").strip()
             if not name:
                 raise ValueError("serial backend needs a serial_port")
-            return SerialTapTransport(name, baudrate=_baudrate(req.get("baudrate")))
+            return SerialTapTransport(name, baudrate=validate_baudrate(req.get("baudrate")))
         ir = self._ir_table(self._resolved_ir_name(req))
         if backend == "openocd":
             return OpenOcdTransport(
