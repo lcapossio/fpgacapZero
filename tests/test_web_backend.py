@@ -107,7 +107,7 @@ class FakeAxiMonTransport(FakeTransport):
 
 
 def _client(monkeypatch, **app_kwargs) -> TestClient:
-    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     return TestClient(create_app(**app_kwargs))
 
 
@@ -252,7 +252,7 @@ def test_capture_accepts_trigger_sequence(monkeypatch):
 
 def test_segmented_capture_bundle(monkeypatch):
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeSegmentTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -273,7 +273,7 @@ def test_segmented_capture_vcd_contains_all_segments(monkeypatch):
     """include_vcd must return every segment's samples (concatenated, with a
     segment marker wire), not just segment 0's waveform."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeSegmentTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -293,7 +293,7 @@ def test_segmented_capture_honors_wide_format(monkeypatch):
     """format='vcd' (the client's >53-bit guard) must not attach JSON-number
     samples — a wide segmented capture downloaded as JSON would round."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeSegmentTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeSegmentTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -501,7 +501,7 @@ def test_discover_boards_rpc_empty_when_none(monkeypatch):
 
 def _local_client(monkeypatch, **app_kwargs) -> TestClient:
     """A TestClient whose peer looks like loopback, so openocd_* isn't guarded."""
-    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     return TestClient(create_app(**app_kwargs), client=("127.0.0.1", 50000))
 
 
@@ -551,7 +551,7 @@ def test_discover_boards_rejects_invalid_port(monkeypatch):
 
 
 def test_host_header_rebinding_guard(monkeypatch):
-    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     c = TestClient(create_app(bind_host="127.0.0.1"))
     # A loopback Host is accepted.
     ok = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers={"Host": "127.0.0.1:8000"})
@@ -564,7 +564,7 @@ def test_host_header_rebinding_guard(monkeypatch):
 def test_host_header_guard_disabled_for_non_loopback_bind(monkeypatch):
     # Bound to 0.0.0.0 we can't allow-list external names, so any Host passes
     # (those deployments rely on --token instead).
-    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     c = TestClient(create_app(bind_host="0.0.0.0"))
     r = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers={"Host": "anything.example"})
     assert r.json()["ok"] is True
@@ -576,6 +576,24 @@ def test_openocd_guard_localhost_only():
     assert _openocd_guard({"cmd": "openocd_start"}, "10.0.0.5")["type"] == "PermissionError"
     assert _openocd_guard({"cmd": "openocd_start"}, "127.0.0.1") is None
     assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
+
+
+def test_serial_guard_needs_a_token_for_remote_clients():
+    from fcapz.web.app import _serial_guard
+
+    enum = {"cmd": "list_serial_ports"}
+    conn = {"cmd": "connect", "backend": "serial", "serial_port": "COM16"}
+    # Token-less server, remote client: enumeration and opening are both
+    # unauthenticated hardware access, so both are refused.
+    assert _serial_guard(enum, "10.0.0.5", None)["type"] == "PermissionError"
+    assert _serial_guard(conn, "10.0.0.5", None)["type"] == "PermissionError"
+    # Loopback is unaffected, and so is an authenticated remote client.
+    assert _serial_guard(enum, "127.0.0.1", None) is None
+    assert _serial_guard(conn, "127.0.0.1", None) is None
+    assert _serial_guard(enum, "10.0.0.5", "s3cret") is None
+    assert _serial_guard(conn, "10.0.0.5", "s3cret") is None
+    # The JTAG backends are untouched.
+    assert _serial_guard({"cmd": "connect", "backend": "openocd"}, "10.0.0.5", None) is None
 
 
 def test_is_loopback_forms():
@@ -651,7 +669,7 @@ def test_eio_discover_finds_shared_chain(monkeypatch):
 
 def test_axi_mon_probe_reports_geometry_and_probes(monkeypatch):
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=True)
+        RpcServer, "_build_transport", lambda self, req, **_: FakeAxiMonTransport(decode=True)
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -721,7 +739,7 @@ def test_axi_mon_probe_finds_monitor_on_other_chain(monkeypatch):
     still returns the monitor's full identity, with `chain` saying where it
     is, and leaves the session on its own chain."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeChainedAxiMonTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)  # explicit chain 1
@@ -739,7 +757,7 @@ def test_connect_autodetects_chain_when_omitted(monkeypatch):
     """No chain in the request: connect binds the first chain with an ELA and
     echoes it — a monitor-only design lands on USER2 with zero user input."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeMonitorOnlyTransport()
     )
     c = TestClient(create_app())
     r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap").json()
@@ -753,7 +771,7 @@ def test_connect_autodetects_chain_when_omitted(monkeypatch):
 def test_connect_explicit_chain_is_honored(monkeypatch):
     """An explicit chain must never be second-guessed, even with no ELA on it."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeMonitorOnlyTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeMonitorOnlyTransport()
     )
     c = TestClient(create_app())
     r = _rpc(c, "connect", backend="openocd", tap="GW1NR-9C.tap", chain=1).json()
@@ -764,7 +782,7 @@ def test_list_cores_reports_other_chain_monitor(monkeypatch):
     """Connected to the USER1 ELA, list_cores still reports the USER2 monitor
     so the UI can offer a one-click switch."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeChainedAxiMonTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeChainedAxiMonTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)  # explicit chain 1
@@ -779,7 +797,7 @@ def test_list_cores_reports_monitor_on_instance_5(monkeypatch):
     the original USER1/2 sweep. Connected to the USER1 ELA, list_cores and
     axi_mon_probe must still surface the monitor on chain 5."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeDe25AxiMonTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeDe25AxiMonTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)  # explicit chain 1 (the ELA)
@@ -880,7 +898,7 @@ def test_ejtag_axi_probe_detects_bridge_on_user4(monkeypatch):
     via its own CONFIG scan and reports its identity, leaving the ELA session
     untouched."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeElaAndBridgeTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)  # ELA on chain 1
@@ -897,7 +915,7 @@ def test_ejtag_axi_probe_detects_bridge_on_user4(monkeypatch):
 def test_ejtag_axi_probe_honors_explicit_chains(monkeypatch):
     """A caller can point the probe at a specific chain set."""
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeElaAndBridgeTransport()
+        RpcServer, "_build_transport", lambda self, req, **_: FakeElaAndBridgeTransport()
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -916,7 +934,7 @@ def test_ejtag_axi_probe_absent_without_bridge(monkeypatch):
 
 def test_list_cores_reports_axi_mon(monkeypatch):
     monkeypatch.setattr(
-        RpcServer, "_build_transport", lambda self, req: FakeAxiMonTransport(decode=False)
+        RpcServer, "_build_transport", lambda self, req, **_: FakeAxiMonTransport(decode=False)
     )
     c = TestClient(create_app())
     _rpc(c, "connect", **_GOWIN)
@@ -1043,7 +1061,7 @@ def test_connect_tears_down_stale_side_sessions(monkeypatch):
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req: FakeTransport())
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     srv = RpcServer()
     old_analyzer = _Sess()
     srv._analyzer = old_analyzer

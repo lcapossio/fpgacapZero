@@ -95,6 +95,50 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
     return None
 
 
+def _serial_guard(req: dict, client_host: Optional[str], token: Optional[str]) -> Optional[dict]:
+    """Restrict serial-port access to loopback clients on a token-less server.
+
+    Enumerating is harmless on its own -- ``list_serial_ports`` never opens a
+    port -- but it hands a caller the exact device names, and a serial
+    ``connect`` then opens one, which asserts DTR/RTS.  On a development machine
+    that reaches far beyond the board under test: JTAG probes, vendor
+    programmers and USB-serial bridges all appear as serial ports, and opening
+    one resets an RP2040/RP2350 or disturbs a programming session.
+
+    A server bound beyond loopback with no ``--token`` has no authentication at
+    all, so that would be an unauthenticated hardware-denial primitive.  Remote
+    use stays available -- it just has to be authenticated.  Loopback clients
+    are unaffected either way.
+
+    Returns an in-band error envelope to send back, or ``None`` to allow.
+    """
+    if token is not None or _is_loopback(client_host):
+        return None
+    cmd = req.get("cmd", "")
+    backend = req.get("backend", "")
+    is_serial = cmd == "list_serial_ports" or (
+        isinstance(backend, str) and backend == "serial"
+    )
+    if not is_serial:
+        return None
+    return {
+        "ok": False,
+        "schema_version": _SCHEMA_VERSION,
+        "error": (
+            "Serial-port access from a remote client needs a server token "
+            "(start the server with --token)."
+        ),
+        "type": "PermissionError",
+    }
+
+
+def _request_guard(
+    req: dict, client_host: Optional[str], token: Optional[str]
+) -> Optional[dict]:
+    """Every per-request origin check, in one place for both transports."""
+    return _openocd_guard(req, client_host) or _serial_guard(req, client_host, token)
+
+
 def _host_name(host_header: Optional[str]) -> Optional[str]:
     """Hostname part of a ``Host`` header, stripping the port and IPv6 brackets."""
     if not host_header:
@@ -198,7 +242,9 @@ def create_app(
                 "error": "Host not allowed (possible DNS rebinding).",
                 "type": "PermissionError",
             }
-        blocked = _openocd_guard(req, request.client.host if request.client else None)
+        blocked = _request_guard(
+            req, request.client.host if request.client else None, token
+        )
         if blocked is not None:
             return blocked
         return await run_in_threadpool(gateway.call, req)
@@ -233,8 +279,8 @@ def create_app(
                         }
                     )
                     continue
-                blocked = _openocd_guard(
-                    req, websocket.client.host if websocket.client else None
+                blocked = _request_guard(
+                    req, websocket.client.host if websocket.client else None, token
                 )
                 if blocked is not None:
                     await websocket.send_json(blocked)

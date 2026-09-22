@@ -42,8 +42,12 @@ class RpcGateway:
     # capture/connect. ``openocd_start`` spawns a new process (idempotent, never
     # touches the live transport) and ``openocd_status`` only reads launcher
     # state, so both stay lock-free.
+    #
+    # ``list_serial_ports`` only reads the OS device list -- it touches no
+    # session state and opens nothing -- so a rescan in the UI should not have
+    # to wait behind an in-flight capture.
     _LOCK_FREE_CMDS = frozenset(
-        {"scan_targets", "openocd_start", "openocd_status"}
+        {"scan_targets", "openocd_start", "openocd_status", "list_serial_ports"}
     )
 
     def __init__(self, server: Optional[RpcServer] = None) -> None:

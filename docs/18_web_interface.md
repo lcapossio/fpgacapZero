@@ -13,9 +13,13 @@ There is no bespoke web protocol.
 ## Install and run
 
 ```bash
-pip install -e ".[web]"     # adds fastapi + uvicorn to the host stack
-fcapz-web                    # serves on http://127.0.0.1:7373
+pip install -e ".[web]"          # adds fastapi + uvicorn to the host stack
+pip install -e ".[web,serial]"   # ...plus pyserial, for the serial backend
+fcapz-web                        # serves on http://127.0.0.1:7373
 ```
+
+The `serial` extra is only needed for the **serial** backend (the byte-stream
+TAP bridge, [chapter 14](14_transports.md)); the JTAG backends do not use it.
 
 Open <http://127.0.0.1:7373>. Connection parameters (backend, host/port, an
 optional tap — the IR table is inferred from the tap name) live in the UI, not
@@ -34,6 +38,14 @@ WebSocket, and the UI hides the token field until a server asks for it. There is
 **no TLS** — put it behind a reverse proxy or an SSH tunnel if it leaves a
 trusted network. `fcapz-web` prints a warning if you bind a non-localhost host
 without a token.
+
+Serial ports get a rule of their own. `list_serial_ports` and a `connect` with
+`backend: "serial"` are refused for **remote** clients on a server started
+without `--token`, because opening a serial port asserts DTR/RTS — on a
+development machine that resets RP2040/RP2350 boards and disturbs JTAG probes
+and programmers, which all appear as serial ports too. Loopback clients are
+unaffected, and a remote client with a token may use them normally. (Enumeration
+itself never opens a port, on any path.)
 
 Cross-origin API access is **off by default** (the bundled UI is same-origin,
 and `npm run dev` proxies `/api`), so a random website cannot drive the board;
