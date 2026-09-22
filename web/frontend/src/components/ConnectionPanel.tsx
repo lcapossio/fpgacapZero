@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { RpcCancelled, getToken, rpc, setToken } from "../api";
-import type { Board, ConnectionParams, Core, Identity, ProbeSpec, SerialPort } from "../api";
+import type {
+  Board,
+  ConnectionParams,
+  Core,
+  Identity,
+  LinkInfo,
+  ProbeSpec,
+  SerialPort,
+} from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
 import { defaultElaForDepth, useSession } from "../session";
@@ -93,6 +101,7 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
     device?: string;
+    link?: LinkInfo;
   } | null>(null);
   const { ela, setEla, setAxiMon, setEjtagAxi, setCores, conn, chainSwitch, setSwitching } =
     useSession();
@@ -259,6 +268,7 @@ export function ConnectionPanel({
       tap,
       ir_table: params.ir_table,
       device: typeof c.device === "string" && c.device ? c.device : undefined,
+      link: (c.link as LinkInfo | null) ?? undefined,
     });
     const id = r.probe as Identity;
     onConnected(params, id);
@@ -597,7 +607,16 @@ export function ConnectionPanel({
                 connected to. */}
             {connTarget.backend === "serial" ? (
               <>
-                <b>{serialPort}</b> · {baud} baud · serial TAP bridge
+                <b>{connTarget.link?.channel ?? serialPort}</b>
+                {" @ "}
+                {(connTarget.link?.baudrate ?? Number(baud)).toLocaleString()} baud
+                {connTarget.link && (
+                  <>
+                    {" · bridge v"}
+                    {connTarget.link.proto_version} · {connTarget.link.num_chains} chains ·{" "}
+                    {connTarget.link.max_dr_bits}-bit max DR
+                  </>
+                )}
               </>
             ) : (
               <>

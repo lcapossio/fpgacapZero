@@ -8,6 +8,18 @@ export interface RpcResponse {
   [key: string]: unknown;
 }
 
+/** What the session is talking *through*, when the transport can say.
+ *  A plain JTAG probe reports nothing (null); the byte-stream TAP bridge
+ *  negotiates these on connect. */
+export interface LinkInfo {
+  kind: string;
+  channel: string;
+  proto_version: number;
+  num_chains: number;
+  max_dr_bits: number;
+  baudrate?: number;
+}
+
 export interface ConnectionParams {
   backend: string;
   host: string;
