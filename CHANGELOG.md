@@ -20,6 +20,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and a developer machine usually has unrelated JTAG cables and vendor probes
   enumerated as serial ports too.
 
+- **Serial backend — hardened after review.** Remote clients on a token-less web
+  server can no longer enumerate or open serial ports (an unauthenticated way to
+  reset every board and probe on the host); loopback and authenticated remote
+  clients are unaffected. A failed handshake now closes the port instead of
+  leaking an exclusive handle, and a failed `connect` closes the transport the
+  session never took ownership of. The burst chain is excluded from the generic
+  core sweeps — it carries a streaming DR, not registers, and a magic word
+  appearing in burst data could otherwise be reported as a core. EIO/AXI/UART
+  side connections are refused with an explanation rather than an OS
+  port-in-use error, and both panels say so. Baud rates are validated
+  server-side. The port picker is a datalist, so the value is always visible and
+  a typed path still works.
+
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
