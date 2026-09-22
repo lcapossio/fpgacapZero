@@ -600,7 +600,7 @@ class RpcServerHarness(RpcServer):
         super().__init__()
         self._transport = transport
 
-    def _build_transport(self, req):
+    def _build_transport(self, req, **_):
         return self._transport
 
 

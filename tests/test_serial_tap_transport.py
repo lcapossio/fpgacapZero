@@ -177,7 +177,11 @@ class FakeTapPort:
 
     def _do_scan(self, chain, width, payload, nb):
         shifted_in = int.from_bytes(payload, "little") & ((1 << width) - 1)
-        if chain == self.burst_chain and width == self.max_dr_bits                 and self._burst_queue:
+        if (
+            chain == self.burst_chain
+            and width == self.max_dr_bits
+            and self._burst_queue
+        ):
             # Armed: hand back staged capture data.  Unarmed, the burst chain
             # is just a shift register, which is what the raw-scan tests use.
             return self._burst_queue.pop(0).to_bytes(nb, "little")
@@ -242,6 +246,9 @@ def test_connect_rejects_wrong_magic(fake_serial):
     t = SerialTapTransport("COM_TEST")
     with pytest.raises(RuntimeError, match="no fcapz TAP bridge"):
         t.connect()
+    # A wrong port is exactly the case that fails here, and on Windows it is an
+    # exclusive handle -- holding it would block the user's next attempt.
+    assert fake_serial["obj"].closed
 
 
 def test_connect_rejects_future_protocol(fake_serial):
@@ -249,6 +256,17 @@ def test_connect_rejects_future_protocol(fake_serial):
     t = SerialTapTransport("COM_TEST")
     with pytest.raises(RuntimeError, match="unsupported fcapz TAP bridge protocol version"):
         t.connect()
+    assert fake_serial["obj"].closed
+
+
+def test_burst_chain_is_excluded_from_generic_probing(fake_serial):
+    t = SerialTapTransport("COM_TEST", burst_data_chain=2)
+    assert t.unprobeable_chains == (2,)
+
+
+def test_no_burst_leaves_every_chain_probeable(fake_serial):
+    t = SerialTapTransport("COM_TEST", burst=False)
+    assert t.unprobeable_chains == ()
 
 
 def test_missing_pyserial_is_actionable(monkeypatch):
@@ -595,9 +613,10 @@ def test_list_serial_ports_reports_and_sorts_without_opening(monkeypatch):
 
     got = list_serial_ports()
 
-    assert [p["device"] for p in got] == ["COM16", "COM7"]
-    assert got[0]["description"] == "USB Serial Device (COM16)"
-    assert got[0]["hwid"] == "USB VID:PID=2E8A:0009"
+    # Natural order: COM7 before COM16, not the lexicographic reverse.
+    assert [p["device"] for p in got] == ["COM7", "COM16"]
+    assert got[1]["description"] == "USB Serial Device (COM16)"
+    assert got[1]["hwid"] == "USB VID:PID=2E8A:0009"
     assert opened == []
 
 
@@ -606,3 +625,55 @@ def test_list_serial_ports_is_empty_without_pyserial(monkeypatch):
     monkeypatch.setitem(sys.modules, "serial.tools.list_ports", None)
     # A missing pyserial must not raise: the caller is populating a UI list.
     assert list_serial_ports() == []
+
+
+# --- RPC-level serial wiring -------------------------------------------------
+#
+# The transport is only half the story: the RPC layer chooses it, validates its
+# parameters, and decides which commands may use it at all.
+
+
+def _rpc_server():
+    from fcapz.rpc import RpcServer
+
+    return RpcServer()
+
+
+def test_rpc_builds_a_serial_transport_without_an_ir_table():
+    t = _rpc_server()._build_transport(
+        {"backend": "serial", "serial_port": "COM16", "baudrate": 2_000_000}
+    )
+    assert isinstance(t, SerialTapTransport)
+    assert t.baudrate == 2_000_000
+
+
+def test_rpc_requires_a_serial_port():
+    with pytest.raises(ValueError, match="needs a serial_port"):
+        _rpc_server()._build_transport({"backend": "serial", "serial_port": "  "})
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "abc", float("nan"), 99_000_000])
+def test_rpc_rejects_an_impossible_baudrate(bad):
+    with pytest.raises(ValueError, match="baudrate"):
+        _rpc_server()._build_transport(
+            {"backend": "serial", "serial_port": "COM16", "baudrate": bad}
+        )
+
+
+def test_rpc_defaults_the_baudrate_when_blank():
+    # A cleared number field arrives as "" (or null), which must mean "default",
+    # not "0 baud".
+    for blank in ("", None):
+        t = _rpc_server()._build_transport(
+            {"backend": "serial", "serial_port": "COM16", "baudrate": blank}
+        )
+        assert t.baudrate == 1_000_000
+
+
+def test_rpc_refuses_serial_side_connections():
+    # EIO/AXI/UART each build a SECOND transport; the analyzer already owns the
+    # port exclusively, so this must fail with our message, not the OS's.
+    with pytest.raises(ValueError, match="side connections"):
+        _rpc_server()._build_transport(
+            {"backend": "serial", "serial_port": "COM16"}, side=True
+        )

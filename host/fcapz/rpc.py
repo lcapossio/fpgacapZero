@@ -80,6 +80,46 @@ _CORE_NAMES = {
 _ELA_SCAN_CHAINS = (1, 2, 5)
 
 
+# Generous bounds rather than a list of "standard" rates: the bridge's divider
+# is set in RTL and unusual rates (a 32 MHz clock divided to an exact value) are
+# normal here.  This only rejects input that cannot be a baud rate at all --
+# blank fields arriving as 0, JavaScript's non-finite numbers serialising to
+# null, fractions silently truncated by int().
+_BAUD_MIN = 300
+_BAUD_MAX = 20_000_000
+
+
+def _baudrate(value: Any) -> int:
+    """Validate a requested serial baud rate, or raise ``ValueError``."""
+    if value is None or value == "":
+        return 1_000_000
+    if isinstance(value, bool):
+        raise ValueError(f"baudrate must be an integer, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        # Also catches NaN/Infinity, which is_integer() reports as False.
+        raise ValueError(f"baudrate must be a whole number, got {value!r}")
+    try:
+        baud = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"baudrate must be an integer, got {value!r}") from None
+    if not _BAUD_MIN <= baud <= _BAUD_MAX:
+        raise ValueError(
+            f"baudrate {baud} out of range ({_BAUD_MIN}..{_BAUD_MAX})"
+        )
+    return baud
+
+
+def _scan_chains(transport, chains=_ELA_SCAN_CHAINS) -> tuple[int, ...]:
+    """*chains* minus the ones this transport says are not register interfaces.
+
+    A byte-stream TAP bridge dedicates one chain to the burst reader's data DR
+    (see ``TapBridgeTransport.unprobeable_chains``); probing it would be the
+    wrong protocol on that chain and could report a core that is not there.
+    """
+    blocked = getattr(transport, "unprobeable_chains", ())
+    return tuple(c for c in chains if c not in blocked)
+
+
 class RpcServer:
     def __init__(
         self,
@@ -167,7 +207,7 @@ class RpcServer:
         if eio is None:
             transport = analyzer.transport
             try:
-                eio = discover_eio(transport, chains=(1, 2))
+                eio = discover_eio(transport, chains=_scan_chains(transport, (1, 2)))
             except Exception:
                 eio = None
             try:
@@ -195,7 +235,7 @@ class RpcServer:
         # Other ELA-protocol chains (see _ELA_SCAN_CHAINS): a plain or monitor
         # ELA the client can switch the session to — chains are an
         # implementation detail the UI resolves with a "use this core" action.
-        for chain in _ELA_SCAN_CHAINS:
+        for chain in _scan_chains(analyzer.transport):
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -414,7 +454,7 @@ class RpcServer:
         if geo is not None:
             return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
         result = None
-        for chain in _ELA_SCAN_CHAINS:
+        for chain in _scan_chains(analyzer.transport):
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -435,10 +475,24 @@ class RpcServer:
             pass
         return result
 
-    def _build_transport(self, req: Dict[str, Any]):
+    def _build_transport(self, req: Dict[str, Any], *, side: bool = False):
+        """Build a transport for *req*.
+
+        *side* marks the EIO/AXI/UART side controllers, which each build a
+        SECOND transport alongside the analyzer's.  On a JTAG probe that is
+        fine -- the probe daemon multiplexes them.  A serial bridge owns its
+        port exclusively, so a second one can only fail, and with the OS's
+        error rather than ours.  Say so plainly instead.
+        """
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
         if backend == "serial":
+            if side:
+                raise ValueError(
+                    "the serial backend does not support EIO/AXI/UART side "
+                    "connections yet: the analyzer holds the port exclusively, "
+                    "so a second connection to it cannot be opened"
+                )
             # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port
             # instead of a JTAG probe, so there is no host/port/tap here.  The
             # bridge's identity probe runs inside connect(), so pointing this
@@ -447,10 +501,7 @@ class RpcServer:
             name = str(req.get("serial_port", "") or "").strip()
             if not name:
                 raise ValueError("serial backend needs a serial_port")
-            return SerialTapTransport(
-                name,
-                baudrate=int(req.get("baudrate", 1_000_000)),
-            )
+            return SerialTapTransport(name, baudrate=_baudrate(req.get("baudrate")))
         ir = self._ir_table(self._resolved_ir_name(req))
         if backend == "openocd":
             return OpenOcdTransport(
@@ -691,20 +742,35 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
+            transport = self._build_transport(req)
             analyzer = Analyzer(
-                self._build_transport(req),
+                transport,
                 chain=int(requested) if requested is not None else 1,
             )
-            analyzer.connect()
-            if requested is None and analyzer.probe_optional() is None:
-                # No chain given and no ELA on the default chain: autodetect on
-                # the conservative scan set (USER1/2 — bridges on 3/4 speak a
-                # different DR protocol and must not see stray shifts).
-                for chain in (2,):
-                    alt = Analyzer(analyzer.transport, chain=chain)
-                    if alt.probe_optional() is not None:
-                        analyzer = alt
-                        break
+            try:
+                analyzer.connect()
+                if requested is None and analyzer.probe_optional() is None:
+                    # No chain given and no ELA on the default chain:
+                    # autodetect on the conservative scan set (USER1/2 —
+                    # bridges on 3/4 speak a different DR protocol and must not
+                    # see stray shifts), minus any chain the transport reserves
+                    # for a non-register protocol such as a burst data DR.
+                    for chain in _scan_chains(transport, (2,)):
+                        alt = Analyzer(transport, chain=chain)
+                        if alt.probe_optional() is not None:
+                            analyzer = alt
+                            break
+            except BaseException:
+                # Nothing owns this transport until it lands in self._analyzer,
+                # so a failure here (wrong port, board unplugged mid-probe)
+                # would otherwise leak an open handle that ``close`` can no
+                # longer reach — on Windows an exclusive serial port that
+                # blocks the user's next attempt.
+                try:
+                    transport.close()
+                except Exception:  # noqa: BLE001 - already failing
+                    pass
+                raise
             self._analyzer = analyzer
             # Echo the resolved preset/chain so a client that omitted them can
             # label the session and reuse them for eio/axi side connects, plus
@@ -923,7 +989,7 @@ class RpcServer:
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
             self._eio = EioController(
-                self._build_transport(req),
+                self._build_transport(req, side=True),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
@@ -940,7 +1006,7 @@ class RpcServer:
             if self._eio is not None:
                 self._eio.close()
                 self._eio = None
-            transport = self._build_transport(req)
+            transport = self._build_transport(req, side=True)
             transport.connect()
             try:
                 chains = req.get("chains")
@@ -1003,7 +1069,7 @@ class RpcServer:
                     pass
                 self._axi_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._build_transport(req)
+            transport = self._build_transport(req, side=True)
             ctrl = EjtagAxiController(transport, chain=chain)
             try:
                 info = ctrl.connect()  # opens transport + probes bridge
@@ -1085,7 +1151,7 @@ class RpcServer:
                     pass
                 self._uart_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._build_transport(req)
+            transport = self._build_transport(req, side=True)
             ctrl = EjtagUartController(transport, chain=chain)
             try:
                 info = ctrl.connect()

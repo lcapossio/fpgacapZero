@@ -164,7 +164,14 @@ def list_serial_ports() -> list[dict[str, str]]:
                 "hwid": str(p.hwid or ""),
             }
         )
-    out.sort(key=lambda d: d["device"])
+    # Natural order, so COM4 comes before COM10 and ttyACM2 before ttyACM10 --
+    # a plain string sort interleaves them and makes the picker hard to read.
+    out.sort(
+        key=lambda d: [
+            int(part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", d["device"])
+        ]
+    )
     return out
 
 
@@ -625,6 +632,22 @@ class TapBridgeTransport(Transport):
         self._has_burst = bool(burst)
         self._cached_sps: int | None = None
 
+    @property
+    def unprobeable_chains(self) -> tuple[int, ...]:
+        """Chains a generic core sweep must leave alone.
+
+        The burst chain is not a register interface: it is the streaming DR of
+        ``jtag_burst_read``, and a scan on it advances that core's staging
+        registers and read pointer.  A real burst start reinitialises them, so
+        a stray probe does not corrupt a capture -- but it is still the wrong
+        protocol on that chain, and burst data that happens to contain an ELA
+        or EIO magic word would be reported as a core that is not there.
+
+        Transports without this attribute are plain JTAG links where every
+        chain is a register interface, so callers default to ``()``.
+        """
+        return (self.burst_data_chain,) if self._has_burst else ()
+
     # -- byte channel: subclass responsibility ------------------------------
     def _open(self) -> None:
         """Open the byte channel.  Raise ``RuntimeError`` if unavailable."""
@@ -651,7 +674,16 @@ class TapBridgeTransport(Transport):
         self._open()
         self._open_channel = True
         self._cached_sps = None
-        self._identify()
+        try:
+            self._identify()
+        except BaseException:
+            # The handshake is where a wrong port shows up (a bootloader, a
+            # console, a JTAG probe's virtual COM port).  Release the channel
+            # instead of leaving an exclusive OS handle owned by an object the
+            # caller is about to drop -- on Windows that handle blocks the next
+            # attempt, and on a probe it is hardware we should not be holding.
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._open_channel:

@@ -270,7 +270,20 @@ the burst readout.
 version, chain count, `MAX_DR_BITS`, and a PHY-defined byte), so a wrong port
 fails with a clear message rather than returning garbage.  `num_chains` and
 `max_dr_bits` are then available on the transport and enforced host-side
-before a scan is sent.
+before a scan is sent.  A failed identity probe **closes the port** — the wrong
+port on a development machine is usually a JTAG probe or a programmer, which is
+not hardware to keep an exclusive handle on.
+
+The burst chain is a streaming DR, not a register interface, so the transport
+reports it in `unprobeable_chains` and the generic core sweeps skip it.  A scan
+there would advance the burst reader's staging registers (harmless in practice —
+a real burst start reinitialises them) and, worse, burst data that happened to
+contain an ELA or EIO magic word would be reported as a core that is not there.
+
+One consequence of the exclusive port: the EIO, EJTAG-AXI and EJTAG-UART side
+controllers each open a **second** transport beside the analyzer's, which a JTAG
+probe daemon multiplexes but a serial link cannot.  They are refused on this
+backend rather than failing with the OS's port-in-use error.
 
 The wire protocol is documented in the header of `rtl/fcapz_tap_bridge.v`.  It
 is framed and status-coded, and the parser hunts for a start-of-frame byte
