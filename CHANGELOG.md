@@ -33,6 +33,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   server-side. The port picker is a datalist, so the value is always visible and
   a typed path still works.
 
+- **`connect` reports the link, not just the preset.** The reply carries
+  `transport_kind` (`jtag` / `bytestream`) and a `link` object with the
+  byte-stream bridge's negotiated protocol version, chain count, DR width and
+  baud rate, so the web GUI can show `COM16 @ 1,000,000 baud · bridge v2 · 2
+  chains · 64-bit max DR` instead of a stale JTAG host and port. `ir_table` is
+  now **null** on a serial session rather than the sentinel string `"serial"` —
+  it was occupying an IR-preset field with a value that is not a preset, and an
+  arbitrary one supplied by a client was echoed back unvalidated.
+
 - **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
   warnings) are captured into a bounded ring and served at `GET /api/logs`; the
   browser tails them in a Log panel that sits as an auto-hiding hover-drawer
