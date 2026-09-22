@@ -391,6 +391,14 @@ body {
   gap: 0.45rem;
   margin-bottom: 0.6rem;
 }
+/* A grid cell holding a bare control with no caption (the Rescan button).
+   Bottom-aligned so it lines up with the inputs in the captioned cells beside
+   it, instead of floating where their caption text is. */
+.form .field {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
 label {
   display: flex;
   flex-direction: column;

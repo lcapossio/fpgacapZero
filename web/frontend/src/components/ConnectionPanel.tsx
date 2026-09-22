@@ -199,7 +199,10 @@ export function ConnectionPanel({
       const found = (r.ports as SerialPort[]) ?? [];
       setSerialPorts(found);
       // Only fill a blank box, so a refresh never overwrites a chosen port.
-      if (!serialPort.trim() && found.length === 1) setSerialPort(found[0].device);
+      // Functional update: a scan can take a moment, and `serialPort` captured
+      // when it started may be stale by the time it returns -- typing into the
+      // box during a slow scan must not be clobbered.
+      if (found.length === 1) setSerialPort((cur) => (cur.trim() ? cur : found[0].device));
     } catch {
       // Enumeration is a convenience; the port can always be typed instead.
       setSerialPorts([]);
@@ -588,13 +591,25 @@ export function ConnectionPanel({
         {error && <p className="err">{error}</p>}
         {connTarget && (
           <p className="muted">
-            {connTarget.device && (
+            {/* Serial has no tap, no IR preset and no host:port — those fields
+                still hold whatever the previous JTAG backend left behind, so
+                printing the generic line would claim a TCP target we are not
+                connected to. */}
+            {connTarget.backend === "serial" ? (
               <>
-                <b>{connTarget.device}</b> ·{" "}
+                <b>{serialPort}</b> · {baud} baud · serial TAP bridge
+              </>
+            ) : (
+              <>
+                {connTarget.device && (
+                  <>
+                    <b>{connTarget.device}</b> ·{" "}
+                  </>
+                )}
+                {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
+                {connTarget.backend} {connTarget.host}:{connTarget.port}
               </>
             )}
-            {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
-            {connTarget.backend} {connTarget.host}:{connTarget.port}
           </p>
         )}
         <p className="muted">
@@ -698,37 +713,51 @@ export function ConnectionPanel({
         )}
         {backend === "serial" && (
           <>
+            {/* A datalist, not a <select>: the enumerated ports are
+                suggestions, not the whole world -- a port can appear after the
+                scan, or be a path we never enumerate. A <select> would also
+                render blank whenever the chosen port is missing from the list
+                while still holding that value underneath, so Connect could use
+                a port the user cannot see. Here the value is always visible. */}
             <label>
               Serial port
-              {serialPorts.length > 0 ? (
-                <select
-                  value={serialPorts.some((p) => p.device === serialPort) ? serialPort : ""}
-                  onChange={(e) => setSerialPort(e.target.value)}
-                >
-                  <option value="">select a port…</option>
-                  {serialPorts.map((p) => (
-                    <option key={p.device} value={p.device}>
-                      {p.description || p.device}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  value={serialPort}
-                  onChange={(e) => setSerialPort(e.target.value)}
-                  placeholder="COM16, or /dev/ttyACM0"
-                />
-              )}
+              <input
+                list="fcapz-serial-ports"
+                value={serialPort}
+                onChange={(e) => setSerialPort(e.target.value)}
+                placeholder="COM16, or /dev/ttyACM0"
+              />
+              <datalist id="fcapz-serial-ports">
+                {serialPorts.map((p) => (
+                  // Keep the device name as the value and the description as
+                  // the label: several FTDI/CP2108 channels share a
+                  // description, so hiding the device name makes them
+                  // indistinguishable.
+                  <option key={p.device} value={p.device}>
+                    {p.description || p.hwid}
+                  </option>
+                ))}
+              </datalist>
             </label>
-            <label>
-              &nbsp;
-              <button className="secondary" onClick={() => void refreshSerialPorts()} disabled={busy}>
+            <div className="field">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void refreshSerialPorts()}
+                disabled={busy}
+              >
                 Rescan ports
               </button>
-            </label>
+            </div>
             <label>
               Baud
-              <input value={baud} onChange={(e) => setBaud(e.target.value)} />
+              <input
+                type="number"
+                min={300}
+                step={1}
+                value={baud}
+                onChange={(e) => setBaud(e.target.value)}
+              />
             </label>
           </>
         )}

@@ -46,13 +46,23 @@ function ElaDock(_: IDockviewPanelProps) {
   const s = useSession();
   return s.conn && s.identity ? <ElaPanel /> : <Empty text="Connect to a target first." />;
 }
+// EIO and AXI attach a SECOND transport beside the analyzer's. A JTAG probe
+// daemon multiplexes that; a serial bridge owns its port exclusively, so the
+// second one cannot be opened at all. Say so here rather than letting the panel
+// try and report a port-in-use error.
+const SIDE_UNSUPPORTED = "Not available over the serial backend: the analyzer holds the port.";
+
 function EioDock(_: IDockviewPanelProps) {
   const s = useSession();
-  return s.conn ? <EioPanel conn={s.conn} /> : <Empty text="Connect to a target first." />;
+  if (!s.conn) return <Empty text="Connect to a target first." />;
+  if (s.conn.backend === "serial") return <Empty text={SIDE_UNSUPPORTED} />;
+  return <EioPanel conn={s.conn} />;
 }
 function AxiDock(_: IDockviewPanelProps) {
   const s = useSession();
-  return s.conn ? <AxiPanel conn={s.conn} /> : <Empty text="Connect to a target first." />;
+  if (!s.conn) return <Empty text="Connect to a target first." />;
+  if (s.conn.backend === "serial") return <Empty text={SIDE_UNSUPPORTED} />;
+  return <AxiPanel conn={s.conn} />;
 }
 function AxiMonDock(_: IDockviewPanelProps) {
   return <AxiMonPanel />;
