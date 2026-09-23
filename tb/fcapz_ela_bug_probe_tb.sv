@@ -595,16 +595,18 @@ module fcapz_ela_bug_probe_tb;
         check("post-trigger sample follows trigger sample",
               word2[7:0] == 8'd34);
 
-        $display("\n=== Regression 10: re-arm keeps rolling history coherent ===");
+        $display("\n=== Regression 10: re-arm never splices the previous capture ===");
         probe_roll = 8'd80;
         ext_trig_roll = 1'b0;
         repeat (6) begin
             @(posedge sample_clk);
             probe_roll <= probe_roll + 1'b1;
         end
-        // Re-arm directly after the previous DONE. The frozen previous
-        // capture tail is allowed to be part of the next pre-trigger history
-        // until enough new samples overwrite it.
+        // Re-arm directly after the previous DONE.  Sample writes were
+        // frozen for the whole readout, so the rolling history has a hole
+        // in it: the core must re-earn pretrig_len fresh samples before a
+        // trigger can commit, and the window it then returns must be one
+        // contiguous run with nothing from before this arm.
         write_roll(16'h0004, 32'h1);
         begin
             integer pulse_delay2;
@@ -636,19 +638,32 @@ module fcapz_ela_bug_probe_tb;
         end
         wait_sample(40);
         read_roll(16'h0008, status);
-        read_roll(16'h0100, word0);
-        read_roll(16'h0100 + 8*4, word1);
-        read_roll(16'h0100 + 9*4, word2);
-        $display("  status=0x%08x samples[0,8,9]=0x%02x 0x%02x 0x%02x",
-                 status, word0[7:0], word1[7:0], word2[7:0]);
+        // Whole window, not three spot samples: a splice can land
+        // anywhere in it, and the old three-point check straddled one
+        // without noticing.
+        for (i = 0; i < 11; i = i + 1)
+            read_roll(16'h0100 + i*4, wrap_samples[i]);
+        $display("  status=0x%08x window=%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                 status,
+                 wrap_samples[0][7:0], wrap_samples[1][7:0], wrap_samples[2][7:0],
+                 wrap_samples[3][7:0], wrap_samples[4][7:0], wrap_samples[5][7:0],
+                 wrap_samples[6][7:0], wrap_samples[7][7:0], wrap_samples[8][7:0],
+                 wrap_samples[9][7:0], wrap_samples[10][7:0]);
         check("second fast external trigger completes",
               status[2] == 1'b1);
-        check("second rolling prehistory includes previous capture tail",
-              word0[7:0] == 8'd33);
-        check("second trigger sample is anchored at pretrigger index",
-              word1[7:0] == 8'd92);
-        check("second post-trigger sample follows trigger sample",
-              word2[7:0] == 8'd93);
+        begin
+            logic contiguous;
+            contiguous = 1'b1;
+            for (i = 1; i < 11; i = i + 1)
+                if (wrap_samples[i][7:0] != (wrap_samples[i-1][7:0] + 8'd1))
+                    contiguous = 1'b0;
+            check("second capture window has no splice", contiguous);
+        end
+        // probe_roll was 86 when the re-arm was issued; anything below
+        // that is left over from the frozen previous capture, whose tail
+        // was 33.
+        check("second capture window predates nothing before the re-arm",
+              wrap_samples[0][7:0] >= 8'd86);
 
         $display("\n=== Regression 11: segmented post-trigger wraps within segment ===");
         write_segtrig(16'h0004, 32'h2);

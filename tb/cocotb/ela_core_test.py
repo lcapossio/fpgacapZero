@@ -929,8 +929,17 @@ async def rolling_prehistory_and_rearm(dut):
         ela.dut.trigger_in.value = 1 if 2 <= cycle <= 4 else 0
     await ela.wait_sample(40)
     assert await ela.read(ADDR_STATUS) & 0x4
-    second = await ela.read_samples(10)
-    assert (second[0] & 0xFF) == (first[9] & 0xFF)
-    assert second[8] & 0xFF >= 88
-    assert second[9] & 0xFF == ((second[8] & 0xFF) + 1) & 0xFF
+    # Writes were frozen for the whole readout of the first capture, so the
+    # rolling history has a hole in it.  The core must re-earn pretrig_len
+    # fresh samples before a trigger can commit, which makes the second
+    # window one contiguous run holding nothing from before the re-arm.
+    second = await ela.read_samples(11)
+    window = [s & 0xFF for s in second]
+    assert all(
+        window[i] == (window[i - 1] + 1) & 0xFF for i in range(1, len(window))
+    ), f"second capture window is spliced: {window}"
+    assert window[0] >= 80, (
+        f"second capture window reaches back before the re-arm: {window} "
+        f"(first capture ended at {first[9] & 0xFF})"
+    )
     FUNCTIONAL_COVERAGE.hit("rolling_rearm_history")
