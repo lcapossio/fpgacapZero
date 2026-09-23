@@ -41,11 +41,20 @@ In single-segment builds, pre-trigger history rolls even before `arm()`,
 so a trigger that arrives immediately after arming can still return real
 history. Segmented capture mode has separate per-segment bookkeeping and
 does not use this rolling pre-arm path. That single-segment history is
-not reset by `arm()`: back-to-back captures can include samples from
-before the latest arm, including the previous capture tail, until new
-samples overwrite them. Pulse `sample_rst` between captures if each
-capture must be fully independent. The rolling writes also mean the BRAM
-write port has idle sample-clock activity in single-segment builds.
+not reset by `arm()`, so samples taken before the latest arm can legally
+appear in the pre-trigger window — but only while they form one
+unbroken run with the samples after it.
+
+Sample writes stop while a completed capture is being read out, which
+puts a hole in that history. The core therefore drops its pre-trigger
+credit when a capture completes, and the next arm must accumulate
+`pretrigger` fresh samples before a trigger can commit. A returned
+window is always contiguous; it is never spliced together from two
+moments. The cost is that a one-shot trigger arriving within
+`pretrigger` stored samples of a re-arm is not captured at all. If you
+need such a trigger caught, configure a shorter `pretrigger`. The
+rolling writes also mean the BRAM write port has idle sample-clock
+activity in single-segment builds.
 
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
