@@ -58,6 +58,32 @@ bound, or your design doesn't have an ELA at `ready_probe_addr=0x0000`.
   to disable the wait.
 - Bump `ready_probe_timeout` if you're on a slow USB hub.
 
+### `ConnectionError: no configuration target for 'xck26' -- nothing would be programmed`
+
+`--program` / the GUI's Bitfile field could not find a debug target to load the
+bitstream into. xsdb has two target trees and configuration uses `targets`, not
+`jtag targets` — see [chapter 14](14_transports.md). Run
+
+```tcl
+connect -url tcp:127.0.0.1:3121
+puts [targets]
+```
+
+and check that a node exists for your board: a part-named node on a standalone
+FPGA, or `PS TAP` on Zynq UltraScale+ MPSoC. If the part name in `--tap` does
+not match the one xsdb reports for the device, fix that first — the filter is
+scoped by it so the right board is chosen when several are attached.
+
+If you are on a part family fcapz has not seen (Versal, for instance), the two
+filters it tries are printed in the error; report which node name that family
+actually uses.
+
+> Before this was fixed the situation was **silent** on MPSoC: the filter matched
+> nothing, `fpga -file` loaded nothing, and the capture ran against whatever
+> was already in the FPGA. If you captured from a Kria or ZCU board with
+> `--program` on an older version, the data may not be from the bitstream you
+> thought you loaded.
+
 ### `ValueError: bitfile path contains unsafe characters for TCL`
 
 **Cause**: TCL injection guard tripped.  Your `bitfile=` or

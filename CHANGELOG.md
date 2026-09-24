@@ -7,6 +7,25 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--program` silently programmed nothing on Zynq UltraScale+ MPSoC.** The
+  configuration target was selected out of xsdb's `targets` tree by the part
+  name (`xck26`), but on MPSoC that tree has no node named for the part — it is
+  `PS TAP` → `PMU`/`PL` plus `PSU` → `RPU`/`APU`. The filter matched nothing,
+  `fpga -file` loaded nothing, and because xsdb reports failures by *printing*
+  a message rather than by exit status, both errors were discarded: the session
+  continued against whatever configuration was already in the FPGA. A Kria or
+  ZCU capture taken with `--program` on an earlier version may not be from the
+  bitstream you thought you loaded. Standalone FPGAs (7-series, UltraScale+)
+  were never affected — there the device node *is* named for the part.
+
+  Programming now selects `PS TAP` on MPSoC and the part-named node elsewhere,
+  scoped by `jtag_device_name` so the right board is picked when several are
+  attached, and both `targets -set` and `fpga -file` run with error checking so
+  a failure raises instead of passing silently. Verified on a chain carrying an
+  Arty A7, a KV260 and a ZCU-class board at once (xsdb 2025.2).
+
 ### Added
 
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`

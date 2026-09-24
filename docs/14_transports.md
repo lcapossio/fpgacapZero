@@ -102,14 +102,58 @@ What `connect()` does:
 1. Spawns `xsdb` as a subprocess (uses `xsdb_path` if set,
    otherwise looks on `PATH`).
 2. Sends `connect -url tcp:HOST:PORT` to xsdb's stdin.
-3. If `bitfile` is set: sends `targets -set -filter {name =~ "FPGA_NAME"}`
-   then `fpga -file {BITFILE}` then `after <ms>` (GUI default 200 ms post-program delay).
-4. Sends another `jtag targets -set -filter` to lock onto the
+3. If `bitfile` is set: selects the **configuration target** (see below), then
+   sends `fpga -file {BITFILE}` and `after <ms>` (GUI default 200 ms
+   post-program delay).
+4. Sends a `jtag targets -set -filter` to lock onto the
    actual FPGA target (not just any device on the chain).
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the
 subprocess dies.
+
+#### Two target namespaces, and why programming picks a different one
+
+xsdb has two separate target trees, and configuration uses the second:
+
+* `jtag targets` — the **JTAG scan chain**. Nodes are named for the part
+  (`xc7a100t`, `xck26`, `xczu7`). This is what step 4 selects, for the raw
+  IR/DR scans the analyzer does.
+* `targets` — the **debug targets**. On a standalone FPGA there is one node
+  per device, named for the part. On Zynq UltraScale+ MPSoC (Kria xck24 /
+  xck26, ZCU+ xczu\*) there is **no node named for the part at all**: the tree
+  is `PS TAP` → `PMU`/`PL`, plus `PSU` → `RPU`/`APU`, and `fpga` works from
+  `PS TAP`.
+
+So the configuration target is chosen by trying, in order:
+
+```tcl
+targets -set -filter {jtag_device_name =~ "PART" && name =~ "PS TAP"}
+targets -set -filter {jtag_device_name =~ "PART" && name =~ "PART"}
+```
+
+Both are scoped by `jtag_device_name`, because several boards can be attached
+at once and each MPSoC contributes its own node named `PS TAP` — the part name
+is the only thing that distinguishes them. If neither matches, `connect()`
+raises rather than programming nothing.
+
+Verified on a chain carrying an Arty A7 (`xc7a100t`), a KV260 (`xck26`) and a
+ZCU-class board (`xczu7`) simultaneously, xsdb 2025.2.
+
+> **Fixed in this release.** Programming previously filtered `targets` by the
+> part name, which matches nothing on MPSoC. xsdb printed an error, the
+> transport discarded it, `fpga -file` loaded nothing, and the session then ran
+> against whatever configuration was already in the FPGA — wrong data with no
+> warning. Both commands now run with error checking (see below).
+
+#### xsdb error checking
+
+xsdb reports a failure by *printing* a message and carrying on; a piped session
+has no per-command exit status. `_send()` therefore returns the printed text
+and lets the caller interpret it, which suits the read commands whose output is
+parsed anyway. Commands whose only failure signal *is* that message —
+`targets -set`, `fpga -file` — are sent with `check=True`, which wraps them in
+a Tcl `catch` and raises `RuntimeError` instead of letting the failure pass.
 
 **Why `connect()` can feel slow:** `fpga -file` dominates (bitstream size
 and USB/JTAG speed — often tens of seconds). After that, the readiness
