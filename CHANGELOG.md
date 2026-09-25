@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — captures no longer splice across a re-arm.** In single-segment builds
+  the pre-trigger history rolls continuously, but sample writes stop while a
+  completed capture is read out, leaving a hole in it. The core kept vouching
+  for that history, so the next capture could commit a trigger immediately and
+  return a window joined from two different moments — samples missing at the
+  seam, nothing marking it, and only ever in the pre-trigger half. The
+  pre-trigger credit is now dropped when a capture completes, so the next arm
+  re-earns `pretrigger` fresh samples first and every returned window is one
+  contiguous run. Segmented builds already reset that credit on arm and are
+  unchanged. Trade-off: a one-shot trigger arriving within `pretrigger` stored
+  samples of a re-arm is now missed rather than captured with a spliced
+  prehistory.
+
 - **`--program` silently programmed nothing on Zynq UltraScale+ MPSoC.** The
   configuration target was selected out of xsdb's `targets` tree by the part
   name (`xck26`), but on MPSoC that tree has no node named for the part — it is
@@ -113,19 +126,6 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
-
-- **ELA — captures no longer splice across a re-arm.** In single-segment builds
-  the pre-trigger history rolls continuously, but sample writes stop while a
-  completed capture is read out, leaving a hole in it. The core kept vouching
-  for that history, so the next capture could commit a trigger immediately and
-  return a window joined from two different moments — samples missing at the
-  seam, nothing marking it, and only ever in the pre-trigger half. The
-  pre-trigger credit is now dropped when a capture completes, so the next arm
-  re-earns `pretrigger` fresh samples first and every returned window is one
-  contiguous run. Segmented builds already reset that credit on arm and are
-  unchanged. Trade-off: a one-shot trigger arriving within `pretrigger` stored
-  samples of a re-arm is now missed rather than captured with a spliced
-  prehistory.
 
 - **Quartus USB-Blaster — clearer "no cores" message.** A board that presents no
   fpgacapZero cores (e.g. an unconfigured device) now reports *"No
