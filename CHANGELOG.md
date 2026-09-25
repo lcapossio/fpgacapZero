@@ -170,23 +170,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.4.8] — 2026-08-10
 
-Packaging only: absolute README image URLs so the logo renders on PyPI.
-No library, RTL or host changes.
+Packaging only: rewrote the README's logo, licence and documentation
+links as absolute URLs so they resolve on the PyPI project page.
+No functional change beyond the version constants a bump regenerates.
 
 ---
 
 ## [0.4.7] — 2026-08-10
 
-Packaging only: corrected the PyPI summary to describe fpgacapZero as a
-vendor-agnostic debug-core suite. No library, RTL or host changes.
+Packaging only: the PyPI summary still called this a "JTAG logic
+analyzer for Xilinx 7-series FPGAs"; it now reads "vendor-agnostic
+full-featured FPGA debug cores". No functional change beyond the
+version constants a bump regenerates.
 
 ---
 
 ## [0.4.6] — 2026-08-10
 
-> Covers 0.4.0 through 0.4.6. Those intermediate bumps were released
-> without their own changelog sections, so their entries are collected
-> here under the first of them that carries a tag.
+> Covers everything between v0.3.0 and v0.4.6. The tree passed through
+> 0.4.0 and 0.4.5 on the way, but neither was tagged, so the entries
+> that accumulated across them are collected here under the first
+> tagged release that contains them.
 
 ### Added
 
