@@ -77,7 +77,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   return a window joined from two different moments — samples missing at the
   seam, nothing marking it, and only ever in the pre-trigger half. The
   pre-trigger credit is now dropped when a capture completes, so the next arm
-  re-earns `pretrigger` fresh samples first, so a readout can no longer join
+  re-earns `pretrigger` fresh samples first; a readout can no longer join
   two moments into one window. Applied to both the Verilog and the native
   VHDL core. Segmented builds already reset that credit on arm and are
   unchanged. Trade-off: a one-shot trigger arriving within `pretrigger` stored
@@ -170,8 +170,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.4.8] — 2026-08-10
 
-Packaging only: rewrote the README's logo, licence and documentation
-links as absolute URLs so they resolve on the PyPI project page.
+Packaging only: rewrote the README's two image URLs (logo, web demo)
+and its licence links as absolute URLs so they resolve on the PyPI
+project page.
 No functional change beyond the version constants a bump regenerates.
 
 ---
