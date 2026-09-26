@@ -157,6 +157,10 @@ architecture rtl of fcapz_ela is
     end function;
 
     constant PTR_W            : positive := fcapz_clog2(DEPTH);
+    -- Capture lengths are counts, not pointers, and a length may legally
+    -- equal DEPTH, so they need one bit more than an address.  Mirrors
+    -- LEN_W in rtl/fcapz_ela.v.
+    constant LEN_W            : positive := fcapz_clog2(DEPTH + 1);
     constant WORDS_PER_SAMPLE : positive := (SAMPLE_W + 31) / 32;
     constant SEG_DEPTH        : positive := DEPTH / NUM_SEGMENTS;
     constant SEG_PTR_W        : positive := fcapz_clog2(SEG_DEPTH);
@@ -257,10 +261,10 @@ architecture rtl of fcapz_ela is
     signal jtag_trig_delay   : std_logic_vector(15 downto 0) := (others => '0');
     signal jtag_trig_holdoff : std_logic_vector(15 downto 0) := (others => '0');
 
-    signal pretrig_len_sync1      : unsigned(PTR_W - 1 downto 0) := (others => '0');
-    signal pretrig_len_sync2      : unsigned(PTR_W - 1 downto 0) := (others => '0');
-    signal posttrig_len_sync1     : unsigned(PTR_W - 1 downto 0) := (others => '0');
-    signal posttrig_len_sync2     : unsigned(PTR_W - 1 downto 0) := (others => '0');
+    signal pretrig_len_sync1      : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal pretrig_len_sync2      : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal posttrig_len_sync1     : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal posttrig_len_sync2     : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal trig_mode_sync1        : std_logic_vector(31 downto 0) := (others => '0');
     signal trig_mode_sync2        : std_logic_vector(31 downto 0) := (others => '0');
     -- Widened to SAMPLE_W so the full comparator-A value/mask can cross the CDC
@@ -270,8 +274,8 @@ architecture rtl of fcapz_ela is
     signal trig_value_sync2       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal trig_mask_sync1        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal trig_mask_sync2        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal pretrig_len            : unsigned(PTR_W - 1 downto 0) := (others => '0');
-    signal posttrig_len           : unsigned(PTR_W - 1 downto 0) := (others => '0');
+    signal pretrig_len            : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal posttrig_len           : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal cap_trig_mode          : std_logic_vector(31 downto 0) := x"00000001";
     signal cap_trig_value         : std_logic_vector(31 downto 0) := (others => '0');
     signal cap_trig_mask          : std_logic_vector(31 downto 0) := x"FFFFFFFF";
@@ -495,9 +499,11 @@ architecture rtl of fcapz_ela is
 
     function cfg_len(v : std_logic_vector(31 downto 0)) return unsigned is
     begin
-        -- Match the Verilog core: capture lengths consume only the pointer-width
+        -- Match the Verilog core: capture lengths consume only the length
         -- field, while JTAG register readback preserves the full 32-bit write.
-        return unsigned(v(PTR_W - 1 downto 0));
+        -- This is LEN_W, not PTR_W: a length may equal DEPTH, and narrowing to
+        -- PTR_W silently turned a written DEPTH into 0.
+        return unsigned(v(LEN_W - 1 downto 0));
     end function;
 
     function next_ptr(ptr : natural; base : natural) return natural is
@@ -1142,6 +1148,14 @@ begin
         datawin_oob_comb <= '0';
         datawin_mem_addr_comb <= (others => '0');
         datawin_chunk_comb <= 0;
+        -- Default the index out of range so the decode below is total.  An
+        -- address under ADDR_DATA_BASE assigns neither branch, and without this
+        -- the process variable would keep its value from the previous
+        -- invocation -- an inferred latch, and a divergence from
+        -- rtl/fcapz_ela.v, whose if/else is unconditional and whose 32-bit
+        -- subtract underflows to a far out-of-range index (so oob = 1,
+        -- mem_addr = 0).
+        sample_index := integer'high;
 
         if TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
             datawin_is_ts_comb <= '1';
@@ -1340,7 +1354,7 @@ begin
         variable base : natural;
         variable start_calc : natural;
         variable next_segment : natural;
-        variable post_limit : unsigned(PTR_W - 1 downto 0);
+        variable post_limit : unsigned(LEN_W - 1 downto 0);
         variable trigger_commit_now : boolean;
         variable force_store_now : boolean;
         variable store_now : boolean;
