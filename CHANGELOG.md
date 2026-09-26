@@ -16,8 +16,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   return a window joined from two different moments — samples missing at the
   seam, nothing marking it, and only ever in the pre-trigger half. The
   pre-trigger credit is now dropped when a capture completes, so the next arm
-  re-earns `pretrigger` fresh samples first and every returned window is one
-  contiguous run. Segmented builds already reset that credit on arm and are
+  re-earns `pretrigger` fresh samples first, so a readout can no longer join
+  two moments into one window. Applied to both the Verilog and the native
+  VHDL core. Segmented builds already reset that credit on arm and are
   unchanged. Trade-off: a one-shot trigger arriving within `pretrigger` stored
   samples of a re-arm is now missed rather than captured with a spliced
   prehistory.

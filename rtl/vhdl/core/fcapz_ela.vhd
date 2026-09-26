@@ -1542,6 +1542,18 @@ begin
                 post_count <= (others => '0');
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
+                -- Sample writes are frozen while done is held (the host is
+                -- reading the buffer out), so the rolling pre-arm history now
+                -- has a hole in it.  pre_count must stop vouching for it, or
+                -- the next arm lets a trigger commit immediately and
+                -- start_ptr reaches back across the freeze into the previous
+                -- capture -- a window spliced from two moments with nothing
+                -- marking the join.  Segmented builds already clear pre_count
+                -- on arm and on segment auto-rearm, so this is single-segment
+                -- only.  Mirrors rtl/fcapz_ela.v.
+                if NUM_SEGMENTS = 1 then
+                    pre_count <= (others => '0');
+                end if;
             end if;
 
             if any_arm_pulse_now then

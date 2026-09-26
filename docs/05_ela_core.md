@@ -48,9 +48,11 @@ unbroken run with the samples after it.
 Sample writes stop while a completed capture is being read out, which
 puts a hole in that history. The core therefore drops its pre-trigger
 credit when a capture completes, and the next arm must accumulate
-`pretrigger` fresh samples before a trigger can commit. A returned
-window is always contiguous; it is never spliced together from two
-moments. The cost is that a one-shot trigger arriving within
+`pretrigger` fresh samples before a trigger can commit, so a readout no
+longer splices two moments into one window. (With `INPUT_PIPE>=1` a
+single stored sample can still be lost if `arm()` lands while the
+registered write command is in flight — a separate defect this does
+not address.) The cost is that a one-shot trigger arriving within
 `pretrigger` stored samples of a re-arm is not captured at all. If you
 need such a trigger caught, configure a shorter `pretrigger`. The
 rolling writes also mean the BRAM write port has idle sample-clock

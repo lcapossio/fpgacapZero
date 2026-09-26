@@ -655,7 +655,7 @@ module fcapz_ela_bug_probe_tb;
             logic contiguous;
             contiguous = 1'b1;
             for (i = 1; i < 11; i = i + 1)
-                if (wrap_samples[i][7:0] != (wrap_samples[i-1][7:0] + 8'd1))
+                if (wrap_samples[i][7:0] !== (wrap_samples[i-1][7:0] + 8'd1))
                     contiguous = 1'b0;
             check("second capture window has no splice", contiguous);
         end

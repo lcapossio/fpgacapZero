@@ -935,10 +935,18 @@ async def rolling_prehistory_and_rearm(dut):
     # window one contiguous run holding nothing from before the re-arm.
     second = await ela.read_samples(11)
     window = [s & 0xFF for s in second]
-    assert all(
-        window[i] == (window[i - 1] + 1) & 0xFF for i in range(1, len(window))
-    ), f"second capture window is spliced: {window}"
-    assert window[0] >= 80, (
+    # The probe is only advanced by the loop below, so it sits at 86 for the
+    # few sample clocks the JTAG arm write takes: a held value is faithful
+    # data, not a seam.  A splice shows up as a *gap* -- a step of neither 0
+    # nor 1 -- so that is what to forbid.
+    steps = [(window[i] - window[i - 1]) & 0xFF for i in range(1, len(window))]
+    assert all(d in (0, 1) for d in steps), (
+        f"second capture window is spliced: {window} (steps {steps})"
+    )
+    # drive_counter(6, start=80) leaves the probe at 86 when arm() is issued,
+    # so the floor is 86: a floor of 80 would admit the pre-arm samples 80..85
+    # this is meant to exclude, and the pre-fix window started at ~31.
+    assert window[0] >= 86, (
         f"second capture window reaches back before the re-arm: {window} "
         f"(first capture ended at {first[9] & 0xFF})"
     )
