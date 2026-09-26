@@ -73,6 +73,7 @@ class ElaFunctionalCoverage:
             "value_trigger": 0,
             "edge_trigger": 0,
             "overflow": 0,
+            "oversize_length": 0,
             "decim_zero": 0,
             "decim_every4": 0,
             "decimation": 0,
@@ -374,6 +375,37 @@ async def overflow_and_reset(dut):
     status = await ela.read(ADDR_STATUS)
     assert status == 0
     FUNCTIONAL_COVERAGE.hit("reset")
+
+
+@cocotb.test()
+async def oversize_length_is_reported_not_truncated(dut):
+    """A length of DEPTH or more must raise overflow, not wrap around.
+
+    The host rejects pre+post+1 > depth, so this is only reachable by a JTAG
+    master writing the register directly -- which is exactly what the overflow
+    flag is for.  DEPTH is the first value that needs more bits than a sample
+    pointer, so a core that narrows the length to pointer width sees 0 here,
+    computes a small capture_len and reports no overflow at all.
+    """
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, DEPTH)
+    await ela.write(ADDR_POSTTRIG, 0)
+    assert await ela.read(ADDR_PRETRIG) == DEPTH, "register readback must keep the full write"
+    await ela.arm()
+    # overflow latches in the arm block from pretrig_len_sync2, so poll rather
+    # than assume the CDC has settled by any particular sample -- the sibling
+    # overflow_and_reset test polls for the same reason.
+    status = 0
+    for _ in range(120):
+        await ela.wait_sample(1)
+        status = await ela.read(ADDR_STATUS)
+        if status & 0x8:
+            break
+    assert status & 0x8, (
+        f"pretrigger={DEPTH} with depth={DEPTH} must set overflow, got 0x{status:08x}"
+    )
+    FUNCTIONAL_COVERAGE.hit("oversize_length")
 
 
 @cocotb.test()
