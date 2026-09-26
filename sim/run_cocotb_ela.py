@@ -72,6 +72,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
+            "oversize_length_is_reported_not_truncated",
             "decimation_and_external_trigger",
             "decimation_zero_and_every4",
             "external_trigger_disabled",

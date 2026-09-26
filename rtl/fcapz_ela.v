@@ -1327,6 +1327,17 @@ module fcapz_ela #(
                 post_count         <= {PTR_W{1'b0}};
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
+                // Sample writes are frozen while done is held (the host is
+                // reading the buffer out), so the rolling pre-arm history now
+                // has a hole in it.  pre_count must stop vouching for it, or
+                // the next arm lets a trigger commit immediately and
+                // start_ptr reaches back across the freeze into the previous
+                // capture -- a window spliced from two moments with nothing
+                // marking the join.  Segmented builds already clear pre_count
+                // on arm and on segment auto-rearm, so this is single-segment
+                // only.
+                if (!HAS_SEGMENTS)
+                    pre_count <= {LEN_W{1'b0}};
             end
 
             if (any_arm_pulse) begin

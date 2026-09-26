@@ -73,6 +73,7 @@ class ElaFunctionalCoverage:
             "value_trigger": 0,
             "edge_trigger": 0,
             "overflow": 0,
+            "oversize_length": 0,
             "decim_zero": 0,
             "decim_every4": 0,
             "decimation": 0,
@@ -374,6 +375,37 @@ async def overflow_and_reset(dut):
     status = await ela.read(ADDR_STATUS)
     assert status == 0
     FUNCTIONAL_COVERAGE.hit("reset")
+
+
+@cocotb.test()
+async def oversize_length_is_reported_not_truncated(dut):
+    """A length of DEPTH or more must raise overflow, not wrap around.
+
+    The host rejects pre+post+1 > depth, so this is only reachable by a JTAG
+    master writing the register directly -- which is exactly what the overflow
+    flag is for.  DEPTH is the first value that needs more bits than a sample
+    pointer, so a core that narrows the length to pointer width sees 0 here,
+    computes a small capture_len and reports no overflow at all.
+    """
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, DEPTH)
+    await ela.write(ADDR_POSTTRIG, 0)
+    assert await ela.read(ADDR_PRETRIG) == DEPTH, "register readback must keep the full write"
+    await ela.arm()
+    # overflow latches in the arm block from pretrig_len_sync2, so poll rather
+    # than assume the CDC has settled by any particular sample -- the sibling
+    # overflow_and_reset test polls for the same reason.
+    status = 0
+    for _ in range(120):
+        await ela.wait_sample(1)
+        status = await ela.read(ADDR_STATUS)
+        if status & 0x8:
+            break
+    assert status & 0x8, (
+        f"pretrigger={DEPTH} with depth={DEPTH} must set overflow, got 0x{status:08x}"
+    )
+    FUNCTIONAL_COVERAGE.hit("oversize_length")
 
 
 @cocotb.test()
@@ -929,8 +961,25 @@ async def rolling_prehistory_and_rearm(dut):
         ela.dut.trigger_in.value = 1 if 2 <= cycle <= 4 else 0
     await ela.wait_sample(40)
     assert await ela.read(ADDR_STATUS) & 0x4
-    second = await ela.read_samples(10)
-    assert (second[0] & 0xFF) == (first[9] & 0xFF)
-    assert second[8] & 0xFF >= 88
-    assert second[9] & 0xFF == ((second[8] & 0xFF) + 1) & 0xFF
+    # Writes were frozen for the whole readout of the first capture, so the
+    # rolling history has a hole in it.  The core must re-earn pretrig_len
+    # fresh samples before a trigger can commit, which makes the second
+    # window one contiguous run holding nothing from before the re-arm.
+    second = await ela.read_samples(11)
+    window = [s & 0xFF for s in second]
+    # The probe is only advanced by the loop below, so it sits at 86 for the
+    # few sample clocks the JTAG arm write takes: a held value is faithful
+    # data, not a seam.  A splice shows up as a *gap* -- a step of neither 0
+    # nor 1 -- so that is what to forbid.
+    steps = [(window[i] - window[i - 1]) & 0xFF for i in range(1, len(window))]
+    assert all(d in (0, 1) for d in steps), (
+        f"second capture window is spliced: {window} (steps {steps})"
+    )
+    # drive_counter(6, start=80) leaves the probe at 86 when arm() is issued,
+    # so the floor is 86: a floor of 80 would admit the pre-arm samples 80..85
+    # this is meant to exclude, and the pre-fix window started at ~31.
+    assert window[0] >= 86, (
+        f"second capture window reaches back before the re-arm: {window} "
+        f"(first capture ended at {first[9] & 0xFF})"
+    )
     FUNCTIONAL_COVERAGE.hit("rolling_rearm_history")
