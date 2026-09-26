@@ -70,6 +70,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA (native VHDL) — an oversize capture length is reported, not silently
+  truncated.** `pretrig_len`, `posttrig_len` and their clock-crossing stages
+  were one bit narrower than the Verilog core's, which sizes them to hold a
+  length equal to `DEPTH`. A length written at or above `DEPTH` therefore
+  wrapped instead of raising `overflow`, so the core proceeded with a different
+  window as though the request were valid. No capture the host library can
+  request was affected — it validates `pretrigger + posttrigger + 1` against the
+  depth — so this only reached a JTAG master writing the registers directly,
+  which is exactly what the overflow flag exists to catch.
+
+- **ELA (native VHDL) — the data-window address decode is now total.** Reading
+  any register below the sample-data window left the decode's sample index
+  holding its value from the previous evaluation, which both inferred a latch
+  and disagreed with the Verilog core (whose decode is unconditional and lands
+  out of range). Masked in practice, since the value is only consumed on a
+  data-window read.
+
 - **ELA — captures no longer splice across a re-arm.** In single-segment builds
   the pre-trigger history rolls continuously, but sample writes stop while a
   completed capture is read out, leaving a hole in it. The core kept vouching
