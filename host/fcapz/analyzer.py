@@ -805,7 +805,7 @@ class Analyzer:
         if self._manager_found is None:
             with self.transport.transaction_lock():
                 self._select_chain()
-                version = int(self.transport.read_reg(_ADDR_MGR_VERSION))
+                version = int(self.transport.read_reg_stable(_ADDR_MGR_VERSION))
             self._manager_found = (version & 0xFFFF) == _CORE_MANAGER_CORE_ID
         return self._manager_found
 
