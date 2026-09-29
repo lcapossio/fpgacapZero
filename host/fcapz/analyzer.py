@@ -819,12 +819,11 @@ class Analyzer:
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
 
-        An explicit slot implies one.  Without a slot (``instance=None``, the
-        CLI default) the manager's identity register decides, since reads then
-        go to whichever slot the manager has active.
+        The manager's identity register decides, with or without a selected
+        slot: ``instance=None`` (the CLI default) still reads whichever slot the
+        manager has active, and a slot selected on a design without a manager
+        (the GUI selects slot 0 on some paths) must not disable burst readout.
         """
-        if self._instance is not None:
-            return True
         if self._manager_found is None:
             with self.transport.transaction_lock():
                 self._select_chain()
@@ -886,9 +885,11 @@ class Analyzer:
                         "the slower read_block path",
                         exc,
                     )
-            # Fallback: read_block's pipelined word path (fast on hw_server;
-            # slow per-word on quartus_stp when its DATA_CHAIN burst can't reach
+            # Fallback: the pipelined word path (fast on hw_server; slow
+            # per-word on quartus_stp when its DATA_CHAIN burst can't reach
             # this core — but correct either way).
+            if not has_burst:
+                return self.transport.read_window_block(_ADDR_DATA_BASE, total_words)
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         if has_burst:
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)

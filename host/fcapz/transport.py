@@ -288,6 +288,13 @@ class Transport(ABC):
         """
         raise NotImplementedError
 
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        """Like :meth:`read_block`, but always through the register window,
+        never a burst.  For a core-manager slot with no burst wiring, whose
+        burst reads return zeros.  Transports whose ``read_block`` never
+        bursts need not override it."""
+        return self.read_block(addr, words)
+
     #: One past the last address a DATA / timestamp window read may touch.
     #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
     #: (``0xF000``) for a core behind a core manager.
@@ -1055,6 +1062,11 @@ class QuartusStpTransport(Transport):
                     exc,
                 )
                 self._has_burst = False
+        return self.read_window_block(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
         check_data_window(addr, words, self.data_window_end)
         instance = self._active_chain
         body = ["set __fcapz_reads {}"]
@@ -2168,6 +2180,11 @@ class XilinxHwServerTransport(Transport):
                     )
                 self._has_burst = False
         # Non-burst path needs flush to reset the 49-bit register pipeline.
+        return self._read_block_user1(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
         return self._read_block_user1(addr, words)
 
     @property
