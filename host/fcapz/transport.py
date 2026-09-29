@@ -167,11 +167,10 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
     Register addresses are 16 bits, so a read past ``0x10000`` wraps onto the
     core's own registers; behind a core manager the window must also stop at
     the manager block (``0xF000``).  Either way the hardware returns register
-    values instead of samples, with no error.  Reads that start at or above
-    *end* (e.g. of the manager registers themselves) are not window reads.
+    values instead of samples, with no error.
     """
     stop = addr + 4 * max(0, words)
-    if stop > REG_ADDR_SPACE_END or addr < end < stop:
+    if stop > min(end, REG_ADDR_SPACE_END):
         raise DataWindowError(
             f"window read 0x{addr:04X}..0x{stop - 4:X} ({words} words) runs past "
             f"0x{end:X}: this capture is too large for the register window; "

@@ -280,6 +280,36 @@ def _selected_transaction(method):
     return wrapper
 
 
+def _join_timestamp_words(raw: list[int], words_per: int, mask: int) -> list[int]:
+    """Assemble little-endian 32-bit window words into timestamp values."""
+    if words_per == 1:
+        return [v & mask for v in raw]
+    values = []
+    for i in range(0, len(raw), words_per):
+        val = 0
+        for j in range(min(words_per, len(raw) - i)):
+            val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
+        values.append(val & mask)
+    return values
+
+
+def _timestamps_advance(ts: list[int], width: int) -> bool:
+    """Return whether *ts* counts strictly forward, allowing one counter wrap.
+
+    Every step must be nonzero modulo ``2**width`` and the steps together must
+    span less than one full counter period, so a repeated (stale) burst scan,
+    which steps back to an earlier value, is still caught.
+    """
+    period = 1 << width
+    span = 0
+    for prev, cur in zip(ts, ts[1:]):
+        step = (cur - prev) % period
+        if step == 0:
+            return False
+        span += step
+    return span < period
+
+
 class Analyzer:
     def __init__(
         self,
@@ -295,6 +325,7 @@ class Analyzer:
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
         self._manager_slot_caps: int | None = None
+        self._manager_found: bool | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -332,6 +363,7 @@ class Analyzer:
         with self.transport.transaction_lock():
             self._instance = None if instance is None else int(instance)
             self._manager_slot_caps = None
+            self._manager_found = None
             self._select_instance()
 
     def connect(self) -> None:
@@ -339,6 +371,8 @@ class Analyzer:
             self._select_chain()
             self.transport.connect()
             self.transport.invalidate_manager_instance_cache()
+            self._manager_slot_caps = None
+            self._manager_found = None
             self._select_instance()
 
     def close(self, *, fast: bool = False) -> None:
@@ -681,7 +715,7 @@ class Analyzer:
         timestamp window whose base passed 0x10000 was decoded at its low 16
         bits, which turns every DATA read from there on into a timestamp read.
         """
-        end = _ADDR_MGR_VERSION if self._instance is not None else REG_ADDR_SPACE_END
+        end = _ADDR_MGR_VERSION if self._behind_manager() else REG_ADDR_SPACE_END
         if self._hw_timestamp_w and self._config is not None:
             words_per_sample = (self._config.sample_width + 31) // 32
             ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
@@ -706,9 +740,10 @@ class Analyzer:
         # Wide, single-chain cores (the 160-bit AXI monitor) keep their timestamp
         # window on the same BSCAN instance as their samples, so the two-chain
         # DATA_CHAIN burst below can never reach it -- read it the same way the
-        # samples were (see _read_data_words).  Gated on sw>32 to mirror that
-        # sample-path decision exactly.
-        if sw > 32 and ts_words_per == 1:
+        # samples were (see _read_data_words).  Gated on sw>32 and the slot's
+        # burst capability to mirror that sample-path decision exactly.
+        has_burst = self._selected_slot_has_burst()
+        if sw > 32 and has_burst:
             ts_single = getattr(
                 self.transport, "read_timestamp_block_single_chain", None
             )
@@ -716,7 +751,7 @@ class Analyzer:
                 try:
                     raw = ts_single(ts_base, total, self._hw_timestamp_w)
                     ts = [v & mask for v in raw]
-                    if all(ts[i] > ts[i - 1] for i in range(1, len(ts))):
+                    if _timestamps_advance(ts, self._hw_timestamp_w):
                         _log.info(
                             "single-chain timestamp burst: %d timestamps (%d-bit)",
                             total,
@@ -736,25 +771,19 @@ class Analyzer:
             # The two-chain burst can't reach a single-chain core, so skip it and
             # read the timestamp words directly (deterministic, just slower).
             raw = self.transport.read_block(ts_base, ts_word_count)
-            return [v & mask for v in raw]
+            return _join_timestamp_words(raw, ts_words_per, mask)
 
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        used_timestamp_burst = ts_words_per == 1 and callable(timestamp_burst)
-        if used_timestamp_burst and self._selected_slot_has_burst():
+        used_timestamp_burst = (
+            ts_words_per == 1 and callable(timestamp_burst) and has_burst
+        )
+        if used_timestamp_burst:
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
-        timestamps = []
-        if ts_words_per == 1:
-            timestamps = [v & mask for v in raw]
-        else:
-            for i in range(0, len(raw), ts_words_per):
-                val = 0
-                for j in range(min(ts_words_per, len(raw) - i)):
-                    val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
-                timestamps.append(val & mask)
-        if used_timestamp_burst and any(
-            timestamps[i] <= timestamps[i - 1] for i in range(1, len(timestamps))
+        timestamps = _join_timestamp_words(raw, ts_words_per, mask)
+        if used_timestamp_burst and not _timestamps_advance(
+            timestamps, self._hw_timestamp_w
         ):
             # Some Xilinx hw_server runs occasionally return one stale burst
             # timestamp scan after the sample burst. Control-chain timestamp
@@ -764,14 +793,38 @@ class Analyzer:
             timestamps = [v & mask for v in raw]
         return timestamps
 
+    def _behind_manager(self) -> bool:
+        """Return whether this core sits behind a core manager.
+
+        An explicit slot implies one.  Without a slot (``instance=None``, the
+        CLI default) the manager's identity register decides, since reads then
+        go to whichever slot the manager has active.
+        """
+        if self._instance is not None:
+            return True
+        if self._manager_found is None:
+            with self.transport.transaction_lock():
+                self._select_chain()
+                version = int(self.transport.read_reg(_ADDR_MGR_VERSION))
+            self._manager_found = (version & 0xFFFF) == _CORE_MANAGER_CORE_ID
+        return self._manager_found
+
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""
         with self.transport.transaction_lock():
-            if self._instance is None:
+            if not self._behind_manager():
                 return True
             if self._manager_slot_caps is None:
                 self._select_chain()
-                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, self._instance)
+                slot = self._instance
+                if slot is None:
+                    # Without descriptors (MGR_CAPS bit 1) the active slot's
+                    # burst wiring is unknown; keep the direct-mode default.
+                    if not int(self.transport.read_reg(_ADDR_MGR_CAPS)) & 0x2:
+                        self._manager_slot_caps = 0x1
+                        return True
+                    slot = int(self.transport.read_reg(_ADDR_MGR_ACTIVE))
+                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
                 self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
             return bool(self._manager_slot_caps & 0x1)
 
@@ -788,9 +841,12 @@ class Analyzer:
         # quartus_stp commands (~20s -> ~1-2s for 1024x160-bit).  This is checked
         # before the burst-slot question because it holds regardless of how the
         # core is presented (standalone or behind the core manager).
+        has_burst = self._selected_slot_has_burst()
         if sw > 32:
+            # A manager slot without burst wiring reads zeros from the shared
+            # burst engine, so only the window path is safe there.
             sample_burst = getattr(self.transport, "read_sample_block", None)
-            if sample_burst is not None:
+            if sample_burst is not None and has_burst:
                 words_per_sample = (sw + 31) // 32
                 n_samples = total_words // words_per_sample
                 try:
@@ -811,7 +867,7 @@ class Analyzer:
             # slow per-word on quartus_stp when its DATA_CHAIN burst can't reach
             # this core — but correct either way).
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
-        if self._selected_slot_has_burst():
+        if has_burst:
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
         check_data_window(_ADDR_DATA_BASE, total_words, self.transport.data_window_end)
