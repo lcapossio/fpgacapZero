@@ -169,6 +169,12 @@ module fcapz_ela #(
     // off the capture-control critical path. This adds one trigger-decision
     // cycle whenever probe input pipelining is enabled.
     localparam COMPARE_PIPE = (INPUT_PIPE >= 1) ? 1 : 0;
+    // Extra trigger_in stages beyond the 2-FF synchronizer so an external
+    // trigger reaches the capture decision with the same latency as the probe
+    // sample it marks (INPUT_PIPE + COMPARE_PIPE).  INPUT_PIPE = 0 cannot be
+    // aligned this way: there the synchronizer is 2 samples slower than the
+    // probe path, and an external trigger marks the sample 2 after its edge.
+    localparam EXT_ALIGN = (INPUT_PIPE + COMPARE_PIPE > 2) ? (INPUT_PIPE + COMPARE_PIPE - 2) : 0;
     localparam HAS_DUAL_COMPARE = (DUAL_COMPARE != 0);
     localparam HAS_USER1_DATA = (USER1_DATA_EN != 0);
     localparam HAS_SEQUENCER = (TRIG_STAGES > 1);
@@ -448,6 +454,7 @@ module fcapz_ela #(
     // When EXT_TRIG_EN=0, all ext trigger state ties to constant 0
     // and optimizes away in synthesis.
     reg trig_in_sync1, trig_in_sync2;
+    wire trig_in_aligned;
     reg [1:0] ext_trig_mode;
     reg trigger_out_r;
     assign trigger_out = HAS_EXT_TRIG ? trigger_out_r : 1'b0;
@@ -678,8 +685,8 @@ module fcapz_ela #(
     always @(*) begin
         case (ext_trig_mode)
             2'd0: trigger_hit = internal_trigger_hit;                          // disabled
-            2'd1: trigger_hit = internal_trigger_hit | trig_in_sync2;          // OR
-            2'd2: trigger_hit = internal_trigger_hit & trig_in_sync2;          // AND
+            2'd1: trigger_hit = internal_trigger_hit | trig_in_aligned;        // OR
+            2'd2: trigger_hit = internal_trigger_hit & trig_in_aligned;        // AND
             default: trigger_hit = internal_trigger_hit;
         endcase
     end
@@ -1093,6 +1100,20 @@ module fcapz_ela #(
                 trig_in_sync2 = 1'b0;
             end
         end
+
+        if (HAS_EXT_TRIG && EXT_ALIGN > 0) begin : g_ext_trig_align
+            reg  [EXT_ALIGN-1:0] trig_in_dly;
+            wire [EXT_ALIGN:0]   trig_in_chain = {trig_in_dly, trig_in_sync2};
+            always @(posedge sample_clk or posedge sample_rst) begin
+                if (sample_rst)
+                    trig_in_dly <= {EXT_ALIGN{1'b0}};
+                else
+                    trig_in_dly <= trig_in_chain[EXT_ALIGN-1:0];
+            end
+            assign trig_in_aligned = trig_in_dly[EXT_ALIGN-1];
+        end else begin : g_no_ext_trig_align
+            assign trig_in_aligned = trig_in_sync2;
+        end
     endgenerate
 
     // ---- Latch config on arm -----------------------------------------------
@@ -1252,7 +1273,9 @@ module fcapz_ela #(
             mem_we_a_q <= mem_we_a;
             if (mem_we_a) begin
                 mem_wr_addr_q <= wr_ptr;
-                mem_wr_data_q <= active_probe;
+                // The registered compare and storage-qualification hits
+                // describe the previous sample, so that is the one stored.
+                mem_wr_data_q <= probe_prev;
                 mem_wr_ts_q   <= ts_counter_cur;
             end
         end

@@ -134,6 +134,14 @@ TARGETS: tuple[CocotbTarget, ...] = (
         {"EXT_TRIG_EN": 1, "INPUT_PIPE": 3},
         ("input_pipe_depth_sets_capture_latency", "input_pipe_keeps_the_write_queued_at_arm"),
     ),
+    *(
+        CocotbTarget(
+            f"trigger_align_pipe{pipe}",
+            {"STOR_QUAL": 1, "DECIM_EN": 1, "EXT_TRIG_EN": 1, "INPUT_PIPE": pipe},
+            ("trigger_marks_the_matched_sample", "input_pipe_depth_sets_capture_latency"),
+        )
+        for pipe in (0, 1, 2, 3)
+    ),
     CocotbTarget(
         "config_min",
         {"TRIG_STAGES": 1, "STOR_QUAL": 0, "DECIM_EN": 0, "EXT_TRIG_EN": 0, "DUAL_COMPARE": 0},
