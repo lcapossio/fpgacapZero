@@ -196,7 +196,9 @@ module fcapz_ela #(
         end
     endgenerate
 
-    // Phase 3: timestamp data base address
+    // Phase 3: timestamp data base address.  Compared at full width: a deep
+    // core pushes it past 0xFFFF, and a truncated compare would alias the
+    // timestamp window onto sample data.
     localparam ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
     // Timestamp words per entry
     localparam TS_WORDS = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 0;
@@ -729,7 +731,7 @@ module fcapz_ela #(
     // ---- JTAG-domain register writes ---------------------------------------
     wire jtag_rd_data_window = HAS_USER1_DATA && (
         (jtag_addr >= ADDR_DATA_BASE) ||
-        (TIMESTAMP_W > 0 && jtag_addr >= ADDR_TS_DATA_BASE[15:0]));
+        (TIMESTAMP_W > 0 && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
     assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
@@ -746,7 +748,7 @@ module fcapz_ela #(
     endgenerate
 
     always @(*) begin
-        datawin_is_ts_comb = (TIMESTAMP_W > 0) && (jtag_addr >= ADDR_TS_DATA_BASE[15:0]);
+        datawin_is_ts_comb = (TIMESTAMP_W > 0) && ({16'h0, jtag_addr} >= ADDR_TS_DATA_BASE);
         datawin_oob_comb = 1'b0;
         datawin_mem_addr_comb = {PTR_W{1'b0}};
         datawin_chunk_comb = 32'h0;
