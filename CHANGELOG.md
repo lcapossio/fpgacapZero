@@ -97,11 +97,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   silently ignored: `ela-list` reported `got 0x0000`, and no write could
   land. A command is now the last 49 bits of any scan at least 49 and fewer
   than `BURST_W` clocks long (the same last-49-bits rule `jtag_reg_iface`
-  uses); full bursts still saturate the counter and never execute. Affects
-  `fcapz_debug_multi_xilinx7`, `fcapz_ela_xilinx7`/`_xilinxus` with the default
-  `SINGLE_CHAIN_BURST=1`, and `fcapz_axi_mon_xilinx7`/`_intel`; requires a
-  rebuild. As a consequence, a stray 49..`BURST_W`-1 bit scan on that chain now
-  executes as a command instead of being ignored. `BURST_W` must now exceed 49.
+  uses); full bursts still saturate the counter and never execute. The MPSoC
+  failure affected `fcapz_debug_multi_xilinx7`, `fcapz_ela_xilinx7`/`_xilinxus`
+  with the default `SINGLE_CHAIN_BURST=1`, and `fcapz_axi_mon_xilinx7`; fixing
+  it needs a bitstream rebuild. Every `jtag_pipe_iface` user, including
+  `fcapz_axi_mon_intel`, now also executes a stray 50..`BURST_W`-1 bit scan on
+  its chain as a command instead of ignoring it. `BURST_W` must now exceed 49.
 
 - **Docs — chapter 04's MPSoC note.** It still said only USER1 is reachable on
   Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.

@@ -567,10 +567,14 @@ async def jtag_pipe_iface_padded_chain(dut):
     JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("padded_register_frames")
 
     # Window edges: 48 is too short; burst_w and beyond are bursts (the shift
-    # counter saturates at BURST_W), whatever TDI carried.
-    ones = (1 << 400) - 1
+    # counter saturates at BURST_W), whatever TDI carried.  A scan of
+    # 2**SHIFT_CTR_W + 49 shifts would wrap an unsaturated counter back onto
+    # 49, so it proves the saturation.
+    wrap_scan = (1 << burst_w.bit_length()) + 49
+    ones = (1 << wrap_scan) - 1
     for count, executes in ((48, False), (49, True), (burst_w - 1, True),
-                            (burst_w, False), (burst_w + 1, False), (burst_w + 40, False)):
+                            (burst_w, False), (burst_w + 1, False), (burst_w + 40, False),
+                            (wrap_scan, False)):
         events.clear()
         await scan_raw(dut, ones, count)
         await idle_tap(dut, 2)
