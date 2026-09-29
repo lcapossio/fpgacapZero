@@ -1137,6 +1137,35 @@ async def _final_stage_hits_after_holdoff(ela, target: int, hits: tuple[int, ...
 
 
 @cocotb.test()
+async def sequencer_next_stage_ignores_previous_stage_match(dut):
+    """Stage 0 matches 5 and advances to stage 1, which matches 7.  A second 5
+    straight after the first is a stage-0 match only; it must not fire the
+    final stage."""
+    ela = await setup(dut)
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, 1 << 10)  # EQ, next stage 1
+    await ela.write(ADDR_SEQ_BASE + 4, 5)
+    await ela.write(ADDR_SEQ_BASE + 8, 0xFF)
+    await ela.write(ADDR_SEQ_BASE + 20, 0x1000)  # EQ, final
+    await ela.write(ADDR_SEQ_BASE + 24, 7)
+    await ela.write(ADDR_SEQ_BASE + 28, 0xFF)
+    dut.probe_in.value = 0
+    await ela.arm()
+    for cycle in range(40):
+        dut.probe_in.value = 5 if cycle in (10, 11) else 0
+        await RisingEdge(dut.sample_clk)
+    await ela.wait_sample(8)
+    assert not await ela.read(ADDR_STATUS) & 0x6, "a stage-0 match fired stage 1"
+    for cycle in range(8):
+        dut.probe_in.value = 7 if cycle == 2 else 0
+        await RisingEdge(dut.sample_clk)
+    assert await ela.wait_done() & 0x4
+    assert await ela.read(ADDR_DATA_BASE) & 0xFF == 7
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+@cocotb.test()
 async def sequencer_counts_first_hit_after_holdoff(dut):
     """A hit that can trigger a count-1 final stage is also counted by a
     count-2 one.  With INPUT_PIPE >= 1 the hit that first clears the holdoff
