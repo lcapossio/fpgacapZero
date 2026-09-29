@@ -124,12 +124,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Host — reads past the end of the 16-bit register window.** A capture larger
   than the data window (from `0x0100` up to `0xF000` behind a core manager,
-  `0x10000` otherwise) read on into manager registers and returned garbage for
-  the last samples. The host now refuses such a window read with
-  `DataWindowError`. On `hw_server`, samples wider than 32 bits (and their
+  which is now detected even when no slot is selected, `0x10000` otherwise)
+  read on into manager registers and returned garbage for the last samples.
+  The host now refuses such a window read with `DataWindowError`. On `hw_server`, samples wider than 32 bits (and their
   timestamps) are instead read with the single-chain burst, chunked 256 scans
   per TCL call, rather than 32 bits per scan: it has no window limit and is
-  much faster.
+  much faster. A manager slot without burst wiring is never burst-read (it
+  would return zeros), and a timestamp counter wrap inside a capture no longer
+  sends a good burst readout to the slow fallback.
 
 - **CLI.** `--trigger-value` accepts hex (`0x…`); `--depth` and the sample
   width default to what the core reports instead of 1024/8.
