@@ -170,6 +170,12 @@ architecture rtl of fcapz_ela is
     -- INPUT_PIPE probe register stages; the array keeps one when INPUT_PIPE = 0
     -- so its bounds stay legal, and that stage is then unused.
     constant PIPE_STAGES      : positive := fcapz_nonzero_width(INPUT_PIPE);
+    -- Extra trigger_in stages beyond the 2-FF synchronizer, so an external
+    -- trigger reaches the capture decision with the same latency as the probe
+    -- sample it marks (INPUT_PIPE plus the registered compare), as in
+    -- rtl/fcapz_ela.v.  INPUT_PIPE = 0 cannot be aligned this way: an external
+    -- trigger there marks the sample 2 after its edge.
+    constant EXT_ALIGN        : natural := bool_to_nat(INPUT_PIPE >= 2) * (INPUT_PIPE - 1);
     constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
 
     constant ADDR_VERSION      : natural := 16#0000#;
@@ -353,6 +359,7 @@ architecture rtl of fcapz_ela is
     signal trigger_out_i     : std_logic := '0';
     signal trigger_in_sync1  : std_logic := '0';
     signal trigger_in_sync2  : std_logic := '0';
+    signal trigger_in_aligned : std_logic := '0';
     signal wr_ptr            : natural range 0 to DEPTH - 1 := 0;
     signal start_ptr         : natural range 0 to DEPTH - 1 := 0;
     signal trig_ptr          : natural range 0 to DEPTH - 1 := 0;
@@ -764,8 +771,8 @@ begin
         end if;
 
         case ext_trig_mode is
-            when "01" => hit_eff := hit_internal or trigger_in_sync2;
-            when "10" => hit_eff := hit_internal and trigger_in_sync2;
+            when "01" => hit_eff := hit_internal or trigger_in_aligned;
+            when "10" => hit_eff := hit_internal and trigger_in_aligned;
             when others => hit_eff := hit_internal;
         end case;
 
@@ -798,13 +805,36 @@ begin
         comb_seq_stage_hit <= seq_stage_hit;
 
         mem_wr_addr <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
+        -- The registered compare and storage-qualification hits describe
+        -- the previous sample, so that is the one stored.
         if INPUT_PIPE > 0 then
-            sample_mem_din <= compare_probe;
+            sample_mem_din <= probe_prev;
         else
             sample_mem_din <= active_probe;
         end if;
         ts_mem_din <= std_logic_vector(timestamp_counter);
     end process;
+
+    g_ext_trig_align : if EXT_TRIG_EN /= 0 and EXT_ALIGN > 0 generate
+        signal trigger_in_dly : std_logic_vector(EXT_ALIGN - 1 downto 0) := (others => '0');
+    begin
+        p_ext_trig_align : process(sample_clk, sample_rst)
+        begin
+            if sample_rst = '1' then
+                trigger_in_dly <= (others => '0');
+            elsif rising_edge(sample_clk) then
+                trigger_in_dly(0) <= trigger_in_sync2;
+                for i in 1 to EXT_ALIGN - 1 loop
+                    trigger_in_dly(i) <= trigger_in_dly(i - 1);
+                end loop;
+            end if;
+        end process;
+        trigger_in_aligned <= trigger_in_dly(EXT_ALIGN - 1);
+    end generate;
+
+    g_no_ext_trig_align : if EXT_TRIG_EN = 0 or EXT_ALIGN = 0 generate
+        trigger_in_aligned <= trigger_in_sync2;
+    end generate;
 
     p_mem_write_pipe : process(sample_clk, sample_rst)
     begin

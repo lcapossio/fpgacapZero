@@ -588,12 +588,14 @@ module fcapz_ela_bug_probe_tb;
                  word0[7:0], word1[7:0], word2[7:0]);
         check("fast external trigger completes without post-arm prefill delay",
               status[2] == 1'b1);
+        // The first pulse clock is driven alongside probe value 32, and that
+        // sample is the one marked.
         check("rolling prehistory start is the expected prior sample",
-              word0[7:0] == 8'd25);
+              word0[7:0] == 8'd24);
         check("trigger sample is anchored at pretrigger index",
-              word1[7:0] == 8'd33);
+              word1[7:0] == 8'd32);
         check("post-trigger sample follows trigger sample",
-              word2[7:0] == 8'd34);
+              word2[7:0] == 8'd33);
 
         $display("\n=== Regression 10: re-arm never splices the previous capture ===");
         probe_roll = 8'd80;

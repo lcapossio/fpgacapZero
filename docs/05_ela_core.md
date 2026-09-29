@@ -67,7 +67,8 @@ timestamps are enabled, the timestamp counter is not delayed by the same
 number of stages; each timestamp marks the cycle when the pipelined sample
 is written, not the original external `probe_in` cycle. In practice the
 reported timestamp is later than the external probe event by `INPUT_PIPE`
-sample-clock cycles.
+sample-clock cycles, plus one for the registered compare stage when
+`INPUT_PIPE>=1`.
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
@@ -305,7 +306,7 @@ samples accurately.
 With `INPUT_PIPE>=1`, timestamps are aligned to the stored, pipelined sample
 stream. Relative spacing between stored samples is still accurate, but the
 absolute timestamp for an external `probe_in` event is offset by the input
-pipeline depth.
+pipeline depth plus the registered compare stage (`INPUT_PIPE + 1` clocks).
 
 ## External trigger I/O (`EXT_TRIG_EN=1`)
 
@@ -336,6 +337,17 @@ cfg = CaptureConfig(
     ext_trigger_mode = 1,         # 0=disabled, 1=OR, 2=AND
 )
 ```
+
+`trigger_in` passes through a 2-flop synchronizer.  With `INPUT_PIPE>=1`
+the core delays it further to match the probe path, so a `trigger_in`
+pulse sampled on the same clock as a probe value marks that value, and in
+AND mode the internal compare and `trigger_in` refer to the same sample.
+With `INPUT_PIPE=0` the synchronizer is two sample clocks slower than the
+probe: an external trigger marks the sample two clocks after the pulse,
+and AND mode combines the current compare with `trigger_in` from two
+clocks earlier.  Build with `INPUT_PIPE>=1` when a synchronous
+`trigger_in` must line up with the probe exactly.  An asynchronous
+`trigger_in` has an inherent one-clock uncertainty either way.
 
 The reference Arty A7 design ties `trigger_in` to an EIO-controlled
 fabric signal, so you can manually fire the trigger from the host

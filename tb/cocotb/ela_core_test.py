@@ -57,10 +57,12 @@ SAMPLE_W = env_int("ELA_PARAM_SAMPLE_W", 8)
 DEPTH = env_int("ELA_PARAM_DEPTH", 16)
 INPUT_PIPE = env_int("ELA_PARAM_INPUT_PIPE", 0)
 DECIM_EN = env_int("ELA_PARAM_DECIM_EN", 0)
-# Committed sample relative to the external-trigger pulse, before subtracting
-# one per INPUT_PIPE stage (valid for INPUT_PIPE >= 1, where the compare path is
-# also registered).  Measured on the Verilog core at INPUT_PIPE = 1, 2 and 3.
-INPUT_PIPE_ANCHOR_OFFSET = 2
+STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
+EXT_TRIG_EN = env_int("ELA_PARAM_EXT_TRIG_EN", 0)
+# Samples between an external trigger_in pulse and the sample it marks.  The
+# core delays trigger_in to match the probe path for INPUT_PIPE >= 1; with no
+# input pipe the 2-FF synchronizer is 2 samples slower than the probe.
+EXT_TRIG_MARK_OFFSET = 2 if INPUT_PIPE == 0 else 0
 TIMESTAMP_W = env_int("ELA_PARAM_TIMESTAMP_W", 0)
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
 TS_WORDS = (TIMESTAMP_W + 31) // 32 if TIMESTAMP_W > 0 else 0
@@ -116,6 +118,7 @@ class ElaFunctionalCoverage:
             "rolling_prehistory": 0,
             "rolling_rearm_history": 0,
             "randomized_value_capture": 0,
+            "trigger_alignment": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -1029,8 +1032,10 @@ async def rolling_prehistory_and_rearm(dut):
     assert await ela.read(ADDR_STATUS) & 0x4
     first = await ela.read_samples(10)
     assert first[0] & 0xFF == 24
-    assert first[8] & 0xFF == 30
-    assert first[9] & 0xFF == 31
+    # The pulse spans probe values 27..29; the pre-trigger window has only
+    # filled by 29, the last of them, so that is the marked sample.
+    assert first[8] & 0xFF == 29
+    assert first[9] & 0xFF == 30
     FUNCTIONAL_COVERAGE.hit("rolling_prehistory")
 
     ela.dut.probe_in.value = 80
@@ -1157,8 +1162,8 @@ async def sequencer_counts_first_hit_after_holdoff(dut):
 
 @cocotb.test()
 async def input_pipe_depth_sets_capture_latency(dut):
-    """Every INPUT_PIPE stage delays the probe by one sample clock against the
-    external trigger, so the committed sample moves back one count per stage."""
+    """An external pulse marks the probe sample driven alongside it at every
+    INPUT_PIPE >= 1 depth, and the one 2 samples later with no input pipe."""
     ela = await setup(dut)
     await ela.write(ADDR_TRIG_EXT, 1)  # OR: the external pulse alone triggers
     await ela.configure_value_capture(pre=0, post=3, value=0xFF, mask=0xFF)
@@ -1174,7 +1179,7 @@ async def input_pipe_depth_sets_capture_latency(dut):
     window = [s & 0xFF for s in await ela.read_samples(4)]
     dut._log.info("INPUT_PIPE=%d pulse at %d window %s", INPUT_PIPE, pulse_at, window)
     assert counter_steps(window) == [1, 1, 1], window
-    assert window[0] == pulse_at + INPUT_PIPE_ANCHOR_OFFSET - INPUT_PIPE, window
+    assert window[0] == pulse_at + EXT_TRIG_MARK_OFFSET, window
 
 
 @cocotb.test()
@@ -1209,6 +1214,74 @@ async def input_pipe_keeps_the_write_queued_at_arm(dut):
     counter.cancel()
     window = [s & 0xFF for s in await ela.read_samples(13)]
     assert counter_steps(window) == [1] * 12, f"window has a stale word: {window}"
+
+
+async def _counter_window(ela, *, pre: int, post: int, value: int, cycles: int = 120) -> list[int]:
+    """Capture a free-running 8-bit counter triggered on ``value``."""
+    await ela.configure_value_capture(pre=pre, post=post, value=value)
+    await ela.arm()
+    await ela.drive_counter(cycles)
+    assert await ela.wait_done() & 0x4
+    return [s & 0xFF for s in await ela.read_samples(pre + post + 1)]
+
+
+@cocotb.test()
+async def trigger_marks_the_matched_sample(dut):
+    """samples[pretrig] is the sample the trigger compare matched, at every
+    INPUT_PIPE depth, with trigger delay, storage qualification, decimation
+    and the external trigger in AND mode."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+
+    window = await _counter_window(ela, pre=4, post=3, value=0x40)
+    assert window[4] == 0x40 and counter_steps(window) == [1] * 7, window
+
+    await ela.reset_core()
+    await ela.write(ADDR_TRIG_DELAY, 3)
+    window = await _counter_window(ela, pre=4, post=3, value=0x40)
+    assert window[4] == 0x43 and counter_steps(window) == [1] * 7, window
+    await ela.write(ADDR_TRIG_DELAY, 0)
+
+    if STOR_QUAL:
+        # Store odd samples only (NEQ against bit 0 clear).
+        await ela.reset_core()
+        await ela.write(ADDR_SQ_MODE, 1)
+        await ela.write(ADDR_SQ_VALUE, 0)
+        await ela.write(ADDR_SQ_MASK, 1)
+        window = await _counter_window(ela, pre=3, post=3, value=0x41)
+        assert window[3] == 0x41 and counter_steps(window) == [2] * 6, window
+        await ela.write(ADDR_SQ_MODE, 0)
+        FUNCTIONAL_COVERAGE.hit("storage_qualifier")
+
+    if DECIM_EN:
+        # The commit force-stores the anchor whatever phase the divider has.
+        await ela.reset_core()
+        await ela.write(ADDR_DECIM, 3)
+        window = await _counter_window(ela, pre=2, post=2, value=0x41)
+        assert window[2] == 0x41, window
+        await ela.write(ADDR_DECIM, 0)
+        FUNCTIONAL_COVERAGE.hit("decimation")
+
+    if EXT_TRIG_EN:
+        # AND: the compare matches 0x30..0x3F; the pulse picks one of them.
+        await ela.reset_core()
+        await ela.write(ADDR_TRIG_EXT, 2)
+        await ela.configure_value_capture(pre=2, post=2, value=0x30, mask=0xF0)
+        dut.trigger_in.value = 0
+        await ela.arm()
+        pulse_at = 0x36 - EXT_TRIG_MARK_OFFSET
+        for cycle in range(96):
+            dut.probe_in.value = cycle
+            dut.trigger_in.value = 1 if cycle == pulse_at else 0
+            await RisingEdge(dut.sample_clk)
+        dut.trigger_in.value = 0
+        assert await ela.wait_done() & 0x4
+        window = [s & 0xFF for s in await ela.read_samples(5)]
+        assert window[2] == 0x36 and counter_steps(window) == [1] * 4, window
+        await ela.write(ADDR_TRIG_EXT, 0)
+        FUNCTIONAL_COVERAGE.hit("external_trigger_and")
+
+    FUNCTIONAL_COVERAGE.hit("trigger_alignment")
 
 
 @cocotb.test()
