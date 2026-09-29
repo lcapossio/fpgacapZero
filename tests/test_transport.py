@@ -151,8 +151,11 @@ class DataWindowCheckTests(unittest.TestCase):
         check_data_window(0x0100, (0x10000 - 0x0100) // 4)  # ends at 0xFFFC
         with self.assertRaises(DataWindowError):
             check_data_window(0x0100, (0x10000 - 0x0100) // 4 + 1)
-        # Reads that start at/after the window end (manager registers) are fine.
-        check_data_window(0xF000, 8, 0xF000)
+        # A read starting at or past the end is refused too; an empty one is not.
+        with self.assertRaises(DataWindowError):
+            check_data_window(0xF000, 8, 0xF000)
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, 1, 0x0100)
         check_data_window(0x0100, 0, 0x0100)
 
 
