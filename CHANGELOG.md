@@ -70,6 +70,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Single-chain and multi-core Xilinx cores dropped every command on Zynq
+  UltraScale+ MPSoC.** `jtag_pipe_iface` only acted on a scan of
+  exactly 49 shift clocks. Every other TAP in BYPASS on the chain adds one
+  clock (the ARM DAP on MPSoC), so each 49-bit command arrived as 50 and was
+  silently ignored: `ela-list` reported `got 0x0000`, and no write could
+  land. A command is now the last 49 bits of any scan at least 49 and fewer
+  than `BURST_W` clocks long (the same last-49-bits rule `jtag_reg_iface`
+  uses); full bursts still saturate the counter and never execute. Affects
+  `fcapz_debug_multi_xilinx7`, `fcapz_ela_xilinx7`/`_xilinxus` with the default
+  `SINGLE_CHAIN_BURST=1`, and `fcapz_axi_mon_xilinx7`/`_intel`; requires a
+  rebuild. As a consequence, a stray 49..`BURST_W`-1 bit scan on that chain now
+  executes as a command instead of being ignored. `BURST_W` must now exceed 49.
+
 - **ELA — one stale sample after a soft reset with `INPUT_PIPE ≥ 1`.** Arming
   (and soft reset) cancelled the RAM write queued in the input pipeline while
   the write pointer still advanced, so that address kept a sample one

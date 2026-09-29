@@ -392,6 +392,16 @@ Verified on xck26 / KV260:
 All four USER chains work.  Reads, writes, and 256-bit burst scans
 are confirmed end-to-end.
 
+That verification predates the single-chain pipe interface
+(`jtag_pipe_iface`): it ran on the register interface on USER1 with
+bursts on USER2.  xsdb hides the DAP's BYPASS bit from the host, but
+the PL still sees it as one extra shift clock on every DR scan (a
+49-bit command is 50 TCKs in Shift-DR).  The pipe interface therefore
+decodes a command from the last 49 bits of any scan that is at least
+49 and fewer than `BURST_W` shifts long, instead of requiring exactly
+49 (see the changelog).  Single-chain and multi-core
+wrappers have not yet been re-verified on MPSoC hardware.
+
 #### Write path difference on MPSoC
 
 Writes on MPSoC in `-register` mode need an explicit `-state DRUPDATE`
