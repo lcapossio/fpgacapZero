@@ -147,10 +147,12 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
             else (
                 probe_file.sample_width
                 if probe_file is not None and probe_file.sample_width is not None
-                else 8
+                else getattr(args, "hw_sample_width", None) or 8
             )
         ),
-        depth=args.depth,
+        depth=args.depth if args.depth is not None else (
+            getattr(args, "hw_depth", None) or 1024
+        ),
         sample_clock_hz=(
             args.sample_clock_hz
             if args.sample_clock_hz is not None
@@ -359,8 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
             help="Trigger comparator mode (see chapter 05)",
         )
         parser.add_argument(
-            "--trigger-value", type=int, default=0, metavar="V",
-            help="Trigger compare value",
+            "--trigger-value", type=lambda x: int(x, 0), default=0, metavar="V",
+            help="Trigger compare value (hex or decimal)",
         )
         parser.add_argument(
             "--trigger-mask", type=lambda x: int(x, 0), default=0xFF, metavar="M",
@@ -368,11 +370,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--sample-width", type=int, default=None, metavar="N",
-            help="Bits per sample, must match the core (default: the probe file's, else 8)",
+            help=(
+                "Bits per sample, must match the core "
+                "(default: the probe file's, else the core's)"
+            ),
         )
         parser.add_argument(
-            "--depth", type=int, default=1024, metavar="N",
-            help="Buffer depth in samples; must match the core",
+            "--depth", type=int, default=None, metavar="N",
+            help="Buffer depth in samples (default: read from the core)",
         )
         parser.add_argument(
             "--sample-clock-hz", type=int, default=None, metavar="HZ",
@@ -899,6 +904,11 @@ def main() -> int:
                     print(f"error: {err}", file=sys.stderr)
                     return 2
 
+        if args.depth is None or args.sample_width is None:
+            # Default to the selected core's real geometry rather than guessing.
+            hw = analyzer.probe()
+            args.hw_depth = int(hw["depth"])
+            args.hw_sample_width = int(hw["sample_width"])
         cfg = _build_config(args)
         analyzer.configure(cfg)
 
