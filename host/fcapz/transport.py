@@ -1657,21 +1657,18 @@ class XilinxHwServerTransport(Transport):
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
         1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
     }
-    # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*).  xsdb at the PL-TAP
-    # target level auto-handles the ARM DAP's **IR** (pads with BYPASS)
-    # but does NOT pad the **DR** — the ARM DAP's 1-bit BYPASS register
-    # still sits in series with the PL's DR.  Chain order on MPSoC is
-    # ``TDI → ARM DAP → PL TAP → TDO``, so the DAP BYPASS bit lands on
-    # the TDI-side end of the 50-bit DR scan.  The host must therefore
-    # pair this table with three constructor args:
-    #   ``ir_length=12``  — PL TAP IR width (no DAP bits; xsdb adds those).
-    #   ``dr_extra_bits=1`` — one DAP BYPASS bit on every DR scan.
-    #   ``dr_extra_position="tdi"`` — BYPASS sits at the TDI end; the
-    #       captured token has the fcapz 49-bit response at offset 0 and
-    #       the BYPASS bit trailing, so the parser skips nothing up front.
+    # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*), raw-opcode mode.
+    # The supported MPSoC path is ``use_register_ir=True`` (the CLI picks
+    # it), where xsdb routes the IR and pads the DR itself; this table is
+    # kept for raw-mode experiments.  In raw mode xsdb at the PL-TAP
+    # target level pads the ARM DAP's **IR** but not its **DR**: the
+    # DAP's 1-bit BYPASS register is still in series with the PL's DR, so
+    # pair this table with ``ir_length=12`` and ``dr_extra_bits=1``.
+    # ``dr_extra_position="tdi"`` matched a KV260 TDO trace, which assumed
+    # ``TDI → ARM DAP → PL TAP → TDO``; OpenOCD's xilinx_zynqmp.cfg implies
+    # the DAP is nearest TDO instead, so treat the position as unverified.
     # The PL BSCANE2 USER1..USER4 instructions share the 7-series opcode
     # pattern but in the 12-bit IR land at 0x024, 0x025, 0x026, 0x027.
-    # Verified on xck26 / KV260 by TDO trace.
     IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
         1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
     }

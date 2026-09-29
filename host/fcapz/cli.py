@@ -184,17 +184,11 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     arguments.  An empty dict means "use transport defaults" (7-series
     single-device 6-bit IR, no bypass padding, no read retries).
 
-    MPSoC-specific fields (Zynq UltraScale+, ``xck*`` / ``xczu*``):
-      - ``ir_length=12`` — PL TAP IR width; xsdb auto-walks the DAP
-        portion of the chain's IR, so only the PL's 12 bits are shifted
-        by the host.
-      - ``dr_extra_bits=1`` + ``dr_extra_position="tdi"`` — the ARM DAP's
-        1-bit BYPASS register sits between TDI and the PL TAP's DR, so
-        every DR scan is 1 bit longer than the fcapz 49-bit frame and
-        the BYPASS bit sits at the TDI-side end of the 50-bit scan.
-        The captured token has the fcapz 49 bits at offset 0 and the
-        BYPASS bit trailing; the parser skips nothing at the front.
-        Verified by TDO trace on xck26 / KV260.
+    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
+    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
+    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
+    itself, so the host shifts plain fcapz frames.  The PL still sees one
+    extra shift clock per DR scan, which the RTL tolerates.
 
     The detection is purely a CLI-layer convenience and lives here, not
     in the transport, so the transport stays a dumb data-shifter.
