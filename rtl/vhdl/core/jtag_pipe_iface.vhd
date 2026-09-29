@@ -13,7 +13,8 @@ entity jtag_pipe_iface is
         SAMPLE_W       : positive := 8;
         TIMESTAMP_W    : natural := 0;
         DEPTH          : positive := 1024;
-        BURST_W        : positive := 256;
+        -- Must exceed the 49-bit register frame (range checked at elaboration).
+        BURST_W        : integer range 50 to integer'high := 256;
         SEG_DEPTH      : positive := 1024;
         BURST_PTR_ADDR : natural := 16#002C#
     );
@@ -101,10 +102,6 @@ architecture rtl of jtag_pipe_iface is
 begin
     assert is_power_of_two(SEG_DEPTH)
         report "jtag_pipe_iface: SEG_DEPTH must be a power of two"
-        severity failure;
-
-    assert BURST_W > 49
-        report "jtag_pipe_iface: BURST_W must exceed the 49-bit register frame"
         severity failure;
 
     tdo       <= sr(0);
