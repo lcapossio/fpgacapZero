@@ -103,6 +103,10 @@ begin
         report "jtag_pipe_iface: SEG_DEPTH must be a power of two"
         severity failure;
 
+    assert BURST_W > 49
+        report "jtag_pipe_iface: BURST_W must exceed the 49-bit register frame"
+        severity failure;
+
     tdo       <= sr(0);
     reg_clk   <= tck;
     reg_rst   <= arst;
@@ -196,7 +200,10 @@ begin
                         shift_cnt <= shift_cnt + to_unsigned(1, SHIFT_CTR_W);
                     end if;
                 elsif update = '1' then
-                    if shift_cnt = to_unsigned(49, SHIFT_CTR_W) then
+                    -- Last 49 bits of any scan shorter than a burst: bypassed
+                    -- TAPs on the chain pad the physical shift count.
+                    if shift_cnt >= to_unsigned(49, SHIFT_CTR_W) and
+                       shift_cnt < to_unsigned(BURST_W, SHIFT_CTR_W) then
                         reg_addr_r <= cmd_sr(47 downto 32);
                         if cmd_sr(48) = '1' then
                             reg_wdata_r <= cmd_sr(31 downto 0);
