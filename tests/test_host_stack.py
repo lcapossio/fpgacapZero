@@ -469,7 +469,7 @@ class AnalyzerTests(unittest.TestCase):
 
     def _wide_capture(
         self, *, managed: bool, capture_len: int, sample_burst: bool, slot_caps: int = 1,
-        instance: int | None = 0, timestamp_w: int = 0,
+        instance: int | None = None, timestamp_w: int = 0,
     ):
         """Capture from a 256-bit x 2048 core whose DATA window is read as
         32-bit words through a range-checked register window."""
@@ -518,7 +518,7 @@ class AnalyzerTests(unittest.TestCase):
             )
 
         transport = WideTransport()
-        analyzer = Analyzer(transport, instance=instance if managed else None)
+        analyzer = Analyzer(transport, instance=instance)
         analyzer.connect()
         analyzer.configure(replace(
             self._make_cfg(), sample_width=256, depth=2048,
@@ -529,14 +529,16 @@ class AnalyzerTests(unittest.TestCase):
     def test_wide_managed_capture_past_manager_block_is_refused(self):
         """256 x 2048 behind a core manager: samples 1912+ would read the
         manager's registers through the window, so the window path refuses."""
-        _, analyzer = self._wide_capture(managed=True, capture_len=2048, sample_burst=False)
+        _, analyzer = self._wide_capture(
+            managed=True, capture_len=2048, sample_burst=False, instance=0
+        )
         with self.assertRaises(DataWindowError):
             analyzer.capture(timeout=0.01)
 
     def test_wide_managed_capture_uses_sample_burst(self):
         """The burst readout addresses RAM by sample, so it has no window limit."""
         transport, analyzer = self._wide_capture(
-            managed=True, capture_len=2048, sample_burst=True
+            managed=True, capture_len=2048, sample_burst=True, instance=0
         )
         result = analyzer.capture(timeout=0.01)
         self.assertEqual(transport.sample_bursts, [(0x0100, 2048, 256)])
@@ -547,12 +549,29 @@ class AnalyzerTests(unittest.TestCase):
         """A manager slot without burst wiring reads zeros from the shared
         burst engine, so its samples come from the register window."""
         transport, analyzer = self._wide_capture(
-            managed=True, capture_len=16, sample_burst=True, slot_caps=0
+            managed=True, capture_len=16, sample_burst=True, slot_caps=0, instance=0
         )
+        window_only = []
+        transport.read_block = lambda addr, words: self.fail("read_block may burst")
+
+        def read_window_block(addr, words):
+            window_only.append((addr, words))
+            return [(i // 8) if i % 8 == 0 else 0 for i in range(words)]
+
+        transport.read_window_block = read_window_block
         result = analyzer.capture(timeout=0.01)
         self.assertEqual(transport.sample_bursts, [])
-        self.assertEqual(transport.window_reads, [(0x0100, 16 * 8)])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)])
         self.assertEqual(result.samples, list(range(16)))
+
+    def test_slot_selected_without_a_manager_keeps_sample_burst(self):
+        """Selecting slot 0 on a design with no core manager (as some GUI paths
+        do) must not read garbage descriptor caps and drop the burst."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=2040, sample_burst=True, instance=0
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 2040, 256)])
 
     def test_default_slot_behind_manager_stops_at_manager_block(self):
         """``instance=None`` still reads the manager's active slot, so the
