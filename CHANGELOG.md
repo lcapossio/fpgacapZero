@@ -104,6 +104,36 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fcapz_axi_mon_intel`, now also executes a stray 50..`BURST_W`-1 bit scan on
   its chain as a command instead of ignoring it. `BURST_W` must now exceed 49.
 
+- **ELA — trigger sample one late with `INPUT_PIPE ≥ 1`.** The registered
+  compare stage judges each sample a clock after the probe path delivers it,
+  but the RAM stored the sample then current, so `samples[pretrigger]` was the
+  sample *after* the one that matched, and storage qualification kept or
+  dropped each sample by its predecessor's compare. The core now stores the
+  judged sample. `trigger_in` is also delayed to match the probe path
+  (`INPUT_PIPE − 1` extra flops for `INPUT_PIPE ≥ 2`), so an external trigger
+  marks the sample driven alongside it, and AND mode compares like with like.
+  With `INPUT_PIPE=0` an external trigger still marks the sample two clocks
+  after the pulse (the synchronizer latency). Timestamps keep their spacing;
+  their absolute offset from `probe_in` grows by one clock. Fixing it needs a
+  bitstream rebuild.
+
+- **ELA (Verilog) — timestamps aliased onto sample data on deep cores.** The
+  timestamp window base (`0x100 + DEPTH·words·4`) was compared as 16 bits, so
+  once it passed `0xFFFF` every data-window read returned timestamps. It is now
+  compared at full width, as the VHDL core already did.
+
+- **Host — reads past the end of the 16-bit register window.** A capture larger
+  than the data window (from `0x0100` up to `0xF000` behind a core manager,
+  `0x10000` otherwise) read on into manager registers and returned garbage for
+  the last samples. The host now refuses such a window read with
+  `DataWindowError`. On `hw_server`, samples wider than 32 bits (and their
+  timestamps) are instead read with the single-chain burst, chunked 256 scans
+  per TCL call, rather than 32 bits per scan: it has no window limit and is
+  much faster.
+
+- **CLI.** `--trigger-value` accepts hex (`0x…`); `--depth` and the sample
+  width default to what the core reports instead of 1024/8.
+
 - **Docs — chapter 04's MPSoC note.** It still said only USER1 is reachable on
   Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.
   It now says that the hw_server transport's named-register mode reaches all
