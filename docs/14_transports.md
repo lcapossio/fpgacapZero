@@ -329,15 +329,18 @@ swap one for the other without changing the IR table.
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
 | AMD/Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
 | AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
-| **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
+| **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
 
-The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
-register sits in series with the PL TAP's DR on the TDI side, so every
-DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
-Without it the host's address field lands one bit position off and
-every non-zero register address reads the wrong register.
+On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
+TAP's DR, so every DR scan is one shift longer than the fcapz frame.
+`use_register_ir=True` lets xsdb route the IR and pad the DR; the host
+then shifts plain 49-bit / 256-bit frames.  The raw-opcode path
+(`IR_TABLE_XILINX_ZYNQUS` with `ir_length`, `dr_extra_bits=1` and
+`dr_extra_position`) is kept for experiments only — raw opcodes don't
+reach the PL BSCANE2 through xsdb on MPSoC (see below), and which end of
+the scan the DAP bit sits on is not established (next section).
 
 CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
 `use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
@@ -347,11 +350,20 @@ See `host/fcapz/cli.py::_chain_shape_kwargs`.
 ### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
 Zynq UltraScale+ MPSoC parts (Kria xck24/xck26, ZCU+ xczu*) have a
-**multi-TAP boundary scan chain**: `TDI -> ARM DAP -> PL TAP -> TDO`.
+**multi-TAP boundary scan chain**: the PL TAP and the ARM DAP.
 The ARM DAP (4-bit IR) handles Arm CoreSight debug; the PL TAP
 (12-bit IR) handles FPGA configuration and BSCANE2 USER instructions.
 When both TAPs are in the chain, every IR shift is 16 bits and every
 DR shift carries an extra 1-bit BYPASS register from the DAP.
+
+The physical order of the two TAPs is not established.  Earlier notes
+here gave `TDI -> ARM DAP -> PL TAP -> TDO`, based on a KV260 TDO trace
+taken through xsdb; OpenOCD's `xilinx_zynqmp.cfg` declares the DAP
+nearest TDO, which implies the opposite.  It doesn't matter for
+`use_register_ir=True`, where xsdb pads the DR.  It does matter for the
+RTL: either way the PL sees one extra shift clock per DR scan, which is
+why `jtag_pipe_iface` decodes the last 49 bits of a scan instead of
+requiring exactly 49 shifts.
 
 #### Why raw hex opcodes don't work on MPSoC
 
