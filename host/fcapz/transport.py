@@ -153,6 +153,32 @@ def list_openocd_taps(
         t.close()
 
 
+REG_ADDR_SPACE_END = 0x10000
+
+
+class DataWindowError(RuntimeError):
+    """A DATA / timestamp window read would leave the addressable window."""
+
+
+def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
+    """Refuse a register-window read of *words* 32-bit words at *addr* that
+    would run past *end*.
+
+    Register addresses are 16 bits, so a read past ``0x10000`` wraps onto the
+    core's own registers; behind a core manager the window must also stop at
+    the manager block (``0xF000``).  Either way the hardware returns register
+    values instead of samples, with no error.  Reads that start at or above
+    *end* (e.g. of the manager registers themselves) are not window reads.
+    """
+    stop = addr + 4 * max(0, words)
+    if stop > REG_ADDR_SPACE_END or addr < end < stop:
+        raise DataWindowError(
+            f"window read 0x{addr:04X}..0x{stop - 4:X} ({words} words) runs past "
+            f"0x{end:X}: this capture is too large for the register window; "
+            "read it with burst readout instead"
+        )
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -262,6 +288,11 @@ class Transport(ABC):
         ``RuntimeError`` if not connected or on I/O failure.
         """
         raise NotImplementedError
+
+    #: One past the last address a DATA / timestamp window read may touch.
+    #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
+    #: (``0xF000``) for a core behind a core manager.
+    data_window_end: int = REG_ADDR_SPACE_END
 
     def select_chain(self, chain: int) -> None:
         """Select the transport-defined JTAG user chain for later accesses.
@@ -488,6 +519,7 @@ class OpenOcdTransport(Transport):
         return shifted_out & 0xFFFFFFFF
 
     def read_block(self, addr: int, words: int) -> List[int]:
+        check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
@@ -1024,6 +1056,7 @@ class QuartusStpTransport(Transport):
                     exc,
                 )
                 self._has_burst = False
+        check_data_window(addr, words, self.data_window_end)
         instance = self._active_chain
         body = ["set __fcapz_reads {}"]
         body.append(self._virtual_ir_tcl(instance))
@@ -2185,9 +2218,9 @@ class XilinxHwServerTransport(Transport):
         IR switch to legacy DATA_CHAIN → N consecutive 256-bit DR scans.
         One round-trip.
         """
-        if timestamp:
-            if element_width is None:
-                element_width = 32
+        if timestamp and element_width is None:
+            element_width = 32
+        if element_width is not None:
             sps = max(1, self.BURST_DR_BITS // element_width)
         else:
             sps = self._burst_samples_per_scan
@@ -2227,14 +2260,9 @@ class XilinxHwServerTransport(Transport):
                 f"$_bqd delay {write_idle}",
                 "$_bqd run; $_bqd delete",
             ]
-            parts_r = ["set _bq [jtag sequence]"]
-            for _ in range(n_scans + prime_scans):
-                parts_r.append(
-                    f"{ir_burst_cmd}; "
-                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
-                )
-            parts_r.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts_w + parts_r)
+            chunks = self._burst_read_chunks(
+                ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+            )
         else:
             parts_w = [
                 "set _bq [jtag sequence]",
@@ -2249,18 +2277,17 @@ class XilinxHwServerTransport(Transport):
                 f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
                 "$_bq run; $_bq delete",
             ]
-            parts_r = ["set _bq [jtag sequence]"]
             # The first wide scan primes/fills staging and is discarded.
-            for _ in range(n_scans + prime_scans):
-                parts_r.append(
-                    f"{ir_burst_cmd}; "
-                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
-                )
-            parts_r.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts_w + parts_r)
+            chunks = self._burst_read_chunks(
+                ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+            )
+        # The BURST_PTR write rides with the first chunk; later chunks continue
+        # the same burst (callers hold the transaction lock, so no register
+        # command can end burst mode in between).
+        tcls = ["; ".join(parts_w + chunks[0])] + ["; ".join(c) for c in chunks[1:]]
 
         def run_once() -> List[int]:
-            out = self._send(tcl)
+            out = "\n".join(self._send(tcl) for tcl in tcls)
             return self._parse_burst_bits(
                 out,
                 words,
@@ -2287,6 +2314,90 @@ class XilinxHwServerTransport(Transport):
                 return current
             previous = current
         raise RuntimeError("single-chain burst readback did not stabilize")
+
+    # Wide scans per xsdb round trip.  A deep wide-sample burst is thousands
+    # of 256-bit scans; sent as one TCL line that is what hung xsdb before wide
+    # cores were routed off this path.  Burst mode holds across sequences --
+    # only a register command ends it -- so the scans are split into separate
+    # sends.  Narrow-core bursts (<= 256 scans) stay one send.
+    _BURST_SCANS_PER_SEQUENCE = 256
+
+    def _burst_read_chunks(
+        self, ir_cmd: str, total_bits: int, zeros: str, n_scans: int
+    ) -> list[list[str]]:
+        """TCL for *n_scans* burst DR scans as sequences of at most
+        ``_BURST_SCANS_PER_SEQUENCE`` scans, each printing its captured bits."""
+        chunks: list[list[str]] = []
+        for start in range(0, n_scans, self._BURST_SCANS_PER_SEQUENCE):
+            count = min(self._BURST_SCANS_PER_SEQUENCE, n_scans - start)
+            parts = ["set _bq [jtag sequence]"]
+            for _ in range(count):
+                parts.append(
+                    f"{ir_cmd}; "
+                    f"$_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
+                )
+            parts.append("puts [$_bq run -bits]; $_bq delete")
+            chunks.append(parts)
+        return chunks
+
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples via the burst DR.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample, the flat layout ``Analyzer.capture()`` reassembles.  This is the
+        readout for wide cores (``SAMPLE_W > 32``): the burst engine addresses
+        the capture RAM by sample, so unlike the 16-bit register window it has
+        no size limit, and one 256-bit scan replaces ``ceil(width / 32)``
+        register reads.  Raises ``RuntimeError`` when burst is unavailable or
+        the stream is short, so the caller can fall back.
+        """
+        if n_samples <= 0:
+            return []
+        if base_addr != 0x0100:
+            raise RuntimeError(f"sample burst needs the DATA base, got 0x{base_addr:04X}")
+        if not 1 <= sample_width <= self.BURST_DR_BITS:
+            raise RuntimeError(
+                f"sample width {sample_width} does not fit the "
+                f"{self.BURST_DR_BITS}-bit burst DR"
+            )
+        if not self._burst_available:
+            raise RuntimeError("burst readout is unavailable on this session")
+        samples = self._read_block_burst(n_samples, element_width=sample_width)
+        if len(samples) != n_samples:
+            raise RuntimeError(
+                f"sample burst returned {len(samples)} samples, expected {n_samples}"
+            )
+        words_per_sample = (sample_width + 31) // 32
+        words: List[int] = []
+        for sample in samples:
+            for w in range(words_per_sample):
+                words.append((sample >> (w * 32)) & 0xFFFFFFFF)
+        return words
+
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Read one timestamp per captured sample via the burst DR.
+
+        The wide-core counterpart of :meth:`read_sample_block`: a deep wide
+        capture's timestamp window can start past the 16-bit register space,
+        so it must not be read through the window.  Raises ``RuntimeError``
+        when burst is unavailable or the stream is short.
+        """
+        if n_timestamps <= 0:
+            return []
+        if not self._burst_available:
+            raise RuntimeError("burst readout is unavailable on this session")
+        values = self._read_block_burst(
+            n_timestamps, timestamp=True, element_width=timestamp_width
+        )
+        if len(values) != n_timestamps:
+            raise RuntimeError(
+                f"timestamp burst returned {len(values)} values, expected {n_timestamps}"
+            )
+        return values
 
     def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
         """Read timestamp words through the configured burst mode when available."""
@@ -2364,6 +2475,7 @@ class XilinxHwServerTransport(Transport):
         the pipelined path is ~25x faster and returns identical data (validated
         on Arty against the per-word path).
         """
+        check_data_window(addr, words, self.data_window_end)
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)

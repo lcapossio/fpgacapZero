@@ -22,6 +22,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
+    DataWindowError,
+    check_data_window,
     find_quartus_stp,
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
@@ -140,6 +142,19 @@ class XsdbTargetParserTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Transport ABC contract
 # ---------------------------------------------------------------------------
+
+class DataWindowCheckTests(unittest.TestCase):
+    def test_limits(self):
+        check_data_window(0x0100, (0xF000 - 0x0100) // 4, 0xF000)  # ends at 0xEFFC
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, (0xF000 - 0x0100) // 4 + 1, 0xF000)
+        check_data_window(0x0100, (0x10000 - 0x0100) // 4)  # ends at 0xFFFC
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, (0x10000 - 0x0100) // 4 + 1)
+        # Reads that start at/after the window end (manager registers) are fine.
+        check_data_window(0xF000, 8, 0xF000)
+        check_data_window(0x0100, 0, 0x0100)
+
 
 class TransportAbcTests(unittest.TestCase):
     """Verify that Transport ABC exposes the expected interface."""
@@ -1808,6 +1823,46 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
+
+    def test_read_sample_block_splits_deep_burst_into_chunks(self):
+        """A deep wide-sample burst is sent as several xsdb round trips (the
+        BURST_PTR write rides with the first), and the words come back
+        little-endian per sample."""
+        t = XilinxHwServerTransport()
+        n = 600  # + 1 prime scan = 601 scans -> 256 + 256 + 89
+        tokens = [self._burst_token([0xDEAD], 256)] + [
+            self._burst_token([(s << 224) | (0xA5 << 32) | s], 256) for s in range(n)
+        ]
+        sent: list[str] = []
+
+        def fake_send(tcl: str) -> str:
+            chunk = len(sent) % 3  # each pass sends chunks 0, 1, 2
+            sent.append(tcl)
+            return " ".join(tokens[chunk * 256:(chunk + 1) * 256])
+
+        t._send = fake_send  # type: ignore[method-assign]
+        words = t.read_sample_block(0x0100, n, 256)
+
+        self.assertEqual(len(sent), 6)  # 3 sends, repeated once for stability
+        self.assertIn("-bits 49", sent[0])  # BURST_PTR write in the first send
+        self.assertNotIn("-bits 49", sent[1])
+        self.assertEqual(len(words), n * 8)
+        self.assertEqual(words[8 * 5:8 * 6], [5, 0xA5, 0, 0, 0, 0, 0, 5 << 0])
+        self.assertEqual(words[8 * 599 + 7], 599)
+
+    def test_read_sample_block_rejects_short_stream(self):
+        t = XilinxHwServerTransport()
+        t._read_block_burst = MagicMock(return_value=[1, 2])  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            t.read_sample_block(0x0100, 3, 256)
+
+    def test_window_read_past_address_space_is_refused(self):
+        """The pipelined DATA-window path must not wrap a read past 0x10000."""
+        t = XilinxHwServerTransport()
+        t._send = MagicMock(return_value="")  # type: ignore[method-assign]
+        with self.assertRaises(DataWindowError):
+            t._read_block_user1(0x0100, 16384)
+        t._send.assert_not_called()
 
     def test_wide_sample_core_skips_burst_readback(self):
         """SAMPLE_W>32 (e.g. the 160-bit AXI monitor) must NOT use the

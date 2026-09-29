@@ -13,7 +13,13 @@ from typing import Dict, List, Optional, Sequence
 
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
-from .transport import OpenOcdTransport, Transport, list_openocd_taps
+from .transport import (
+    REG_ADDR_SPACE_END,
+    OpenOcdTransport,
+    Transport,
+    check_data_window,
+    list_openocd_taps,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -667,12 +673,29 @@ class Analyzer:
             "overflow": bool(s & _STATUS_OVERFLOW),
         }
 
+    def _set_data_window_end(self) -> None:
+        """Tell the transport where DATA / timestamp window reads must stop.
+
+        Register addresses are 16 bits.  Behind a core manager the window also
+        ends at the manager block, and on RTL before the timestamp-base fix a
+        timestamp window whose base passed 0x10000 was decoded at its low 16
+        bits, which turns every DATA read from there on into a timestamp read.
+        """
+        end = _ADDR_MGR_VERSION if self._instance is not None else REG_ADDR_SPACE_END
+        if self._hw_timestamp_w and self._config is not None:
+            words_per_sample = (self._config.sample_width + 31) // 32
+            ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
+            if ts_base >= REG_ADDR_SPACE_END:
+                end = min(end, max(_ADDR_DATA_BASE, ts_base & 0xFFFF))
+        self.transport.data_window_end = end
+
     @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
         self._select_instance()
         if self._hw_timestamp_w == 0:
             return []
+        self._set_data_window_end()
         sw = self._config.sample_width if self._config else 8
         words_per_sample = (sw + 31) // 32
         ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
@@ -754,6 +777,7 @@ class Analyzer:
 
     @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
+        self._set_data_window_end()
         sw = self._config.sample_width if self._config else 8
         # Wide cores (e.g. the 160-bit AXI monitor) are single-chain: their burst
         # DR shares one BSCAN instance with control frames (jtag_pipe_iface), so
@@ -790,6 +814,7 @@ class Analyzer:
         if self._selected_slot_has_burst():
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
+        check_data_window(_ADDR_DATA_BASE, total_words, self.transport.data_window_end)
         read = self.transport.read_reg_stable
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 

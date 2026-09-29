@@ -23,7 +23,7 @@ from fcapz.analyzer import (
     expected_ela_version_reg,
 )
 from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
-from fcapz.transport import Transport
+from fcapz.transport import DataWindowError, Transport, check_data_window
 
 
 def _expected_eio_version_reg() -> int:
@@ -456,6 +456,74 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual(result.samples, [0x40, 0x41, 0x42])
         self.assertEqual(transport.slow_reads, [0x0100, 0x0104, 0x0108])
+
+    def _wide_capture(self, *, managed: bool, capture_len: int, sample_burst: bool):
+        """Capture from a 256-bit x 2048 core whose DATA window is read as
+        32-bit words through a range-checked register window."""
+
+        class WideTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x000C] = 256          # SAMPLE_W
+                self.regs[0x0010] = 2048         # DEPTH
+                self.regs[0x001C] = capture_len  # CAPTURE_LEN
+                if managed:
+                    self._manager_regs[0xF004] = 1
+                self.window_reads: list[tuple[int, int]] = []
+                self.sample_bursts: list[tuple[int, int, int]] = []
+
+            def read_block(self, addr: int, words: int):
+                check_data_window(addr, words, self.data_window_end)
+                self.window_reads.append((addr, words))
+                return [(i // 8) & 0xFFFFFFFF if i % 8 == 0 else 0 for i in range(words)]
+
+        if sample_burst:
+            def read_sample_block(self, base_addr: int, n_samples: int, sample_width: int):
+                self.sample_bursts.append((base_addr, n_samples, sample_width))
+                words = []
+                for s in range(n_samples):
+                    words.extend([s] + [0] * 7)
+                return words
+
+            WideTransport.read_sample_block = read_sample_block  # type: ignore[attr-defined]
+
+        transport = WideTransport()
+        analyzer = Analyzer(transport, instance=0 if managed else None)
+        analyzer.connect()
+        analyzer.configure(replace(
+            self._make_cfg(), sample_width=256, depth=2048,
+            pretrigger=64, posttrigger=2048 - 65,
+        ))
+        return transport, analyzer
+
+    def test_wide_managed_capture_past_manager_block_is_refused(self):
+        """256 x 2048 behind a core manager: samples 1912+ would read the
+        manager's registers through the window, so the window path refuses."""
+        _, analyzer = self._wide_capture(managed=True, capture_len=2048, sample_burst=False)
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
+
+    def test_wide_managed_capture_uses_sample_burst(self):
+        """The burst readout addresses RAM by sample, so it has no window limit."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=2048, sample_burst=True
+        )
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 2048, 256)])
+        self.assertEqual(transport.window_reads, [])
+        self.assertEqual(result.samples, list(range(2048)))
+
+    def test_wide_standalone_window_stops_only_at_address_wrap(self):
+        """Without a manager 0xF000..0xFFFF is still DATA; only the 16-bit wrap
+        (sample 2040 at 256 bits) is refused."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=2040, sample_burst=False
+        )
+        self.assertEqual(len(analyzer.capture(timeout=0.01).samples), 2040)
+        self.assertEqual(transport.window_reads, [(0x0100, 2040 * 8)])
+        _, analyzer = self._wide_capture(managed=False, capture_len=2041, sample_burst=False)
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
 
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
