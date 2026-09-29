@@ -100,7 +100,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **ELA (Verilog) — timestamps aliased onto sample data on deep cores.** The
   timestamp window base (`0x100 + DEPTH·words·4`) was compared as 16 bits, so
   once it passed `0xFFFF` every data-window read returned timestamps. It is now
-  compared at full width, as the VHDL core already did.
+  compared at full width, as the VHDL core already did. The host cannot tell
+  a fixed core from an older one, so for such a core it still refuses window
+  reads from the aliased address (`base & 0xFFFF`) on; burst readout is
+  unaffected.
 
 - **Host — reads past the end of the 16-bit register window.** A capture larger
   than the data window (from `0x0100` up to `0xF000` behind a core manager,
