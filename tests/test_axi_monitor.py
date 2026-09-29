@@ -350,6 +350,7 @@ def test_read_data_words_wide_core_uses_read_block():
         sample_width=160, depth=1024,
     )
     a._selected_slot_has_burst = lambda: False  # non-burst manager slot
+    a._behind_manager = lambda: True
 
     a._read_data_words(8)
 
@@ -374,6 +375,7 @@ def test_read_data_words_narrow_core_keeps_per_word_on_nonburst_slot():
         sample_width=8, depth=64,
     )
     a._selected_slot_has_burst = lambda: False
+    a._behind_manager = lambda: True
 
     a._read_data_words(4)
 
