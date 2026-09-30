@@ -84,6 +84,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fcapz_axi_mon_intel`, now also executes a stray 50..`BURST_W`-1 bit scan on
   its chain as a command instead of ignoring it. `BURST_W` must now exceed 49.
 
+- **Core manager — a burst after switching slots could read from the old
+  pointer.** The manager passed on each slot's own burst-start toggle, but the
+  burst reader keeps one last-seen copy: after a slot switch the new slot's
+  toggle could match it, the start was missed and the burst read the new
+  slot's RAM from the previous burst's pointer, with no error; a slot switch
+  alone could also look like a start. The manager now raises the start itself
+  on every `BURST_PTR` write to a burst-capable slot (both HDLs). Fixing it
+  needs a bitstream rebuild.
+
+- **hw_server — a deep burst could drop out of burst mode mid-read.** Each
+  chunk of scans ran as its own `jtag sequence`, and between two runs hw_server
+  can put a scan of its own through the PL (seen on Zynq UltraScale+ MPSoC),
+  which the pipe decodes as a register command. The pointer write and every
+  scan are now one sequence, built over several xsdb sends and run once.
+
 - **ELA — trigger sample one late with `INPUT_PIPE ≥ 1`.** The registered
   compare stage judges each sample a clock after the probe path delivers it,
   but the RAM stored the sample then current, so `samples[pretrigger]` was the
