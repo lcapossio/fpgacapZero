@@ -145,9 +145,23 @@ module fcapz_core_manager_case #(
             expect_bits({{(8-NUM_SLOTS){1'b0}}, slot_rd_en}, (8'h01 << idx), "selected slot read asserted");
             expect32({24'h0, burst_rd_data}, {24'h0, expected_burst_data}, "burst data follows active burst-capable slot");
             expect32({28'h0, burst_rd_ts_data}, {28'h0, expected_ts_data}, "burst timestamp follows active burst-capable slot");
-            expect_bits({7'b0, burst_start}, {7'b0, expected_has_burst}, "burst_start follows active burst-capable slot");
             expect_bits({7'b0, burst_timestamp}, {7'b0, expected_has_burst & idx[0]}, "burst_timestamp follows active burst-capable slot");
             expect_bits({4'h0, burst_start_ptr}, {4'h0, expected_start_ptr}, "burst_start_ptr follows active burst-capable slot");
+        end
+    endtask
+
+    // The manager raises the burst start event itself, once per BURST_PTR
+    // write to a burst-capable slot; selecting a slot is not a start.
+    reg start_before;
+    task check_burst_ptr_write(input integer idx);
+        begin
+            start_before = burst_start;
+            write_reg(16'h002C, 32'h0);
+            #1 expect_bits({7'b0, burst_start}, {7'b0, start_before ^ SLOT_HAS_BURST[idx]},
+                           "BURST_PTR write toggles burst_start on a burst slot only");
+            start_before = burst_start;
+            write_reg(16'h0020, 32'h0);
+            #1 expect_bits({7'b0, burst_start}, {7'b0, start_before}, "other writes are not starts");
         end
     endtask
 
@@ -183,9 +197,15 @@ module fcapz_core_manager_case #(
         read_reg(16'hF018, {16'h0, SLOT_CORE_IDS[(NUM_SLOTS-1)*16 +: 16]}, "descriptor core id for last slot");
         read_reg(16'hF01C, {31'h0, SLOT_HAS_BURST[NUM_SLOTS-1]}, "descriptor caps for last slot");
 
+        start_before = burst_start;
         write_reg(16'hF008, NUM_SLOTS - 1);
+        #1 expect_bits({7'b0, burst_start}, {7'b0, start_before}, "selecting a slot is not a start");
         read_reg(16'hF008, NUM_SLOTS - 1, "active slot switches to last slot");
         check_active_slot(NUM_SLOTS - 1, "last slot register read");
+        check_burst_ptr_write(NUM_SLOTS - 1);
+        write_reg(16'hF008, 0);
+        check_burst_ptr_write(0);
+        write_reg(16'hF008, NUM_SLOTS - 1);
 
         write_reg(16'hF008, NUM_SLOTS);
         read_reg(16'hF008, NUM_SLOTS - 1, "out-of-range active write NUM_SLOTS ignored");

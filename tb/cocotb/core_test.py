@@ -878,11 +878,68 @@ async def fcapz_core_manager_mux(dut):
     await Timer(1, unit="ns")
     assert int(dut.burst_rd_data.value) == 0xB1
     assert int(dut.burst_rd_ts_data.value) == 1
-    assert int(dut.burst_start.value) == 1
+    # The start event is the manager's own: no BURST_PTR write yet.
+    assert int(dut.burst_start.value) == 0
     assert int(dut.burst_timestamp.value) == 0
     assert int(dut.burst_start_ptr.value) == 0xB
     await manager_write(dut, 0xF008, 7)
     assert await manager_read(dut, 0xF008) == 1
+
+
+@cocotb.test()
+async def fcapz_core_manager_burst_start_per_write(dut):
+    """Every BURST_PTR write to a burst slot is a new start at the pipe.
+
+    Each slot toggles its own start flag on its own BURST_PTR writes, but the
+    pipe keeps one last-seen copy. Moving the burst from slot 0 to slot 1
+    when both flags hold the same value must still read as a start, or the
+    pipe reads slot 1 from slot 0's old pointer.
+    """
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
+    dut.jtag_rst.value = 1
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    dut.slot_rdata.value = 0
+    dut.slot_burst_rd_data.value = 0
+    dut.slot_burst_rd_ts_data.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
+    dut.slot_burst_start.value = 0
+    dut.slot_burst_timestamp.value = 0
+    dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+
+    flags = [0, 0, 0]
+
+    async def burst_ptr_write(slot: int) -> None:
+        # What the slot does on the same edge: an ELA toggles its own flag.
+        await manager_write(dut, 0xF008, slot)
+        await manager_write(dut, 0x002C, 0)
+        flags[slot] ^= 1
+        dut.slot_burst_start.value = flags[0] | (flags[1] << 1) | (flags[2] << 2)
+        await Timer(1, unit="ns")
+
+    seen = int(dut.burst_start.value)
+    for slot, ptr in ((0, 0xA), (1, 0xB), (0, 0xA), (0, 0xA), (1, 0xB), (1, 0xB)):
+        await burst_ptr_write(slot)
+        now = int(dut.burst_start.value)
+        assert now != seen, f"BURST_PTR write to slot {slot} (flags {flags}) raised no start"
+        assert int(dut.burst_start_ptr.value) == ptr
+        seen = now
+
+    # Slot 2 has no burst wiring, and other writes are not starts.
+    await burst_ptr_write(2)
+    assert int(dut.burst_start.value) == seen
+    await manager_write(dut, 0xF008, 0)
+    await manager_write(dut, 0x0020, 0x1234)
+    await manager_write(dut, 0xF02C, 0)
+    await Timer(1, unit="ns")
+    assert int(dut.burst_start.value) == seen
 
 
 @cocotb.test()

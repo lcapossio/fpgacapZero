@@ -117,7 +117,7 @@ TARGETS: tuple[Target, ...] = (
         "fcapz_core_manager",
         "fcapz_core_manager",
         (RTL / "fcapz_core_manager.v",),
-        "fcapz_core_manager_mux",
+        ("fcapz_core_manager_mux", "fcapz_core_manager_burst_start_per_write"),
         {
             "NUM_SLOTS": 3,
             "SAMPLE_W": 8,

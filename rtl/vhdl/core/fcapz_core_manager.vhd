@@ -75,6 +75,8 @@ architecture rtl of fcapz_core_manager is
     signal burst_owner_idx   : unsigned(IDX_W - 1 downto 0) := (others => '0');
     signal burst_owner_valid : std_logic := '0';
     signal burst_rd_active_d : std_logic := '0';
+    -- The burst start event the pipe sees; see fcapz_core_manager.v.
+    signal burst_start_r     : std_logic := '0';
 
     signal manager_hit         : std_logic;
     signal requested_idx_valid : std_logic;
@@ -84,7 +86,6 @@ architecture rtl of fcapz_core_manager is
     signal active_rdata           : std_logic_vector(31 downto 0);
     signal active_burst_data      : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal active_burst_ts_data   : std_logic_vector(TS_W_SAFE - 1 downto 0);
-    signal active_burst_start     : std_logic;
     signal active_burst_timestamp : std_logic;
     signal active_burst_start_ptr : std_logic_vector(PTR_W - 1 downto 0);
 
@@ -105,12 +106,14 @@ begin
             burst_owner_idx <= (others => '0');
             burst_owner_valid <= '0';
             burst_rd_active_d <= '0';
+            burst_start_r <= '0';
         elsif rising_edge(jtag_clk) then
             burst_rd_active_d <= burst_rd_active;
             if jtag_wr_en = '1' and manager_hit = '0' and
                jtag_addr = ADDR_BURST_PTR and SLOT_HAS_BURST(to_integer(active_idx)) = '1' then
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= '1';
+                burst_start_r <= not burst_start_r;
             elsif burst_rd_active = '1' and burst_rd_active_d = '0' then
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= '1';
@@ -145,14 +148,12 @@ begin
         variable rdata_v      : std_logic_vector(31 downto 0);
         variable data_v       : std_logic_vector(SAMPLE_W - 1 downto 0);
         variable ts_data_v    : std_logic_vector(TS_W_SAFE - 1 downto 0);
-        variable start_v      : std_logic;
         variable timestamp_v  : std_logic;
         variable start_ptr_v  : std_logic_vector(PTR_W - 1 downto 0);
     begin
         rdata_v := (others => '0');
         data_v := (others => '0');
         ts_data_v := (others => '0');
-        start_v := '0';
         timestamp_v := '0';
         start_ptr_v := (others => '0');
 
@@ -165,7 +166,6 @@ begin
                 if SLOT_HAS_BURST(i) = '1' then
                     data_v := slot_burst_rd_data((i + 1) * SAMPLE_W - 1 downto i * SAMPLE_W);
                     ts_data_v := slot_burst_rd_ts_data((i + 1) * TS_W_SAFE - 1 downto i * TS_W_SAFE);
-                    start_v := slot_burst_start(i);
                     timestamp_v := slot_burst_timestamp(i);
                     start_ptr_v := slot_burst_start_ptr((i + 1) * PTR_W - 1 downto i * PTR_W);
                 end if;
@@ -175,7 +175,6 @@ begin
         active_rdata <= rdata_v;
         active_burst_data <= data_v;
         active_burst_ts_data <= ts_data_v;
-        active_burst_start <= start_v;
         active_burst_timestamp <= timestamp_v;
         active_burst_start_ptr <= start_ptr_v;
     end process;
@@ -225,7 +224,7 @@ begin
     jtag_rdata <= manager_rdata when manager_hit = '1' else active_rdata;
     burst_rd_data <= active_burst_data;
     burst_rd_ts_data <= active_burst_ts_data;
-    burst_start <= active_burst_start;
+    burst_start <= burst_start_r;
     burst_timestamp <= active_burst_timestamp;
     burst_start_ptr <= active_burst_start_ptr;
 end architecture rtl;
