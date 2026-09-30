@@ -1827,23 +1827,35 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertFalse(t._has_burst)
         t._read_block_user1.assert_called_once_with(0x0100, 3)
 
-    def test_read_sample_block_splits_deep_burst_into_chunks(self):
-        """A deep wide-sample burst is sent as several xsdb round trips (the
-        BURST_PTR write rides with the first), and the words come back
-        little-endian per sample."""
+    def _fake_xsdb_sequence(self, tokens: list[str], sent: list[str]):
+        """xsdb stand-in: a ``jtag sequence`` collects scans across sends and
+        prints one token per captured scan only when it is run."""
+        state = {"captures": 0}
+
+        def fake_send(tcl: str) -> str:
+            sent.append(tcl)
+            if "[jtag sequence]" in tcl:
+                state["captures"] = 0
+            state["captures"] += tcl.count("-capture")
+            if "run -bits" not in tcl:
+                return ""
+            n = state["captures"]
+            state["captures"] = 0
+            return " ".join(tokens[:n])
+
+        return fake_send
+
+    def test_read_sample_block_builds_deep_burst_over_several_sends(self):
+        """A deep wide-sample burst is added to the sequence over several xsdb
+        sends (the BURST_PTR write in the first) and run once, and the words
+        come back little-endian per sample."""
         t = XilinxHwServerTransport()
         n = 600  # + 1 prime scan = 601 scans -> 256 + 256 + 89
         tokens = [self._burst_token([0xDEAD], 256)] + [
             self._burst_token([(s << 224) | (0xA5 << 32) | s], 256) for s in range(n)
         ]
         sent: list[str] = []
-
-        def fake_send(tcl: str) -> str:
-            chunk = len(sent) % 3  # each pass sends chunks 0, 1, 2
-            sent.append(tcl)
-            return " ".join(tokens[chunk * 256:(chunk + 1) * 256])
-
-        t._send = fake_send  # type: ignore[method-assign]
+        t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
         words = t.read_sample_block(0x0100, n, 256)
 
         self.assertEqual(len(sent), 6)  # 3 sends, repeated once for stability
@@ -1852,6 +1864,31 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(len(words), n * 8)
         self.assertEqual(words[8 * 5:8 * 6], [5, 0xA5, 0, 0, 0, 0, 0, 5 << 0])
         self.assertEqual(words[8 * 599 + 7], 599)
+
+    def test_burst_is_one_jtag_sequence_from_write_to_last_scan(self):
+        """No other scan may reach the chain between the BURST_PTR write and
+        the last burst scan: on the MPSoC hw_server can scan the PL between
+        two sequence runs, and the pipe then decodes that scan as a register
+        command and leaves burst mode.  So each pass creates one sequence and
+        runs it once, in its last send, after every scan was added."""
+        for register_ir in (False, True):
+            with self.subTest(use_register_ir=register_ir):
+                t = XilinxHwServerTransport(use_register_ir=register_ir)
+                n = 600
+                tokens = [self._burst_token([s], 256) for s in range(n + 1)]
+                sent: list[str] = []
+                t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                t.read_sample_block(0x0100, n, 256)
+
+                passes = [sent[:3], sent[3:]]
+                for sends in passes:
+                    body = "; ".join(sends)
+                    self.assertEqual(body.count("[jtag sequence]"), 1)
+                    self.assertEqual(body.count(" run"), 1)
+                    self.assertNotIn(" delete", "; ".join(sends[:-1]))
+                    self.assertIn("run -bits", sends[-1])
+                    self.assertLess(body.index("-bits 49"), body.index("-capture"))
+                    self.assertEqual(body.count("-capture"), n + 1)
 
     def test_read_sample_block_rejects_short_stream(self):
         t = XilinxHwServerTransport()

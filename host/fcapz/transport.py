@@ -2229,10 +2229,16 @@ class XilinxHwServerTransport(Transport):
     ) -> List[int]:
         """Read *words* samples via the 256-bit burst DR.
 
-        Packs everything into a **single** ``jtag sequence``:
-        Control-chain write to BURST_PTR → idle for staging fill → optional
-        IR switch to legacy DATA_CHAIN → N consecutive 256-bit DR scans.
-        One round-trip.
+        The BURST_PTR write, the staging-fill idle and every 256-bit DR scan
+        are ONE ``jtag sequence``, run once.  Nothing else can reach the chain
+        from the write to the last scan: between two runs hw_server can put
+        a scan of its own through the PL with the USER chain still selected,
+        and on a single-chain build jtag_pipe_iface decodes its last 49 bits
+        as a register command, which ends burst mode.  Seen on Zynq US+ MPSoC
+        (``-register`` mode): the scan after the gap returns the register
+        read data instead of samples.  A deep burst is too long for one TCL
+        line, so the sequence object is built over several xsdb sends and only
+        the last one runs it.
         """
         if timestamp and element_width is None:
             element_width = 32
@@ -2261,49 +2267,38 @@ class XilinxHwServerTransport(Transport):
         burst_chain = ctrl_chain if self.single_chain_burst else 2
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
+        head = ["set _bq [jtag sequence]"]
         if self.use_register_ir:
-            # Register mode: BURST_PTR write needs DRUPDATE + split-
-            # sequence IDLE/delay (same pattern as _write_reg_tcl).
-            # Burst scans go in a separate sequence afterwards.
+            # Register mode: the write needs an explicit DRUPDATE to fire
+            # UPDATE-DR through the named-register path, and xsdb only takes
+            # a delay in IDLE, so walk there first -- inside the sequence.
             write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
-            parts_w = [
-                "set _bq [jtag sequence]",
+            head += [
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
-                "$_bq run; $_bq delete",
-                "set _bqd [jtag sequence]",
-                "$_bqd state IDLE",
-                f"$_bqd delay {write_idle}",
-                "$_bqd run; $_bqd delete",
+                "$_bq state IDLE",
+                f"$_bq delay {write_idle}",
             ]
-            chunks = self._burst_read_chunks(
-                ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
-            )
         else:
-            parts_w = [
-                "set _bq [jtag sequence]",
-                # Write BURST_PTR via the active ELA control chain.
+            head += [
                 # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
                 # Idle so the BURST_PTR update crosses into the burst
                 # reader and the first 256-bit staging word fills before
-                # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
-                # more margin than the raw ~33 TCK memory-fill latency.
+                # the first burst CAPTURE samples it. Real BSCAN/XSDB timing
+                # needs more margin than the raw ~33 TCK memory-fill latency.
                 f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
-                "$_bq run; $_bq delete",
             ]
-            # The first wide scan primes/fills staging and is discarded.
-            chunks = self._burst_read_chunks(
-                ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
-            )
-        # The BURST_PTR write rides with the first chunk; later chunks continue
-        # the same burst (callers hold the transaction lock, so no register
-        # command can end burst mode in between).
-        tcls = ["; ".join(parts_w + chunks[0])] + ["; ".join(c) for c in chunks[1:]]
+        # The first wide scan primes/fills staging and is discarded.
+        tcls = self._burst_sequence_sends(
+            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+        )
 
         def run_once() -> List[int]:
-            out = "\n".join(self._send(tcl) for tcl in tcls)
+            out = ""
+            for tcl in tcls:
+                out = self._send(tcl)  # only the last send prints the scans
             return self._parse_burst_bits(
                 out,
                 words,
@@ -2331,30 +2326,25 @@ class XilinxHwServerTransport(Transport):
             previous = current
         raise RuntimeError("single-chain burst readback did not stabilize")
 
-    # Wide scans per xsdb round trip.  A deep wide-sample burst is thousands
-    # of 256-bit scans; sent as one TCL line that is what hung xsdb before wide
-    # cores were routed off this path.  Burst mode holds across sequences --
-    # only a register command ends it -- so the scans are split into separate
-    # sends.  Narrow-core bursts (<= 256 scans) stay one send.
+    # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
+    # 256-bit scans; as one TCL line that hung xsdb, so the scans are added to
+    # the sequence object over several sends.  They still run as one sequence.
     _BURST_SCANS_PER_SEQUENCE = 256
 
-    def _burst_read_chunks(
-        self, ir_cmd: str, total_bits: int, zeros: str, n_scans: int
-    ) -> list[list[str]]:
-        """TCL for *n_scans* burst DR scans as sequences of at most
-        ``_BURST_SCANS_PER_SEQUENCE`` scans, each printing its captured bits."""
-        chunks: list[list[str]] = []
+    def _burst_sequence_sends(
+        self, head: list[str], ir_cmd: str, total_bits: int, zeros: str, n_scans: int
+    ) -> list[str]:
+        """TCL sends that build ONE ``_bq`` sequence -- *head* plus *n_scans*
+        burst DR scans, at most ``_BURST_SCANS_PER_SEQUENCE`` per send -- and
+        run it in the last send, printing every captured scan."""
+        scan = f"{ir_cmd}; $_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
+        sends: list[list[str]] = []
         for start in range(0, n_scans, self._BURST_SCANS_PER_SEQUENCE):
             count = min(self._BURST_SCANS_PER_SEQUENCE, n_scans - start)
-            parts = ["set _bq [jtag sequence]"]
-            for _ in range(count):
-                parts.append(
-                    f"{ir_cmd}; "
-                    f"$_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
-                )
-            parts.append("puts [$_bq run -bits]; $_bq delete")
-            chunks.append(parts)
-        return chunks
+            sends.append([scan] * count)
+        sends[0] = head + sends[0]
+        sends[-1] = sends[-1] + ["puts [$_bq run -bits]; $_bq delete"]
+        return ["; ".join(s) for s in sends]
 
     def read_sample_block(
         self, base_addr: int, n_samples: int, sample_width: int
