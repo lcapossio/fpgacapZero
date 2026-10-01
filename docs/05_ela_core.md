@@ -43,20 +43,28 @@ history. Segmented capture mode has separate per-segment bookkeeping and
 does not use this rolling pre-arm path. That single-segment history is
 not reset by `arm()`, so samples taken before the latest arm can legally
 appear in the pre-trigger window — but only while they form one
-unbroken run with the samples after it.
+unbroken run with the samples after it.  Arms that break that run start
+the pre-trigger window afresh: one that switches channel or probe slice,
+one with storage qualification on and `INPUT_PIPE>=1` (the registered
+qualifier restarts, so the next sample is not stored), and one that
+restarts a capture which had already triggered.
 
 Sample writes stop while a completed capture is being read out, which
 puts a hole in that history. The core therefore drops its pre-trigger
 credit when a capture completes, and the next arm must accumulate
 `pretrigger` fresh samples before a trigger can commit, so a readout no
-longer splices two moments into one window. (With `INPUT_PIPE>=1` a
-single stored sample can still be lost if `arm()` lands while the
-registered write command is in flight — a separate defect this does
-not address.) The cost is that a one-shot trigger arriving within
-`pretrigger` stored samples of a re-arm is not captured at all. If you
-need such a trigger caught, configure a shorter `pretrigger`. The
-rolling writes also mean the BRAM write port has idle sample-clock
-activity in single-segment builds.
+longer splices two moments into one window. The cost is that a
+one-shot trigger arriving within `pretrigger` stored samples of a
+re-arm is not captured at all. If you need such a trigger caught,
+configure a shorter `pretrigger`. The rolling writes also mean the BRAM
+write port has idle sample-clock activity in single-segment builds.
+
+An `ARM` (or soft reset) that arrives while a capture is still running
+restarts it on the sample clock it lands: the running capture neither
+commits a trigger, completes, nor advances a segment on that clock.
+`STATUS.done` after an `ARM` describes only the capture that `ARM`
+started; a capture that completed while the `ARM` was crossing into the
+sample clock domain is not reported.
 
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,

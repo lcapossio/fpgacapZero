@@ -405,6 +405,8 @@ architecture rtl of fcapz_ela is
     signal probe_sel_next    : natural range 0 to 255 := 0;
     signal arm_sel_change    : std_logic := '0';
     signal sel_flush_start   : std_logic := '0';
+    signal arm_sq_bubble     : std_logic := '0';
+    signal arm_voids_history : std_logic := '0';
     signal sel_flush_active  : std_logic := '0';
     signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
@@ -450,6 +452,9 @@ architecture rtl of fcapz_ela is
     signal rb_meta_ack_sync2      : std_logic := '0';
     signal rb_meta_pending_sample : std_logic := '0';
     signal rb_done_sample         : std_logic := '0';
+    -- {arm, reset} toggles the sample domain had processed when the snapshot
+    -- was taken; see p_rb_meta_jtag.
+    signal rb_gen_sample          : std_logic_vector(1 downto 0) := "00";
     signal rb_capture_len_jtag    : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_start_ptr_jtag      : natural range 0 to DEPTH - 1 := 0;
     signal rb_seg_start_ptr_jtag  : seg_ptr_t := (others => 0);
@@ -662,6 +667,13 @@ begin
                       else '0';
     sel_flush_start <= arm_sel_change and
                        ((arm_toggle_sync1 xor arm_toggle_sync2) or startup_arm_pending);
+    -- Arming clears the registered storage-qualification hit, so with the
+    -- registered compare and qualification on, the sample right after the
+    -- arm is not stored and the rolling history gets a hole.
+    arm_sq_bubble <= '1' when PROBE_PIPE > 0 and STOR_QUAL /= 0 and
+                              sq_mode_sync2(3 downto 0) /= x"0" else '0';
+    -- Arms after which the rolling pre-arm history cannot be trusted.
+    arm_voids_history <= arm_sel_change or arm_sq_bubble;
 
     p_sel_flush : process(sample_clk, sample_rst)
     begin
@@ -872,7 +884,11 @@ begin
             sq_eff := sq_ok;
         end if;
         store_ok := store_tick and sq_eff and sel_flush_active = '0';
+        -- An arm or soft reset on this edge takes priority (see p_capture).
         trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
+                              (arm_toggle_sync1 xor arm_toggle_sync2) = '0' and
+                              startup_arm_pending = '0' and
+                              (reset_toggle_sync1 xor reset_toggle_sync2) = '0' and
                               pre_count >= count_u(pretrig_len) and
                               trig_holdoff_active = '0' and sel_flush_active = '0' and
                               ((trig_delay_pending = '1' and trig_delay_count = 0) or
@@ -1321,6 +1337,7 @@ begin
             rb_meta_ack_sync2 <= '0';
             rb_meta_pending_sample <= '0';
             rb_done_sample <= '0';
+            rb_gen_sample <= "00";
             rb_capture_len_sample <= (others => '0');
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
@@ -1336,6 +1353,7 @@ begin
 
             if rb_meta_sample_busy = '0' and (rb_meta_pending_sample = '1' or rb_meta_event_sample = '1') then
                 rb_done_sample <= done;
+                rb_gen_sample <= arm_toggle_sync2 & reset_toggle_sync2;
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 rb_seg_start_ptr_sample <= seg_start_ptr;
@@ -1361,15 +1379,24 @@ begin
             rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
             rb_meta_toggle_sync3 <= rb_meta_toggle_sync2;
 
-            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
-               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
-                rb_done_jtag <= '0';
-            elsif (rb_meta_toggle_sync2 xor rb_meta_toggle_sync3) = '1' then
+            -- Every snapshot is copied and acknowledged; a dropped ack would
+            -- leave the sample side busy and stop all later snapshots.
+            if (rb_meta_toggle_sync2 xor rb_meta_toggle_sync3) = '1' then
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 rb_seg_start_ptr_jtag <= rb_seg_start_ptr_sample;
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
-                rb_done_jtag <= rb_done_sample;
+                -- Done counts only for the latest ARM / reset (see
+                -- rtl/fcapz_ela.v).
+                if rb_gen_sample = (arm_toggle_jtag & reset_toggle_jtag) then
+                    rb_done_jtag <= rb_done_sample;
+                else
+                    rb_done_jtag <= '0';
+                end if;
+            end if;
+            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
+               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                rb_done_jtag <= '0';
             end if;
         end if;
     end process;
@@ -1574,8 +1601,9 @@ begin
             arm_pulse_now := (arm_toggle_sync1 xor arm_toggle_sync2) = '1';
             any_arm_pulse_now := arm_pulse_now or startup_arm_pending = '1';
 
-            if armed = '1' and triggered = '0' and pre_count >= count_u(pretrig_len) and
-               trig_holdoff_active = '0' and sel_flush_active = '0' and hit_eff = '1' then
+            if armed = '1' and triggered = '0' and not any_arm_pulse_now and not reset_pulse_now and
+               pre_count >= count_u(pretrig_len) and trig_holdoff_active = '0' and
+               sel_flush_active = '0' and hit_eff = '1' then
                 trigger_out_i <= '1';
             else
                 trigger_out_i <= '0';
@@ -1649,9 +1677,12 @@ begin
                     wr_ptr <= 0;
                     pre_count <= (others => '0');
                 end if;
-                -- A switched selection voids the rolling pre-arm history: it
-                -- holds the old selection's samples.
-                if arm_sel_change = '1' then
+                -- A switched selection voids the rolling pre-arm history (it
+                -- holds the old selection's samples), as does the
+                -- qualification bubble (arm_sq_bubble).  So does a restart of
+                -- a capture that had triggered: once its post-trigger samples
+                -- are in, it stops writing, leaving a hole.
+                if arm_voids_history = '1' or triggered = '1' then
                     pre_count <= (others => '0');
                 end if;
                 post_count <= (others => '0');
@@ -1681,11 +1712,13 @@ begin
             -- runs after the arm block on the arm edge (armed is still '0'),
             -- so an unguarded wr_ptr update here would override that reset
             -- and start segment 0 on stale pre-arm samples.
-            if armed = '0' and done = '0' then
+            -- A soft reset restarts the ring; prefill must not override it.
+            if armed = '0' and done = '0' and not reset_pulse_now then
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 if NUM_SEGMENTS = 1 and store_ok then
-                    if pre_count < count_u(pretrig_len) and sel_flush_start = '0' then
+                    if pre_count < count_u(pretrig_len) and
+                       not (any_arm_pulse_now and arm_voids_history = '1') then
                         pre_count <= pre_count + 1;
                     end if;
                     if triggered = '0' then
@@ -1699,7 +1732,19 @@ begin
                 end if;
             end if;
 
-            if armed = '1' and done = '0' then
+            -- An arm or soft reset on this edge restarts the capture, so the
+            -- running capture's decisions below must not override it (as in
+            -- rtl/fcapz_ela.v).  Only the single-segment ring still advances
+            -- past the sample stored on this edge, which keeps the rolling
+            -- history contiguous.
+            if armed = '1' and done = '0' and (any_arm_pulse_now or reset_pulse_now) then
+                if NUM_SEGMENTS = 1 and not reset_pulse_now and mem_we_a = '1' then
+                    if wr_ptr = SEG_DEPTH - 1 then
+                        segment_wrapped <= '1';
+                    end if;
+                    wr_ptr <= next_ptr(wr_ptr, 0);
+                end if;
+            elsif armed = '1' and done = '0' then
                 base := seg_base(cur_segment);
                 trigger_commit_now := false;
                 force_store_now := comb_trigger_commit_now = '1';
@@ -1754,7 +1799,7 @@ begin
 
                     store_now := store_ok or force_store_now;
 
-                    if store_ok and not force_store_now and sel_flush_start = '0' then
+                    if store_ok and not force_store_now then
                         if pre_count < count_u(pretrig_len) then
                             pre_count <= pre_count + 1;
                         end if;

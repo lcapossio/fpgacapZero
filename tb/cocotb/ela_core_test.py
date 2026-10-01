@@ -71,6 +71,7 @@ TIMESTAMP_W = env_int("ELA_PARAM_TIMESTAMP_W", 0)
 NUM_SEGMENTS = env_int("ELA_PARAM_NUM_SEGMENTS", 1)
 NUM_CHANNELS = env_int("ELA_PARAM_NUM_CHANNELS", 1)
 PROBE_MUX_W = env_int("ELA_PARAM_PROBE_MUX_W", 0)
+STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
 # Register that selects the probe slice / channel latched on arm.
 SEL_ADDR = 0x00AC if PROBE_MUX_W else 0x00A0  # ADDR_PROBE_SEL / ADDR_CHAN_SEL
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
@@ -111,6 +112,7 @@ class ElaFunctionalCoverage:
             "channel_switch": 0,
             "channel_switch_edge": 0,
             "channel_switch_history": 0,
+            "rearm_restart": 0,
             "trigger_delay": 0,
             "trigger_delay_zero": 0,
             "startup_arm": 0,
@@ -772,6 +774,69 @@ async def channel_switch_rearm_drops_old_credit(dut):
     steps = [(window[i] - window[i - 1]) & 0x7F for i in range(1, len(window))]
     assert steps == [1] * 13, f"window {window}"
     FUNCTIONAL_COVERAGE.hit("channel_switch_history")
+
+
+@cocotb.test()
+async def rearm_mid_capture_restarts_cleanly(dut):
+    """An ARM that lands while a capture is running restarts it on that clock:
+    the running capture must not commit a trigger, complete, or move the write
+    pointer over the restart, and STATUS.done must report only the new
+    capture.  The re-arm is swept across the running capture (and the jtag /
+    sample clock phases) so it meets every edge of it."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    # The old trigger matches once per 16 samples, so the swept re-arm meets
+    # every clock of the old capture, post=0's write-free completion clock
+    # included.
+    for pre, post in ((1, 2), (2, 0)):
+        size = pre + post + 1
+        for phase in range(72):
+            await ela.reset_core()
+            await ela.configure_value_capture(pre=pre, post=post, value=1, mask=0x0F)
+            if STOR_QUAL:
+                # Qualifier that keeps every counter sample (bit 0 always
+                # changes), so any hole in the window is the core's.
+                await ela.write(ADDR_SQ_MODE, 8)
+                await ela.write(ADDR_SQ_VALUE, 0)
+                await ela.write(ADDR_SQ_MASK, 0x01)
+            await ela.arm()
+            await ela.wait_sample(phase % 24)
+            await ela.write(ADDR_TRIG_VALUE, 3)
+            await ela.arm()
+            assert await ela.wait_done(400) & 0x4, f"post {post} phase {phase}: no done"
+            for seg in range(NUM_SEGMENTS):
+                await ela.write(ADDR_SEG_SEL, seg)
+                await ela.read(ADDR_SEG_SEL)
+                window = [s & 0xFF for s in await ela.read_samples(size)]
+                where = f"post {post} phase {phase} segment {seg} window {window}"
+                assert counter_steps(window) == [1] * (size - 1), where
+                assert window[pre] & 0x0F == 3, f"old trigger: {where}"
+    counter.cancel()
+    FUNCTIONAL_COVERAGE.hit("rearm_restart")
+
+
+@cocotb.test()
+async def soft_reset_drops_idle_prefill_credit(dut):
+    """A soft reset during idle prefill restarts the ring and its pre-trigger
+    credit.  With registered storage qualification the reset also drops the
+    next sample, so credit kept across it would splice the window."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    pre = 96
+    await ela.configure_value_capture(pre=pre, post=0, value=0, mask=0)
+    await ela.write(ADDR_SQ_MODE, 8)  # CHANGED on bit 0: keeps every sample
+    await ela.write(ADDR_SQ_MASK, 0x01)
+    await ela.arm()  # latch pre and the qualifier
+    await ela.reset_core()  # idle prefill, pre_count still below pre
+    await ela.wait_sample(20)
+    await ela.write(ADDR_SQ_MODE, 0)  # the next arm has no qualifier bubble
+    await ela.write(ADDR_CTRL, 0x2)
+    await ela.arm()
+    assert await ela.wait_done(400) & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(pre + 1)]
+    assert counter_steps(window) == [1] * pre, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("rearm_restart")
 
 
 @cocotb.test()
