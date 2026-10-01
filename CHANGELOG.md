@@ -166,6 +166,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   next segment started on a later match. The hits are now kept across the
   rearm. Both HDLs; fixing it needs a bitstream rebuild.
 
+- **ELA — an ARM or soft reset during a running capture could be lost or
+  corrupt the next capture.** On the clock the restart landed, the running
+  capture's own transitions still applied and won: a trigger or completion
+  of the old capture could leave the core `done` (or triggered with the old
+  configuration) instead of re-armed, a segmented core restarted at the old
+  write address with stale pre-trigger credit, and a new holdoff was lost.
+  The restart now takes priority; single-segment cores still keep their
+  rolling history contiguous, and restarting a capture that had already
+  triggered re-earns the pre-trigger window instead of reaching back across
+  the samples it never wrote. Likewise, with storage qualification and
+  `INPUT_PIPE ≥ 1` every arm drops the sample right after it, so such an arm
+  now re-earns the window too. Both HDLs; fixing it needs a bitstream
+  rebuild.
+
+- **ELA — `STATUS.done` after an ARM could describe the previous capture,
+  and a badly timed ARM could stop status updates.** A capture that
+  completed while an ARM was still crossing into the sample clock domain
+  set `done` after the ARM had cleared it, so the host read the previous
+  capture as the new one. Done is now tagged with the ARM / reset it
+  belongs to and a stale one is not reported. Separately, an ARM or reset
+  written on the one JTAG clock a capture-status update arrived dropped
+  that update's handshake, after which `done` and segment progress never
+  updated again until the core's reset inputs were asserted. Both HDLs;
+  fixing it needs a bitstream rebuild.
+
 - **hw_server — register access now clocks the JTAG idle it meant to.**
   xsdb's `jtag sequence delay` waits without clocking TCK, so the idle
   cycles meant to let a command land were never clocked. Every idle is now
