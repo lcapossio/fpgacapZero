@@ -48,22 +48,14 @@ wide core's 32-bit *word* count to the burst engine would build a
 multi-hundred-KB single-line TCL scan sequence that xsdb never
 completes — a hard readback hang, not a throughput issue.
 
-For single-chain burst readback, the host verifies stability instead of
-trusting the first transaction.  The invariant is simple: after the ELA
-reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,
-so repeating the same `BURST_PTR` read transaction must return identical data.
-Some real `hw_server` sessions can produce one stale first transaction after
-rapid re-arm; `XilinxHwServerTransport` requires two consecutive matching
-single-chain burst reads and raises `RuntimeError` if the result does not
-stabilize.  The legacy two-chain DATA_CHAIN path remains a single transaction.
-
-This is a stability check, not a cryptographic or protocol-level data oracle:
-two identical but stale/corrupt scans would still pass.  The reference Arty
-hardware tests add a higher-level plausibility check by capturing the known
-free-running counter and requiring adjacent samples to increment by +1 when
+Every burst readback is a single pass.  The `BURST_PTR` write, the
+staging-fill idle (real TCKs) and every burst scan run as one JTAG
+transaction, so nothing else can reach the chain mid-burst, and the first
+scan, which primes the staging register, is discarded.  Burst data carries
+no framing or CRC: the reference Arty and DE25-Nano hardware tests capture a
+free-running counter and require adjacent samples to increment by +1 when
 decimation is disabled.  Designs with critical readback requirements should
-use a similar application-level invariant, or add a future versioned burst
-framing/CRC to the RTL and host protocol.
+check a similar application-level invariant.
 
 An **optional** extension method `read_timestamp_block(addr, words,
 timestamp_width)` accelerates timestamp readback via the burst path.

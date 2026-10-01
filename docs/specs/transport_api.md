@@ -37,7 +37,7 @@ path for timestamp data.
   the transport adds (batched vs single DR).
 - `read_timestamp_block(addr, words, timestamp_width)` — timestamp burst via the
   same configured burst path.  Sets `BURST_PTR` bit[31]=1 to select the timestamp BRAM.
-  No priming scan required; the first 256-bit capture already holds valid data.
+  Like the sample burst, the first 256-bit scan primes staging and is discarded.
   Returns `words` integers of width `timestamp_width` bits each.
 - Falls back to control-chain single-sequence pipelined reads for non-DATA addresses.
 - All operations within a read use a single `jtag sequence` object to prevent

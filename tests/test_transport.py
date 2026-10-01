@@ -490,23 +490,6 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
         self.assertEqual(t.last_script.count("-length 49"), 1)
 
-    def test_read_sample_block_raises_when_stream_unstable(self):
-        # Alternating payloads never converge across the stability retries ->
-        # raise, so the caller falls back to the per-word path, not garbage.
-        prime = "0" * 256
-        a = prime + " " + "1" * 256
-        b = prime + " " + "0" * 256
-        payloads = iter([a, b, a, b])
-
-        class FakeQuartus(QuartusStpTransport):
-            def _send(self, script):
-                return next(payloads)
-
-        t = FakeQuartus()
-        t.select_chain(5)
-        with self.assertRaises(RuntimeError):
-            t.read_sample_block(0x0100, 1, 160)
-
     def test_read_timestamp_block_single_chain_sets_timestamp_bit(self):
         # Four 32-bit timestamps pack into one 256-bit scan (8 per scan), plus
         # one discarded prime scan -- read on the active chain, not the ELA's.
@@ -766,7 +749,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         sample_width_reads: list[int] = []
 
         class FakeQuartus(QuartusStpTransport):
-            def read_reg_verified(self, addr):
+            def read_reg(self, addr):
                 sample_width_reads.append(addr)
                 return 8
 
@@ -778,7 +761,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         t.select_chain(5)
         self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
         self.assertEqual(sample_width_reads, [0x000C])
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 1)
         self.assertIn("-instance_index 5", scripts[0])
         self.assertIn("-instance_index 7", scripts[0])
         self.assertIn("device_run_test_idle -num_clocks 123", scripts[0])
@@ -798,41 +781,8 @@ class QuartusStpTransportTests(unittest.TestCase):
         t = FakeQuartus()
         t._cached_sps = 32
         self.assertEqual(t._read_block_burst(33), list(range(33)))
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 1)  # one pass, no repeat
         self.assertEqual(scripts[0].count("-length 256"), 3)
-
-    def test_quartus_burst_requires_stable_repeated_readback(self):
-        prime = self._quartus_burst_token([0xAA] * 32)
-        responses = [
-            f"{prime} {self._quartus_burst_token([0x10] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x20] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x30] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x40] * 32)}",
-        ]
-
-        class FakeQuartus(QuartusStpTransport):
-            def _send(self, _script):
-                return responses.pop(0)
-
-        t = FakeQuartus()
-        t._cached_sps = 32
-        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-            t._read_block_burst(8)
-
-    def test_quartus_burst_accepts_first_stale_then_stable_pair(self):
-        prime = self._quartus_burst_token([0xAA] * 32)
-        stale = f"{prime} {self._quartus_burst_token([0xEE] * 32)}"
-        fresh = f"{prime} {self._quartus_burst_token(list(range(32)))}"
-        responses = [stale, fresh, fresh]
-
-        class FakeQuartus(QuartusStpTransport):
-            def _send(self, _script):
-                return responses.pop(0)
-
-        t = FakeQuartus()
-        t._cached_sps = 32
-        self.assertEqual(t._read_block_burst(8), list(range(8)))
-        self.assertEqual(responses, [])
 
     def test_quartus_timestamp_burst_primes_and_selects_timestamp_stream(self):
         scripts: list[str] = []
@@ -1755,45 +1705,6 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-hex 6 02", sent[0])
         self.assertIn("-bits 256", sent[0])
 
-    def test_single_chain_burst_requires_stable_repeated_readback(self):
-        """Single-chain retry rejects streams that never produce a stable pair."""
-        t = XilinxHwServerTransport()
-        t._cached_sps = 32
-        prime = self._burst_token([0xAA] * 32)
-        responses = [
-            f"{prime} {self._burst_token([0x10] * 32)}",
-            f"{prime} {self._burst_token([0x20] * 32)}",
-            f"{prime} {self._burst_token([0x30] * 32)}",
-            f"{prime} {self._burst_token([0x40] * 32)}",
-        ]
-
-        def fake_send(_tcl: str) -> str:
-            return responses.pop(0)
-
-        t._send = fake_send  # type: ignore[method-assign]
-
-        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-            t._read_block_burst(8)
-
-    def test_single_chain_burst_accepts_first_stale_then_stable_pair(self):
-        """A one-transaction stale read is tolerated only after stability."""
-        t = XilinxHwServerTransport()
-        t._cached_sps = 32
-        prime = self._burst_token([0xAA] * 32)
-        stale = f"{prime} {self._burst_token([0xEE] * 32)}"
-        fresh = f"{prime} {self._burst_token(list(range(32)))}"
-        responses = [stale, fresh, fresh]
-
-        def fake_send(_tcl: str) -> str:
-            return responses.pop(0)
-
-        t._send = fake_send  # type: ignore[method-assign]
-
-        vals = t._read_block_burst(8)
-
-        self.assertEqual(vals, list(range(8)))
-        self.assertEqual(responses, [])
-
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)
@@ -1859,7 +1770,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
         words = t.read_sample_block(0x0100, n, 256)
 
-        self.assertEqual(len(sent), 6)  # 3 sends, repeated once for stability
+        self.assertEqual(len(sent), 3)  # one pass, no repeat
         self.assertIn("-bits 49", sent[0])  # BURST_PTR write in the first send
         self.assertNotIn("-bits 49", sent[1])
         self.assertEqual(len(words), n * 8)
@@ -1871,7 +1782,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         the last burst scan: on the MPSoC hw_server can scan the PL between
         two sequence runs, and the pipe then decodes that scan as a register
         command and leaves burst mode.  So each pass creates one sequence and
-        runs it once, in its last send, after every scan was added."""
+        runs it once, in its last send, after every scan was added.  The
+        burst is read in that single pass, not repeated."""
         for register_ir in (False, True):
             with self.subTest(use_register_ir=register_ir):
                 t = XilinxHwServerTransport(use_register_ir=register_ir)
@@ -1881,15 +1793,14 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                 t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
                 t.read_sample_block(0x0100, n, 256)
 
-                passes = [sent[:3], sent[3:]]
-                for sends in passes:
-                    body = "; ".join(sends)
-                    self.assertEqual(body.count("[jtag sequence]"), 1)
-                    self.assertEqual(body.count(" run"), 1)
-                    self.assertNotIn(" delete", "; ".join(sends[:-1]))
-                    self.assertIn("run -bits", sends[-1])
-                    self.assertLess(body.index("-bits 49"), body.index("-capture"))
-                    self.assertEqual(body.count("-capture"), n + 1)
+                self.assertEqual(len(sent), 3)
+                body = "; ".join(sent)
+                self.assertEqual(body.count("[jtag sequence]"), 1)
+                self.assertEqual(body.count(" run"), 1)
+                self.assertNotIn(" delete", "; ".join(sent[:-1]))
+                self.assertIn("run -bits", sent[-1])
+                self.assertLess(body.index("-bits 49"), body.index("-capture"))
+                self.assertEqual(body.count("-capture"), n + 1)
 
     def test_read_sample_block_rejects_short_stream(self):
         t = XilinxHwServerTransport()
@@ -1973,7 +1884,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport()
 
         def fail_burst(*args, **kwargs):
-            raise RuntimeError("single-chain burst readback did not stabilize")
+            raise RuntimeError("single-chain burst readback failed")
 
         t._read_block_burst = fail_burst  # type: ignore[method-assign]
         t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]

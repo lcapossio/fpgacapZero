@@ -1044,11 +1044,6 @@ class QuartusStpTransport(Transport):
         )
         return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
 
-    def read_reg_verified(self, addr: int) -> int:
-        """Read a Quartus virtual JTAG register twice and return the second value."""
-        self.read_reg(addr)
-        return self.read_reg(addr)
-
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
@@ -1133,7 +1128,7 @@ class QuartusStpTransport(Transport):
     @property
     def _burst_samples_per_scan(self) -> int:
         if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_verified(0x000C)
+            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
             if sw < 1:
                 sw = 8
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)
@@ -1162,52 +1157,43 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        def run_once() -> List[int]:
-            body = ["set __fcapz_burst {}"]
-            body.append(self._virtual_ir_tcl(ctrl_chain))
+        body = ["set __fcapz_burst {}"]
+        body.append(self._virtual_ir_tcl(ctrl_chain))
+        body.append(
+            self._dr_shift_tcl(
+                ctrl_chain,
+                burst_frame,
+                self.DR_BITS,
+                "__fcapz_burst_ptr_discard",
+            )
+        )
+        body.append(
+            "device_run_test_idle "
+            f"-num_clocks {self.burst_prefill_idle_cycles}"
+        )
+        body.append(self._virtual_ir_tcl(self.burst_data_chain))
+        for idx in range(n_scans + prime_scans):
+            var = f"__fcapz_burst_{idx}"
             body.append(
                 self._dr_shift_tcl(
-                    ctrl_chain,
-                    burst_frame,
-                    self.DR_BITS,
-                    "__fcapz_burst_ptr_discard",
+                    self.burst_data_chain, 0, self.BURST_DR_BITS, var
                 )
             )
-            body.append(
-                "device_run_test_idle "
-                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            body.append(f"lappend __fcapz_burst ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_burst",
+                status="__fcapz_burst_status",
+                error="__fcapz_burst_error",
             )
-            body.append(self._virtual_ir_tcl(self.burst_data_chain))
-            for idx in range(n_scans + prime_scans):
-                var = f"__fcapz_burst_{idx}"
-                body.append(
-                    self._dr_shift_tcl(
-                        self.burst_data_chain, 0, self.BURST_DR_BITS, var
-                    )
-                )
-                body.append(f"lappend __fcapz_burst ${var}")
-            captured = self._send(
-                self._locked_script(
-                    body=body,
-                    result="__fcapz_burst",
-                    status="__fcapz_burst_status",
-                    error="__fcapz_burst_error",
-                )
-            )
-            return self._parse_burst_tokens(
-                captured.split(),
-                words,
-                skip_scans=prime_scans,
-                element_width=element_width,
-            )
-
-        previous = run_once()
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("Quartus DATA_CHAIN burst readback did not stabilize")
+        )
+        return self._parse_burst_tokens(
+            captured.split(),
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+        )
 
     def _parse_burst_tokens(
         self,
@@ -1253,8 +1239,8 @@ class QuartusStpTransport(Transport):
 
         The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
         (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
-        the burst scans go on the control chain itself.  Raises on a stream that
-        will not converge so the caller can fall back to the per-word path.
+        the burst scans go on the control chain itself.  Raises on a malformed
+        reply so the caller can fall back to the per-word path.
         """
         elements = self._single_chain_burst(
             n_samples, sample_width, timestamp=False
@@ -1279,8 +1265,8 @@ class QuartusStpTransport(Transport):
         separate ``burst_data_chain``) can never reach them and silently falls
         back to a slow per-word read.  This mirrors the sample burst but asserts
         the timestamp-select bit in the burst pointer, returning one value per
-        captured sample.  Raises on a stream that will not converge so the
-        caller can fall back to the per-word path.
+        captured sample.  Raises on a malformed reply so the caller can fall
+        back to the per-word path.
         """
         return self._single_chain_burst(
             n_timestamps, timestamp_width, timestamp=True
@@ -1292,8 +1278,7 @@ class QuartusStpTransport(Transport):
         """Stream ``n_elements`` of ``element_width`` bits, all on the active
         (control) chain -- one 256-bit DR carries ``256 // element_width``
         elements.  ``timestamp`` selects the burst engine's timestamp window
-        instead of the sample window.  Returns masked element values; raises if
-        the readback will not converge across the stability retries."""
+        instead of the sample window.  Returns masked element values."""
         if n_elements <= 0:
             return []
         if element_width < 1:
@@ -1310,49 +1295,38 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        def run_once() -> List[int]:
-            body = ["set __fcapz_scb {}"]
-            body.append(self._virtual_ir_tcl(chain))
+        body = ["set __fcapz_scb {}"]
+        body.append(self._virtual_ir_tcl(chain))
+        body.append(
+            self._dr_shift_tcl(
+                chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
+            )
+        )
+        body.append(
+            "device_run_test_idle "
+            f"-num_clocks {self.burst_prefill_idle_cycles}"
+        )
+        # First scan primes/flushes the 256-bit staging register; discarded.
+        for idx in range(n_scans + prime_scans):
+            var = f"__fcapz_scb_{idx}"
             body.append(
-                self._dr_shift_tcl(
-                    chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
-                )
+                self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
             )
-            body.append(
-                "device_run_test_idle "
-                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            body.append(f"lappend __fcapz_scb ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_scb",
+                status="__fcapz_scb_status",
+                error="__fcapz_scb_error",
             )
-            # First scan primes/flushes the 256-bit staging register; discarded.
-            for idx in range(n_scans + prime_scans):
-                var = f"__fcapz_scb_{idx}"
-                body.append(
-                    self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
-                )
-                body.append(f"lappend __fcapz_scb ${var}")
-            captured = self._send(
-                self._locked_script(
-                    body=body,
-                    result="__fcapz_scb",
-                    status="__fcapz_scb_status",
-                    error="__fcapz_scb_error",
-                )
-            )
-            return self._parse_single_chain_burst(
-                captured.split(),
-                n_elements,
-                element_width,
-                skip_scans=prime_scans,
-            )
-
-        # The capture RAM is read-only once STATUS.done is set, so a correct
-        # stream repeats identically; require a stable pair before trusting it.
-        previous = run_once()
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("Quartus single-chain burst did not stabilize")
+        )
+        return self._parse_single_chain_burst(
+            captured.split(),
+            n_elements,
+            element_width,
+            skip_scans=prime_scans,
+        )
 
     def _parse_single_chain_burst(
         self,
@@ -2281,36 +2255,15 @@ class XilinxHwServerTransport(Transport):
             head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
         )
 
-        def run_once() -> List[int]:
-            out = ""
-            for tcl in tcls:
-                out = self._send(tcl)  # only the last send prints the scans
-            return self._parse_burst_bits(
-                out,
-                words,
-                skip_scans=prime_scans,
-                element_width=element_width,
-            )
-
-        first = run_once()
-        if not self.single_chain_burst:
-            return first
-
-        # Single-chain burst shares one USER chain between 49-bit register
-        # frames and 256-bit burst frames.  Once STATUS.done is observed, the
-        # capture RAM is read-only until the next ARM/RESET, so repeating the
-        # same BURST_PTR transaction must return identical data.  Real
-        # hw_server/BSCANE2 sessions can return one stale first transaction
-        # immediately after rapid re-arm; require a stable pair and fail loudly
-        # if the stream does not converge instead of silently accepting a
-        # one-off retry result.
-        previous = first
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("single-chain burst readback did not stabilize")
+        out = ""
+        for tcl in tcls:
+            out = self._send(tcl)  # only the last send prints the scans
+        return self._parse_burst_bits(
+            out,
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+        )
 
     # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
     # 256-bit scans; as one TCL line that hung xsdb, so the scans are added to
