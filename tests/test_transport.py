@@ -1941,12 +1941,15 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # `delay` only waits; it clocks no TCK, so the TCK-domain core would
         # get no time from it.
         self.assertNotIn(" delay ", tcl)
-        # The final scan has no trailing idle and stays in DRUPDATE.
+        # Every address-bearing scan fires an explicit UPDATE-DR (the
+        # -state IDLE shortcut is unreliable through MPSoC -register IR);
+        # the final flush scan has no trailing idle.
+        self.assertNotIn("-state IDLE -", tcl)
         self.assertEqual(
-            tcl.count("drshift -state IDLE -capture"),
-            t.USER1_PIPE_PRIME_READS + 3,
+            tcl.count("drshift -state DRUPDATE -capture"),
+            t.USER1_PIPE_PRIME_READS + 3 + 1,
         )
-        self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 1)
+        self.assertEqual(tcl.count("drshift -state DRUPDATE -bits"), 1)
 
     def test_default_chain_shape_emits_6bit_ir_and_49bit_dr(self):
         """Default (7-series single-device) chain stays at -hex 6 / -bits 49."""
@@ -2023,6 +2026,38 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
             self.assertIn("drshift -state DRUPDATE -bits", cmd)
             self.assertIn("-capture", capture)
             self.assertNotIn(" delay ", tcl)
+
+    def test_every_command_scan_fires_explicit_update(self):
+        """Raw scans, the burst BURST_PTR write and pipelined register reads
+        end each command scan in DRUPDATE and then clock idle TCKs; the
+        -state IDLE shortcut is unreliable through MPSoC -register IR."""
+        for register_ir in (False, True):
+            t = XilinxHwServerTransport(use_register_ir=register_ir)
+            t._active_chain = 1
+            scripts: list[str] = []
+
+            def send(tcl, scripts=scripts, t=t):
+                scripts.append(tcl)
+                return " ".join(["0" * t._user_dr_bits(t.BURST_DR_BITS)] * 4)
+
+            t._send = send  # type: ignore[method-assign]
+            t.raw_dr_scan(0, 49)
+            t.raw_dr_scan_batch([(0, 49), (1, 49)])
+            t._parse_burst_bits = MagicMock(return_value=[0])  # type: ignore[method-assign]
+            t._read_block_burst(1, element_width=32)
+            t._parse_block_bits = MagicMock(return_value=[0, 0])  # type: ignore[method-assign]
+            t.read_reg = MagicMock(return_value=0)  # type: ignore[method-assign]
+            t.read_regs_pipelined_user1([0x0, 0x4])
+            for tcl in scripts:
+                self.assertNotIn("-state IDLE -", tcl)
+                self.assertNotIn(" delay ", tcl)
+            raw, batch, burst, piped = scripts
+            self.assertIn(f"state IDLE {t.RAW_DR_IDLE_CYCLES}", raw)
+            self.assertEqual(batch.count(f"state IDLE {t.RAW_DR_IDLE_CYCLES}"), 2)
+            head, scans = burst.split("state IDLE", 1)
+            self.assertIn("drshift -state DRUPDATE -bits", head)
+            self.assertIn("-capture", scans)
+            self.assertEqual(piped.count(f"state IDLE {t.READ_IDLE_CYCLES}"), 2)
 
     def test_register_ir_forces_dr_extra_bits_zero(self):
         """use_register_ir overrides dr_extra_bits to 0."""
