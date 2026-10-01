@@ -410,9 +410,12 @@ wrappers have not yet been re-verified on MPSoC hardware.
 
 #### Register access sequence
 
-Every command scan (read or write) ends in an explicit `-state DRUPDATE`
-and is followed by idle TCKs with `state IDLE <n>`.  The explicit UPDATE-DR
-is required on MPSoC in `-register` mode, where the `-state IDLE` shortcut
+Every DR scan the transport issues ends in an explicit `-state DRUPDATE`:
+register reads and writes, block-read and pipelined-read scans, the burst
+`BURST_PTR` write and burst scans, and the raw scans of the bridges.  Each
+scan that carries a command for the core to act on before the next capture
+is followed by idle TCKs with `state IDLE <n>`.  The explicit UPDATE-DR is
+required on MPSoC in `-register` mode, where the `-state IDLE` shortcut
 doesn't reliably fire the UPDATE-DR event through the named-register path.
 The idle must be `state IDLE <n>`, which clocks `n` TCKs; xsdb's
 `delay <usec>` only waits and clocks nothing, so it gives the TCK-domain

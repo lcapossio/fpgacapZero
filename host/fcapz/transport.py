@@ -2065,7 +2065,7 @@ class XilinxHwServerTransport(Transport):
         tcl = (
             f"set _rd [jtag sequence]; "
             f"{self._irshift_tcl('_rd', ch)}; "
-            f"$_rd drshift -state IDLE -capture -bits {total} {padded}; "
+            f"$_rd drshift -state DRUPDATE -capture -bits {total} {padded}; "
             f"$_rd state IDLE {self.RAW_DR_IDLE_CYCLES}; "
             f"puts [$_rd run -bits]; $_rd delete"
         )
@@ -2088,7 +2088,7 @@ class XilinxHwServerTransport(Transport):
             total = self._user_dr_bits(width)
             parts.append(
                 f"{self._irshift_tcl('_rdb', ch)}; "
-                f"$_rdb drshift -state IDLE -capture -bits {total} {padded}; "
+                f"$_rdb drshift -state DRUPDATE -capture -bits {total} {padded}; "
                 f"$_rdb state IDLE {self.RAW_DR_IDLE_CYCLES}"
             )
             totals.append(total)
@@ -2231,25 +2231,20 @@ class XilinxHwServerTransport(Transport):
         burst_chain = ctrl_chain if self.single_chain_burst else 2
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
-        head = ["set _bq [jtag sequence]"]
+        # The BURST_PTR write ends in an explicit UPDATE-DR, like every
+        # command scan, then idle TCKs so the update crosses into the burst
+        # reader (TCK-clocked) and the first 256-bit staging word fills before
+        # the first burst CAPTURE samples it.  Register mode also needs the
+        # longer register-write settle.
+        write_idle = self.BURST_PREFILL_IDLE_CYCLES
         if self.use_register_ir:
-            # Register mode: the write needs an explicit DRUPDATE to fire
-            # UPDATE-DR through the named-register path, then idle TCKs.
-            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
-            head += [
-                f"{ir1_cmd}; "
-                f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
-                f"$_bq state IDLE {write_idle}",
-            ]
-        else:
-            head += [
-                f"{ir1_cmd}; "
-                f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle TCKs so the BURST_PTR update crosses into the burst
-                # reader (TCK-clocked) and the first 256-bit staging word
-                # fills before the first burst CAPTURE samples it.
-                f"$_bq state IDLE {self.BURST_PREFILL_IDLE_CYCLES}",
-            ]
+            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, write_idle)
+        head = [
+            "set _bq [jtag sequence]",
+            f"{ir1_cmd}; "
+            f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
+            f"$_bq state IDLE {write_idle}",
+        ]
         # The first wide scan primes/fills staging and is discarded.
         tcls = self._burst_sequence_sends(
             head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
@@ -2443,8 +2438,8 @@ class XilinxHwServerTransport(Transport):
 
         All scans go into one sequence object: one address setup,
         USER1_PIPE_PRIME_READS discarded priming captures, then N returned
-        captures.  A short idle
-        follows each address update before the next capture so the
+        captures.  Each address-bearing scan ends in an explicit UPDATE-DR
+        and a short idle follows it before the next capture, so the
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
         """
@@ -2467,7 +2462,7 @@ class XilinxHwServerTransport(Transport):
             "set _q [jtag sequence]",
             # Scan 0: set first address, no capture
             f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -bits {n} {frames[0]}",
+            f"$_q drshift -state DRUPDATE -bits {n} {frames[0]}",
             f"$_q state IDLE {idle}",
         ]
         # Prime captures: discard the stale register-pipeline word plus the
@@ -2477,14 +2472,14 @@ class XilinxHwServerTransport(Transport):
         for _ in range(self.USER1_PIPE_PRIME_READS):
             parts.append(
                 f"{ir_cmd}; "
-                f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
+                f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[0]}"
             )
             parts.append(f"$_q state IDLE {idle}")
         # Scans 1..N-1: capture previous AND set next address.
         for i in range(1, count):
             parts.append(
                 f"{ir_cmd}; "
-                f"$_q drshift -state IDLE -capture -bits {n} {frames[i]}"
+                f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
             parts.append(f"$_q state IDLE {idle}")
         # Final scan: capture last result
@@ -2505,6 +2500,7 @@ class XilinxHwServerTransport(Transport):
         if not addrs:
             return []
         n = self._user_dr_bits(self.DR_BITS)
+        idle = self.READ_IDLE_CYCLES
         ir_cmd = self._irshift_tcl("_pq")
         frames = [
             self._pad_dr(self._frame_bits(addr=a, data=0, write=False))
@@ -2515,12 +2511,14 @@ class XilinxHwServerTransport(Transport):
             "set _pq [jtag sequence]",
             f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
+            f"$_pq state IDLE {idle}",
         ]
         for i in range(1, count):
             parts.append(
                 f"{ir_cmd}; "
                 f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
+            parts.append(f"$_pq state IDLE {idle}")
         parts.append(
             f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
@@ -2617,7 +2615,7 @@ class XilinxHwServerTransport(Transport):
             f"${v} drshift -state DRUPDATE -bits {n} {padded}; "
             f"${v} state IDLE {idle}; "
             f"{ir_cmd}; "
-            f"${v} drshift -state IDLE -capture -bits {n} {padded}; "
+            f"${v} drshift -state DRUPDATE -capture -bits {n} {padded}; "
             f"puts [${v} run -bits]; ${v} delete"
         )
 
