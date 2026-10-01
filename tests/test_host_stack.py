@@ -219,16 +219,6 @@ class ContinuousTransport(FakeTransport):
                 self.regs[0x0008] = 0x4  # immediately "done" so capture() returns
 
 
-class TimestampAdvanceTests(unittest.TestCase):
-    def test_counter_wrap_and_stale_scan(self):
-        from fcapz.analyzer import _timestamps_advance
-
-        self.assertTrue(_timestamps_advance([0xFFFFFFFE, 0xFFFFFFFF, 0, 5], 32))
-        self.assertFalse(_timestamps_advance([1, 2, 2], 32))  # repeat
-        self.assertFalse(_timestamps_advance([1, 2, 3, 1, 2, 3], 32))  # stale scan
-        self.assertTrue(_timestamps_advance([], 32))
-
-
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(
@@ -612,8 +602,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(transport.data_window_end, 0x0100)
 
     def test_wide_48_bit_timestamps_use_burst_across_counter_wrap(self):
-        """Multi-word timestamps take the burst too, and a counter wrap inside
-        the capture is not mistaken for a stale scan."""
+        """Multi-word timestamps take the burst too, across a counter wrap."""
         transport, analyzer = self._wide_capture(
             managed=False, capture_len=2048, sample_burst=True, timestamp_w=48
         )
@@ -664,6 +653,37 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual(result.timestamps, [100, 101, 102])
         self.assertEqual(transport.timestamp_burst_args, (0x1100, 3, 32))
+
+    def test_timestamp_burst_is_returned_as_read(self):
+        """Burst timestamps are not second-guessed: a capture spanning a full
+        counter period (here back to the same value) is valid and must not be
+        replaced by a window re-read."""
+
+        class TimestampBurstTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self.data = [10, 11, 12]
+                self.block_reads: list[tuple[int, int]] = []
+
+            def read_timestamp_block(self, addr, words, timestamp_width):
+                return [7, (1 << 31) + 7, 7][:words]
+
+            def read_block(self, addr, words):
+                self.block_reads.append((addr, words))
+                return super().read_block(addr, words)
+
+        transport = TimestampBurstTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.timestamps, [7, (1 << 31) + 7, 7])
+        self.assertNotIn(0x1100, [addr for addr, _ in transport.block_reads])
 
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""

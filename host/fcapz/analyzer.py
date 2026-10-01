@@ -296,23 +296,6 @@ def _join_timestamp_words(raw: list[int], words_per: int, mask: int) -> list[int
     return values
 
 
-def _timestamps_advance(ts: list[int], width: int) -> bool:
-    """Return whether *ts* counts strictly forward, allowing one counter wrap.
-
-    Every step must be nonzero modulo ``2**width`` and the steps together must
-    span less than one full counter period, so a repeated (stale) burst scan,
-    which steps back to an earlier value, is still caught.
-    """
-    period = 1 << width
-    span = 0
-    for prev, cur in zip(ts, ts[1:]):
-        step = (cur - prev) % period
-        if step == 0:
-            return False
-        span += step
-    return span < period
-
-
 class Analyzer:
     def __init__(
         self,
@@ -453,9 +436,7 @@ class Analyzer:
                 (e.g. ``STARTUP_ARM`` is still enabled because :meth:`configure`
                 was not called first).
         """
-        read_status = getattr(
-            self.transport, "read_reg_verified", self.transport.read_reg
-        )
+        read_status = self.transport.read_reg_stable
         deadline = time.monotonic() + timeout
         last_status = -1
         attempt = 0
@@ -761,18 +742,12 @@ class Analyzer:
             if callable(ts_single):
                 try:
                     raw = ts_single(ts_base, total, self._hw_timestamp_w)
-                    ts = [v & mask for v in raw]
-                    if _timestamps_advance(ts, self._hw_timestamp_w):
-                        _log.info(
-                            "single-chain timestamp burst: %d timestamps (%d-bit)",
-                            total,
-                            self._hw_timestamp_w,
-                        )
-                        return ts
-                    _log.warning(
-                        "single-chain timestamp burst non-monotonic; using "
-                        "slower per-word timestamp reads"
+                    _log.info(
+                        "single-chain timestamp burst: %d timestamps (%d-bit)",
+                        total,
+                        self._hw_timestamp_w,
                     )
+                    return [v & mask for v in raw]
                 except (ConnectionError, RuntimeError) as exc:
                     _log.warning(
                         "single-chain timestamp burst failed (%s); using slower "
@@ -785,24 +760,11 @@ class Analyzer:
             return _join_timestamp_words(raw, ts_words_per, mask)
 
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        used_timestamp_burst = (
-            ts_words_per == 1 and callable(timestamp_burst) and has_burst
-        )
-        if used_timestamp_burst:
+        if ts_words_per == 1 and callable(timestamp_burst) and has_burst:
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
-        timestamps = _join_timestamp_words(raw, ts_words_per, mask)
-        if used_timestamp_burst and not _timestamps_advance(
-            timestamps, self._hw_timestamp_w
-        ):
-            # Some Xilinx hw_server runs occasionally return one stale burst
-            # timestamp scan after the sample burst. Control-chain timestamp
-            # reads are slower but deterministic, so fall back rather than
-            # reporting bad timing metadata with otherwise-good samples.
-            raw = self.transport.read_block(ts_base, ts_word_count)
-            timestamps = [v & mask for v in raw]
-        return timestamps
+        return _join_timestamp_words(raw, ts_words_per, mask)
 
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
