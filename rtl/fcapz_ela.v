@@ -181,6 +181,10 @@ module fcapz_ela #(
     // trigger reaches the capture decision with the same latency as the probe
     // sample it marks (PROBE_PIPE + COMPARE_PIPE, at least 2 with EXT_TRIG_EN).
     localparam EXT_ALIGN = (PROBE_PIPE + COMPARE_PIPE > 2) ? (PROBE_PIPE + COMPARE_PIPE - 2) : 0;
+    // Sample clocks after an arm that switches channel or probe slice before
+    // the stored sample and both compare operands come from the new one.
+    localparam SEL_FLUSH_LEN = PROBE_PIPE + COMPARE_PIPE + 1;
+    localparam SEL_FLUSH_W = $clog2(SEL_FLUSH_LEN + 1);
     localparam HAS_DUAL_COMPARE = (DUAL_COMPARE != 0);
     localparam HAS_USER1_DATA = (USER1_DATA_EN != 0);
     localparam HAS_SEQUENCER = (TRIG_STAGES > 1);
@@ -472,7 +476,6 @@ module fcapz_ela #(
     reg [SEG_IDX_W-1:0] seg_count;            // number of completed segments
     reg                  all_seg_done;
     reg                  segment_wrapped;
-    wire                 segment_auto_rearm_now;
     // Per-segment start_ptr storage
     reg [PTR_W-1:0] seg_start_ptr [0:NUM_SEGMENTS-1];
 
@@ -603,6 +606,38 @@ module fcapz_ela #(
     wire startup_arm_pulse = startup_arm_pending;
     wire any_arm_pulse = arm_pulse | startup_arm_pulse;
     wire reset_pulse = reset_toggle_sync1 ^ reset_toggle_sync2;
+
+    // ---- Selection flush ---------------------------------------------------
+    // chan_sel / probe_sel change only on arm, and the probe pipe, probe_prev
+    // and the registered hits still hold the old selection's samples for
+    // SEL_FLUSH_LEN sample clocks after it.  While sel_flush_active the
+    // capture neither stores nor evaluates the trigger, so no old-selection
+    // sample is captured, counted as pre-trigger history, compared, or used
+    // as the previous sample of an edge.  Arms that keep the selection pay
+    // nothing.
+    wire [7:0] chan_sel_next = (HAS_CHANNEL_MUX && chan_sel_sync2 < NUM_CHANNELS)
+                               ? chan_sel_sync2 : 8'h0;
+    wire [7:0] probe_sel_next = (HAS_PROBE_MUX && probe_sel_sync2 < PROBE_MUX_SLICES)
+                                ? probe_sel_sync2 : 8'h0;
+    wire arm_sel_change = HAS_PROBE_MUX   ? (probe_sel_next != probe_sel) :
+                          HAS_CHANNEL_MUX ? (chan_sel_next != chan_sel) : 1'b0;
+    wire sel_flush_start = any_arm_pulse && arm_sel_change;
+    reg                   sel_flush_active;
+    reg [SEL_FLUSH_W-1:0] sel_flush_count;
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            sel_flush_active <= 1'b0;
+            sel_flush_count  <= {SEL_FLUSH_W{1'b0}};
+        end else if (sel_flush_start) begin
+            sel_flush_active <= 1'b1;
+            sel_flush_count  <= SEL_FLUSH_LEN - 1;
+        end else if (sel_flush_active) begin
+            if (sel_flush_count == {SEL_FLUSH_W{1'b0}})
+                sel_flush_active <= 1'b0;
+            else
+                sel_flush_count <= sel_flush_count - 1'b1;
+        end
+    end
 
     // Simple trigger: uses stage-0 comparators (backward compatible)
     wire simple_hit_a_raw, simple_hit_b_raw;
@@ -754,7 +789,7 @@ module fcapz_ela #(
             seq_hit_a_q    <= {TRIG_STAGES{1'b0}};
             seq_hit_b_q    <= {TRIG_STAGES{1'b0}};
             sq_hit_q       <= 1'b0;
-        end else if (reset_pulse || any_arm_pulse || segment_auto_rearm_now) begin
+        end else if (reset_pulse || any_arm_pulse) begin
             simple_hit_a_q <= 1'b0;
             simple_hit_b_q <= 1'b0;
             seq_hit_a_q    <= {TRIG_STAGES{1'b0}};
@@ -770,7 +805,7 @@ module fcapz_ela #(
     end
 
     // Phase 1: combined store enable (storage qualification AND decimation)
-    wire store_enable = store_sample & decim_tick;
+    wire store_enable = store_sample & decim_tick & !sel_flush_active;
 
     // ---- JTAG-domain register writes ---------------------------------------
     wire jtag_rd_data_window = HAS_USER1_DATA && (
@@ -1206,13 +1241,9 @@ module fcapz_ela #(
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                  ? seq_mask_b_sync2[0] : {SAMPLE_W{1'b1}};
             // Channel select (clamped to valid range)
-            chan_sel         <= (HAS_CHANNEL_MUX && chan_sel_sync2 < NUM_CHANNELS)
-                                ? chan_sel_sync2 : 8'h0;
+            chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
-            if (HAS_PROBE_MUX)
-                probe_sel   <= (probe_sel_sync2 < PROBE_MUX_SLICES) ? probe_sel_sync2 : 8'h0;
-            else
-                probe_sel   <= 8'h0;
+            probe_sel        <= probe_sel_next;
             // Storage qualification
             sq_enable        <= HAS_STOR_QUAL && (sq_mode_sync2 != 0);
             sq_cmp_mode      <= HAS_STOR_QUAL ? sq_mode_sync2 : 4'h0;
@@ -1276,12 +1307,8 @@ module fcapz_ela #(
         {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
     wire [LEN_W:0] capture_len_next =
         {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
-    assign segment_auto_rearm_now = HAS_SEGMENTS && armed && !done && triggered &&
-        (cur_segment != NUM_SEGMENTS - 1) &&
-        ((post_count >= post_store_limit) ||
-         (store_enable && (post_count + 1'b1 >= post_store_limit)));
     wire trigger_commit_now = armed && !done && !triggered && pretrigger_ready &&
-        trigger_holdoff_done &&
+        trigger_holdoff_done && !sel_flush_active &&
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
@@ -1324,7 +1351,8 @@ module fcapz_ela #(
             trigger_out_r <= 1'b0;
         else
             trigger_out_r <= (armed && !triggered && pretrigger_ready &&
-                              trigger_holdoff_done && trigger_hit) ? 1'b1 : 1'b0;
+                              trigger_holdoff_done && !sel_flush_active &&
+                              trigger_hit) ? 1'b1 : 1'b0;
     end
 
     // Phase 4: segment base address
@@ -1410,7 +1438,9 @@ module fcapz_ela #(
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
                 post_count  <= {LEN_W{1'b0}};
-                if (HAS_SEGMENTS)
+                // A switched selection voids the rolling pre-arm history:
+                // it holds the old selection's samples.
+                if (HAS_SEGMENTS || arm_sel_change)
                     pre_count <= {LEN_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
@@ -1447,7 +1477,7 @@ module fcapz_ela #(
                         if (wr_ptr >= DEPTH_LAST)
                             wr_ptr <= {PTR_W{1'b0}};
                     end
-                    if (store_enable && !pretrigger_ready)
+                    if (store_enable && !pretrigger_ready && !sel_flush_start)
                         pre_count <= pre_count + 1'b1;
                 end
             end
@@ -1475,14 +1505,16 @@ module fcapz_ela #(
                         end
                     end
                 end
-                if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready)
+                if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready &&
+                    !sel_flush_start)
                     pre_count <= pre_count + 1'b1;
 
                 // Trigger / sequencer evaluation (runs every cycle, NOT gated by decimation)
                 if (!triggered) begin
-                    if (trig_holdoff_active) begin
+                    if (trig_holdoff_active || sel_flush_active) begin
                         // Ignore trigger / sequencer activity until the
-                        // post-arm holdoff window expires.
+                        // post-arm holdoff window and any selection flush
+                        // expire.
                         if (!trig_delay_pending)
                             trig_delay_count <= 16'h0;
                     end else if (trig_delay_pending) begin
