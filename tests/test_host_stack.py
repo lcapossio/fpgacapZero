@@ -253,7 +253,7 @@ class ManagerDetectionTests(unittest.TestCase):
         self.assertFalse(Analyzer(t)._behind_manager())
 
     def test_deep_standalone_sample_matching_the_id_is_not_a_manager(self):
-        # 16K x 32-bit: 0xF000 is sample 15360, which here reads as the ID.
+        # 16K x 32-bit: 0xF000 is sample 15296, which here reads as the ID.
         t = self._transport(depth=16384, sample_w=32, manager_block=False,
                             f000=CORE_MANAGER_CORE_ID)
         self.assertFalse(Analyzer(t)._behind_manager())
@@ -262,6 +262,46 @@ class ManagerDetectionTests(unittest.TestCase):
         t = self._transport(depth=16384, sample_w=32)
         self.assertTrue(Analyzer(t)._behind_manager())
         self.assertIn(0xF00C, t.reads)  # the manager block was checked
+
+    def test_deep_standalone_mimicking_the_block_is_not_a_manager(self):
+        # Captured samples that reproduce the whole two-slot manager block:
+        # only the DESC_INDEX write, which a standalone core ignores, tells.
+        t = self._transport(depth=16384, sample_w=32, manager_block=False)
+        t.regs.update({0xF000: CORE_MANAGER_CORE_ID, 0xF004: 2, 0xF008: 0,
+                       0xF00C: 0, 0xF010: 3, 0xF014: 0})
+        write_reg = t.write_reg
+
+        def standalone_write(addr: int, value: int) -> None:
+            if addr < 0x0100:
+                write_reg(addr, value)
+
+        t.write_reg = standalone_write  # type: ignore[method-assign]
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_core_behind_a_multi_slot_manager_keeps_desc_index(self):
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 3, 0xF010: 3, 0xF014: 2})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def tracked_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            write_reg(addr, value)
+
+        t.write_reg = tracked_write  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [(0xF014, 0), (0xF014, 2)])
+        self.assertEqual(t._manager_regs[0xF014], 2)
+
+    def test_deep_core_behind_a_manager_without_descriptors_is_detected(self):
+        # MGR_CAPS bit 1 clear: DESC_INDEX is not implemented, so it is not
+        # written; the register block alone decides.
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 2, 0xF010: 1})
+        writes: list[int] = []
+        t.write_reg = lambda addr, value: writes.append(addr)  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [])
 
     def test_explicit_topology_is_authoritative(self):
         t = self._transport(depth=1024)

@@ -808,7 +808,8 @@ class Analyzer:
         every address from ``0x0100`` up as its DATA/timestamp window and
         reads 0 past its capture, so ``0xF000`` returns sample data only when
         those windows reach it (very deep cores).  Then the rest of the
-        manager block must match as well.
+        manager block must match, and on a manager with several slots
+        ``MGR_DESC_INDEX`` must take a write, which a standalone core ignores.
         """
         if self._manager_override is not None:
             return self._manager_override
@@ -822,7 +823,9 @@ class Analyzer:
                 elif not self._standalone_windows_reach(_ADDR_MGR_VERSION, read):
                     found = True
                 else:
-                    found = self._manager_block_matches(read)
+                    found = self._manager_block_matches(read) and self._desc_index_writable(
+                        read, self.transport.write_reg
+                    )
             self._manager_found = found
         return self._manager_found
 
@@ -846,6 +849,29 @@ class Analyzer:
         stride = int(read(_ADDR_MGR_STRIDE))
         caps = int(read(_ADDR_MGR_CAPS))
         return 1 <= count <= 256 and active < count and stride == 0 and bool(caps & 0x1)
+
+    @staticmethod
+    def _desc_index_writable(read, write) -> bool:
+        """Whether ``MGR_DESC_INDEX`` latches a write of another valid slot.
+
+        A manager with descriptors (``MGR_CAPS`` bit 1) latches any index
+        below its slot count; a standalone ELA ignores writes from ``0x0100``
+        up, so the word it returns there stays put.  The original index is
+        restored.  Without descriptors, or with one slot and so no other
+        valid index, the register match alone decides.
+        """
+        count = int(read(_ADDR_MGR_COUNT))
+        if count < 2 or not int(read(_ADDR_MGR_CAPS)) & 0x2:
+            return True
+        original = int(read(_ADDR_MGR_DESC_INDEX))
+        if original >= count:
+            return False
+        probe = (original + 1) % count
+        write(_ADDR_MGR_DESC_INDEX, probe)
+        latched = int(read(_ADDR_MGR_DESC_INDEX)) == probe
+        if latched:
+            write(_ADDR_MGR_DESC_INDEX, original)
+        return latched
 
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""

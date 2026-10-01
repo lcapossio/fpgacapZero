@@ -174,9 +174,14 @@ a.close()                    # releases the transport
 selects a core-manager slot.  `manager` says whether the ELA sits behind a
 core manager; the default `None` detects it from the manager ID at `0xF000`.
 That ID decides on its own unless a standalone core of the probed geometry
-decodes `0xF000` inside its DATA/timestamp windows (cores of 15360 or more
-words); then the rest of the manager block must match too.  Pass
-`manager=True` or `False` to state the topology outright.
+decodes `0xF000` inside its DATA/timestamp windows (more than 15296 words of
+samples plus timestamps).  Then the rest of the manager block must match
+too, and a manager with descriptors (`MGR_CAPS` bit 1) and two or more
+slots must also latch a test write to `MGR_DESC_INDEX` (restored
+afterwards), which a standalone core ignores.  Only a deep core whose live
+capture reproduces the whole register block of a one-slot or
+descriptor-less manager can still fool detection.  Pass `manager=True` or `False` to
+state the topology outright.
 
 ### `probe() -> dict`
 
