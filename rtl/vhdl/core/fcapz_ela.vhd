@@ -180,6 +180,10 @@ architecture rtl of fcapz_ela is
     -- sample it marks (PROBE_PIPE plus the registered compare, at least 2
     -- with EXT_TRIG_EN), as in rtl/fcapz_ela.v.
     constant EXT_ALIGN        : natural := bool_to_nat(PROBE_PIPE >= 2) * (PROBE_PIPE - 1);
+    -- Sample clocks after an arm that switches channel or probe slice before
+    -- the stored sample and both compare operands come from the new one, as
+    -- in rtl/fcapz_ela.v.
+    constant SEL_FLUSH_LEN    : positive := PROBE_PIPE + bool_to_nat(PROBE_PIPE > 0) + 1;
     constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
 
     constant ADDR_VERSION      : natural := 16#0000#;
@@ -397,6 +401,12 @@ architecture rtl of fcapz_ela is
     signal seq_pipe_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal seq_pipe_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal sq_pipe           : std_logic := '0';
+    signal chan_sel_next     : natural range 0 to 255 := 0;
+    signal probe_sel_next    : natural range 0 to 255 := 0;
+    signal arm_sel_change    : std_logic := '0';
+    signal sel_flush_start   : std_logic := '0';
+    signal sel_flush_active  : std_logic := '0';
+    signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
     signal mem_we_a          : std_logic := '0';
@@ -639,6 +649,39 @@ begin
                          (armed = '1' and done = '0' and triggered = '1' and
                           comb_store_ok = '1' and post_count < posttrig_len) else '0';
 
+    -- Selection flush, as in rtl/fcapz_ela.v: chan_sel / probe_sel change only
+    -- on arm, and the probe pipe, probe_prev and the registered hits still
+    -- hold the old selection's samples for SEL_FLUSH_LEN sample clocks after
+    -- it.  While sel_flush_active the capture neither stores nor evaluates the
+    -- trigger.  Arms that keep the selection pay nothing.
+    chan_sel_next <= chan_sel_sync2 when NUM_CHANNELS > 1 and chan_sel_sync2 < NUM_CHANNELS else 0;
+    probe_sel_next <= probe_sel_sync2
+                      when PROBE_MUX_W > 0 and probe_sel_sync2 < (PROBE_MUX_W / SAMPLE_W) else 0;
+    arm_sel_change <= '1' when (PROBE_MUX_W > 0 and probe_sel_next /= probe_sel) or
+                               (PROBE_MUX_W = 0 and NUM_CHANNELS > 1 and chan_sel_next /= chan_sel)
+                      else '0';
+    sel_flush_start <= arm_sel_change and
+                       ((arm_toggle_sync1 xor arm_toggle_sync2) or startup_arm_pending);
+
+    p_sel_flush : process(sample_clk, sample_rst)
+    begin
+        if sample_rst = '1' then
+            sel_flush_active <= '0';
+            sel_flush_count <= 0;
+        elsif rising_edge(sample_clk) then
+            if sel_flush_start = '1' then
+                sel_flush_active <= '1';
+                sel_flush_count <= SEL_FLUSH_LEN - 1;
+            elsif sel_flush_active = '1' then
+                if sel_flush_count = 0 then
+                    sel_flush_active <= '0';
+                else
+                    sel_flush_count <= sel_flush_count - 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
     u_samplebuf : entity work.fcapz_dpram
         generic map (
             WIDTH => SAMPLE_W,
@@ -828,10 +871,10 @@ begin
         else
             sq_eff := sq_ok;
         end if;
-        store_ok := store_tick and sq_eff;
+        store_ok := store_tick and sq_eff and sel_flush_active = '0';
         trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
                               pre_count >= count_u(pretrig_len) and
-                              trig_holdoff_active = '0' and
+                              trig_holdoff_active = '0' and sel_flush_active = '0' and
                               ((trig_delay_pending = '1' and trig_delay_count = 0) or
                                (trig_delay_pending = '0' and hit_eff = '1' and trig_delay = 0));
         comb_hit_eff <= hit_eff;
@@ -988,16 +1031,8 @@ begin
                     trig_value_b <= (others => '0');
                     trig_mask_b <= (others => '1');
                 end if;
-                if NUM_CHANNELS > 1 and chan_sel_sync2 < NUM_CHANNELS then
-                    chan_sel <= chan_sel_sync2;
-                else
-                    chan_sel <= 0;
-                end if;
-                if PROBE_MUX_W > 0 and probe_sel_sync2 < (PROBE_MUX_W / SAMPLE_W) then
-                    probe_sel <= probe_sel_sync2;
-                else
-                    probe_sel <= 0;
-                end if;
+                chan_sel <= chan_sel_next;
+                probe_sel <= probe_sel_next;
                 -- From the synchronisers, like every other field latched
                 -- here: jtag_decim / jtag_trig_ext belong to the JTAG clock
                 -- domain.  Mirrors rtl/fcapz_ela.v.
@@ -1540,7 +1575,7 @@ begin
             any_arm_pulse_now := arm_pulse_now or startup_arm_pending = '1';
 
             if armed = '1' and triggered = '0' and pre_count >= count_u(pretrig_len) and
-               trig_holdoff_active = '0' and hit_eff = '1' then
+               trig_holdoff_active = '0' and sel_flush_active = '0' and hit_eff = '1' then
                 trigger_out_i <= '1';
             else
                 trigger_out_i <= '0';
@@ -1614,6 +1649,11 @@ begin
                     wr_ptr <= 0;
                     pre_count <= (others => '0');
                 end if;
+                -- A switched selection voids the rolling pre-arm history: it
+                -- holds the old selection's samples.
+                if arm_sel_change = '1' then
+                    pre_count <= (others => '0');
+                end if;
                 post_count <= (others => '0');
                 cur_segment <= 0;
                 seg_count <= 0;
@@ -1645,7 +1685,7 @@ begin
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 if NUM_SEGMENTS = 1 and store_ok then
-                    if pre_count < count_u(pretrig_len) then
+                    if pre_count < count_u(pretrig_len) and sel_flush_start = '0' then
                         pre_count <= pre_count + 1;
                     end if;
                     if triggered = '0' then
@@ -1673,7 +1713,7 @@ begin
                 end if;
 
                 if triggered = '0' then
-                    if trig_holdoff_active = '1' then
+                    if trig_holdoff_active = '1' or sel_flush_active = '1' then
                         if trig_delay_pending = '0' then
                             trig_delay_count <= (others => '0');
                         end if;
@@ -1714,7 +1754,7 @@ begin
 
                     store_now := store_ok or force_store_now;
 
-                    if store_ok and not force_store_now then
+                    if store_ok and not force_store_now and sel_flush_start = '0' then
                         if pre_count < count_u(pretrig_len) then
                             pre_count <= pre_count + 1;
                         end if;
@@ -1775,11 +1815,6 @@ begin
                                 trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else (others => '0');
                                 seq_state <= 0;
                                 seq_counter <= (others => '0');
-                                hit_a_pipe <= '0';
-                                hit_b_pipe <= '0';
-                                seq_pipe_a <= (others => '0');
-                                seq_pipe_b <= (others => '0');
-                                sq_pipe <= '0';
                             end if;
                         end if;
                     elsif store_ok then
@@ -1826,11 +1861,6 @@ begin
                                     trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else (others => '0');
                                     seq_state <= 0;
                                     seq_counter <= (others => '0');
-                                    hit_a_pipe <= '0';
-                                    hit_b_pipe <= '0';
-                                    seq_pipe_a <= (others => '0');
-                                    seq_pipe_b <= (others => '0');
-                                    sq_pipe <= '0';
                                 end if;
                             end if;
                         else

@@ -68,6 +68,11 @@ EXT_TRIG_MARK_OFFSET = 0
 # Probe-path register stages the core actually builds (see PROBE_PIPE in RTL).
 PROBE_PIPE = INPUT_PIPE if INPUT_PIPE or not EXT_TRIG_EN else 1
 TIMESTAMP_W = env_int("ELA_PARAM_TIMESTAMP_W", 0)
+NUM_SEGMENTS = env_int("ELA_PARAM_NUM_SEGMENTS", 1)
+NUM_CHANNELS = env_int("ELA_PARAM_NUM_CHANNELS", 1)
+PROBE_MUX_W = env_int("ELA_PARAM_PROBE_MUX_W", 0)
+# Register that selects the probe slice / channel latched on arm.
+SEL_ADDR = 0x00AC if PROBE_MUX_W else 0x00A0  # ADDR_PROBE_SEL / ADDR_CHAN_SEL
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
 TS_WORDS = (TIMESTAMP_W + 31) // 32 if TIMESTAMP_W > 0 else 0
 ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4
@@ -103,6 +108,9 @@ class ElaFunctionalCoverage:
             "segmented_rearm_pulses": 0,
             "probe_mux": 0,
             "probe_mux_slice0": 0,
+            "channel_switch": 0,
+            "channel_switch_edge": 0,
+            "channel_switch_history": 0,
             "trigger_delay": 0,
             "trigger_delay_zero": 0,
             "startup_arm": 0,
@@ -641,6 +649,129 @@ async def segmented_capture(dut):
     assert status & 0x4
     assert seg_status & 0x8000_0000
     FUNCTIONAL_COVERAGE.hit("segments")
+
+
+@cocotb.test()
+async def segment_restart_keeps_the_first_sample(dut):
+    """The first sample after a segment completes can trigger the next one.
+    With pretrigger 0, post 3 and a trigger on low bits == 3, every segment's
+    first sample matches, so the windows tile the counter with no gap."""
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=0, post=3, value=3, mask=0x03)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    firsts = []
+    for seg in range(NUM_SEGMENTS):
+        await ela.write(ADDR_SEG_SEL, seg)
+        window = [s & 0xFF for s in await ela.read_samples(4)]
+        assert counter_steps(window) == [1, 1, 1], f"segment {seg} window {window}"
+        firsts.append(window[0])
+    assert counter_steps(firsts) == [4] * (NUM_SEGMENTS - 1), f"segment starts {firsts}"
+    FUNCTIONAL_COVERAGE.hit("segments")
+
+
+def _slices(*values: int) -> int:
+    """Pack per-slice/channel probe values, slice 0 in the low bits."""
+    return sum((v & ((1 << SAMPLE_W) - 1)) << (i * SAMPLE_W) for i, v in enumerate(values))
+
+
+async def _slices_counter(dut) -> None:
+    """Slice 0 counts with bit 7 clear, slice 1 the same count with it set."""
+    value = 0
+    while True:
+        dut.probe_in.value = _slices(value & 0x7F, (value & 0x7F) | 0x80)
+        await RisingEdge(dut.sample_clk)
+        value += 1
+
+
+@cocotb.test()
+async def channel_switch_ignores_old_channel_samples(dut):
+    """After an arm that switches channel, samples of the old channel still in
+    the probe pipeline must not reach the new trigger configuration."""
+    ela = await setup(dut)
+    dut.probe_in.value = _slices(5, 7)
+    await ela.wait_sample(12)  # slice 0, selected since reset, fills the pipe
+    await ela.write(SEL_ADDR, 1)
+    await ela.configure_value_capture(pre=0, post=0, value=5)
+    await ela.arm()
+    await ela.wait_sample(30)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"old-channel sample triggered, status=0x{status:x}"
+    dut.probe_in.value = _slices(5, 5)
+    assert await ela.wait_done() & 0x4
+    FUNCTIONAL_COVERAGE.hit("channel_switch")
+
+
+@cocotb.test()
+async def channel_switch_is_not_an_edge(dut):
+    """The step from the old channel's last sample to the new channel's first
+    is not an edge on the probe."""
+    ela = await setup(dut)
+    dut.probe_in.value = _slices(0x00, 0xFF)
+    await ela.wait_sample(12)
+    await ela.write(SEL_ADDR, 1)
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_TRIG_MODE, 2)  # changed, under the mask
+    await ela.write(ADDR_TRIG_VALUE, 0)
+    await ela.write(ADDR_TRIG_MASK, 0x01)
+    await ela.arm()
+    await ela.wait_sample(30)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"channel switch read as an edge, status=0x{status:x}"
+    dut.probe_in.value = _slices(0x00, 0xFE)
+    assert await ela.wait_done() & 0x4
+    FUNCTIONAL_COVERAGE.hit("channel_switch_edge")
+
+
+@cocotb.test()
+async def channel_switch_drops_old_prearm_history(dut):
+    """Single-segment cores keep rolling pre-arm history in the old channel; an
+    arm that switches channel must re-earn the pre-trigger window from the new
+    one, so every captured sample is a new-channel (bit 7 set) sample."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(_slices_counter(dut))
+    # A capture on slice 0 latches pre=6; the soft reset then returns to idle,
+    # where the prefill rolls slice-0 history and earns the pre-trigger credit.
+    await ela.configure_value_capture(pre=6, post=1, value=0, mask=0)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    await ela.reset_core()
+    await ela.wait_sample(40)
+    await ela.write(SEL_ADDR, 1)
+    await ela.configure_value_capture(pre=6, post=1, value=0x80, mask=0x80)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(8)]
+    assert all(s & 0x80 for s in window), f"old-channel samples in window {window}"
+    steps = [(window[i] - window[i - 1]) & 0x7F for i in range(1, len(window))]
+    assert steps == [1] * 7, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("channel_switch_history")
+
+
+@cocotb.test()
+async def channel_switch_rearm_drops_old_credit(dut):
+    """A re-arm that switches channel while the capture is still earning its
+    pre-trigger window must not keep the old channel's credit, the sample
+    stored on the re-arm edge included."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(_slices_counter(dut))
+    # Slice 0 never has bit 7 set, so this capture keeps filling its window.
+    await ela.configure_value_capture(pre=12, post=1, value=0x80, mask=0x80)
+    await ela.write(SEL_ADDR, 0)
+    await ela.arm()
+    await ela.write(SEL_ADDR, 1)  # the arm above is still earning its window
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(14)]
+    assert all(s & 0x80 for s in window), f"old-channel samples in window {window}"
+    steps = [(window[i] - window[i - 1]) & 0x7F for i in range(1, len(window))]
+    assert steps == [1] * 13, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("channel_switch_history")
 
 
 @cocotb.test()

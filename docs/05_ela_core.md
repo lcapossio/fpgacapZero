@@ -802,6 +802,14 @@ You can use both at once if you really want to (one ELA observing N
 channels of M signals each), but in practice pick the one that fits
 your bus naturally.
 
+When an arm changes the selection, the probe pipeline still holds a few
+samples of the old one.  For those clocks (the probe pipeline length plus
+up to two) the core neither stores samples nor evaluates the trigger, an
+external trigger included, so no old-selection sample is captured,
+compared, or taken as the previous sample of an edge.  A single-segment
+core also drops its pre-arm history and refills the pre-trigger window from
+the new selection.  An arm that keeps the selection starts at once.
+
 ## Reading the FEATURES register
 
 When you call `Analyzer.probe()`, the host queries the `FEATURES`

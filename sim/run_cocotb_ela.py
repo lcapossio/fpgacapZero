@@ -59,6 +59,13 @@ class CocotbTarget:
         return {**BASE_PARAMETERS, **self.parameters}
 
 
+CHANNEL_SWITCH_TESTS = (
+    "channel_switch_ignores_old_channel_samples",
+    "channel_switch_is_not_an_edge",
+    "channel_switch_drops_old_prearm_history",
+    "channel_switch_rearm_drops_old_credit",
+)
+
 SEQUENCER_TESTS = (
     "sequencer_count_target_one",
     "sequencer_final_stage_counts_to_target",
@@ -96,13 +103,33 @@ TARGETS: tuple[CocotbTarget, ...] = (
                  ("timestamp_capture", "timestamp_decimation_gap")),
     CocotbTarget("timestamp48", {"TIMESTAMP_W": 48}, ("timestamp_48_upper_word",)),
     CocotbTarget("segments4", {"NUM_SEGMENTS": 4},
-                 ("segmented_capture", "segmented_windows_are_contiguous")),
+                 ("segmented_capture", "segmented_windows_are_contiguous",
+                  "segment_restart_keeps_the_first_sample")),
     CocotbTarget("probe_mux", {"PROBE_MUX_W": 32}, ("probe_mux_slice_selection",)),
+    *(
+        CocotbTarget(
+            f"channel_switch_mux_pipe{pipe}",
+            {"PROBE_MUX_W": 32, "INPUT_PIPE": pipe},
+            CHANNEL_SWITCH_TESTS,
+        )
+        for pipe in (0, 1, 2, 3)
+    ),
+    CocotbTarget("channel_switch_mux_ext", {"PROBE_MUX_W": 32, "EXT_TRIG_EN": 1},
+                 CHANNEL_SWITCH_TESTS),
+    *(
+        CocotbTarget(
+            f"channel_switch_chan2_pipe{pipe}",
+            {"NUM_CHANNELS": 2, "INPUT_PIPE": pipe},
+            CHANNEL_SWITCH_TESTS,
+        )
+        for pipe in (0, 1)
+    ),
     CocotbTarget(
         "input_pipe",
         {"DEPTH": 1024, "DECIM_EN": 1, "EXT_TRIG_EN": 1,
          "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
-        ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse"),
+        ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse",
+         "segment_restart_keeps_the_first_sample"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
