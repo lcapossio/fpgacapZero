@@ -737,6 +737,7 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0x1234)
 
+    @unittest.skipUnless(_BITSTREAM_VARIANT == "vex", "only the vex variant has a CPU")
     def test_cpu_writes_reach_shared_slave(self):
         """Both masters are merged onto one slave by fcapz_axi_interconnect, so
         the host must be able to read back what the CPU wrote. The free-running
