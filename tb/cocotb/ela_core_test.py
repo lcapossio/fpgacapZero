@@ -61,10 +61,12 @@ DUAL_COMPARE = env_int("ELA_PARAM_DUAL_COMPARE", 1)
 DECIM_EN = env_int("ELA_PARAM_DECIM_EN", 0)
 STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
 EXT_TRIG_EN = env_int("ELA_PARAM_EXT_TRIG_EN", 0)
-# Samples between an external trigger_in pulse and the sample it marks.  The
-# core delays trigger_in to match the probe path for INPUT_PIPE >= 1; with no
-# input pipe the 2-FF synchronizer is 2 samples slower than the probe.
-EXT_TRIG_MARK_OFFSET = 2 if INPUT_PIPE == 0 else 0
+# An external trigger_in pulse marks the probe sample driven alongside it: the
+# core matches trigger_in to the probe path, and builds one input stage when
+# INPUT_PIPE = 0 so that path is as long as the 2-FF synchronizer.
+EXT_TRIG_MARK_OFFSET = 0
+# Probe-path register stages the core actually builds (see PROBE_PIPE in RTL).
+PROBE_PIPE = INPUT_PIPE if INPUT_PIPE or not EXT_TRIG_EN else 1
 TIMESTAMP_W = env_int("ELA_PARAM_TIMESTAMP_W", 0)
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
 TS_WORDS = (TIMESTAMP_W + 31) // 32 if TIMESTAMP_W > 0 else 0
@@ -706,7 +708,9 @@ async def trigger_delay_startup_and_holdoff(dut):
     await ela.write(ADDR_TRIG_HOLDOFF, 4)
     assert await ela.read(ADDR_TRIG_HOLDOFF) == 4
     await ela.reset_core()
-    await ela.configure_value_capture(pre=0, post=2, value=3)
+    # Holdoff counts cycles at the comparator; the probe pipeline lets earlier
+    # counter values reach it after the window, so pick one still inside.
+    await ela.configure_value_capture(pre=0, post=2, value=3 - PROBE_PIPE)
     await ela.arm()
     await ela.drive_counter(16)
     status = await ela.read(ADDR_STATUS)
@@ -1284,7 +1288,7 @@ async def sequencer_counts_first_hit_after_holdoff(dut):
 @cocotb.test()
 async def input_pipe_depth_sets_capture_latency(dut):
     """An external pulse marks the probe sample driven alongside it at every
-    INPUT_PIPE >= 1 depth, and the one 2 samples later with no input pipe."""
+    INPUT_PIPE depth, including 0."""
     ela = await setup(dut)
     await ela.write(ADDR_TRIG_EXT, 1)  # OR: the external pulse alone triggers
     await ela.configure_value_capture(pre=0, post=3, value=0xFF, mask=0xFF)

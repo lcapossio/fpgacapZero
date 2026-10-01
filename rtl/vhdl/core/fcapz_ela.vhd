@@ -167,15 +167,19 @@ architecture rtl of fcapz_ela is
     constant SEG_IDX_W        : positive := fcapz_clog2(NUM_SEGMENTS);
     constant SEQ_STATE_W      : positive := fcapz_clog2(TRIG_STAGES);
     constant TS_WIDTH         : positive := fcapz_nonzero_width(TIMESTAMP_W);
-    -- INPUT_PIPE probe register stages; the array keeps one when INPUT_PIPE = 0
+    -- Probe pipeline stages actually built.  The external trigger needs a
+    -- 2-FF synchronizer, so a core with EXT_TRIG_EN and INPUT_PIPE = 0 is
+    -- built with one input stage: with the registered compare the probe path
+    -- is then as long as the synchronizer (see rtl/fcapz_ela.v PROBE_PIPE).
+    constant PROBE_PIPE       : natural := bool_to_nat(EXT_TRIG_EN /= 0 and INPUT_PIPE = 0) + INPUT_PIPE;
+    -- PROBE_PIPE probe register stages; the array keeps one when PROBE_PIPE = 0
     -- so its bounds stay legal, and that stage is then unused.
-    constant PIPE_STAGES      : positive := fcapz_nonzero_width(INPUT_PIPE);
+    constant PIPE_STAGES      : positive := fcapz_nonzero_width(PROBE_PIPE);
     -- Extra trigger_in stages beyond the 2-FF synchronizer, so an external
     -- trigger reaches the capture decision with the same latency as the probe
-    -- sample it marks (INPUT_PIPE plus the registered compare), as in
-    -- rtl/fcapz_ela.v.  INPUT_PIPE = 0 cannot be aligned this way: an external
-    -- trigger there marks the sample 2 after its edge.
-    constant EXT_ALIGN        : natural := bool_to_nat(INPUT_PIPE >= 2) * (INPUT_PIPE - 1);
+    -- sample it marks (PROBE_PIPE plus the registered compare, at least 2
+    -- with EXT_TRIG_EN), as in rtl/fcapz_ela.v.
+    constant EXT_ALIGN        : natural := bool_to_nat(PROBE_PIPE >= 2) * (PROBE_PIPE - 1);
     constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
 
     constant ADDR_VERSION      : natural := 16#0000#;
@@ -389,7 +393,7 @@ architecture rtl of fcapz_ela is
     signal pipe_probe        : sample_array_t(0 to PIPE_STAGES - 1) := (others => (others => '0'));
     signal hit_a_pipe        : std_logic := '0';
     signal hit_b_pipe        : std_logic := '0';
-    -- Per-stage registered sequencer hits (INPUT_PIPE > 0, TRIG_STAGES > 1).
+    -- Per-stage registered sequencer hits (PROBE_PIPE > 0, TRIG_STAGES > 1).
     signal seq_pipe_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal seq_pipe_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal sq_pipe           : std_logic := '0';
@@ -616,10 +620,10 @@ begin
     burst_start_ptr <= burst_start_ptr_i;
     burst_rd_data <= sample_mem_dout_b;
     burst_rd_ts_data <= ts_mem_dout_b;
-    mem_we_a_ram <= mem_we_a_q when INPUT_PIPE > 0 else mem_we_a;
-    sample_mem_din_ram <= mem_wr_data_q when INPUT_PIPE > 0 else sample_mem_din;
-    ts_mem_din_ram <= mem_wr_ts_q when INPUT_PIPE > 0 else ts_mem_din;
-    mem_addr_a <= mem_wr_addr_q when INPUT_PIPE > 0 and mem_we_a_q = '1' else mem_wr_addr;
+    mem_we_a_ram <= mem_we_a_q when PROBE_PIPE > 0 else mem_we_a;
+    sample_mem_din_ram <= mem_wr_data_q when PROBE_PIPE > 0 else sample_mem_din;
+    ts_mem_din_ram <= mem_wr_ts_q when PROBE_PIPE > 0 else ts_mem_din;
+    mem_addr_a <= mem_wr_addr_q when PROBE_PIPE > 0 and mem_we_a_q = '1' else mem_wr_addr;
     mem_addr_b <= burst_rd_addr when burst_rd_active = '1' else
                   datawin_mem_addr_comb when datawin_req_now = '1' and datawin_oob_comb = '0' else
                   (others => '0');
@@ -701,7 +705,7 @@ begin
             active_probe := probe_in(SAMPLE_W - 1 downto 0);
         end if;
 
-        if INPUT_PIPE > 0 then
+        if PROBE_PIPE > 0 then
             compare_probe := pipe_probe(PIPE_STAGES - 1);
         else
             compare_probe := active_probe;
@@ -715,7 +719,7 @@ begin
 
         seq_bank_a := (others => '0');
         seq_bank_b := (others => '0');
-        if TRIG_STAGES > 1 and INPUT_PIPE > 0 then
+        if TRIG_STAGES > 1 and PROBE_PIPE > 0 then
             -- Every stage's A/B compare on this sample; the decision selects
             -- the registered hits of the stage active when they are consumed
             -- (see rtl/fcapz_ela.v g_seq_cmp_bank).
@@ -761,16 +765,16 @@ begin
         comb_seq_a <= seq_bank_a;
         comb_seq_b <= seq_bank_b;
 
-        -- With INPUT_PIPE > 0 only the raw A/B compares are registered, as in
+        -- With PROBE_PIPE > 0 only the raw A/B compares are registered, as in
         -- rtl/fcapz_ela.v.  Stage combine, final and count qualification then
         -- use the current seq_state and seq_counter, so the trigger, the
         -- stage advance and the hit count all see the same registered hit.
         -- The sequencer selects the active stage's entry from the per-stage
         -- registered hits, all of which describe the same sample.
-        if INPUT_PIPE > 0 and TRIG_STAGES > 1 then
+        if PROBE_PIPE > 0 and TRIG_STAGES > 1 then
             hit_a := seq_pipe_a(seq_state);
             hit_b := seq_pipe_b(seq_state);
-        elsif INPUT_PIPE > 0 then
+        elsif PROBE_PIPE > 0 then
             hit_a := hit_a_pipe;
             hit_b := hit_b_pipe;
         end if;
@@ -819,7 +823,7 @@ begin
             ) = '1';
         end if;
 
-        if INPUT_PIPE > 0 then
+        if PROBE_PIPE > 0 then
             sq_eff := (STOR_QUAL = 0) or (sq_enable = '0') or (sq_pipe = '1');
         else
             sq_eff := sq_ok;
@@ -839,7 +843,7 @@ begin
         mem_wr_addr <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
         -- The registered compare and storage-qualification hits describe
         -- the previous sample, so that is the one stored.
-        if INPUT_PIPE > 0 then
+        if PROBE_PIPE > 0 then
             sample_mem_din <= probe_prev;
         else
             sample_mem_din <= active_probe;
@@ -1511,8 +1515,8 @@ begin
             else
                 active_probe := probe_in(SAMPLE_W - 1 downto 0);
             end if;
-            if INPUT_PIPE > 0 then
-                -- INPUT_PIPE stages, as rtl/fcapz_ela.v builds them.
+            if PROBE_PIPE > 0 then
+                -- PROBE_PIPE stages, as rtl/fcapz_ela.v builds them.
                 compare_probe := pipe_probe(PIPE_STAGES - 1);
                 pipe_probe(0) <= active_probe;
                 for i in 1 to PIPE_STAGES - 1 loop

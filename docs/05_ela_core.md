@@ -68,7 +68,8 @@ number of stages; each timestamp marks the cycle when the pipelined sample
 is written, not the original external `probe_in` cycle. In practice the
 reported timestamp is later than the external probe event by `INPUT_PIPE`
 sample-clock cycles, plus one for the registered compare stage when
-`INPUT_PIPE>=1`.
+`INPUT_PIPE>=1`.  A core with `EXT_TRIG_EN=1` and `INPUT_PIPE=0` behaves
+as `INPUT_PIPE=1` (see External trigger I/O below).
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
@@ -338,15 +339,15 @@ cfg = CaptureConfig(
 )
 ```
 
-`trigger_in` passes through a 2-flop synchronizer.  With `INPUT_PIPE>=1`
-the core delays it further to match the probe path, so a `trigger_in`
-pulse sampled on the same clock as a probe value marks that value, and in
-AND mode the internal compare and `trigger_in` refer to the same sample.
-With `INPUT_PIPE=0` the synchronizer is two sample clocks slower than the
-probe: an external trigger marks the sample two clocks after the pulse,
-and AND mode combines the current compare with `trigger_in` from two
-clocks earlier.  Build with `INPUT_PIPE>=1` when a synchronous
-`trigger_in` must line up with the probe exactly.  An asynchronous
+`trigger_in` passes through a 2-flop synchronizer, and the core matches
+the probe path to it: a `trigger_in` pulse sampled on the same clock as a
+probe value marks that value, and in AND mode the internal compare and
+`trigger_in` refer to the same sample.  With `INPUT_PIPE>=1` the core
+delays `trigger_in` further to match the deeper probe path.  With
+`INPUT_PIPE=0` and `EXT_TRIG_EN=1` the core is built as `INPUT_PIPE=1`
+(one probe input stage plus the registered compare, so the probe path is
+as long as the synchronizer), at the cost of `SAMPLE_W` flops and that
+setting's latency.  An asynchronous
 `trigger_in` has an inherent one-clock uncertainty either way.
 
 The reference Arty A7 design ties `trigger_in` to an EIO-controlled
