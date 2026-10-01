@@ -88,7 +88,13 @@ def _pack_mem(bin_path: Path, mem_path: Path) -> None:
         )
     lines = [f"{struct.unpack('<I', data[i * 4:i * 4 + 4])[0]:08x}"
              for i in range(words)]
-    mem_path.write_text("\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    # Rewrite only on change: bitstream freshness checks compare mtimes, so
+    # rewriting identical content would mark a current bitstream stale.
+    if mem_path.is_file() and mem_path.read_text() == text:
+        print(f"fcapz: {mem_path.name} unchanged ({words} words / {len(data)} bytes)")
+        return
+    mem_path.write_text(text)
     print(f"fcapz: wrote {mem_path.name} ({words} words / {len(data)} bytes)")
 
 
