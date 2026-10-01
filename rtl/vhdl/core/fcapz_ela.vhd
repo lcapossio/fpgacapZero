@@ -1930,6 +1930,7 @@ begin
                 if HAS_WIDE_TRIG then
                     r(18) := '1';  -- full-width comparator A programmable
                 end if;
+                r(19) := '1';  -- timestamp window base decoded at full width
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then

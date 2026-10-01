@@ -469,7 +469,7 @@ class AnalyzerTests(unittest.TestCase):
 
     def _wide_capture(
         self, *, managed: bool, capture_len: int, sample_burst: bool, slot_caps: int = 1,
-        instance: int | None = None, timestamp_w: int = 0,
+        instance: int | None = None, timestamp_w: int = 0, compare_caps: int | None = None,
     ):
         """Capture from a 256-bit x 2048 core whose DATA window is read as
         32-bit words through a range-checked register window."""
@@ -481,6 +481,8 @@ class AnalyzerTests(unittest.TestCase):
                 self.regs[0x0010] = 2048         # DEPTH
                 self.regs[0x001C] = capture_len  # CAPTURE_LEN
                 self.regs[0x00C4] = timestamp_w  # TIMESTAMP_W
+                if compare_caps is not None:
+                    self.regs[0x00E0] = compare_caps
                 if managed:
                     self._manager_regs[0xF004] = 1
                     self._manager_regs[0xF010] = 0x3        # descriptors
@@ -591,6 +593,23 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(DataWindowError):
             analyzer.capture(timeout=0.01)
         self.assertEqual(transport.window_reads, [])  # samples refused too
+
+    def test_full_width_ts_base_cap_lifts_the_alias_limit(self):
+        """COMPARE_CAPS bit 19 says the timestamp base is decoded at full
+        width, so the DATA window runs to the 16-bit address limit; without
+        it the window stops at the base's 16-bit alias (0x10100 -> 0x0100)."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=4, sample_burst=False, timestamp_w=32,
+            compare_caps=0x3_01FF | (1 << 19),
+        )
+        analyzer._set_data_window_end()
+        self.assertEqual(transport.data_window_end, 0x10000)
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=4, sample_burst=False, timestamp_w=32,
+            compare_caps=0x3_01FF,
+        )
+        analyzer._set_data_window_end()
+        self.assertEqual(transport.data_window_end, 0x0100)
 
     def test_wide_48_bit_timestamps_use_burst_across_counter_wrap(self):
         """Multi-word timestamps take the burst too, and a counter wrap inside

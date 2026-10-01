@@ -822,7 +822,7 @@ info = analyzer.probe()
 #   "timestamp_width": 32,
 #   "num_segments": 4,
 #   "probe_mux_w": 0,
-#   "compare_caps": 0x301C3,
+#   "compare_caps": 0xB01C3,
 #   "compare_modes": [0, 1, 6, 7, 8],
 #   "has_dual_compare": True,
 # }
