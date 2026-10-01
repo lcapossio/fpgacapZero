@@ -107,18 +107,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   judged sample. `trigger_in` is also delayed to match the probe path
   (`INPUT_PIPE − 1` extra flops for `INPUT_PIPE ≥ 2`), so an external trigger
   marks the sample driven alongside it, and AND mode compares like with like.
-  With `INPUT_PIPE=0` an external trigger still marks the sample two clocks
-  after the pulse (the synchronizer latency). Timestamps keep their spacing;
-  their absolute offset from `probe_in` grows by one clock. Fixing it needs a
-  bitstream rebuild.
+  A core with `EXT_TRIG_EN=1` and `INPUT_PIPE=0` is now built as
+  `INPUT_PIPE=1`, so its probe path is as long as the `trigger_in`
+  synchronizer and it aligns the same way; before, its external trigger marked
+  the sample two clocks after the pulse. That costs one probe stage plus the
+  registered RAM write command (data, address, timestamp and write enable)
+  and two clocks of latency. Timestamps keep their spacing; their absolute
+  offset from `probe_in` grows by one clock (two for that `INPUT_PIPE=0`
+  case). Fixing it needs a bitstream rebuild.
 
 - **ELA (Verilog) — timestamps aliased onto sample data on deep cores.** The
   timestamp window base (`0x100 + DEPTH·words·4`) was compared as 16 bits, so
   once it passed `0xFFFF` every data-window read returned timestamps. It is now
-  compared at full width, as the VHDL core already did. The host cannot tell
-  a fixed core from an older one, so for such a core it still refuses window
-  reads from the aliased address (`base & 0xFFFF`) on; burst readout is
-  unaffected.
+  compared at full width, as the VHDL core already did. A fixed core sets
+  `COMPARE_CAPS` bit 19 and the host reads its whole window; for an older
+  core the host still refuses window reads from the aliased address
+  (`base & 0xFFFF`) on. Burst readout is unaffected.
 
 - **Host — reads past the end of the 16-bit register window.** A capture larger
   than the data window (from `0x0100` up to `0xF000` behind a core manager,
@@ -128,8 +132,70 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   timestamps) are instead read with the single-chain burst, chunked 256 scans
   per TCL call, rather than 32 bits per scan: it has no window limit and is
   much faster. A manager slot without burst wiring is never burst-read (it
-  would return zeros), and a timestamp counter wrap inside a capture no longer
-  sends a good burst readout to the slow fallback.
+  would return zeros).
+
+- **ELA — a sequencer could fire on a sample matched against the previous
+  stage (`INPUT_PIPE ≥ 1`).** With the registered compare, each sample was
+  compared against the stage active when it arrived, but the hit was used a
+  clock later by whatever stage was active then. Right after an advance, a
+  sample that matched only the old stage counted as a hit of the new one:
+  stage 0 `== 5` → stage 1 `== 7` fired on `5, 5`. Every stage's compare is
+  now registered and the decision takes the current stage's hit, so counts,
+  AND/OR combine and back-to-back matches follow the stage that is actually
+  active. Costs one comparator pair per extra stage when `TRIG_STAGES > 1`
+  and `INPUT_PIPE ≥ 1`. Both HDLs; fixing it needs a bitstream rebuild.
+
+- **ELA — an arm that switched channel or probe slice used old-selection
+  samples.** `NUM_CHANNELS > 1` and `PROBE_MUX_W` select the probe on arm, but
+  the probe pipeline, the previous-sample register and the registered
+  compares still held the old selection's samples for a few clocks after it.
+  Those samples could trigger the new capture, land in its window, or read as
+  an edge against the first new sample, and a single-segment core's rolling
+  pre-arm history (all old-selection samples) counted toward the pre-trigger
+  window. After an arm that changes the selection the core now neither
+  stores nor evaluates the trigger until the pipeline holds only new samples
+  (the probe pipeline length plus up to two clocks), and the pre-trigger
+  window is refilled from the new selection. An external trigger in those
+  clocks is ignored. Arms that keep the selection are unchanged. Both HDLs;
+  fixing it needs a bitstream rebuild.
+
+- **ELA — a segment could not trigger on the first sample after the previous
+  one (`INPUT_PIPE ≥ 1`).** Each segment's auto-rearm cleared the registered
+  compare hits, so the sample right after a completed segment was never
+  judged; with no pre-trigger a matching sample there was skipped and the
+  next segment started on a later match. The hits are now kept across the
+  rearm. Both HDLs; fixing it needs a bitstream rebuild.
+
+- **hw_server — register access now clocks the JTAG idle it meant to.**
+  xsdb's `jtag sequence delay` waits without clocking TCK, so the idle
+  cycles meant to let a command land were never clocked. Every idle is now
+  `state IDLE <n>`, and every DR scan (register, block and pipelined reads,
+  bursts, and the bridges' raw scans) ends in an explicit UPDATE-DR, which
+  `-register` mode needs. The
+  warmup read that the hw_server transport discarded before identity and
+  status reads is gone, so each of those reads is one scan sequence, not two.
+  Not yet re-validated on Zynq UltraScale+ MPSoC (`-register` mode).
+
+- **Burst readout runs once.** Each burst used to be repeated until two
+  passes agreed (hw_server single-chain, and both Quartus burst paths), and
+  burst timestamps that did not count strictly forward were re-read through
+  the slow window, which also re-read valid captures spanning a full counter
+  period. On hw_server the stale passes came from the pointer write and the
+  scans running as separate JTAG transactions with no clocked idle between
+  them, both since fixed; repeated hardware stress on Arty A7 and DE25-Nano
+  showed no stale pass on any burst path. Each burst is now one pass instead
+  of at least two. Quartus register reads are likewise read once, not twice.
+
+- **Core-manager detection is deterministic.** A standalone ELA answers
+  `0xF000` from its DATA/timestamp window, so on a very deep core a sample
+  could read as the manager ID. The ID is now conclusive only when a
+  standalone core of the probed geometry cannot reach `0xF000`; otherwise the
+  rest of the manager block must match too, and a manager with descriptors
+  and two or more slots must latch a test write to `MGR_DESC_INDEX`
+  (restored afterwards), which a standalone core ignores. Only a deep core
+  whose live capture reproduces the register block of a one-slot or
+  descriptor-less manager can still fool it.
+  `Analyzer(..., manager=True/False)` states the topology outright.
 
 - **CLI.** `--trigger-value` accepts hex (`0x…`); `--depth` and the sample
   width default to what the core reports instead of 1024/8.
