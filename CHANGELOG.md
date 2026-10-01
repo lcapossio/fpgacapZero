@@ -80,6 +80,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `vid_pid`), not just `ftdi vid_pid`, so non-FTDI adapters are recognised
   instead of always probed.
 
+- **ELA — shorter segment-completion path.** The post-trigger count is now a
+  down-counter with registered last-sample flags, so the decision that ends a
+  capture or segment no longer starts at an arithmetic compare. Capture
+  behavior is unchanged; this restores timing margin on the Arty A7 VexRiscv
+  build's 150 MHz ELA. Both HDLs.
+
 ### Deprecated
 
 - **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
