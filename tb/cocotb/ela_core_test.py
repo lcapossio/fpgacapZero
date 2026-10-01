@@ -482,9 +482,8 @@ async def oversize_length_sum_still_reports_overflow(dut):
 async def posttrigger_at_depth_still_completes(dut):
     """A posttrigger of DEPTH must still terminate the capture.
 
-    post_count is compared against posttrig_len, so it needs the same width as
-    a length. One bit narrower and it wraps one short of DEPTH, so `done` never
-    asserts and the capture hangs rather than completing (overflowed).
+    The post-trigger counter is loaded from posttrig_len, so it needs the same
+    width as a length: one bit narrower cannot hold DEPTH.
     """
     ela = await setup(dut)
     await ela.reset_core()

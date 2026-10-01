@@ -161,6 +161,8 @@ module fcapz_ela #(
 
     localparam PTR_W = $clog2(DEPTH);
     localparam LEN_W = $clog2(DEPTH+1);
+    localparam [LEN_W-1:0] LEN_ONE = 1;
+    localparam [LEN_W-1:0] LEN_TWO = 2;
     // Used by the single-segment pre-arm rolling buffer. Keep this explicit
     // instead of slicing DEPTH, because power-of-two DEPTH would truncate to 0.
     localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
@@ -426,7 +428,12 @@ module fcapz_ela #(
     reg [SAMPLE_W-1:0] trig_value, trig_mask;
     reg [SAMPLE_W-1:0] trig_value_b, trig_mask_b;
     reg [PTR_W-1:0] wr_ptr, trig_ptr, start_ptr;
-    reg [LEN_W-1:0] post_count;
+    // Post-trigger samples still to store, loaded with posttrig_len at the
+    // trigger commit and counted down.  post_left_zero / post_left_one are
+    // registered (post_left == 0) / (post_left == 1), so the
+    // segment-complete decision starts at a flop, not a counter compare.
+    reg [LEN_W-1:0] post_left;
+    reg post_left_zero, post_left_one;
     reg [LEN_W-1:0] pre_count;
     reg [LEN_W-1:0] capture_len;  // can equal DEPTH
     reg [SAMPLE_W-1:0] probe_prev;
@@ -1333,7 +1340,7 @@ module fcapz_ela #(
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
-                          (post_count < post_store_limit);
+                          !post_left_zero;
     wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
@@ -1396,7 +1403,9 @@ module fcapz_ela #(
             wr_ptr      <= {PTR_W{1'b0}};
             trig_ptr    <= {PTR_W{1'b0}};
             start_ptr   <= {PTR_W{1'b0}};
-            post_count  <= {LEN_W{1'b0}};
+            post_left   <= {LEN_W{1'b0}};
+            post_left_zero <= 1'b1;
+            post_left_one  <= 1'b0;
             pre_count   <= {LEN_W{1'b0}};
             capture_len <= {LEN_W{1'b0}};
             seq_state   <= {SEQ_STATE_W{1'b0}};
@@ -1419,7 +1428,9 @@ module fcapz_ela #(
                 done        <= 1'b0;
                 overflow    <= 1'b0;
                 wr_ptr      <= {PTR_W{1'b0}};
-                post_count  <= {LEN_W{1'b0}};
+                post_left   <= {LEN_W{1'b0}};
+                post_left_zero <= 1'b1;
+                post_left_one  <= 1'b0;
                 pre_count   <= {LEN_W{1'b0}};
                 capture_len <= {LEN_W{1'b0}};
                 trig_holdoff_active <= 1'b0;
@@ -1436,7 +1447,9 @@ module fcapz_ela #(
 
             if (done) begin
                 armed              <= 1'b0;
-                post_count         <= {PTR_W{1'b0}};
+                post_left   <= {LEN_W{1'b0}};
+                post_left_zero <= 1'b1;
+                post_left_one  <= 1'b0;
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
                 // Sample writes are frozen while done is held (the host is
@@ -1458,7 +1471,9 @@ module fcapz_ela #(
                 done        <= 1'b0;
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
-                post_count  <= {LEN_W{1'b0}};
+                post_left   <= {LEN_W{1'b0}};
+                post_left_zero <= 1'b1;
+                post_left_one  <= 1'b0;
                 // A switched selection voids the rolling pre-arm history (it
                 // holds the old selection's samples), as does the
                 // qualification bubble above.  So does a restart of a
@@ -1559,7 +1574,9 @@ module fcapz_ela #(
                         if (trig_delay_count == 16'h0) begin
                             triggered          <= 1'b1;
                             trig_ptr           <= wr_ptr;
-                            post_count         <= {LEN_W{1'b0}};
+                            post_left          <= post_store_limit;
+                            post_left_zero     <= (post_store_limit == {LEN_W{1'b0}});
+                            post_left_one      <= (post_store_limit == LEN_ONE);
                             capture_len        <= capture_len_next[LEN_W-1:0];
                             trig_delay_pending <= 1'b0;
                         end else begin
@@ -1570,7 +1587,9 @@ module fcapz_ela #(
                             // Zero delay: legacy behavior, commit immediately.
                             triggered   <= 1'b1;
                             trig_ptr    <= wr_ptr;
-                            post_count  <= {LEN_W{1'b0}};
+                            post_left          <= post_store_limit;
+                            post_left_zero     <= (post_store_limit == {LEN_W{1'b0}});
+                            post_left_one      <= (post_store_limit == LEN_ONE);
                             capture_len <= capture_len_next[LEN_W-1:0];
                         end else begin
                             // Enter delay countdown.  trig_delay_count is
@@ -1593,7 +1612,7 @@ module fcapz_ela #(
                     trig_delay_pending <= 1'b0;
                     trig_delay_count   <= 16'h0;
                     // Post-trigger countdown (counts stored samples only)
-                    if (post_count >= post_store_limit) begin
+                    if (post_left_zero) begin
                         // Segment complete
                         if (NUM_SEGMENTS > 1) begin
                             // Ring start within this segment. Before the
@@ -1612,7 +1631,9 @@ module fcapz_ela #(
                                 cur_segment <= cur_segment + 1'b1;
                                 seg_count   <= seg_count + 1'b1;
                                 triggered   <= 1'b0;
-                                post_count  <= {LEN_W{1'b0}};
+                                post_left   <= {LEN_W{1'b0}};
+                                post_left_zero <= 1'b1;
+                                post_left_one  <= 1'b0;
                                 pre_count   <= {LEN_W{1'b0}};
                                 seq_state   <= {SEQ_STATE_W{1'b0}};
                                 seq_counter <= 16'h0;
@@ -1631,7 +1652,7 @@ module fcapz_ela #(
                             start_ptr <= capture_start_ptr;
                         end
                     end else if (store_enable) begin
-                        if (post_count + 1'b1 >= post_store_limit) begin
+                        if (post_left_one) begin
                             // Segment complete
                             if (NUM_SEGMENTS > 1) begin
                                 // Ring start within this segment. Before the
@@ -1650,7 +1671,9 @@ module fcapz_ela #(
                                     cur_segment <= cur_segment + 1'b1;
                                     seg_count   <= seg_count + 1'b1;
                                     triggered   <= 1'b0;
-                                    post_count  <= {LEN_W{1'b0}};
+                                    post_left   <= {LEN_W{1'b0}};
+                                    post_left_zero <= 1'b1;
+                                    post_left_one  <= 1'b0;
                                     pre_count   <= {LEN_W{1'b0}};
                                     seq_state   <= {SEQ_STATE_W{1'b0}};
                                     seq_counter <= 16'h0;
@@ -1669,7 +1692,9 @@ module fcapz_ela #(
                                 start_ptr <= capture_start_ptr;
                             end
                         end else begin
-                            post_count <= post_count + 1'b1;
+                            post_left      <= post_left - 1'b1;
+                            post_left_zero <= 1'b0;
+                            post_left_one  <= (post_left == LEN_TWO);
                         end
                     end
                 end
