@@ -414,24 +414,25 @@ decodes a command from the last 49 bits of any scan that is at least
 49 (see the changelog).  Single-chain and multi-core
 wrappers have not yet been re-verified on MPSoC hardware.
 
-#### Write path difference on MPSoC
+#### Register access sequence
 
-Writes on MPSoC in `-register` mode need an explicit `-state DRUPDATE`
-on the `drshift` (the `-state IDLE` shortcut that works on 7-series
-doesn't reliably fire the UPDATE-DR event through the named-register
-path) and a longer settling delay (~100 TCK instead of 20):
+Every command scan (read or write) ends in an explicit `-state DRUPDATE`
+and is followed by idle TCKs with `state IDLE <n>`.  The explicit UPDATE-DR
+is required on MPSoC in `-register` mode, where the `-state IDLE` shortcut
+doesn't reliably fire the UPDATE-DR event through the named-register path.
+The idle must be `state IDLE <n>`, which clocks `n` TCKs; xsdb's
+`delay <usec>` only waits and clocks nothing, so it gives the TCK-domain
+core no time to accept the command or stage the response.  Writes in
+`-register` mode get 100 idle TCKs instead of 20:
 
 ```
 # Write (MPSoC, -register mode):
 $seq irshift -state IRUPDATE -register user1
 $seq drshift -state DRUPDATE -bits 49 $write_frame
-# [run; delete]
-$seq2 state IDLE
-$seq2 delay 100
+$seq state IDLE 100
 # [run; delete]
 ```
 
-Reads use the standard `-state IDLE` + `delay 20` pattern unchanged.
 The transport handles this automatically when `use_register_ir=True`.
 
 #### Usage

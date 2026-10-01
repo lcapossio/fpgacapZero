@@ -2092,7 +2092,7 @@ class XilinxHwServerTransport(Transport):
             f"set _rd [jtag sequence]; "
             f"{self._irshift_tcl('_rd', ch)}; "
             f"$_rd drshift -state IDLE -capture -bits {total} {padded}; "
-            f"$_rd delay {self.RAW_DR_IDLE_CYCLES}; "
+            f"$_rd state IDLE {self.RAW_DR_IDLE_CYCLES}; "
             f"puts [$_rd run -bits]; $_rd delete"
         )
         out = self._send(tcl)
@@ -2115,7 +2115,7 @@ class XilinxHwServerTransport(Transport):
             parts.append(
                 f"{self._irshift_tcl('_rdb', ch)}; "
                 f"$_rdb drshift -state IDLE -capture -bits {total} {padded}; "
-                f"$_rdb delay {self.RAW_DR_IDLE_CYCLES}"
+                f"$_rdb state IDLE {self.RAW_DR_IDLE_CYCLES}"
             )
             totals.append(total)
             widths.append(width)
@@ -2130,16 +2130,6 @@ class XilinxHwServerTransport(Transport):
         tcl = self._read_reg_tcl(frame)
         raw = self._send(tcl)
         return self._parse_bits_u32(raw)
-
-    def read_reg_stable(self, addr: int) -> int:
-        """Read through the hw_server register pipeline and return settled data.
-
-        XSDB JTAG sequences can return data from the previous register window
-        on the first read after changing addresses or session state.  Discard
-        one warmup read and return the second scan.
-        """
-        self.read_reg(addr)
-        return self.read_reg(addr)
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = self._frame_bits(addr=addr, data=value, write=True)
@@ -2270,25 +2260,21 @@ class XilinxHwServerTransport(Transport):
         head = ["set _bq [jtag sequence]"]
         if self.use_register_ir:
             # Register mode: the write needs an explicit DRUPDATE to fire
-            # UPDATE-DR through the named-register path, and xsdb only takes
-            # a delay in IDLE, so walk there first -- inside the sequence.
+            # UPDATE-DR through the named-register path, then idle TCKs.
             write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
             head += [
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
-                "$_bq state IDLE",
-                f"$_bq delay {write_idle}",
+                f"$_bq state IDLE {write_idle}",
             ]
         else:
             head += [
-                # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
                 f"{ir1_cmd}; "
                 f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so the BURST_PTR update crosses into the burst
-                # reader and the first 256-bit staging word fills before
-                # the first burst CAPTURE samples it. Real BSCAN/XSDB timing
-                # needs more margin than the raw ~33 TCK memory-fill latency.
-                f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
+                # Idle TCKs so the BURST_PTR update crosses into the burst
+                # reader (TCK-clocked) and the first 256-bit staging word
+                # fills before the first burst CAPTURE samples it.
+                f"$_bq state IDLE {self.BURST_PREFILL_IDLE_CYCLES}",
             ]
         # The first wide scan primes/fills staging and is discarded.
         tcls = self._burst_sequence_sends(
@@ -2529,7 +2515,7 @@ class XilinxHwServerTransport(Transport):
             # Scan 0: set first address, no capture
             f"{ir_cmd}; "
             f"$_q drshift -state IDLE -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
+            f"$_q state IDLE {idle}",
         ]
         # Prime captures: discard the stale register-pipeline word plus the
         # RTL jtag_rdata fill latency before counting returned words. If the
@@ -2540,15 +2526,14 @@ class XilinxHwServerTransport(Transport):
                 f"{ir_cmd}; "
                 f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
             )
-            parts.append(f"$_q delay {idle}")
+            parts.append(f"$_q state IDLE {idle}")
         # Scans 1..N-1: capture previous AND set next address.
-        # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
             parts.append(
                 f"{ir_cmd}; "
                 f"$_q drshift -state IDLE -capture -bits {n} {frames[i]}"
             )
-            parts.append(f"$_q delay {idle}")
+            parts.append(f"$_q state IDLE {idle}")
         # Final scan: capture last result
         parts.append(
             f"{ir_cmd}; "
@@ -2597,9 +2582,9 @@ class XilinxHwServerTransport(Transport):
 
     # -- chain shape helpers -------------------------------------------------
 
-    # Write delay: on MPSoC in -register mode, writes need a longer settling
-    # delay (~100 TCK) and an explicit state-IDLE transition to reliably
-    # commit the UPDATE-DR event.  On 7-series READ_IDLE_CYCLES (20) suffices.
+    # Idle TCKs after a write: on MPSoC in -register mode writes need more
+    # settling TCKs (~100) after the explicit UPDATE-DR.  On 7-series
+    # READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
     BURST_PREFILL_IDLE_CYCLES = 160
 
@@ -2662,11 +2647,11 @@ class XilinxHwServerTransport(Transport):
     def _read_reg_tcl(self, frame: str, var_suffix: str = "") -> str:
         """Return TCL that performs one register read and returns the bit string.
 
-        Uses a SINGLE jtag sequence for all operations (IR+DR+idle+IR+DR)
-        to eliminate inter-sequence timing gaps that cause stale reads.
-
-        Note: drshift ends in state IDLE (not DRUPDATE) because xsdb 2025.2
-        requires delay to be in RESET/IDLE/PAUSE — DRUPDATE→delay errors.
+        One jtag sequence: IR, command DR ending in an explicit UPDATE-DR,
+        READ_IDLE_CYCLES idle TCKs for the core to accept the command and
+        stage the response, then IR and the capture DR.  ``state IDLE n``
+        clocks TCK; ``delay`` would not (it only waits), so it must not be
+        used to give the TCK-domain core time.
         """
         v = f"_s{var_suffix}"
         n = self._user_dr_bits(self.DR_BITS)
@@ -2676,8 +2661,8 @@ class XilinxHwServerTransport(Transport):
         return (
             f"set {v} [jtag sequence]; "
             f"{ir_cmd}; "
-            f"${v} drshift -state IDLE -bits {n} {padded}; "
-            f"${v} delay {idle}; "
+            f"${v} drshift -state DRUPDATE -bits {n} {padded}; "
+            f"${v} state IDLE {idle}; "
             f"{ir_cmd}; "
             f"${v} drshift -state IDLE -capture -bits {n} {padded}; "
             f"puts [${v} run -bits]; ${v} delete"
@@ -2690,29 +2675,17 @@ class XilinxHwServerTransport(Transport):
         if self.use_register_ir:
             # On MPSoC in -register mode, writes need explicit DRUPDATE
             # state (the -state IDLE shortcut doesn't reliably fire the
-            # UPDATE-DR event through the named-register path) and a
-            # longer settling delay (~100 TCK).  The delay runs in a
-            # separate sequence after an explicit state-IDLE transition.
+            # UPDATE-DR event through the named-register path) and more
+            # settling TCKs.
             idle = self.WRITE_IDLE_CYCLES_REGISTER
-            return (
-                f"set _w [jtag sequence]; "
-                f"{ir_cmd}; "
-                f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
-                f"$_w run; $_w delete; "
-                f"set _wd [jtag sequence]; "
-                f"$_wd state IDLE; "
-                f"$_wd delay {idle}; "
-                f"$_wd run; $_wd delete"
-            )
-        idle = self.READ_IDLE_CYCLES
+        else:
+            idle = self.READ_IDLE_CYCLES
         return (
             f"set _w [jtag sequence]; "
             f"{ir_cmd}; "
-            f"$_w drshift -state IDLE -bits {n} {padded}; "
-            f"$_w run; $_w delete; "
-            f"set _wd [jtag sequence]; "
-            f"$_wd delay {idle}; "
-            f"$_wd run; $_wd delete"
+            f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
+            f"$_w state IDLE {idle}; "
+            f"$_w run; $_w delete"
         )
 
     # -- output parsing ------------------------------------------------------
