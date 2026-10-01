@@ -226,7 +226,8 @@ module fcapz_ela #(
     localparam [31:0] COMPARE_CAPS =
         COMPARE_MODE_CAPS | 32'h0002_0000 |
         (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
-        (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000);  // bit18: wide comparator A
+        (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000) |  // bit18: wide comparator A
+        32'h0008_0000;  // bit19: timestamp window base decoded at full width
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED

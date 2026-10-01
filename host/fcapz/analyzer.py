@@ -114,6 +114,9 @@ _ADDR_SQ_MASK = 0x0038
 _ADDR_WIDE_SEL = 0x00E4
 _ADDR_WIDE_DATA = 0x00F0
 _COMPARE_CAPS_WIDE_TRIG = 1 << 18
+# COMPARE_CAPS bit 19: the timestamp window base is decoded at full width.
+# Cores without it decode a base past 0x10000 at its low 16 bits.
+_COMPARE_CAPS_TS_BASE_FULL = 1 << 19
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -324,6 +327,7 @@ class Analyzer:
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
+        self._hw_compare_caps: int = 0
         self._manager_slot_caps: int | None = None
         self._manager_found: bool | None = None
 
@@ -544,7 +548,9 @@ class Analyzer:
         # Auto-detect hw capabilities
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = hw_features & 0xF  # bits[3:0]
-        hw_compare_caps = int(_read(_ADDR_COMPARE_CAPS)) or _COMPARE_CAPS_LEGACY_FULL
+        raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
+        self._hw_compare_caps = raw_compare_caps
+        hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
 
@@ -711,12 +717,17 @@ class Analyzer:
         """Tell the transport where DATA / timestamp window reads must stop.
 
         Register addresses are 16 bits.  Behind a core manager the window also
-        ends at the manager block, and on RTL before the timestamp-base fix a
-        timestamp window whose base passed 0x10000 was decoded at its low 16
-        bits, which turns every DATA read from there on into a timestamp read.
+        ends at the manager block.  A core without COMPARE_CAPS bit 19 decodes
+        a timestamp window base past 0x10000 at its low 16 bits, which turns
+        every DATA read from there on into a timestamp read, so the window
+        stops there on such cores.
         """
         end = _ADDR_MGR_VERSION if self._behind_manager() else REG_ADDR_SPACE_END
-        if self._hw_timestamp_w and self._config is not None:
+        if (
+            self._hw_timestamp_w
+            and self._config is not None
+            and not self._hw_compare_caps & _COMPARE_CAPS_TS_BASE_FULL
+        ):
             words_per_sample = (self._config.sample_width + 31) // 32
             ts_base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
             if ts_base >= REG_ADDR_SPACE_END:

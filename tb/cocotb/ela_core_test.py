@@ -878,7 +878,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0002_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -905,7 +905,7 @@ async def config_user1_disabled(dut):
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0002_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -927,7 +927,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0003_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 1)
