@@ -56,6 +56,8 @@ def env_int(name: str, default: int) -> int:
 SAMPLE_W = env_int("ELA_PARAM_SAMPLE_W", 8)
 DEPTH = env_int("ELA_PARAM_DEPTH", 16)
 INPUT_PIPE = env_int("ELA_PARAM_INPUT_PIPE", 0)
+TRIG_STAGES = env_int("ELA_PARAM_TRIG_STAGES", 1)
+DUAL_COMPARE = env_int("ELA_PARAM_DUAL_COMPARE", 1)
 DECIM_EN = env_int("ELA_PARAM_DECIM_EN", 0)
 STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
 EXT_TRIG_EN = env_int("ELA_PARAM_EXT_TRIG_EN", 0)
@@ -1162,6 +1164,96 @@ async def sequencer_next_stage_ignores_previous_stage_match(dut):
         await RisingEdge(dut.sample_clk)
     assert await ela.wait_done() & 0x4
     assert await ela.read(ADDR_DATA_BASE) & 0xFF == 7
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+def _seq_reference(stages: list[dict], symbols: list[int]) -> int | None:
+    """Cycle reference for the trigger sequencer on EQ predicates.
+
+    Each sample is checked against the stage active when that sample is
+    decided.  Returns the index of the sample that fires the final stage, or
+    None.  Mirrors the RTL priority: a final stage's hit with its count
+    reached triggers; a non-final one advances (count reset); any other stage
+    hit only counts; a miss keeps the count.
+    """
+    state = 0
+    counter = 0
+    for i, sym in enumerate(symbols):
+        st = stages[state]
+        a = sym == st["va"]
+        b = sym == st["vb"] if DUAL_COMPARE else False
+        hit = (a, b, a and b, a or b)[st["combine"] if DUAL_COMPARE else 0]
+        if not hit:
+            continue
+        reached = st["count"] == 0 or counter + 1 >= st["count"]
+        if st["final"] and reached:
+            return i
+        if reached:
+            state, counter = st["next"], 0
+        else:
+            counter += 1
+    return None
+
+
+@cocotb.test()
+async def sequencer_matches_cycle_reference(dut):
+    """Random sequencer programs against the cycle reference: adjacent-stage
+    matches, identical adjacent predicates, backward jumps, self-loops, counts
+    and A/B combine.  Symbols 1..3 sit in the low nibble (EQ, mask 0x0F); the
+    high nibble carries the sample index so the stored trigger sample names
+    the sample that fired."""
+    ela = await setup(dut)
+    rng = random.Random(0x5E9 + INPUT_PIPE * 31 + TRIG_STAGES)
+    lead = 8 + INPUT_PIPE
+    fired = 0
+    for trial in range(30):
+        stages = []
+        for idx in range(TRIG_STAGES):
+            stages.append({
+                "va": rng.randint(1, 3),
+                "vb": rng.randint(1, 3),
+                "combine": rng.randint(0, 3),
+                "next": rng.randrange(TRIG_STAGES),
+                "final": rng.random() < (0.5 if idx else 0.15),
+                "count": rng.choice((0, 1, 1, 2, 3)),
+            })
+        if not any(st["final"] for st in stages):
+            stages[rng.randrange(TRIG_STAGES)]["final"] = True
+        symbols = [rng.choice((0, 1, 2, 3)) for _ in range(24)]
+        expected = _seq_reference(stages, symbols)
+
+        await ela.reset_core()
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 0)
+        for idx, st in enumerate(stages):
+            cfg = ((st["combine"] << 8) | (st["next"] << 10)  # modes A/B = 0 (EQ)
+                   | (int(st["final"]) << 12) | (st["count"] << 16))
+            base = ADDR_SEQ_BASE + idx * 20
+            await ela.write(base + 0, cfg)
+            await ela.write(base + 4, st["va"])
+            await ela.write(base + 8, 0x0F)
+            await ela.write(base + 12, st["vb"])
+            await ela.write(base + 16, 0x0F)
+        dut.probe_in.value = 0
+        await ela.arm()
+        for _ in range(lead):
+            await RisingEdge(dut.sample_clk)
+        for i, sym in enumerate(symbols):
+            dut.probe_in.value = ((i & 0xF) << 4) | sym
+            await RisingEdge(dut.sample_clk)
+        dut.probe_in.value = 0
+        await ela.wait_sample(8 + INPUT_PIPE)
+        status = await ela.read(ADDR_STATUS)
+        program = (stages, symbols)
+        if expected is None:
+            assert not status & 0x6, f"trial {trial}: fired, reference did not: {program}"
+            continue
+        fired += 1
+        assert status & 0x4, f"trial {trial}: reference fires at {expected}: {program}"
+        got = await ela.read(ADDR_DATA_BASE) & 0xFF
+        want = ((expected & 0xF) << 4) | symbols[expected]
+        assert got == want, f"trial {trial}: stored 0x{got:02x}, want 0x{want:02x}: {program}"
+    assert fired >= 8, f"only {fired} of 30 random programs fired"
     FUNCTIONAL_COVERAGE.hit("sequencer")
 
 

@@ -632,27 +632,57 @@ module fcapz_ela #(
         end
     end
 
-    // Sequencer trigger: current stage comparators A and B
-    wire seq_hit_a_raw, seq_hit_b_raw;
-    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_a (
-        .probe(active_probe), .probe_prev(probe_prev),
-        .value(seq_value_a[seq_state]), .mask(seq_mask_a[seq_state]),
-        .mode(seq_mode_a[seq_state]), .hit(seq_hit_a_raw)
-    );
+    // Sequencer trigger: stage comparators A and B.
+    //
+    // With COMPARE_PIPE every stage's A/B compare runs on each sample and is
+    // registered; the decision selects the registered hits of the stage that
+    // is active when they are consumed.  All entries of the hit vectors
+    // describe the same sample, so a stage change never applies the old
+    // stage's operands to the next sample, and adjacent-stage matches are
+    // exact.  Without COMPARE_PIPE the active stage's operands are selected
+    // and compared in the decision cycle.
+    wire seq_hit_a, seq_hit_b;
+    reg  [TRIG_STAGES-1:0] seq_hit_a_q, seq_hit_b_q;
+    wire [TRIG_STAGES-1:0] seq_hit_a_raw, seq_hit_b_raw;
     generate
-        if (HAS_DUAL_COMPARE) begin : g_seq_b_cmp
-            trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
+        if (COMPARE_PIPE != 0 && TRIG_STAGES > 1) begin : g_seq_cmp_bank
+            for (gi = 0; gi < TRIG_STAGES; gi = gi + 1) begin : g_stage
+                trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_a (
+                    .probe(active_probe), .probe_prev(probe_prev),
+                    .value(seq_value_a[gi]), .mask(seq_mask_a[gi]),
+                    .mode(seq_mode_a[gi]), .hit(seq_hit_a_raw[gi])
+                );
+                if (HAS_DUAL_COMPARE) begin : g_seq_b_cmp
+                    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
+                        .probe(active_probe), .probe_prev(probe_prev),
+                        .value(seq_value_b[gi]), .mask(seq_mask_b[gi]),
+                        .mode(seq_mode_b[gi]), .hit(seq_hit_b_raw[gi])
+                    );
+                end else begin : g_no_seq_b_cmp
+                    assign seq_hit_b_raw[gi] = 1'b0;
+                end
+            end
+            assign seq_hit_a = seq_hit_a_q[seq_state];
+            assign seq_hit_b = seq_hit_b_q[seq_state];
+        end else begin : g_seq_cmp_active
+            trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_a (
                 .probe(active_probe), .probe_prev(probe_prev),
-                .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
-                .mode(seq_mode_b[seq_state]), .hit(seq_hit_b_raw)
+                .value(seq_value_a[seq_state]), .mask(seq_mask_a[seq_state]),
+                .mode(seq_mode_a[seq_state]), .hit(seq_hit_a)
             );
-        end else begin : g_no_seq_b_cmp
-            assign seq_hit_b_raw = 1'b0;
+            if (HAS_DUAL_COMPARE) begin : g_seq_b_cmp
+                trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_seq_b (
+                    .probe(active_probe), .probe_prev(probe_prev),
+                    .value(seq_value_b[seq_state]), .mask(seq_mask_b[seq_state]),
+                    .mode(seq_mode_b[seq_state]), .hit(seq_hit_b)
+                );
+            end else begin : g_no_seq_b_cmp
+                assign seq_hit_b = 1'b0;
+            end
+            assign seq_hit_a_raw = {TRIG_STAGES{1'b0}};
+            assign seq_hit_b_raw = {TRIG_STAGES{1'b0}};
         end
     endgenerate
-    reg seq_hit_a_q, seq_hit_b_q;
-    wire seq_hit_a = (COMPARE_PIPE != 0) ? seq_hit_a_q : seq_hit_a_raw;
-    wire seq_hit_b = (COMPARE_PIPE != 0) ? seq_hit_b_q : seq_hit_b_raw;
     wire [1:0] seq_combine_cur = seq_combine[seq_state];
     reg seq_stage_hit;
     always @(*) begin
@@ -714,14 +744,14 @@ module fcapz_ela #(
         if (sample_rst) begin
             simple_hit_a_q <= 1'b0;
             simple_hit_b_q <= 1'b0;
-            seq_hit_a_q    <= 1'b0;
-            seq_hit_b_q    <= 1'b0;
+            seq_hit_a_q    <= {TRIG_STAGES{1'b0}};
+            seq_hit_b_q    <= {TRIG_STAGES{1'b0}};
             sq_hit_q       <= 1'b0;
         end else if (reset_pulse || any_arm_pulse || segment_auto_rearm_now) begin
             simple_hit_a_q <= 1'b0;
             simple_hit_b_q <= 1'b0;
-            seq_hit_a_q    <= 1'b0;
-            seq_hit_b_q    <= 1'b0;
+            seq_hit_a_q    <= {TRIG_STAGES{1'b0}};
+            seq_hit_b_q    <= {TRIG_STAGES{1'b0}};
             sq_hit_q       <= 1'b0;
         end else begin
             simple_hit_a_q <= simple_hit_a_raw;
