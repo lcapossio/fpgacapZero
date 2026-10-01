@@ -102,8 +102,6 @@ proc _vhdl_add_sources {vhdl_sources verilog_sources example_dir} {
     }
 }
 
-set_param project.enableUnifiedSimulation 0
-
 # ── Open or create project ────────────────────────────────────
 if {[llength [current_project -quiet]] > 0} {
     close_project
