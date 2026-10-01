@@ -496,6 +496,9 @@ module fcapz_ela #(
     reg                rb_meta_ack_sync2;
     reg                rb_meta_pending_sample;
     reg                rb_done_sample;
+    // {arm, reset} toggles the sample domain had processed when the snapshot
+    // was taken; see the jtag-side copy.
+    reg [1:0]          rb_gen_sample;
     reg [LEN_W-1:0]    rb_capture_len_jtag;
     reg [PTR_W-1:0]    rb_start_ptr_jtag;
     reg [PTR_W-1:0]    rb_seg_start_ptr_jtag [0:NUM_SEGMENTS-1];
@@ -606,6 +609,9 @@ module fcapz_ela #(
     wire startup_arm_pulse = startup_arm_pending;
     wire any_arm_pulse = arm_pulse | startup_arm_pulse;
     wire reset_pulse = reset_toggle_sync1 ^ reset_toggle_sync2;
+    // An arm or soft reset restarts the capture on this edge and takes
+    // priority over every decision of the capture already running.
+    wire capture_restart = any_arm_pulse | reset_pulse;
 
     // ---- Selection flush ---------------------------------------------------
     // chan_sel / probe_sel change only on arm, and the probe pipe, probe_prev
@@ -622,6 +628,12 @@ module fcapz_ela #(
     wire arm_sel_change = HAS_PROBE_MUX   ? (probe_sel_next != probe_sel) :
                           HAS_CHANNEL_MUX ? (chan_sel_next != chan_sel) : 1'b0;
     wire sel_flush_start = any_arm_pulse && arm_sel_change;
+    // Arming clears the registered storage-qualification hit, so with
+    // COMPARE_PIPE and qualification on, the sample right after the arm is
+    // not stored and the rolling history gets a hole.
+    wire arm_sq_bubble = (COMPARE_PIPE != 0) && HAS_STOR_QUAL && (sq_mode_sync2 != 0);
+    // Arms after which the rolling pre-arm history cannot be trusted.
+    wire arm_voids_history = arm_sel_change || arm_sq_bubble;
     reg                   sel_flush_active;
     reg [SEL_FLUSH_W-1:0] sel_flush_count;
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -987,6 +999,7 @@ module fcapz_ela #(
             rb_meta_ack_sync2 <= 1'b0;
             rb_meta_pending_sample <= 1'b0;
             rb_done_sample <= 1'b0;
+            rb_gen_sample <= 2'b00;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
             for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
@@ -1005,6 +1018,7 @@ module fcapz_ela #(
             // three-flop toggle synchronizer is still in flight.
             if (!rb_meta_sample_busy && (rb_meta_pending_sample || rb_meta_event_sample)) begin
                 rb_done_sample <= done;
+                rb_gen_sample <= {arm_toggle_sync2, reset_toggle_sync2};
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
@@ -1030,16 +1044,23 @@ module fcapz_ela #(
             rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
             rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
             rb_meta_toggle_sync3 <= rb_meta_toggle_sync2;
-            if (jtag_wr_en && jtag_addr == ADDR_CTRL && (jtag_wdata[0] || jtag_wdata[1])) begin
-                rb_done_jtag <= 1'b0;
-            end else if (rb_meta_toggle_sync2 ^ rb_meta_toggle_sync3) begin
+            // Every snapshot is copied and acknowledged; a dropped ack would
+            // leave the sample side busy and stop all later snapshots.
+            if (rb_meta_toggle_sync2 ^ rb_meta_toggle_sync3) begin
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
                     rb_seg_start_ptr_jtag[rb_jtag_i] <= rb_seg_start_ptr_sample[rb_jtag_i];
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
-                rb_done_jtag <= rb_done_sample;
+                // Done counts only for the latest ARM / reset: a capture that
+                // completed while an ARM was still crossing is the previous
+                // one.  One bit per toggle suffices, since a JTAG write takes
+                // far longer than the toggle synchronizer.
+                rb_done_jtag <= rb_done_sample &&
+                                (rb_gen_sample == {arm_toggle_jtag, reset_toggle_jtag});
             end
+            if (jtag_wr_en && jtag_addr == ADDR_CTRL && (jtag_wdata[0] || jtag_wdata[1]))
+                rb_done_jtag <= 1'b0;
         end
     end
 
@@ -1307,8 +1328,8 @@ module fcapz_ela #(
         {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
     wire [LEN_W:0] capture_len_next =
         {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
-    wire trigger_commit_now = armed && !done && !triggered && pretrigger_ready &&
-        trigger_holdoff_done && !sel_flush_active &&
+    wire trigger_commit_now = armed && !done && !triggered && !capture_restart &&
+        pretrigger_ready && trigger_holdoff_done && !sel_flush_active &&
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
@@ -1350,9 +1371,9 @@ module fcapz_ela #(
         if (sample_rst)
             trigger_out_r <= 1'b0;
         else
-            trigger_out_r <= (armed && !triggered && pretrigger_ready &&
-                              trigger_holdoff_done && !sel_flush_active &&
-                              trigger_hit) ? 1'b1 : 1'b0;
+            trigger_out_r <= (armed && !triggered && !capture_restart &&
+                              pretrigger_ready && trigger_holdoff_done &&
+                              !sel_flush_active && trigger_hit) ? 1'b1 : 1'b0;
     end
 
     // Phase 4: segment base address
@@ -1438,9 +1459,12 @@ module fcapz_ela #(
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
                 post_count  <= {LEN_W{1'b0}};
-                // A switched selection voids the rolling pre-arm history:
-                // it holds the old selection's samples.
-                if (HAS_SEGMENTS || arm_sel_change)
+                // A switched selection voids the rolling pre-arm history (it
+                // holds the old selection's samples), as does the
+                // qualification bubble above.  So does a restart of a
+                // capture that had triggered: once its post-trigger samples
+                // are in, it stops writing, leaving a hole.
+                if (HAS_SEGMENTS || arm_voids_history || triggered)
                     pre_count <= {LEN_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
@@ -1468,7 +1492,8 @@ module fcapz_ela #(
             // leak stale samples into segment 0 — gate the prefill on
             // !HAS_SEGMENTS while still clearing trig-delay state every idle
             // cycle.
-            if (!armed && !done) begin
+            // A soft reset restarts the ring; prefill must not override it.
+            if (!armed && !done && !reset_pulse) begin
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
                 if (!HAS_SEGMENTS) begin
@@ -1477,36 +1502,43 @@ module fcapz_ela #(
                         if (wr_ptr >= DEPTH_LAST)
                             wr_ptr <= {PTR_W{1'b0}};
                     end
-                    if (store_enable && !pretrigger_ready && !sel_flush_start)
+                    if (store_enable && !pretrigger_ready &&
+                        !(any_arm_pulse && arm_voids_history))
                         pre_count <= pre_count + 1'b1;
                 end
             end
 
-            if (armed && !done) begin
+            // An arm or soft reset on this edge restarts the capture, so the
+            // running capture's decisions below must not override it.  Only
+            // the single-segment ring still advances past the sample stored
+            // on this edge, which keeps the rolling history contiguous.
+            //
+            // Store sample (qualified + decimated).  A trigger commit
+            // force-stores the anchor sample so samples[pretrig] remains
+            // the committed trigger sample even when decimation or storage
+            // qualification would otherwise skip that cycle.
+            if (armed && !done && mem_we_a && !reset_pulse &&
+                !(HAS_SEGMENTS && any_arm_pulse)) begin
+                wr_ptr <= wr_ptr + 1'b1;
+                // Phase 4: segment-aware wrap
+                if (NUM_SEGMENTS > 1) begin
+                    if (wr_seg_off >= SEG_DEPTH_LAST) begin
+                        wr_ptr <= seg_base;
+                        segment_wrapped <= 1'b1;
+                    end else begin
+                        wr_ptr <= wr_ptr + 1'b1;
+                    end
+                end
+            end
+
+            if (armed && !done && !capture_restart) begin
                 if (trig_holdoff_active) begin
                     if (trig_holdoff_count == 16'h0)
                         trig_holdoff_active <= 1'b0;
                     else
                         trig_holdoff_count <= trig_holdoff_count - 16'h1;
                 end
-                // Store sample (qualified + decimated).  A trigger commit
-                // force-stores the anchor sample so samples[pretrig] remains
-                // the committed trigger sample even when decimation or storage
-                // qualification would otherwise skip that cycle.
-                if (mem_we_a) begin
-                    wr_ptr <= wr_ptr + 1'b1;
-                    // Phase 4: segment-aware wrap
-                    if (NUM_SEGMENTS > 1) begin
-                        if (wr_seg_off >= SEG_DEPTH_LAST) begin
-                            wr_ptr <= seg_base;
-                            segment_wrapped <= 1'b1;
-                        end else begin
-                            wr_ptr <= wr_ptr + 1'b1;
-                        end
-                    end
-                end
-                if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready &&
-                    !sel_flush_start)
+                if (!triggered && !trigger_commit_now && store_enable && !pretrigger_ready)
                     pre_count <= pre_count + 1'b1;
 
                 // Trigger / sequencer evaluation (runs every cycle, NOT gated by decimation)

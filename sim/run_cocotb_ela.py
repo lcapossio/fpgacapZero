@@ -97,6 +97,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "trigger_delay_startup_and_holdoff",
             "burst_start_register",
             "config_written_after_arm_does_not_reach_armed_capture",
+            "rearm_mid_capture_restarts_cleanly",
         ),
     ),
     CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32},
@@ -104,7 +105,16 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget("timestamp48", {"TIMESTAMP_W": 48}, ("timestamp_48_upper_word",)),
     CocotbTarget("segments4", {"NUM_SEGMENTS": 4},
                  ("segmented_capture", "segmented_windows_are_contiguous",
-                  "segment_restart_keeps_the_first_sample")),
+                  "segment_restart_keeps_the_first_sample",
+                  "rearm_mid_capture_restarts_cleanly")),
+    CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
+    *(
+        CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},
+                     ("rearm_mid_capture_restarts_cleanly",))
+        for pipe in (0, 1)
+    ),
+    CocotbTarget("reset_sq_pipe1", {"STOR_QUAL": 1, "INPUT_PIPE": 1, "DEPTH": 128},
+                 ("soft_reset_drops_idle_prefill_credit",)),
     CocotbTarget("probe_mux", {"PROBE_MUX_W": 32}, ("probe_mux_slice_selection",)),
     *(
         CocotbTarget(
@@ -129,7 +139,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
         {"DEPTH": 1024, "DECIM_EN": 1, "EXT_TRIG_EN": 1,
          "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
         ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse",
-         "segment_restart_keeps_the_first_sample"),
+         "segment_restart_keeps_the_first_sample", "rearm_mid_capture_restarts_cleanly"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
