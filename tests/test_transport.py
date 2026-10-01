@@ -210,18 +210,19 @@ class TransportAbcTests(unittest.TestCase):
         self.assertEqual(t.read_reg_stable(0x000C), 0x1234)
         self.assertEqual(calls, [0x000C])
 
-    def test_xsdb_read_reg_stable_discards_warmup_read(self):
-        """hw_server overrides stable reads to discard one stale pipeline value."""
+    def test_xsdb_read_reg_stable_reads_once(self):
+        """hw_server reads commit with UPDATE-DR and clock idle TCKs, so a
+        stable read needs no discarded warmup scan."""
         calls: list[int] = []
         t = XilinxHwServerTransport()
 
         def fake_read_reg(addr: int) -> int:
             calls.append(addr)
-            return 0x10 if len(calls) == 1 else 0x20
+            return 0x20
 
         t.read_reg = fake_read_reg  # type: ignore[method-assign]
         self.assertEqual(t.read_reg_stable(0x000C), 0x20)
-        self.assertEqual(calls, [0x000C, 0x000C])
+        self.assertEqual(calls, [0x000C])
 
 
 # ---------------------------------------------------------------------------
@@ -2017,18 +2018,19 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
 
     def test_user1_block_read_has_idle_before_each_capture(self):
-        """USER1 pipelined reads leave CDC time before every captured word."""
+        """USER1 pipelined reads clock idle TCKs before every captured word."""
         t = XilinxHwServerTransport()
 
         tcl = t._burst_read_tcl(0x0100, 0, 4)
 
         self.assertEqual(
-            tcl.count(f"delay {t.READ_IDLE_CYCLES}"),
+            tcl.count(f"state IDLE {t.READ_IDLE_CYCLES}"),
             1 + t.USER1_PIPE_PRIME_READS + 3,
         )
-        # xsdb 2025.2 requires `delay` to follow IDLE/PAUSE/RESET, so every
-        # capture-and-delay pair parks the TAP in IDLE. The final scan has no
-        # trailing delay and stays in DRUPDATE.
+        # `delay` only waits; it clocks no TCK, so the TCK-domain core would
+        # get no time from it.
+        self.assertNotIn(" delay ", tcl)
+        # The final scan has no trailing idle and stays in DRUPDATE.
         self.assertEqual(
             tcl.count("drshift -state IDLE -capture"),
             t.USER1_PIPE_PRIME_READS + 3,
@@ -2090,14 +2092,26 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-bits 50", tcl)
 
     def test_register_ir_write_uses_drupdate(self):
-        """Writes in register mode use -state DRUPDATE + split sequence."""
+        """Writes in register mode use -state DRUPDATE then idle TCKs."""
         t = XilinxHwServerTransport(use_register_ir=True)
         t._active_chain = 1
         tcl = t._write_reg_tcl(t._frame_bits(0x14, 0xCAFE, True))
         self.assertIn("-register user1", tcl)
         self.assertIn("-state DRUPDATE", tcl)
-        self.assertIn("state IDLE", tcl)
-        self.assertIn(f"delay {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+        self.assertIn(f"state IDLE {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+        self.assertNotIn(" delay ", tcl)
+
+    def test_register_read_clocks_idle_after_explicit_update(self):
+        """A register read commits its command with UPDATE-DR and gives the
+        core real TCKs (``state IDLE n``), not a clockless ``delay``."""
+        for register_ir in (False, True):
+            t = XilinxHwServerTransport(use_register_ir=register_ir)
+            t._active_chain = 1
+            tcl = t._read_reg_tcl(t._frame_bits(addr=0x10, data=0, write=False))
+            cmd, capture = tcl.split(f"state IDLE {t.READ_IDLE_CYCLES}")
+            self.assertIn("drshift -state DRUPDATE -bits", cmd)
+            self.assertIn("-capture", capture)
+            self.assertNotIn(" delay ", tcl)
 
     def test_register_ir_forces_dr_extra_bits_zero(self):
         """use_register_ir overrides dr_extra_bits to 0."""
