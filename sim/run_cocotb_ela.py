@@ -59,6 +59,14 @@ class CocotbTarget:
         return {**BASE_PARAMETERS, **self.parameters}
 
 
+SEQUENCER_TESTS = (
+    "sequencer_count_target_one",
+    "sequencer_final_stage_counts_to_target",
+    "sequencer_counts_first_hit_after_holdoff",
+    "sequencer_next_stage_ignores_previous_stage_match",
+    "sequencer_matches_cycle_reference",
+)
+
 TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget(
         "base",
@@ -99,14 +107,18 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
-    CocotbTarget("sequencer", {"TRIG_STAGES": 2},
-                 ("sequencer_count_target_one", "sequencer_final_stage_counts_to_target",
-                  "sequencer_counts_first_hit_after_holdoff",
-                  "sequencer_next_stage_ignores_previous_stage_match")),
-    CocotbTarget("sequencer_pipe1", {"TRIG_STAGES": 2, "INPUT_PIPE": 1},
-                 ("sequencer_counts_first_hit_after_holdoff",)),
-    CocotbTarget("sequencer_pipe3", {"TRIG_STAGES": 2, "INPUT_PIPE": 3},
-                 ("sequencer_counts_first_hit_after_holdoff",)),
+    *(
+        CocotbTarget(
+            f"sequencer{stages}" + (f"_pipe{pipe}" if pipe else ""),
+            {"TRIG_STAGES": stages, "INPUT_PIPE": pipe},
+            SEQUENCER_TESTS,
+        )
+        for stages in (2, 4)
+        for pipe in (0, 1, 2, 3)
+    ),
+    CocotbTarget("sequencer2_single_compare", {"TRIG_STAGES": 2, "INPUT_PIPE": 1,
+                                                "DUAL_COMPARE": 0},
+                 ("sequencer_matches_cycle_reference",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
     CocotbTarget("wide_trig", {"SAMPLE_W": 48, "DEPTH": 8, "WIDE_TRIG": 1},
                  ("wide_trigger_upper_bit",)),

@@ -389,6 +389,9 @@ architecture rtl of fcapz_ela is
     signal pipe_probe        : sample_array_t(0 to PIPE_STAGES - 1) := (others => (others => '0'));
     signal hit_a_pipe        : std_logic := '0';
     signal hit_b_pipe        : std_logic := '0';
+    -- Per-stage registered sequencer hits (INPUT_PIPE > 0, TRIG_STAGES > 1).
+    signal seq_pipe_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
+    signal seq_pipe_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal sq_pipe           : std_logic := '0';
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
@@ -397,6 +400,8 @@ architecture rtl of fcapz_ela is
     signal mem_we_a_ram      : std_logic := '0';
     signal comb_hit_a        : std_logic := '0';
     signal comb_hit_b        : std_logic := '0';
+    signal comb_seq_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
+    signal comb_seq_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal comb_hit_eff      : std_logic := '0';
     signal comb_sq_ok        : std_logic := '1';
     signal comb_store_ok     : std_logic := '0';
@@ -674,6 +679,8 @@ begin
         variable hit_internal : std_logic;
         variable hit_a : std_logic;
         variable hit_b : std_logic;
+        variable seq_bank_a : std_logic_vector(TRIG_STAGES - 1 downto 0);
+        variable seq_bank_b : std_logic_vector(TRIG_STAGES - 1 downto 0);
         variable seq_stage_hit : std_logic;
         variable hit_eff : std_logic;
         variable sq_ok : boolean;
@@ -706,7 +713,25 @@ begin
             store_tick := decim_count = 0;
         end if;
 
-        if TRIG_STAGES > 1 then
+        seq_bank_a := (others => '0');
+        seq_bank_b := (others => '0');
+        if TRIG_STAGES > 1 and INPUT_PIPE > 0 then
+            -- Every stage's A/B compare on this sample; the decision selects
+            -- the registered hits of the stage active when they are consumed
+            -- (see rtl/fcapz_ela.v g_seq_cmp_bank).
+            for s in 0 to TRIG_STAGES - 1 loop
+                seq_bank_a(s) := cmp_hit(
+                    compare_probe, probe_prev, seq_value_a(s), seq_mask_a(s), seq_mode_a(s)
+                );
+                if DUAL_COMPARE /= 0 then
+                    seq_bank_b(s) := cmp_hit(
+                        compare_probe, probe_prev, seq_value_b(s), seq_mask_b(s), seq_mode_b(s)
+                    );
+                end if;
+            end loop;
+            hit_a := '0';
+            hit_b := '0';
+        elsif TRIG_STAGES > 1 then
             hit_a := cmp_hit(
                 compare_probe,
                 probe_prev,
@@ -733,12 +758,19 @@ begin
         end if;
         comb_hit_a <= hit_a;
         comb_hit_b <= hit_b;
+        comb_seq_a <= seq_bank_a;
+        comb_seq_b <= seq_bank_b;
 
         -- With INPUT_PIPE > 0 only the raw A/B compares are registered, as in
         -- rtl/fcapz_ela.v.  Stage combine, final and count qualification then
         -- use the current seq_state and seq_counter, so the trigger, the
         -- stage advance and the hit count all see the same registered hit.
-        if INPUT_PIPE > 0 then
+        -- The sequencer selects the active stage's entry from the per-stage
+        -- registered hits, all of which describe the same sample.
+        if INPUT_PIPE > 0 and TRIG_STAGES > 1 then
+            hit_a := seq_pipe_a(seq_state);
+            hit_b := seq_pipe_b(seq_state);
+        elsif INPUT_PIPE > 0 then
             hit_a := hit_a_pipe;
             hit_b := hit_b_pipe;
         end if;
@@ -1453,6 +1485,8 @@ begin
             pipe_probe <= (others => (others => '0'));
             hit_a_pipe <= '0';
             hit_b_pipe <= '0';
+            seq_pipe_a <= (others => '0');
+            seq_pipe_b <= (others => '0');
             sq_pipe <= '0';
         elsif rising_edge(sample_clk) then
             if EXT_TRIG_EN /= 0 then
@@ -1494,6 +1528,8 @@ begin
             seg_start_next := seg_start_ptr;
             hit_a_pipe <= comb_hit_a;
             hit_b_pipe <= comb_hit_b;
+            seq_pipe_a <= comb_seq_a;
+            seq_pipe_b <= comb_seq_b;
             sq_pipe <= comb_sq_ok;
             reset_pulse_now := (reset_toggle_sync1 xor reset_toggle_sync2) = '1';
             arm_pulse_now := (arm_toggle_sync1 xor arm_toggle_sync2) = '1';
@@ -1540,6 +1576,8 @@ begin
                 seq_counter <= (others => '0');
                 hit_a_pipe <= '0';
                 hit_b_pipe <= '0';
+                seq_pipe_a <= (others => '0');
+                seq_pipe_b <= (others => '0');
                 sq_pipe <= '0';
             end if;
 
@@ -1589,6 +1627,8 @@ begin
                 seq_counter <= (others => '0');
                 hit_a_pipe <= '0';
                 hit_b_pipe <= '0';
+                seq_pipe_a <= (others => '0');
+                seq_pipe_b <= (others => '0');
                 sq_pipe <= '0';
             end if;
 
@@ -1733,6 +1773,8 @@ begin
                                 seq_counter <= (others => '0');
                                 hit_a_pipe <= '0';
                                 hit_b_pipe <= '0';
+                                seq_pipe_a <= (others => '0');
+                                seq_pipe_b <= (others => '0');
                                 sq_pipe <= '0';
                             end if;
                         end if;
@@ -1782,6 +1824,8 @@ begin
                                     seq_counter <= (others => '0');
                                     hit_a_pipe <= '0';
                                     hit_b_pipe <= '0';
+                                    seq_pipe_a <= (others => '0');
+                                    seq_pipe_b <= (others => '0');
                                     sq_pipe <= '0';
                                 end if;
                             end if;
