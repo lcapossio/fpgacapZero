@@ -16,7 +16,8 @@
 //   TRIG_STAGES  - trigger sequencer stages (1 = simple, 2-4 = sequencer)
 //   STOR_QUAL    - storage qualification (0 = off, 1 = on)
 //   NUM_CHANNELS - number of mutually-exclusive probe buses (default 1)
-//   INPUT_PIPE   - number of pipeline register stages on probe_in (0 = none)
+//   INPUT_PIPE   - number of pipeline register stages on probe_in (0 = none;
+//                  built as 1 when EXT_TRIG_EN, to match the trigger_in sync)
 //   TIMESTAMP_W  - timestamp counter width (0 = disabled, 32 or 48 = enabled)
 //   NUM_SEGMENTS - number of capture segments (1 = single capture, >1 = segmented)
 //   REL_COMPARE  - 1 enables relational trigger modes (<, >, <=, >=)
@@ -165,16 +166,21 @@ module fcapz_ela #(
     localparam [PTR_W-1:0] DEPTH_LAST = DEPTH - 1;
     localparam WORDS_PER_SAMPLE = (SAMPLE_W + 31) / 32;
     localparam SEQ_STATE_W = (TRIG_STAGES > 1) ? $clog2(TRIG_STAGES) : 1;
-    // INPUT_PIPE also registers compare hits so REL_COMPARE comparators stay
+    // Probe pipeline stages actually built.  The external trigger needs a
+    // 2-FF synchronizer, so it reaches the capture decision 2 samples after
+    // its edge; a probe path of PROBE_PIPE input stages plus the registered
+    // compare must be at least that long for the trigger to mark the sample
+    // driven with it.  A core with EXT_TRIG_EN and INPUT_PIPE = 0 is
+    // therefore built with one input stage.
+    localparam PROBE_PIPE = (EXT_TRIG_EN != 0 && INPUT_PIPE == 0) ? 1 : INPUT_PIPE;
+    // PROBE_PIPE also registers compare hits so REL_COMPARE comparators stay
     // off the capture-control critical path. This adds one trigger-decision
     // cycle whenever probe input pipelining is enabled.
-    localparam COMPARE_PIPE = (INPUT_PIPE >= 1) ? 1 : 0;
+    localparam COMPARE_PIPE = (PROBE_PIPE >= 1) ? 1 : 0;
     // Extra trigger_in stages beyond the 2-FF synchronizer so an external
     // trigger reaches the capture decision with the same latency as the probe
-    // sample it marks (INPUT_PIPE + COMPARE_PIPE).  INPUT_PIPE = 0 cannot be
-    // aligned this way: there the synchronizer is 2 samples slower than the
-    // probe path, and an external trigger marks the sample 2 after its edge.
-    localparam EXT_ALIGN = (INPUT_PIPE + COMPARE_PIPE > 2) ? (INPUT_PIPE + COMPARE_PIPE - 2) : 0;
+    // sample it marks (PROBE_PIPE + COMPARE_PIPE, at least 2 with EXT_TRIG_EN).
+    localparam EXT_ALIGN = (PROBE_PIPE + COMPARE_PIPE > 2) ? (PROBE_PIPE + COMPARE_PIPE - 2) : 0;
     localparam HAS_DUAL_COMPARE = (DUAL_COMPARE != 0);
     localparam HAS_USER1_DATA = (USER1_DATA_EN != 0);
     localparam HAS_SEQUENCER = (TRIG_STAGES > 1);
@@ -389,12 +395,12 @@ module fcapz_ela #(
     // Optional input pipeline
     wire [SAMPLE_W-1:0] active_probe;
     generate
-        if (INPUT_PIPE == 0) begin : g_nopipe
+        if (PROBE_PIPE == 0) begin : g_nopipe
             assign active_probe = probe_muxed;
         end else begin : g_pipe
-            reg [SAMPLE_W-1:0] pipe [0:INPUT_PIPE-1];
+            reg [SAMPLE_W-1:0] pipe [0:PROBE_PIPE-1];
             genvar pi;
-            for (pi = 0; pi < INPUT_PIPE; pi = pi + 1) begin : g_stage
+            for (pi = 0; pi < PROBE_PIPE; pi = pi + 1) begin : g_stage
                 always @(posedge sample_clk or posedge sample_rst) begin
                     if (sample_rst)
                         pipe[pi] <= {SAMPLE_W{1'b0}};
@@ -404,7 +410,7 @@ module fcapz_ela #(
                         pipe[pi] <= pipe[pi-1];
                 end
             end
-            assign active_probe = pipe[INPUT_PIPE-1];
+            assign active_probe = pipe[PROBE_PIPE-1];
         end
     endgenerate
 
@@ -507,9 +513,9 @@ module fcapz_ela #(
     wire [TS_DATA_W-1:0] mem_ts_din_a_ram;
     wire [TS_DATA_W-1:0] ts_counter_cur;
 
-    assign mem_we_a_ram   = (INPUT_PIPE >= 1) ? mem_we_a_q : mem_we_a;
-    assign mem_din_a_ram  = (INPUT_PIPE >= 1) ? mem_wr_data_q : active_probe;
-    assign mem_ts_din_a_ram = (INPUT_PIPE >= 1) ? mem_wr_ts_q : ts_counter_cur;
+    assign mem_we_a_ram   = (PROBE_PIPE >= 1) ? mem_we_a_q : mem_we_a;
+    assign mem_din_a_ram  = (PROBE_PIPE >= 1) ? mem_wr_data_q : active_probe;
+    assign mem_ts_din_a_ram = (PROBE_PIPE >= 1) ? mem_wr_ts_q : ts_counter_cur;
 
     dpram #(.WIDTH(SAMPLE_W), .DEPTH(DEPTH)) u_samplebuf (
         .clk_a  (sample_clk),
@@ -1283,7 +1289,7 @@ module fcapz_ela #(
     wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
-    assign mem_addr_a = ((INPUT_PIPE >= 1) && mem_we_a_q) ? mem_wr_addr_q : wr_ptr;
+    assign mem_addr_a = ((PROBE_PIPE >= 1) && mem_we_a_q) ? mem_wr_addr_q : wr_ptr;
 
     // Register the RAM write command so address, data, and enable stay
     // aligned and the trigger/WEA path does not have to reach the BRAM in
@@ -1293,7 +1299,7 @@ module fcapz_ela #(
     // its own address, and the pointer that produced it has already advanced;
     // cancelling it left that address holding a sample one buffer-length old,
     // inside any pre-trigger window reaching back across the arm.  With
-    // INPUT_PIPE = 0 the same sample is written on the arm edge itself.
+    // PROBE_PIPE = 0 the same sample is written on the arm edge itself.
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             mem_we_a_q     <= 1'b0;
