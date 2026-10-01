@@ -372,11 +372,14 @@ architecture rtl of fcapz_ela is
     signal start_ptr         : natural range 0 to DEPTH - 1 := 0;
     signal trig_ptr          : natural range 0 to DEPTH - 1 := 0;
     signal pre_count         : unsigned(PTR_W downto 0) := (others => '0');
-    -- LEN_W wide, like the Verilog core's: post_count is compared against
-    -- posttrig_len, which may legally hold DEPTH, so a PTR_W counter wraps
-    -- one short and the capture never completes.  (pre_count below is
-    -- already LEN_W wide, spelled PTR_W downto 0.)
-    signal post_count        : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    -- Post-trigger samples still to store, loaded with posttrig_len at the
+    -- trigger commit and counted down.  LEN_W wide, like the Verilog core's:
+    -- posttrig_len may legally hold DEPTH.  post_left_zero / post_left_one are
+    -- registered (post_left = 0) / (post_left = 1), so the segment-complete
+    -- decision starts at a flop, not a counter compare.
+    signal post_left         : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal post_left_zero    : std_logic := '1';
+    signal post_left_one     : std_logic := '0';
     signal capture_len       : unsigned(PTR_W downto 0) := (others => '0');
     signal probe_prev        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal decim_count       : unsigned(23 downto 0) := (others => '0');
@@ -652,7 +655,7 @@ begin
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and
-                          comb_store_ok = '1' and post_count < posttrig_len) else '0';
+                          comb_store_ok = '1' and post_left_zero = '0') else '0';
 
     -- Selection flush, as in rtl/fcapz_ela.v: chan_sel / probe_sel change only
     -- on arm, and the probe pipe, probe_prev and the registered hits still
@@ -1509,7 +1512,6 @@ begin
         variable base : natural;
         variable start_calc : natural;
         variable next_segment : natural;
-        variable post_limit : unsigned(LEN_W - 1 downto 0);
         variable trigger_commit_now : boolean;
         variable force_store_now : boolean;
         variable store_now : boolean;
@@ -1529,7 +1531,9 @@ begin
             start_ptr <= 0;
             trig_ptr <= 0;
             pre_count <= (others => '0');
-            post_count <= (others => '0');
+            post_left <= (others => '0');
+            post_left_zero <= '1';
+            post_left_one <= '0';
             capture_len <= (others => '0');
             probe_prev <= (others => '0');
             decim_count <= (others => '0');
@@ -1628,7 +1632,9 @@ begin
                 overflow <= '0';
                 wr_ptr <= 0;
                 pre_count <= (others => '0');
-                post_count <= (others => '0');
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 capture_len <= (others => '0');
                 cur_segment <= 0;
                 seg_count <= 0;
@@ -1650,7 +1656,9 @@ begin
 
             if done = '1' then
                 armed <= '0';
-                post_count <= (others => '0');
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 -- Sample writes are frozen while done is held (the host is
@@ -1685,7 +1693,9 @@ begin
                 if arm_voids_history = '1' or triggered = '1' then
                     pre_count <= (others => '0');
                 end if;
-                post_count <= (others => '0');
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 cur_segment <= 0;
                 seg_count <= 0;
                 all_seg_done <= '0';
@@ -1814,7 +1824,9 @@ begin
                         triggered <= '1';
                         trig_ptr <= wr_ptr;
                         capture_len <= count_u(pretrig_len) + count_u(posttrig_len) + 1;
-                        post_count <= (others => '0');
+                        post_left <= posttrig_len;
+                        post_left_zero <= bool_to_sl(posttrig_len = 0);
+                        post_left_one <= bool_to_sl(posttrig_len = 1);
                     end if;
 
                     if store_now then
@@ -1823,8 +1835,7 @@ begin
                 else
                     trig_delay_pending <= '0';
                     trig_delay_count <= (others => '0');
-                    post_limit := posttrig_len;
-                    if post_count >= post_limit then
+                    if post_left_zero = '1' then
                         start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                         if NUM_SEGMENTS = 1 then
                             done <= '1';
@@ -1851,7 +1862,9 @@ begin
                                 seg_count <= seg_count + 1;
                                 triggered <= '0';
                                 pre_count <= (others => '0');
-                                post_count <= (others => '0');
+                                post_left <= (others => '0');
+                                post_left_zero <= '1';
+                                post_left_one <= '0';
                                 wr_ptr <= seg_base(next_segment);
                                 segment_wrapped <= '0';
                                 trig_delay_pending <= '0';
@@ -1868,7 +1881,7 @@ begin
                                 segment_wrapped <= '1';
                             end if;
                         end if;
-                        if post_count + 1 >= post_limit then
+                        if post_left_one = '1' then
                             start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                             if NUM_SEGMENTS = 1 then
                                 done <= '1';
@@ -1897,7 +1910,9 @@ begin
                                     seg_count <= seg_count + 1;
                                     triggered <= '0';
                                     pre_count <= (others => '0');
-                                    post_count <= (others => '0');
+                                    post_left <= (others => '0');
+                                    post_left_zero <= '1';
+                                    post_left_one <= '0';
                                     wr_ptr <= seg_base(next_segment);
                                     segment_wrapped <= '0';
                                     trig_delay_pending <= '0';
@@ -1909,7 +1924,9 @@ begin
                                 end if;
                             end if;
                         else
-                            post_count <= post_count + 1;
+                            post_left <= post_left - 1;
+                            post_left_zero <= '0';
+                            post_left_one <= bool_to_sl(post_left = 2);
                             wr_ptr <= next_ptr(wr_ptr, base);
                         end if;
                     end if;

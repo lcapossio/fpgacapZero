@@ -23,7 +23,7 @@ arm_pulse  ──────►│   ARMED      │ ── trigger_hit ──�
                                               │  posttrig)   │
                                               └──────────────┘
                                                      │
-                                                     │ post_count == posttrig_len
+                                                     │ posttrig_len samples stored
                                                      ▼
                                               ┌──────────────┐
                                               │    DONE      │ ── host reads buffer ──►
