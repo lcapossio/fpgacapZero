@@ -166,6 +166,14 @@ a.connect()                  # selects chain 1, validates ELA core_id
 a.close()                    # releases the transport
 ```
 
+`Analyzer(transport, chain=1, instance=None, manager=None)`: `instance`
+selects a core-manager slot.  `manager` says whether the ELA sits behind a
+core manager; the default `None` detects it from the manager ID at `0xF000`.
+That ID decides on its own unless a standalone core of the probed geometry
+decodes `0xF000` inside its DATA/timestamp windows (cores of 15360 or more
+words); then the rest of the manager block must match too.  Pass
+`manager=True` or `False` to state the topology outright.
+
 ### `probe() -> dict`
 
 Reads the ELA identity, version, and FEATURES bits.  Raises

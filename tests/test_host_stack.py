@@ -219,6 +219,58 @@ class ContinuousTransport(FakeTransport):
                 self.regs[0x0008] = 0x4  # immediately "done" so capture() returns
 
 
+class ManagerDetectionTests(unittest.TestCase):
+    """0xF000 holds the manager ID when there is a manager; on a standalone
+    ELA it is DATA/timestamp window, which reads 0 past the capture."""
+
+    def _transport(self, *, depth: int, sample_w: int = 8, timestamp_w: int = 0,
+                   manager_block: bool = True, f000: int | None = None):
+        t = FakeTransport()
+        t.regs[0x000C] = sample_w
+        t.regs[0x0010] = depth
+        t.regs[0x00C4] = timestamp_w
+        if not manager_block:
+            t._manager_regs = {}
+        if f000 is not None:
+            t._manager_regs[0xF000] = f000
+        t.reads: list[int] = []
+        read_reg = t.read_reg
+
+        def tracked(addr: int) -> int:
+            t.reads.append(addr)
+            return read_reg(addr)
+
+        t.read_reg = tracked  # type: ignore[method-assign]
+        return t
+
+    def test_id_is_conclusive_when_no_window_reaches_0xf000(self):
+        t = self._transport(depth=1024, timestamp_w=32)
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertNotIn(0xF004, t.reads)  # the ID alone decided
+
+    def test_other_value_means_no_manager(self):
+        t = self._transport(depth=1024, manager_block=False)
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_standalone_sample_matching_the_id_is_not_a_manager(self):
+        # 16K x 32-bit: 0xF000 is sample 15360, which here reads as the ID.
+        t = self._transport(depth=16384, sample_w=32, manager_block=False,
+                            f000=CORE_MANAGER_CORE_ID)
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_core_behind_a_real_manager_is_detected(self):
+        t = self._transport(depth=16384, sample_w=32)
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertIn(0xF00C, t.reads)  # the manager block was checked
+
+    def test_explicit_topology_is_authoritative(self):
+        t = self._transport(depth=1024)
+        self.assertFalse(Analyzer(t, manager=False)._behind_manager())
+        t = self._transport(depth=1024, manager_block=False)
+        self.assertTrue(Analyzer(t, manager=True)._behind_manager())
+        self.assertNotIn(0xF000, t.reads)
+
+
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(

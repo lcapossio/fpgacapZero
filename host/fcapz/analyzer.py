@@ -303,10 +303,14 @@ class Analyzer:
         *,
         chain: int = 1,
         instance: int | None = None,
+        manager: bool | None = None,
     ):
+        """``manager`` states whether the core sits behind a core manager;
+        ``None`` (the default) detects it from the hardware."""
         self.transport = transport
         self._chain = int(chain)
         self._instance = None if instance is None else int(instance)
+        self._manager_override = None if manager is None else bool(manager)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
@@ -769,17 +773,56 @@ class Analyzer:
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
 
-        The manager's identity register decides, with or without a selected
-        slot: ``instance=None`` (the CLI default) still reads whichever slot the
-        manager has active, and a slot selected on a design without a manager
-        (the GUI selects slot 0 on some paths) must not disable burst readout.
+        ``manager=`` given to the constructor is authoritative.  Otherwise the
+        hardware decides, with or without a selected slot: ``instance=None``
+        (the CLI default) still reads whichever slot the manager has active,
+        and a slot selected on a design without a manager (the GUI selects
+        slot 0 on some paths) must not disable burst readout.
+
+        A manager always answers ``0xF000`` with its ID, so any other value
+        means no manager.  The ID alone is conclusive when a standalone core
+        of this geometry cannot alias ``0xF000``: a standalone ELA decodes
+        every address from ``0x0100`` up as its DATA/timestamp window and
+        reads 0 past its capture, so ``0xF000`` returns sample data only when
+        those windows reach it (very deep cores).  Then the rest of the
+        manager block must match as well.
         """
+        if self._manager_override is not None:
+            return self._manager_override
         if self._manager_found is None:
             with self.transport.transaction_lock():
                 self._select_chain()
-                version = int(self.transport.read_reg_stable(_ADDR_MGR_VERSION))
-            self._manager_found = (version & 0xFFFF) == _CORE_MANAGER_CORE_ID
+                read = self.transport.read_reg_stable
+                version = int(read(_ADDR_MGR_VERSION))
+                if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
+                    found = False
+                elif not self._standalone_windows_reach(_ADDR_MGR_VERSION, read):
+                    found = True
+                else:
+                    found = self._manager_block_matches(read)
+            self._manager_found = found
         return self._manager_found
+
+    @staticmethod
+    def _standalone_windows_reach(addr: int, read) -> bool:
+        """Whether a standalone ELA with the geometry read here decodes *addr*
+        inside its DATA + timestamp windows (``DEPTH`` bounds the capture)."""
+        sample_w = max(1, int(read(_ADDR_SAMPLE_W)))
+        depth = int(read(_ADDR_DEPTH))
+        ts_w = int(read(_ADDR_TIMESTAMP_W))
+        words_per_sample = (sample_w + 31) // 32 + (ts_w + 31) // 32
+        return addr < _ADDR_DATA_BASE + depth * words_per_sample * 4
+
+    @staticmethod
+    def _manager_block_matches(read) -> bool:
+        """Whether the registers after the manager ID hold a manager's values
+        (slot count, an active slot below it, zero stride, the active-slot
+        capability)."""
+        count = int(read(_ADDR_MGR_COUNT))
+        active = int(read(_ADDR_MGR_ACTIVE))
+        stride = int(read(_ADDR_MGR_STRIDE))
+        caps = int(read(_ADDR_MGR_CAPS))
+        return 1 <= count <= 256 and active < count and stride == 0 and bool(caps & 0x1)
 
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""
