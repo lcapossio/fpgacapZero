@@ -147,6 +147,9 @@ TARGETS: tuple[CocotbTarget, ...] = (
         {"EXT_TRIG_EN": 1, "INPUT_PIPE": 3},
         ("input_pipe_depth_sets_capture_latency", "input_pipe_keeps_the_write_queued_at_arm"),
     ),
+    # pipe0 checks the INPUT_PIPE=0 parameter with EXT_TRIG_EN, which the core
+    # builds as one probe stage; unpipelined RTL is covered by the
+    # EXT_TRIG_EN=0 targets (sequencer2/4, timestamp32, config_min, ...).
     *(
         CocotbTarget(
             f"trigger_align_pipe{pipe}",
