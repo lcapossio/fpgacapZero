@@ -1635,13 +1635,15 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(checks["n"], 3)
 
     def test_select_fpga_target_retries_a_target_that_vanished(self):
-        """A select that finds the target gone again is part of the rescan."""
+        """A select that fails because the rescan took the target away again
+        is waited out: the list no longer shows it."""
         t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        listings = iter(["  1  xczu7\n", ""])  # listed, then gone after the select
         selects = {"n": 0}
 
         def fake_send(tcl: str, check: bool = False) -> str:
             if tcl == "puts [jtag targets]":
-                return "  1  xczu7\n"
+                return next(listings, "  1  xczu7\n")
             if tcl.startswith("jtag targets -set"):
                 selects["n"] += 1
                 if selects["n"] == 1:
@@ -1652,6 +1654,28 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with patch("fcapz.transport.time.sleep"):
             t._select_fpga_target()
         self.assertEqual(selects["n"], 2)
+
+    def test_select_fpga_target_raises_a_lasting_select_error_at_once(self):
+        """A select that fails while the target stays listed (two boards
+        matching the filter, say) will not fix itself: raised, not waited."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=5.0)
+        selects = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xc7a100t\n  2  xc7a100t\n"
+            if tcl.startswith("jtag targets -set"):
+                selects["n"] += 1
+                raise RuntimeError("xsdb rejected: target list contains more than one entry")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep") as sleep:
+            with self.assertRaises(RuntimeError) as cm:
+                t._select_fpga_target()
+        self.assertIn("more than one", str(cm.exception))
+        self.assertEqual(selects["n"], 1)
+        sleep.assert_not_called()
 
     def test_select_fpga_target_raises_other_scan_errors_at_once(self):
         """Only the rescan's signature is retried; other scan errors surface."""

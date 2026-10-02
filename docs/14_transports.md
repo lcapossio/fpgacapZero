@@ -103,9 +103,11 @@ What `connect()` does:
    reopens and rescans them all for the next client, which can take several
    seconds with a few boards attached. During that window `jtag targets`
    lists nothing, or lists the target from the stale cable while every scan
-   fails with "JTAG node is not accessible". Both are retried until
+   fails with "JTAG node is not accessible". Both are waited out until
    `target_wait_timeout` (default 10 s, a deadline: a live target is
-   selected in milliseconds). Any other scan error is raised at once.
+   selected in milliseconds). A select that fails while the target is still
+   listed (two boards matching `fpga_name`, say) and any other scan error
+   are raised at once.
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the

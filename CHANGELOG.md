@@ -105,9 +105,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   xsdb client exits, hw_server releases its cables and rescans them for several
   seconds: the target list is empty or shows closed cables, or a target is
   listed while every scan fails with "JTAG node is not accessible". Connect
-  waited a fixed 3 s and took the first listed target. It now waits up to
-  10 s (`target_wait_timeout`), and accepts a target only once an IDCODE scan
-  through it succeeds, retrying only those rescan errors.
+  polled the list for up to 3 s and took the first listed target without
+  checking that it answered. It now polls for up to 10 s
+  (`target_wait_timeout`) and accepts a target only once an IDCODE scan
+  through it succeeds. Only those two rescan states are waited out; a select
+  that fails while the target is still listed (two boards matching the
+  name, say) and any other scan error are raised at once.
 
 - **hw_server — a failed burst send went unnoticed.** A burst is built over
   several xsdb sends, but only the last send's output was checked, so an
