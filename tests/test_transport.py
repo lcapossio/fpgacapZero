@@ -1655,6 +1655,26 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
             t._select_fpga_target()
         self.assertEqual(selects["n"], 2)
 
+    def test_select_fpga_target_does_not_relist_past_the_deadline(self):
+        """A select that fails once the deadline has passed ends the wait;
+        no further xsdb command is sent to classify it."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=0.0)
+        listings = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                listings["n"] += 1
+                return "  1  xczu7\n"
+            if tcl.startswith("jtag targets -set"):
+                raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(ConnectionError) as cm:
+            t._select_fpga_target()
+        self.assertIn("no targets found", str(cm.exception))
+        self.assertEqual(listings["n"], 1)
+
     def test_select_fpga_target_raises_a_lasting_select_error_at_once(self):
         """A select that fails while the target stays listed (two boards
         matching the filter, say) will not fix itself: raised, not waited."""
