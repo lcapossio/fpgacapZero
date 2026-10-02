@@ -15,6 +15,7 @@ from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import (
     REG_ADDR_SPACE_END,
+    BurstIntegrityError,
     OpenOcdTransport,
     Transport,
     check_data_window,
@@ -781,6 +782,8 @@ class Analyzer:
                         self._hw_timestamp_w,
                     )
                     return [v & mask for v in raw]
+                except BurstIntegrityError:
+                    raise
                 except (ConnectionError, RuntimeError) as exc:
                     _log.warning(
                         "single-chain timestamp burst failed (%s); using slower "
@@ -957,6 +960,8 @@ class Analyzer:
                         sw,
                     )
                     return words
+                except BurstIntegrityError:
+                    raise
                 except (ConnectionError, RuntimeError) as exc:
                     _log.warning(
                         "single-chain sample burst failed (%s); falling back to "

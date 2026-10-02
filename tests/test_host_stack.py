@@ -23,7 +23,12 @@ from fcapz.analyzer import (
     expected_ela_version_reg,
 )
 from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
-from fcapz.transport import DataWindowError, Transport, check_data_window
+from fcapz.transport import (
+    BurstIntegrityError,
+    DataWindowError,
+    Transport,
+    check_data_window,
+)
 
 
 def _expected_eio_version_reg() -> int:
@@ -725,6 +730,23 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
         self.assertEqual(result.samples, list(range(16)))
         self.assertEqual(sum("burst-start" in m for m in logs.output), 1)
+
+    def test_burst_integrity_error_reaches_the_caller(self):
+        """A burst that ran but came back malformed is a readout defect, not
+        a missing capability: capture() raises it instead of re-reading the
+        window."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+        window_only = self._window_only(transport)
+
+        def malformed(base_addr, n_samples, sample_width):
+            raise BurstIntegrityError("burst returned 15 samples, expected 16")
+
+        transport.read_sample_block = malformed
+        with self.assertRaises(BurstIntegrityError):
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(window_only, [])
 
     def test_old_one_slot_manager_keeps_sample_burst(self):
         """With one slot there is no slot switch, so no rotation to guard."""
