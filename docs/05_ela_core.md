@@ -496,7 +496,7 @@ Manager registers:
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
 | `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |

@@ -854,6 +854,8 @@ async def fcapz_core_manager_mux(dut):
 
     assert await manager_read(dut, 0xF000) == 0x0004_434D
     assert await manager_read(dut, 0xF004) == 3
+    # bit2: the burst start is raised on every BURST_PTR write
+    assert await manager_read(dut, 0xF010) == 0x7
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xEFFF) == 0
     assert int(dut.slot_rd_en.value) & 1

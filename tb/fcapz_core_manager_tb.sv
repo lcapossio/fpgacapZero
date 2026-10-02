@@ -188,6 +188,8 @@ module fcapz_core_manager_case #(
 
         read_reg(16'hF000, 32'h0004_434D, "manager version");
         read_reg(16'hF004, NUM_SLOTS[31:0], "manager slot count");
+        // bit2: the burst start is raised on every BURST_PTR write
+        read_reg(16'hF010, 32'h0000_0007, "manager caps");
         read_reg(16'hF008, 32'h0000_0000, "reset active slot");
         check_active_slot(0, "0xEFFF routes to active slot 0");
         read_reg(16'hF000, 32'h0004_434D, "0xF000 stays in manager window");
