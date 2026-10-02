@@ -209,7 +209,8 @@ begin
             when ADDR_MGR_STRIDE =>
                 manager_rdata <= (others => '0');
             when ADDR_MGR_CAPS =>
-                manager_rdata <= x"00000003";
+                -- bit2: burst start raised on every BURST_PTR write
+                manager_rdata <= x"00000007";
             when ADDR_MGR_DESC_INDEX =>
                 manager_rdata <= std_logic_vector(resize(desc_idx, 32));
             when ADDR_MGR_DESC_CORE =>

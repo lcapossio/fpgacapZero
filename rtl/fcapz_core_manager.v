@@ -184,7 +184,9 @@ module fcapz_core_manager #(
             ADDR_MGR_COUNT:   manager_rdata = NUM_SLOTS;
             ADDR_MGR_ACTIVE:  manager_rdata = {{(32-IDX_W){1'b0}}, active_idx};
             ADDR_MGR_STRIDE:  manager_rdata = 32'h0;
-            ADDR_MGR_CAPS:    manager_rdata = 32'h0000_0003; // bit0 active-slot, bit1 descriptors
+            // bit0 active-slot, bit1 descriptors, bit2 the manager raises the
+            // burst start on every BURST_PTR write (safe across slot switches)
+            ADDR_MGR_CAPS:    manager_rdata = 32'h0000_0007;
             ADDR_MGR_DESC_INDEX: manager_rdata = {{(32-IDX_W){1'b0}}, desc_idx};
             ADDR_MGR_DESC_CORE:  manager_rdata = {16'h0, desc_core_id};
             ADDR_MGR_DESC_CAPS:  manager_rdata = {31'h0, desc_has_burst};
