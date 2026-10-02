@@ -96,8 +96,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   toggle could match it, the start was missed and the burst read the new
   slot's RAM from the previous burst's pointer, with no error; a slot switch
   alone could also look like a start. The manager now raises the start itself
-  on every `BURST_PTR` write to a burst-capable slot (both HDLs). Fixing it
-  needs a bitstream rebuild.
+  on every `BURST_PTR` write to a burst-capable slot (both HDLs) and reports it
+  in `MGR_CAPS` bit 2. Fixing it needs a bitstream rebuild; until then the host
+  reads a manager with two or more slots and without that bit through the
+  register window instead of the burst, and warns once.
+
+- **hw_server — a connect right after another session could fail.** When an
+  xsdb client exits, hw_server releases its cables and rescans them for several
+  seconds: the target list is empty or shows closed cables, or a target is
+  listed while every scan fails with "JTAG node is not accessible". Connect
+  waited a fixed 3 s and took the first listed target. It now waits up to
+  10 s (`target_wait_timeout`), and accepts a target only once an IDCODE scan
+  through it succeeds, retrying only those rescan errors.
+
+- **hw_server — a short burst was not detected.** A burst is built over
+  several xsdb sends, but only the last send's output was checked, and a
+  narrow core's burst could come back one scan short without error. Every
+  send is now checked, and a burst with the wrong number of scans is refused
+  and read through the register window instead.
 
 - **hw_server — a deep burst could drop out of burst mode mid-read.** Each
   chunk of scans ran as its own `jtag sequence`, and between two runs hw_server
@@ -223,7 +239,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   standalone core of the probed geometry cannot reach `0xF000`; otherwise the
   rest of the manager block must match too, and a manager with descriptors
   and two or more slots must latch a test write to `MGR_DESC_INDEX`
-  (restored afterwards), which a standalone core ignores. Only a deep core
+  (restored afterwards, even when the readback fails; a missed latch is
+  tried once more), which a standalone core ignores. Every register read
+  that decides the topology or the readout path must read back the same
+  twice; if it never does, the answer is left open for that capture
+  (register window, never the burst) and asked again next time. Only a deep core
   whose live capture reproduces the register block of a one-slot or
   descriptor-less manager can still fool it.
   `Analyzer(..., manager=True/False)` states the topology outright.
