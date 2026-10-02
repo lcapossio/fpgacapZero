@@ -239,13 +239,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   standalone core of the probed geometry cannot reach `0xF000`; otherwise the
   rest of the manager block must match too, and a manager with descriptors
   and two or more slots must latch a test write to `MGR_DESC_INDEX`
-  (restored afterwards, even when the readback fails; a missed latch is
-  tried once more), which a standalone core ignores. Every register read
-  that decides the topology or the readout path must read back the same
-  twice; if it never does, the answer is left open for that capture
-  (register window, never the burst) and asked again next time. Only a deep core
-  whose live capture reproduces the register block of a one-slot or
-  descriptor-less manager can still fool it.
+  (restored afterwards, even when the readback fails, and then the failure
+  propagates without caching an answer), which a standalone core ignores.
+  Only a deep core whose live capture reproduces the register block of a
+  one-slot or descriptor-less manager can still fool it.
   `Analyzer(..., manager=True/False)` states the topology outright.
 
 - **CLI.** `--trigger-value` accepts hex (`0x…`); `--depth` and the sample
