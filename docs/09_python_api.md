@@ -178,9 +178,9 @@ decodes `0xF000` inside its DATA/timestamp windows (more than 15296 words of
 samples plus timestamps).  Then the rest of the manager block must match
 too, and a manager with descriptors (`MGR_CAPS` bit 1) and two or more
 slots must also latch a test write to `MGR_DESC_INDEX`, which a standalone
-core ignores.  The index is restored afterwards even if a read fails, and a
-write that seems not to latch is tried once more, so one bad readback does
-not decide the topology for the session.  Only a deep core whose live
+core ignores.  The index is restored afterwards even if a read fails; the
+failure then propagates and no answer is kept, so the next call decides
+afresh.  Only a deep core whose live
 capture reproduces the whole register block of a one-slot or
 descriptor-less manager can still fool detection.  Pass `manager=True` or `False` to
 state the topology outright.
