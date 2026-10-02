@@ -2287,14 +2287,18 @@ class XilinxHwServerTransport(Transport):
             head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
         )
 
+        # Every send is checked: a failure while the sequence is being built
+        # prints only into that send's output, and the last send would then
+        # run a partial sequence whose scans parse as a short burst.
         out = ""
         for tcl in tcls:
-            out = self._send(tcl)  # only the last send prints the scans
+            out = self._send(tcl, check=True)  # only the last send prints the scans
         return self._parse_burst_bits(
             out,
             words,
             skip_scans=prime_scans,
             element_width=element_width,
+            expected_scans=n_scans + prime_scans,
         )
 
     # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
@@ -2406,9 +2410,13 @@ class XilinxHwServerTransport(Transport):
         *,
         skip_scans: int = 0,
         element_width: int | None = None,
+        expected_scans: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
+
+        With *expected_scans*, any other number of scan tokens raises
+        ``RuntimeError`` rather than returning a short or misaligned burst.
         """
         if element_width is None:
             sps = self._burst_samples_per_scan
@@ -2436,6 +2444,14 @@ class XilinxHwServerTransport(Transport):
                 offset = burst_offset + s * sw
                 val = self._bits_to_int(token, offset, sw)
                 values.append(val)
+        if expected_scans is not None and scan_idx != expected_scans:
+            raise RuntimeError(
+                f"burst returned {scan_idx} scans, expected {expected_scans}"
+            )
+        if len(values) < total_words:
+            raise RuntimeError(
+                f"burst returned {len(values)} values, expected {total_words}"
+            )
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
