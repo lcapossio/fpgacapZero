@@ -95,11 +95,18 @@ What `connect()` does:
 1. Spawns `xsdb` as a subprocess (uses `xsdb_path` if set,
    otherwise looks on `PATH`).
 2. Sends `connect -url tcp:HOST:PORT` to xsdb's stdin.
-3. If `bitfile` is set: selects the **configuration target** (see below), then
-   sends `fpga -file {BITFILE}` and `after <ms>` (GUI default 200 ms
-   post-program delay).
-4. Sends a `jtag targets -set -filter` to lock onto the
-   actual FPGA target (not just any device on the chain).
+3. If `bitfile` is set: waits for a live FPGA target (step 4), selects the
+   **configuration target** (see below), then sends `fpga -file {BITFILE}`
+   and `after <ms>` (GUI default 200 ms post-program delay).
+4. Waits for a JTAG target matching `fpga_name`, selects it with
+   `jtag targets -set -filter`, and confirms it with one IDCODE scan.
+   When the previous xsdb client exits, hw_server releases every cable and
+   reopens and rescans them all for the next client, which can take several
+   seconds with a few boards attached. During that window `jtag targets`
+   lists nothing, or lists the target from the stale cable while every scan
+   fails with "JTAG node is not accessible". Both are retried until
+   `target_wait_timeout` (default 10 s, a deadline: a live target is
+   selected in milliseconds). Any other scan error is raised at once.
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the

@@ -1569,7 +1569,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport(fpga_name="xc7a100t")
         calls: list[str] = []
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             calls.append(tcl)
             return "  1  xc7a100t\n  2  xck26\n" if tcl == "puts [jtag targets]" else ""
 
@@ -1578,6 +1578,8 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertTrue(
             any("jtag targets -set -filter" in c and "xc7a100t" in c for c in calls)
         )
+        # The selected node is confirmed with a scan before it is used.
+        self.assertEqual(calls[-1], t._NODE_CHECK_TCL)
 
     def test_select_fpga_target_waits_out_empty_chain(self):
         """A transiently empty chain is polled until the target appears."""
@@ -1585,7 +1587,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         listings = iter(["", "", "  1  xc7a100t\n"])  # empty, empty, then present
         polls = {"n": 0}
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             if tcl == "puts [jtag targets]":
                 polls["n"] += 1
                 return next(listings, "  1  xc7a100t\n")
@@ -1596,11 +1598,88 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
             t._select_fpga_target()
         self.assertGreaterEqual(polls["n"], 3)  # rode out the empty window
 
+    def test_default_target_wait_outlasts_a_cable_rescan(self):
+        """The default deadline outlasts the 6.2 s worst cable rescan seen."""
+        self.assertGreaterEqual(XilinxHwServerTransport().target_wait_timeout, 8.0)
+
+    def test_select_fpga_target_retries_node_not_accessible(self):
+        """A target listed from a stale cable is retried until its scans work."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        checks = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl == t._NODE_CHECK_TCL:
+                checks["n"] += 1
+                if checks["n"] <= 2:
+                    raise RuntimeError("xsdb rejected: JTAG node is not accessible")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            t._select_fpga_target()
+        self.assertEqual(checks["n"], 3)
+
+    def test_select_fpga_target_retries_a_target_that_vanished(self):
+        """A select that finds the target gone again is part of the rescan."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        selects = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl.startswith("jtag targets -set"):
+                selects["n"] += 1
+                if selects["n"] == 1:
+                    raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            t._select_fpga_target()
+        self.assertEqual(selects["n"], 2)
+
+    def test_select_fpga_target_raises_other_scan_errors_at_once(self):
+        """Only the rescan's signature is retried; other scan errors surface."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        checks = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl == t._NODE_CHECK_TCL:
+                checks["n"] += 1
+                raise RuntimeError("xsdb rejected: invalid register name")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                t._select_fpga_target()
+        self.assertEqual(checks["n"], 1)
+
+    def test_select_fpga_target_reports_a_node_that_never_answers(self):
+        """The deadline error names the last scan error."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=0.05)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl == t._NODE_CHECK_TCL:
+                raise RuntimeError("xsdb rejected: JTAG node is not accessible")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(ConnectionError) as cm:
+            t._select_fpga_target()
+        self.assertIn("not accessible", str(cm.exception))
+
     def test_select_fpga_target_times_out_with_clear_error(self):
         """A never-appearing target fails with a message naming what is visible."""
         t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=0.05)
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             return "  1  xck26\n" if tcl == "puts [jtag targets]" else ""  # never the Arty
 
         t._send = fake_send  # type: ignore[method-assign]
