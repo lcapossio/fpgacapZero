@@ -293,6 +293,73 @@ class ManagerDetectionTests(unittest.TestCase):
         self.assertEqual(writes, [(0xF014, 0), (0xF014, 2)])
         self.assertEqual(t._manager_regs[0xF014], 2)
 
+    def _multi_slot_manager(self):
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 3, 0xF010: 3, 0xF014: 2})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def tracked_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            write_reg(addr, value)
+
+        t.write_reg = tracked_write  # type: ignore[method-assign]
+        return t, writes
+
+    def test_one_bad_desc_index_readback_does_not_hide_the_manager(self):
+        t, writes = self._multi_slot_manager()
+        reads = {"desc": 0}
+        read_reg = t.read_reg
+
+        def garbled_once(addr: int) -> int:
+            value = read_reg(addr)
+            if addr == 0xF014:
+                reads["desc"] += 1
+                if reads["desc"] == 2:  # the first readback of the probe
+                    return 0x5A5A5A5A
+            return value
+
+        t.read_reg = garbled_once  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(t._manager_regs[0xF014], 2)
+        self.assertEqual(writes[-1], (0xF014, 2))
+
+    def test_desc_index_is_restored_when_the_readback_fails(self):
+        t, writes = self._multi_slot_manager()
+        reads = {"desc": 0}
+        read_reg = t.read_reg
+
+        def failing(addr: int) -> int:
+            if addr == 0xF014:
+                reads["desc"] += 1
+                if reads["desc"] == 2:
+                    raise ConnectionError("JTAG read failed")
+            return read_reg(addr)
+
+        t.read_reg = failing  # type: ignore[method-assign]
+        analyzer = Analyzer(t)
+        with self.assertRaises(ConnectionError):
+            analyzer._behind_manager()
+        self.assertEqual(t._manager_regs[0xF014], 2)  # original index back
+        self.assertIsNone(analyzer._manager_found)  # nothing cached
+        self.assertTrue(analyzer._behind_manager())  # next call decides afresh
+
+    def test_two_consistent_misses_mean_no_manager(self):
+        t = self._transport(depth=16384, sample_w=32, manager_block=False)
+        t.regs.update({0xF000: CORE_MANAGER_CORE_ID, 0xF004: 2, 0xF008: 0,
+                       0xF00C: 0, 0xF010: 3, 0xF014: 0})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def standalone_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            if addr < 0x0100:
+                write_reg(addr, value)
+
+        t.write_reg = standalone_write  # type: ignore[method-assign]
+        self.assertFalse(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [(0xF014, 1), (0xF014, 0)] * 2)
+
     def test_deep_core_behind_a_manager_without_descriptors_is_detected(self):
         # MGR_CAPS bit 1 clear: DESC_INDEX is not implemented, so it is not
         # written; the register block alone decides.

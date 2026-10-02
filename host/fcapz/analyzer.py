@@ -857,21 +857,31 @@ class Analyzer:
         A manager with descriptors (``MGR_CAPS`` bit 1) latches any index
         below its slot count; a standalone ELA ignores writes from ``0x0100``
         up, so the word it returns there stays put.  The original index is
-        restored.  Without descriptors, or with one slot and so no other
-        valid index, the register match alone decides.
+        restored, even when a read fails.  Without descriptors, or with one
+        slot and so no other valid index, the register match alone decides.
+
+        Register reads are single, unverified reads, so one bad readback must
+        not settle the answer for the session: a write that seems not to
+        latch is tried once more, and only two misses in a row mean no
+        manager.  A latch needs the exact index back, which a bad read is
+        very unlikely to produce.
         """
         count = int(read(_ADDR_MGR_COUNT))
         if count < 2 or not int(read(_ADDR_MGR_CAPS)) & 0x2:
             return True
-        original = int(read(_ADDR_MGR_DESC_INDEX))
-        if original >= count:
-            return False
-        probe = (original + 1) % count
-        write(_ADDR_MGR_DESC_INDEX, probe)
-        latched = int(read(_ADDR_MGR_DESC_INDEX)) == probe
-        if latched:
-            write(_ADDR_MGR_DESC_INDEX, original)
-        return latched
+
+        def latches() -> bool:
+            original = int(read(_ADDR_MGR_DESC_INDEX))
+            if original >= count:
+                return False
+            probe = (original + 1) % count
+            write(_ADDR_MGR_DESC_INDEX, probe)
+            try:
+                return int(read(_ADDR_MGR_DESC_INDEX)) == probe
+            finally:
+                write(_ADDR_MGR_DESC_INDEX, original)
+
+        return latches() or latches()
 
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback."""
