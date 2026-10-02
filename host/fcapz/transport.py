@@ -1958,10 +1958,12 @@ class XilinxHwServerTransport(Transport):
             seconds.
 
         So poll ``jtag targets`` until a matching device appears, select it,
-        and confirm it with an IDCODE scan; a "not accessible" answer, or a
-        select that finds the target gone again, means the rescan is still
-        running, so poll and retry until ``target_wait_timeout``.  Any other
-        scan error is real and raised at once.
+        and confirm it with an IDCODE scan.  Only those two rescan states are
+        waited out, until ``target_wait_timeout``: a target missing from the
+        list, and a "not accessible" answer to the scan.  A select that fails
+        is waited out only if the list no longer shows the target; while it
+        is still listed the failure is lasting (an ambiguous filter, say) and
+        raised at once, as is any other scan error.
         """
         deadline = time.monotonic() + self.target_wait_timeout
         names: list[str] = []
@@ -1977,6 +1979,9 @@ class XilinxHwServerTransport(Transport):
                         check=True,
                     )
                 except RuntimeError as exc:
+                    names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
+                    if any(self.fpga_name in name for name in names):
+                        raise
                     last_error = str(exc)
                 else:
                     try:
