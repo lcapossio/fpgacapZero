@@ -1751,7 +1751,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         fresh0 = self._burst_token(list(range(32)))
         fresh1 = self._burst_token(list(range(32, 64)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh0} {fresh1}"
 
@@ -1771,7 +1771,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh}"
 
@@ -1792,7 +1792,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh}"
 
@@ -1823,7 +1823,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         prints one token per captured scan only when it is run."""
         state = {"captures": 0}
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             if "[jtag sequence]" in tcl:
                 state["captures"] = 0
@@ -1887,6 +1887,53 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t.read_sample_block(0x0100, 3, 256)
 
+    def test_narrow_burst_one_scan_short_falls_back(self):
+        """A narrow-core burst that comes back a scan short is not returned:
+        read_block drops to the DATA window instead."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+        # 33 samples need 2 scans + 1 prime; only 2 tokens come back.
+        t._send = MagicMock(return_value=f"{stale} {fresh}")  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=list(range(33)))  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 33), list(range(33)))
+        t._read_block_user1.assert_called_once_with(0x0100, 33)
+
+    def test_burst_with_extra_scans_is_refused(self):
+        """More scans than were queued means the output is not this burst."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        tok = self._burst_token(list(range(32)))
+        t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            t._read_block_burst(8)  # 1 scan + 1 prime expected
+
+    def test_deep_burst_checks_every_send(self):
+        """An error while an early send builds the sequence is raised, not
+        hidden behind the last send's partial run."""
+        t = XilinxHwServerTransport()
+        n = 600
+        tokens = [self._burst_token([s], 256) for s in range(n + 1)]
+        sent: list[str] = []
+        inner = self._fake_xsdb_sequence(tokens, sent)
+        checks: list[bool] = []
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            checks.append(check)
+            if len(sent) == 1:  # the second send fails; xsdb only prints it
+                sent.append(tcl)
+                if check:
+                    raise RuntimeError("xsdb rejected: JTAG node is not accessible")
+                return ""  # its scans never joined the sequence
+            return inner(tcl)
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            t._read_block_burst(n, element_width=256)
+        self.assertEqual(checks, [True, True])
+
     def test_window_read_past_address_space_is_refused(self):
         """The pipelined DATA-window path must not wrap a read past 0x10000."""
         t = XilinxHwServerTransport()
@@ -1937,7 +1984,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport()
         sent: list[str] = []
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return ""
 
@@ -1996,7 +2043,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 8, sample_w=32)
         first = self._burst_token(list(range(8)), sample_w=32)
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {first}"
 
@@ -2115,7 +2162,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
             t._active_chain = 1
             scripts: list[str] = []
 
-            def send(tcl, scripts=scripts, t=t):
+            def send(tcl, scripts=scripts, t=t, check=False):
                 scripts.append(tcl)
                 return " ".join(["0" * t._user_dr_bits(t.BURST_DR_BITS)] * 4)
 
