@@ -1730,7 +1730,7 @@ class XilinxHwServerTransport(Transport):
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
-        target_wait_timeout: float = 3.0,
+        target_wait_timeout: float = 10.0,
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
@@ -1758,9 +1758,11 @@ class XilinxHwServerTransport(Transport):
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
         # How long connect() waits for a JTAG target matching ``fpga_name`` to
-        # appear before giving up — rides out a transiently empty scan chain
-        # (re-enumeration when another board is plugged in, or right after
-        # ``fpga -file``) instead of selecting nothing and failing later.
+        # appear and answer a scan before giving up.  It must outlast a full
+        # cable rescan: when the previous xsdb client exits, hw_server releases
+        # every cable and the next client makes it reopen and rescan them all,
+        # which took up to 6.2 s on a host with three boards.  It is a
+        # deadline, not a delay: a live target is selected in milliseconds.
         self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
@@ -1830,6 +1832,9 @@ class XilinxHwServerTransport(Transport):
         mark("hw_server_tcp")
 
         if self.bitfile:
+            # Programming over a cable hw_server is still reopening fails the
+            # same way a scan does, so wait for a live target first.
+            self._select_fpga_target()
             _hw_log.info(
                 "Programming FPGA from bitfile (fpga -file): %s",
                 self.bitfile,
@@ -1919,37 +1924,69 @@ class XilinxHwServerTransport(Transport):
             "selected, or the probe register address is wrong for this design."
         )
 
-    def _select_fpga_target(self) -> None:
-        """Select the JTAG target matching ``fpga_name``, tolerating a
-        transiently empty scan chain.
+    # One IDCODE scan: harmless on any device (it never selects a USER chain)
+    # and named by register so xsdb picks each device's own IR code.
+    _NODE_CHECK_TCL = (
+        "set _nc [jtag sequence]; "
+        "$_nc irshift -state IRUPDATE -register idcode; "
+        "$_nc drshift -state DRUPDATE -capture -tdi 0 32; "
+        "$_nc run; $_nc delete"
+    )
+    _NODE_NOT_ACCESSIBLE = "JTAG node is not accessible"
 
-        hw_server briefly reports an empty JTAG target list while the chain
-        re-enumerates — right after ``fpga -file``, or when another board is
-        plugged in and the whole chain is re-scanned. Firing
-        ``jtag targets -set -filter`` in that window silently selects nothing,
-        and every later read then fails with XSDB's opaque "target list is
-        empty" / "Invalid target" errors (surfaced to callers as "no bit
-        string in output"). Poll ``jtag targets`` until a matching device
-        appears, then select it; fail with a clear message if it never does.
+    def _select_fpga_target(self) -> None:
+        """Select the JTAG target matching ``fpga_name`` once it answers a scan.
+
+        When the previous xsdb client exits, hw_server releases every cable
+        and the next client makes it reopen and rescan them all.  A client
+        that connects during that window sees one of:
+
+          * ``jtag targets`` with no targets, or with every cable closed,
+            until the rescan finishes;
+          * the target listed at once from the stale open cable, after which
+            every scan fails with "JTAG node is not accessible" for a few
+            seconds.
+
+        So poll ``jtag targets`` until a matching device appears, select it,
+        and confirm it with an IDCODE scan; a "not accessible" answer, or a
+        select that finds the target gone again, means the rescan is still
+        running, so poll and retry until ``target_wait_timeout``.  Any other
+        scan error is real and raised at once.
         """
         deadline = time.monotonic() + self.target_wait_timeout
         names: list[str] = []
+        last_error = ""
         while True:
             # ``puts`` forces the list onto stdout — the bare command doesn't
             # echo its result through a piped (non-interactive) xsdb session.
             names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
             if any(self.fpga_name in name for name in names):
-                break
+                try:
+                    self._send(
+                        f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}',
+                        check=True,
+                    )
+                except RuntimeError as exc:
+                    last_error = str(exc)
+                else:
+                    try:
+                        self._send(self._NODE_CHECK_TCL, check=True)
+                        return
+                    except RuntimeError as exc:
+                        if self._NODE_NOT_ACCESSIBLE not in str(exc):
+                            raise
+                        last_error = str(exc)
             if time.monotonic() >= deadline:
                 visible = ", ".join(names) if names else "(none)"
+                detail = f" Last error: {last_error}" if last_error else ""
                 raise ConnectionError(
-                    f"no JTAG target matching {self.fpga_name!r} appeared within "
+                    f"no JTAG target matching {self.fpga_name!r} answered within "
                     f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
-                    "may be unplugged or powered off, or the JTAG chain is still "
-                    "re-enumerating (e.g. another board was just connected)."
+                    "may be unplugged or powered off, or hw_server is still "
+                    "reopening its cables (e.g. right after another client exited "
+                    f"or another board was connected).{detail}"
                 )
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
 
     def _select_config_target(self) -> None:
         """Select the debug target that ``fpga -file`` configures.
