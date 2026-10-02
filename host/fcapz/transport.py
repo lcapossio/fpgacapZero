@@ -41,7 +41,9 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
-_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
+# xsdb marks the selected target with ``*``, after its number in ``jtag
+# targets`` (``2* xc7a100t``) and before it in ``targets`` (``* 2  ...``).
+_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\*?\s+(.+?)\s*$")
 QUARTUS_AUTO_DEVICE_TAPS = frozenset(("", "auto", "xc7a100t", "xc7a100t.tap"))
 
 

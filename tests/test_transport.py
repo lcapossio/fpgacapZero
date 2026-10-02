@@ -92,6 +92,18 @@ class XsdbTargetParserTests(unittest.TestCase):
         """
         self.assertEqual(parse_xsdb_jtag_targets(raw), ["xc7a100t", "xck26"])
 
+    def test_parse_jtag_targets_keeps_the_selected_fpga(self) -> None:
+        # xsdb's real output once xc7a100t is selected: the marker follows
+        # the number.  Dropping it hid the selected board from connect().
+        raw = """
+          1  Digilent Arty A7-100T 210319B26DC2A
+             2* xc7a100t (idcode 13631093 irlen 6 fpga)
+          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+             4  xck26 (idcode 04724093 irlen 12 fpga)
+             5  arm_dap (idcode 5ba00477 irlen 4)
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xc7a100t", "xck26"])
+
     def test_parse_jtag_targets_deduplicates_names(self) -> None:
         raw = """
           1  xck26
