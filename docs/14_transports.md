@@ -38,12 +38,13 @@ burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
-The 256-bit burst DR packs **whole samples** per scan, so it is used
-only when a sample fits one 32-bit word (`SAMPLE_W <= 32`). Wider cores
-— notably the AXI monitor (`SAMPLE_W=160`) — are read back through the
-32-bit-word DATA path, which `capture()` reassembles into wide samples;
-`read_block` gates on the selected core's `SAMPLE_W` (read fresh, so it
-is correct when a session hops between an ELA and a monitor). Feeding a
+The 256-bit burst DR packs **whole samples** per scan, so `read_block`
+uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
+gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
+a session hops between an ELA and a monitor. Wider cores — notably the AXI
+monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
+per scan, which `capture()` splits into 32-bit words; only a slot without
+burst wiring falls back to the 32-bit-word DATA window. Feeding a
 wide core's 32-bit *word* count to the burst engine would build a
 multi-hundred-KB single-line TCL scan sequence that xsdb never
 completes — a hard readback hang, not a throughput issue.
@@ -105,10 +106,12 @@ What `connect()` does:
    seconds with a few boards attached. During that window `jtag targets`
    lists nothing, or lists the target from the stale cable while every scan
    fails with "JTAG node is not accessible". Both are waited out until
-   `target_wait_timeout` (default 10 s, a deadline: a live target is
-   selected in milliseconds). A select that fails while the target is still
-   listed (two boards matching `fpga_name`, say) and any other scan error
-   are raised at once.
+   `target_wait_timeout` (default 10 s; a live target is selected in
+   milliseconds). A select that fails while the target is still listed (two
+   boards matching `fpga_name`, say) and any other scan error are raised at
+   once. The timeout bounds this polling, not a single xsdb command: as
+   everywhere on this transport, a command hw_server never answers is
+   waited for.
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the
@@ -188,9 +191,6 @@ bursts as for sample bursts; the host discards that first 256-bit scan.
 
 - `BURST_PTR` is written with `bit[31]=1` to switch the staging mux
   to the timestamp BRAM instead of the sample BRAM.
-- No priming scan is needed — the staging buffer is already filled
-  from the first 256-bit capture, so the first scan returns valid
-  data directly.
 - `words_per_scan = 256 // timestamp_width` (e.g. 8 words per scan
   for 32-bit timestamps).
 

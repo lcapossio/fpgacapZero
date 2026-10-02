@@ -1964,6 +1964,10 @@ class XilinxHwServerTransport(Transport):
         is waited out only if the list no longer shows the target; while it
         is still listed the failure is lasting (an ambiguous filter, say) and
         raised at once, as is any other scan error.
+
+        The deadline bounds this polling, not a single xsdb command: like
+        every command on this transport, one that never answers is waited
+        for.
         """
         deadline = time.monotonic() + self.target_wait_timeout
         names: list[str] = []
@@ -1979,10 +1983,11 @@ class XilinxHwServerTransport(Transport):
                         check=True,
                     )
                 except RuntimeError as exc:
-                    names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
-                    if any(self.fpga_name in name for name in names):
-                        raise
                     last_error = str(exc)
+                    if time.monotonic() < deadline:
+                        names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
+                        if any(self.fpga_name in name for name in names):
+                            raise
                 else:
                     try:
                         self._send(self._NODE_CHECK_TCL, check=True)
@@ -2348,8 +2353,10 @@ class XilinxHwServerTransport(Transport):
         readout for wide cores (``SAMPLE_W > 32``): the burst engine addresses
         the capture RAM by sample, so unlike the 16-bit register window it has
         no size limit, and one 256-bit scan replaces ``ceil(width / 32)``
-        register reads.  Raises ``RuntimeError`` when burst is unavailable or
-        the stream is short, so the caller can fall back.
+        register reads.  Raises ``RuntimeError`` when burst is unavailable,
+        so the caller can read the window instead, and
+        :class:`BurstIntegrityError` when a burst ran but returned the wrong
+        number of samples, which is a defect and must not be read around.
         """
         if n_samples <= 0:
             return []
@@ -2382,7 +2389,8 @@ class XilinxHwServerTransport(Transport):
         The wide-core counterpart of :meth:`read_sample_block`: a deep wide
         capture's timestamp window can start past the 16-bit register space,
         so it must not be read through the window.  Raises ``RuntimeError``
-        when burst is unavailable or the stream is short.
+        when burst is unavailable and :class:`BurstIntegrityError` when a
+        burst ran but returned the wrong number of timestamps.
         """
         if n_timestamps <= 0:
             return []
