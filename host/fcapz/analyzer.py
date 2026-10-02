@@ -85,6 +85,11 @@ _ADDR_MGR_CAPS = 0xF010
 _ADDR_MGR_DESC_INDEX = 0xF014
 _ADDR_MGR_DESC_CORE = 0xF018
 _ADDR_MGR_DESC_CAPS = 0xF01C
+# MGR_CAPS bit 2: the manager raises the burst start on every BURST_PTR write.
+# Older multi-slot managers passed on the owner slot's own start toggle, which
+# a slot switch can hide, so a burst could read the new slot from the old
+# slot's pointer and return the capture rotated.
+_MGR_CAP_BURST_START = 0x4
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
@@ -283,6 +288,39 @@ def _selected_transaction(method):
     return wrapper
 
 
+def _agreed_read(read, addr: int, attempts: int = 4) -> int | None:
+    """Read ``addr`` until two reads in a row agree, at most ``attempts`` reads.
+
+    Register reads are single, unverified reads, so a value that decides
+    something for the whole session must read back the same twice.  ``None``
+    means the reads never agreed.
+    """
+    last = int(read(addr))
+    for _ in range(attempts - 1):
+        value = int(read(addr))
+        if value == last:
+            return value
+        last = value
+    return None
+
+
+class _UndecidedRead(Exception):
+    """Reads of one register never agreed twice in a row."""
+
+
+def _confirmed_reader(read):
+    """Wrap *read* so each value must read back the same twice; raises
+    :class:`_UndecidedRead` when it never does."""
+
+    def confirmed(addr: int) -> int:
+        value = _agreed_read(read, addr)
+        if value is None:
+            raise _UndecidedRead(f"register 0x{addr:04X} never read back the same twice")
+        return value
+
+    return confirmed
+
+
 def _join_timestamp_words(raw: list[int], words_per: int, mask: int) -> list[int]:
     """Assemble little-endian 32-bit window words into timestamp values."""
     if words_per == 1:
@@ -317,6 +355,8 @@ class Analyzer:
         self._hw_compare_caps: int = 0
         self._manager_slot_caps: int | None = None
         self._manager_found: bool | None = None
+        self._warned_old_manager_burst = False
+        self._warned_undecided_manager = False
 
     @property
     def bscan_chain(self) -> int:
@@ -787,22 +827,44 @@ class Analyzer:
         those windows reach it (very deep cores).  Then the rest of the
         manager block must match, and on a manager with several slots
         ``MGR_DESC_INDEX`` must take a write, which a standalone core ignores.
+
+        An undecided detection (see :meth:`_manager_detected`) counts as a
+        manager here, so the register window stops short of ``0xF000``.
+        """
+        return self._manager_detected() is not False
+
+    def _manager_detected(self) -> bool | None:
+        """Detect the core manager; ``None`` when the reads stayed undecided.
+
+        Register reads are single, unverified reads, and the answer is kept
+        for the session: a wrong "no manager" would let a burst run on a
+        manager that cannot burst safely.  So every register read here must
+        read back the same twice, and a register that never does leaves the
+        answer undecided and uncached, to be asked again next time.
         """
         if self._manager_override is not None:
             return self._manager_override
         if self._manager_found is None:
             with self.transport.transaction_lock():
                 self._select_chain()
-                read = self.transport.read_reg_stable
-                version = int(read(_ADDR_MGR_VERSION))
-                if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
-                    found = False
-                elif not self._standalone_windows_reach(_ADDR_MGR_VERSION, read):
-                    found = True
-                else:
-                    found = self._manager_block_matches(read) and self._desc_index_writable(
-                        read, self.transport.write_reg
-                    )
+                read = _confirmed_reader(self.transport.read_reg_stable)
+                try:
+                    version = read(_ADDR_MGR_VERSION)
+                    if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
+                        found = False
+                    elif not self._standalone_windows_reach(_ADDR_MGR_VERSION, read):
+                        found = True
+                    else:
+                        found = self._manager_block_matches(read) and self._desc_index_writable(
+                            read, self.transport.write_reg
+                        )
+                except _UndecidedRead as exc:
+                    # Once per undecided streak; a capture asks several times.
+                    log = _log.debug if self._warned_undecided_manager else _log.warning
+                    self._warned_undecided_manager = True
+                    log("core manager detection undecided: %s", exc)
+                    return None
+            self._warned_undecided_manager = False
             self._manager_found = found
         return self._manager_found
 
@@ -837,11 +899,10 @@ class Analyzer:
         restored, even when a read fails.  Without descriptors, or with one
         slot and so no other valid index, the register match alone decides.
 
-        Register reads are single, unverified reads, so one bad readback must
-        not settle the answer for the session: a write that seems not to
+        *read* is a confirmed reader (each value read back the same twice),
+        so the index restored is the real one.  A write that seems not to
         latch is tried once more, and only two misses in a row mean no
-        manager.  A latch needs the exact index back, which a bad read is
-        very unlikely to produce.
+        manager.
         """
         count = int(read(_ADDR_MGR_COUNT))
         if count < 2 or not int(read(_ADDR_MGR_CAPS)) & 0x2:
@@ -861,22 +922,62 @@ class Analyzer:
         return latches() or latches()
 
     def _selected_slot_has_burst(self) -> bool:
-        """Return whether the active managed slot participates in fast burst readback."""
+        """Return whether the active managed slot participates in fast burst readback.
+
+        A manager with two or more slots that does not advertise
+        ``MGR_CAPS`` bit 2 predates the burst-start fix: its bursts can come
+        back rotated after a slot switch, with nothing to show it.  Its slots
+        are read through the DATA window instead (slower, never wrong).
+        """
         with self.transport.transaction_lock():
-            if not self._behind_manager():
+            behind = self._manager_detected()
+            if behind is None:
+                return False  # undecided: the window is safe either way
+            if not behind:
                 return True
             if self._manager_slot_caps is None:
                 self._select_chain()
+                read = self.transport.read_reg
+                # Each value read here picks the readout path for the session,
+                # and a wrong "burst is safe" corrupts captures silently, so
+                # every one must read back the same twice.  Undecided reads
+                # use the window for this capture and ask again next time.
+                mgr_caps = _agreed_read(read, _ADDR_MGR_CAPS)
+                if mgr_caps is None:
+                    return False
+                old_multi_slot = False
+                if not mgr_caps & _MGR_CAP_BURST_START:
+                    count = _agreed_read(read, _ADDR_MGR_COUNT)
+                    if count is None:
+                        return False
+                    old_multi_slot = count >= 2
+                if old_multi_slot:
+                    if not self._warned_old_manager_burst:
+                        self._warned_old_manager_burst = True
+                        _log.warning(
+                            "this bitstream's core manager predates the burst-start "
+                            "fix (MGR_CAPS bit 2 clear): burst readback could return "
+                            "a capture rotated after a slot switch, so reading "
+                            "through the DATA window instead. Rebuild the bitstream "
+                            "to restore burst speed."
+                        )
+                    self._manager_slot_caps = 0
+                    return False
                 slot = self._instance
                 if slot is None:
                     # Without descriptors (MGR_CAPS bit 1) the active slot's
                     # burst wiring is unknown; keep the direct-mode default.
-                    if not int(self.transport.read_reg(_ADDR_MGR_CAPS)) & 0x2:
+                    if not mgr_caps & 0x2:
                         self._manager_slot_caps = 0x1
                         return True
-                    slot = int(self.transport.read_reg(_ADDR_MGR_ACTIVE))
+                    slot = _agreed_read(read, _ADDR_MGR_ACTIVE)
+                    if slot is None:
+                        return False
                 self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-                self._manager_slot_caps = int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS))
+                slot_caps = _agreed_read(read, _ADDR_MGR_DESC_CAPS)
+                if slot_caps is None:
+                    return False
+                self._manager_slot_caps = slot_caps
             return bool(self._manager_slot_caps & 0x1)
 
     @_selected_transaction
