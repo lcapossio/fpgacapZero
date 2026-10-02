@@ -1734,7 +1734,6 @@ begin
                     if triggered = '0' then
                         if wr_ptr = DEPTH - 1 then
                             wr_ptr <= 0;
-                            segment_wrapped <= '1';
                         else
                             wr_ptr <= wr_ptr + 1;
                         end if;
@@ -1749,9 +1748,6 @@ begin
             -- history contiguous.
             if armed = '1' and done = '0' and (any_arm_pulse_now or reset_pulse_now) then
                 if NUM_SEGMENTS = 1 and not reset_pulse_now and mem_we_a = '1' then
-                    if wr_ptr = SEG_DEPTH - 1 then
-                        segment_wrapped <= '1';
-                    end if;
                     wr_ptr <= next_ptr(wr_ptr, 0);
                 end if;
             elsif armed = '1' and done = '0' then
@@ -1814,7 +1810,9 @@ begin
                             pre_count <= pre_count + 1;
                         end if;
                     end if;
-                    if store_now then
+                    -- segment_wrapped only matters with segments (as in
+                    -- rtl/fcapz_ela.v); capture_start_ptr ignores it otherwise.
+                    if NUM_SEGMENTS > 1 and store_now then
                         if wr_ptr = base + SEG_DEPTH - 1 then
                             segment_wrapped <= '1';
                         end if;
