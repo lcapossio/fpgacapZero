@@ -42,8 +42,10 @@ uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
 gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
 a session hops between an ELA and a monitor. Wider cores — notably the AXI
 monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
-per scan, which `capture()` splits into 32-bit words; only a slot without
-burst wiring falls back to the 32-bit-word DATA window. Feeding a
+per scan, which returns each sample as 32-bit words for `capture()` to
+reassemble. A slot without burst wiring, or a sample burst that fails to
+run, is read through the 32-bit-word DATA window instead; a burst that
+runs but returns the wrong number of samples raises. Feeding a
 wide core's 32-bit *word* count to the burst engine would build a
 multi-hundred-KB single-line TCL scan sequence that xsdb never
 completes — a hard readback hang, not a throughput issue.
