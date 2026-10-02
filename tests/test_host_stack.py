@@ -315,7 +315,7 @@ class ManagerDetectionTests(unittest.TestCase):
             value = read_reg(addr)
             if addr == 0xF014:
                 reads["desc"] += 1
-                if reads["desc"] == 2:  # the first readback of the probe
+                if reads["desc"] == 3:  # the first readback of the probe
                     return 0x5A5A5A5A
             return value
 
@@ -332,7 +332,7 @@ class ManagerDetectionTests(unittest.TestCase):
         def failing(addr: int) -> int:
             if addr == 0xF014:
                 reads["desc"] += 1
-                if reads["desc"] == 2:
+                if reads["desc"] == 3:  # after the probe write
                     raise ConnectionError("JTAG read failed")
             return read_reg(addr)
 
@@ -343,6 +343,24 @@ class ManagerDetectionTests(unittest.TestCase):
         self.assertEqual(t._manager_regs[0xF014], 2)  # original index back
         self.assertIsNone(analyzer._manager_found)  # nothing cached
         self.assertTrue(analyzer._behind_manager())  # next call decides afresh
+
+    def test_a_bad_read_of_the_original_index_is_not_restored(self):
+        t, writes = self._multi_slot_manager()
+        reads = {"desc": 0}
+        read_reg = t.read_reg
+
+        def garbled_once(addr: int) -> int:
+            value = read_reg(addr)
+            if addr == 0xF014:
+                reads["desc"] += 1
+                if reads["desc"] == 1:  # in range, but not the real index 2
+                    return 0
+            return value
+
+        t.read_reg = garbled_once  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(t._manager_regs[0xF014], 2)
+        self.assertEqual(writes, [(0xF014, 0), (0xF014, 2)])
 
     def test_two_consistent_misses_mean_no_manager(self):
         t = self._transport(depth=16384, sample_w=32, manager_block=False)
@@ -619,6 +637,7 @@ class AnalyzerTests(unittest.TestCase):
     def _wide_capture(
         self, *, managed: bool, capture_len: int, sample_burst: bool, slot_caps: int = 1,
         instance: int | None = None, timestamp_w: int = 0, compare_caps: int | None = None,
+        mgr_count: int = 1, mgr_caps: int = 0x7,
     ):
         """Capture from a 256-bit x 2048 core whose DATA window is read as
         32-bit words through a range-checked register window."""
@@ -633,8 +652,8 @@ class AnalyzerTests(unittest.TestCase):
                 if compare_caps is not None:
                     self.regs[0x00E0] = compare_caps
                 if managed:
-                    self._manager_regs[0xF004] = 1
-                    self._manager_regs[0xF010] = 0x3        # descriptors
+                    self._manager_regs[0xF004] = mgr_count
+                    self._manager_regs[0xF010] = mgr_caps   # descriptors, burst start
                     self._manager_regs[0xF014] = 0          # DESC_INDEX
                     self._manager_regs[0xF01C] = slot_caps  # DESC_CAPS
                 else:
@@ -714,6 +733,170 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(transport.sample_bursts, [])
         self.assertEqual(window_only, [(0x0100, 16 * 8)])
         self.assertEqual(result.samples, list(range(16)))
+
+    def _window_only(self, transport):
+        window_only = []
+        transport.read_block = lambda addr, words: self.fail("read_block may burst")
+
+        def read_window_block(addr, words):
+            window_only.append((addr, words))
+            return [(i // 8) if i % 8 == 0 else 0 for i in range(words)]
+
+        transport.read_window_block = read_window_block
+        return window_only
+
+    def test_old_multi_slot_manager_is_read_through_the_window(self):
+        """A multi-slot manager without MGR_CAPS bit 2 predates the burst-start
+        fix and can return a rotated burst, so it is read through the window,
+        with one warning per session."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x3,
+        )
+        window_only = self._window_only(transport)
+        with self.assertLogs("fcapz.analyzer", level="WARNING") as logs:
+            result = analyzer.capture(timeout=0.01)
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
+        self.assertEqual(result.samples, list(range(16)))
+        self.assertEqual(sum("burst-start" in m for m in logs.output), 1)
+
+    def test_old_one_slot_manager_keeps_sample_burst(self):
+        """With one slot there is no slot switch, so no rotation to guard."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=1, mgr_caps=0x3,
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+
+    def test_current_multi_slot_manager_keeps_sample_burst(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+
+    def test_one_bad_mgr_caps_read_does_not_drop_burst(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        read_reg = transport.read_reg
+        caps_reads = {"n": 0}
+
+        def garbled_once(addr: int) -> int:
+            if addr == 0xF010:
+                caps_reads["n"] += 1
+                if caps_reads["n"] == 1:
+                    return 0
+            return read_reg(addr)
+
+        transport.read_reg = garbled_once  # type: ignore[method-assign]
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+        self.assertTrue(analyzer._manager_found)
+
+    def _garble_reads(self, transport, addr: int, values: list[int]) -> None:
+        """Return ``values`` for the next reads of ``addr``, then the truth."""
+        read_reg = transport.read_reg
+        pending = list(values)
+
+        def garbled(a: int) -> int:
+            if a == addr and pending:
+                return pending.pop(0)
+            return read_reg(a)
+
+        transport.read_reg = garbled  # type: ignore[method-assign]
+
+    def test_one_bad_read_cannot_enable_burst_on_an_old_manager(self):
+        """A set bit 2 or a count of one each allow the burst, so neither may
+        come from a single read."""
+        for addr, bad in ((0xF010, 0x7), (0xF004, 1)):
+            with self.subTest(addr=hex(addr)):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=16, sample_burst=True, instance=0,
+                    mgr_count=2, mgr_caps=0x3,
+                )
+                window_only = self._window_only(transport)
+                self.assertTrue(analyzer._behind_manager())  # detected first
+                self._garble_reads(transport, addr, [bad])
+                with self.assertLogs("fcapz.analyzer", level="WARNING"):
+                    analyzer.capture(timeout=0.01)
+                self.assertEqual(transport.sample_bursts, [])
+                self.assertEqual(window_only, [(0x0100, 16 * 8)])
+
+    def test_undecided_manager_caps_use_the_window_and_ask_again(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        window_only = self._window_only(transport)
+        self.assertTrue(analyzer._behind_manager())  # detected first
+        self._garble_reads(transport, 0xF010, [1, 2, 3, 4])
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)])
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+
+    def test_one_bad_read_during_detection_cannot_enable_burst(self):
+        """A wrong "no manager" would skip the old-manager guard, so no single
+        read may decide manager detection either."""
+        for addr, bad in ((0xF000, 0), (0xF004, 0), (0xF008, 5), (0xF00C, 4), (0xF010, 0)):
+            with self.subTest(addr=hex(addr)):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=16, sample_burst=True, instance=0,
+                    mgr_count=2, mgr_caps=0x3,
+                )
+                window_only = self._window_only(transport)
+                analyzer._manager_found = None  # detect during the capture
+                analyzer._manager_slot_caps = None
+                self._garble_reads(transport, addr, [bad])
+                with self.assertLogs("fcapz.analyzer", level="WARNING"):
+                    analyzer.capture(timeout=0.01)
+                self.assertTrue(analyzer._manager_found)
+                self.assertEqual(transport.sample_bursts, [])
+                self.assertEqual(window_only, [(0x0100, 16 * 8)])
+
+    def test_undecided_detection_uses_the_window_and_asks_again(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        analyzer._manager_found = None
+        analyzer._manager_slot_caps = None
+        self._garble_reads(transport, 0xF000, [1, 2, 3, 4])
+        with self.assertLogs("fcapz.analyzer", level="WARNING") as logs:
+            self.assertFalse(analyzer._selected_slot_has_burst())  # window
+        self.assertTrue(any("undecided" in m for m in logs.output))
+        self.assertIsNone(analyzer._manager_found)  # not cached
+        self.assertIsNone(analyzer._manager_slot_caps)
+        self.assertTrue(analyzer._selected_slot_has_burst())  # asked again
+        self.assertTrue(analyzer._manager_found)
+
+    def test_undecided_detection_warns_once_per_streak(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+        analyzer._manager_found = None
+        self._garble_reads(transport, 0xF000, list(range(1, 9)))
+        with self.assertLogs("fcapz.analyzer", level="DEBUG") as logs:
+            self.assertIsNone(analyzer._manager_detected())
+            self.assertIsNone(analyzer._manager_detected())
+        warnings = [m for m in logs.output if m.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+
+    def test_undecided_detection_keeps_the_window_short_of_the_manager(self):
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=16, sample_burst=False,
+        )
+        analyzer._manager_found = None
+        self._garble_reads(transport, 0xF000, [1, 2, 3, 4])
+        with self.assertLogs("fcapz.analyzer", level="WARNING"):
+            self.assertTrue(analyzer._behind_manager())
 
     def test_slot_selected_without_a_manager_keeps_sample_burst(self):
         """Selecting slot 0 on a design with no core manager (as some GUI paths
