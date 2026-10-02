@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
+    BurstIntegrityError,
     DataWindowError,
     check_data_window,
     find_quartus_stp,
@@ -1899,9 +1900,9 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t.read_sample_block(0x0100, 3, 256)
 
-    def test_narrow_burst_one_scan_short_falls_back(self):
-        """A narrow-core burst that comes back a scan short is not returned:
-        read_block drops to the DATA window instead."""
+    def test_narrow_burst_one_scan_short_is_raised(self):
+        """A narrow-core burst that comes back a scan short is a readout
+        defect: it is raised, not hidden behind a DATA-window re-read."""
         t = XilinxHwServerTransport()
         t._cached_sps = 32
         t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
@@ -1910,8 +1911,19 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # 33 samples need 2 scans + 1 prime; only 2 tokens come back.
         t._send = MagicMock(return_value=f"{stale} {fresh}")  # type: ignore[method-assign]
         t._read_block_user1 = MagicMock(return_value=list(range(33)))  # type: ignore[method-assign]
-        self.assertEqual(t.read_block(0x0100, 33), list(range(33)))
-        t._read_block_user1.assert_called_once_with(0x0100, 33)
+        with self.assertRaises(BurstIntegrityError):
+            t.read_block(0x0100, 33)
+        t._read_block_user1.assert_not_called()
+        self.assertTrue(t._has_burst)  # the capability is not in question
+
+    def test_short_timestamp_burst_is_raised(self):
+        t = XilinxHwServerTransport()
+        stale = self._burst_token([0xEE] * 8, sample_w=32)
+        t._send = MagicMock(return_value=stale)  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[0] * 8)  # type: ignore[method-assign]
+        with self.assertRaises(BurstIntegrityError):
+            t.read_timestamp_block(0x2100, 8, 32)  # 1 scan + 1 prime expected
+        t._read_block_user1.assert_not_called()
 
     def test_burst_with_extra_scans_is_refused(self):
         """More scans than were queued means the output is not this burst."""
@@ -1919,7 +1931,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t._cached_sps = 32
         tok = self._burst_token(list(range(32)))
         t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(BurstIntegrityError):
             t._read_block_burst(8)  # 1 scan + 1 prime expected
 
     def test_deep_burst_checks_every_send(self):

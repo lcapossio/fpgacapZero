@@ -109,11 +109,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   10 s (`target_wait_timeout`), and accepts a target only once an IDCODE scan
   through it succeeds, retrying only those rescan errors.
 
-- **hw_server — a short burst was not detected.** A burst is built over
-  several xsdb sends, but only the last send's output was checked, and a
-  narrow core's burst could come back one scan short without error. Every
-  send is now checked, and a burst with the wrong number of scans is refused
-  and read through the register window instead.
+- **hw_server — a failed burst send went unnoticed.** A burst is built over
+  several xsdb sends, but only the last send's output was checked, so an
+  error in an earlier send could leave a partial sequence that still ran.
+  Every send is now checked. A burst that returns any other number of scans
+  or values than it queued now raises `BurstIntegrityError` instead of being
+  re-read through the register window, which would hide the defect.
 
 - **hw_server — a deep burst could drop out of burst mode mid-read.** Each
   chunk of scans ran as its own `jtag sequence`, and between two runs hw_server

@@ -162,6 +162,14 @@ class DataWindowError(RuntimeError):
     """A DATA / timestamp window read would leave the addressable window."""
 
 
+class BurstIntegrityError(RuntimeError):
+    """A burst ran but returned the wrong number of scans or values.
+
+    That is a defect in the readout, not a missing burst capability, so it is
+    raised to the caller instead of being read again through the window.
+    """
+
+
 def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
     """Refuse a register-window read of *words* 32-bit words at *addr* that
     would run past *end*.
@@ -2172,6 +2180,8 @@ class XilinxHwServerTransport(Transport):
         if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
             try:
                 return self._read_block_burst(words)
+            except BurstIntegrityError:
+                raise
             except (ConnectionError, RuntimeError) as exc:
                 if self.single_chain_burst:
                     _hw_log.warning(
@@ -2349,7 +2359,7 @@ class XilinxHwServerTransport(Transport):
             raise RuntimeError("burst readout is unavailable on this session")
         samples = self._read_block_burst(n_samples, element_width=sample_width)
         if len(samples) != n_samples:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"sample burst returned {len(samples)} samples, expected {n_samples}"
             )
         words_per_sample = (sample_width + 31) // 32
@@ -2377,7 +2387,7 @@ class XilinxHwServerTransport(Transport):
             n_timestamps, timestamp=True, element_width=timestamp_width
         )
         if len(values) != n_timestamps:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"timestamp burst returned {len(values)} values, expected {n_timestamps}"
             )
         return values
@@ -2393,6 +2403,8 @@ class XilinxHwServerTransport(Transport):
                     timestamp=True,
                     element_width=timestamp_width,
                 )
+            except BurstIntegrityError:
+                raise
             except (ConnectionError, RuntimeError) as exc:
                 if self.single_chain_burst:
                     _hw_log.warning(
@@ -2418,7 +2430,8 @@ class XilinxHwServerTransport(Transport):
         samples (SAMPLE_W bits each, LSB first).
 
         With *expected_scans*, any other number of scan tokens raises
-        ``RuntimeError`` rather than returning a short or misaligned burst.
+        :class:`BurstIntegrityError` rather than returning a short or
+        misaligned burst.
         """
         if element_width is None:
             sps = self._burst_samples_per_scan
@@ -2447,11 +2460,11 @@ class XilinxHwServerTransport(Transport):
                 val = self._bits_to_int(token, offset, sw)
                 values.append(val)
         if expected_scans is not None and scan_idx != expected_scans:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"burst returned {scan_idx} scans, expected {expected_scans}"
             )
         if len(values) < total_words:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"burst returned {len(values)} values, expected {total_words}"
             )
         return values[:total_words]
