@@ -121,16 +121,25 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reads a manager with two or more slots and without that bit through the
   register window instead of the burst, and warns once.
 
-- **hw_server — a connect right after another session could fail.** When an
-  xsdb client exits, hw_server releases its cables and rescans them for several
-  seconds: the target list is empty or shows closed cables, or a target is
-  listed while every scan fails with "JTAG node is not accessible". Connect
-  polled the list for up to 3 s and took the first listed target without
-  checking that it answered. It now polls for up to 10 s
-  (`target_wait_timeout`) and accepts a target only once an IDCODE scan
-  through it succeeds. Only those two rescan states are waited out; a select
-  that fails while the target is still listed (two boards matching the
-  name, say) and any other scan error are raised at once.
+- **hw_server — a connect right after another session could fail.** About
+  1 s after the last xsdb client exits, hw_server releases its cables one
+  after another, and once a client is connected again it reopens and rescans
+  them all, which takes several seconds. A client that connects after the
+  release has begun does not stop it: it sees some cables closed and the
+  rest still open, and a target on an open cable answers a scan, then drops
+  out with "JTAG node is not accessible" until the reopen finishes. Connect
+  polled the list for up to 3 s and took the first listed target. It now
+  first waits until hw_server reports every cable open and initialized
+  (one reporting an error, such as a board powered off, is not waited for),
+  which marks the end of a release (none starts while a client is
+  connected), then waits for the target to be listed, within 10 s in all
+  (`target_wait_timeout`), and confirms it with one IDCODE scan. A select
+  or scan that fails is raised at once instead of being retried. One rare
+  window remains. A connect that lands right as the release starts can see
+  every cable open for about 0.2 s after hw_server has decided to close one,
+  and hw_server reports no closing state. The target then drops out for
+  about 1 s just after connect returns, and reads fail with "JTAG node is
+  not accessible" (see docs/14_transports.md).
 
 - **hw_server — a failed burst send went unnoticed.** A burst is built over
   several xsdb sends, but only the last send's output was checked, so an
