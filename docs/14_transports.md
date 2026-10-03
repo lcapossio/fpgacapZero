@@ -102,15 +102,30 @@ What `connect()` does:
    and `after <ms>` (GUI default 200 ms post-program delay).
 4. Waits for a JTAG target matching `fpga_name`, selects it with
    `jtag targets -set -filter`, and confirms it with one IDCODE scan.
-   When the previous xsdb client exits, hw_server releases every cable and
-   reopens and rescans them all for the next client, which can take several
-   seconds with a few boards attached. During that window `jtag targets`
-   lists nothing, or lists the target from the stale cable while every scan
-   fails with "JTAG node is not accessible". Both are waited out until
-   `target_wait_timeout` (default 10 s; a live target is selected in
-   milliseconds). A select that fails while the target is still listed (two
-   boards matching `fpga_name`, say) and any other scan error are raised at
-   once. The timeout bounds this polling, not a single xsdb command: as
+   About 1 s after the last xsdb client exits, hw_server releases its
+   cables one after another; once a client is connected again it reopens
+   and rescans them all, which can take several seconds with a few boards
+   attached. A client that connects after the release has begun does not
+   stop it: some cables are listed closed, and a target on a cable still
+   open answers a scan, then drops out with "JTAG node is not accessible"
+   until the reopen finishes. So connect first waits until hw_server
+   reports every cable open and initialized: none closes on its own while a
+   client is connected, so that marks the end of the release. A cable
+   reporting an error (its board powered off, say) is not waited for. It then waits
+   for the target to be listed (a board still powering up, say). Both waits
+   share `target_wait_timeout` (default 10 s; with no release under way a
+   live target is selected in milliseconds); a cable still closed or a
+   target still missing at the deadline is an error. A select or IDCODE scan
+   that fails (two boards matching `fpga_name`, say) is raised at once.
+   One window remains, and only hw_server could close it. A client whose
+   connect lands right as the release starts can be told every cable is
+   open for about 0.2 s after hw_server has decided to close one, and
+   hw_server reports no closing state to wait on. Connect then succeeds,
+   and the target drops out for about 1 s just afterwards. The reads in
+   that window fail with "JTAG node is not accessible"; they never return
+   wrong data. To avoid it, don't start a session within about 1 s of the
+   previous one exiting, or keep one xsdb client connected throughout.
+   The timeout bounds this polling, not a single xsdb command: as
    everywhere on this transport, a command hw_server never answers is
    waited for.
 5. **Runs the readiness wait** — see "Readiness wait" below.

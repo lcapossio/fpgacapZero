@@ -1767,12 +1767,13 @@ class XilinxHwServerTransport(Transport):
         self.ready_poll_interval_sec = float(
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
-        # How long connect() waits for a JTAG target matching ``fpga_name`` to
-        # appear and answer a scan before giving up.  It must outlast a full
-        # cable rescan: when the previous xsdb client exits, hw_server releases
-        # every cable and the next client makes it reopen and rescan them all,
-        # which took up to 6.2 s on a host with three boards.  It is a
-        # deadline, not a delay: a live target is selected in milliseconds.
+        # How long connect() waits for hw_server to finish releasing its
+        # cables and for a JTAG target matching ``fpga_name`` to appear before
+        # giving up.  It must outlast a full release and rescan: when the
+        # previous xsdb client exits, hw_server releases every cable and the
+        # next client makes it reopen and rescan them all, which took up to
+        # 6.2 s on a host with three boards.  It is a deadline, not a delay: a
+        # live target is selected in milliseconds.
         self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
@@ -1942,69 +1943,103 @@ class XilinxHwServerTransport(Transport):
         "$_nc drshift -state DRUPDATE -capture -tdi 0 32; "
         "$_nc run; $_nc delete"
     )
-    _NODE_NOT_ACCESSIBLE = "JTAG node is not accessible"
+
+    # Prints the name of every cable hw_server reports as closed or still
+    # initializing, one per line.  A cable in an error state is left out:
+    # that lasts, and is not part of a release.
+    _CLOSED_CABLES_TCL = (
+        "foreach _t [jtag targets -target-properties] { "
+        "set _s [dict get $_t state]; "
+        "if {[dict get $_t level] == 0 && ![string match error* $_s] && "
+        "(![dict get $_t is_open] || [string match initializing* $_s])} "
+        "{ puts [dict get $_t name] } }"
+    )
 
     def _select_fpga_target(self) -> None:
         """Select the JTAG target matching ``fpga_name`` once it answers a scan.
 
-        When the previous xsdb client exits, hw_server releases every cable
-        and the next client makes it reopen and rescan them all.  A client
-        that connects during that window sees one of:
+        When the last xsdb client exits, hw_server releases its cables
+        ``jtag-poll-close-delay`` (1 s) later, closing them one after another;
+        with a client connected again it reopens and rescans them all.  A
+        client that arrives once the release has begun does not stop it: it
+        sees some cables closed and the rest still open, and the open ones
+        close a moment later.  A target on a still-open cable answers a scan
+        and then drops out for the whole reopen (about 3 s).
 
-          * ``jtag targets`` with no targets, or with every cable closed,
-            until the rescan finishes;
-          * the target listed at once from the stale open cable, after which
-            every scan fails with "JTAG node is not accessible" for a few
-            seconds.
+        So first wait for any release to finish: while a client is connected,
+        hw_server never starts one, so a cable it reports closed means a
+        release is under way, and every cable open and initialized means it
+        is over.  A cable reporting an error (a board powered off, say) is
+        not part of a release and is not waited for.  Then poll ``jtag
+        targets`` until a matching device appears (a board still powering
+        up, say), select it, and confirm it with an IDCODE scan.  Both waits
+        are polled until ``target_wait_timeout``; a select or scan that
+        fails is raised at once.
 
-        So poll ``jtag targets`` until a matching device appears, select it,
-        and confirm it with an IDCODE scan.  Only those two rescan states are
-        waited out, until ``target_wait_timeout``: a target missing from the
-        list, and a "not accessible" answer to the scan.  A select that fails
-        is waited out only if the list no longer shows the target; while it
-        is still listed the failure is lasting (an ambiguous filter, say) and
-        raised at once, as is any other scan error.
+        One window is left, and only hw_server could close it.  For about
+        0.2 s after it decides to close a cable, hw_server still reports
+        that cable open, and it has no closing state to wait on.  A connect
+        that lands right at a release's start can pass every check here and
+        see the target drop out just after this returns.  The reads in that
+        window fail; they never return wrong data.
 
         The deadline bounds this polling, not a single xsdb command: like
         every command on this transport, one that never answers is waited
         for.
         """
         deadline = time.monotonic() + self.target_wait_timeout
-        names: list[str] = []
-        last_error = ""
+        self._wait_for_cable_release(deadline)
         while True:
             # ``puts`` forces the list onto stdout — the bare command doesn't
             # echo its result through a piped (non-interactive) xsdb session.
             names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
             if any(self.fpga_name in name for name in names):
-                try:
-                    self._send(
-                        f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}',
-                        check=True,
-                    )
-                except RuntimeError as exc:
-                    last_error = str(exc)
-                    if time.monotonic() < deadline:
-                        names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
-                        if any(self.fpga_name in name for name in names):
-                            raise
-                else:
-                    try:
-                        self._send(self._NODE_CHECK_TCL, check=True)
-                        return
-                    except RuntimeError as exc:
-                        if self._NODE_NOT_ACCESSIBLE not in str(exc):
-                            raise
-                        last_error = str(exc)
+                # ``-timeout 0``: with ``-filter`` xsdb otherwise polls up to
+                # 3 s for a match, which would wait out a target that just
+                # left the list instead of failing.
+                self._send(
+                    "jtag targets -set -timeout 0 "
+                    f'-filter {{name =~ "{self.fpga_name}"}}',
+                    check=True,
+                )
+                self._send(self._NODE_CHECK_TCL, check=True)
+                return
             if time.monotonic() >= deadline:
                 visible = ", ".join(names) if names else "(none)"
-                detail = f" Last error: {last_error}" if last_error else ""
                 raise ConnectionError(
-                    f"no JTAG target matching {self.fpga_name!r} answered within "
-                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
-                    "may be unplugged or powered off, or hw_server is still "
-                    "reopening its cables (e.g. right after another client exited "
-                    f"or another board was connected).{detail}"
+                    f"no JTAG target matching {self.fpga_name!r} appeared within "
+                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The "
+                    "board may be unplugged or powered off."
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+    def _wait_for_cable_release(self, deadline: float) -> None:
+        """Wait until hw_server reports every cable open and initialized.
+
+        A cable reporting an error is left out: that state lasts, and the
+        target wait that follows names a board that is missing.
+
+        While a client is connected hw_server reopens a closed cable within a
+        few seconds, so a release ends well inside ``target_wait_timeout``.
+        A cable still closed at the deadline means the release has not
+        ended, and selecting a target then could hand back one that is about
+        to drop out, so it is an error.
+        """
+        while True:
+            closed = [
+                line.strip()
+                for line in self._send(self._CLOSED_CABLES_TCL, check=True).splitlines()
+                if line.strip()
+            ]
+            if not closed:
+                return
+            if time.monotonic() >= deadline:
+                raise ConnectionError(
+                    f"hw_server still reports JTAG cable(s) closed or initializing "
+                    f"after {self.target_wait_timeout:.1f}s: {', '.join(closed)}. "
+                    "It reopens its cables within a few seconds while a client "
+                    "is connected; check that no other program holds the cable "
+                    "and that hw_server's auto-open-ports is on."
                 )
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
