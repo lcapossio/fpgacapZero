@@ -1979,9 +1979,10 @@ class XilinxHwServerTransport(Transport):
         One window is left, and only hw_server could close it.  For about
         0.2 s after it decides to close a cable, hw_server still reports
         that cable open, and it has no closing state to wait on.  A connect
-        that lands right at a release's start can pass every check here and
-        see the target drop out just after this returns.  The reads in that
-        window fail; they never return wrong data.
+        that lands right at a release's start can pass the cable wait and
+        select, then see the target drop out for about 1 s: the IDCODE scan
+        here fails, or this returns and the reads just after it fail.
+        Either way the error is raised; no wrong data is returned.
 
         The deadline bounds this polling, not a single xsdb command: like
         every command on this transport, one that never answers is waited

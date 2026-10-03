@@ -121,10 +121,10 @@ What `connect()` does:
    One window remains, and only hw_server could close it. A client whose
    connect lands right as the release starts can be told every cable is
    open for about 0.2 s after hw_server has decided to close one, and
-   hw_server reports no closing state to wait on. Connect then succeeds,
-   and the target drops out for about 1 s just afterwards. The reads in
-   that window fail with "JTAG node is not accessible"; they never return
-   wrong data. To avoid it, don't start a session within about 1 s of the
+   hw_server reports no closing state to wait on. The target then drops
+   out for about 1 s: either connect's IDCODE scan fails, or connect
+   succeeds and the reads just after it fail. Both fail with "JTAG node is
+   not accessible"; neither returns wrong data. To avoid it, don't start a session within about 1 s of the
    previous one exiting, or keep one xsdb client connected throughout.
    The timeout bounds this polling, not a single xsdb command: as
    everywhere on this transport, a command hw_server never answers is
