@@ -118,8 +118,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   window remains. A connect that lands right as the release starts can see
   every cable open for about 0.2 s after hw_server has decided to close one,
   and hw_server reports no closing state. The target then drops out for
-  about 1 s just after connect returns, and reads fail with "JTAG node is
-  not accessible" (see docs/14_transports.md).
+  about 1 s, and connect's IDCODE scan or the reads just after it fail
+  with "JTAG node is not accessible" (see docs/14_transports.md).
 
 - **hw_server — a failed burst send went unnoticed.** A burst is built over
   several xsdb sends, but only the last send's output was checked, so an
