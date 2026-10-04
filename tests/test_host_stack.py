@@ -780,6 +780,20 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
         self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
 
+    def test_descriptorless_manager_keeps_burst_for_a_selected_slot(self):
+        """Without MGR_CAPS bit 1 there are no descriptor registers to read,
+        selected slot or not: the burst stays on."""
+        for instance in (None, 0):
+            with self.subTest(instance=instance):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=2048, sample_burst=True,
+                    instance=instance, mgr_count=2, mgr_caps=0x1,
+                )
+                transport._manager_regs[0xF01C] = 0  # unimplemented: reads 0
+                result = analyzer.capture(timeout=0.01)
+                self.assertEqual(transport.sample_bursts, [(0x0100, 2048, 256)])
+                self.assertEqual(len(result.samples), 2048)
+
     def test_failed_sample_burst_reaches_the_caller(self):
         """A burst that ran and failed is raised, never read around."""
         transport, analyzer = self._wide_capture(

@@ -914,12 +914,12 @@ class Analyzer:
             self.transport.burst_start_sync = (
                 count >= 2 and not mgr_caps & _MGR_CAP_BURST_START
             )
+            # Without descriptors (MGR_CAPS bit 1) no slot's burst wiring can
+            # be read; keep the direct-mode default.
+            if not mgr_caps & 0x2:
+                return True
             slot = self._instance
             if slot is None:
-                # Without descriptors (MGR_CAPS bit 1) the active slot's
-                # burst wiring is unknown; keep the direct-mode default.
-                if not mgr_caps & 0x2:
-                    return True
                 slot = int(read(_ADDR_MGR_ACTIVE))
             caps = self._manager_slot_caps.get(slot)
             if caps is None:

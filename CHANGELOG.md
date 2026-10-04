@@ -199,7 +199,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   timestamps) are instead read with the single-chain burst, chunked 256 scans
   per TCL call, rather than 32 bits per scan: it has no window limit and is
   much faster. A manager slot without burst wiring is never burst-read (it
-  would return zeros).
+  would return zeros); a manager without slot descriptors (`MGR_CAPS` bit 1
+  clear) keeps the burst for every slot, selected or not.
 
 - **ELA — a sequencer could fire on a sample matched against the previous
   stage (`INPUT_PIPE ≥ 1`).** With the registered compare, each sample was
