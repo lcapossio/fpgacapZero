@@ -1037,6 +1037,29 @@ async def wide_sample_readback(dut):
 
 
 @cocotb.test()
+async def deep_timestamp_base_does_not_alias_data(dut):
+    """A deep wide core puts the timestamp window base past 0xFFFF.  Every
+    16-bit register address is then below it, so DATA window reads must
+    return sample words, never timestamps (a base compared as 16 bits wraps
+    onto ADDR_DATA_BASE).  COMPARE_CAPS bit 19 advertises the full-width
+    compare."""
+    assert TIMESTAMP_W > 0 and ADDR_TS_DATA_BASE > 0xFFFF
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 19)
+    words = [0xA500_0033] + [0xA500_0000 | (i << 16) | 0x5A5A for i in range(1, WORDS_PER_SAMPLE)]
+    sample = sum(w << (32 * i) for i, w in enumerate(words))
+    await ela.configure_value_capture(pre=0, post=2, value=0x33, mask=0xFF)
+    await ela.arm()
+    ela.dut.probe_in.value = sample
+    await ela.wait_sample(8)
+    assert await ela.wait_done() & 0x4
+    for idx in (0, 2):
+        base = ADDR_DATA_BASE + idx * WORDS_PER_SAMPLE * 4
+        got = [await ela.read(base + 4 * i) for i in range(WORDS_PER_SAMPLE)]
+        assert got == words, f"sample {idx}: {[hex(w) for w in got]}"
+
+
+@cocotb.test()
 async def wide_trigger_upper_bit(dut):
     """WIDE_TRIG: program comparator A above bit 31 through the WIDE window and
     prove the trigger fires on a high bit the 32-bit register path can't reach.
