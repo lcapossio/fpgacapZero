@@ -85,9 +85,9 @@ class XsdbTargetParserTests(unittest.TestCase):
 
     def test_parse_jtag_targets_prefers_fpga_device_names(self) -> None:
         raw = """
-          1  Digilent Arty A7-100T 210319B26DC2A
+          1  Digilent Arty A7-100T 0123456789ABC
              2  xc7a100t (idcode 13631093 irlen 6 fpga)
-          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+          3  Xilinx X-MLCC-01 XFL0000000000
              4  xck26 (idcode 04724093 irlen 12 fpga)
              5  arm_dap (idcode 5ba00477 irlen 4)
         """
@@ -97,9 +97,9 @@ class XsdbTargetParserTests(unittest.TestCase):
         # xsdb's real output once xc7a100t is selected: the marker follows
         # the number.  Dropping it hid the selected board from connect().
         raw = """
-          1  Digilent Arty A7-100T 210319B26DC2A
+          1  Digilent Arty A7-100T 0123456789ABC
              2* xc7a100t (idcode 13631093 irlen 6 fpga)
-          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+          3  Xilinx X-MLCC-01 XFL0000000000
              4  xck26 (idcode 04724093 irlen 12 fpga)
              5  arm_dap (idcode 5ba00477 irlen 4)
         """
@@ -1728,7 +1728,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         def fake_send(tcl: str, check: bool = False) -> str:
             calls.append(tcl)
             if tcl == t._CLOSED_CABLES_TCL:
-                return "Digilent Arty A7-100T 210319B26DC2A\n"
+                return "Digilent Arty A7-100T 0123456789ABC\n"
             return "  1  xczu7\n" if tcl == "puts [jtag targets]" else ""
 
         t._send = fake_send  # type: ignore[method-assign]
@@ -2348,7 +2348,7 @@ class TclInjectionTests(unittest.TestCase):
         # (the path is interpolated inside TCL braces which disable substitution).
         t = XilinxHwServerTransport(
             fpga_name="xc7a100t",
-            bitfile=r"C:\Projects\fpgacapZero\examples\arty_a7\arty_a7_top.bit",
+            bitfile=r"C:\work\design\arty_a7_top.bit",
         )
         self.assertIn("\\", t.bitfile)
 
