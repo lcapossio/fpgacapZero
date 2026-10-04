@@ -330,9 +330,11 @@ module fcapz_ela_xilinx7 #(
 **Migration note:** older AMD/Xilinx bitstreams may have been built with
 `SINGLE_CHAIN_BURST=0`, where 256-bit burst scans live on `DATA_CHAIN`.
 The current host default expects single-chain burst on `CTRL_CHAIN`. If a
-legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
-warning, use the CLI `--two-chain-burst` option or construct
-`XilinxHwServerTransport(single_chain_burst=False)`.
+legacy bitstream's capture fails with a burst error that names
+`--two-chain-burst`, use that CLI option or construct
+`XilinxHwServerTransport(single_chain_burst=False)`. A build with neither
+burst path (`SINGLE_CHAIN_BURST=0`, `BURST_EN=0`) is opened with
+`--no-burst` (`burst=False`) and read through the register window.
 
 **Startup defaults:** `STARTUP_ARM` and `DEFAULT_TRIG_EXT` rely on the FPGA
 and synthesis flow preserving register initial values at configuration time

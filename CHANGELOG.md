@@ -86,6 +86,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   behavior is unchanged; this restores timing margin on the Arty A7 VexRiscv
   build's 150 MHz ELA. Both HDLs.
 
+- **Host — a failed burst is raised, not read around.** A burst that failed
+  used to turn burst readout off for the session and re-read the capture
+  through the register window, which also hid real faults, such as a JTAG
+  drop mid-burst. Any burst failure now raises, with a hint naming
+  `--two-chain-burst` or `--no-burst`. A bitstream with no burst path at all
+  (`SINGLE_CHAIN_BURST=0` with `BURST_EN=0`) must now be declared: CLI
+  `--no-burst`, RPC `connect` `"burst": false`, the GUI's new "Burst readout"
+  setting (which also selects two-chain builds), or `burst=False` on the
+  hw_server and Quartus transports.
+
 ### Deprecated
 
 - **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
@@ -117,9 +127,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   slot's RAM from the previous burst's pointer, with no error; a slot switch
   alone could also look like a start. The manager now raises the start itself
   on every `BURST_PTR` write to a burst-capable slot (both HDLs) and reports it
-  in `MGR_CAPS` bit 2. Fixing it needs a bitstream rebuild; until then the host
-  reads a manager with two or more slots and without that bit through the
-  register window instead of the burst, and warns once.
+  in `MGR_CAPS` bit 2. On a manager with two or more slots and without that
+  bit, the host now syncs the start before each burst, in the same JTAG
+  transaction: after the `BURST_PTR` write, one burst scan whose capture
+  copies the new owner's toggle, then a second `BURST_PTR` write the reader
+  cannot miss. Old bitstreams keep burst speed; no rebuild is needed.
 
 - **hw_server — a connect right after another session could fail.** About
   1 s after the last xsdb client exits, hw_server releases its cables one

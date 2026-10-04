@@ -23,6 +23,24 @@ None)` and falls back to `read_block` if absent.  Transports that support the
 256-bit burst path should implement it to avoid the slow per-word USER1 readback
 path for timestamp data.
 
+### Burst errors and options
+
+- `BurstUnavailableError(RuntimeError)` — the transport cannot burst this
+  request at all, raised before any scan (burst off, a non-DATA base, or a
+  sample width outside 1..256).  The analyzer then reads the register window.
+- `BurstIntegrityError(RuntimeError)` — a burst ran but returned the wrong
+  number of scans or values.  Raised to the caller.
+- Any other exception from a burst propagates; nothing reads around it.
+- `burst: bool = True` (constructor of the hw_server and Quartus transports) —
+  declares whether the bitstream has a burst path.  It is never probed:
+  `False` reads every capture through the register window.
+- `burst_start_sync: bool` (attribute, default `False`) — set by the
+  analyzer before a burst on a core manager with two or more slots and
+  `MGR_CAPS` bit 2 clear.  The transport then adds, ahead of the prime scan
+  and in the same JTAG transaction, one burst-length scan that is not
+  returned and a second `BURST_PTR` write (see `MGR_CAPS` in
+  [`register_map.md`](register_map.md)).
+
 ## Implementations
 
 ### `XilinxHwServerTransport` (primary, hardware-validated)

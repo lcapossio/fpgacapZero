@@ -38,15 +38,25 @@ burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
+Burst readout is declared, never probed: a build with no burst path at
+all (`SINGLE_CHAIN_BURST=0` with `BURST_EN=0`) is opened with
+`burst=False` (CLI `--no-burst`, RPC `"burst": false`, GUI "Burst
+readout: None"), and every capture is then read through the register
+window. Otherwise a burst that fails is raised, with a hint naming the
+option that matches the build; it is never read around, since a JTAG
+fault mid-burst would otherwise come back as a slow, silent re-read.
+
 The 256-bit burst DR packs **whole samples** per scan, so `read_block`
 uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
 gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
 a session hops between an ELA and a monitor. Wider cores — notably the AXI
 monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
 per scan, which returns each sample as 32-bit words for `capture()` to
-reassemble. A slot without burst wiring, or a sample burst that fails to
-run, is read through the 32-bit-word DATA window instead; a burst that
-runs but returns the wrong number of samples raises. Feeding a
+reassemble. A slot without burst wiring, or a request the burst engine
+cannot take (`BurstUnavailableError`, raised before any scan: burst off,
+or a width outside 1..256), is read through the 32-bit-word DATA window
+instead; any other burst failure raises, and a burst that runs but
+returns the wrong number of samples raises `BurstIntegrityError`. Feeding a
 wide core's 32-bit *word* count to the burst engine would build a
 multi-hundred-KB single-line TCL scan sequence that xsdb never
 completes — a hard readback hang, not a throughput issue.
