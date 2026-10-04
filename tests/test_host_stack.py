@@ -25,6 +25,7 @@ from fcapz.analyzer import (
 from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
 from fcapz.transport import (
     BurstIntegrityError,
+    BurstUnavailableError,
     DataWindowError,
     Transport,
     check_data_window,
@@ -714,22 +715,100 @@ class AnalyzerTests(unittest.TestCase):
         transport.read_window_block = read_window_block
         return window_only
 
-    def test_old_multi_slot_manager_is_read_through_the_window(self):
-        """A multi-slot manager without MGR_CAPS bit 2 predates the burst-start
-        fix and can return a rotated burst, so it is read through the window,
-        with one warning per session."""
+    def _record_burst_sync(self, transport):
+        """Wrap read_sample_block to record burst_start_sync at each burst."""
+        syncs: list[bool] = []
+        burst = transport.read_sample_block
+
+        def read_sample_block(base_addr, n_samples, sample_width):
+            syncs.append(transport.burst_start_sync)
+            return burst(base_addr, n_samples, sample_width)
+
+        transport.read_sample_block = read_sample_block
+        return syncs
+
+    def test_old_multi_slot_manager_bursts_with_start_sync(self):
+        """A multi-slot manager without MGR_CAPS bit 2 can hide the burst start
+        after a slot switch, so its bursts run with the start sync."""
         transport, analyzer = self._wide_capture(
             managed=True, capture_len=16, sample_burst=True, instance=0,
             mgr_count=2, mgr_caps=0x3,
         )
-        window_only = self._window_only(transport)
-        with self.assertLogs("fcapz.analyzer", level="WARNING") as logs:
-            result = analyzer.capture(timeout=0.01)
-            analyzer.capture(timeout=0.01)
-        self.assertEqual(transport.sample_bursts, [])
-        self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
+        syncs = self._record_burst_sync(transport)
+        result = analyzer.capture(timeout=0.01)
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(syncs, [True, True])
+        self.assertEqual(transport.window_reads, [])
         self.assertEqual(result.samples, list(range(16)))
-        self.assertEqual(sum("burst-start" in m for m in logs.output), 1)
+
+    def test_current_and_one_slot_managers_burst_without_start_sync(self):
+        for mgr_count, mgr_caps in ((2, 0x7), (1, 0x3)):
+            with self.subTest(mgr_count=mgr_count, mgr_caps=mgr_caps):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=16, sample_burst=True, instance=0,
+                    mgr_count=mgr_count, mgr_caps=mgr_caps,
+                )
+                transport.burst_start_sync = True  # stale from another session
+                syncs = self._record_burst_sync(transport)
+                analyzer.capture(timeout=0.01)
+                self.assertEqual(syncs, [False])
+
+    def test_active_slot_burst_caps_follow_a_slot_switch(self):
+        """With no slot selected, the active slot is re-read on every capture:
+        a switch to a burst slot must restore the burst, and a switch back
+        must drop it again."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=None,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        slot_caps = {0: 0x0, 1: 0x1}
+        read_reg = transport.read_reg
+
+        def read_with_slot_caps(addr):
+            if addr == 0xF01C:
+                return slot_caps[transport._manager_regs[0xF014]]
+            return read_reg(addr)
+
+        transport.read_reg = read_with_slot_caps
+        window_only = self._window_only(transport)
+        transport._manager_regs[0xF008] = 0
+        analyzer.capture(timeout=0.01)
+        transport._manager_regs[0xF008] = 1  # e.g. CoreManager.select_raw(1)
+        analyzer.capture(timeout=0.01)
+        transport._manager_regs[0xF008] = 0
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
+
+    def test_failed_sample_burst_reaches_the_caller(self):
+        """A burst that ran and failed is raised, never read around."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+        window_only = self._window_only(transport)
+
+        def fails(base_addr, n_samples, sample_width):
+            raise RuntimeError("JTAG node is not accessible")
+
+        transport.read_sample_block = fails
+        with self.assertRaisesRegex(RuntimeError, "not accessible"):
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(window_only, [])
+
+    def test_unavailable_sample_burst_reads_the_window(self):
+        """BurstUnavailableError is raised before any scan: the transport has
+        no burst for the request, so the DATA window is read word by word."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+
+        def unavailable(base_addr, n_samples, sample_width):
+            raise BurstUnavailableError("burst readout is off for this transport")
+
+        transport.read_sample_block = unavailable
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.window_reads, [(0x0100, 16 * 8)])
+        self.assertEqual(result.samples, list(range(16)))
 
     def test_burst_integrity_error_reaches_the_caller(self):
         """A burst that ran but came back malformed is a readout defect, not
@@ -862,6 +941,40 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual(result.timestamps, [100, 101, 102])
         self.assertEqual(transport.timestamp_burst_args, (0x1100, 3, 32))
+
+    def test_old_multi_slot_manager_syncs_narrow_and_timestamp_bursts(self):
+        """The SAMPLE_W <= 32 burst and the timestamp burst on an old
+        multi-slot manager also run with the start sync."""
+
+        class OldManagerTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self._manager_regs[0xF004] = 2      # MGR_COUNT
+                self._manager_regs[0xF010] = 0x3    # MGR_CAPS without bit 2
+                self._manager_regs[0xF014] = 0      # DESC_INDEX
+                self._manager_regs[0xF01C] = 0x1    # DESC_CAPS: burst slot
+                self.data = [10, 11, 12]
+                self.bursts: list[tuple[str, bool]] = []
+
+            def read_block(self, addr, words):
+                if addr == 0x0100:
+                    self.bursts.append(("samples", self.burst_start_sync))
+                return super().read_block(addr, words)
+
+            def read_timestamp_block(self, addr, words, timestamp_width):
+                self.bursts.append(("timestamps", self.burst_start_sync))
+                return [100, 101, 102][:words]
+
+        transport = OldManagerTransport()
+        analyzer = Analyzer(transport, instance=0)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(result.timestamps, [100, 101, 102])
+        self.assertEqual(transport.bursts, [("samples", True), ("timestamps", True)])
 
     def test_timestamp_burst_is_returned_as_read(self):
         """Burst timestamps are not second-guessed: a capture spanning a full

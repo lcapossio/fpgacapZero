@@ -170,6 +170,17 @@ class BurstIntegrityError(RuntimeError):
     """
 
 
+class BurstUnavailableError(RuntimeError):
+    """This session cannot burst-read the request at all.
+
+    Raised before any scan runs: the transport was built without burst
+    readout (``burst=False``), or the request does not fit the burst engine
+    (not the DATA base, an element wider than the burst DR).  The caller
+    reads the register window instead.  A burst that runs and fails raises
+    something else, and that is never read around.
+    """
+
+
 def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
     """Refuse a register-window read of *words* 32-bit words at *addr* that
     would run past *end*.
@@ -309,6 +320,17 @@ class Transport(ABC):
     #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
     #: (``0xF000``) for a core behind a core manager.
     data_window_end: int = REG_ADDR_SPACE_END
+
+    #: Set by :class:`~fcapz.analyzer.Analyzer` before a burst when the core
+    #: sits behind a core manager with two or more slots that predates
+    #: ``MGR_CAPS`` bit 2.  That manager passes on the owner slot's own burst
+    #: start toggle, and after a slot switch the toggle can equal the copy the
+    #: burst engine last saw, so the engine misses the start and reads the new
+    #: slot from the previous burst's pointer.  A bursting transport then
+    #: writes ``BURST_PTR``, runs one burst scan (its capture makes the
+    #: engine's copy match the new owner's toggle), and writes ``BURST_PTR``
+    #: again: that second toggle the engine cannot miss.
+    burst_start_sync: bool = False
 
     def select_chain(self, chain: int) -> None:
         """Select the transport-defined JTAG user chain for later accesses.
@@ -670,7 +692,11 @@ class QuartusStpTransport(Transport):
         read_idle_cycles: int = READ_IDLE_CYCLES,
         burst_data_chain: int = 2,
         burst_prefill_idle_cycles: int = 160,
+        burst: bool = True,
     ):
+        """``burst=False`` declares a build with no burst path: every capture
+        is then read through the register window.  With ``burst=True`` a
+        burst that fails is raised, never read around."""
         self.hardware_name = hardware_name
         self.device_name = device_name
         self._quartus_stp_path = quartus_stp_path
@@ -690,7 +716,7 @@ class QuartusStpTransport(Transport):
         # whose request timed out).  Lock order is always _life_lock, then
         # _stp_io_lock; nothing takes them the other way round.
         self._life_lock = threading.RLock()
-        self._has_burst = True
+        self.burst = bool(burst)
         # The actual device quartus_stp opened (family/part + IDCODE), filled in
         # by connect(). None until connected. Surfaced so the UI can name the
         # FPGA it attached to, not just the vendor.
@@ -742,7 +768,6 @@ class QuartusStpTransport(Transport):
                 # Not published yet, so no close() could ever find it.
                 self._reap_killed(session)
                 raise
-            self._has_burst = True
             # Published before the open handshake, so a close() from another
             # thread (a GUI cancel) has a process to kill while it runs.
             self._session = session
@@ -1058,15 +1083,7 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            try:
-                return self._read_block_burst(words)
-            except (ConnectionError, RuntimeError) as exc:
-                _quartus_log.warning(
-                    "Quartus ELA burst readback failed (%s); falling back to "
-                    "slow control-chain DATA reads",
-                    exc,
-                )
-                self._has_burst = False
+            return self._read_block_burst(words)
         return self.read_window_block(addr, words)
 
     def read_window_block(self, addr: int, words: int) -> List[int]:
@@ -1116,24 +1133,17 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         if timestamp_width > 0 and self._burst_available:
-            try:
-                return self._read_block_burst(
-                    words,
-                    timestamp=True,
-                    element_width=timestamp_width,
-                )
-            except (ConnectionError, RuntimeError) as exc:
-                _quartus_log.warning(
-                    "Quartus ELA timestamp burst readback failed (%s); falling back "
-                    "to slow control-chain timestamp reads",
-                    exc,
-                )
-                self._has_burst = False
+            return self._read_block_burst(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
         return self.read_block(addr, words)
 
     @property
     def _burst_available(self) -> bool:
-        return bool(self._has_burst)
+        """Declared by the ``burst`` constructor argument, never probed."""
+        return self.burst
 
     @property
     def _burst_samples_per_scan(self) -> int:
@@ -1167,20 +1177,25 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        body = ["set __fcapz_burst {}"]
-        body.append(self._virtual_ir_tcl(ctrl_chain))
-        body.append(
-            self._dr_shift_tcl(
-                ctrl_chain,
-                burst_frame,
-                self.DR_BITS,
-                "__fcapz_burst_ptr_discard",
-            )
-        )
-        body.append(
-            "device_run_test_idle "
-            f"-num_clocks {self.burst_prefill_idle_cycles}"
-        )
+        def write_ptr() -> list[str]:
+            return [
+                self._virtual_ir_tcl(ctrl_chain),
+                self._dr_shift_tcl(
+                    ctrl_chain, burst_frame, self.DR_BITS, "__fcapz_burst_ptr_discard"
+                ),
+                f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
+            ]
+
+        body = ["set __fcapz_burst {}", *write_ptr()]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync.
+            body += [
+                self._virtual_ir_tcl(self.burst_data_chain),
+                self._dr_shift_tcl(
+                    self.burst_data_chain, 0, self.BURST_DR_BITS, "__fcapz_burst_sync"
+                ),
+                *write_ptr(),
+            ]
         body.append(self._virtual_ir_tcl(self.burst_data_chain))
         for idx in range(n_scans + prime_scans):
             var = f"__fcapz_burst_{idx}"
@@ -1249,9 +1264,12 @@ class QuartusStpTransport(Transport):
 
         The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
         (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
-        the burst scans go on the control chain itself.  Raises on a malformed
-        reply so the caller can fall back to the per-word path.
+        the burst scans go on the control chain itself.  Raises
+        :class:`BurstUnavailableError` when burst readout is off, and on a
+        malformed reply.
         """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
         elements = self._single_chain_burst(
             n_samples, sample_width, timestamp=False
         )
@@ -1275,9 +1293,11 @@ class QuartusStpTransport(Transport):
         separate ``burst_data_chain``) can never reach them and silently falls
         back to a slow per-word read.  This mirrors the sample burst but asserts
         the timestamp-select bit in the burst pointer, returning one value per
-        captured sample.  Raises on a malformed reply so the caller can fall
-        back to the per-word path.
+        captured sample.  Raises :class:`BurstUnavailableError` when burst
+        readout is off, and on a malformed reply.
         """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
         return self._single_chain_burst(
             n_timestamps, timestamp_width, timestamp=True
         )
@@ -1305,17 +1325,17 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        body = ["set __fcapz_scb {}"]
-        body.append(self._virtual_ir_tcl(chain))
-        body.append(
-            self._dr_shift_tcl(
-                chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
-            )
-        )
-        body.append(
-            "device_run_test_idle "
-            f"-num_clocks {self.burst_prefill_idle_cycles}"
-        )
+        write_ptr = [
+            self._dr_shift_tcl(chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"),
+            f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
+        ]
+        body = ["set __fcapz_scb {}", self._virtual_ir_tcl(chain), *write_ptr]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync.
+            body += [
+                self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, "__fcapz_scb_sync"),
+                *write_ptr,
+            ]
         # First scan primes/flushes the 256-bit staging register; discarded.
         for idx in range(n_scans + prime_scans):
             var = f"__fcapz_scb_{idx}"
@@ -1746,7 +1766,13 @@ class XilinxHwServerTransport(Transport):
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
         use_register_ir: bool = False,
         single_chain_burst: bool = True,
+        burst: bool = True,
     ):
+        """``burst=False`` declares a bitstream with no burst path at all
+        (``SINGLE_CHAIN_BURST=0`` and ``BURST_EN=0``): every capture is then
+        read through the register window.  With ``burst=True`` a burst that
+        fails is raised, never read around, so a build without the burst
+        path the transport expects must be declared here."""
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
                 f"fpga_name contains unsafe characters for TCL: {fpga_name!r}"
@@ -1794,6 +1820,7 @@ class XilinxHwServerTransport(Transport):
             )
         self.use_register_ir = bool(use_register_ir)
         self.single_chain_burst = bool(single_chain_burst)
+        self.burst = bool(burst)
         if self.use_register_ir:
             # In -register mode xsdb handles both IR routing and DR BYPASS
             # padding for multi-TAP chains (e.g. Zynq US+ MPSoC ARM DAP).
@@ -2224,20 +2251,7 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
-            try:
-                return self._read_block_burst(words)
-            except BurstIntegrityError:
-                raise
-            except (ConnectionError, RuntimeError) as exc:
-                if self.single_chain_burst:
-                    _hw_log.warning(
-                        "single-chain ELA burst readback failed (%s); falling back to "
-                        "slow control-chain DATA reads. If this bitstream was built with "
-                        "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
-                        "XilinxHwServerTransport(single_chain_burst=False).",
-                        exc,
-                    )
-                self._has_burst = False
+            return self._burst_with_hint(words)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
 
@@ -2248,12 +2262,14 @@ class XilinxHwServerTransport(Transport):
 
     @property
     def _burst_available(self) -> bool:
-        """True if the bitstream has a fast burst interface."""
-        if not hasattr(self, "_has_burst"):
-            # Do not probe by writing BURST_PTR here: that register is a
-            # side-effecting start toggle for the burst engine.
-            self._has_burst = True
-        return self._has_burst
+        """True if the bitstream has a fast burst interface.
+
+        Declared by the ``burst`` constructor argument, never probed: a
+        BURST_PTR write is a side-effecting start toggle for the burst
+        engine, and a failed burst is a defect to raise, not a sign that
+        the build has none.
+        """
+        return self.burst
 
     def _burst_sample_ok(self) -> bool:
         """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
@@ -2263,10 +2279,7 @@ class XilinxHwServerTransport(Transport):
         (not cached) so a session that hops between an 8-bit ELA and a 160-bit
         AXI monitor always gates on the *currently selected* core.
         """
-        try:
-            sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
-        except (ConnectionError, RuntimeError):
-            return True  # can't tell — keep prior fast-path behavior
+        sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
         return sw < 1 or sw <= 32
 
     @property
@@ -2334,12 +2347,23 @@ class XilinxHwServerTransport(Transport):
         write_idle = self.BURST_PREFILL_IDLE_CYCLES
         if self.use_register_ir:
             write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, write_idle)
-        head = [
-            "set _bq [jtag sequence]",
+        write_ptr = [
             f"{ir1_cmd}; "
             f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
             f"$_bq state IDLE {write_idle}",
         ]
+        head = ["set _bq [jtag sequence]", *write_ptr]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync: one burst scan whose capture
+            # matches the engine's copy to the new owner's start toggle, then
+            # a second BURST_PTR write the engine cannot miss.  The TAP
+            # passes Capture-DR either way; without ``-capture`` xsdb just
+            # does not print the scan, so the burst output is unchanged.
+            head += [
+                f"{ir_burst_cmd}; $_bq drshift -state DRUPDATE "
+                f"-bits {burst_total} {burst_zeros}",
+                *write_ptr,
+            ]
         # The first wide scan primes/fills staging and is discarded.
         tcls = self._burst_sequence_sends(
             head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
@@ -2389,23 +2413,26 @@ class XilinxHwServerTransport(Transport):
         readout for wide cores (``SAMPLE_W > 32``): the burst engine addresses
         the capture RAM by sample, so unlike the 16-bit register window it has
         no size limit, and one 256-bit scan replaces ``ceil(width / 32)``
-        register reads.  Raises ``RuntimeError`` when burst is unavailable,
-        so the caller can read the window instead, and
-        :class:`BurstIntegrityError` when a burst ran but returned the wrong
-        number of samples, which is a defect and must not be read around.
+        register reads.  Raises :class:`BurstUnavailableError`, before any
+        scan, when this transport cannot burst the request, so the caller can
+        read the window instead.  A burst that runs and fails raises anything
+        else -- :class:`BurstIntegrityError` for the wrong number of samples --
+        and must not be read around.
         """
         if n_samples <= 0:
             return []
         if base_addr != 0x0100:
-            raise RuntimeError(f"sample burst needs the DATA base, got 0x{base_addr:04X}")
+            raise BurstUnavailableError(
+                f"sample burst needs the DATA base, got 0x{base_addr:04X}"
+            )
         if not 1 <= sample_width <= self.BURST_DR_BITS:
-            raise RuntimeError(
+            raise BurstUnavailableError(
                 f"sample width {sample_width} does not fit the "
                 f"{self.BURST_DR_BITS}-bit burst DR"
             )
         if not self._burst_available:
-            raise RuntimeError("burst readout is unavailable on this session")
-        samples = self._read_block_burst(n_samples, element_width=sample_width)
+            raise BurstUnavailableError("burst readout is off for this transport")
+        samples = self._burst_with_hint(n_samples, element_width=sample_width)
         if len(samples) != n_samples:
             raise BurstIntegrityError(
                 f"sample burst returned {len(samples)} samples, expected {n_samples}"
@@ -2424,15 +2451,16 @@ class XilinxHwServerTransport(Transport):
 
         The wide-core counterpart of :meth:`read_sample_block`: a deep wide
         capture's timestamp window can start past the 16-bit register space,
-        so it must not be read through the window.  Raises ``RuntimeError``
-        when burst is unavailable and :class:`BurstIntegrityError` when a
-        burst ran but returned the wrong number of timestamps.
+        so it must not be read through the window.  Raises
+        :class:`BurstUnavailableError` when burst readout is off, and
+        :class:`BurstIntegrityError` when a burst ran but returned the wrong
+        number of timestamps.
         """
         if n_timestamps <= 0:
             return []
         if not self._burst_available:
-            raise RuntimeError("burst readout is unavailable on this session")
-        values = self._read_block_burst(
+            raise BurstUnavailableError("burst readout is off for this transport")
+        values = self._burst_with_hint(
             n_timestamps, timestamp=True, element_width=timestamp_width
         )
         if len(values) != n_timestamps:
@@ -2446,25 +2474,35 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            try:
-                return self._read_block_burst(
-                    words,
-                    timestamp=True,
-                    element_width=timestamp_width,
-                )
-            except BurstIntegrityError:
-                raise
-            except (ConnectionError, RuntimeError) as exc:
-                if self.single_chain_burst:
-                    _hw_log.warning(
-                        "single-chain ELA timestamp burst readback failed (%s); "
-                        "falling back to slow USER1 timestamp reads. If this bitstream "
-                        "was built with SINGLE_CHAIN_BURST=0, pass --two-chain-burst or "
-                        "construct XilinxHwServerTransport(single_chain_burst=False).",
-                        exc,
-                    )
-                self._has_burst = False
+            return self._burst_with_hint(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
         return self._read_block_user1(addr, words)
+
+    def _burst_with_hint(self, words: int, **kwargs) -> List[int]:
+        """Run :meth:`_read_block_burst`; a burst that fails is raised with
+        the build options that would explain it, never read around."""
+        try:
+            return self._read_block_burst(words, **kwargs)
+        except RuntimeError as exc:
+            if type(exc) is not RuntimeError:
+                raise  # BurstIntegrityError and other typed errors, unchanged
+            if self.single_chain_burst:
+                hint = (
+                    "If this bitstream was built with SINGLE_CHAIN_BURST=0, pass "
+                    "--two-chain-burst (single_chain_burst=False)"
+                )
+            else:
+                hint = (
+                    "If this bitstream was built with BURST_EN=0, it has no USER2 "
+                    "burst path"
+                )
+            raise RuntimeError(
+                f"burst readback failed: {exc}. {hint}; if it has no burst path at "
+                "all, pass --no-burst (burst=False)."
+            ) from exc
 
     def _parse_burst_bits(
         self,

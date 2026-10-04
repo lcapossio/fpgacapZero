@@ -59,6 +59,15 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertEqual(out.connect_timeout_sec, 45.0)
         self.assertEqual(out.hw_ready_timeout_sec, 120.0)
 
+    def test_burst_path_roundtrip_and_disabled_for_openocd(self) -> None:
+        p = ConnectionPanel()
+        for burst_path in ("two_chain", "none", "single_chain"):
+            p.load_from_settings(ConnectionSettings(burst_path=burst_path))
+            self.assertEqual(p.connection_settings().burst_path, burst_path)
+            self.assertTrue(p._burst_path.isEnabled())
+        p.load_from_settings(ConnectionSettings(backend="openocd"))
+        self.assertFalse(p._burst_path.isEnabled())
+
     def test_scan_finish_populates_target_dropdown(self) -> None:
         p = ConnectionPanel()
         p.load_from_settings(ConnectionSettings(tap="custom.tap"))

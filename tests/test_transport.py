@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
     BurstIntegrityError,
+    BurstUnavailableError,
     DataWindowError,
     check_data_window,
     find_quartus_stp,
@@ -816,7 +818,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
         self.assertEqual(scripts[0].count("-length 256"), 2)
 
-    def test_quartus_read_block_falls_back_and_disables_failed_burst(self):
+    def test_quartus_failed_burst_is_raised_not_read_around(self):
         scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
@@ -826,17 +828,14 @@ class QuartusStpTransportTests(unittest.TestCase):
 
         t = FakeQuartus()
         t._read_block_burst = MagicMock(side_effect=RuntimeError("DATA_CHAIN missing"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "DATA_CHAIN missing"):
+            t.read_block(0x0100, 2)
+        with self.assertRaisesRegex(RuntimeError, "DATA_CHAIN missing"):
+            t.read_timestamp_block(0x1100, 2, 32)
+        self.assertTrue(t._burst_available)  # still declared, never probed
+        self.assertEqual(scripts, [])
 
-        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
-            self.assertEqual(t.read_block(0x0100, 2), [1, 2])
-        self.assertIn("falling back", "\n".join(logs.output))
-        self.assertFalse(t._burst_available)
-
-        self.assertEqual(t.read_block(0x0100, 2), [1, 2])
-        t._read_block_burst.assert_called_once_with(2)
-        self.assertEqual(len(scripts), 2)
-
-    def test_quartus_timestamp_block_falls_back_and_disables_failed_burst(self):
+    def test_quartus_without_burst_reads_the_window(self):
         scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
@@ -844,19 +843,56 @@ class QuartusStpTransportTests(unittest.TestCase):
                 scripts.append(script)
                 return f"{4:049b} {5:049b}"
 
-        t = FakeQuartus()
-        t._read_block_burst = MagicMock(side_effect=RuntimeError("timestamp missing"))  # type: ignore[method-assign]
+        t = FakeQuartus(burst=False)
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
+        self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
+        self.assertEqual(t.read_block(0x0100, 2), [4, 5])
+        t._read_block_burst.assert_not_called()
+        self.assertEqual(len(scripts), 2)
+        for call in (
+            lambda: t.read_sample_block(0x0100, 2, 64),
+            lambda: t.read_timestamp_block_single_chain(0x1100, 2, 32),
+        ):
+            with self.assertRaises(BurstUnavailableError):
+                call()
 
-        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
-            self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
-        self.assertIn("timestamp burst readback failed", "\n".join(logs.output))
-        self.assertFalse(t._burst_available)
-        t._read_block_burst.assert_called_once_with(
-            2,
-            timestamp=True,
-            element_width=32,
-        )
+    def _quartus_sync_script(self, *, sync: bool, single_chain: bool) -> str:
+        scripts: list[str] = []
+        n = 4
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return " ".join(["0" * 256] * (n + 1))
+
+        t = FakeQuartus()
+        t.burst_start_sync = sync
+        if single_chain:
+            t.read_sample_block(0x0100, n, 256)
+        else:
+            t._cached_sps = 32
+            t._read_block_burst(n)
         self.assertEqual(len(scripts), 1)
+        return scripts[0]
+
+    def test_quartus_burst_start_sync_rewrites_the_pointer(self):
+        """burst_start_sync adds one unreturned burst scan and a second
+        BURST_PTR write ahead of the prime; the returned scans are unchanged."""
+        for single_chain in (False, True):
+            with self.subTest(single_chain=single_chain):
+                plain = self._quartus_sync_script(sync=False, single_chain=single_chain)
+                synced = self._quartus_sync_script(sync=True, single_chain=single_chain)
+                self.assertNotIn("_sync", plain)
+                self.assertEqual(plain.count("-length 49"), 1)
+                self.assertEqual(synced.count("-length 49"), 2)
+                self.assertEqual(
+                    synced.count("-length 256"), plain.count("-length 256") + 1
+                )
+                self.assertEqual(synced.count("lappend"), plain.count("lappend"))
+                sync_at = synced.index("_sync")
+                ptr_writes = [m.start() for m in re.finditer("-length 49", synced)]
+                self.assertLess(ptr_writes[0], sync_at)
+                self.assertLess(sync_at, ptr_writes[1])
 
     def test_read_block_zero_words_is_noop(self):
         class FakeQuartus(QuartusStpTransport):
@@ -1880,19 +1916,38 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertIn("-hex 6 03", sent[0])
         self.assertIn("-bits 256", sent[0])
 
-    def test_read_block_falls_back_when_user2_burst_missing(self):
-        """Single-chain ELA builds can fall back to the USER1 DATA window."""
+    def test_failed_burst_is_raised_with_a_hint(self):
+        """A failed burst is raised, never read around; the message says which
+        option declares the build's actual burst path."""
+        for single_chain, hint in ((True, "--two-chain-burst"), (False, "BURST_EN=0")):
+            with self.subTest(single_chain=single_chain):
+                t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+                t._read_block_burst = MagicMock(side_effect=RuntimeError("USER2 unavailable"))  # type: ignore[method-assign]
+                t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+                for call in (
+                    lambda: t.read_block(0x0100, 3),
+                    lambda: t.read_timestamp_block(0x2100, 3, 32),
+                    lambda: t.read_sample_block(0x0100, 3, 64),
+                    lambda: t.read_timestamp_block_single_chain(0x2100, 3, 32),
+                ):
+                    with self.assertRaises(RuntimeError) as cm:
+                        call()
+                    text = str(cm.exception)
+                    self.assertIn("USER2 unavailable", text)
+                    self.assertIn(hint, text)
+                    self.assertIn("--no-burst", text)
+                t._read_block_user1.assert_not_called()
+
+    def test_typed_burst_errors_pass_through_unchanged(self):
         t = XilinxHwServerTransport()
-
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("USER2 unavailable")
-
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
-        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
-
-        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
-        self.assertFalse(t._has_burst)
-        t._read_block_user1.assert_called_once_with(0x0100, 3)
+        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        for error in (BurstIntegrityError("short"), DataWindowError("past the end")):
+            with self.subTest(error=type(error).__name__):
+                t._read_block_burst = MagicMock(side_effect=error)  # type: ignore[method-assign]
+                with self.assertRaises(type(error)) as cm:
+                    t.read_block(0x0100, 3)
+                self.assertIs(cm.exception, error)
 
     def _fake_xsdb_sequence(self, tokens: list[str], sent: list[str]):
         """xsdb stand-in: a ``jtag sequence`` collects scans across sends and
@@ -1977,7 +2032,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(BurstIntegrityError):
             t.read_block(0x0100, 33)
         t._read_block_user1.assert_not_called()
-        self.assertTrue(t._has_burst)  # the capability is not in question
+        self.assertTrue(t.burst)  # the capability is not in question
 
     def test_short_timestamp_burst_is_raised(self):
         t = XilinxHwServerTransport()
@@ -2082,46 +2137,66 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # 8 words fit one _BLOCK_CHUNK -> a single pipelined _send, not 8+.
         self.assertEqual(len(sent), 1)
 
-    def test_burst_sample_gate_defaults_open_when_width_unreadable(self):
-        """If SAMPLE_W can't be read, keep the prior fast-path behavior."""
+    def test_burst_sample_gate_raises_when_width_unreadable(self):
+        """An unreadable SAMPLE_W is a link fault, not a reason to guess."""
         t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(side_effect=RuntimeError("not connected"))
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            t._burst_sample_ok()
 
-        def boom():
-            raise RuntimeError("not connected")
-
-        t.read_reg_stable = MagicMock(side_effect=lambda addr: boom())
-        self.assertTrue(t._burst_sample_ok())
-
-    def test_single_chain_burst_fallback_logs_migration_hint(self):
-        """Default single-chain failure should point legacy users at two-chain mode."""
-        t = XilinxHwServerTransport()
-
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("single-chain burst readback failed")
-
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+    def test_without_burst_reads_the_window(self):
+        """burst=False declares a build with no burst path: read the window."""
+        t = XilinxHwServerTransport(burst=False)
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
         t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+        self.assertEqual(t.read_timestamp_block(0x2100, 3, 32), [1, 2, 3])
+        t._read_block_burst.assert_not_called()
+        for call in (
+            lambda: t.read_sample_block(0x0100, 2, 64),
+            lambda: t.read_timestamp_block_single_chain(0x2100, 2, 32),
+        ):
+            with self.assertRaises(BurstUnavailableError):
+                call()
 
-        with self.assertLogs("fcapz.transport.hw_server", level="WARNING") as logs:
-            self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
-
-        text = "\n".join(logs.output)
-        self.assertIn("SINGLE_CHAIN_BURST=0", text)
-        self.assertIn("--two-chain-burst", text)
-
-    def test_timestamp_block_falls_back_when_burst_missing(self):
-        """Timestamp burst failures also disable fast burst reads."""
+    def test_sample_burst_outside_the_engine_is_unavailable(self):
         t = XilinxHwServerTransport()
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
+        for base, width in ((0x0200, 64), (0x0100, 0), (0x0100, 257)):
+            with self.assertRaises(BurstUnavailableError):
+                t.read_sample_block(base, 2, width)
+        t._read_block_burst.assert_not_called()
 
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("burst unavailable")
-
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
-        t._read_block_user1 = MagicMock(return_value=[4, 5])  # type: ignore[method-assign]
-
-        self.assertEqual(t.read_timestamp_block(0x2100, 2, 32), [4, 5])
-        self.assertFalse(t._has_burst)
-        t._read_block_user1.assert_called_once_with(0x2100, 2)
+    def test_burst_start_sync_rewrites_the_pointer(self):
+        """burst_start_sync adds one uncaptured burst scan and a second
+        BURST_PTR write ahead of the prime, in the same sequence; the captured
+        scans, and so the parse, are unchanged."""
+        for single_chain in (True, False):
+            for sync in (False, True):
+                with self.subTest(single_chain=single_chain, sync=sync):
+                    t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                    t.burst_start_sync = sync
+                    n = 4
+                    tokens = [self._burst_token([0xEE], 256)] + [
+                        self._burst_token([s], 256) for s in range(n)
+                    ]
+                    sent: list[str] = []
+                    t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                    words = t.read_sample_block(0x0100, n, 256)
+                    self.assertEqual(words[::8], list(range(n)))
+                    body = "; ".join(sent)
+                    self.assertEqual(body.count("[jtag sequence]"), 1)
+                    self.assertEqual(body.count("-capture"), n + 1)
+                    self.assertEqual(body.count("-bits 49"), 2 if sync else 1)
+                    self.assertEqual(
+                        body.count("-bits 256"), n + 1 + (1 if sync else 0)
+                    )
+                    if sync:
+                        ptr = [m.start() for m in re.finditer("-bits 49", body)]
+                        first_burst = body.index("-bits 256")
+                        self.assertLess(ptr[0], first_burst)
+                        self.assertLess(first_burst, ptr[1])
+                        self.assertLess(ptr[1], body.index("-capture"))
 
     def test_timestamp_burst_primes_before_returned_scan(self):
         """Timestamp burst reads also discard the first fill scan."""

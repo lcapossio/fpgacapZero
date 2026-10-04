@@ -15,7 +15,7 @@ from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import (
     REG_ADDR_SPACE_END,
-    BurstIntegrityError,
+    BurstUnavailableError,
     OpenOcdTransport,
     Transport,
     check_data_window,
@@ -89,7 +89,8 @@ _ADDR_MGR_DESC_CAPS = 0xF01C
 # MGR_CAPS bit 2: the manager raises the burst start on every BURST_PTR write.
 # Older multi-slot managers passed on the owner slot's own start toggle, which
 # a slot switch can hide, so a burst could read the new slot from the old
-# slot's pointer and return the capture rotated.
+# slot's pointer; on those the transport syncs the start first
+# (Transport.burst_start_sync).
 _MGR_CAP_BURST_START = 0x4
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
@@ -330,9 +331,11 @@ class Analyzer:
         self._hw_timestamp_w: int = 0
         self._hw_num_segments: int = 1
         self._hw_compare_caps: int = 0
-        self._manager_slot_caps: int | None = None
+        # (MGR_CAPS, MGR_COUNT), read once per session.
+        self._manager_caps: tuple[int, int] | None = None
+        # MGR_DESC_CAPS per slot index.
+        self._manager_slot_caps: dict[int, int] = {}
         self._manager_found: bool | None = None
-        self._warned_old_manager_burst = False
 
     @property
     def bscan_chain(self) -> int:
@@ -369,7 +372,8 @@ class Analyzer:
         """
         with self.transport.transaction_lock():
             self._instance = None if instance is None else int(instance)
-            self._manager_slot_caps = None
+            self._manager_caps = None
+            self._manager_slot_caps = {}
             self._manager_found = None
             self._select_instance()
 
@@ -379,7 +383,8 @@ class Analyzer:
             self._select_chain()
             self.transport.connect()
             self.transport.invalidate_manager_instance_cache()
-            self._manager_slot_caps = None
+            self._manager_caps = None
+            self._manager_slot_caps = {}
             self._manager_found = None
             self._select_instance()
 
@@ -776,20 +781,15 @@ class Analyzer:
             if callable(ts_single):
                 try:
                     raw = ts_single(ts_base, total, self._hw_timestamp_w)
+                except BurstUnavailableError as exc:
+                    _log.info("timestamp burst unavailable (%s); reading the window", exc)
+                else:
                     _log.info(
                         "single-chain timestamp burst: %d timestamps (%d-bit)",
                         total,
                         self._hw_timestamp_w,
                     )
                     return [v & mask for v in raw]
-                except BurstIntegrityError:
-                    raise
-                except (ConnectionError, RuntimeError) as exc:
-                    _log.warning(
-                        "single-chain timestamp burst failed (%s); using slower "
-                        "per-word timestamp reads",
-                        exc,
-                    )
             # The two-chain burst can't reach a single-chain core, so skip it and
             # read the timestamp words directly (deterministic, just slower).
             raw = self.transport.read_block(ts_base, ts_word_count)
@@ -892,44 +892,41 @@ class Analyzer:
     def _selected_slot_has_burst(self) -> bool:
         """Return whether the active managed slot participates in fast burst readback.
 
-        A manager with two or more slots that does not advertise
-        ``MGR_CAPS`` bit 2 predates the burst-start fix: its bursts can come
-        back rotated after a slot switch, with nothing to show it.  Its slots
-        are read through the DATA window instead (slower, never wrong).
+        Also sets ``transport.burst_start_sync`` for the burst that follows:
+        a manager with two or more slots that does not advertise ``MGR_CAPS``
+        bit 2 can hide the burst start after a slot switch, and the
+        transport then syncs the start first (see
+        :attr:`Transport.burst_start_sync`).
+
+        Slot capabilities are cached per slot.  With no slot selected, the
+        active slot is read from ``MGR_ACTIVE`` on every call: another
+        controller, or :meth:`CoreManager.select_raw`, may have moved it.
         """
         with self.transport.transaction_lock():
+            self.transport.burst_start_sync = False
             if not self._behind_manager():
                 return True
-            if self._manager_slot_caps is None:
-                self._select_chain()
-                read = self.transport.read_reg
-                mgr_caps = int(read(_ADDR_MGR_CAPS))
-                old_multi_slot = (
-                    not mgr_caps & _MGR_CAP_BURST_START and int(read(_ADDR_MGR_COUNT)) >= 2
-                )
-                if old_multi_slot:
-                    if not self._warned_old_manager_burst:
-                        self._warned_old_manager_burst = True
-                        _log.warning(
-                            "this bitstream's core manager predates the burst-start "
-                            "fix (MGR_CAPS bit 2 clear): burst readback could return "
-                            "a capture rotated after a slot switch, so reading "
-                            "through the DATA window instead. Rebuild the bitstream "
-                            "to restore burst speed."
-                        )
-                    self._manager_slot_caps = 0
-                    return False
-                slot = self._instance
-                if slot is None:
-                    # Without descriptors (MGR_CAPS bit 1) the active slot's
-                    # burst wiring is unknown; keep the direct-mode default.
-                    if not mgr_caps & 0x2:
-                        self._manager_slot_caps = 0x1
-                        return True
-                    slot = int(read(_ADDR_MGR_ACTIVE))
+            self._select_chain()
+            read = self.transport.read_reg
+            if self._manager_caps is None:
+                self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
+            mgr_caps, count = self._manager_caps
+            self.transport.burst_start_sync = (
+                count >= 2 and not mgr_caps & _MGR_CAP_BURST_START
+            )
+            slot = self._instance
+            if slot is None:
+                # Without descriptors (MGR_CAPS bit 1) the active slot's
+                # burst wiring is unknown; keep the direct-mode default.
+                if not mgr_caps & 0x2:
+                    return True
+                slot = int(read(_ADDR_MGR_ACTIVE))
+            caps = self._manager_slot_caps.get(slot)
+            if caps is None:
                 self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-                self._manager_slot_caps = int(read(_ADDR_MGR_DESC_CAPS))
-            return bool(self._manager_slot_caps & 0x1)
+                caps = int(read(_ADDR_MGR_DESC_CAPS))
+                self._manager_slot_caps[slot] = caps
+            return bool(caps & 0x1)
 
     @_selected_transaction
     def _read_data_words(self, total_words: int) -> list[int]:
@@ -954,23 +951,19 @@ class Analyzer:
                 n_samples = total_words // words_per_sample
                 try:
                     words = sample_burst(_ADDR_DATA_BASE, n_samples, sw)
+                except BurstUnavailableError as exc:
+                    # Raised before any scan: this session has no burst for
+                    # the request.  A burst that ran and failed propagates.
+                    _log.info("sample burst unavailable (%s); reading the window", exc)
+                else:
                     _log.info(
                         "single-chain sample burst: %d samples (%d-bit)",
                         n_samples,
                         sw,
                     )
                     return words
-                except BurstIntegrityError:
-                    raise
-                except (ConnectionError, RuntimeError) as exc:
-                    _log.warning(
-                        "single-chain sample burst failed (%s); falling back to "
-                        "the slower read_block path",
-                        exc,
-                    )
-            # Fallback: the pipelined word path (fast on hw_server; slow
-            # per-word on quartus_stp when its DATA_CHAIN burst can't reach
-            # this core — but correct either way).
+            # The pipelined word path (fast on hw_server; slow per-word on
+            # quartus_stp when its DATA_CHAIN burst can't reach this core).
             if not has_burst:
                 return self.transport.read_window_block(_ADDR_DATA_BASE, total_words)
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)

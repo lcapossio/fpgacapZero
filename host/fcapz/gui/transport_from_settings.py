@@ -61,6 +61,8 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             ready_probe_timeout=ready_to,
             post_program_delay_ms=conn.hw_post_program_delay_ms,
             ready_poll_interval_sec=conn.hw_ready_poll_interval_ms / 1000.0,
+            single_chain_burst=conn.burst_path != "two_chain",
+            burst=conn.burst_path != "none",
             **chain_kwargs,
         )
     if conn.backend == "usb_blaster":
@@ -70,5 +72,6 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             hardware_name=conn.hardware,
             device_name=device_name,
             quartus_stp_path=conn.quartus_stp,
+            burst=conn.burst_path != "none",
         )
     raise ValueError(f"unknown backend {conn.backend!r}")

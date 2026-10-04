@@ -239,6 +239,7 @@ def _make_transport(args: argparse.Namespace):
             hardware_name=getattr(args, "hardware", None),
             device_name=device_name,
             quartus_stp_path=getattr(args, "quartus_stp", None),
+            burst=not getattr(args, "no_burst", False),
         )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
@@ -246,6 +247,7 @@ def _make_transport(args: argparse.Namespace):
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
         single_chain_burst=not getattr(args, "two_chain_burst", False),
+        burst=not getattr(args, "no_burst", False),
         **_chain_shape_kwargs(fpga_name),
     )
 
@@ -302,6 +304,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--two-chain-burst",
         action="store_true",
         help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
+    )
+    p.add_argument(
+        "--no-burst",
+        action="store_true",
+        help=(
+            "hw_server/usb_blaster: the bitstream has no burst readout path "
+            "(e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture "
+            "through the register window. A failed burst is otherwise an error."
+        ),
     )
     p.add_argument(
         "--chain",

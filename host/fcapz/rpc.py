@@ -443,6 +443,7 @@ class RpcServer:
                 fpga_name=req.get("tap", "xc7a100t"),
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
+                burst=bool(req.get("burst", True)),
                 ir_table=ir,
             )
         if backend == "usb_blaster":
@@ -451,6 +452,7 @@ class RpcServer:
                 hardware_name=req.get("hardware"),
                 device_name=None if tap in ("", "auto", "xc7a100t.tap") else tap,
                 quartus_stp_path=req.get("quartus_stp") or self._quartus_stp_path,
+                burst=bool(req.get("burst", True)),
             )
         raise ValueError(f"unknown backend: {backend}")
 
