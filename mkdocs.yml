@@ -37,8 +37,8 @@ theme:
     - content.action.view
     - content.code.copy
     - navigation.footer
-    - navigation.instant
-    - navigation.instant.progress
+    # navigation.instant needs site_url (it follows the sitemap); add both
+    # when the site gets a published address.
     - navigation.sections
     - navigation.tabs
     - navigation.top

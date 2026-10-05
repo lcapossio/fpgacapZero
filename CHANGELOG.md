@@ -43,7 +43,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   points links that leave `docs/` at the repository. A new CI job runs
   `mkdocs build --strict`, so a broken link, anchor or image anywhere in the
   manual fails the pull request. The site is built only, not published.
-  The site has tabs, instant navigation, search suggestions, per-page edit
+  The site has tabs, search suggestions, per-page edit
   buttons and "last updated" dates, and the version in its title. Notes use
   GitHub alerts (`> [!NOTE]`) and the block and state diagrams are `mermaid`,
   both rendered on GitHub and in the site; Markdown only the site understands
