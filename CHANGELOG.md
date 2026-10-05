@@ -58,6 +58,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
+  tops count the clocks the ELA `trigger_out` is high and expose the count on
+  EIO inputs 15:8 (cleared by EIO output 7), so the EIO there is now 16 inputs
+  wide. A new hardware test uses it to check one `trigger_out` clock per
+  trigger, with and without a trigger delay. Rebuild the DE25 bitstreams to
+  get it.
+
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
   a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with
   `--variant microblaze`/`--variant vhdl` for the others; `test_hw_integration.py`
