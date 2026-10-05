@@ -43,6 +43,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   points links that leave `docs/` at the repository. A new CI job runs
   `mkdocs build --strict`, so a broken link, anchor or image anywhere in the
   manual fails the pull request. The site is built only, not published.
+  The site has tabs, instant navigation, search suggestions, per-page edit
+  buttons and "last updated" dates, and the version in its title. Notes use
+  GitHub alerts (`> [!NOTE]`) and the block and state diagrams are `mermaid`,
+  both rendered on GitHub and in the site; Markdown only the site understands
+  fails the build, so the two renderings cannot diverge.
+
+- **Generated CLI tables and Python API reference.** `tools/gen_docs.py`
+  rebuilds chapter 10's usage lines and option tables from the CLI parser and
+  writes `docs/specs/python_api.md` (every public `fcapz` name with its
+  signature and docstring). CI and pytest fail when either is out of date, so
+  the manual follows the code. Every CLI option now has `--help` text, and the
+  public API's undocumented classes and methods have docstrings.
 
 ### Changed
 
@@ -82,6 +94,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.
   It now says that the hw_server transport's named-register mode reaches all
   four USER chains, so `EIO_EN=1` is needed there only without that mode.
+
+- **Docs — chapter 10 had drifted from the CLI.** It gave `openocd` as the
+  default `--backend` (it is `hw_server`) and `8` as the `--sample-width`
+  default (it comes from the probe file, else 8), said `--format` follows the
+  `--out` extension (it does not), and left out `--gui-config`,
+  `--two-chain-burst`, `--startup-arm`, `--trigger-holdoff`, `--profile`,
+  `--open-in` and the `axi-mon` subcommand. The tables are now generated.
+
+- **Docs — the AXI monitor spec said no RTL exists.** Phase P1 ships for
+  AXI4-Lite (`rtl/fcapz_axi_mon.v`, chapter 19); the spec now says so.
 
 - **ELA — one stale sample after a soft reset with `INPUT_PIPE ≥ 1`.** Arming
   (and soft reset) cancelled the RAM write queued in the input pipeline while
