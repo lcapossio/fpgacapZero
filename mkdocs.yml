@@ -127,5 +127,6 @@ nav:
       - Architecture: specs/architecture.md
       - Register map: specs/register_map.md
       - Transport API: specs/transport_api.md
+      - Python API reference: specs/python_api.md
       - Waveform schema: specs/waveform_schema.md
       - AXI monitor (design plan): specs/axi_monitor.md

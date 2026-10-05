@@ -53,6 +53,7 @@ and should be corrected.
 | [`specs/architecture.md`](specs/architecture.md) | Block diagram, parameter list, resource usage, clock domains. |
 | [`specs/register_map.md`](specs/register_map.md) | Full register map for ELA, EIO, EJTAG-AXI, EJTAG-UART. Opens with an **Index** (anchor links); each major section ends with **↑ Top**. |
 | [`specs/transport_api.md`](specs/transport_api.md) | The `Transport` ABC contract — required to implement when adding a new backend. |
+| [`specs/python_api.md`](specs/python_api.md) | Every public `fcapz` name with its signature and docstring, generated from the code by `tools/gen_docs.py`. |
 | [`specs/waveform_schema.md`](specs/waveform_schema.md) | JSON / CSV / VCD export formats, field-by-field. |
 | [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Partly implemented** (AXI4-Lite, see chapter 19). Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
 
@@ -100,6 +101,14 @@ mkdocs build --strict   # static site in site/
 
 CI runs the strict build on every pull request, so a broken link or
 anchor anywhere in the manual fails the check.
+
+Both renderings come from the same Markdown, so the manual uses only
+what GitHub renders too: GitHub alerts (`> [!NOTE]`) and `mermaid`
+diagrams are styled in both, and site-only syntax fails the build.
+Chapter 10's option tables and the
+[Python API reference](specs/python_api.md) are generated from the code
+by `tools/gen_docs.py`; edit the CLI help or the docstrings and rerun it,
+never the generated text.
 
 ## Project resources
 

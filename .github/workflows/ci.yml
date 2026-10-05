@@ -125,8 +125,9 @@ jobs:
         run: git diff --exit-code -- host/fcapz/web/static
 
   # ── 3c. HTML manual build ─────────────────────────────────────────
-  # Builds docs/ with MkDocs in strict mode: any broken page link, missing
-  # anchor, or link to a repository file that does not exist fails the job.
+  # Checks the generated docs are current, then builds docs/ with MkDocs in
+  # strict mode: any broken page link, missing anchor, link to a repository
+  # file that does not exist, or site-only Markdown fails the job.
   # Build check only; nothing is published.
   docs-build:
     name: HTML manual build (mkdocs --strict)
@@ -140,6 +141,8 @@ jobs:
           python-version: "3.11"
       - name: Install the docs extra
         run: pip install ".[docs]"
+      - name: Generated docs match the code (CLI tables, API reference)
+        run: python tools/gen_docs.py --check
       - name: Build the manual
         run: mkdocs build --strict
 
