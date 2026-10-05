@@ -50,6 +50,10 @@ _SITE_ONLY = (
     (re.compile(r'^\s*===\+?\s+"'), "a content tab"),
     (re.compile(r"\]\([^)]*\)\{[^}\n]*\}|^\s*\{:?\s*[.#][^}]*\}\s*$"), "an attribute list"),
     (re.compile(r"<[a-z][^>]*\smarkdown(=|\s|>)", re.I), "a markdown-in-HTML attribute"),
+    (
+        re.compile(r"^\s*\|.*`[^`]*\\\|[^`]*`"),
+        r"an escaped pipe inside code in a table (write <code>a &#124; b</code>)",
+    ),
 )
 _FRONT_MATTER = re.compile(r"\A\ufeff?---[ \t]*\r?\n")
 _ALERT = re.compile(r"^\s*>\s*\[!(\w+)\]")
@@ -146,7 +150,7 @@ def on_page_markdown(markdown, page, config, files):
         elif in_fence is None:
             what = site_only_syntax(line)
             if what:
-                log.warning("%s: %s does not render on GitHub: %r", src_uri, what, line.strip())
+                log.warning("%s: %s renders differently on GitHub: %r", src_uri, what, line.strip())
             line = rewrite_line(line, **kwargs)
         out.append(line)
     return "".join(out)
