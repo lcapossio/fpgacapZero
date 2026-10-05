@@ -454,6 +454,39 @@ class TestStartupArmAndHoldoff(unittest.TestCase):
         self.assertEqual(len(result.samples), 3)
         self.assertFalse(result.overflow)
 
+    def _trigger_out_cycles(self, trigger_delay: int) -> int:
+        """Run one segmented capture whose trigger hit stays high, and return
+        how many clocks trigger_out was high (the top counts them on EIO
+        in[15:8]; EIO out[7] clears the count)."""
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=2,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+            startup_arm=False,
+            trigger_delay=trigger_delay,
+        )
+        self.a.configure(cfg)
+        self.a.reset()
+        self._set_eio_outputs(1 << 7)
+        self._set_eio_outputs(0)
+        self.assertEqual(self.eio.read_inputs() >> 8, 0)
+        self.t.select_chain(ELA_CHAIN)
+        self.a.arm()
+        self.assertTrue(self.a.wait_all_segments_done(timeout=5.0))
+        return self.eio.read_inputs() >> 8
+
+    def test_trigger_out_one_pulse_per_trigger_with_delay(self):
+        # One trigger per segment, each a single trigger_out clock, with or
+        # without a trigger delay (a held hit used to keep it high for
+        # trigger_delay + 1 clocks).
+        segments = self.a.probe().get("num_segments", 1)
+        self.assertEqual(self._trigger_out_cycles(0), segments)
+        self.assertEqual(self._trigger_out_cycles(4), segments)
+
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestExportFormats(unittest.TestCase):
@@ -620,7 +653,7 @@ class TestEioProbe(unittest.TestCase):
         eio = EioController(_make_transport(), chain=EIO_CHAIN)
         try:
             eio.connect()
-            self.assertEqual(eio.in_w, 8)
+            self.assertEqual(eio.in_w, 16)  # [15:8] = trigger_out clock count
             self.assertEqual(eio.out_w, 8)
         finally:
             eio.close()
