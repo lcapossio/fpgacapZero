@@ -30,26 +30,19 @@ stage, occurrence counters, a branching `next_state` FSM, storage qualification,
 segmented windows, external trigger I/O, decimation, timestamps). The monitor is
 therefore **`fcapz_ela` plus an AXI front-end**, not a new capture engine:
 
-```
-        AXI interface under test (passive tap; READY is never driven)
-   AW* W* B* AR* R*  ──────────────┐
-                                   ▼
-   ┌──────────────────────────────────────────────────────────────┐
-   │ fcapz_axi_mon  (ACLK domain)                                   │
-   │                                                                │
-   │   ┌─ channel select / flatten ─┐   ┌─ transaction decoder ──┐  │
-   │   │  AW/W/B/AR/R fields ->      │   │ handshakes, addr-range │  │
-   │   │  one wide probe vector      │   │ resp codes, ID match,  │  │
-   │   │                             │   │ burst, outstanding,    │  │
-   │   │                             │   │ stall-for-N, violations│  │
-   │   └──────────────┬──────────────┘   └───────────┬────────────┘  │
-   │                  └──────────►  probe_in  ◄───────┘               │
-   │                         ┌───────────────────┐                   │
-   │                         │     fcapz_ela      │  (instantiated)   │
-   │                         │  capture + trigger │                   │
-   │                         └─────────┬──────────┘                   │
-   └───────────────────────────────────┼───────────────────────────┘
-              JTAG (USER chain) ────────┘     same regs / host / viewer
+```mermaid
+flowchart TB
+    bus["AXI interface under test: AW, W, B, AR, R<br>(passive tap; READY is never driven)"]
+    subgraph mon["fcapz_axi_mon (ACLK domain)"]
+        flat["Channel select / flatten<br>AW/W/B/AR/R fields into one wide probe vector"]
+        dec["Transaction decoder<br>handshakes, address range, response codes, ID match,<br>burst, outstanding, stall-for-N, violations"]
+        ela["fcapz_ela (instantiated)<br>capture + trigger"]
+        flat -->|probe_in| ela
+        dec -->|probe_in| ela
+    end
+    bus --> flat
+    bus --> dec
+    ela <-->|"JTAG (USER chain): same registers, host and viewer"| host["Host"]
 ```
 
 `sample_clk` = the monitored interface's `ACLK`; `probe_in` = the flattened

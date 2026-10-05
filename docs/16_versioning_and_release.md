@@ -36,55 +36,17 @@ that needs it.
 
 ### The pipeline
 
-```
-                 ┌──────────────┐
-                 │   VERSION    │  ← single source of truth
-                 │   "0.3.0"    │     (text file at repo root)
-                 └──────┬───────┘
-                        │
-                        │  python tools/sync_version.py
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-        ▼                               ▼
-┌──────────────────┐        ┌────────────────────────────┐
-│ pyproject.toml   │        │ rtl/fcapz_version.vh       │
-│ dynamic = ["ver" │        │ (auto-generated header)    │
-│ version =        │        │                            │
-│  {file=VERSION}  │        │ `define FCAPZ_VERSION_*    │
-└────────┬─────────┘        │ `define FCAPZ_ELA_CORE_ID  │
-         │                  │ `define FCAPZ_EIO_CORE_ID  │
-         │                  └──────────┬─────────────────┘
-         ▼                             │
-┌──────────────────┐                   │  `include in
-│ pip install →    │                   │
-│ fcapz.__version__│                   ▼
-│   = "0.3.0"      │       ┌────────────────────────┐
-└──────────────────┘       │ rtl/fcapz_ela.v        │
-                           │ rtl/fcapz_eio.v        │
-                           │ tb/fcapz_ela_tb.sv     │
-                           │ tb/fcapz_eio_tb.sv     │
-                           └────────────────────────┘
-                                        │
-                                        │  synthesised into bitstream
-                                        │
-                                        ▼
-                           ┌────────────────────────┐
-                           │ ELA VERSION reg        │
-                           │   = 0x0003_4C41        │
-                           │ EIO VERSION reg        │
-                           │   = 0x0003_494F        │
-                           └────────────────────────┘
-                                        │
-                                        │  read by Analyzer.probe() /
-                                        │  EioController.connect()
-                                        ▼
-                           ┌────────────────────────┐
-                           │ test asserts:          │
-                           │  version_major == 0    │
-                           │  version_minor == 3    │
-                           │  core_id    == "LA"/"IO"
-                           └────────────────────────┘
+```mermaid
+flowchart TB
+    V["VERSION (text file at repo root), e.g. 0.3.0<br>single source of truth"]
+    V -->|"python tools/sync_version.py"| PY
+    V -->|"python tools/sync_version.py"| VH
+    PY["pyproject.toml<br>dynamic version = {file = VERSION}"]
+    VH["rtl/fcapz_version.vh (auto-generated header)<br>FCAPZ_VERSION_*, FCAPZ_ELA_CORE_ID, FCAPZ_EIO_CORE_ID"]
+    PY -->|"pip install"| PKG["fcapz.__version__ = 0.3.0"]
+    VH -->|"include in"| RTL["rtl/fcapz_ela.v, rtl/fcapz_eio.v<br>tb/fcapz_ela_tb.sv, tb/fcapz_eio_tb.sv"]
+    RTL -->|"synthesised into bitstream"| REG["ELA VERSION reg = 0x0003_4C41<br>EIO VERSION reg = 0x0003_494F"]
+    REG -->|"read by Analyzer.probe() / EioController.connect()"| T["test asserts:<br>version_major == 0, version_minor == 3<br>core_id == LA / IO"]
 ```
 
 Bumping the version is now a **two-step procedure**:

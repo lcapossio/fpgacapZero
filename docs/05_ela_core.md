@@ -13,22 +13,16 @@
 
 ## The capture flow in one diagram
 
-```
-                  ┌──────────────┐
-arm_pulse  ──────►│   ARMED      │ ── trigger_hit ──┐
-                  │ (recording   │                  │
-                  │  pre-trig    │                  ▼
-                  │  history)    │           ┌──────────────┐
-                  └──────────────┘           │  TRIGGERED   │
-                                              │ (counting    │
-                                              │  posttrig)   │
-                                              └──────────────┘
-                                                     │
-                                                     │ post_count == posttrig_len
-                                                     ▼
-                                              ┌──────────────┐
-                                              │    DONE      │ ── host reads buffer ──►
-                                              └──────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "ARMED: recording pre-trigger history" as ARMED
+    state "TRIGGERED: counting post-trigger samples" as TRIGGERED
+    state "DONE: buffer holds the capture" as DONE
+    [*] --> ARMED: arm_pulse
+    ARMED --> TRIGGERED: trigger_hit
+    TRIGGERED --> DONE: posttrig_len samples stored
+    DONE --> [*]: host reads buffer
 ```
 
 The ELA is a circular buffer.  When you arm it, samples flow into a

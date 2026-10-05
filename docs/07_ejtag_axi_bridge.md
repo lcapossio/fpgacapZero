@@ -56,18 +56,11 @@ What it **can't** do (yet):
 
 ## Architecture
 
-```
-   ┌────────────┐  72-bit DR   ┌──────────┐  toggle   ┌─────────────┐  AXI4
-   │   Host     │  via USER4   │  TCK     │  handshake│  axi_clk    │ master
-   │ (XSDB or   │ ◄──────────► │  domain  │ ◄────────►│  domain     │ ◄────►
-   │  OpenOCD)  │              │  shadow  │   CDC     │  10-state   │
-   └────────────┘              │  regs    │           │  FSM        │
-                               └──────────┘           │             │
-                                                      │  async FIFO │
-                                                      │ (Gray-coded │
-                                                      │  pointers,  │
-                                                      │  FIFO_DEPTH)│
-                                                      └─────────────┘
+```mermaid
+flowchart LR
+    host["Host<br>(XSDB or OpenOCD)"] <-->|"72-bit DR via USER4"| tck["TCK domain<br>shadow registers"]
+    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>10-state FSM<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
+    axi <-->|"AXI4 master"| bus["Your AXI4 bus"]
 ```
 
 The **TCK domain** holds a 72-bit shift register that the host
