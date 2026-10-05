@@ -31,6 +31,7 @@ class ProbeDefinition:
             raise ValueError(f"ProbeDefinition '{self.name}': lsb must be >= 0, got {self.lsb}")
 
     def extract(self, sample: int) -> int:
+        """Return this probe's bits of ``sample``."""
         return (sample >> self.lsb) & ((1 << self.width) - 1)
 
 
