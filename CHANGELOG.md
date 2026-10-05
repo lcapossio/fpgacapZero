@@ -58,6 +58,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
+  tops count the clocks the ELA `trigger_out` is high and expose the count on
+  EIO inputs 15:8 (cleared by EIO output 7), so the EIO there is now 16 inputs
+  wide. A new hardware test uses it to check one `trigger_out` clock per
+  trigger, with and without a trigger delay. Rebuild the DE25 bitstreams to
+  get it.
+
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
   a variant dispatcher defaulting to the open-source VexRiscv top (`vex`), with
   `--variant microblaze`/`--variant vhdl` for the others; `test_hw_integration.py`
@@ -105,6 +112,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **ELA — `trigger_out` stayed high through the trigger delay.** With
+  `trigger_delay > 0` a hit still present during the countdown kept
+  `trigger_out` asserted, for up to `trigger_delay + 1` clocks, and a hit that
+  came and went during the countdown pulsed it again. It is now one pulse per
+  trigger, on the trigger event, as documented. Both HDLs.
+
+- **ELA — a soft reset during a decimated capture could stall the idle
+  prefill.** Decimation was cleared on arm but not on soft reset, and the idle
+  ring stores only on a decimation tick while holding the count. A soft reset
+  (`force_idle()` / `Analyzer.reset()`) that landed mid-ratio therefore stopped
+  the pre-arm history until the next arm, so a trigger shortly after that arm
+  waited for the pre-trigger window to fill and could be missed. Soft reset now
+  clears the decimation count. Both HDLs.
 
 - **Single-chain and multi-core Xilinx cores dropped every command on Zynq
   UltraScale+ MPSoC.** `jtag_pipe_iface` only acted on a scan of

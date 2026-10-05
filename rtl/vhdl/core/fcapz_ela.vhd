@@ -1605,7 +1605,10 @@ begin
             arm_pulse_now := (arm_toggle_sync1 xor arm_toggle_sync2) = '1';
             any_arm_pulse_now := arm_pulse_now or startup_arm_pending = '1';
 
+            -- One pulse per trigger: hits during the trigger-delay countdown
+            -- are not evaluated, so they must not extend or repeat it.
             if armed = '1' and triggered = '0' and not any_arm_pulse_now and not reset_pulse_now and
+               trig_delay_pending = '0' and
                pre_count >= count_u(pretrig_len) and trig_holdoff_active = '0' and
                sel_flush_active = '0' and hit_eff = '1' then
                 trigger_out_i <= '1';
@@ -1615,7 +1618,9 @@ begin
 
             if DECIM_EN = 0 then
                 decim_count <= (others => '0');
-            elsif any_arm_pulse_now then
+            elsif any_arm_pulse_now or reset_pulse_now then
+                -- A soft reset must not leave the count mid-ratio: idle
+                -- prefill stores only on a decimation tick, and idle holds it.
                 decim_count <= (others => '0');
             elsif armed = '1' and done = '0' then
                 if decim_count >= decim_ratio then

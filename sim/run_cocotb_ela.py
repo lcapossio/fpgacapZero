@@ -94,6 +94,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "decimation_zero_and_every4",
             "external_trigger_disabled",
             "trigger_out_pulse",
+            "trigger_out_pulses_once_with_trigger_delay",
+            "soft_reset_does_not_stall_decimated_prefill",
             "trigger_delay_startup_and_holdoff",
             "burst_start_register",
             "config_written_after_arm_does_not_reach_armed_capture",

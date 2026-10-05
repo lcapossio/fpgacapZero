@@ -323,8 +323,10 @@ The ELA exposes `trigger_in` and `trigger_out` ports when built with
 `EXT_TRIG_EN=1`.  These let you:
 
 - **`trigger_out`** — pulse high for one cycle when the ELA's
-  internal trigger fires.  Wire it to a pin / LED / another ELA's
-  `trigger_in`.
+  internal trigger fires.  With a trigger delay it pulses on the
+  trigger event, not on the delayed commit, and hits during the
+  countdown do not pulse it again.  Wire it to a pin / LED / another
+  ELA's `trigger_in`.
 - **`trigger_in`** — combine an external signal with the internal
   trigger logic.  Modes: disabled (default), OR, AND.
 

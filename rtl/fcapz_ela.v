@@ -1318,7 +1318,9 @@ module fcapz_ela #(
         end else begin
             if (!HAS_DECIM) begin
                 decim_count <= 24'h0;
-            end else if (any_arm_pulse) begin
+            end else if (any_arm_pulse || reset_pulse) begin
+                // A soft reset must not leave the count mid-ratio: idle
+                // prefill stores only on decim_tick, and idle holds the count.
                 decim_count <= 24'h0;
             end else if (armed && !done) begin
                 if (decim_count >= decim_ratio)
@@ -1378,7 +1380,10 @@ module fcapz_ela #(
         if (sample_rst)
             trigger_out_r <= 1'b0;
         else
+            // One pulse per trigger: hits during the trigger-delay countdown
+            // are not evaluated, so they must not extend or repeat it.
             trigger_out_r <= (armed && !triggered && !capture_restart &&
+                              !trig_delay_pending &&
                               pretrigger_ready && trigger_holdoff_done &&
                               !sel_flush_active && trigger_hit) ? 1'b1 : 1'b0;
     end
