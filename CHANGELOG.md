@@ -301,7 +301,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Docs — chapter 10 had drifted from the CLI.** It gave `openocd` as the
   default `--backend` (it is `hw_server`) and `8` as the `--sample-width`
-  default (it comes from the probe file, else 8), said `--format` follows the
+  default (it comes from the probe file, else the core), said `--format` follows the
   `--out` extension (it does not), and left out `--gui-config`,
   `--two-chain-burst`, `--startup-arm`, `--trigger-holdoff`, `--profile`,
   `--open-in` and the `axi-mon` subcommand. The tables are now generated.
