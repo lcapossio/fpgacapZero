@@ -215,7 +215,7 @@ Usage: `fcapz [global options] configure [options]`
 | `--trigger-mask M` | `0xff` | Trigger bit mask (hex or decimal) |
 | `--sample-width N` | — | Bits per sample, must match the core (default: the probe file's, else 8) |
 | `--depth N` | `1024` | Buffer depth in samples; must match the core |
-| `--sample-clock-hz HZ` | — | Sample clock for the VCD timescale (default: the probe file's, else 100 MHz) |
+| `--sample-clock-hz HZ` | — | Sample clock rate, recorded in JSON exports; VCD time counts samples (default: the probe file's, else 100 MHz) |
 | `--channel N` | `0` | Probe mux channel index |
 | `--decimation N` | `0` | Sample decimation ratio (0=every cycle, N=every N+1); needs DECIM_EN=1 |
 | `--ext-trigger-mode {disabled,or,and}` | `disabled` | Combine the external trigger input with the comparators; needs EXT_TRIG_EN=1 |
@@ -241,7 +241,7 @@ Options `capture` has in addition to those of `configure`:
 
 | Option | Default | Description |
 |---|---|---|
-| `--timeout SEC` | `10.0` | Seconds to wait for the trigger |
+| `--timeout SEC` | `10.0` | Seconds to wait for the capture to complete (trigger and post-trigger samples) |
 | `--out FILE` | required | Output file |
 | `--format {json,csv,vcd}` | `json` | Export format (not inferred from the --out extension) |
 | `--summarize` | off | Print LLM-friendly capture summary to stdout |

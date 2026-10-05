@@ -356,7 +356,12 @@ class Analyzer:
 
     @_selected_transaction
     def reset(self) -> None:
-        """Soft-reset the ELA (CTRL reset bit); the core returns to idle."""
+        """Soft-reset the ELA capture state (CTRL reset bit).
+
+        The core re-arms at once if the runtime STARTUP_ARM register is set
+        (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
+        next step needs a verified idle core.
+        """
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
 

@@ -382,7 +382,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--sample-clock-hz", type=int, default=None, metavar="HZ",
-            help="Sample clock for the VCD timescale (default: the probe file's, else 100 MHz)",
+            help=(
+                "Sample clock rate, recorded in JSON exports; VCD time counts samples "
+                "(default: the probe file's, else 100 MHz)"
+            ),
         )
         parser.add_argument(
             "--channel", type=int, default=0, metavar="N", help="Probe mux channel index"
@@ -486,7 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cap.add_argument(
         "--timeout", type=_positive_float, default=10.0, metavar="SEC",
-        help="Seconds to wait for the trigger",
+        help="Seconds to wait for the capture to complete (trigger and post-trigger samples)",
     )
     cap.add_argument("--out", required=True, metavar="FILE", help="Output file")
     cap.add_argument(

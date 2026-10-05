@@ -72,7 +72,11 @@ Close the JTAG transport. `fast=True` skips long waits (e.g. Ctrl+C).
 reset() -> None
 ```
 
-Soft-reset the ELA (CTRL reset bit); the core returns to idle.
+Soft-reset the ELA capture state (CTRL reset bit).
+
+The core re-arms at once if the runtime STARTUP_ARM register is set
+(`CaptureConfig.startup_arm=True`); use `force_idle` when the
+next step needs a verified idle core.
 
 #### `Analyzer.force_idle`
 
