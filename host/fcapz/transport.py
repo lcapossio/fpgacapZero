@@ -1265,8 +1265,9 @@ class QuartusStpTransport(Transport):
         The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
         (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
         the burst scans go on the control chain itself.  Raises
-        :class:`BurstUnavailableError` when burst readout is off, and on a
-        malformed reply.
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, and :class:`BurstIntegrityError` when a burst ran but returned the
+        wrong number of samples; that is never read around.
         """
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
@@ -1290,11 +1291,12 @@ class QuartusStpTransport(Transport):
         The wide, single-chain cores handled by :meth:`read_sample_block` keep
         their timestamp window behind the *same* BSCAN instance, so the
         two-chain :meth:`read_timestamp_block` (which shifts on the ELA's
-        separate ``burst_data_chain``) can never reach them and silently falls
-        back to a slow per-word read.  This mirrors the sample burst but asserts
-        the timestamp-select bit in the burst pointer, returning one value per
-        captured sample.  Raises :class:`BurstUnavailableError` when burst
-        readout is off, and on a malformed reply.
+        separate ``burst_data_chain``) can never reach them.  This mirrors the
+        sample burst but asserts the timestamp-select bit in the burst pointer,
+        returning one value per captured sample.  Raises
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, and :class:`BurstIntegrityError` when a burst ran but returned the
+        wrong number of timestamps.
         """
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
@@ -1378,7 +1380,7 @@ class QuartusStpTransport(Transport):
                     break
                 values.append((scan_value >> (s * element_width)) & mask)
         if len(values) != n_elements:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"Quartus single-chain burst returned {len(values)} values, "
                 f"expected {n_elements}: {tokens!r}"
             )
@@ -2240,13 +2242,12 @@ class XilinxHwServerTransport(Transport):
         Otherwise falls back to single-sequence pipelined reads on the
         active ELA control chain.
 
-        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, so
-        it is only valid when a sample fits one 32-bit word (``SAMPLE_W <= 32``).
-        For a wider core (e.g. the AXI monitor, ``SAMPLE_W=160``) ``capture()``
-        reassembles each sample from 32-bit words and passes a *word* count here;
-        feeding that word count to the burst engine builds a 5x-oversized
-        single-line TCL scan sequence that xsdb never finishes — hanging the
-        read. Wide cores therefore skip burst and use the 32-bit word path.
+        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, but
+        *words* counts 32-bit words, so this burst is only used when a sample
+        fits one word (``SAMPLE_W <= 32``); a wider core here takes the 32-bit
+        word path.  ``Analyzer.capture()`` reads a wide core with
+        :meth:`read_sample_block`, which bursts whole samples, and comes here
+        only when that raises :class:`BurstUnavailableError`.
         """
         if words <= 0:
             return []

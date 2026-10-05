@@ -158,7 +158,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   error in an earlier send could leave a partial sequence that still ran.
   Every send is now checked. A burst that returns any other number of scans
   or values than it queued now raises `BurstIntegrityError` instead of being
-  re-read through the register window, which would hide the defect.
+  re-read through the register window, which would hide the defect. The
+  Quartus single-chain burst raises it too, instead of a plain `RuntimeError`.
 
 - **hw_server — a deep burst could drop out of burst mode mid-read.** Each
   chunk of scans ran as its own `jtag sequence`, and between two runs hw_server

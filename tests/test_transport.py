@@ -505,6 +505,19 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
         self.assertEqual(t.last_script.count("-length 49"), 1)
 
+    def test_read_sample_block_single_chain_short_reply_is_an_integrity_error(self):
+        # Prime scan plus one sample scan, but two samples requested.
+        payload = " ".join(["0" * 256, "1" * 256])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(5)
+        with self.assertRaises(BurstIntegrityError):
+            t.read_sample_block(0x0100, 2, 160)
+
     def test_read_timestamp_block_single_chain_sets_timestamp_bit(self):
         # Four 32-bit timestamps pack into one 256-bit scan (8 per scan), plus
         # one discarded prime scan -- read on the active chain, not the ELA's.
