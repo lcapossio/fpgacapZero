@@ -50,17 +50,26 @@ def test_arty_verilog_and_vhdl_tops_expose_same_validation_blocks() -> None:
 
 
 def test_arty_vhdl_build_and_freshness_lists_include_monitor_sources() -> None:
-    required_files = (
-        "fcapz_axi_mon.v",
-        "fcapz_axi_mon_xilinx7.v",
-    )
+    # The Verilog/MicroBlaze build compiles the Verilog monitor core; the VHDL
+    # build compiles the VHDL monitor entity instead. Both compile the Xilinx-7
+    # TAP wrapper. Assert each build actually *lists* the monitor source it uses
+    # (a path that appears only in an explanatory comment would not satisfy this,
+    # since the checked paths differ per build and never appear as comments).
+    verilog_build = _read(ARTY / "build_arty.tcl").replace("\\", "/")
+    for source in ("rtl/fcapz_axi_mon.v", "rtl/fcapz_axi_mon_xilinx7.v"):
+        assert source in verilog_build, f"build_arty.tcl missing {source}"
 
-    for file in (ARTY / "build_arty.tcl", ARTY / "build_arty_vhdl.tcl"):
-        text = _read(file).replace("\\", "/")
-        for source in required_files:
-            assert f"rtl/{source}" in text, f"{file.relative_to(ROOT)} missing rtl/{source}"
+    vhdl_build = _read(ARTY / "build_arty_vhdl.tcl").replace("\\", "/")
+    for source in ("rtl/vhdl/core/fcapz_axi_mon.vhd", "rtl/fcapz_axi_mon_xilinx7.v"):
+        assert source in vhdl_build, f"build_arty_vhdl.tcl missing {source}"
 
+    # Freshness manifests must list the monitor source each variant actually
+    # builds: the Verilog list the .v core, the VHDL list the .vhd entity.
     hw_test = _read(ARTY / "test_hw_integration.py")
-    for source in required_files:
+    for source in ("fcapz_axi_mon.v", "fcapz_axi_mon_xilinx7.v"):
         pattern = rf'_ROOT\s*/\s*"rtl"\s*/\s*"{re.escape(source)}"'
         assert re.search(pattern, hw_test), f"test_hw_integration.py missing rtl/{source}"
+    assert re.search(
+        r'_ROOT\s*/\s*"rtl"\s*/\s*"vhdl"\s*/\s*"core"\s*/\s*"fcapz_axi_mon\.vhd"',
+        hw_test,
+    ), "test_hw_integration.py VHDL list missing rtl/vhdl/core/fcapz_axi_mon.vhd"

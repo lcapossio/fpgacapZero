@@ -1,5 +1,6 @@
 # 15 — Export formats
 
+> [!NOTE]
 > **Goal**: understand every file format `Analyzer` can write, what
 > each contains, when to use which, how the auto-generated `.gtkw`
 > waveform-viewer layout file works, and the practical embedding

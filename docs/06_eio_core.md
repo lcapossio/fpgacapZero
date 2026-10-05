@@ -1,5 +1,6 @@
 # 06 — EIO core
 
+> [!NOTE]
 > **Goal**: understand the Embedded I/O core — the simplest of the
 > four — and how to use it from the host stack to read fabric
 > signals and drive them from your laptop in real time, without
@@ -53,22 +54,16 @@ trigger-test plumbing used by the Arty hardware integration suite.
 
 ## Architecture
 
-```
-                       +------------------+
-                       |  fcapz_eio       |
-fabric → probe_in[*] → | (2-FF sync into  |  <-- jtag_clk
-                       |  jtag_clk)       |
-                       |                  |
-                       |  Register file:  |  <-- USER3 (BSCANE2)
-                       |  0x0000 VERSION  |  <-- 49-bit DR protocol
-                       |  0x0004 IN_W     |
-                       |  0x0008 OUT_W    |
-                       |  0x0010+ IN[i]   |
-                       |  0x0100+ OUT[i]  |
-                       |                  |
-                       |  Output regs     |
-fabric ← probe_out[*]← | (jtag_clk)       |
-                       +------------------+
+```mermaid
+flowchart LR
+    fin["fabric: probe_in[*]"] --> sync
+    host["Host: 49-bit DR protocol<br>on USER3 (BSCANE2)"] <--> regs
+    subgraph eio["fcapz_eio"]
+        sync["2-FF sync into jtag_clk"] --> regs
+        regs["Register file (jtag_clk)<br>0x0000 VERSION<br>0x0004 IN_W<br>0x0008 OUT_W<br>0x0010+ IN[i]<br>0x0100+ OUT[i]"]
+        regs --> outr["Output registers (jtag_clk)"]
+    end
+    outr --> fout["fabric: probe_out[*]"]
 ```
 
 The whole core is in [`../rtl/fcapz_eio.v`](../rtl/fcapz_eio.v) and

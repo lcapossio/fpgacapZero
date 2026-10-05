@@ -47,9 +47,6 @@ GW_SH_PROC = "gw_sh.exe" if sys.platform == "win32" else "gw_sh"
 HELPER_NAMES_WIN = {
     GW_SH_PROC,
 }
-HELPER_NAMES_LIN = {
-    GW_SH_PROC,
-}
 
 # NOTE: common helper script for all examples ?
 def _runs_dir_is_deletable(project_dir: Path) -> bool:
@@ -79,39 +76,22 @@ def _runs_dir_is_deletable(project_dir: Path) -> bool:
 
 
 def cleanup_orphans() -> int:
-    """Kill any GoWIN helper processes left over from a killed build.
+    """Kill GoWIN helper processes left over from a killed build.
+
+    Windows only.  Only orphans are terminated: processes named in the helper
+    list whose parent process is gone.  A helper with a live parent belongs to
+    a running build or session and is left alone.
 
     Returns the number of processes terminated.
     """
 
     killed = 0
 
-    if sys.platform == "linux":
-        for proc in HELPER_NAMES_LIN:
-            try:
-                subprocess.run(
-                    ["pkill", proc],
-                    capture_output=True,
-                    timeout=5,
-                )
-                killed += 1
-                print(f"[build.py] terminated orphan GoWIN helper process={proc}")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-
-        return killed
-
+    # Only Windows needs this: an open handle there blocks deleting the
+    # project directory.  On Linux open files don't block unlink, and an
+    # orphan can't be told apart reliably (subreapers adopt it, not init),
+    # so nothing is killed.
     if sys.platform == "win32":
-
-        """Uses PowerShell's Get-Process to enumerate helper children by
-        executable basename, then filters to those whose Path lives under a
-        GoWIN install.  Any matching process is terminated — a concurrent
-        interactive GoWIN session may also spawn these helpers, but they
-        are short-lived workers for synthesis/simulation, not user-facing
-        state, so killing them is safe.  (vivado.exe itself is never in
-        HELPER_NAMES_WIN, and hw_server is likewise excluded.)
-        """
-
         # Locate powershell.exe explicitly — it is not always on the
         # subprocess PATH under some shells (e.g. Git Bash) even though
         # it exists at the standard Windows location.
@@ -125,13 +105,17 @@ def cleanup_orphans() -> int:
             print("[build.py] warning: powershell.exe not found, skipping orphan cleanup")
             return 0
 
-        # Strip .exe from names for Get-Process (which matches by basename)
-        proc_names = [n.removesuffix(".exe") for n in HELPER_NAMES_WIN]
-        names_arg = ",".join(f"'{n}'" for n in proc_names)
+        names_arg = ",".join(f"'{n}'" for n in sorted(HELPER_NAMES_WIN))
         ps = (
-            f"Get-Process -Name @({names_arg}) -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.Path -like '*GoWIN*' -or $_.Path -like '*Xilinx*' } | "
-            "ForEach-Object { \"$($_.Id)`t$($_.Path)\" }"
+            f"$names = @({names_arg}); "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $names -contains $_.Name -and "
+            "($_.ExecutablePath -like '*GoWIN*' -or $_.ExecutablePath -like '*Xilinx*') } | "
+            "ForEach-Object { "
+            "$parent = Get-CimInstance Win32_Process "
+            "-Filter \"ProcessId=$($_.ParentProcessId)\" -ErrorAction SilentlyContinue; "
+            "if (-not $parent -or $parent.CreationDate -gt $_.CreationDate) "
+            "{ \"$($_.ProcessId)`t$($_.ExecutablePath)\" } }"
         )
         try:
             result = subprocess.run(
@@ -152,15 +136,21 @@ def cleanup_orphans() -> int:
                 continue
             pid_str, path = parts
             try:
-                subprocess.run(
+                tk = subprocess.run(
                     ["taskkill", "/F", "/PID", pid_str],
                     capture_output=True,
+                    text=True,
                     timeout=5,
                 )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+            if tk.returncode == 0:
                 killed += 1
                 print(f"[build.py] terminated orphan GoWIN helper pid={pid_str} ({path})")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
+            else:
+                reason = (tk.stderr or tk.stdout).strip().splitlines()
+                print(f"[build.py] warning: could not terminate orphan pid={pid_str} "
+                      f"({path}): {reason[-1] if reason else tk.returncode}")
 
     return killed
 

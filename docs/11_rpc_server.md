@@ -1,5 +1,6 @@
 # 11 — JSON-RPC server
 
+> [!NOTE]
 > **Goal**: drive fpgacapZero from another language or process.
 > By the end of this chapter you can spawn the RPC server, send
 > JSON commands over its stdin, parse the JSON responses on its
@@ -193,6 +194,11 @@ semantics apply only to the former, which is why `ir_table` is **null** on a
 something to report: `{"kind", "channel", "proto_version", "num_chains",
 "max_dr_bits"}` for the byte-stream bridge (plus `baudrate` over serial), and
 `null` for a JTAG probe, which negotiates nothing.
+
+`hw_server` and `usb_blaster` also take `"burst": false` for a bitstream with
+no burst readout path (the CLI's `--no-burst`); every capture is then read
+through the register window. `hw_server` takes `"single_chain_burst": false`
+for a legacy two-chain build (the CLI's `--two-chain-burst`).
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
 server infers the preset from the tap name (`gw*` → `gowin`,

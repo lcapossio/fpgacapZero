@@ -1,0 +1,31 @@
+# Provenance for the vendored VexRiscv soft CPU core.
+#
+# VexRiscv is an open-source RISC-V CPU generated from SpinalHDL. fpgacapZero
+# uses it ONLY as an AXI traffic generator inside the example reference designs
+# (examples/arty_a7, examples/de25_nano) -- it is never part of the fcapz debug
+# IP under rtl/, which stays CPU-agnostic. See examples/common/vexriscv/.
+#
+# This directory vendors the exact pre-generated core so clean builds are
+# reproducible and offline. examples/common/vexriscv/get_deps.py verifies the
+# checked-in file against the SHA-256 below; run it with --update to re-fetch
+# the pinned core from upstream (the only step that needs network access).
+
+[core]
+file    = "VexRiscv_Lite.v"
+sha256  = "90e0b8f5912df2532d12bc766b110a632c1b85dd82b8aecd431d715c25f4cbbe"
+license = "MIT"                     # see ./LICENSE
+variant = "VexRiscv_Lite (RV32I, plain Wishbone iBus/dBus)"
+
+# Where the pre-generated file is fetched from (LiteX packaging of VexRiscv).
+[source]
+repo       = "https://github.com/litex-hub/pythondata-cpu-vexriscv"
+commit     = "1979a644dbe64d8d32dfbdd970dccee6add63723"
+path       = "pythondata_cpu_vexriscv/verilog/VexRiscv_Lite.v"
+raw_url    = "https://raw.githubusercontent.com/litex-hub/pythondata-cpu-vexriscv/1979a644dbe64d8d32dfbdd970dccee6add63723/pythondata_cpu_vexriscv/verilog/VexRiscv_Lite.v"
+
+# Upstream generator provenance, as recorded in the file header.
+[upstream]
+project        = "https://github.com/SpinalHDL/VexRiscv"
+license_source = "https://github.com/SpinalHDL/VexRiscv/blob/master/LICENSE"
+spinalhdl      = "v1.9.4 (git head 270018552577f3bb8e5339ee2583c9c22d324215)"
+vexriscv_git   = "8542a5786b26857f3ef830ae9e72eec031df42d3"

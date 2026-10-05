@@ -2,6 +2,12 @@
 # skip whitespace checks (git diff --check), and exclude from language stats.
 host/fcapz/web/vendor/** linguist-vendored -whitespace
 
+# Vendored VexRiscv core: pin LF so its checked-out bytes match the SHA-256 that
+# examples/common/vexriscv/get_deps.py verifies offline. Without this, a Windows
+# checkout with core.autocrlf=true would CRLF-convert the file and fail the hash
+# on an otherwise-clean clone. Also excluded from language stats.
+third_party/vexriscv/VexRiscv_Lite.v text eol=lf linguist-vendored
+
 # Built web bundle: normalize to LF so a Linux CI rebuild matches the committed
 # tree byte-for-byte (see the frontend-build drift guard in CI).
 host/fcapz/web/static/assets/*.js  text eol=lf

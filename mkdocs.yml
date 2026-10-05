@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+#
+# HTML build of the user manual in docs/.  The Markdown in docs/ stays the
+# single source and keeps rendering on GitHub; this file only adds the site
+# navigation and theme.
+#
+#   pip install -e ".[docs]"
+#   mkdocs serve            # live preview on http://127.0.0.1:8000
+#   mkdocs build --strict   # what CI runs; writes site/
+#
+# Only use Markdown that GitHub renders too: GitHub alerts (> [!NOTE]) and
+# ```mermaid fences are styled here, while site-only syntax (!!! admonitions,
+# === tabs, {attr} lists, front matter) fails the build through the hook.
+
+# The hook appends the version from the VERSION file.
+site_name: fpgacapZero User Manual
+site_description: >-
+  Open-source, vendor-agnostic FPGA debug suite: logic analyzer, embedded
+  I/O, JTAG-to-AXI and JTAG-to-UART bridges, with a Python host stack.
+site_author: Leonardo Capossio - bard0 design
+copyright: Copyright &copy; 2026 Leonardo Capossio - bard0 design. Apache-2.0.
+
+repo_url: https://github.com/lcapossio/fpgacapZero
+repo_name: lcapossio/fpgacapZero
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  logo: assets/fcapz-logo.png
+  favicon: assets/fcapz-logo.png
+  features:
+    - content.action.edit
+    - content.action.view
+    - content.code.copy
+    - navigation.footer
+    # navigation.instant needs site_url (it follows the sitemap); add both
+    # when the site gets a published address.
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra_css:
+  - assets/github-alerts.css
+
+plugins:
+  - search
+  # "Last updated" from git history; CI checks out the full history for it.
+  - git-revision-date-localized:
+      type: date
+      enable_creation_date: false
+      fallback_to_build_date: true
+
+# Links that leave docs/ (../rtl/..., ../CHANGELOG.md, ...) or name a folder
+# (specs/) work on GitHub but have no page in the site; the hook points them at
+# the repository instead and fails the build when the target does not exist.
+hooks:
+  - tools/mkdocs_hooks.py
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+# No attr_list, md_in_html or admonition: their syntax does not render on
+# GitHub, so it is not enabled here either.
+markdown_extensions:
+  - github-callouts
+  - tables
+  # GitHub-style heading anchors, so the #links written for GitHub resolve.
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  # ```mermaid fences become diagrams, as they do on GitHub.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: README.md
+  - Manual:
+      - 01 Overview: 01_overview.md
+      - 02 Installation: 02_install.md
+      - 03 First capture: 03_first_capture.md
+      - 04 RTL integration: 04_rtl_integration.md
+      - 05 ELA core: 05_ela_core.md
+      - 06 EIO core: 06_eio_core.md
+      - 07 EJTAG-AXI bridge: 07_ejtag_axi_bridge.md
+      - 08 EJTAG-UART bridge: 08_ejtag_uart_bridge.md
+      - 09 Python API: 09_python_api.md
+      - 10 CLI reference: 10_cli_reference.md
+      - 11 JSON-RPC server: 11_rpc_server.md
+      - 12 Desktop GUI: 12_gui.md
+      - 13 Register map: 13_register_map.md
+      - 14 Transports: 14_transports.md
+      - 15 Export formats: 15_export_formats.md
+      - 16 Versioning and release: 16_versioning_and_release.md
+      - 17 Troubleshooting: 17_troubleshooting.md
+      - 18 Web interface: 18_web_interface.md
+      - 19 AXI monitor: 19_axi_monitor.md
+  - Reference specs:
+      - Architecture: specs/architecture.md
+      - Register map: specs/register_map.md
+      - Transport API: specs/transport_api.md
+      - Python API reference: specs/python_api.md
+      - Waveform schema: specs/waveform_schema.md
+      - AXI monitor (design plan): specs/axi_monitor.md

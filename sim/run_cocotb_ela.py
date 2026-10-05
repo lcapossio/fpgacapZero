@@ -59,6 +59,21 @@ class CocotbTarget:
         return {**BASE_PARAMETERS, **self.parameters}
 
 
+CHANNEL_SWITCH_TESTS = (
+    "channel_switch_ignores_old_channel_samples",
+    "channel_switch_is_not_an_edge",
+    "channel_switch_drops_old_prearm_history",
+    "channel_switch_rearm_drops_old_credit",
+)
+
+SEQUENCER_TESTS = (
+    "sequencer_count_target_one",
+    "sequencer_final_stage_counts_to_target",
+    "sequencer_counts_first_hit_after_holdoff",
+    "sequencer_next_stage_ignores_previous_stage_match",
+    "sequencer_matches_cycle_reference",
+)
+
 TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget(
         "base",
@@ -72,30 +87,81 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "randomized_value_capture",
             "edge_capture",
             "overflow_and_reset",
+            "oversize_length_is_reported_not_truncated",
+            "oversize_length_sum_still_reports_overflow",
+            "posttrigger_at_depth_still_completes",
             "decimation_and_external_trigger",
             "decimation_zero_and_every4",
             "external_trigger_disabled",
             "trigger_out_pulse",
+            "trigger_out_pulses_once_with_trigger_delay",
+            "soft_reset_does_not_stall_decimated_prefill",
             "trigger_delay_startup_and_holdoff",
             "burst_start_register",
+            "config_written_after_arm_does_not_reach_armed_capture",
+            "rearm_mid_capture_restarts_cleanly",
         ),
     ),
     CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32},
                  ("timestamp_capture", "timestamp_decimation_gap")),
     CocotbTarget("timestamp48", {"TIMESTAMP_W": 48}, ("timestamp_48_upper_word",)),
-    CocotbTarget("segments4", {"NUM_SEGMENTS": 4}, ("segmented_capture",)),
+    CocotbTarget("segments4", {"NUM_SEGMENTS": 4},
+                 ("segmented_capture", "segmented_windows_are_contiguous",
+                  "segment_restart_keeps_the_first_sample",
+                  "rearm_mid_capture_restarts_cleanly")),
+    CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
+    *(
+        CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},
+                     ("rearm_mid_capture_restarts_cleanly",))
+        for pipe in (0, 1)
+    ),
+    CocotbTarget("reset_sq_pipe1", {"STOR_QUAL": 1, "INPUT_PIPE": 1, "DEPTH": 128},
+                 ("soft_reset_drops_idle_prefill_credit",)),
     CocotbTarget("probe_mux", {"PROBE_MUX_W": 32}, ("probe_mux_slice_selection",)),
+    *(
+        CocotbTarget(
+            f"channel_switch_mux_pipe{pipe}",
+            {"PROBE_MUX_W": 32, "INPUT_PIPE": pipe},
+            CHANNEL_SWITCH_TESTS,
+        )
+        for pipe in (0, 1, 2, 3)
+    ),
+    CocotbTarget("channel_switch_mux_ext", {"PROBE_MUX_W": 32, "EXT_TRIG_EN": 1},
+                 CHANNEL_SWITCH_TESTS),
+    *(
+        CocotbTarget(
+            f"channel_switch_chan2_pipe{pipe}",
+            {"NUM_CHANNELS": 2, "INPUT_PIPE": pipe},
+            CHANNEL_SWITCH_TESTS,
+        )
+        for pipe in (0, 1)
+    ),
     CocotbTarget(
         "input_pipe",
         {"DEPTH": 1024, "DECIM_EN": 1, "EXT_TRIG_EN": 1,
          "TIMESTAMP_W": 32, "NUM_SEGMENTS": 4, "INPUT_PIPE": 1},
-        ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse"),
+        ("input_pipe_captures", "input_pipe_holdoff_late_ext_pulse",
+         "segment_restart_keeps_the_first_sample", "rearm_mid_capture_restarts_cleanly"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
-    CocotbTarget("sequencer", {"TRIG_STAGES": 2}, ("sequencer_count_target_one",)),
+    *(
+        CocotbTarget(
+            f"sequencer{stages}" + (f"_pipe{pipe}" if pipe else ""),
+            {"TRIG_STAGES": stages, "INPUT_PIPE": pipe},
+            SEQUENCER_TESTS,
+        )
+        for stages in (2, 4)
+        for pipe in (0, 1, 2, 3)
+    ),
+    CocotbTarget("sequencer2_single_compare", {"TRIG_STAGES": 2, "INPUT_PIPE": 1,
+                                                "DUAL_COMPARE": 0},
+                 ("sequencer_matches_cycle_reference",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
+    # 256 x 2048: the timestamp window base (0x10100) is past 0xFFFF.
+    CocotbTarget("deep_wide_timestamp", {"SAMPLE_W": 256, "DEPTH": 2048, "TIMESTAMP_W": 32},
+                 ("deep_timestamp_base_does_not_alias_data",)),
     CocotbTarget("wide_trig", {"SAMPLE_W": 48, "DEPTH": 8, "WIDE_TRIG": 1},
                  ("wide_trigger_upper_bit",)),
     CocotbTarget(
@@ -106,7 +172,33 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget(
         "rolling_prehistory",
         {"EXT_TRIG_EN": 1, "INPUT_PIPE": 1},
-        ("rolling_prehistory_and_rearm",),
+        (
+            "rolling_prehistory_and_rearm",
+            "input_pipe_depth_sets_capture_latency",
+            "input_pipe_keeps_the_write_queued_at_arm",
+            "config_written_after_arm_does_not_reach_armed_capture",
+        ),
+    ),
+    CocotbTarget(
+        "input_pipe2",
+        {"EXT_TRIG_EN": 1, "INPUT_PIPE": 2},
+        ("input_pipe_depth_sets_capture_latency", "input_pipe_keeps_the_write_queued_at_arm"),
+    ),
+    CocotbTarget(
+        "input_pipe3",
+        {"EXT_TRIG_EN": 1, "INPUT_PIPE": 3},
+        ("input_pipe_depth_sets_capture_latency", "input_pipe_keeps_the_write_queued_at_arm"),
+    ),
+    # pipe0 checks the INPUT_PIPE=0 parameter with EXT_TRIG_EN, which the core
+    # builds as one probe stage; unpipelined RTL is covered by the
+    # EXT_TRIG_EN=0 targets (sequencer2/4, timestamp32, config_min, ...).
+    *(
+        CocotbTarget(
+            f"trigger_align_pipe{pipe}",
+            {"STOR_QUAL": 1, "DECIM_EN": 1, "EXT_TRIG_EN": 1, "INPUT_PIPE": pipe},
+            ("trigger_marks_the_matched_sample", "input_pipe_depth_sets_capture_latency"),
+        )
+        for pipe in (0, 1, 2, 3)
     ),
     CocotbTarget(
         "config_min",

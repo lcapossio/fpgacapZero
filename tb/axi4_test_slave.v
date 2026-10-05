@@ -13,7 +13,14 @@ module axi4_test_slave #(
     parameter NUM_WORDS    = 16,
     parameter STALL_CYCLES = 0,
     parameter ERROR_ADDR   = 32'hFFFF_FFFC,
-    parameter HANG_ADDR    = 32'hFFFF_FFF8
+    parameter HANG_ADDR    = 32'hFFFF_FFF8,
+    // HANG_EN=0 disables the never-ready hang behaviour entirely: HANG_ADDR then
+    // behaves as an ordinary register word. Set this to 0 for a slave on a
+    // *shared* bus (e.g. behind fcapz_axi_interconnect): a blocking interconnect
+    // that has granted a transaction to the hang address would otherwise never
+    // see its response, wedging the bus for every master. Keep it 1 (default)
+    // for a single-master timeout bench that deliberately exercises the hang.
+    parameter HANG_EN      = 1
 ) (
     input  wire                    clk,
     input  wire                    rst,
@@ -72,7 +79,7 @@ module axi4_test_slave #(
 
     function is_hang_addr;
         input [ADDR_W-1:0] addr;
-        is_hang_addr = (addr == HANG_ADDR);
+        is_hang_addr = (HANG_EN != 0) && (addr == HANG_ADDR);
     endfunction
 
     // ---- Initialise memory ---------------------------------------------------

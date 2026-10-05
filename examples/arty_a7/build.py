@@ -4,14 +4,20 @@
 
 """Launch a Vivado batch build of the Arty A7 reference design.
 
-This is the only supported entry point for building the bitstream — it does
-not invoke any shell primitive (no ``rm``) and relies on Vivado's own
-``-force`` flag to recreate the project directory.  All build artefacts land
-under ``vivado/fpgacapZero_arty/`` and ``examples/arty_a7/arty_a7_top.bit``.
+Variant dispatcher. The default is the open-source **VexRiscv** design
+(``arty_a7_vex_top``); the proprietary MicroBlaze design is deprecated and
+built only on request:
 
-Usage
------
-    python examples/arty_a7/build.py              # default, ~10-15 min
+    python examples/arty_a7/build.py                        # vex (default)
+    python examples/arty_a7/build.py --variant microblaze   # legacy MicroBlaze
+    python examples/arty_a7/build.py --variant vhdl         # VHDL top
+
+The ``vex`` and ``vhdl`` variants delegate to ``build_arty_vex.py`` and
+``build_vhdl.py``; ``microblaze`` builds ``build_arty.tcl`` here (artefacts
+under ``vivado/fpgacapZero_arty/`` and ``examples/arty_a7/arty_a7_top.bit``).
+It invokes no shell primitive (no ``rm``) and relies on Vivado's own
+``-force`` flag to recreate the project directory.
+
     python examples/arty_a7/build.py --vivado PATH/TO/vivado
     python examples/arty_a7/build.py --log-dir vivado/logs
 
@@ -43,8 +49,9 @@ PROJECT_DIR = PROJECT_PARENT / PROJECT_NAME
 # hw_server is NOT in this list — it is a long-running debug server and
 # must never be killed by the build.  vivado.exe is also NOT in the list
 # because a concurrent interactive Vivado session would be wrongly
-# targeted — we match helper children by name *and* by reference to
-# this build's project directory via their command line or CWD.
+# targeted.  A helper matched by name is killed only when it is an orphan
+# (its parent process is gone): a live xsdb owned by a host/test session or
+# an xsim owned by a running simulation is left alone.
 HELPER_NAMES = {
     "vrs.exe", "xvlog.exe", "xelab.exe", "xsim.exe",
     "xsdb.exe", "loader.exe", "rdiServer.exe",
@@ -79,15 +86,15 @@ def _runs_dir_is_deletable(project_dir: Path) -> bool:
 
 
 def cleanup_orphans() -> int:
-    """Kill any Vivado helper processes left over from a killed build.
+    """Kill Vivado helper processes left over from a killed build.
 
-    Uses PowerShell's Get-Process to enumerate helper children by
-    executable basename, then filters to those whose Path lives under a
-    Vivado install.  Any matching process is terminated — a concurrent
-    interactive Vivado session may also spawn these helpers, but they
-    are short-lived workers for synthesis/simulation, not user-facing
-    state, so killing them is safe.  (vivado.exe itself is never in
-    HELPER_NAMES, and hw_server is likewise excluded.)
+    Enumerates processes named in HELPER_NAMES whose executable lives under
+    a Vivado/Xilinx install, and terminates only orphans: those whose parent
+    process no longer exists (or whose parent PID was reused by a process
+    started after the helper).  A helper with a live parent belongs to a
+    running Vivado, host session or simulation and is never touched.
+    (vivado.exe itself is never in HELPER_NAMES, and hw_server is likewise
+    excluded.)
 
     Returns the number of processes terminated.
     """
@@ -107,13 +114,17 @@ def cleanup_orphans() -> int:
         print("[build.py] warning: powershell.exe not found, skipping orphan cleanup")
         return 0
 
-    # Strip .exe from names for Get-Process (which matches by basename)
-    proc_names = [n.removesuffix(".exe") for n in HELPER_NAMES]
-    names_arg = ",".join(f"'{n}'" for n in proc_names)
+    names_arg = ",".join(f"'{n}'" for n in sorted(HELPER_NAMES))
     ps = (
-        f"Get-Process -Name @({names_arg}) -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.Path -like '*Vivado*' -or $_.Path -like '*Xilinx*' } | "
-        "ForEach-Object { \"$($_.Id)`t$($_.Path)\" }"
+        f"$names = @({names_arg}); "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $names -contains $_.Name -and "
+        "($_.ExecutablePath -like '*Vivado*' -or $_.ExecutablePath -like '*Xilinx*') } | "
+        "ForEach-Object { "
+        "$parent = Get-CimInstance Win32_Process "
+        "-Filter \"ProcessId=$($_.ParentProcessId)\" -ErrorAction SilentlyContinue; "
+        "if (-not $parent -or $parent.CreationDate -gt $_.CreationDate) "
+        "{ \"$($_.ProcessId)`t$($_.ExecutablePath)\" } }"
     )
     try:
         result = subprocess.run(
@@ -135,15 +146,21 @@ def cleanup_orphans() -> int:
             continue
         pid_str, path = parts
         try:
-            subprocess.run(
+            tk = subprocess.run(
                 ["taskkill", "/F", "/PID", pid_str],
                 capture_output=True,
+                text=True,
                 timeout=5,
             )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if tk.returncode == 0:
             killed += 1
             print(f"[build.py] terminated orphan Vivado helper pid={pid_str} ({path})")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        else:
+            reason = (tk.stderr or tk.stdout).strip().splitlines()
+            print(f"[build.py] warning: could not terminate orphan pid={pid_str} "
+                  f"({path}): {reason[-1] if reason else tk.returncode}")
     return killed
 
 
@@ -158,10 +175,28 @@ def find_vivado(explicit: str | None) -> str:
     return found
 
 
+def _delegate(script_name: str, args) -> int:
+    """Run a sibling build launcher (vex/vhdl) as a subprocess."""
+    script = ROOT / "examples" / "arty_a7" / script_name
+    cmd = [sys.executable, str(script)]
+    if args.vivado:
+        cmd += ["--vivado", args.vivado]
+    cmd += ["--log-dir", args.log_dir]
+    print(f"[build.py] variant '{args.variant}' -> {script_name}: {' '.join(cmd)}")
+    return subprocess.run(cmd, cwd=str(ROOT), check=False).returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["vex", "microblaze", "vhdl"],
+        default="vex",
+        help="Design variant: 'vex' (default, open-source VexRiscv), "
+             "'microblaze' (legacy, proprietary), or 'vhdl'.",
     )
     parser.add_argument("--vivado", default=None, help="Path to vivado executable")
     parser.add_argument(
@@ -171,6 +206,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.variant == "vex":
+        return _delegate("build_arty_vex.py", args)
+    if args.variant == "vhdl":
+        return _delegate("build_vhdl.py", args)
+    return _build_microblaze(args)
+
+
+def _build_microblaze(args) -> int:
     vivado = find_vivado(args.vivado)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

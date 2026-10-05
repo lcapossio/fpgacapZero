@@ -103,6 +103,18 @@ class ConnectionPanel(QGroupBox):
         self._ir.addItem("UltraScale+", "ultrascale")
         self._ir.addItem("Gowin (OpenOCD)", "gowin")
 
+        self._burst_path = QComboBox()
+        self._burst_path.addItem("Single chain (default)", "single_chain")
+        self._burst_path.addItem("Two chain (legacy USER2)", "two_chain")
+        self._burst_path.addItem("None (register window)", "none")
+        self._burst_path.setToolTip(
+            "The bitstream's burst readout path. Single chain matches the default "
+            "SINGLE_CHAIN_BURST=1 build; two chain is for SINGLE_CHAIN_BURST=0 "
+            "builds with the USER2 burst chain (hw_server only); none is for builds "
+            "with no burst path, read through the slower register window. A burst "
+            "that fails is reported, not read around.",
+        )
+
         self._hardware = QLineEdit()
         self._hardware.setPlaceholderText("auto or <board name> [USB-N]")
         self._hardware.setToolTip(
@@ -210,6 +222,7 @@ class ConnectionPanel(QGroupBox):
         form.addRow("Port", self._port)
         form.addRow("TAP / target", tap_row)
         form.addRow("IR table", self._ir)
+        form.addRow("Burst readout", self._burst_path)
         self._hardware_label = QLabel("Quartus hardware")
         self._quartus_stp_label = QLabel("quartus_stp")
         self._tcp_timeout_label = QLabel("Connect timeout")
@@ -242,6 +255,7 @@ class ConnectionPanel(QGroupBox):
         self._host.setEnabled(not is_usb)
         self._port.setEnabled(not is_usb)
         self._ir.setEnabled(not is_usb)
+        self._burst_path.setEnabled(backend != "openocd")
         self._hardware.setEnabled(is_usb)
         self._quartus_stp.setEnabled(is_usb)
         self._quartus_row.setEnabled(is_usb)
@@ -485,6 +499,7 @@ class ConnectionPanel(QGroupBox):
             hw_ready_timeout_sec=float(self._hw_ready.value()),
             hw_post_program_delay_ms=int(self._post_program_ms.value()),
             hw_ready_poll_interval_ms=int(self._ready_poll_ms.value()),
+            burst_path=str(self._burst_path.currentData()),
         )
 
     def load_from_settings(self, conn: ConnectionSettings) -> None:
@@ -499,6 +514,9 @@ class ConnectionPanel(QGroupBox):
         ir_idx = self._ir.findData(conn.ir_table)
         if ir_idx >= 0:
             self._ir.setCurrentIndex(ir_idx)
+        burst_idx = self._burst_path.findData(conn.burst_path)
+        if burst_idx >= 0:
+            self._burst_path.setCurrentIndex(burst_idx)
         self._program.setText(conn.program or "")
         self._program_on_connect.setChecked(conn.program_on_connect)
         self._tcp_timeout.setValue(int(max(3, min(600, round(conn.connect_timeout_sec)))))
@@ -531,6 +549,7 @@ class ConnectionPanel(QGroupBox):
         self._host.setEnabled(editable and not is_usb)
         self._port.setEnabled(editable and not is_usb)
         self._ir.setEnabled(editable and not is_usb)
+        self._burst_path.setEnabled(editable and backend != "openocd")
         self._hardware.setEnabled(editable and is_usb)
         self._quartus_stp.setEnabled(editable and is_usb)
         self._quartus_row.setEnabled(editable and is_usb)

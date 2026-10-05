@@ -106,6 +106,15 @@ TESTBENCHES = {
             RTL / "fcapz_core_manager.v",
         ],
     ),
+    "fcapz_core_manager_legacy_burst": (
+        TB / "fcapz_core_manager_legacy_burst_tb.sv",
+        [
+            TB / "legacy" / "fcapz_core_manager_pre_burst_start.v",
+            RTL / "fcapz_core_manager.v",
+            RTL / "jtag_pipe_iface.v",
+            RTL / "jtag_burst_read.v",
+        ],
+    ),
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
@@ -113,6 +122,13 @@ TESTBENCHES = {
             RTL / "fcapz_ela.v",
             RTL / "dpram.v",
             RTL / "trig_compare.v",
+        ],
+    ),
+    "fcapz_axi_interconnect": (
+        TB / "fcapz_axi_interconnect_tb.sv",
+        [
+            TB / "axi4_test_slave.v",
+            RTL / "fcapz_axi_interconnect.v",
         ],
     ),
 }
@@ -127,7 +143,9 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "fcapz_core_manager",
+    "fcapz_core_manager_legacy_burst",
     "chan_mux",
+    "fcapz_axi_interconnect",
 ]
 
 LINT_TARGETS = [
@@ -143,6 +161,7 @@ LINT_TARGETS = [
     RTL / "fcapz_ela.v",
     RTL / "fcapz_ela_xilinx7.v",
     RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_axi_interconnect.v",
     RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_eio.v",
     RTL / "fcapz_eio_xilinx7.v",

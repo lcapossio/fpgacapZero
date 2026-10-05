@@ -1,5 +1,6 @@
 # 08 — EJTAG-UART bridge
 
+> [!NOTE]
 > **Goal**: deep dive on the JTAG-to-UART bridge.  By the end of
 > this chapter you will know how to wire it into your design, how
 > to send and receive bytes from the host, and what the known
@@ -29,32 +30,17 @@ Use cases that just work:
 
 ## Architecture
 
-```
-                        ┌────────────────────┐
-                        │  fcapz_ejtaguart   │
-host (XSDB/OpenOCD)     │                    │
-   │                    │  ┌──────────────┐  │
-   │   32-bit DR        │  │ TX FIFO      │  │     UART TX
-   │  via USER4 BSCANE2 │  │ async FIFO   │──┼──►  state machine
-   │                    │  │ (TX_FIFO_    │  │     drives
-   │   commands:        │  │  DEPTH       │  │     uart_txd
-   │     NOP, TX_PUSH,  │  │  bytes)      │  │
-   │     RX_POP, TXRX,  │  └──────────────┘  │
-   │     CONFIG, RESET  │                    │
-   │                    │  ┌──────────────┐  │
-   │                    │  │ RX FIFO      │  │     UART RX
-   │                    │  │ async FIFO   │◄─┼───  state machine
-   │                    │  │ (RX_FIFO_    │  │     samples
-   │                    │  │  DEPTH       │  │     uart_rxd
-   │                    │  │  bytes)      │  │
-   │                    │  └──────────────┘  │
-   └────────────────────┴────────────────────┘
-                                 │
-                            uart_clk domain
-                                 │
-                                 ▼
-                          your fabric (CPU,
-                          state machine, ...)
+```mermaid
+flowchart LR
+    host["Host (XSDB / OpenOCD)<br>32-bit DR via USER4 BSCANE2<br>commands: NOP, TX_PUSH, RX_POP,<br>TXRX, CONFIG, RESET"]
+    subgraph bridge["fcapz_ejtaguart"]
+        tx["TX FIFO<br>async, TX_FIFO_DEPTH bytes"] --> utx["UART TX state machine"]
+        urx["UART RX state machine"] --> rx["RX FIFO<br>async, RX_FIFO_DEPTH bytes"]
+    end
+    host --> tx
+    rx --> host
+    utx -->|uart_txd| fabric["Your fabric (CPU, state machine, ...)<br>uart_clk domain"]
+    fabric -->|uart_rxd| urx
 ```
 
 The host scans 32 bits in and 32 bits out per JTAG transaction.

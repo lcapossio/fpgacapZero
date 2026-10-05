@@ -49,6 +49,10 @@ def ir_table_preset(name: str) -> dict[int, int]:
     raise ValueError(f"unknown ir_table preset {name!r}")
 
 
+#: Valid :attr:`ConnectionSettings.burst_path` values.
+BURST_PATHS = ("single_chain", "two_chain", "none")
+
+
 @dataclass
 class ConnectionSettings:
     backend: str = "hw_server"
@@ -70,6 +74,10 @@ class ConnectionSettings:
     hw_post_program_delay_ms: int = 200
     #: Sleep between non-ready polls while waiting for the probe register (ms).
     hw_ready_poll_interval_ms: int = 20
+    #: The bitstream's burst readout path: ``single_chain`` (default),
+    #: ``two_chain`` (legacy USER2, hw_server only) or ``none`` (read every
+    #: capture through the register window).
+    burst_path: str = "single_chain"
 
 
 @dataclass
@@ -162,6 +170,9 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         poll_ms = 20
     poll_ms = max(5, min(500, poll_ms))
     _conn_defaults = ConnectionSettings()
+    burst_path = str(conn_raw.get("burst_path", _conn_defaults.burst_path))
+    if burst_path not in BURST_PATHS:
+        burst_path = _conn_defaults.burst_path
     poc_raw = conn_raw.get("program_on_connect", _conn_defaults.program_on_connect)
     if isinstance(poc_raw, bool):
         program_on_connect = poc_raw
@@ -181,6 +192,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         hw_ready_timeout_sec=float(conn_raw.get("hw_ready_timeout_sec", 60.0)),
         hw_post_program_delay_ms=post_ms,
         hw_ready_poll_interval_ms=poll_ms,
+        burst_path=burst_path,
     )
 
     vraw = dict(data.get("viewers") or {})
@@ -282,6 +294,7 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
             "hw_ready_timeout_sec": settings.connection.hw_ready_timeout_sec,
             "hw_post_program_delay_ms": int(settings.connection.hw_post_program_delay_ms),
             "hw_ready_poll_interval_ms": int(settings.connection.hw_ready_poll_interval_ms),
+            "burst_path": settings.connection.burst_path,
         },
         "viewers": {
             "default": settings.viewers.default_viewer,
