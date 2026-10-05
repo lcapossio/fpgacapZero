@@ -50,11 +50,10 @@ _SITE_ONLY = (
     (re.compile(r'^\s*===\+?\s+"'), "a content tab"),
     (re.compile(r"\]\([^)]*\)\{[^}\n]*\}|^\s*\{:?\s*[.#][^}]*\}\s*$"), "an attribute list"),
     (re.compile(r"<[a-z][^>]*\smarkdown(=|\s|>)", re.I), "a markdown-in-HTML attribute"),
-    (
-        re.compile(r"^\s*\|.*`[^`]*\\\|[^`]*`"),
-        r"an escaped pipe inside code in a table (write <code>a &#124; b</code>)",
-    ),
 )
+_TABLE_ROW = re.compile(r"^\s*\|")
+# A backtick run closed by a run of the same length (CommonMark code span).
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 _FRONT_MATTER = re.compile(r"\A\ufeff?---[ \t]*\r?\n")
 _ALERT = re.compile(r"^\s*>\s*\[!(\w+)\]")
 ALERT_TYPES = ("NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION")
@@ -114,6 +113,8 @@ def site_only_syntax(line):
     for pattern, what in _SITE_ONLY:
         if pattern.search(line):
             return what
+    if _TABLE_ROW.match(line) and any("\\|" in m.group(2) for m in _CODE_SPAN.finditer(line)):
+        return r"an escaped pipe inside code in a table (write <code>a &#124; b</code>)"
     alert = _ALERT.match(line)
     if alert and alert.group(1) not in ALERT_TYPES:
         return f"an alert type GitHub does not know ([!{alert.group(1)}])"

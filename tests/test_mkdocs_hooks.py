@@ -121,6 +121,7 @@ def test_fenced_code_is_not_rewritten(repo):
         '<div class="grid" markdown>',
         "> [!DANGER]",
         "| 7 | `b_err \\| r_err` |",
+        "| `x` | ``a\\|b`` |",
     ],
 )
 def test_site_only_syntax_is_flagged(line):
@@ -135,6 +136,8 @@ def test_site_only_syntax_is_flagged(line):
         "Use `{x}` and [link](a.md) {not attr}",
         "| `--depth N` | `1024` |",
         "| x \\| y | <code>b_err &#124; r_err</code> |",
+        "| `left` | a \\| b | `right` |",
+        "Prose `a \\| b` outside a table",
     ],
 )
 def test_github_markdown_is_not_flagged(line):
