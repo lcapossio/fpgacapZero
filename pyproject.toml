@@ -52,7 +52,11 @@ include = ["fcapz*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.4.0"]
-docs = ["mkdocs-material>=9.5,<10"]
+docs = [
+    "mkdocs-material>=9.5,<10",
+    "mkdocs-git-revision-date-localized-plugin>=1.2,<2",
+    "markdown-callouts>=0.4,<1",
+]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 gui-preview = ["fpgacapzero[gui]"]
 hdl = ["cocotb>=2", "cocotb-tools>=0.1.0", "cocotbext-axi>=0.1.26"]

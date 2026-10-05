@@ -133,6 +133,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for the pages' "last updated" dates
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

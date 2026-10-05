@@ -8,7 +8,12 @@
 #   pip install -e ".[docs]"
 #   mkdocs serve            # live preview on http://127.0.0.1:8000
 #   mkdocs build --strict   # what CI runs; writes site/
+#
+# Only use Markdown that GitHub renders too: GitHub alerts (> [!NOTE]) and
+# ```mermaid fences are styled here, while site-only syntax (!!! admonitions,
+# === tabs, {attr} lists, front matter) fails the build through the hook.
 
+# The hook appends the version from the VERSION file.
 site_name: fpgacapZero User Manual
 site_description: >-
   Open-source, vendor-agnostic FPGA debug suite: logic analyzer, embedded
@@ -28,11 +33,17 @@ theme:
   logo: assets/fcapz-logo.png
   favicon: assets/fcapz-logo.png
   features:
+    - content.action.edit
+    - content.action.view
     - content.code.copy
     - navigation.footer
+    - navigation.instant
+    - navigation.instant.progress
     - navigation.sections
+    - navigation.tabs
     - navigation.top
     - search.highlight
+    - search.suggest
     - toc.follow
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -46,6 +57,14 @@ theme:
         icon: material/brightness-4
         name: Switch to light mode
 
+plugins:
+  - search
+  # "Last updated" from git history; CI checks out the full history for it.
+  - git-revision-date-localized:
+      type: date
+      enable_creation_date: false
+      fallback_to_build_date: true
+
 # Links that leave docs/ (../rtl/..., ../CHANGELOG.md, ...) or name a folder
 # (specs/) work on GitHub but have no page in the site; the hook points them at
 # the repository instead and fails the build when the target does not exist.
@@ -58,10 +77,10 @@ validation:
   unrecognized_links: warn
   anchors: warn
 
+# No attr_list, md_in_html or admonition: their syntax does not render on
+# GitHub, so it is not enabled here either.
 markdown_extensions:
-  - admonition
-  - attr_list
-  - md_in_html
+  - github-callouts
   - tables
   # GitHub-style heading anchors, so the #links written for GitHub resolve.
   - toc:
@@ -69,11 +88,15 @@ markdown_extensions:
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:
           case: lower
-  - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.superfences
+  # ```mermaid fences become diagrams, as they do on GitHub.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
   - Home: README.md

@@ -89,10 +89,73 @@ def test_raw_images_follow_the_page_url(repo, caplog):
     assert len(caplog.records) == 1
 
 
+def _page(markdown, src_uri="01_intro.md", page_url="01_intro/"):
+    return SimpleNamespace(
+        file=SimpleNamespace(src_uri=src_uri, content_string=markdown),
+        url=page_url,
+        edit_url="https://example.com/edit",
+    )
+
+
+def _config(repo):
+    return {"config_file_path": str(repo / "mkdocs.yml"), "repo_url": REPO_URL + "/"}
+
+
 def test_fenced_code_is_not_rewritten(repo):
     markdown = "[a](../CHANGELOG.md)\n```md\n[b](../CHANGELOG.md)\n```\n[c](../CHANGELOG.md)\n"
-    page = SimpleNamespace(file=SimpleNamespace(src_uri="01_intro.md"), url="01_intro/")
-    config = {"config_file_path": str(repo / "mkdocs.yml"), "repo_url": REPO_URL + "/"}
-    out = hooks.on_page_markdown(markdown, page, config, files=None).splitlines()
+    page = _page(markdown)
+    out = hooks.on_page_markdown(markdown, page, _config(repo), files=None).splitlines()
     url = f"{REPO_URL}/blob/main/CHANGELOG.md"
     assert out == [f"[a]({url})", "```md", "[b](../CHANGELOG.md)", "```", f"[c]({url})"]
+    assert page.edit_url == "https://example.com/edit"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '!!! note "Title"',
+        "??? tip",
+        '=== "Python"',
+        "![shot](assets/shot.png){ width=300 }",
+        "{: .center }",
+        '<div class="grid" markdown>',
+        "> [!DANGER]",
+    ],
+)
+def test_site_only_syntax_is_flagged(line):
+    assert hooks.site_only_syntax(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        *(f"> [!{kind}]" for kind in hooks.ALERT_TYPES),
+        "> **Goal**: read this",
+        "Use `{x}` and [link](a.md) {not attr}",
+        "| `--depth N` | `1024` |",
+    ],
+)
+def test_github_markdown_is_not_flagged(line):
+    assert hooks.site_only_syntax(line) is None
+
+
+def test_site_only_syntax_and_front_matter_warn_outside_fences(repo, caplog):
+    markdown = "---\ntitle: x\n---\n!!! note\n```md\n!!! note\n```\n"
+    with caplog.at_level(logging.WARNING, logger="mkdocs.hooks.fcapz"):
+        hooks.on_page_markdown(markdown, _page(markdown), _config(repo), files=None)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2, messages
+    assert "front matter" in messages[0] and "admonition" in messages[1]
+
+
+def test_generated_pages_have_no_edit_button(repo):
+    markdown = hooks.GENERATED_PAGE_MARK + " -->\n# API\n"
+    page = _page(markdown)
+    hooks.on_page_markdown(markdown, page, _config(repo), files=None)
+    assert page.edit_url is None
+
+
+def test_site_name_carries_the_version(repo):
+    (repo / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    config = {"config_file_path": str(repo / "mkdocs.yml"), "site_name": "Manual"}
+    assert hooks.on_config(config)["site_name"] == "Manual v1.2.3"
