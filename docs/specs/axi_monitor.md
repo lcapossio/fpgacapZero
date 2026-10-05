@@ -1,9 +1,12 @@
 # AXI Monitor (`fcapz_axi_mon.v`) — design spec
 
-> **Status: proposed / draft.** No RTL exists yet. This is the canonical
-> design plan for a portable, vendor-agnostic passive AXI monitor core. It is the
-> ground truth the implementation must follow; when a future chapter and this
-> spec disagree, this spec wins.
+> [!NOTE]
+> **Status: partly implemented.** Phase P1 ships for AXI4-Lite as
+> [`rtl/fcapz_axi_mon.v`](../../rtl/fcapz_axi_mon.v), with part of P2: the
+> decode layer that triggers on handshakes and error responses. How the shipped
+> core behaves is documented in [chapter 19](../19_axi_monitor.md); this spec
+> stays the design plan for the remaining phases (full AXI4, AXI4-Stream,
+> address-range and ID filters, the protocol checker, viewer decode).
 
 ## Goal
 

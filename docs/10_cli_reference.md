@@ -1,5 +1,6 @@
 # 10 — CLI reference
 
+> [!NOTE]
 > **Goal**: complete reference for the `fcapz` command-line tool.
 > Every subcommand, every flag, with copy-pasteable examples.
 >

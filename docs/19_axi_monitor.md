@@ -1,5 +1,6 @@
 # 19 — AXI monitor
 
+> [!NOTE]
 > **Goal**: capture and trigger on an AXI4-Lite interface over JTAG —
 > a portable, vendor-agnostic AXI bus monitor. By the end
 > of this chapter you will know how to instantiate the monitor, what it

@@ -1,5 +1,6 @@
 # 04 — RTL integration
 
+> [!NOTE]
 > **Goal**: by the end of this chapter you can drop fcapz cores into
 > your own design.  You will know which wrapper to instantiate, what
 > every parameter does, how `fcapz_version.vh` fits in, and how to
@@ -54,6 +55,7 @@ the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
 PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
 lint-clean until a board-level smoke test is added for that family.
 
+> [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
 > primitive is byte-identical between 7-series, UltraScale, and
 > UltraScale+.  The `_xilinxus` files are 33-88 LOC each and

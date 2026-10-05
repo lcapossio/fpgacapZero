@@ -10,7 +10,8 @@ The manual is split into focused chapters so each topic stays
 reviewable on its own.  Read them in order the first time, then come
 back to individual chapters as you need them.
 
-> **Tip**: this manual is in addition to the project README, which is
+> [!TIP]
+> This manual is in addition to the project README, which is
 > a short overview and quick tour.  When in doubt the manual is more
 > accurate; it is updated with every release.
 
@@ -53,7 +54,7 @@ and should be corrected.
 | [`specs/register_map.md`](specs/register_map.md) | Full register map for ELA, EIO, EJTAG-AXI, EJTAG-UART. Opens with an **Index** (anchor links); each major section ends with **↑ Top**. |
 | [`specs/transport_api.md`](specs/transport_api.md) | The `Transport` ABC contract — required to implement when adding a new backend. |
 | [`specs/waveform_schema.md`](specs/waveform_schema.md) | JSON / CSV / VCD export formats, field-by-field. |
-| [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Proposed/draft.** Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
+| [`specs/axi_monitor.md`](specs/axi_monitor.md) | **Partly implemented** (AXI4-Lite, see chapter 19). Design plan for `fcapz_axi_mon` — a portable, vendor-agnostic passive AXI monitor built as an AXI front-end over the ELA capture/trigger engine. |
 
 ## Conventions used in this manual
 

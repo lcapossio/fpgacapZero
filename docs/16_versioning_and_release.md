@@ -1,5 +1,6 @@
 # 16 — Versioning and release
 
+> [!NOTE]
 > **Goal**: understand how the project version flows from the
 > canonical `VERSION` file at the repo root through
 > `tools/sync_version.py` into the RTL `fcapz_version.vh`, the

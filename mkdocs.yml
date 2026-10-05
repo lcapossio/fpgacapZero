@@ -57,6 +57,9 @@ theme:
         icon: material/brightness-4
         name: Switch to light mode
 
+extra_css:
+  - assets/github-alerts.css
+
 plugins:
   - search
   # "Last updated" from git history; CI checks out the full history for it.
@@ -125,4 +128,4 @@ nav:
       - Register map: specs/register_map.md
       - Transport API: specs/transport_api.md
       - Waveform schema: specs/waveform_schema.md
-      - AXI monitor (draft): specs/axi_monitor.md
+      - AXI monitor (design plan): specs/axi_monitor.md

@@ -1,5 +1,6 @@
 # 03 — First capture in 10 minutes
 
+> [!NOTE]
 > **Goal**: by the end of this chapter you will have built the
 > reference Arty A7 bitstream, opened the desktop GUI, programmed
 > the FPGA, captured a waveform that triggers on a specific value,

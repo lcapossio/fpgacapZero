@@ -1,5 +1,6 @@
 # 11 — JSON-RPC server
 
+> [!NOTE]
 > **Goal**: drive fpgacapZero from another language or process.
 > By the end of this chapter you can spawn the RPC server, send
 > JSON commands over its stdin, parse the JSON responses on its

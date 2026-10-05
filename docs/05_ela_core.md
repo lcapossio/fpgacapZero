@@ -1,5 +1,6 @@
 # 05 — ELA core
 
+> [!NOTE]
 > **Goal**: deep dive on the Embedded Logic Analyzer.  By the end of
 > this chapter you will understand every trigger mode, every storage
 > option, and how the runtime knobs (decimation, segments, probe mux,
@@ -659,6 +660,7 @@ cfg = CaptureConfig(
 )
 ```
 
+> [!IMPORTANT]
 > **Host-initiated captures on a startup-armed bitstream.** Because
 > `STARTUP_ARM=1` makes the core boot armed, it may already be armed — or even
 > triggered/done — before your host code runs. A bare `configure(cfg); arm()`

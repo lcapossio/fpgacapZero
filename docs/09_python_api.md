@@ -1,5 +1,6 @@
 # 09 — Python API
 
+> [!NOTE]
 > **Goal**: complete reference for the `fcapz` Python package.  By
 > the end of this chapter you can drive every fcapz core
 > programmatically, integrate it into your own scripts and tests,

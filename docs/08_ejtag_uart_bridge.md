@@ -1,5 +1,6 @@
 # 08 — EJTAG-UART bridge
 
+> [!NOTE]
 > **Goal**: deep dive on the JTAG-to-UART bridge.  By the end of
 > this chapter you will know how to wire it into your design, how
 > to send and receive bytes from the host, and what the known

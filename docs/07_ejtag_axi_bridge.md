@@ -1,5 +1,6 @@
 # 07 — EJTAG-AXI bridge
 
+> [!NOTE]
 > **Goal**: deep dive on the JTAG-to-AXI4 master bridge.  By the end
 > of this chapter you will know how the bridge moves bytes between
 > JTAG and your AXI bus, what FIFO_DEPTH means and why the host
@@ -19,6 +20,7 @@ JTAG plus a custom 72-bit DR), the source is yours, the host stack
 is Python, and you can read every line of the FSM in
 [`../rtl/fcapz_ejtagaxi.v`](../rtl/fcapz_ejtagaxi.v).
 
+> [!TIP]
 > **See also:** the EJTAG-AXI bridge *drives* an AXI bus (it is a master). To
 > *observe* one passively — capture and trigger on transactions without
 > perturbing them — use the [AXI monitor](19_axi_monitor.md).

@@ -1,5 +1,6 @@
 # 06 — EIO core
 
+> [!NOTE]
 > **Goal**: understand the Embedded I/O core — the simplest of the
 > four — and how to use it from the host stack to read fabric
 > signals and drive them from your laptop in real time, without

@@ -1,0 +1,37 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+ *
+ * HTML manual only (mkdocs.yml extra_css).  GitHub alerts (> [!NOTE] ...)
+ * become Material admonitions; NOTE, TIP and WARNING map onto Material's own
+ * styles, and IMPORTANT / CAUTION, which Material lacks, get GitHub's colours.
+ */
+
+.md-typeset .admonition.important,
+.md-typeset details.important {
+  border-color: #8250df;
+}
+.md-typeset .important > .admonition-title,
+.md-typeset .important > summary {
+  background-color: rgba(130, 80, 223, 0.1);
+}
+.md-typeset .important > .admonition-title::before,
+.md-typeset .important > summary::before {
+  background-color: #8250df;
+  -webkit-mask-image: var(--md-admonition-icon--info);
+  mask-image: var(--md-admonition-icon--info);
+}
+
+.md-typeset .admonition.caution,
+.md-typeset details.caution {
+  border-color: #cf222e;
+}
+.md-typeset .caution > .admonition-title,
+.md-typeset .caution > summary {
+  background-color: rgba(207, 34, 46, 0.1);
+}
+.md-typeset .caution > .admonition-title::before,
+.md-typeset .caution > summary::before {
+  background-color: #cf222e;
+  -webkit-mask-image: var(--md-admonition-icon--danger);
+  mask-image: var(--md-admonition-icon--danger);
+}

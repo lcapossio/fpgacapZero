@@ -1,5 +1,6 @@
 # 17 — Troubleshooting
 
+> [!NOTE]
 > **Goal**: a single page you can grep when something breaks.  Each
 > entry is **symptom → cause → fix**, ordered roughly by how often
 > we've seen it in practice.
