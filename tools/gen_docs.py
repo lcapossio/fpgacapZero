@@ -282,6 +282,8 @@ _LIST_SECTIONS = {"Args", "Arguments", "Parameters", "Raises", "Attributes"}
 _TEXT_SECTIONS = {"Returns", "Return", "Yields", "Note", "Notes"}
 _CODE_SECTIONS = {"Example", "Examples"}
 _ITEM_NAME = re.compile(r"^([\w.*]+)(\s*\([^)]*\))?:\s")
+# A NumPy-style "Title" over "-----": Markdown would make it a page heading.
+_UNDERLINE = re.compile(r"^\s*(-{3,}|={3,})\s*$")
 
 
 def _escape(line: str) -> str:
@@ -331,6 +333,10 @@ def _docstring(obj) -> str:
     i = 0
     while i < len(lines):
         line = lines[i]
+        if line.strip() and i + 1 < len(lines) and _UNDERLINE.match(lines[i + 1]):
+            out += [f"**{_escape(line.strip())}:**", ""]
+            i += 2
+            continue
         j = i + 1
         while j < len(lines) and not lines[j].strip():
             j += 1

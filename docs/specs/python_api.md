@@ -465,8 +465,8 @@ Implementations must override the five abstract methods below.
 Two optional extension points (`select_chain` and `raw_dr_scan`)
 can be overridden to support multi-chain and raw DR access respectively.
 
-Exception contract
-------------------
+**Exception contract:**
+
 All methods should raise:
 
 * `RuntimeError`  — if called before `connect` or after

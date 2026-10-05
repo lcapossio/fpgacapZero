@@ -99,6 +99,24 @@ def test_docstring_sections_become_lists_and_literal_blocks():
     ]
 
 
+def test_underlined_docstring_headers_do_not_become_page_headings():
+    def sample():
+        """Summary.
+
+        Exception contract
+        ------------------
+        All methods raise.
+        """
+
+    assert gen._docstring(sample).split("\n") == [
+        "Summary.",
+        "",
+        "**Exception contract:**",
+        "",
+        "All methods raise.",
+    ]
+
+
 def test_reprs_do_not_depend_on_hash_seed_or_addresses():
     assert gen._stable_repr(frozenset({"b", "a"})) == "frozenset({'a', 'b'})"
     assert gen._stable_repr(object()) == "<object>"
