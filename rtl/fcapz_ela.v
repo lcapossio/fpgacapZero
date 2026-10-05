@@ -1318,7 +1318,9 @@ module fcapz_ela #(
         end else begin
             if (!HAS_DECIM) begin
                 decim_count <= 24'h0;
-            end else if (any_arm_pulse) begin
+            end else if (any_arm_pulse || reset_pulse) begin
+                // A soft reset must not leave the count mid-ratio: idle
+                // prefill stores only on decim_tick, and idle holds the count.
                 decim_count <= 24'h0;
             end else if (armed && !done) begin
                 if (decim_count >= decim_ratio)

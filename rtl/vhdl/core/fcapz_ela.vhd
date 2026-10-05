@@ -1618,7 +1618,9 @@ begin
 
             if DECIM_EN = 0 then
                 decim_count <= (others => '0');
-            elsif any_arm_pulse_now then
+            elsif any_arm_pulse_now or reset_pulse_now then
+                -- A soft reset must not leave the count mid-ratio: idle
+                -- prefill stores only on a decimation tick, and idle holds it.
                 decim_count <= (others => '0');
             elsif armed = '1' and done = '0' then
                 if decim_count >= decim_ratio then

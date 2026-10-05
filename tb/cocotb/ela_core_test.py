@@ -1657,6 +1657,44 @@ async def config_written_after_arm_does_not_reach_armed_capture(dut):
     assert await ela.read(ADDR_TRIG_EXT) == 2
 
 
+async def _arm_offset_after_soft_reset(ela, decim_during_reset: int, phase: int) -> int:
+    """Soft-reset a decimating capture `phase` samples after arm, let the idle
+    prefill run, then arm a match-anything capture.  Returns how far past the
+    arm the trigger sample sits, which is short only if the prefill built
+    pre-trigger history."""
+    dut = ela.dut
+    await ela.reset_core()
+    await ela.write(ADDR_DECIM, decim_during_reset)
+    await ela.configure_value_capture(pre=10, post=1, value=1, mask=0xFF)
+    dut.probe_in.value = 0  # never 1: this capture is still running at reset
+    await ela.arm()
+    await ela.wait_sample(phase)
+    await ela.reset_core()
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=10, post=1, value=0, mask=0)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.wait_sample(40)  # idle prefill
+    await ela.arm()
+    armed_at = int(dut.probe_in.value)
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(12)]
+    assert counter_steps(window) == [1] * 11, window
+    return ((window[10] - armed_at + 128) & 0xFF) - 128  # signed
+
+
+@cocotb.test()
+async def soft_reset_does_not_stall_decimated_prefill(dut):
+    """A soft reset mid-decimation must leave the idle prefill running, as it
+    does after a reset taken with the decimation counter at zero."""
+    ela = await setup(dut)
+    expected = await _arm_offset_after_soft_reset(ela, 0, 0)
+    assert expected < 10, f"no pre-arm history even without decimation ({expected})"
+    for phase in range(4):  # ratio 3: covers every decimation counter value
+        offset = await _arm_offset_after_soft_reset(ela, 3, phase)
+        assert offset == expected, (phase, offset, expected)
+
+
 @cocotb.test()
 async def trigger_out_pulses_once_with_trigger_delay(dut):
     """trigger_out is one pulse per trigger even while the trigger delay
