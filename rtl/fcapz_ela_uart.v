@@ -26,6 +26,9 @@ module fcapz_ela_uart #(
     // UART front-end
     parameter CLK_HZ      = 50_000_000,
     parameter BAUD_RATE   = 1_000_000,
+    // Drop a command that stalls mid-parse for this long (0 = never); see
+    // fcapz_uart_tap.v.
+    parameter RX_TIMEOUT_US = 10_000,
     // ELA core -- mirrors the vendor wrappers
     parameter SAMPLE_W    = 8,
     parameter DEPTH       = 1024,
@@ -117,7 +120,8 @@ module fcapz_ela_uart #(
     // which is what puts the floor under BURST_W (see the guard above).
     fcapz_uart_tap #(
         .CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD_RATE),
-        .NUM_CHAINS(NUM_CHAINS), .MAX_DR_BITS(BURST_W)
+        .NUM_CHAINS(NUM_CHAINS), .MAX_DR_BITS(BURST_W),
+        .RX_TIMEOUT_US(RX_TIMEOUT_US)
     ) u_tap (
         .clk(sample_clk), .arst(sample_rst),
         .uart_rxd(uart_rxd), .uart_txd(uart_txd),

@@ -8,7 +8,8 @@
 // Drives fcapz_uart_tap from a behavioural 8N1 host UART and checks that the
 // TAP contract it synthesises is good enough to run the *real* jtag_reg_iface
 // behind it: identity, register write, register read-back, the 256-bit burst
-// width, and the two error paths that must not desynchronise the link.
+// width, the two error paths that must not desynchronise the link, and the
+// receive timeout that drops a command truncated mid-parse.
 
 module fcapz_uart_tap_tb;
 
@@ -17,6 +18,9 @@ module fcapz_uart_tap_tb;
     localparam int BIT_NS      = 1_000_000_000 / BAUD;
     localparam int NCH         = 4;
     localparam int MAX_DR_BITS = 256;
+    // Short enough to keep the run quick, long enough (20 byte times) that a
+    // healthy back-to-back command never trips it.
+    localparam int RX_TIMEOUT_US = 200;
 
     logic clk  = 1'b0;
     logic arst = 1'b1;
@@ -47,7 +51,8 @@ module fcapz_uart_tap_tb;
     // ------------------------------------------------------------------
     fcapz_uart_tap #(
         .CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD),
-        .NUM_CHAINS(NCH), .MAX_DR_BITS(MAX_DR_BITS)
+        .NUM_CHAINS(NCH), .MAX_DR_BITS(MAX_DR_BITS),
+        .RX_TIMEOUT_US(RX_TIMEOUT_US)
     ) dut (
         .clk(clk), .arst(arst),
         .uart_rxd(host_tx), .uart_txd(dut_tx),
@@ -272,6 +277,57 @@ module fcapz_uart_tap_tb;
         send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
         await_reply(9, "recovery write");
         check("write after errors", mem[5] == 32'hCAFEF00D);
+
+        // ---- Test 8: a truncated header is dropped after the timeout -------
+        // SOF, CMD_SCAN, chain -- and then nothing.  Without the timeout the
+        // next command's SOF and opcode are parsed as this one's width
+        // (0x035A, out of range) and the INFO comes back as BAD_WIDTH.
+        $display("\n=== Test 8: receive timeout, truncated header ===");
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        #(RX_TIMEOUT_US * 1000 + 50_000);
+        check("truncated command sends no reply", rxn == 0);
+        send_byte(8'h5A); send_byte(8'h03);
+        await_reply(11, "info after truncated header");
+        check("info after timeout", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00 &&
+                                    {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
+
+        // ---- Test 9: a truncated payload never reaches the TAP -------------
+        // A register write to 0x18 with only three of its seven payload bytes:
+        // nothing may be written, nothing may come back, and the buffered
+        // bytes must not leak into the next scan.
+        $display("\n=== Test 9: receive timeout, truncated payload ===");
+        frame = {1'b1, 16'h0018, 32'h12345678};
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        send_byte(8'd49); send_byte(8'd0);
+        for (int i = 0; i < 3; i++) send_byte(frame[i*8 +: 8]);
+        #(RX_TIMEOUT_US * 1000 + 50_000);
+        check("truncated payload sends no reply", rxn == 0);
+        check("truncated payload writes nothing", mem[6] == 32'h0);
+
+        frame = {1'b1, 16'h001C, 32'h0BADF00D};
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "write after truncated payload");
+        check("write after truncated payload", rxbuf[1] == 8'h00 &&
+                                               mem[7] == 32'h0BADF00D &&
+                                               mem[6] == 32'h0);
+
+        // ---- Test 10: a gap shorter than the timeout is not a stall --------
+        // Half the timeout, in the middle of the payload: the command must
+        // complete exactly as if its bytes had been back to back.
+        $display("\n=== Test 10: inter-byte gap inside the timeout ===");
+        frame = {1'b1, 16'h0020, 32'hFEEDC0DE};
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        send_byte(8'd49); send_byte(8'd0);
+        for (int i = 0; i < 7; i++) begin
+            send_byte(frame[i*8 +: 8]);
+            if (i == 3) #(RX_TIMEOUT_US * 1000 / 2);
+        end
+        await_reply(9, "write with a gap");
+        check("gap write status OK", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00);
+        check("gap write landed", mem[8] == 32'hFEEDC0DE);
 
         $display("\n=== Summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);

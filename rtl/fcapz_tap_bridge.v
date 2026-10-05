@@ -57,21 +57,31 @@
 //   SOF 0xA5, STATUS, payload...
 // STATUS is 0x00 on success, or one of the STAT_* codes below.  Between
 // commands the parser hunts for SOF, so leading junk -- the handover noise a
-// configuration-pin bridge leaves behind, say -- is skipped.  It is NOT a
-// self-recovering protocol: there is no length, checksum or inter-byte
-// timeout, so a command truncated mid-field leaves the parser waiting for the
-// bytes it is still owed.
+// configuration-pin bridge leaves behind, say -- is skipped.
+//
+// Resynchronisation.  There is no length or checksum, so a command that loses
+// a byte would otherwise leave the parser waiting for a field the host never
+// sends, and parse the next command into it.  RX_TIMEOUT bounds that: if a
+// command stalls mid-parse for RX_TIMEOUT clocks, the parser drops it and goes
+// back to hunting for SOF.  It does so silently -- the host has already given
+// up on that command, and a late reply would be read as the header of its
+// next one.  Every state the timeout covers comes before the scan starts (sel
+// is low, tck has not moved), so a dropped command has no effect on the TAP.
 //
 // Parameters
 //   NUM_CHAINS  - number of user chains exposed via sel[]
 //   MAX_DR_BITS - largest DR width accepted (256 covers the burst chain)
 //   PROTO_EXTRA - reported in the identity block; a PHY may use it to tell
 //                 the host something about itself (0 when unused)
+//   RX_TIMEOUT  - clk cycles a partly received command may wait for its next
+//                 byte before it is dropped; 0 waits forever.  Set it well
+//                 above the longest gap the PHY can leave inside one command.
 
 module fcapz_tap_bridge #(
     parameter NUM_CHAINS  = 4,
     parameter MAX_DR_BITS = 256,
-    parameter PROTO_EXTRA = 0
+    parameter PROTO_EXTRA = 0,
+    parameter RX_TIMEOUT  = 0
 ) (
     input  wire                   clk,
     input  wire                   arst,
@@ -146,6 +156,8 @@ module fcapz_tap_bridge #(
         // scan_width and the identity block both carry the width in 16 bits.
         if (MAX_DR_BITS > 65535)
             $error("MAX_DR_BITS must be <= 65535");
+        if (RX_TIMEOUT < 0)
+            $error("RX_TIMEOUT must be >= 0");
     end
     // synthesis translate_on
 
@@ -194,6 +206,14 @@ module fcapz_tap_bridge #(
     // PHY leaves enough slack to hide that; a PHY that delivers bytes
     // back to back does not.
     wire chain_bad = (chain_sel == 8'd0) || (chain_sel > NUM_CHAINS[7:0]);
+
+    // ceil(width/8) of the width completing in S_SCAN_W1.  17 bits so the +7
+    // cannot wrap; only the low CNT_W bits are kept, which is exact for every
+    // width S_SCAN_W1 accepts (<= MAX_DR_BITS) and don't-care for the rest,
+    // since those are rejected on the same cycle.
+    wire [15:0] rx_width       = {rx_data, scan_width[7:0]};
+    wire [16:0] rx_width_plus7 = {1'b0, rx_width} + 17'd7;
+    wire [13:0] rx_width_bytes = rx_width_plus7[16:3];
 
     // ------------------------------------------------------------------
     //  TAP drive
@@ -252,6 +272,36 @@ module fcapz_tap_bridge #(
     localparam [4:0] S_ALIGN      = 5'd24;
 
     reg [4:0] state;
+
+    // ------------------------------------------------------------------
+    //  Receive timeout (see "Resynchronisation" above)
+    //
+    //  Covers exactly the states that wait on the host for part of a
+    //  command.  S_SOF is not one of them -- an idle link is not a stall --
+    //  and neither is anything from the scan onwards.
+    // ------------------------------------------------------------------
+    localparam HAS_RX_TIMEOUT = (RX_TIMEOUT > 0);
+    localparam RX_TO_W        = HAS_RX_TIMEOUT ? $clog2(RX_TIMEOUT + 1) : 1;
+
+    wire in_cmd_parse = (state == S_CMD)        || (state == S_SCAN_CHAIN) ||
+                        (state == S_SCAN_W0)    || (state == S_SCAN_W1)    ||
+                        (state == S_SCAN_PAY)   || (state == S_BR_C0)      ||
+                        (state == S_BR_C1)      || (state == S_IDLE_C0)    ||
+                        (state == S_IDLE_C1);
+
+    reg  [RX_TO_W-1:0] rx_gap;
+    // A byte that lands on the deadline still counts: it is the command
+    // completing, not the stall the timeout is for.
+    wire rx_timeout = HAS_RX_TIMEOUT && in_cmd_parse && !rx_valid &&
+                      (rx_gap == RX_TIMEOUT[RX_TO_W-1:0]);
+
+    always @(posedge clk or posedge arst) begin
+        if (arst)                         rx_gap <= {RX_TO_W{1'b0}};
+        else if (!HAS_RX_TIMEOUT || !in_cmd_parse || rx_valid || rx_timeout)
+                                          rx_gap <= {RX_TO_W{1'b0}};
+        else                              rx_gap <= rx_gap + 1'b1;
+    end
+
     reg [4:0] rsp_next;      // state to enter once the reply has drained
     reg [4:0] idle_next;     // state to enter once the tck idle run finishes
     reg       rsp_is_info;
@@ -403,7 +453,7 @@ module fcapz_tap_bridge #(
             S_SCAN_W1: begin
                 if (rx_valid) begin
                     scan_width[15:8] <= rx_data;
-                    scan_bytes       <= (({rx_data, scan_width[7:0]} + 16'd7) >> 3);
+                    scan_bytes       <= rx_width_bytes[CNT_W-1:0];
                     byte_index <= {CNT_W{1'b0}};
                     // Validate the width *before* the payload phase.  A bad
                     // width makes the payload length itself untrustworthy, so
@@ -411,8 +461,7 @@ module fcapz_tap_bridge #(
                     // once and let the SOF hunt resynchronise.  (A zero-byte
                     // payload would otherwise park S_SCAN_PAY forever waiting
                     // on a byte the host never sends.)
-                    if ({rx_data, scan_width[7:0]} == 16'd0 ||
-                        {rx_data, scan_width[7:0]} > MAX_DR_BITS[15:0]) begin
+                    if (rx_width == 16'd0 || rx_width > MAX_DR_BITS[15:0]) begin
                         status     <= STAT_BAD_WIDTH;
                         byte_count <= {CNT_W{1'b0}};
                         state      <= S_RSP_SOF;
@@ -658,6 +707,12 @@ module fcapz_tap_bridge #(
 
             default: state <= S_SOF;
             endcase
+
+            // Drop a stalled command.  Nothing else needs undoing: every
+            // command clears the scan buffer and status on its way in, and
+            // S_SOF clears sel and br_active.
+            if (rx_timeout)
+                state <= S_SOF;
         end
     end
 

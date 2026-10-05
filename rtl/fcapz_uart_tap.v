@@ -21,12 +21,20 @@
 //   BAUD_RATE   - UART baud rate; CLK_HZ/BAUD_RATE must be >= 4
 //   NUM_CHAINS  - number of user chains exposed via sel[]
 //   MAX_DR_BITS - largest DR width accepted (256 covers the burst chain)
+//   RX_TIMEOUT_US - how long, in microseconds, a partly received command may
+//                 wait for its next byte before the bridge drops it and
+//                 hunts for SOF again (see fcapz_tap_bridge.v); 0 waits
+//                 forever.  The host sends a command in one write, so its
+//                 bytes arrive back to back; 10 ms is far above any gap a
+//                 USB-serial bridge leaves inside one, and far below the
+//                 host transport's reply timeout.
 
 module fcapz_uart_tap #(
-    parameter CLK_HZ      = 50_000_000,
-    parameter BAUD_RATE   = 1_000_000,
-    parameter NUM_CHAINS  = 4,
-    parameter MAX_DR_BITS = 256
+    parameter CLK_HZ        = 50_000_000,
+    parameter BAUD_RATE     = 1_000_000,
+    parameter NUM_CHAINS    = 4,
+    parameter MAX_DR_BITS   = 256,
+    parameter RX_TIMEOUT_US = 10_000
 ) (
     input  wire                   clk,
     input  wire                   arst,
@@ -46,11 +54,19 @@ module fcapz_uart_tap #(
 );
 
     localparam BAUD_DIV = CLK_HZ / BAUD_RATE;
+    // Divide first: CLK_HZ * RX_TIMEOUT_US overflows 32-bit parameter maths
+    // at ordinary clock rates.  CLK_HZ is rounded down to whole MHz, which
+    // only makes the timeout slightly shorter.
+    localparam RX_TIMEOUT_CYC = (CLK_HZ / 1_000_000) * RX_TIMEOUT_US;
 
     // synthesis translate_off
     initial begin
         if (CLK_HZ / BAUD_RATE < 4)
             $error("BAUD_RATE too high for CLK_HZ: divider must be >= 4");
+        if (RX_TIMEOUT_US > 0 && RX_TIMEOUT_US < 20 * 1_000_000 / BAUD_RATE)
+            $error("RX_TIMEOUT_US must cover at least two bytes on the wire");
+        if (RX_TIMEOUT_US > 0 && CLK_HZ < 1_000_000)
+            $error("RX_TIMEOUT_US needs CLK_HZ >= 1 MHz");
     end
     // synthesis translate_on
 
@@ -162,7 +178,8 @@ module fcapz_uart_tap #(
     fcapz_tap_bridge #(
         .NUM_CHAINS(NUM_CHAINS),
         .MAX_DR_BITS(MAX_DR_BITS),
-        .PROTO_EXTRA(0)
+        .PROTO_EXTRA(0),
+        .RX_TIMEOUT(RX_TIMEOUT_CYC)
     ) u_bridge (
         .clk(clk), .arst(arst),
         .rx_data(rx_data), .rx_valid(rx_valid),
