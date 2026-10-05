@@ -106,6 +106,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — `trigger_out` stayed high through the trigger delay.** With
+  `trigger_delay > 0` a hit still present during the countdown kept
+  `trigger_out` asserted, for up to `trigger_delay + 1` clocks, and a hit that
+  came and went during the countdown pulsed it again. It is now one pulse per
+  trigger, on the trigger event, as documented. Both HDLs.
+
+- **ELA — a soft reset during a decimated capture could stall the idle
+  prefill.** Decimation was cleared on arm but not on soft reset, and the idle
+  ring stores only on a decimation tick while holding the count. A soft reset
+  (`force_idle()` / `Analyzer.reset()`) that landed mid-ratio therefore stopped
+  the pre-arm history until the next arm, so a trigger shortly after that arm
+  waited for the pre-trigger window to fill and could be missed. Soft reset now
+  clears the decimation count. Both HDLs.
+
 - **Single-chain and multi-core Xilinx cores dropped every command on Zynq
   UltraScale+ MPSoC.** `jtag_pipe_iface` only acted on a scan of
   exactly 49 shift clocks. Every other TAP in BYPASS on the chain adds one
