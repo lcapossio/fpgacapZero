@@ -369,10 +369,23 @@ backend rather than failing with the OS's port-in-use error.
 The wire protocol is documented in the header of `rtl/fcapz_tap_bridge.v`.  It
 is framed and status-coded, and the parser hunts for a start-of-frame byte
 between commands, which is what lets the link survive the junk a
-configuration-pin handover leaves behind.  It is **not** a self-recovering
-protocol: there is no frame length, checksum or inter-byte timeout, so a
-command truncated mid-field leaves the parser waiting for the bytes it is
-still owed.  Reset the board to recover.
+configuration-pin handover leaves behind.
+
+There is no frame length or checksum, so a lost byte is recovered by time
+instead.  If a command stalls mid-parse for `RX_TIMEOUT_US` (a
+`fcapz_uart_tap` / `fcapz_ela_uart` parameter, 10 ms by default; 0 turns it
+off), the bridge drops it and goes back to hunting for start-of-frame.  It
+does so silently, and always before the scan starts, so a dropped command
+never touches the TAP.  On the host side, a transaction that fails without a
+complete reply (no reply, a short one, or bad framing) waits until the link
+has been quiet for `RESYNC_QUIET_S` (50 ms), discarding anything that arrives,
+before raising.  By then the bridge has dropped whatever it was waiting on,
+and a late reply cannot be read as the header of the next command.  The next
+command therefore starts clean, without a board reset.  A bridge error status
+is a complete reply, and needs no resync.
+
+Corrupted bytes inside a command are not detected: they are parsed as data,
+like any other byte.  The timeout recovers lost bytes, not wrong ones.
 
 #### Burst readback
 

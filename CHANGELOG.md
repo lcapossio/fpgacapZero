@@ -85,6 +85,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
   by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
   lint targets.
+- **Byte-stream TAP — recovers from a lost byte without a board reset.** A
+  command that stalls mid-parse for `RX_TIMEOUT_US` (10 ms by default, a
+  `fcapz_uart_tap` / `fcapz_ela_uart` parameter; 0 disables it) is dropped
+  silently, before its scan starts. Previously the parser waited for the
+  missing bytes and read the next command into them. After a failed
+  transaction the host waits for 50 ms of silence and discards any late
+  reply, so it is not read as the next command's header.
 - **Forgix board example (Efinix Trion T8F49 + RP2354) — validated on
   hardware.** Ships a complete Efinity project (`examples/forgix/efinity/`)
   with the pin assignments worked out and confirmed: `clk_in` on B4 (32 MHz),
