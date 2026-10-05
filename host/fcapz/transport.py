@@ -728,6 +728,18 @@ class TapBridgeTransport(Transport):
     # this link it costs one four-byte command either way.
     BURST_PREFILL_IDLE_CYCLES = 160
 
+    # After a transaction goes wrong -- no reply, a short one, bad framing --
+    # wait until the link has been silent this long, discarding whatever
+    # arrives, before the next command.  That lets a late reply drain instead
+    # of being read as the next command's header, and outlasts the bridge's
+    # own receive timeout (RX_TIMEOUT_US in rtl/fcapz_uart_tap.v, 10 ms by
+    # default), so a command the bridge was still waiting on has been dropped
+    # by the time the next one starts.  Keep it above that timeout.
+    RESYNC_QUIET_S = 0.05
+    # Give up draining after this many quiet periods that were not quiet: a
+    # link that never stops talking is not one a resync can fix.
+    RESYNC_MAX_ROUNDS = 40
+
     def __init__(
         self,
         *,
@@ -802,6 +814,12 @@ class TapBridgeTransport(Transport):
     def _read_bytes(self, count: int) -> bytes:
         """Read up to *count* bytes, returning fewer only on timeout."""
         raise NotImplementedError
+
+    def _discard_input(self) -> int:
+        """Drop whatever has already arrived without blocking; return how many
+        bytes that was.  A channel that cannot tell returns 0, which makes
+        :meth:`_resync` a single quiet wait."""
+        return 0
 
     def _channel_name(self) -> str:
         """Short identifier for error messages (a port name, say)."""
@@ -878,15 +896,19 @@ class TapBridgeTransport(Transport):
             ) from exc
 
         if len(header) < 2:
+            self._resync()
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()} did not reply "
                 f"(got {len(header)} of 2 header bytes)"
             )
         if header[0] != self.SOF_RSP:
+            self._resync()
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: bad reply framing "
                 f"(expected SOF 0x{self.SOF_RSP:02X}, got 0x{header[0]:02X})"
             )
+        # A bridge-reported error is a complete, well-framed reply: the link
+        # is still in step, so there is nothing to resynchronise.
         status = header[1]
         if status != 0:
             text = self._STATUS_TEXT.get(status, "unknown error")
@@ -899,11 +921,31 @@ class TapBridgeTransport(Transport):
             return b""
         payload = self._read_bytes(resp_bytes)
         if len(payload) < resp_bytes:
+            self._resync()
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: short reply "
                 f"({len(payload)} of {resp_bytes} bytes)"
             )
         return payload
+
+    def _resync(self) -> None:
+        """Bring the link back into step after a failed transaction.
+
+        Waits for :attr:`RESYNC_QUIET_S` of silence, dropping anything that
+        arrives meanwhile.  Best effort: a channel error here is left for the
+        next transaction to report.
+        """
+        try:
+            for _ in range(self.RESYNC_MAX_ROUNDS):
+                time.sleep(self.RESYNC_QUIET_S)
+                if self._discard_input() == 0:
+                    return
+            _tap_log.warning(
+                "%s did not go quiet after a failed transaction",
+                self._channel_name(),
+            )
+        except OSError:
+            pass
 
     # -- Transport API ------------------------------------------------------
     def select_chain(self, chain: int) -> None:
@@ -1233,6 +1275,12 @@ class SerialTapTransport(TapBridgeTransport):
 
     def _read_bytes(self, count: int) -> bytes:
         return self._ser.read(count)
+
+    def _discard_input(self) -> int:
+        pending = self._ser.in_waiting
+        if pending:
+            self._ser.read(pending)
+        return pending
 
 
 def find_quartus_stp(explicit: str | None = None) -> str | None:

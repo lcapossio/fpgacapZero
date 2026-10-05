@@ -69,6 +69,10 @@ class FakeTapPort:
         del self._tx[:n]
         return out
 
+    @property
+    def in_waiting(self):
+        return len(self._tx)
+
     def flush(self):
         pass
 
@@ -205,6 +209,12 @@ class FakeTapPort:
                 self._arm_burst(bool(data & 0x80000000))
 
         return (captured & ((1 << width) - 1)).to_bytes(nb, "little")
+
+
+@pytest.fixture(autouse=True)
+def _no_resync_wait(monkeypatch):
+    """Resync waits on wall-clock silence; the fake port is silent at once."""
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_QUIET_S", 0.0)
 
 
 @pytest.fixture
@@ -524,6 +534,63 @@ def test_short_reply_raises(fake_serial):
     port.write = _silent          # bridge stops answering
     with pytest.raises(RuntimeError, match="did not reply"):
         t.read_reg(0)
+
+
+def test_bad_framing_drains_the_stale_reply(fake_serial):
+    """Bytes left over from a failed transaction must not answer the next.
+
+    Two junk bytes ahead of a good reply: the host reads the junk as a header
+    and gives up.  Without a resync the good reply would still be queued, and
+    the next read would take it as its own -- the wrong register's value, with
+    clean framing, so nothing would notice.
+    """
+    t, port = _connect(fake_serial)
+    port.mem[0x0040] = 0x11111111
+    port.mem[0x0044] = 0x22222222
+
+    port._tx.extend(b"\x00\x00")
+    with pytest.raises(RuntimeError, match="bad reply framing"):
+        t.read_reg(0x0040)
+    assert port.in_waiting == 0
+
+    assert t.read_reg(0x0044) == 0x22222222
+
+
+def test_a_bridge_error_status_does_not_resync(fake_serial, monkeypatch):
+    """An error reply is complete and well framed: the link is in step."""
+    t, _ = _connect(fake_serial)
+    calls = []
+    monkeypatch.setattr(t, "_resync", lambda: calls.append(1))
+    with pytest.raises(RuntimeError, match="chain out of range"):
+        t.raw_dr_scan(0, 8, chain=9)
+    assert calls == []
+
+
+def test_resync_waits_until_the_link_is_quiet(fake_serial, monkeypatch):
+    """A reply still arriving is drained in full, then one quiet period."""
+    t, port = _connect(fake_serial)
+    trickle = [b"\xA5\x00", b"\x01\x02\x03", b""]
+    sleeps = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        port._tx.extend(trickle.pop(0))
+
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_QUIET_S", 0.05)
+    monkeypatch.setattr("fcapz.transport.time.sleep", _sleep)
+    t._resync()
+    assert sleeps == [0.05, 0.05, 0.05]
+    assert port.in_waiting == 0
+
+
+def test_resync_gives_up_on_a_link_that_never_goes_quiet(fake_serial, monkeypatch):
+    t, port = _connect(fake_serial)
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_MAX_ROUNDS", 3)
+    monkeypatch.setattr(
+        "fcapz.transport.time.sleep", lambda _s: port._tx.extend(b"\x55")
+    )
+    t._resync()                   # returns rather than spinning forever
+    assert port.in_waiting == 0
 
 
 # -- the protocol engine is PHY-agnostic ------------------------------------
