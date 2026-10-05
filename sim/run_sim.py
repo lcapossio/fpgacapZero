@@ -142,6 +142,7 @@ DEFAULT_TESTBENCHES = [
     "jtag_pipe_iface",
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
+    "fcapz_uart_tap",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",
     "chan_mux",
