@@ -62,10 +62,6 @@ _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
 PORT = 3121
 FPGA = "xc7a100t"
-# The Arty example instantiates the ELA with INPUT_PIPE=1.  The RTL derives
-# COMPARE_PIPE=1 from that setting, so the visible trigger decision sample is
-# one sample after the comparator match.
-TRIGGER_DECISION_LATENCY = 1
 ELA0_SAMPLE_CLOCK_HZ = 150_000_000
 ELA1_SAMPLE_CLOCK_HZ = 130_000_000
 
@@ -917,8 +913,8 @@ class TestDecimation(unittest.TestCase):
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertEqual(len(result.samples), 8)
-        expected_anchor = (trigger_value + TRIGGER_DECISION_LATENCY) & 0xFF
-        self.assertEqual(result.samples[pretrigger], expected_anchor)
+        # samples[pretrigger] is the sample the compare matched.
+        self.assertEqual(result.samples[pretrigger], trigger_value)
 
         # The post window away from the forced trigger anchor keeps the /4 cadence.
         # The oldest pre-history slot can be an initial buffer value if the
@@ -991,8 +987,7 @@ class TestTimestamps(unittest.TestCase):
         self.a.arm()
         result = self.a.capture(timeout=5.0)
         self.assertGreater(len(result.timestamps), 1)
-        expected_anchor = (trigger_value + TRIGGER_DECISION_LATENCY) & 0xFF
-        self.assertEqual(result.samples[pretrigger], expected_anchor)
+        self.assertEqual(result.samples[pretrigger], trigger_value)
 
         gaps = [result.timestamps[i+1] - result.timestamps[i]
                 for i in range(len(result.timestamps)-1)]
@@ -1051,9 +1046,8 @@ class TestSegmentedCapture(unittest.TestCase):
             result = self.a.capture_segment(seg, timeout=5.0)
             self.assertEqual(len(result.samples), 6,
                              f"Segment {seg}: expected 6 samples, got {len(result.samples)}")
-            expected_anchor = TRIGGER_DECISION_LATENCY & 0xFF
-            self.assertIn(expected_anchor, result.samples,
-                          f"Segment {seg}: trigger anchor not found in {result.samples}")
+            self.assertEqual(result.samples[2], 0x00,
+                             f"Segment {seg}: trigger sample not at pretrigger: {result.samples}")
 
     def test_segment_data_independent(self):
         """Each segment has its own capture data, not shared."""
@@ -1069,12 +1063,11 @@ class TestSegmentedCapture(unittest.TestCase):
         done = self.a.wait_all_segments_done(timeout=10.0)
         self.assertTrue(done)
 
-        # Read all 4 segments; each should contain the delayed trigger anchor.
-        expected_anchor = TRIGGER_DECISION_LATENCY & 0xFF
+        # Each segment starts at its own trigger sample (pretrigger=0).
         for seg in range(4):
             result = self.a.capture_segment(seg, timeout=5.0)
-            self.assertIn(expected_anchor, result.samples,
-                          f"Segment {seg}: trigger anchor not in {result.samples}")
+            self.assertEqual(result.samples[0], 0x00,
+                             f"Segment {seg}: trigger sample not first: {result.samples}")
             self.assertEqual(len(result.samples), 3,
                              f"Segment {seg}: expected 3 samples, got {len(result.samples)}")
 

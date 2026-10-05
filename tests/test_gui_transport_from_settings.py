@@ -116,6 +116,27 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.post_program_delay_ms, 350)
         self.assertAlmostEqual(t.ready_poll_interval_sec, 0.04)
 
+    def test_hw_server_burst_path_from_settings(self) -> None:
+        for burst_path, single_chain, burst in (
+            ("single_chain", True, True),
+            ("two_chain", False, True),
+            ("none", True, False),
+        ):
+            with self.subTest(burst_path=burst_path):
+                t = transport_from_connection(ConnectionSettings(
+                    backend="hw_server", tap="xc7a100t", burst_path=burst_path,
+                ))
+                self.assertEqual(t.single_chain_burst, single_chain)
+                self.assertEqual(t.burst, burst)
+
+    def test_usb_blaster_burst_path_from_settings(self) -> None:
+        for burst_path, burst in (("single_chain", True), ("none", False)):
+            with self.subTest(burst_path=burst_path):
+                t = transport_from_connection(ConnectionSettings(
+                    backend="usb_blaster", tap="auto", burst_path=burst_path,
+                ))
+                self.assertEqual(t.burst, burst)
+
     def test_usb_blaster_transport_from_settings(self) -> None:
         c = ConnectionSettings(
             backend="usb_blaster",

@@ -38,32 +38,37 @@ burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
-The 256-bit burst DR packs **whole samples** per scan, so it is used
-only when a sample fits one 32-bit word (`SAMPLE_W <= 32`). Wider cores
-— notably the AXI monitor (`SAMPLE_W=160`) — are read back through the
-32-bit-word DATA path, which `capture()` reassembles into wide samples;
-`read_block` gates on the selected core's `SAMPLE_W` (read fresh, so it
-is correct when a session hops between an ELA and a monitor). Feeding a
+Burst readout is declared, never probed: a build with no burst path at
+all (`SINGLE_CHAIN_BURST=0` with `BURST_EN=0`) is opened with
+`burst=False` (CLI `--no-burst`, RPC `"burst": false`, GUI "Burst
+readout: None"), and every capture is then read through the register
+window. Otherwise a burst that fails is raised, with a hint naming the
+option that matches the build; it is never read around, since a JTAG
+fault mid-burst would otherwise come back as a slow, silent re-read.
+
+The 256-bit burst DR packs **whole samples** per scan, so `read_block`
+uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
+gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
+a session hops between an ELA and a monitor. Wider cores — notably the AXI
+monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
+per scan, which returns each sample as 32-bit words for `capture()` to
+reassemble. A slot without burst wiring, or a request the burst engine
+cannot take (`BurstUnavailableError`, raised before any scan: burst off,
+or a width outside 1..256), is read through the 32-bit-word DATA window
+instead; any other burst failure raises, and a burst that runs but
+returns the wrong number of samples raises `BurstIntegrityError`. Feeding a
 wide core's 32-bit *word* count to the burst engine would build a
 multi-hundred-KB single-line TCL scan sequence that xsdb never
 completes — a hard readback hang, not a throughput issue.
 
-For single-chain burst readback, the host verifies stability instead of
-trusting the first transaction.  The invariant is simple: after the ELA
-reports `DONE`, capture memory is immutable until the next `ARM` or `RESET`,
-so repeating the same `BURST_PTR` read transaction must return identical data.
-Some real `hw_server` sessions can produce one stale first transaction after
-rapid re-arm; `XilinxHwServerTransport` requires two consecutive matching
-single-chain burst reads and raises `RuntimeError` if the result does not
-stabilize.  The legacy two-chain DATA_CHAIN path remains a single transaction.
-
-This is a stability check, not a cryptographic or protocol-level data oracle:
-two identical but stale/corrupt scans would still pass.  The reference Arty
-hardware tests add a higher-level plausibility check by capturing the known
-free-running counter and requiring adjacent samples to increment by +1 when
+Every burst readback is a single pass.  The `BURST_PTR` write, the
+staging-fill idle (real TCKs) and every burst scan run as one JTAG
+transaction, so nothing else can reach the chain mid-burst, and the first
+scan, which primes the staging register, is discarded.  Burst data carries
+no framing or CRC: the reference Arty and DE25-Nano hardware tests capture a
+free-running counter and require adjacent samples to increment by +1 when
 decimation is disabled.  Designs with critical readback requirements should
-use a similar application-level invariant, or add a future versioned burst
-framing/CRC to the RTL and host protocol.
+check a similar application-level invariant.
 
 An **optional** extension method `read_timestamp_block(addr, words,
 timestamp_width)` accelerates timestamp readback via the burst path.
@@ -103,11 +108,37 @@ What `connect()` does:
 1. Spawns `xsdb` as a subprocess (uses `xsdb_path` if set,
    otherwise looks on `PATH`).
 2. Sends `connect -url tcp:HOST:PORT` to xsdb's stdin.
-3. If `bitfile` is set: selects the **configuration target** (see below), then
-   sends `fpga -file {BITFILE}` and `after <ms>` (GUI default 200 ms
-   post-program delay).
-4. Sends a `jtag targets -set -filter` to lock onto the
-   actual FPGA target (not just any device on the chain).
+3. If `bitfile` is set: waits for a live FPGA target (step 4), selects the
+   **configuration target** (see below), then sends `fpga -file {BITFILE}`
+   and `after <ms>` (GUI default 200 ms post-program delay).
+4. Waits for a JTAG target matching `fpga_name`, selects it with
+   `jtag targets -set -filter`, and confirms it with one IDCODE scan.
+   About 1 s after the last xsdb client exits, hw_server releases its
+   cables one after another; once a client is connected again it reopens
+   and rescans them all, which can take several seconds with a few boards
+   attached. A client that connects after the release has begun does not
+   stop it: some cables are listed closed, and a target on a cable still
+   open answers a scan, then drops out with "JTAG node is not accessible"
+   until the reopen finishes. So connect first waits until hw_server
+   reports every cable open and initialized: none closes on its own while a
+   client is connected, so that marks the end of the release. A cable
+   reporting an error (its board powered off, say) is not waited for. It then waits
+   for the target to be listed (a board still powering up, say). Both waits
+   share `target_wait_timeout` (default 10 s; with no release under way a
+   live target is selected in milliseconds); a cable still closed or a
+   target still missing at the deadline is an error. A select or IDCODE scan
+   that fails (two boards matching `fpga_name`, say) is raised at once.
+   One window remains, and only hw_server could close it. A client whose
+   connect lands right as the release starts can be told every cable is
+   open for about 0.2 s after hw_server has decided to close one, and
+   hw_server reports no closing state to wait on. The target then drops
+   out for about 1 s: either connect's IDCODE scan fails, or connect
+   succeeds and the reads just after it fail. Both fail with "JTAG node is
+   not accessible"; neither returns wrong data. To avoid it, don't start a session within about 1 s of the
+   previous one exiting, or keep one xsdb client connected throughout.
+   The timeout bounds this polling, not a single xsdb command: as
+   everywhere on this transport, a command hw_server never answers is
+   waited for.
 5. **Runs the readiness wait** — see "Readiness wait" below.
 
 The connection persists until you call `close()` or the
@@ -187,9 +218,6 @@ bursts as for sample bursts; the host discards that first 256-bit scan.
 
 - `BURST_PTR` is written with `bit[31]=1` to switch the staging mux
   to the timestamp BRAM instead of the sample BRAM.
-- No priming scan is needed — the staging buffer is already filled
-  from the first 256-bit capture, so the first scan returns valid
-  data directly.
 - `words_per_scan = 256 // timestamp_width` (e.g. 8 words per scan
   for 32-bit timestamps).
 
@@ -331,15 +359,18 @@ swap one for the other without changing the IR table.
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
 | AMD/Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
 | AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
-| **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | `IR_TABLE_XILINX_ZYNQUS` | `ir_length=12`, `dr_extra_bits=1`, `dr_extra_position="tdi"` |
+| **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
 
-The MPSoC row is not optional padding — the ARM DAP's 1-bit BYPASS
-register sits in series with the PL TAP's DR on the TDI side, so every
-DR scan carries one extra bit that `dr_extra_bits=1` accounts for.
-Without it the host's address field lands one bit position off and
-every non-zero register address reads the wrong register.
+On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
+TAP's DR, so every DR scan is one shift longer than the fcapz frame.
+`use_register_ir=True` lets xsdb route the IR and pad the DR; the host
+then shifts plain 49-bit / 256-bit frames.  The raw-opcode path
+(`IR_TABLE_XILINX_ZYNQUS` with `ir_length`, `dr_extra_bits=1` and
+`dr_extra_position`) is kept for experiments only — raw opcodes don't
+reach the PL BSCANE2 through xsdb on MPSoC (see below), and which end of
+the scan the DAP bit sits on is not established (next section).
 
 CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
 `use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
@@ -349,11 +380,20 @@ See `host/fcapz/cli.py::_chain_shape_kwargs`.
 ### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
 Zynq UltraScale+ MPSoC parts (Kria xck24/xck26, ZCU+ xczu*) have a
-**multi-TAP boundary scan chain**: `TDI -> ARM DAP -> PL TAP -> TDO`.
+**multi-TAP boundary scan chain**: the PL TAP and the ARM DAP.
 The ARM DAP (4-bit IR) handles Arm CoreSight debug; the PL TAP
 (12-bit IR) handles FPGA configuration and BSCANE2 USER instructions.
 When both TAPs are in the chain, every IR shift is 16 bits and every
 DR shift carries an extra 1-bit BYPASS register from the DAP.
+
+The physical order of the two TAPs is not established.  Earlier notes
+here gave `TDI -> ARM DAP -> PL TAP -> TDO`, based on a KV260 TDO trace
+taken through xsdb; OpenOCD's `xilinx_zynqmp.cfg` declares the DAP
+nearest TDO, which implies the opposite.  It doesn't matter for
+`use_register_ir=True`, where xsdb pads the DR.  It does matter for the
+RTL: either way the PL sees one extra shift clock per DR scan, which is
+why `jtag_pipe_iface` decodes the last 49 bits of a scan instead of
+requiring exactly 49 shifts.
 
 #### Why raw hex opcodes don't work on MPSoC
 
@@ -394,24 +434,38 @@ Verified on xck26 / KV260:
 All four USER chains work.  Reads, writes, and 256-bit burst scans
 are confirmed end-to-end.
 
-#### Write path difference on MPSoC
+That verification predates the single-chain pipe interface
+(`jtag_pipe_iface`): it ran on the register interface on USER1 with
+bursts on USER2.  xsdb hides the DAP's BYPASS bit from the host, but
+the PL still sees it as one extra shift clock on every DR scan (a
+49-bit command is 50 TCKs in Shift-DR).  The pipe interface therefore
+decodes a command from the last 49 bits of any scan that is at least
+49 and fewer than `BURST_W` shifts long, instead of requiring exactly
+49 (see the changelog).  Single-chain and multi-core
+wrappers have not yet been re-verified on MPSoC hardware.
 
-Writes on MPSoC in `-register` mode need an explicit `-state DRUPDATE`
-on the `drshift` (the `-state IDLE` shortcut that works on 7-series
-doesn't reliably fire the UPDATE-DR event through the named-register
-path) and a longer settling delay (~100 TCK instead of 20):
+#### Register access sequence
+
+Every DR scan the transport issues ends in an explicit `-state DRUPDATE`:
+register reads and writes, block-read and pipelined-read scans, the burst
+`BURST_PTR` write and burst scans, and the raw scans of the bridges.  Each
+scan that carries a command for the core to act on before the next capture
+is followed by idle TCKs with `state IDLE <n>`.  The explicit UPDATE-DR is
+required on MPSoC in `-register` mode, where the `-state IDLE` shortcut
+doesn't reliably fire the UPDATE-DR event through the named-register path.
+The idle must be `state IDLE <n>`, which clocks `n` TCKs; xsdb's
+`delay <usec>` only waits and clocks nothing, so it gives the TCK-domain
+core no time to accept the command or stage the response.  Writes in
+`-register` mode get 100 idle TCKs instead of 20:
 
 ```
 # Write (MPSoC, -register mode):
 $seq irshift -state IRUPDATE -register user1
 $seq drshift -state DRUPDATE -bits 49 $write_frame
-# [run; delete]
-$seq2 state IDLE
-$seq2 delay 100
+$seq state IDLE 100
 # [run; delete]
 ```
 
-Reads use the standard `-state IDLE` + `delay 20` pattern unchanged.
 The transport handles this automatically when `use_register_ir=True`.
 
 #### Usage

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, FallingEdge, Timer
+from cocotb.triggers import RisingEdge, FallingEdge, ReadOnly, Timer
 from cocotbext.axi import AxiBus, AxiRam
 
 try:
@@ -99,6 +99,11 @@ JTAG_PIPE_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "burst_read_first",
         "burst_read_second",
         "segmented_burst_alignment",
+        "padded_register_frames",
+        "padded_command_window",
+        "padded_burst_read",
+        "partial_burst_update",
+        "foreign_scan_suffix",
     ),
 )
 
@@ -472,6 +477,168 @@ async def jtag_pipe_iface_protocol(dut):
     JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_read_second")
 
 
+async def pipe_command_monitor(dut, events: list) -> None:
+    """Record every register-bus strobe as (kind, addr, wdata)."""
+    while True:
+        await RisingEdge(dut.tck)
+        await ReadOnly()
+        if int(dut.reg_wr_en.value):
+            events.append(("wr", int(dut.reg_addr.value), int(dut.reg_wdata.value)))
+        if int(dut.reg_rd_en.value):
+            events.append(("rd", int(dut.reg_addr.value), 0))
+
+
+def pad_frame(frame: int, pad: int, pad_value: int) -> int:
+    """TDI stream for a 49-bit frame behind *pad* bits of chain padding.
+
+    The pipe receives the pad bits first (a BYPASS register upstream of it
+    captures 0; a device downstream receives host filler that passes through
+    the pipe first), then the frame.  Only the last 49 bits may decode.
+    """
+    return (frame << pad) | (((1 << pad) - 1) if pad_value else 0)
+
+
+async def scan_raw(dut, bits: int, count: int, *, update: bool = True) -> int:
+    """Shift *count* TDI bits (LSB first); return the first 32 TDO bits."""
+    captured = 0
+    dut.sel.value = 1
+    dut.capture.value = 1
+    await tick(dut.tck)
+    dut.capture.value = 0
+    dut.shift_en.value = 1
+    for i in range(count):
+        dut.tdi.value = (bits >> i) & 1
+        if i < 32 and int(dut.tdo.value):
+            captured |= 1 << i
+        await tick(dut.tck)
+    dut.shift_en.value = 0
+    dut.tdi.value = 0
+    if update:
+        dut.update.value = 1
+        await tick(dut.tck)
+        dut.update.value = 0
+    dut.sel.value = 0
+    return captured
+
+
+@cocotb.test()
+async def jtag_pipe_iface_padded_chain(dut):
+    """Commands survive chain padding; bursts and short scans never execute."""
+    burst_w = int(os.environ.get("FCAPZ_COCOTB_BURST_W", "256"))
+    events: list = []
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
+    cocotb.start_soon(pipe_bus_monitor(dut))
+    cocotb.start_soon(pipe_command_monitor(dut, events))
+    dut.arst.value = 1
+    dut.tdi.value = 0
+    dut.capture.value = 0
+    dut.shift_en.value = 0
+    dut.update.value = 0
+    dut.sel.value = 0
+    dut.reg_rdata.value = 0x1234_5678
+    dut.sample_data.value = 0
+    dut.timestamp_data.value = 0
+    dut.burst_start.value = 0
+    dut.burst_timestamp.value = 0
+    dut.burst_ptr_in.value = 0
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+
+    # Odd write data (ARM is CTRL[0]) and reads, across padding depths and
+    # both pad polarities, up to the widest legal command scan.
+    max_pad = burst_w - 1 - 49
+    for pad in sorted({p for p in (0, 1, 2, 7, max_pad) if p <= max_pad}):
+        for pad_value in (0, 1):
+            data = 0x8000_0001 ^ (pad << 8)
+            events.clear()
+            await scan_raw(dut, pad_frame(make_frame(0x0004, data, True), pad, pad_value),
+                           49 + pad)
+            await idle_tap(dut, 2)
+            assert events == [("wr", 0x0004, data)], (pad, pad_value, events)
+            events.clear()
+            await scan_raw(dut, pad_frame(make_frame(0xF000, 0, False), pad, pad_value),
+                           49 + pad)
+            await idle_tap(dut, 2)
+            assert events == [("rd", 0xF000, 0)], (pad, pad_value, events)
+            captured = await scan_raw(
+                dut, pad_frame(make_frame(0xF000, 0, False), pad, pad_value), 49 + pad)
+            assert captured == 0x1234_5678, (pad, pad_value, hex(captured))
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("padded_register_frames")
+
+    # Window edges: 48 is too short; burst_w and beyond are bursts (the shift
+    # counter saturates at BURST_W), whatever TDI carried.  A scan of
+    # 2**SHIFT_CTR_W + 49 shifts would wrap an unsaturated counter back onto
+    # 49, so it proves the saturation.
+    wrap_scan = (1 << burst_w.bit_length()) + 49
+    ones = (1 << wrap_scan) - 1
+    for count, executes in ((48, False), (49, True), (burst_w - 1, True),
+                            (burst_w, False), (burst_w + 1, False), (burst_w + 40, False),
+                            (wrap_scan, False)):
+        events.clear()
+        await scan_raw(dut, ones, count)
+        await idle_tap(dut, 2)
+        if executes:
+            assert events == [("wr", 0xFFFF, 0xFFFF_FFFF)], (count, events)
+        else:
+            assert events == [], (count, events)
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("padded_command_window")
+
+    # Burst session on a one-pad chain: BURST_PTR -> prime -> two bursts,
+    # all padded; then a padded READ exits burst mode and a new BURST_PTR
+    # restarts it.
+    mask = (1 << burst_w) - 1
+    events.clear()
+    await scan_raw(dut, pad_frame(make_frame(0x002C, 0, True), 1, 0), 50)
+    await idle_tap(dut, 80)
+    await scan_raw(dut, 0, burst_w + 1)
+    first = await scan_burst(dut, bits=burst_w + 1) & mask
+    second = await scan_burst(dut, bits=burst_w + 1) & mask
+    assert_sample_sequence(first, 42, burst_w // 8)
+    assert_sample_sequence(second, 42 + burst_w // 8, burst_w // 8)
+    assert events == [("wr", 0x002C, 0)], events
+    events.clear()
+    await scan_raw(dut, pad_frame(make_frame(0x0000, 0, False), 1, 0), 50)
+    await idle_tap(dut, 2)
+    assert events == [("rd", 0x0000, 0)], events
+    captured = await scan_raw(dut, pad_frame(make_frame(0x0000, 0, False), 1, 0), 50)
+    assert captured == 0x1234_5678, hex(captured)
+    await scan_raw(dut, pad_frame(make_frame(0x002C, 0, True), 1, 0), 50)
+    await idle_tap(dut, 80)
+    await scan_raw(dut, 0, burst_w + 1)
+    again = await scan_burst(dut, bits=burst_w + 1) & mask
+    assert_sample_sequence(again, 42, burst_w // 8)
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("padded_burst_read")
+
+    # A burst cut short: without UPDATE nothing executes; with UPDATE the
+    # zero-filled command register decodes as a READ of address 0 (never a
+    # write) and leaves burst mode.
+    await scan_raw(dut, pad_frame(make_frame(0x002C, 0, True), 1, 0), 50)
+    await idle_tap(dut, 80)
+    partial = (49 + burst_w) // 2
+    events.clear()
+    await scan_raw(dut, 0, partial, update=False)
+    await idle_tap(dut, 2)
+    assert events == [], events
+    await scan_raw(dut, 0, partial)
+    await idle_tap(dut, 2)
+    assert events == [("rd", 0x0000, 0)], events
+    captured = await scan_raw(dut, make_frame(0x0000, 0, False), 49)
+    assert captured == 0x1234_5678, hex(captured)
+    JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("partial_burst_update")
+
+    # A foreign scan shorter than a burst executes its last 49 bits.  This is
+    # the documented cost of padding tolerance (jtag_reg_iface behaves the
+    # same): a 72-bit EJTAG-AXI CONFIG frame lands as WRITE 0xC000.
+    if burst_w > 72:
+        events.clear()
+        config = (0xE << 68) | 0x0004  # CMD_CONFIG, addr 0x0004
+        await scan_raw(dut, config, 72)
+        await idle_tap(dut, 2)
+        assert events == [("wr", 0xC000, 0)], events
+        JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("foreign_scan_suffix")
+
+
 @cocotb.test()
 async def jtag_pipe_iface_segmented_alignment(dut):
     cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
@@ -687,6 +854,8 @@ async def fcapz_core_manager_mux(dut):
 
     assert await manager_read(dut, 0xF000) == 0x0004_434D
     assert await manager_read(dut, 0xF004) == 3
+    # bit2: the burst start is raised on every BURST_PTR write
+    assert await manager_read(dut, 0xF010) == 0x7
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xEFFF) == 0
     assert int(dut.slot_rd_en.value) & 1
@@ -711,11 +880,68 @@ async def fcapz_core_manager_mux(dut):
     await Timer(1, unit="ns")
     assert int(dut.burst_rd_data.value) == 0xB1
     assert int(dut.burst_rd_ts_data.value) == 1
-    assert int(dut.burst_start.value) == 1
+    # The start event is the manager's own: no BURST_PTR write yet.
+    assert int(dut.burst_start.value) == 0
     assert int(dut.burst_timestamp.value) == 0
     assert int(dut.burst_start_ptr.value) == 0xB
     await manager_write(dut, 0xF008, 7)
     assert await manager_read(dut, 0xF008) == 1
+
+
+@cocotb.test()
+async def fcapz_core_manager_burst_start_per_write(dut):
+    """Every BURST_PTR write to a burst slot is a new start at the pipe.
+
+    Each slot toggles its own start flag on its own BURST_PTR writes, but the
+    pipe keeps one last-seen copy. Moving the burst from slot 0 to slot 1
+    when both flags hold the same value must still read as a start, or the
+    pipe reads slot 1 from slot 0's old pointer.
+    """
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
+    dut.jtag_rst.value = 1
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    dut.slot_rdata.value = 0
+    dut.slot_burst_rd_data.value = 0
+    dut.slot_burst_rd_ts_data.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
+    dut.slot_burst_start.value = 0
+    dut.slot_burst_timestamp.value = 0
+    dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+
+    flags = [0, 0, 0]
+
+    async def burst_ptr_write(slot: int) -> None:
+        # What the slot does on the same edge: an ELA toggles its own flag.
+        await manager_write(dut, 0xF008, slot)
+        await manager_write(dut, 0x002C, 0)
+        flags[slot] ^= 1
+        dut.slot_burst_start.value = flags[0] | (flags[1] << 1) | (flags[2] << 2)
+        await Timer(1, unit="ns")
+
+    seen = int(dut.burst_start.value)
+    for slot, ptr in ((0, 0xA), (1, 0xB), (0, 0xA), (0, 0xA), (1, 0xB), (1, 0xB)):
+        await burst_ptr_write(slot)
+        now = int(dut.burst_start.value)
+        assert now != seen, f"BURST_PTR write to slot {slot} (flags {flags}) raised no start"
+        assert int(dut.burst_start_ptr.value) == ptr
+        seen = now
+
+    # Slot 2 has no burst wiring, and other writes are not starts.
+    await burst_ptr_write(2)
+    assert int(dut.burst_start.value) == seen
+    await manager_write(dut, 0xF008, 0)
+    await manager_write(dut, 0x0020, 0x1234)
+    await manager_write(dut, 0xF02C, 0)
+    await Timer(1, unit="ns")
+    assert int(dut.burst_start.value) == seen
 
 
 @cocotb.test()

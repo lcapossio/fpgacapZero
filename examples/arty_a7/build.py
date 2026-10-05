@@ -49,8 +49,9 @@ PROJECT_DIR = PROJECT_PARENT / PROJECT_NAME
 # hw_server is NOT in this list — it is a long-running debug server and
 # must never be killed by the build.  vivado.exe is also NOT in the list
 # because a concurrent interactive Vivado session would be wrongly
-# targeted — we match helper children by name *and* by reference to
-# this build's project directory via their command line or CWD.
+# targeted.  A helper matched by name is killed only when it is an orphan
+# (its parent process is gone): a live xsdb owned by a host/test session or
+# an xsim owned by a running simulation is left alone.
 HELPER_NAMES = {
     "vrs.exe", "xvlog.exe", "xelab.exe", "xsim.exe",
     "xsdb.exe", "loader.exe", "rdiServer.exe",
@@ -85,15 +86,15 @@ def _runs_dir_is_deletable(project_dir: Path) -> bool:
 
 
 def cleanup_orphans() -> int:
-    """Kill any Vivado helper processes left over from a killed build.
+    """Kill Vivado helper processes left over from a killed build.
 
-    Uses PowerShell's Get-Process to enumerate helper children by
-    executable basename, then filters to those whose Path lives under a
-    Vivado install.  Any matching process is terminated — a concurrent
-    interactive Vivado session may also spawn these helpers, but they
-    are short-lived workers for synthesis/simulation, not user-facing
-    state, so killing them is safe.  (vivado.exe itself is never in
-    HELPER_NAMES, and hw_server is likewise excluded.)
+    Enumerates processes named in HELPER_NAMES whose executable lives under
+    a Vivado/Xilinx install, and terminates only orphans: those whose parent
+    process no longer exists (or whose parent PID was reused by a process
+    started after the helper).  A helper with a live parent belongs to a
+    running Vivado, host session or simulation and is never touched.
+    (vivado.exe itself is never in HELPER_NAMES, and hw_server is likewise
+    excluded.)
 
     Returns the number of processes terminated.
     """
@@ -113,13 +114,17 @@ def cleanup_orphans() -> int:
         print("[build.py] warning: powershell.exe not found, skipping orphan cleanup")
         return 0
 
-    # Strip .exe from names for Get-Process (which matches by basename)
-    proc_names = [n.removesuffix(".exe") for n in HELPER_NAMES]
-    names_arg = ",".join(f"'{n}'" for n in proc_names)
+    names_arg = ",".join(f"'{n}'" for n in sorted(HELPER_NAMES))
     ps = (
-        f"Get-Process -Name @({names_arg}) -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.Path -like '*Vivado*' -or $_.Path -like '*Xilinx*' } | "
-        "ForEach-Object { \"$($_.Id)`t$($_.Path)\" }"
+        f"$names = @({names_arg}); "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $names -contains $_.Name -and "
+        "($_.ExecutablePath -like '*Vivado*' -or $_.ExecutablePath -like '*Xilinx*') } | "
+        "ForEach-Object { "
+        "$parent = Get-CimInstance Win32_Process "
+        "-Filter \"ProcessId=$($_.ParentProcessId)\" -ErrorAction SilentlyContinue; "
+        "if (-not $parent -or $parent.CreationDate -gt $_.CreationDate) "
+        "{ \"$($_.ProcessId)`t$($_.ExecutablePath)\" } }"
     )
     try:
         result = subprocess.run(
@@ -141,15 +146,21 @@ def cleanup_orphans() -> int:
             continue
         pid_str, path = parts
         try:
-            subprocess.run(
+            tk = subprocess.run(
                 ["taskkill", "/F", "/PID", pid_str],
                 capture_output=True,
+                text=True,
                 timeout=5,
             )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if tk.returncode == 0:
             killed += 1
             print(f"[build.py] terminated orphan Vivado helper pid={pid_str} ({path})")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        else:
+            reason = (tk.stderr or tk.stdout).strip().splitlines()
+            print(f"[build.py] warning: could not terminate orphan pid={pid_str} "
+                  f"({path}): {reason[-1] if reason else tk.returncode}")
     return killed
 
 

@@ -766,6 +766,16 @@ class MakeTransportTests(unittest.TestCase):
                 self.assertIsInstance(t, QuartusStpTransport)
                 self.assertIsNone(t.device_name)
 
+    def test_no_burst_flag_declares_a_build_without_burst(self):
+        parser = build_parser()
+        for backend, tap in (("hw_server", "xc7a100t"), ("usb_blaster", "auto")):
+            for flags, burst in (([], True), (["--no-burst"], False)):
+                with self.subTest(backend=backend, flags=flags):
+                    args = parser.parse_args(
+                        ["--backend", backend, "--tap", tap, *flags, "probe"]
+                    )
+                    self.assertEqual(_make_transport(args).burst, burst)
+
 
 if __name__ == "__main__":
     unittest.main()

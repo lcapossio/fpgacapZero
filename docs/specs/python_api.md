@@ -12,7 +12,13 @@ out of date).  For a guided tour with worked examples, read
 ### `Analyzer`
 
 ```python
-Analyzer(transport: Transport, *, chain: int = 1, instance: int | None = None)
+Analyzer(
+    transport: Transport,
+    *,
+    chain: int = 1,
+    instance: int | None = None,
+    manager: bool | None = None,
+)
 ```
 
 Host controller for one ELA core.
@@ -582,6 +588,17 @@ Read *words* consecutive 32-bit registers starting at *addr*.
 Returns a list of *words* unsigned 32-bit integers.  Raises
 `RuntimeError` if not connected or on I/O failure.
 
+#### `Transport.read_window_block`
+
+```python
+read_window_block(addr: int, words: int) -> List[int]
+```
+
+Like `read_block`, but always through the register window,
+never a burst.  For a core-manager slot with no burst wiring, whose
+burst reads return zeros.  Transports whose `read_block` never
+bursts need not override it.
+
 #### `Transport.select_chain`
 
 ```python
@@ -775,12 +792,13 @@ XilinxHwServerTransport(
     *,
     post_program_delay_ms: int = 200,
     ready_poll_interval_sec: float = 0.02,
-    target_wait_timeout: float = 3.0,
+    target_wait_timeout: float = 10.0,
     ir_length: int = 6,
     dr_extra_bits: int = 0,
     dr_extra_position: str = 'tdo',
     use_register_ir: bool = False,
     single_chain_burst: bool = True,
+    burst: bool = True,
 )
 ```
 
@@ -826,7 +844,10 @@ _ERR_MARKER = '<<XSDB_ERR>>'
 DEFAULT_IR_LENGTH = 6
 DEFAULT_DR_EXTRA_BITS = 0
 DEFAULT_DR_EXTRA_POSITION = 'tdo'
+_NODE_CHECK_TCL = 'set _nc [jtag sequence]; $_nc irshift -state IRUPDATE -register idcode; $_nc drshift -state DRUPDATE -capture -tdi 0 32; $_nc run; $_nc delete'
+_CLOSED_CABLES_TCL = 'foreach _t [jtag targets -target-properties] { set _s [dict get $_t state]; if {[dict get $_t level] == 0 && ![string match error* $_s] && (![dict get $_t is_open] || [string match initializing* $_s])} { puts [dict get $_t name] } }'
 _BLOCK_CHUNK = 512
+_BURST_SCANS_PER_SEQUENCE = 256
 WRITE_IDLE_CYCLES_REGISTER = 100
 BURST_PREFILL_IDLE_CYCLES = 160
 ```
@@ -906,18 +927,6 @@ Read a 32-bit register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
 
-#### `XilinxHwServerTransport.read_reg_stable`
-
-```python
-read_reg_stable(addr: int) -> int
-```
-
-Read through the hw_server register pipeline and return settled data.
-
-XSDB JTAG sequences can return data from the previous register window
-on the first read after changing addresses or session state.  Discard
-one warmup read and return the second scan.
-
 #### `XilinxHwServerTransport.write_reg`
 
 ```python
@@ -942,13 +951,61 @@ available, uses the wide burst DR for ~10x faster throughput.
 Otherwise falls back to single-sequence pipelined reads on the
 active ELA control chain.
 
-The burst DR packs whole `SAMPLE_W`-bit samples per 256-bit scan, so
-it is only valid when a sample fits one 32-bit word (`SAMPLE_W <= 32`).
-For a wider core (e.g. the AXI monitor, `SAMPLE_W=160`) `capture()`
-reassembles each sample from 32-bit words and passes a *word* count here;
-feeding that word count to the burst engine builds a 5x-oversized
-single-line TCL scan sequence that xsdb never finishes — hanging the
-read. Wide cores therefore skip burst and use the 32-bit word path.
+The burst DR packs whole `SAMPLE_W`-bit samples per 256-bit scan, but
+*words* counts 32-bit words, so this burst is only used when a sample
+fits one word (`SAMPLE_W <= 32`); a wider core here takes the 32-bit
+word path.  `Analyzer.capture()` reads a wide core with
+`read_sample_block`, which bursts whole samples, and comes here
+only when that raises `BurstUnavailableError`.
+
+#### `XilinxHwServerTransport.read_window_block`
+
+```python
+read_window_block(addr: int, words: int) -> List[int]
+```
+
+Like `read_block`, but always through the register window,
+never a burst.  For a core-manager slot with no burst wiring, whose
+burst reads return zeros.  Transports whose `read_block` never
+bursts need not override it.
+
+#### `XilinxHwServerTransport.read_sample_block`
+
+```python
+read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+```
+
+Read *n_samples* whole samples via the burst DR.
+
+Returns `ceil(sample_width / 32)` little-endian 32-bit words per
+sample, the flat layout `Analyzer.capture()` reassembles.  This is the
+readout for wide cores (`SAMPLE_W > 32`): the burst engine addresses
+the capture RAM by sample, so unlike the 16-bit register window it has
+no size limit, and one 256-bit scan replaces `ceil(width / 32)`
+register reads.  Raises `BurstUnavailableError`, before any
+scan, when this transport cannot burst the request, so the caller can
+read the window instead.  A burst that runs and fails raises anything
+else -- `BurstIntegrityError` for the wrong number of samples --
+and must not be read around.
+
+#### `XilinxHwServerTransport.read_timestamp_block_single_chain`
+
+```python
+read_timestamp_block_single_chain(
+    base_addr: int,
+    n_timestamps: int,
+    timestamp_width: int,
+) -> List[int]
+```
+
+Read one timestamp per captured sample via the burst DR.
+
+The wide-core counterpart of `read_sample_block`: a deep wide
+capture's timestamp window can start past the 16-bit register space,
+so it must not be read through the window.  Raises
+`BurstUnavailableError` when burst readout is off, and
+`BurstIntegrityError` when a burst ran but returned the wrong
+number of timestamps.
 
 #### `XilinxHwServerTransport.read_timestamp_block`
 
@@ -984,6 +1041,7 @@ QuartusStpTransport(
     read_idle_cycles: int = 20,
     burst_data_chain: int = 2,
     burst_prefill_idle_cycles: int = 160,
+    burst: bool = True,
 )
 ```
 
@@ -1124,14 +1182,6 @@ Read a 32-bit register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
 
-#### `QuartusStpTransport.read_reg_verified`
-
-```python
-read_reg_verified(addr: int) -> int
-```
-
-Read a Quartus virtual JTAG register twice and return the second value.
-
 #### `QuartusStpTransport.read_block`
 
 ```python
@@ -1142,6 +1192,17 @@ Read *words* consecutive 32-bit registers starting at *addr*.
 
 Returns a list of *words* unsigned 32-bit integers.  Raises
 `RuntimeError` if not connected or on I/O failure.
+
+#### `QuartusStpTransport.read_window_block`
+
+```python
+read_window_block(addr: int, words: int) -> List[int]
+```
+
+Like `read_block`, but always through the register window,
+never a burst.  For a core-manager slot with no burst wiring, whose
+burst reads return zeros.  Transports whose `read_block` never
+bursts need not override it.
 
 #### `QuartusStpTransport.read_timestamp_block`
 
@@ -1172,8 +1233,10 @@ quartus_stp commands, which is where the readback time actually goes.
 
 The two-chain `_read_block_burst` shifts on `burst_data_chain`
 (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
-the burst scans go on the control chain itself.  Raises on a stream that
-will not converge so the caller can fall back to the per-word path.
+the burst scans go on the control chain itself.  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, and `BurstIntegrityError` when a burst ran but returned the
+wrong number of samples; that is never read around.
 
 #### `QuartusStpTransport.read_timestamp_block_single_chain`
 
@@ -1190,11 +1253,12 @@ Read per-sample timestamps via single-chain burst on the active chain.
 The wide, single-chain cores handled by `read_sample_block` keep
 their timestamp window behind the *same* BSCAN instance, so the
 two-chain `read_timestamp_block` (which shifts on the ELA's
-separate `burst_data_chain`) can never reach them and silently falls
-back to a slow per-word read.  This mirrors the sample burst but asserts
-the timestamp-select bit in the burst pointer, returning one value per
-captured sample.  Raises on a stream that will not converge so the
-caller can fall back to the per-word path.
+separate `burst_data_chain`) can never reach them.  This mirrors the
+sample burst but asserts the timestamp-select bit in the burst pointer,
+returning one value per captured sample.  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, and `BurstIntegrityError` when a burst ran but returned the
+wrong number of timestamps.
 
 ### `VendorStubTransport`
 

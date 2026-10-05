@@ -167,9 +167,23 @@ architecture rtl of fcapz_ela is
     constant SEG_IDX_W        : positive := fcapz_clog2(NUM_SEGMENTS);
     constant SEQ_STATE_W      : positive := fcapz_clog2(TRIG_STAGES);
     constant TS_WIDTH         : positive := fcapz_nonzero_width(TIMESTAMP_W);
-    -- INPUT_PIPE probe register stages; the array keeps one when INPUT_PIPE = 0
+    -- Probe pipeline stages actually built.  The external trigger needs a
+    -- 2-FF synchronizer, so a core with EXT_TRIG_EN and INPUT_PIPE = 0 is
+    -- built with one input stage: with the registered compare the probe path
+    -- is then as long as the synchronizer (see rtl/fcapz_ela.v PROBE_PIPE).
+    constant PROBE_PIPE       : natural := bool_to_nat(EXT_TRIG_EN /= 0 and INPUT_PIPE = 0) + INPUT_PIPE;
+    -- PROBE_PIPE probe register stages; the array keeps one when PROBE_PIPE = 0
     -- so its bounds stay legal, and that stage is then unused.
-    constant PIPE_STAGES      : positive := fcapz_nonzero_width(INPUT_PIPE);
+    constant PIPE_STAGES      : positive := fcapz_nonzero_width(PROBE_PIPE);
+    -- Extra trigger_in stages beyond the 2-FF synchronizer, so an external
+    -- trigger reaches the capture decision with the same latency as the probe
+    -- sample it marks (PROBE_PIPE plus the registered compare, at least 2
+    -- with EXT_TRIG_EN), as in rtl/fcapz_ela.v.
+    constant EXT_ALIGN        : natural := bool_to_nat(PROBE_PIPE >= 2) * (PROBE_PIPE - 1);
+    -- Sample clocks after an arm that switches channel or probe slice before
+    -- the stored sample and both compare operands come from the new one, as
+    -- in rtl/fcapz_ela.v.
+    constant SEL_FLUSH_LEN    : positive := PROBE_PIPE + bool_to_nat(PROBE_PIPE > 0) + 1;
     constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
 
     constant ADDR_VERSION      : natural := 16#0000#;
@@ -353,15 +367,19 @@ architecture rtl of fcapz_ela is
     signal trigger_out_i     : std_logic := '0';
     signal trigger_in_sync1  : std_logic := '0';
     signal trigger_in_sync2  : std_logic := '0';
+    signal trigger_in_aligned : std_logic := '0';
     signal wr_ptr            : natural range 0 to DEPTH - 1 := 0;
     signal start_ptr         : natural range 0 to DEPTH - 1 := 0;
     signal trig_ptr          : natural range 0 to DEPTH - 1 := 0;
     signal pre_count         : unsigned(PTR_W downto 0) := (others => '0');
-    -- LEN_W wide, like the Verilog core's: post_count is compared against
-    -- posttrig_len, which may legally hold DEPTH, so a PTR_W counter wraps
-    -- one short and the capture never completes.  (pre_count below is
-    -- already LEN_W wide, spelled PTR_W downto 0.)
-    signal post_count        : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    -- Post-trigger samples still to store, loaded with posttrig_len at the
+    -- trigger commit and counted down.  LEN_W wide, like the Verilog core's:
+    -- posttrig_len may legally hold DEPTH.  post_left_zero / post_left_one are
+    -- registered (post_left = 0) / (post_left = 1), so the segment-complete
+    -- decision starts at a flop, not a counter compare.
+    signal post_left         : unsigned(LEN_W - 1 downto 0) := (others => '0');
+    signal post_left_zero    : std_logic := '1';
+    signal post_left_one     : std_logic := '0';
     signal capture_len       : unsigned(PTR_W downto 0) := (others => '0');
     signal probe_prev        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal decim_count       : unsigned(23 downto 0) := (others => '0');
@@ -382,7 +400,18 @@ architecture rtl of fcapz_ela is
     signal pipe_probe        : sample_array_t(0 to PIPE_STAGES - 1) := (others => (others => '0'));
     signal hit_a_pipe        : std_logic := '0';
     signal hit_b_pipe        : std_logic := '0';
+    -- Per-stage registered sequencer hits (PROBE_PIPE > 0, TRIG_STAGES > 1).
+    signal seq_pipe_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
+    signal seq_pipe_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal sq_pipe           : std_logic := '0';
+    signal chan_sel_next     : natural range 0 to 255 := 0;
+    signal probe_sel_next    : natural range 0 to 255 := 0;
+    signal arm_sel_change    : std_logic := '0';
+    signal sel_flush_start   : std_logic := '0';
+    signal arm_sq_bubble     : std_logic := '0';
+    signal arm_voids_history : std_logic := '0';
+    signal sel_flush_active  : std_logic := '0';
+    signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
     signal mem_we_a          : std_logic := '0';
@@ -390,6 +419,8 @@ architecture rtl of fcapz_ela is
     signal mem_we_a_ram      : std_logic := '0';
     signal comb_hit_a        : std_logic := '0';
     signal comb_hit_b        : std_logic := '0';
+    signal comb_seq_a        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
+    signal comb_seq_b        : std_logic_vector(TRIG_STAGES - 1 downto 0) := (others => '0');
     signal comb_hit_eff      : std_logic := '0';
     signal comb_sq_ok        : std_logic := '1';
     signal comb_store_ok     : std_logic := '0';
@@ -424,6 +455,9 @@ architecture rtl of fcapz_ela is
     signal rb_meta_ack_sync2      : std_logic := '0';
     signal rb_meta_pending_sample : std_logic := '0';
     signal rb_done_sample         : std_logic := '0';
+    -- {arm, reset} toggles the sample domain had processed when the snapshot
+    -- was taken; see p_rb_meta_jtag.
+    signal rb_gen_sample          : std_logic_vector(1 downto 0) := "00";
     signal rb_capture_len_jtag    : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_start_ptr_jtag      : natural range 0 to DEPTH - 1 := 0;
     signal rb_seg_start_ptr_jtag  : seg_ptr_t := (others => 0);
@@ -604,10 +638,10 @@ begin
     burst_start_ptr <= burst_start_ptr_i;
     burst_rd_data <= sample_mem_dout_b;
     burst_rd_ts_data <= ts_mem_dout_b;
-    mem_we_a_ram <= mem_we_a_q when INPUT_PIPE > 0 else mem_we_a;
-    sample_mem_din_ram <= mem_wr_data_q when INPUT_PIPE > 0 else sample_mem_din;
-    ts_mem_din_ram <= mem_wr_ts_q when INPUT_PIPE > 0 else ts_mem_din;
-    mem_addr_a <= mem_wr_addr_q when INPUT_PIPE > 0 and mem_we_a_q = '1' else mem_wr_addr;
+    mem_we_a_ram <= mem_we_a_q when PROBE_PIPE > 0 else mem_we_a;
+    sample_mem_din_ram <= mem_wr_data_q when PROBE_PIPE > 0 else sample_mem_din;
+    ts_mem_din_ram <= mem_wr_ts_q when PROBE_PIPE > 0 else ts_mem_din;
+    mem_addr_a <= mem_wr_addr_q when PROBE_PIPE > 0 and mem_we_a_q = '1' else mem_wr_addr;
     mem_addr_b <= burst_rd_addr when burst_rd_active = '1' else
                   datawin_mem_addr_comb when datawin_req_now = '1' and datawin_oob_comb = '0' else
                   (others => '0');
@@ -621,7 +655,47 @@ begin
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and
-                          comb_store_ok = '1' and post_count < posttrig_len) else '0';
+                          comb_store_ok = '1' and post_left_zero = '0') else '0';
+
+    -- Selection flush, as in rtl/fcapz_ela.v: chan_sel / probe_sel change only
+    -- on arm, and the probe pipe, probe_prev and the registered hits still
+    -- hold the old selection's samples for SEL_FLUSH_LEN sample clocks after
+    -- it.  While sel_flush_active the capture neither stores nor evaluates the
+    -- trigger.  Arms that keep the selection pay nothing.
+    chan_sel_next <= chan_sel_sync2 when NUM_CHANNELS > 1 and chan_sel_sync2 < NUM_CHANNELS else 0;
+    probe_sel_next <= probe_sel_sync2
+                      when PROBE_MUX_W > 0 and probe_sel_sync2 < (PROBE_MUX_W / SAMPLE_W) else 0;
+    arm_sel_change <= '1' when (PROBE_MUX_W > 0 and probe_sel_next /= probe_sel) or
+                               (PROBE_MUX_W = 0 and NUM_CHANNELS > 1 and chan_sel_next /= chan_sel)
+                      else '0';
+    sel_flush_start <= arm_sel_change and
+                       ((arm_toggle_sync1 xor arm_toggle_sync2) or startup_arm_pending);
+    -- Arming clears the registered storage-qualification hit, so with the
+    -- registered compare and qualification on, the sample right after the
+    -- arm is not stored and the rolling history gets a hole.
+    arm_sq_bubble <= '1' when PROBE_PIPE > 0 and STOR_QUAL /= 0 and
+                              sq_mode_sync2(3 downto 0) /= x"0" else '0';
+    -- Arms after which the rolling pre-arm history cannot be trusted.
+    arm_voids_history <= arm_sel_change or arm_sq_bubble;
+
+    p_sel_flush : process(sample_clk, sample_rst)
+    begin
+        if sample_rst = '1' then
+            sel_flush_active <= '0';
+            sel_flush_count <= 0;
+        elsif rising_edge(sample_clk) then
+            if sel_flush_start = '1' then
+                sel_flush_active <= '1';
+                sel_flush_count <= SEL_FLUSH_LEN - 1;
+            elsif sel_flush_active = '1' then
+                if sel_flush_count = 0 then
+                    sel_flush_active <= '0';
+                else
+                    sel_flush_count <= sel_flush_count - 1;
+                end if;
+            end if;
+        end if;
+    end process;
 
     u_samplebuf : entity work.fcapz_dpram
         generic map (
@@ -667,6 +741,8 @@ begin
         variable hit_internal : std_logic;
         variable hit_a : std_logic;
         variable hit_b : std_logic;
+        variable seq_bank_a : std_logic_vector(TRIG_STAGES - 1 downto 0);
+        variable seq_bank_b : std_logic_vector(TRIG_STAGES - 1 downto 0);
         variable seq_stage_hit : std_logic;
         variable hit_eff : std_logic;
         variable sq_ok : boolean;
@@ -687,7 +763,7 @@ begin
             active_probe := probe_in(SAMPLE_W - 1 downto 0);
         end if;
 
-        if INPUT_PIPE > 0 then
+        if PROBE_PIPE > 0 then
             compare_probe := pipe_probe(PIPE_STAGES - 1);
         else
             compare_probe := active_probe;
@@ -699,7 +775,25 @@ begin
             store_tick := decim_count = 0;
         end if;
 
-        if TRIG_STAGES > 1 then
+        seq_bank_a := (others => '0');
+        seq_bank_b := (others => '0');
+        if TRIG_STAGES > 1 and PROBE_PIPE > 0 then
+            -- Every stage's A/B compare on this sample; the decision selects
+            -- the registered hits of the stage active when they are consumed
+            -- (see rtl/fcapz_ela.v g_seq_cmp_bank).
+            for s in 0 to TRIG_STAGES - 1 loop
+                seq_bank_a(s) := cmp_hit(
+                    compare_probe, probe_prev, seq_value_a(s), seq_mask_a(s), seq_mode_a(s)
+                );
+                if DUAL_COMPARE /= 0 then
+                    seq_bank_b(s) := cmp_hit(
+                        compare_probe, probe_prev, seq_value_b(s), seq_mask_b(s), seq_mode_b(s)
+                    );
+                end if;
+            end loop;
+            hit_a := '0';
+            hit_b := '0';
+        elsif TRIG_STAGES > 1 then
             hit_a := cmp_hit(
                 compare_probe,
                 probe_prev,
@@ -726,12 +820,19 @@ begin
         end if;
         comb_hit_a <= hit_a;
         comb_hit_b <= hit_b;
+        comb_seq_a <= seq_bank_a;
+        comb_seq_b <= seq_bank_b;
 
-        -- With INPUT_PIPE > 0 only the raw A/B compares are registered, as in
+        -- With PROBE_PIPE > 0 only the raw A/B compares are registered, as in
         -- rtl/fcapz_ela.v.  Stage combine, final and count qualification then
         -- use the current seq_state and seq_counter, so the trigger, the
         -- stage advance and the hit count all see the same registered hit.
-        if INPUT_PIPE > 0 then
+        -- The sequencer selects the active stage's entry from the per-stage
+        -- registered hits, all of which describe the same sample.
+        if PROBE_PIPE > 0 and TRIG_STAGES > 1 then
+            hit_a := seq_pipe_a(seq_state);
+            hit_b := seq_pipe_b(seq_state);
+        elsif PROBE_PIPE > 0 then
             hit_a := hit_a_pipe;
             hit_b := hit_b_pipe;
         end if;
@@ -764,8 +865,8 @@ begin
         end if;
 
         case ext_trig_mode is
-            when "01" => hit_eff := hit_internal or trigger_in_sync2;
-            when "10" => hit_eff := hit_internal and trigger_in_sync2;
+            when "01" => hit_eff := hit_internal or trigger_in_aligned;
+            when "10" => hit_eff := hit_internal and trigger_in_aligned;
             when others => hit_eff := hit_internal;
         end case;
 
@@ -780,15 +881,19 @@ begin
             ) = '1';
         end if;
 
-        if INPUT_PIPE > 0 then
+        if PROBE_PIPE > 0 then
             sq_eff := (STOR_QUAL = 0) or (sq_enable = '0') or (sq_pipe = '1');
         else
             sq_eff := sq_ok;
         end if;
-        store_ok := store_tick and sq_eff;
+        store_ok := store_tick and sq_eff and sel_flush_active = '0';
+        -- An arm or soft reset on this edge takes priority (see p_capture).
         trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
+                              (arm_toggle_sync1 xor arm_toggle_sync2) = '0' and
+                              startup_arm_pending = '0' and
+                              (reset_toggle_sync1 xor reset_toggle_sync2) = '0' and
                               pre_count >= count_u(pretrig_len) and
-                              trig_holdoff_active = '0' and
+                              trig_holdoff_active = '0' and sel_flush_active = '0' and
                               ((trig_delay_pending = '1' and trig_delay_count = 0) or
                                (trig_delay_pending = '0' and hit_eff = '1' and trig_delay = 0));
         comb_hit_eff <= hit_eff;
@@ -798,13 +903,36 @@ begin
         comb_seq_stage_hit <= seq_stage_hit;
 
         mem_wr_addr <= std_logic_vector(to_unsigned(wr_ptr, PTR_W));
-        if INPUT_PIPE > 0 then
-            sample_mem_din <= compare_probe;
+        -- The registered compare and storage-qualification hits describe
+        -- the previous sample, so that is the one stored.
+        if PROBE_PIPE > 0 then
+            sample_mem_din <= probe_prev;
         else
             sample_mem_din <= active_probe;
         end if;
         ts_mem_din <= std_logic_vector(timestamp_counter);
     end process;
+
+    g_ext_trig_align : if EXT_TRIG_EN /= 0 and EXT_ALIGN > 0 generate
+        signal trigger_in_dly : std_logic_vector(EXT_ALIGN - 1 downto 0) := (others => '0');
+    begin
+        p_ext_trig_align : process(sample_clk, sample_rst)
+        begin
+            if sample_rst = '1' then
+                trigger_in_dly <= (others => '0');
+            elsif rising_edge(sample_clk) then
+                trigger_in_dly(0) <= trigger_in_sync2;
+                for i in 1 to EXT_ALIGN - 1 loop
+                    trigger_in_dly(i) <= trigger_in_dly(i - 1);
+                end loop;
+            end if;
+        end process;
+        trigger_in_aligned <= trigger_in_dly(EXT_ALIGN - 1);
+    end generate;
+
+    g_no_ext_trig_align : if EXT_TRIG_EN = 0 or EXT_ALIGN = 0 generate
+        trigger_in_aligned <= trigger_in_sync2;
+    end generate;
 
     p_mem_write_pipe : process(sample_clk, sample_rst)
     begin
@@ -922,16 +1050,8 @@ begin
                     trig_value_b <= (others => '0');
                     trig_mask_b <= (others => '1');
                 end if;
-                if NUM_CHANNELS > 1 and chan_sel_sync2 < NUM_CHANNELS then
-                    chan_sel <= chan_sel_sync2;
-                else
-                    chan_sel <= 0;
-                end if;
-                if PROBE_MUX_W > 0 and probe_sel_sync2 < (PROBE_MUX_W / SAMPLE_W) then
-                    probe_sel <= probe_sel_sync2;
-                else
-                    probe_sel <= 0;
-                end if;
+                chan_sel <= chan_sel_next;
+                probe_sel <= probe_sel_next;
                 -- From the synchronisers, like every other field latched
                 -- here: jtag_decim / jtag_trig_ext belong to the JTAG clock
                 -- domain.  Mirrors rtl/fcapz_ela.v.
@@ -1220,6 +1340,7 @@ begin
             rb_meta_ack_sync2 <= '0';
             rb_meta_pending_sample <= '0';
             rb_done_sample <= '0';
+            rb_gen_sample <= "00";
             rb_capture_len_sample <= (others => '0');
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
@@ -1235,6 +1356,7 @@ begin
 
             if rb_meta_sample_busy = '0' and (rb_meta_pending_sample = '1' or rb_meta_event_sample = '1') then
                 rb_done_sample <= done;
+                rb_gen_sample <= arm_toggle_sync2 & reset_toggle_sync2;
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 rb_seg_start_ptr_sample <= seg_start_ptr;
@@ -1260,15 +1382,24 @@ begin
             rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
             rb_meta_toggle_sync3 <= rb_meta_toggle_sync2;
 
-            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
-               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
-                rb_done_jtag <= '0';
-            elsif (rb_meta_toggle_sync2 xor rb_meta_toggle_sync3) = '1' then
+            -- Every snapshot is copied and acknowledged; a dropped ack would
+            -- leave the sample side busy and stop all later snapshots.
+            if (rb_meta_toggle_sync2 xor rb_meta_toggle_sync3) = '1' then
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 rb_seg_start_ptr_jtag <= rb_seg_start_ptr_sample;
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
-                rb_done_jtag <= rb_done_sample;
+                -- Done counts only for the latest ARM / reset (see
+                -- rtl/fcapz_ela.v).
+                if rb_gen_sample = (arm_toggle_jtag & reset_toggle_jtag) then
+                    rb_done_jtag <= rb_done_sample;
+                else
+                    rb_done_jtag <= '0';
+                end if;
+            end if;
+            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
+               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                rb_done_jtag <= '0';
             end if;
         end if;
     end process;
@@ -1381,7 +1512,6 @@ begin
         variable base : natural;
         variable start_calc : natural;
         variable next_segment : natural;
-        variable post_limit : unsigned(LEN_W - 1 downto 0);
         variable trigger_commit_now : boolean;
         variable force_store_now : boolean;
         variable store_now : boolean;
@@ -1401,7 +1531,9 @@ begin
             start_ptr <= 0;
             trig_ptr <= 0;
             pre_count <= (others => '0');
-            post_count <= (others => '0');
+            post_left <= (others => '0');
+            post_left_zero <= '1';
+            post_left_one <= '0';
             capture_len <= (others => '0');
             probe_prev <= (others => '0');
             decim_count <= (others => '0');
@@ -1423,6 +1555,8 @@ begin
             pipe_probe <= (others => (others => '0'));
             hit_a_pipe <= '0';
             hit_b_pipe <= '0';
+            seq_pipe_a <= (others => '0');
+            seq_pipe_b <= (others => '0');
             sq_pipe <= '0';
         elsif rising_edge(sample_clk) then
             if EXT_TRIG_EN /= 0 then
@@ -1447,8 +1581,8 @@ begin
             else
                 active_probe := probe_in(SAMPLE_W - 1 downto 0);
             end if;
-            if INPUT_PIPE > 0 then
-                -- INPUT_PIPE stages, as rtl/fcapz_ela.v builds them.
+            if PROBE_PIPE > 0 then
+                -- PROBE_PIPE stages, as rtl/fcapz_ela.v builds them.
                 compare_probe := pipe_probe(PIPE_STAGES - 1);
                 pipe_probe(0) <= active_probe;
                 for i in 1 to PIPE_STAGES - 1 loop
@@ -1464,13 +1598,16 @@ begin
             seg_start_next := seg_start_ptr;
             hit_a_pipe <= comb_hit_a;
             hit_b_pipe <= comb_hit_b;
+            seq_pipe_a <= comb_seq_a;
+            seq_pipe_b <= comb_seq_b;
             sq_pipe <= comb_sq_ok;
             reset_pulse_now := (reset_toggle_sync1 xor reset_toggle_sync2) = '1';
             arm_pulse_now := (arm_toggle_sync1 xor arm_toggle_sync2) = '1';
             any_arm_pulse_now := arm_pulse_now or startup_arm_pending = '1';
 
-            if armed = '1' and triggered = '0' and pre_count >= count_u(pretrig_len) and
-               trig_holdoff_active = '0' and hit_eff = '1' then
+            if armed = '1' and triggered = '0' and not any_arm_pulse_now and not reset_pulse_now and
+               pre_count >= count_u(pretrig_len) and trig_holdoff_active = '0' and
+               sel_flush_active = '0' and hit_eff = '1' then
                 trigger_out_i <= '1';
             else
                 trigger_out_i <= '0';
@@ -1495,7 +1632,9 @@ begin
                 overflow <= '0';
                 wr_ptr <= 0;
                 pre_count <= (others => '0');
-                post_count <= (others => '0');
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 capture_len <= (others => '0');
                 cur_segment <= 0;
                 seg_count <= 0;
@@ -1510,12 +1649,16 @@ begin
                 seq_counter <= (others => '0');
                 hit_a_pipe <= '0';
                 hit_b_pipe <= '0';
+                seq_pipe_a <= (others => '0');
+                seq_pipe_b <= (others => '0');
                 sq_pipe <= '0';
             end if;
 
             if done = '1' then
                 armed <= '0';
-                post_count <= (others => '0');
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 -- Sample writes are frozen while done is held (the host is
@@ -1542,7 +1685,17 @@ begin
                     wr_ptr <= 0;
                     pre_count <= (others => '0');
                 end if;
-                post_count <= (others => '0');
+                -- A switched selection voids the rolling pre-arm history (it
+                -- holds the old selection's samples), as does the
+                -- qualification bubble (arm_sq_bubble).  So does a restart of
+                -- a capture that had triggered: once its post-trigger samples
+                -- are in, it stops writing, leaving a hole.
+                if arm_voids_history = '1' or triggered = '1' then
+                    pre_count <= (others => '0');
+                end if;
+                post_left <= (others => '0');
+                post_left_zero <= '1';
+                post_left_one <= '0';
                 cur_segment <= 0;
                 seg_count <= 0;
                 all_seg_done <= '0';
@@ -1559,6 +1712,8 @@ begin
                 seq_counter <= (others => '0');
                 hit_a_pipe <= '0';
                 hit_b_pipe <= '0';
+                seq_pipe_a <= (others => '0');
+                seq_pipe_b <= (others => '0');
                 sq_pipe <= '0';
             end if;
 
@@ -1567,17 +1722,18 @@ begin
             -- runs after the arm block on the arm edge (armed is still '0'),
             -- so an unguarded wr_ptr update here would override that reset
             -- and start segment 0 on stale pre-arm samples.
-            if armed = '0' and done = '0' then
+            -- A soft reset restarts the ring; prefill must not override it.
+            if armed = '0' and done = '0' and not reset_pulse_now then
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 if NUM_SEGMENTS = 1 and store_ok then
-                    if pre_count < count_u(pretrig_len) then
+                    if pre_count < count_u(pretrig_len) and
+                       not (any_arm_pulse_now and arm_voids_history = '1') then
                         pre_count <= pre_count + 1;
                     end if;
                     if triggered = '0' then
                         if wr_ptr = DEPTH - 1 then
                             wr_ptr <= 0;
-                            segment_wrapped <= '1';
                         else
                             wr_ptr <= wr_ptr + 1;
                         end if;
@@ -1585,7 +1741,16 @@ begin
                 end if;
             end if;
 
-            if armed = '1' and done = '0' then
+            -- An arm or soft reset on this edge restarts the capture, so the
+            -- running capture's decisions below must not override it (as in
+            -- rtl/fcapz_ela.v).  Only the single-segment ring still advances
+            -- past the sample stored on this edge, which keeps the rolling
+            -- history contiguous.
+            if armed = '1' and done = '0' and (any_arm_pulse_now or reset_pulse_now) then
+                if NUM_SEGMENTS = 1 and not reset_pulse_now and mem_we_a = '1' then
+                    wr_ptr <= next_ptr(wr_ptr, 0);
+                end if;
+            elsif armed = '1' and done = '0' then
                 base := seg_base(cur_segment);
                 trigger_commit_now := false;
                 force_store_now := comb_trigger_commit_now = '1';
@@ -1599,7 +1764,7 @@ begin
                 end if;
 
                 if triggered = '0' then
-                    if trig_holdoff_active = '1' then
+                    if trig_holdoff_active = '1' or sel_flush_active = '1' then
                         if trig_delay_pending = '0' then
                             trig_delay_count <= (others => '0');
                         end if;
@@ -1645,7 +1810,9 @@ begin
                             pre_count <= pre_count + 1;
                         end if;
                     end if;
-                    if store_now then
+                    -- segment_wrapped only matters with segments (as in
+                    -- rtl/fcapz_ela.v); capture_start_ptr ignores it otherwise.
+                    if NUM_SEGMENTS > 1 and store_now then
                         if wr_ptr = base + SEG_DEPTH - 1 then
                             segment_wrapped <= '1';
                         end if;
@@ -1655,7 +1822,9 @@ begin
                         triggered <= '1';
                         trig_ptr <= wr_ptr;
                         capture_len <= count_u(pretrig_len) + count_u(posttrig_len) + 1;
-                        post_count <= (others => '0');
+                        post_left <= posttrig_len;
+                        post_left_zero <= bool_to_sl(posttrig_len = 0);
+                        post_left_one <= bool_to_sl(posttrig_len = 1);
                     end if;
 
                     if store_now then
@@ -1664,8 +1833,7 @@ begin
                 else
                     trig_delay_pending <= '0';
                     trig_delay_count <= (others => '0');
-                    post_limit := posttrig_len;
-                    if post_count >= post_limit then
+                    if post_left_zero = '1' then
                         start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                         if NUM_SEGMENTS = 1 then
                             done <= '1';
@@ -1692,7 +1860,9 @@ begin
                                 seg_count <= seg_count + 1;
                                 triggered <= '0';
                                 pre_count <= (others => '0');
-                                post_count <= (others => '0');
+                                post_left <= (others => '0');
+                                post_left_zero <= '1';
+                                post_left_one <= '0';
                                 wr_ptr <= seg_base(next_segment);
                                 segment_wrapped <= '0';
                                 trig_delay_pending <= '0';
@@ -1701,9 +1871,6 @@ begin
                                 trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else (others => '0');
                                 seq_state <= 0;
                                 seq_counter <= (others => '0');
-                                hit_a_pipe <= '0';
-                                hit_b_pipe <= '0';
-                                sq_pipe <= '0';
                             end if;
                         end if;
                     elsif store_ok then
@@ -1712,7 +1879,7 @@ begin
                                 segment_wrapped <= '1';
                             end if;
                         end if;
-                        if post_count + 1 >= post_limit then
+                        if post_left_one = '1' then
                             start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                             if NUM_SEGMENTS = 1 then
                                 done <= '1';
@@ -1741,7 +1908,9 @@ begin
                                     seg_count <= seg_count + 1;
                                     triggered <= '0';
                                     pre_count <= (others => '0');
-                                    post_count <= (others => '0');
+                                    post_left <= (others => '0');
+                                    post_left_zero <= '1';
+                                    post_left_one <= '0';
                                     wr_ptr <= seg_base(next_segment);
                                     segment_wrapped <= '0';
                                     trig_delay_pending <= '0';
@@ -1750,13 +1919,12 @@ begin
                                     trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else (others => '0');
                                     seq_state <= 0;
                                     seq_counter <= (others => '0');
-                                    hit_a_pipe <= '0';
-                                    hit_b_pipe <= '0';
-                                    sq_pipe <= '0';
                                 end if;
                             end if;
                         else
-                            post_count <= post_count + 1;
+                            post_left <= post_left - 1;
+                            post_left_zero <= '0';
+                            post_left_one <= bool_to_sl(post_left = 2);
                             wr_ptr <= next_ptr(wr_ptr, base);
                         end if;
                     end if;
@@ -1856,6 +2024,7 @@ begin
                 if HAS_WIDE_TRIG then
                     r(18) := '1';  -- full-width comparator A programmable
                 end if;
+                r(19) := '1';  -- timestamp window base decoded at full width
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then

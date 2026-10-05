@@ -113,6 +113,17 @@ class TestGuiSettingsRoundTrip(unittest.TestCase):
             self.assertEqual(loaded.connection.hw_ready_poll_interval_ms, 33)
             self.assertFalse(loaded.connection.program_on_connect)
 
+    def test_burst_path_roundtrip(self) -> None:
+        for burst_path in ("single_chain", "two_chain", "none"):
+            with self.subTest(burst_path=burst_path):
+                s = GuiSettings()
+                s.connection.burst_path = burst_path
+                with tempfile.TemporaryDirectory() as td:
+                    path = Path(td) / "gui.toml"
+                    save_gui_settings(s, path)
+                    loaded = load_gui_settings(path)
+                    self.assertEqual(loaded.connection.burst_path, burst_path)
+
     def test_missing_file_is_default(self) -> None:
         p = Path("__no_such_gui__.toml")
         self.assertFalse(p.is_file())

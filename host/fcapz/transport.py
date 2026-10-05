@@ -41,7 +41,9 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
-_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\s+(.+?)\s*$")
+# xsdb marks the selected target with ``*``, after its number in ``jtag
+# targets`` (``2* xc7a100t``) and before it in ``targets`` (``* 2  ...``).
+_XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\*?\s+(.+?)\s*$")
 QUARTUS_AUTO_DEVICE_TAPS = frozenset(("", "auto", "xc7a100t", "xc7a100t.tap"))
 
 
@@ -153,6 +155,50 @@ def list_openocd_taps(
         t.close()
 
 
+REG_ADDR_SPACE_END = 0x10000
+
+
+class DataWindowError(RuntimeError):
+    """A DATA / timestamp window read would leave the addressable window."""
+
+
+class BurstIntegrityError(RuntimeError):
+    """A burst ran but returned the wrong number of scans or values.
+
+    That is a defect in the readout, not a missing burst capability, so it is
+    raised to the caller instead of being read again through the window.
+    """
+
+
+class BurstUnavailableError(RuntimeError):
+    """This session cannot burst-read the request at all.
+
+    Raised before any scan runs: the transport was built without burst
+    readout (``burst=False``), or the request does not fit the burst engine
+    (not the DATA base, an element wider than the burst DR).  The caller
+    reads the register window instead.  A burst that runs and fails raises
+    something else, and that is never read around.
+    """
+
+
+def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
+    """Refuse a register-window read of *words* 32-bit words at *addr* that
+    would run past *end*.
+
+    Register addresses are 16 bits, so a read past ``0x10000`` wraps onto the
+    core's own registers; behind a core manager the window must also stop at
+    the manager block (``0xF000``).  Either way the hardware returns register
+    values instead of samples, with no error.
+    """
+    stop = addr + 4 * max(0, words)
+    if stop > min(end, REG_ADDR_SPACE_END):
+        raise DataWindowError(
+            f"window read 0x{addr:04X}..0x{stop - 4:X} ({words} words) runs past "
+            f"0x{end:X}: this capture is too large for the register window; "
+            "read it with burst readout instead"
+        )
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -262,6 +308,29 @@ class Transport(ABC):
         ``RuntimeError`` if not connected or on I/O failure.
         """
         raise NotImplementedError
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        """Like :meth:`read_block`, but always through the register window,
+        never a burst.  For a core-manager slot with no burst wiring, whose
+        burst reads return zeros.  Transports whose ``read_block`` never
+        bursts need not override it."""
+        return self.read_block(addr, words)
+
+    #: One past the last address a DATA / timestamp window read may touch.
+    #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
+    #: (``0xF000``) for a core behind a core manager.
+    data_window_end: int = REG_ADDR_SPACE_END
+
+    #: Set by :class:`~fcapz.analyzer.Analyzer` before a burst when the core
+    #: sits behind a core manager with two or more slots that predates
+    #: ``MGR_CAPS`` bit 2.  That manager passes on the owner slot's own burst
+    #: start toggle, and after a slot switch the toggle can equal the copy the
+    #: burst engine last saw, so the engine misses the start and reads the new
+    #: slot from the previous burst's pointer.  A bursting transport then
+    #: writes ``BURST_PTR``, runs one burst scan (its capture makes the
+    #: engine's copy match the new owner's toggle), and writes ``BURST_PTR``
+    #: again: that second toggle the engine cannot miss.
+    burst_start_sync: bool = False
 
     def select_chain(self, chain: int) -> None:
         """Select the transport-defined JTAG user chain for later accesses.
@@ -488,6 +557,7 @@ class OpenOcdTransport(Transport):
         return shifted_out & 0xFFFFFFFF
 
     def read_block(self, addr: int, words: int) -> List[int]:
+        check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
 
@@ -622,7 +692,11 @@ class QuartusStpTransport(Transport):
         read_idle_cycles: int = READ_IDLE_CYCLES,
         burst_data_chain: int = 2,
         burst_prefill_idle_cycles: int = 160,
+        burst: bool = True,
     ):
+        """``burst=False`` declares a build with no burst path: every capture
+        is then read through the register window.  With ``burst=True`` a
+        burst that fails is raised, never read around."""
         self.hardware_name = hardware_name
         self.device_name = device_name
         self._quartus_stp_path = quartus_stp_path
@@ -642,7 +716,7 @@ class QuartusStpTransport(Transport):
         # whose request timed out).  Lock order is always _life_lock, then
         # _stp_io_lock; nothing takes them the other way round.
         self._life_lock = threading.RLock()
-        self._has_burst = True
+        self.burst = bool(burst)
         # The actual device quartus_stp opened (family/part + IDCODE), filled in
         # by connect(). None until connected. Surfaced so the UI can name the
         # FPGA it attached to, not just the vendor.
@@ -694,7 +768,6 @@ class QuartusStpTransport(Transport):
                 # Not published yet, so no close() could ever find it.
                 self._reap_killed(session)
                 raise
-            self._has_burst = True
             # Published before the open handshake, so a close() from another
             # thread (a GUI cancel) has a process to kill while it runs.
             self._session = session
@@ -1006,24 +1079,17 @@ class QuartusStpTransport(Transport):
         )
         return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
 
-    def read_reg_verified(self, addr: int) -> int:
-        """Read a Quartus virtual JTAG register twice and return the second value."""
-        self.read_reg(addr)
-        return self.read_reg(addr)
-
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            try:
-                return self._read_block_burst(words)
-            except (ConnectionError, RuntimeError) as exc:
-                _quartus_log.warning(
-                    "Quartus ELA burst readback failed (%s); falling back to "
-                    "slow control-chain DATA reads",
-                    exc,
-                )
-                self._has_burst = False
+            return self._read_block_burst(words)
+        return self.read_window_block(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
+        check_data_window(addr, words, self.data_window_end)
         instance = self._active_chain
         body = ["set __fcapz_reads {}"]
         body.append(self._virtual_ir_tcl(instance))
@@ -1067,29 +1133,22 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         if timestamp_width > 0 and self._burst_available:
-            try:
-                return self._read_block_burst(
-                    words,
-                    timestamp=True,
-                    element_width=timestamp_width,
-                )
-            except (ConnectionError, RuntimeError) as exc:
-                _quartus_log.warning(
-                    "Quartus ELA timestamp burst readback failed (%s); falling back "
-                    "to slow control-chain timestamp reads",
-                    exc,
-                )
-                self._has_burst = False
+            return self._read_block_burst(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
         return self.read_block(addr, words)
 
     @property
     def _burst_available(self) -> bool:
-        return bool(self._has_burst)
+        """Declared by the ``burst`` constructor argument, never probed."""
+        return self.burst
 
     @property
     def _burst_samples_per_scan(self) -> int:
         if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_verified(0x000C)
+            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
             if sw < 1:
                 sw = 8
             self._cached_sps = max(1, self.BURST_DR_BITS // sw)
@@ -1118,52 +1177,48 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        def run_once() -> List[int]:
-            body = ["set __fcapz_burst {}"]
-            body.append(self._virtual_ir_tcl(ctrl_chain))
+        def write_ptr() -> list[str]:
+            return [
+                self._virtual_ir_tcl(ctrl_chain),
+                self._dr_shift_tcl(
+                    ctrl_chain, burst_frame, self.DR_BITS, "__fcapz_burst_ptr_discard"
+                ),
+                f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
+            ]
+
+        body = ["set __fcapz_burst {}", *write_ptr()]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync.
+            body += [
+                self._virtual_ir_tcl(self.burst_data_chain),
+                self._dr_shift_tcl(
+                    self.burst_data_chain, 0, self.BURST_DR_BITS, "__fcapz_burst_sync"
+                ),
+                *write_ptr(),
+            ]
+        body.append(self._virtual_ir_tcl(self.burst_data_chain))
+        for idx in range(n_scans + prime_scans):
+            var = f"__fcapz_burst_{idx}"
             body.append(
                 self._dr_shift_tcl(
-                    ctrl_chain,
-                    burst_frame,
-                    self.DR_BITS,
-                    "__fcapz_burst_ptr_discard",
+                    self.burst_data_chain, 0, self.BURST_DR_BITS, var
                 )
             )
-            body.append(
-                "device_run_test_idle "
-                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            body.append(f"lappend __fcapz_burst ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_burst",
+                status="__fcapz_burst_status",
+                error="__fcapz_burst_error",
             )
-            body.append(self._virtual_ir_tcl(self.burst_data_chain))
-            for idx in range(n_scans + prime_scans):
-                var = f"__fcapz_burst_{idx}"
-                body.append(
-                    self._dr_shift_tcl(
-                        self.burst_data_chain, 0, self.BURST_DR_BITS, var
-                    )
-                )
-                body.append(f"lappend __fcapz_burst ${var}")
-            captured = self._send(
-                self._locked_script(
-                    body=body,
-                    result="__fcapz_burst",
-                    status="__fcapz_burst_status",
-                    error="__fcapz_burst_error",
-                )
-            )
-            return self._parse_burst_tokens(
-                captured.split(),
-                words,
-                skip_scans=prime_scans,
-                element_width=element_width,
-            )
-
-        previous = run_once()
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("Quartus DATA_CHAIN burst readback did not stabilize")
+        )
+        return self._parse_burst_tokens(
+            captured.split(),
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+        )
 
     def _parse_burst_tokens(
         self,
@@ -1209,9 +1264,13 @@ class QuartusStpTransport(Transport):
 
         The two-chain :meth:`_read_block_burst` shifts on ``burst_data_chain``
         (the ELA's legacy DATA_CHAIN); a single-chain core has no such chain, so
-        the burst scans go on the control chain itself.  Raises on a stream that
-        will not converge so the caller can fall back to the per-word path.
+        the burst scans go on the control chain itself.  Raises
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, and :class:`BurstIntegrityError` when a burst ran but returned the
+        wrong number of samples; that is never read around.
         """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
         elements = self._single_chain_burst(
             n_samples, sample_width, timestamp=False
         )
@@ -1232,12 +1291,15 @@ class QuartusStpTransport(Transport):
         The wide, single-chain cores handled by :meth:`read_sample_block` keep
         their timestamp window behind the *same* BSCAN instance, so the
         two-chain :meth:`read_timestamp_block` (which shifts on the ELA's
-        separate ``burst_data_chain``) can never reach them and silently falls
-        back to a slow per-word read.  This mirrors the sample burst but asserts
-        the timestamp-select bit in the burst pointer, returning one value per
-        captured sample.  Raises on a stream that will not converge so the
-        caller can fall back to the per-word path.
+        separate ``burst_data_chain``) can never reach them.  This mirrors the
+        sample burst but asserts the timestamp-select bit in the burst pointer,
+        returning one value per captured sample.  Raises
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, and :class:`BurstIntegrityError` when a burst ran but returned the
+        wrong number of timestamps.
         """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
         return self._single_chain_burst(
             n_timestamps, timestamp_width, timestamp=True
         )
@@ -1248,8 +1310,7 @@ class QuartusStpTransport(Transport):
         """Stream ``n_elements`` of ``element_width`` bits, all on the active
         (control) chain -- one 256-bit DR carries ``256 // element_width``
         elements.  ``timestamp`` selects the burst engine's timestamp window
-        instead of the sample window.  Returns masked element values; raises if
-        the readback will not converge across the stability retries."""
+        instead of the sample window.  Returns masked element values."""
         if n_elements <= 0:
             return []
         if element_width < 1:
@@ -1266,49 +1327,38 @@ class QuartusStpTransport(Transport):
             | (0x80000000 if timestamp else 0)
         )
 
-        def run_once() -> List[int]:
-            body = ["set __fcapz_scb {}"]
-            body.append(self._virtual_ir_tcl(chain))
+        write_ptr = [
+            self._dr_shift_tcl(chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"),
+            f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
+        ]
+        body = ["set __fcapz_scb {}", self._virtual_ir_tcl(chain), *write_ptr]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync.
+            body += [
+                self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, "__fcapz_scb_sync"),
+                *write_ptr,
+            ]
+        # First scan primes/flushes the 256-bit staging register; discarded.
+        for idx in range(n_scans + prime_scans):
+            var = f"__fcapz_scb_{idx}"
             body.append(
-                self._dr_shift_tcl(
-                    chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"
-                )
+                self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
             )
-            body.append(
-                "device_run_test_idle "
-                f"-num_clocks {self.burst_prefill_idle_cycles}"
+            body.append(f"lappend __fcapz_scb ${var}")
+        captured = self._send(
+            self._locked_script(
+                body=body,
+                result="__fcapz_scb",
+                status="__fcapz_scb_status",
+                error="__fcapz_scb_error",
             )
-            # First scan primes/flushes the 256-bit staging register; discarded.
-            for idx in range(n_scans + prime_scans):
-                var = f"__fcapz_scb_{idx}"
-                body.append(
-                    self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
-                )
-                body.append(f"lappend __fcapz_scb ${var}")
-            captured = self._send(
-                self._locked_script(
-                    body=body,
-                    result="__fcapz_scb",
-                    status="__fcapz_scb_status",
-                    error="__fcapz_scb_error",
-                )
-            )
-            return self._parse_single_chain_burst(
-                captured.split(),
-                n_elements,
-                element_width,
-                skip_scans=prime_scans,
-            )
-
-        # The capture RAM is read-only once STATUS.done is set, so a correct
-        # stream repeats identically; require a stable pair before trusting it.
-        previous = run_once()
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("Quartus single-chain burst did not stabilize")
+        )
+        return self._parse_single_chain_burst(
+            captured.split(),
+            n_elements,
+            element_width,
+            skip_scans=prime_scans,
+        )
 
     def _parse_single_chain_burst(
         self,
@@ -1330,7 +1380,7 @@ class QuartusStpTransport(Transport):
                     break
                 values.append((scan_value >> (s * element_width)) & mask)
         if len(values) != n_elements:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"Quartus single-chain burst returned {len(values)} values, "
                 f"expected {n_elements}: {tokens!r}"
             )
@@ -1657,21 +1707,18 @@ class XilinxHwServerTransport(Transport):
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
         1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
     }
-    # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*).  xsdb at the PL-TAP
-    # target level auto-handles the ARM DAP's **IR** (pads with BYPASS)
-    # but does NOT pad the **DR** — the ARM DAP's 1-bit BYPASS register
-    # still sits in series with the PL's DR.  Chain order on MPSoC is
-    # ``TDI → ARM DAP → PL TAP → TDO``, so the DAP BYPASS bit lands on
-    # the TDI-side end of the 50-bit DR scan.  The host must therefore
-    # pair this table with three constructor args:
-    #   ``ir_length=12``  — PL TAP IR width (no DAP bits; xsdb adds those).
-    #   ``dr_extra_bits=1`` — one DAP BYPASS bit on every DR scan.
-    #   ``dr_extra_position="tdi"`` — BYPASS sits at the TDI end; the
-    #       captured token has the fcapz 49-bit response at offset 0 and
-    #       the BYPASS bit trailing, so the parser skips nothing up front.
+    # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*), raw-opcode mode.
+    # The supported MPSoC path is ``use_register_ir=True`` (the CLI picks
+    # it), where xsdb routes the IR and pads the DR itself; this table is
+    # kept for raw-mode experiments.  In raw mode xsdb at the PL-TAP
+    # target level pads the ARM DAP's **IR** but not its **DR**: the
+    # DAP's 1-bit BYPASS register is still in series with the PL's DR, so
+    # pair this table with ``ir_length=12`` and ``dr_extra_bits=1``.
+    # ``dr_extra_position="tdi"`` matched a KV260 TDO trace, which assumed
+    # ``TDI → ARM DAP → PL TAP → TDO``; OpenOCD's xilinx_zynqmp.cfg implies
+    # the DAP is nearest TDO instead, so treat the position as unverified.
     # The PL BSCANE2 USER1..USER4 instructions share the 7-series opcode
     # pattern but in the 12-bit IR land at 0x024, 0x025, 0x026, 0x027.
-    # Verified on xck26 / KV260 by TDO trace.
     IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
         1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
     }
@@ -1715,13 +1762,19 @@ class XilinxHwServerTransport(Transport):
         *,
         post_program_delay_ms: int = 200,
         ready_poll_interval_sec: float = 0.02,
-        target_wait_timeout: float = 3.0,
+        target_wait_timeout: float = 10.0,
         ir_length: int = DEFAULT_IR_LENGTH,
         dr_extra_bits: int = DEFAULT_DR_EXTRA_BITS,
         dr_extra_position: str = DEFAULT_DR_EXTRA_POSITION,
         use_register_ir: bool = False,
         single_chain_burst: bool = True,
+        burst: bool = True,
     ):
+        """``burst=False`` declares a bitstream with no burst path at all
+        (``SINGLE_CHAIN_BURST=0`` and ``BURST_EN=0``): every capture is then
+        read through the register window.  With ``burst=True`` a burst that
+        fails is raised, never read around, so a build without the burst
+        path the transport expects must be declared here."""
         if not _TCL_NAME_RE.match(fpga_name):
             raise ValueError(
                 f"fpga_name contains unsafe characters for TCL: {fpga_name!r}"
@@ -1742,10 +1795,13 @@ class XilinxHwServerTransport(Transport):
         self.ready_poll_interval_sec = float(
             max(0.005, min(0.5, ready_poll_interval_sec))
         )
-        # How long connect() waits for a JTAG target matching ``fpga_name`` to
-        # appear before giving up — rides out a transiently empty scan chain
-        # (re-enumeration when another board is plugged in, or right after
-        # ``fpga -file``) instead of selecting nothing and failing later.
+        # How long connect() waits for hw_server to finish releasing its
+        # cables and for a JTAG target matching ``fpga_name`` to appear before
+        # giving up.  It must outlast a full release and rescan: when the
+        # previous xsdb client exits, hw_server releases every cable and the
+        # next client makes it reopen and rescan them all, which took up to
+        # 6.2 s on a host with three boards.  It is a deadline, not a delay: a
+        # live target is selected in milliseconds.
         self.target_wait_timeout = float(max(0.0, min(30.0, target_wait_timeout)))
         self._active_chain: int = 1
         self._proc: subprocess.Popen | None = None
@@ -1766,6 +1822,7 @@ class XilinxHwServerTransport(Transport):
             )
         self.use_register_ir = bool(use_register_ir)
         self.single_chain_burst = bool(single_chain_burst)
+        self.burst = bool(burst)
         if self.use_register_ir:
             # In -register mode xsdb handles both IR routing and DR BYPASS
             # padding for multi-TAP chains (e.g. Zynq US+ MPSoC ARM DAP).
@@ -1815,6 +1872,9 @@ class XilinxHwServerTransport(Transport):
         mark("hw_server_tcp")
 
         if self.bitfile:
+            # Programming over a cable hw_server is still reopening fails the
+            # same way a scan does, so wait for a live target first.
+            self._select_fpga_target()
             _hw_log.info(
                 "Programming FPGA from bitfile (fpga -file): %s",
                 self.bitfile,
@@ -1904,37 +1964,114 @@ class XilinxHwServerTransport(Transport):
             "selected, or the probe register address is wrong for this design."
         )
 
-    def _select_fpga_target(self) -> None:
-        """Select the JTAG target matching ``fpga_name``, tolerating a
-        transiently empty scan chain.
+    # One IDCODE scan: harmless on any device (it never selects a USER chain)
+    # and named by register so xsdb picks each device's own IR code.
+    _NODE_CHECK_TCL = (
+        "set _nc [jtag sequence]; "
+        "$_nc irshift -state IRUPDATE -register idcode; "
+        "$_nc drshift -state DRUPDATE -capture -tdi 0 32; "
+        "$_nc run; $_nc delete"
+    )
 
-        hw_server briefly reports an empty JTAG target list while the chain
-        re-enumerates — right after ``fpga -file``, or when another board is
-        plugged in and the whole chain is re-scanned. Firing
-        ``jtag targets -set -filter`` in that window silently selects nothing,
-        and every later read then fails with XSDB's opaque "target list is
-        empty" / "Invalid target" errors (surfaced to callers as "no bit
-        string in output"). Poll ``jtag targets`` until a matching device
-        appears, then select it; fail with a clear message if it never does.
+    # Prints the name of every cable hw_server reports as closed or still
+    # initializing, one per line.  A cable in an error state is left out:
+    # that lasts, and is not part of a release.
+    _CLOSED_CABLES_TCL = (
+        "foreach _t [jtag targets -target-properties] { "
+        "set _s [dict get $_t state]; "
+        "if {[dict get $_t level] == 0 && ![string match error* $_s] && "
+        "(![dict get $_t is_open] || [string match initializing* $_s])} "
+        "{ puts [dict get $_t name] } }"
+    )
+
+    def _select_fpga_target(self) -> None:
+        """Select the JTAG target matching ``fpga_name`` once it answers a scan.
+
+        When the last xsdb client exits, hw_server releases its cables
+        ``jtag-poll-close-delay`` (1 s) later, closing them one after another;
+        with a client connected again it reopens and rescans them all.  A
+        client that arrives once the release has begun does not stop it: it
+        sees some cables closed and the rest still open, and the open ones
+        close a moment later.  A target on a still-open cable answers a scan
+        and then drops out for the whole reopen (about 3 s).
+
+        So first wait for any release to finish: while a client is connected,
+        hw_server never starts one, so a cable it reports closed means a
+        release is under way, and every cable open and initialized means it
+        is over.  A cable reporting an error (a board powered off, say) is
+        not part of a release and is not waited for.  Then poll ``jtag
+        targets`` until a matching device appears (a board still powering
+        up, say), select it, and confirm it with an IDCODE scan.  Both waits
+        are polled until ``target_wait_timeout``; a select or scan that
+        fails is raised at once.
+
+        One window is left, and only hw_server could close it.  For about
+        0.2 s after it decides to close a cable, hw_server still reports
+        that cable open, and it has no closing state to wait on.  A connect
+        that lands right at a release's start can pass the cable wait and
+        select, then see the target drop out for about 1 s: the IDCODE scan
+        here fails, or this returns and the reads just after it fail.
+        Either way the error is raised; no wrong data is returned.
+
+        The deadline bounds this polling, not a single xsdb command: like
+        every command on this transport, one that never answers is waited
+        for.
         """
         deadline = time.monotonic() + self.target_wait_timeout
-        names: list[str] = []
+        self._wait_for_cable_release(deadline)
         while True:
             # ``puts`` forces the list onto stdout — the bare command doesn't
             # echo its result through a piped (non-interactive) xsdb session.
             names = parse_xsdb_jtag_targets(self._send("puts [jtag targets]"))
             if any(self.fpga_name in name for name in names):
-                break
+                # ``-timeout 0``: with ``-filter`` xsdb otherwise polls up to
+                # 3 s for a match, which would wait out a target that just
+                # left the list instead of failing.
+                self._send(
+                    "jtag targets -set -timeout 0 "
+                    f'-filter {{name =~ "{self.fpga_name}"}}',
+                    check=True,
+                )
+                self._send(self._NODE_CHECK_TCL, check=True)
+                return
             if time.monotonic() >= deadline:
                 visible = ", ".join(names) if names else "(none)"
                 raise ConnectionError(
                     f"no JTAG target matching {self.fpga_name!r} appeared within "
-                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The board "
-                    "may be unplugged or powered off, or the JTAG chain is still "
-                    "re-enumerating (e.g. another board was just connected)."
+                    f"{self.target_wait_timeout:.1f}s (visible: {visible}). The "
+                    "board may be unplugged or powered off."
                 )
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        self._send(f'jtag targets -set -filter {{name =~ "{self.fpga_name}"}}')
+
+    def _wait_for_cable_release(self, deadline: float) -> None:
+        """Wait until hw_server reports every cable open and initialized.
+
+        A cable reporting an error is left out: that state lasts, and the
+        target wait that follows names a board that is missing.
+
+        While a client is connected hw_server reopens a closed cable within a
+        few seconds, so a release ends well inside ``target_wait_timeout``.
+        A cable still closed at the deadline means the release has not
+        ended, and selecting a target then could hand back one that is about
+        to drop out, so it is an error.
+        """
+        while True:
+            closed = [
+                line.strip()
+                for line in self._send(self._CLOSED_CABLES_TCL, check=True).splitlines()
+                if line.strip()
+            ]
+            if not closed:
+                return
+            if time.monotonic() >= deadline:
+                raise ConnectionError(
+                    f"hw_server still reports JTAG cable(s) closed or initializing "
+                    f"after {self.target_wait_timeout:.1f}s: {', '.join(closed)}. "
+                    "It reopens its cables within a few seconds while a client "
+                    "is connected; check that no other program holds the cable "
+                    "and that hw_server's auto-open-ports is on."
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def _select_config_target(self) -> None:
         """Select the debug target that ``fpga -file`` configures.
@@ -2050,8 +2187,8 @@ class XilinxHwServerTransport(Transport):
         tcl = (
             f"set _rd [jtag sequence]; "
             f"{self._irshift_tcl('_rd', ch)}; "
-            f"$_rd drshift -state IDLE -capture -bits {total} {padded}; "
-            f"$_rd delay {self.RAW_DR_IDLE_CYCLES}; "
+            f"$_rd drshift -state DRUPDATE -capture -bits {total} {padded}; "
+            f"$_rd state IDLE {self.RAW_DR_IDLE_CYCLES}; "
             f"puts [$_rd run -bits]; $_rd delete"
         )
         out = self._send(tcl)
@@ -2073,8 +2210,8 @@ class XilinxHwServerTransport(Transport):
             total = self._user_dr_bits(width)
             parts.append(
                 f"{self._irshift_tcl('_rdb', ch)}; "
-                f"$_rdb drshift -state IDLE -capture -bits {total} {padded}; "
-                f"$_rdb delay {self.RAW_DR_IDLE_CYCLES}"
+                f"$_rdb drshift -state DRUPDATE -capture -bits {total} {padded}; "
+                f"$_rdb state IDLE {self.RAW_DR_IDLE_CYCLES}"
             )
             totals.append(total)
             widths.append(width)
@@ -2089,16 +2226,6 @@ class XilinxHwServerTransport(Transport):
         tcl = self._read_reg_tcl(frame)
         raw = self._send(tcl)
         return self._parse_bits_u32(raw)
-
-    def read_reg_stable(self, addr: int) -> int:
-        """Read through the hw_server register pipeline and return settled data.
-
-        XSDB JTAG sequences can return data from the previous register window
-        on the first read after changing addresses or session state.  Discard
-        one warmup read and return the second scan.
-        """
-        self.read_reg(addr)
-        return self.read_reg(addr)
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = self._frame_bits(addr=addr, data=value, write=True)
@@ -2115,40 +2242,35 @@ class XilinxHwServerTransport(Transport):
         Otherwise falls back to single-sequence pipelined reads on the
         active ELA control chain.
 
-        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, so
-        it is only valid when a sample fits one 32-bit word (``SAMPLE_W <= 32``).
-        For a wider core (e.g. the AXI monitor, ``SAMPLE_W=160``) ``capture()``
-        reassembles each sample from 32-bit words and passes a *word* count here;
-        feeding that word count to the burst engine builds a 5x-oversized
-        single-line TCL scan sequence that xsdb never finishes — hanging the
-        read. Wide cores therefore skip burst and use the 32-bit word path.
+        The burst DR packs whole ``SAMPLE_W``-bit samples per 256-bit scan, but
+        *words* counts 32-bit words, so this burst is only used when a sample
+        fits one word (``SAMPLE_W <= 32``); a wider core here takes the 32-bit
+        word path.  ``Analyzer.capture()`` reads a wide core with
+        :meth:`read_sample_block`, which bursts whole samples, and comes here
+        only when that raises :class:`BurstUnavailableError`.
         """
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
-            try:
-                return self._read_block_burst(words)
-            except (ConnectionError, RuntimeError) as exc:
-                if self.single_chain_burst:
-                    _hw_log.warning(
-                        "single-chain ELA burst readback failed (%s); falling back to "
-                        "slow control-chain DATA reads. If this bitstream was built with "
-                        "SINGLE_CHAIN_BURST=0, pass --two-chain-burst or construct "
-                        "XilinxHwServerTransport(single_chain_burst=False).",
-                        exc,
-                    )
-                self._has_burst = False
+            return self._burst_with_hint(words)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
+        return self._read_block_user1(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        if words <= 0:
+            return []
         return self._read_block_user1(addr, words)
 
     @property
     def _burst_available(self) -> bool:
-        """True if the bitstream has a fast burst interface."""
-        if not hasattr(self, "_has_burst"):
-            # Do not probe by writing BURST_PTR here: that register is a
-            # side-effecting start toggle for the burst engine.
-            self._has_burst = True
-        return self._has_burst
+        """True if the bitstream has a fast burst interface.
+
+        Declared by the ``burst`` constructor argument, never probed: a
+        BURST_PTR write is a side-effecting start toggle for the burst
+        engine, and a failed burst is a defect to raise, not a sign that
+        the build has none.
+        """
+        return self.burst
 
     def _burst_sample_ok(self) -> bool:
         """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
@@ -2158,10 +2280,7 @@ class XilinxHwServerTransport(Transport):
         (not cached) so a session that hops between an 8-bit ELA and a 160-bit
         AXI monitor always gates on the *currently selected* core.
         """
-        try:
-            sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
-        except (ConnectionError, RuntimeError):
-            return True  # can't tell — keep prior fast-path behavior
+        sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
         return sw < 1 or sw <= 32
 
     @property
@@ -2183,14 +2302,20 @@ class XilinxHwServerTransport(Transport):
     ) -> List[int]:
         """Read *words* samples via the 256-bit burst DR.
 
-        Packs everything into a **single** ``jtag sequence``:
-        Control-chain write to BURST_PTR → idle for staging fill → optional
-        IR switch to legacy DATA_CHAIN → N consecutive 256-bit DR scans.
-        One round-trip.
+        The BURST_PTR write, the staging-fill idle and every 256-bit DR scan
+        are ONE ``jtag sequence``, run once.  Nothing else can reach the chain
+        from the write to the last scan: between two runs hw_server can put
+        a scan of its own through the PL with the USER chain still selected,
+        and on a single-chain build jtag_pipe_iface decodes its last 49 bits
+        as a register command, which ends burst mode.  Seen on Zynq US+ MPSoC
+        (``-register`` mode): the scan after the gap returns the register
+        read data instead of samples.  A deep burst is too long for one TCL
+        line, so the sequence object is built over several xsdb sends and only
+        the last one runs it.
         """
-        if timestamp:
-            if element_width is None:
-                element_width = 32
+        if timestamp and element_width is None:
+            element_width = 32
+        if element_width is not None:
             sps = max(1, self.BURST_DR_BITS // element_width)
         else:
             sps = self._burst_samples_per_scan
@@ -2215,104 +2340,170 @@ class XilinxHwServerTransport(Transport):
         burst_chain = ctrl_chain if self.single_chain_burst else 2
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
+        # The BURST_PTR write ends in an explicit UPDATE-DR, like every
+        # command scan, then idle TCKs so the update crosses into the burst
+        # reader (TCK-clocked) and the first 256-bit staging word fills before
+        # the first burst CAPTURE samples it.  Register mode also needs the
+        # longer register-write settle.
+        write_idle = self.BURST_PREFILL_IDLE_CYCLES
         if self.use_register_ir:
-            # Register mode: BURST_PTR write needs DRUPDATE + split-
-            # sequence IDLE/delay (same pattern as _write_reg_tcl).
-            # Burst scans go in a separate sequence afterwards.
-            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, self.BURST_PREFILL_IDLE_CYCLES)
-            parts_w = [
-                "set _bq [jtag sequence]",
-                f"{ir1_cmd}; "
-                f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
-                "$_bq run; $_bq delete",
-                "set _bqd [jtag sequence]",
-                "$_bqd state IDLE",
-                f"$_bqd delay {write_idle}",
-                "$_bqd run; $_bqd delete",
+            write_idle = max(self.WRITE_IDLE_CYCLES_REGISTER, write_idle)
+        write_ptr = [
+            f"{ir1_cmd}; "
+            f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
+            f"$_bq state IDLE {write_idle}",
+        ]
+        head = ["set _bq [jtag sequence]", *write_ptr]
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync: one burst scan whose capture
+            # matches the engine's copy to the new owner's start toggle, then
+            # a second BURST_PTR write the engine cannot miss.  The TAP
+            # passes Capture-DR either way; without ``-capture`` xsdb just
+            # does not print the scan, so the burst output is unchanged.
+            head += [
+                f"{ir_burst_cmd}; $_bq drshift -state DRUPDATE "
+                f"-bits {burst_total} {burst_zeros}",
+                *write_ptr,
             ]
-            parts_r = ["set _bq [jtag sequence]"]
-            for _ in range(n_scans + prime_scans):
-                parts_r.append(
-                    f"{ir_burst_cmd}; "
-                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
-                )
-            parts_r.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts_w + parts_r)
-        else:
-            parts_w = [
-                "set _bq [jtag sequence]",
-                # Write BURST_PTR via the active ELA control chain.
-                # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
-                f"{ir1_cmd}; "
-                f"$_bq drshift -state IDLE -bits {user_total} {burst_frame}",
-                # Idle so the BURST_PTR update crosses into the burst
-                # reader and the first 256-bit staging word fills before
-                # USER2 CAPTURE samples it. Real BSCAN/XSDB timing needs
-                # more margin than the raw ~33 TCK memory-fill latency.
-                f"$_bq delay {self.BURST_PREFILL_IDLE_CYCLES}",
-                "$_bq run; $_bq delete",
-            ]
-            parts_r = ["set _bq [jtag sequence]"]
-            # The first wide scan primes/fills staging and is discarded.
-            for _ in range(n_scans + prime_scans):
-                parts_r.append(
-                    f"{ir_burst_cmd}; "
-                    f"$_bq drshift -state DRUPDATE -capture -bits {burst_total} {burst_zeros}"
-                )
-            parts_r.append("puts [$_bq run -bits]; $_bq delete")
-            tcl = "; ".join(parts_w + parts_r)
+        # The first wide scan primes/fills staging and is discarded.
+        tcls = self._burst_sequence_sends(
+            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+        )
 
-        def run_once() -> List[int]:
-            out = self._send(tcl)
-            return self._parse_burst_bits(
-                out,
-                words,
-                skip_scans=prime_scans,
-                element_width=element_width,
+        # Every send is checked: a failure while the sequence is being built
+        # prints only into that send's output, and the last send would then
+        # run a partial sequence whose scans parse as a short burst.
+        out = ""
+        for tcl in tcls:
+            out = self._send(tcl, check=True)  # only the last send prints the scans
+        return self._parse_burst_bits(
+            out,
+            words,
+            skip_scans=prime_scans,
+            element_width=element_width,
+            expected_scans=n_scans + prime_scans,
+        )
+
+    # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
+    # 256-bit scans; as one TCL line that hung xsdb, so the scans are added to
+    # the sequence object over several sends.  They still run as one sequence.
+    _BURST_SCANS_PER_SEQUENCE = 256
+
+    def _burst_sequence_sends(
+        self, head: list[str], ir_cmd: str, total_bits: int, zeros: str, n_scans: int
+    ) -> list[str]:
+        """TCL sends that build ONE ``_bq`` sequence -- *head* plus *n_scans*
+        burst DR scans, at most ``_BURST_SCANS_PER_SEQUENCE`` per send -- and
+        run it in the last send, printing every captured scan."""
+        scan = f"{ir_cmd}; $_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
+        sends: list[list[str]] = []
+        for start in range(0, n_scans, self._BURST_SCANS_PER_SEQUENCE):
+            count = min(self._BURST_SCANS_PER_SEQUENCE, n_scans - start)
+            sends.append([scan] * count)
+        sends[0] = head + sends[0]
+        sends[-1] = sends[-1] + ["puts [$_bq run -bits]; $_bq delete"]
+        return ["; ".join(s) for s in sends]
+
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples via the burst DR.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample, the flat layout ``Analyzer.capture()`` reassembles.  This is the
+        readout for wide cores (``SAMPLE_W > 32``): the burst engine addresses
+        the capture RAM by sample, so unlike the 16-bit register window it has
+        no size limit, and one 256-bit scan replaces ``ceil(width / 32)``
+        register reads.  Raises :class:`BurstUnavailableError`, before any
+        scan, when this transport cannot burst the request, so the caller can
+        read the window instead.  A burst that runs and fails raises anything
+        else -- :class:`BurstIntegrityError` for the wrong number of samples --
+        and must not be read around.
+        """
+        if n_samples <= 0:
+            return []
+        if base_addr != 0x0100:
+            raise BurstUnavailableError(
+                f"sample burst needs the DATA base, got 0x{base_addr:04X}"
             )
+        if not 1 <= sample_width <= self.BURST_DR_BITS:
+            raise BurstUnavailableError(
+                f"sample width {sample_width} does not fit the "
+                f"{self.BURST_DR_BITS}-bit burst DR"
+            )
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        samples = self._burst_with_hint(n_samples, element_width=sample_width)
+        if len(samples) != n_samples:
+            raise BurstIntegrityError(
+                f"sample burst returned {len(samples)} samples, expected {n_samples}"
+            )
+        words_per_sample = (sample_width + 31) // 32
+        words: List[int] = []
+        for sample in samples:
+            for w in range(words_per_sample):
+                words.append((sample >> (w * 32)) & 0xFFFFFFFF)
+        return words
 
-        first = run_once()
-        if not self.single_chain_burst:
-            return first
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Read one timestamp per captured sample via the burst DR.
 
-        # Single-chain burst shares one USER chain between 49-bit register
-        # frames and 256-bit burst frames.  Once STATUS.done is observed, the
-        # capture RAM is read-only until the next ARM/RESET, so repeating the
-        # same BURST_PTR transaction must return identical data.  Real
-        # hw_server/BSCANE2 sessions can return one stale first transaction
-        # immediately after rapid re-arm; require a stable pair and fail loudly
-        # if the stream does not converge instead of silently accepting a
-        # one-off retry result.
-        previous = first
-        for _attempt in range(3):
-            current = run_once()
-            if current == previous:
-                return current
-            previous = current
-        raise RuntimeError("single-chain burst readback did not stabilize")
+        The wide-core counterpart of :meth:`read_sample_block`: a deep wide
+        capture's timestamp window can start past the 16-bit register space,
+        so it must not be read through the window.  Raises
+        :class:`BurstUnavailableError` when burst readout is off, and
+        :class:`BurstIntegrityError` when a burst ran but returned the wrong
+        number of timestamps.
+        """
+        if n_timestamps <= 0:
+            return []
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        values = self._burst_with_hint(
+            n_timestamps, timestamp=True, element_width=timestamp_width
+        )
+        if len(values) != n_timestamps:
+            raise BurstIntegrityError(
+                f"timestamp burst returned {len(values)} values, expected {n_timestamps}"
+            )
+        return values
 
     def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> List[int]:
         """Read timestamp words through the configured burst mode when available."""
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            try:
-                return self._read_block_burst(
-                    words,
-                    timestamp=True,
-                    element_width=timestamp_width,
-                )
-            except (ConnectionError, RuntimeError) as exc:
-                if self.single_chain_burst:
-                    _hw_log.warning(
-                        "single-chain ELA timestamp burst readback failed (%s); "
-                        "falling back to slow USER1 timestamp reads. If this bitstream "
-                        "was built with SINGLE_CHAIN_BURST=0, pass --two-chain-burst or "
-                        "construct XilinxHwServerTransport(single_chain_burst=False).",
-                        exc,
-                    )
-                self._has_burst = False
+            return self._burst_with_hint(
+                words,
+                timestamp=True,
+                element_width=timestamp_width,
+            )
         return self._read_block_user1(addr, words)
+
+    def _burst_with_hint(self, words: int, **kwargs) -> List[int]:
+        """Run :meth:`_read_block_burst`; a burst that fails is raised with
+        the build options that would explain it, never read around."""
+        try:
+            return self._read_block_burst(words, **kwargs)
+        except RuntimeError as exc:
+            if type(exc) is not RuntimeError:
+                raise  # BurstIntegrityError and other typed errors, unchanged
+            if self.single_chain_burst:
+                hint = (
+                    "If this bitstream was built with SINGLE_CHAIN_BURST=0, pass "
+                    "--two-chain-burst (single_chain_burst=False)"
+                )
+            else:
+                hint = (
+                    "If this bitstream was built with BURST_EN=0, it has no USER2 "
+                    "burst path"
+                )
+            raise RuntimeError(
+                f"burst readback failed: {exc}. {hint}; if it has no burst path at "
+                "all, pass --no-burst (burst=False)."
+            ) from exc
 
     def _parse_burst_bits(
         self,
@@ -2321,9 +2512,14 @@ class XilinxHwServerTransport(Transport):
         *,
         skip_scans: int = 0,
         element_width: int | None = None,
+        expected_scans: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
+
+        With *expected_scans*, any other number of scan tokens raises
+        :class:`BurstIntegrityError` rather than returning a short or
+        misaligned burst.
         """
         if element_width is None:
             sps = self._burst_samples_per_scan
@@ -2351,6 +2547,14 @@ class XilinxHwServerTransport(Transport):
                 offset = burst_offset + s * sw
                 val = self._bits_to_int(token, offset, sw)
                 values.append(val)
+        if expected_scans is not None and scan_idx != expected_scans:
+            raise BurstIntegrityError(
+                f"burst returned {scan_idx} scans, expected {expected_scans}"
+            )
+        if len(values) < total_words:
+            raise BurstIntegrityError(
+                f"burst returned {len(values)} values, expected {total_words}"
+            )
         return values[:total_words]
 
     def _read_block_user1(self, addr: int, words: int) -> List[int]:
@@ -2367,6 +2571,7 @@ class XilinxHwServerTransport(Transport):
         the pipelined path is ~25x faster and returns identical data (validated
         on Arty against the per-word path).
         """
+        check_data_window(addr, words, self.data_window_end)
         results: list[int] = []
         for start in range(0, words, self._BLOCK_CHUNK):
             end = min(start + self._BLOCK_CHUNK, words)
@@ -2389,8 +2594,8 @@ class XilinxHwServerTransport(Transport):
 
         All scans go into one sequence object: one address setup,
         USER1_PIPE_PRIME_READS discarded priming captures, then N returned
-        captures.  A short idle
-        follows each address update before the next capture so the
+        captures.  Each address-bearing scan ends in an explicit UPDATE-DR
+        and a short idle follows it before the next capture, so the
         fabric-domain read request can cross, read RAM, and resynchronize
         before CAPTURE samples jtag_rdata.
         """
@@ -2413,8 +2618,8 @@ class XilinxHwServerTransport(Transport):
             "set _q [jtag sequence]",
             # Scan 0: set first address, no capture
             f"{ir_cmd}; "
-            f"$_q drshift -state IDLE -bits {n} {frames[0]}",
-            f"$_q delay {idle}",
+            f"$_q drshift -state DRUPDATE -bits {n} {frames[0]}",
+            f"$_q state IDLE {idle}",
         ]
         # Prime captures: discard the stale register-pipeline word plus the
         # RTL jtag_rdata fill latency before counting returned words. If the
@@ -2423,17 +2628,16 @@ class XilinxHwServerTransport(Transport):
         for _ in range(self.USER1_PIPE_PRIME_READS):
             parts.append(
                 f"{ir_cmd}; "
-                f"$_q drshift -state IDLE -capture -bits {n} {frames[0]}"
+                f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[0]}"
             )
-            parts.append(f"$_q delay {idle}")
+            parts.append(f"$_q state IDLE {idle}")
         # Scans 1..N-1: capture previous AND set next address.
-        # End in IDLE so the subsequent delay is valid on xsdb 2025.2.
         for i in range(1, count):
             parts.append(
                 f"{ir_cmd}; "
-                f"$_q drshift -state IDLE -capture -bits {n} {frames[i]}"
+                f"$_q drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
-            parts.append(f"$_q delay {idle}")
+            parts.append(f"$_q state IDLE {idle}")
         # Final scan: capture last result
         parts.append(
             f"{ir_cmd}; "
@@ -2452,6 +2656,7 @@ class XilinxHwServerTransport(Transport):
         if not addrs:
             return []
         n = self._user_dr_bits(self.DR_BITS)
+        idle = self.READ_IDLE_CYCLES
         ir_cmd = self._irshift_tcl("_pq")
         frames = [
             self._pad_dr(self._frame_bits(addr=a, data=0, write=False))
@@ -2462,12 +2667,14 @@ class XilinxHwServerTransport(Transport):
             "set _pq [jtag sequence]",
             f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
+            f"$_pq state IDLE {idle}",
         ]
         for i in range(1, count):
             parts.append(
                 f"{ir_cmd}; "
                 f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[i]}"
             )
+            parts.append(f"$_pq state IDLE {idle}")
         parts.append(
             f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -capture -bits {n} {frames[-1]}"
@@ -2482,9 +2689,9 @@ class XilinxHwServerTransport(Transport):
 
     # -- chain shape helpers -------------------------------------------------
 
-    # Write delay: on MPSoC in -register mode, writes need a longer settling
-    # delay (~100 TCK) and an explicit state-IDLE transition to reliably
-    # commit the UPDATE-DR event.  On 7-series READ_IDLE_CYCLES (20) suffices.
+    # Idle TCKs after a write: on MPSoC in -register mode writes need more
+    # settling TCKs (~100) after the explicit UPDATE-DR.  On 7-series
+    # READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
     BURST_PREFILL_IDLE_CYCLES = 160
 
@@ -2547,11 +2754,11 @@ class XilinxHwServerTransport(Transport):
     def _read_reg_tcl(self, frame: str, var_suffix: str = "") -> str:
         """Return TCL that performs one register read and returns the bit string.
 
-        Uses a SINGLE jtag sequence for all operations (IR+DR+idle+IR+DR)
-        to eliminate inter-sequence timing gaps that cause stale reads.
-
-        Note: drshift ends in state IDLE (not DRUPDATE) because xsdb 2025.2
-        requires delay to be in RESET/IDLE/PAUSE — DRUPDATE→delay errors.
+        One jtag sequence: IR, command DR ending in an explicit UPDATE-DR,
+        READ_IDLE_CYCLES idle TCKs for the core to accept the command and
+        stage the response, then IR and the capture DR.  ``state IDLE n``
+        clocks TCK; ``delay`` would not (it only waits), so it must not be
+        used to give the TCK-domain core time.
         """
         v = f"_s{var_suffix}"
         n = self._user_dr_bits(self.DR_BITS)
@@ -2561,10 +2768,10 @@ class XilinxHwServerTransport(Transport):
         return (
             f"set {v} [jtag sequence]; "
             f"{ir_cmd}; "
-            f"${v} drshift -state IDLE -bits {n} {padded}; "
-            f"${v} delay {idle}; "
+            f"${v} drshift -state DRUPDATE -bits {n} {padded}; "
+            f"${v} state IDLE {idle}; "
             f"{ir_cmd}; "
-            f"${v} drshift -state IDLE -capture -bits {n} {padded}; "
+            f"${v} drshift -state DRUPDATE -capture -bits {n} {padded}; "
             f"puts [${v} run -bits]; ${v} delete"
         )
 
@@ -2575,29 +2782,17 @@ class XilinxHwServerTransport(Transport):
         if self.use_register_ir:
             # On MPSoC in -register mode, writes need explicit DRUPDATE
             # state (the -state IDLE shortcut doesn't reliably fire the
-            # UPDATE-DR event through the named-register path) and a
-            # longer settling delay (~100 TCK).  The delay runs in a
-            # separate sequence after an explicit state-IDLE transition.
+            # UPDATE-DR event through the named-register path) and more
+            # settling TCKs.
             idle = self.WRITE_IDLE_CYCLES_REGISTER
-            return (
-                f"set _w [jtag sequence]; "
-                f"{ir_cmd}; "
-                f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
-                f"$_w run; $_w delete; "
-                f"set _wd [jtag sequence]; "
-                f"$_wd state IDLE; "
-                f"$_wd delay {idle}; "
-                f"$_wd run; $_wd delete"
-            )
-        idle = self.READ_IDLE_CYCLES
+        else:
+            idle = self.READ_IDLE_CYCLES
         return (
             f"set _w [jtag sequence]; "
             f"{ir_cmd}; "
-            f"$_w drshift -state IDLE -bits {n} {padded}; "
-            f"$_w run; $_w delete; "
-            f"set _wd [jtag sequence]; "
-            f"$_wd delay {idle}; "
-            f"$_wd run; $_wd delete"
+            f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
+            f"$_w state IDLE {idle}; "
+            f"$_w run; $_w delete"
         )
 
     # -- output parsing ------------------------------------------------------

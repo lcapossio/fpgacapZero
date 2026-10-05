@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
+// SIMULATION ONLY.  A frozen copy of rtl/fcapz_core_manager.v at commit
+// 8e863969d444ae94785937cb49f035951d8b658d, before the manager raised the
+// burst start itself (MGR_CAPS bit 2).  Bitstreams built with it are still in
+// the field; tb/fcapz_core_manager_legacy_burst_tb.sv runs the host's burst
+// sequences against it.  Only the module name differs from that commit.
+
 `timescale 1ns/1ps
 `include "fcapz_version.vh"
 
@@ -10,7 +16,7 @@
 // active slot, which exposes its native register map at 0x0000.  Slots without
 // burst support (for example EIO) simply return idle/zero burst controls.
 
-module fcapz_core_manager #(
+module fcapz_core_manager_pre_burst_start #(
     parameter NUM_SLOTS = 2,
     parameter SAMPLE_W = 8,
     parameter TIMESTAMP_W = 0,
@@ -39,8 +45,6 @@ module fcapz_core_manager #(
     output wire [NUM_SLOTS-1:0]       slot_burst_rd_active,
     input  wire [NUM_SLOTS*SAMPLE_W-1:0] slot_burst_rd_data,
     input  wire [NUM_SLOTS*((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] slot_burst_rd_ts_data,
-    // Not used: the manager raises the start event itself (burst_start_r).
-    // Kept so every wrapper still connects the slots' flags unchanged.
     input  wire [NUM_SLOTS-1:0]       slot_burst_start,
     input  wire [NUM_SLOTS-1:0]       slot_burst_timestamp,
     input  wire [NUM_SLOTS*$clog2(DEPTH)-1:0] slot_burst_start_ptr,
@@ -73,12 +77,6 @@ module fcapz_core_manager #(
     reg [IDX_W-1:0] burst_owner_idx;
     reg             burst_owner_valid;
     reg             burst_rd_active_d;
-    // The burst start event the pipe sees. The manager owns it rather than
-    // passing on the owner slot's own toggle: the pipe keeps ONE last-seen
-    // copy, so after the owner changes, the new slot's toggle can equal the
-    // old slot's and the start is missed -- the pipe then reads the new
-    // slot's memory from the previous burst's pointer, silently.
-    reg             burst_start_r;
 
     wire manager_hit = (jtag_addr[15:8] == 8'hF0);
     wire requested_idx_valid = (jtag_wdata < NUM_SLOTS);
@@ -93,15 +91,11 @@ module fcapz_core_manager #(
             burst_owner_idx <= {IDX_W{1'b0}};
             burst_owner_valid <= 1'b0;
             burst_rd_active_d <= 1'b0;
-            burst_start_r <= 1'b0;
         end else begin
             burst_rd_active_d <= burst_rd_active;
             if (jtag_wr_en && !manager_hit && jtag_addr == ADDR_BURST_PTR && SLOT_HAS_BURST[active_idx]) begin
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= 1'b1;
-                // Same edge the slot latches its start pointer and toggles
-                // its own flag, so pointer and event reach the pipe together.
-                burst_start_r <= ~burst_start_r;
             end else if (burst_rd_active && !burst_rd_active_d) begin
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= 1'b1;
@@ -136,6 +130,7 @@ module fcapz_core_manager #(
     reg [31:0] active_rdata;
     reg [SAMPLE_W-1:0] active_burst_data;
     reg [TS_W_SAFE-1:0] active_burst_ts_data;
+    reg active_burst_start;
     reg active_burst_timestamp;
     reg [PTR_W-1:0] active_burst_start_ptr;
 
@@ -143,6 +138,7 @@ module fcapz_core_manager #(
         active_rdata = 32'h0;
         active_burst_data = {SAMPLE_W{1'b0}};
         active_burst_ts_data = {TS_W_SAFE{1'b0}};
+        active_burst_start = 1'b0;
         active_burst_timestamp = 1'b0;
         active_burst_start_ptr = {PTR_W{1'b0}};
         for (i = 0; i < NUM_SLOTS; i = i + 1) begin
@@ -157,6 +153,7 @@ module fcapz_core_manager #(
             end
             if (burst_mux_idx == i[IDX_W-1:0]) begin
                 if (SLOT_HAS_BURST[i]) begin
+                    active_burst_start = slot_burst_start[i];
                     active_burst_timestamp = slot_burst_timestamp[i];
                     active_burst_start_ptr = slot_burst_start_ptr[i*PTR_W +: PTR_W];
                 end
@@ -184,9 +181,7 @@ module fcapz_core_manager #(
             ADDR_MGR_COUNT:   manager_rdata = NUM_SLOTS;
             ADDR_MGR_ACTIVE:  manager_rdata = {{(32-IDX_W){1'b0}}, active_idx};
             ADDR_MGR_STRIDE:  manager_rdata = 32'h0;
-            // bit0 active-slot, bit1 descriptors, bit2 the manager raises the
-            // burst start on every BURST_PTR write (safe across slot switches)
-            ADDR_MGR_CAPS:    manager_rdata = 32'h0000_0007;
+            ADDR_MGR_CAPS:    manager_rdata = 32'h0000_0003; // bit0 active-slot, bit1 descriptors
             ADDR_MGR_DESC_INDEX: manager_rdata = {{(32-IDX_W){1'b0}}, desc_idx};
             ADDR_MGR_DESC_CORE:  manager_rdata = {16'h0, desc_core_id};
             ADDR_MGR_DESC_CAPS:  manager_rdata = {31'h0, desc_has_burst};
@@ -197,7 +192,7 @@ module fcapz_core_manager #(
     assign jtag_rdata = manager_hit ? manager_rdata : active_rdata;
     assign burst_rd_data = active_burst_data;
     assign burst_rd_ts_data = active_burst_ts_data;
-    assign burst_start = burst_start_r;
+    assign burst_start = active_burst_start;
     assign burst_timestamp = active_burst_timestamp;
     assign burst_start_ptr = active_burst_start_ptr;
 

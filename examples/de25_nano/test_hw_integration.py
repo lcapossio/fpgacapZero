@@ -65,7 +65,6 @@ EIO_CHAIN = 3
 AXI_CHAIN = 4
 AXI_MON_CHAIN = 5
 SAMPLE_CLOCK_HZ = 50_000_000
-TRIGGER_DECISION_LATENCY = 1
 
 _BITSTREAM_SOURCES_COMMON = [
     _ROOT / "rtl" / "fcapz_version.vh",
@@ -604,11 +603,11 @@ class TestSegmentedCapture(unittest.TestCase):
         self.a.arm()
         self.assertTrue(self.a.wait_all_segments_done(timeout=10.0))
 
-        expected_anchor = TRIGGER_DECISION_LATENCY & 0xFF
         for seg in range(4):
             result = self.a.capture_segment(seg, timeout=5.0)
             self.assertEqual(len(result.samples), 6)
-            self.assertIn(expected_anchor, [s & 0xFF for s in result.samples])
+            # samples[pretrigger] is the sample the compare matched.
+            self.assertEqual(result.samples[2] & 0xFF, 0x00, result.samples)
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
@@ -738,6 +737,7 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         with self.assertRaises(AXIError):
             self.bridge.axi_write(0xFFFFFFFC, 0x1234)
 
+    @unittest.skipUnless(_BITSTREAM_VARIANT == "vex", "only the vex variant has a CPU")
     def test_cpu_writes_reach_shared_slave(self):
         """Both masters are merged onto one slave by fcapz_axi_interconnect, so
         the host must be able to read back what the CPU wrote. The free-running

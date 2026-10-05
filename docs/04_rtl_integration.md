@@ -304,7 +304,7 @@ module fcapz_ela_xilinx7 #(
 | `DEPTH` | int | 16..16M, **power of 2** | Buffer depth.  Stored in dual-port BRAM; ~512 LUTs at depth=1024.  Larger means more BRAM. |
 | `TRIG_STAGES` | int | 1..4 | Number of trigger sequencer stages.  `1` = single-stage simple trigger; `2..4` = multi-stage state machine.  Each extra stage adds sequencer state and comparator configuration. |
 | `STOR_QUAL` | bit | 0/1 | Storage qualification: filter which samples get stored based on a comparator.  +21 LUTs.  Up to ~10× effective depth on sparse signals. |
-| `INPUT_PIPE` | int | 0..N | Pipeline registers between `probe_in` and the comparators.  Use this if your fabric has tight timing on the probe path; each stage adds 1 cycle of latency.  With `INPUT_PIPE>=1`, the ELA also registers the BRAM write command and internally enables a one-cycle `COMPARE_PIPE`, so wide relational compares do not sit on the capture-control critical path. |
+| `INPUT_PIPE` | int | 0..N | Pipeline registers between `probe_in` and the comparators.  Use this if your fabric has tight timing on the probe path; each stage adds 1 cycle of latency.  With `INPUT_PIPE>=1`, the ELA also registers the BRAM write command and internally enables a one-cycle `COMPARE_PIPE`, so wide relational compares do not sit on the capture-control critical path. With `EXT_TRIG_EN=1`, `INPUT_PIPE=0` is built as `1` so `trigger_in` (2-FF synchronized) lines up with the probe. |
 | `NUM_CHANNELS` | int | 1..256 | Channel mux: lets one ELA observe `N` separate buses, one selected at arm time.  Probe input width becomes `SAMPLE_W * NUM_CHANNELS` bits. |
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
@@ -330,9 +330,11 @@ module fcapz_ela_xilinx7 #(
 **Migration note:** older AMD/Xilinx bitstreams may have been built with
 `SINGLE_CHAIN_BURST=0`, where 256-bit burst scans live on `DATA_CHAIN`.
 The current host default expects single-chain burst on `CTRL_CHAIN`. If a
-legacy bitstream falls back to slow USER1 reads or logs a single-chain burst
-warning, use the CLI `--two-chain-burst` option or construct
-`XilinxHwServerTransport(single_chain_burst=False)`.
+legacy bitstream's capture fails with a burst error that names
+`--two-chain-burst`, use that CLI option or construct
+`XilinxHwServerTransport(single_chain_burst=False)`. A build with neither
+burst path (`SINGLE_CHAIN_BURST=0`, `BURST_EN=0`) is opened with
+`--no-burst` (`burst=False`) and read through the register window.
 
 **Startup defaults:** `STARTUP_ARM` and `DEFAULT_TRIG_EXT` rely on the FPGA
 and synthesis flow preserving register initial values at configuration time

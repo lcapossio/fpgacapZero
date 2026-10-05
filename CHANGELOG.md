@@ -80,6 +80,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `vid_pid`), not just `ftdi vid_pid`, so non-FTDI adapters are recognised
   instead of always probed.
 
+- **ELA — shorter segment-completion path.** The post-trigger count is now a
+  down-counter with registered last-sample flags, so the decision that ends a
+  capture or segment no longer starts at an arithmetic compare. Capture
+  behavior is unchanged; this restores timing margin on the Arty A7 VexRiscv
+  build's 150 MHz ELA. Both HDLs.
+
+- **Host — a failed burst is raised, not read around.** A burst that failed
+  used to turn burst readout off for the session and re-read the capture
+  through the register window, which also hid real faults, such as a JTAG
+  drop mid-burst. Any burst failure now raises, with a hint naming
+  `--two-chain-burst` or `--no-burst`. A bitstream with no burst path at all
+  (`SINGLE_CHAIN_BURST=0` with `BURST_EN=0`) must now be declared: CLI
+  `--no-burst`, RPC `connect` `"burst": false`, the GUI's new "Burst readout"
+  setting (which also selects two-chain builds), or `burst=False` on the
+  hw_server and Quartus transports.
+
 ### Deprecated
 
 - **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
@@ -90,6 +106,195 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Single-chain and multi-core Xilinx cores dropped every command on Zynq
+  UltraScale+ MPSoC.** `jtag_pipe_iface` only acted on a scan of
+  exactly 49 shift clocks. Every other TAP in BYPASS on the chain adds one
+  clock (the ARM DAP on MPSoC), so each 49-bit command arrived as 50 and was
+  silently ignored: `ela-list` reported `got 0x0000`, and no write could
+  land. A command is now the last 49 bits of any scan at least 49 and fewer
+  than `BURST_W` clocks long (the same last-49-bits rule `jtag_reg_iface`
+  uses); full bursts still saturate the counter and never execute. The MPSoC
+  failure affected `fcapz_debug_multi_xilinx7`, `fcapz_ela_xilinx7`/`_xilinxus`
+  with the default `SINGLE_CHAIN_BURST=1`, and `fcapz_axi_mon_xilinx7`; fixing
+  it needs a bitstream rebuild. Every `jtag_pipe_iface` user, including
+  `fcapz_axi_mon_intel`, now also executes a stray 50..`BURST_W`-1 bit scan on
+  its chain as a command instead of ignoring it. `BURST_W` must now exceed 49.
+
+- **Core manager — a burst after switching slots could read from the old
+  pointer.** The manager passed on each slot's own burst-start toggle, but the
+  burst reader keeps one last-seen copy: after a slot switch the new slot's
+  toggle could match it, the start was missed and the burst read the new
+  slot's RAM from the previous burst's pointer, with no error; a slot switch
+  alone could also look like a start. The manager now raises the start itself
+  on every `BURST_PTR` write to a burst-capable slot (both HDLs) and reports it
+  in `MGR_CAPS` bit 2. On a manager with two or more slots and without that
+  bit, the host now syncs the start before each burst, in the same JTAG
+  transaction: after the `BURST_PTR` write, one burst scan whose capture
+  copies the new owner's toggle, then a second `BURST_PTR` write the reader
+  cannot miss. Old bitstreams keep burst speed; no rebuild is needed.
+
+- **hw_server — a connect right after another session could fail.** About
+  1 s after the last xsdb client exits, hw_server releases its cables one
+  after another, and once a client is connected again it reopens and rescans
+  them all, which takes several seconds. A client that connects after the
+  release has begun does not stop it: it sees some cables closed and the
+  rest still open, and a target on an open cable answers a scan, then drops
+  out with "JTAG node is not accessible" until the reopen finishes. Connect
+  polled the list for up to 3 s and took the first listed target. It now
+  first waits until hw_server reports every cable open and initialized
+  (one reporting an error, such as a board powered off, is not waited for),
+  which marks the end of a release (none starts while a client is
+  connected), then waits for the target to be listed, within 10 s in all
+  (`target_wait_timeout`), and confirms it with one IDCODE scan. A select
+  or scan that fails is raised at once instead of being retried. One rare
+  window remains. A connect that lands right as the release starts can see
+  every cable open for about 0.2 s after hw_server has decided to close one,
+  and hw_server reports no closing state. The target then drops out for
+  about 1 s, and connect's IDCODE scan or the reads just after it fail
+  with "JTAG node is not accessible" (see docs/14_transports.md).
+
+- **hw_server — a failed burst send went unnoticed.** A burst is built over
+  several xsdb sends, but only the last send's output was checked, so an
+  error in an earlier send could leave a partial sequence that still ran.
+  Every send is now checked. A burst that returns any other number of scans
+  or values than it queued now raises `BurstIntegrityError` instead of being
+  re-read through the register window, which would hide the defect. The
+  Quartus single-chain burst raises it too, instead of a plain `RuntimeError`.
+
+- **hw_server — a deep burst could drop out of burst mode mid-read.** Each
+  chunk of scans ran as its own `jtag sequence`, and between two runs hw_server
+  can put a scan of its own through the PL (seen on Zynq UltraScale+ MPSoC),
+  which the pipe decodes as a register command. The pointer write and every
+  scan are now one sequence, built over several xsdb sends and run once.
+
+- **ELA — trigger sample one late with `INPUT_PIPE ≥ 1`.** The registered
+  compare stage judges each sample a clock after the probe path delivers it,
+  but the RAM stored the sample then current, so `samples[pretrigger]` was the
+  sample *after* the one that matched, and storage qualification kept or
+  dropped each sample by its predecessor's compare. The core now stores the
+  judged sample. `trigger_in` is also delayed to match the probe path
+  (`INPUT_PIPE − 1` extra flops for `INPUT_PIPE ≥ 2`), so an external trigger
+  marks the sample driven alongside it, and AND mode compares like with like.
+  A core with `EXT_TRIG_EN=1` and `INPUT_PIPE=0` is now built as
+  `INPUT_PIPE=1`, so its probe path is as long as the `trigger_in`
+  synchronizer and it aligns the same way; before, its external trigger marked
+  the sample two clocks after the pulse. That costs one probe stage plus the
+  registered RAM write command (data, address, timestamp and write enable)
+  and two clocks of latency. Timestamps keep their spacing; their absolute
+  offset from `probe_in` grows by one clock (two for that `INPUT_PIPE=0`
+  case). Fixing it needs a bitstream rebuild.
+
+- **ELA (Verilog) — timestamps aliased onto sample data on deep cores.** The
+  timestamp window base (`0x100 + DEPTH·words·4`) was compared as 16 bits, so
+  once it passed `0xFFFF` every data-window read returned timestamps. It is now
+  compared at full width, as the VHDL core already did. A fixed core sets
+  `COMPARE_CAPS` bit 19 and the host reads its whole window; for an older
+  core the host still refuses window reads from the aliased address
+  (`base & 0xFFFF`) on. Burst readout is unaffected.
+
+- **Host — reads past the end of the 16-bit register window.** A capture larger
+  than the data window (from `0x0100` up to `0xF000` behind a core manager,
+  which is now detected even when no slot is selected, `0x10000` otherwise)
+  read on into manager registers and returned garbage for the last samples.
+  The host now refuses such a window read with `DataWindowError`. On `hw_server`, samples wider than 32 bits (and their
+  timestamps) are instead read with the single-chain burst, chunked 256 scans
+  per TCL call, rather than 32 bits per scan: it has no window limit and is
+  much faster. A manager slot without burst wiring is never burst-read (it
+  would return zeros); a manager without slot descriptors (`MGR_CAPS` bit 1
+  clear) keeps the burst for every slot, selected or not.
+
+- **ELA — a sequencer could fire on a sample matched against the previous
+  stage (`INPUT_PIPE ≥ 1`).** With the registered compare, each sample was
+  compared against the stage active when it arrived, but the hit was used a
+  clock later by whatever stage was active then. Right after an advance, a
+  sample that matched only the old stage counted as a hit of the new one:
+  stage 0 `== 5` → stage 1 `== 7` fired on `5, 5`. Every stage's compare is
+  now registered and the decision takes the current stage's hit, so counts,
+  AND/OR combine and back-to-back matches follow the stage that is actually
+  active. Costs one comparator pair per extra stage when `TRIG_STAGES > 1`
+  and `INPUT_PIPE ≥ 1`. Both HDLs; fixing it needs a bitstream rebuild.
+
+- **ELA — an arm that switched channel or probe slice used old-selection
+  samples.** `NUM_CHANNELS > 1` and `PROBE_MUX_W` select the probe on arm, but
+  the probe pipeline, the previous-sample register and the registered
+  compares still held the old selection's samples for a few clocks after it.
+  Those samples could trigger the new capture, land in its window, or read as
+  an edge against the first new sample, and a single-segment core's rolling
+  pre-arm history (all old-selection samples) counted toward the pre-trigger
+  window. After an arm that changes the selection the core now neither
+  stores nor evaluates the trigger until the pipeline holds only new samples
+  (the probe pipeline length plus up to two clocks), and the pre-trigger
+  window is refilled from the new selection. An external trigger in those
+  clocks is ignored. Arms that keep the selection are unchanged. Both HDLs;
+  fixing it needs a bitstream rebuild.
+
+- **ELA — a segment could not trigger on the first sample after the previous
+  one (`INPUT_PIPE ≥ 1`).** Each segment's auto-rearm cleared the registered
+  compare hits, so the sample right after a completed segment was never
+  judged; with no pre-trigger a matching sample there was skipped and the
+  next segment started on a later match. The hits are now kept across the
+  rearm. Both HDLs; fixing it needs a bitstream rebuild.
+
+- **ELA — an ARM or soft reset during a running capture could be lost or
+  corrupt the next capture.** On the clock the restart landed, the running
+  capture's own transitions still applied and won: a trigger or completion
+  of the old capture could leave the core `done` (or triggered with the old
+  configuration) instead of re-armed, a segmented core restarted at the old
+  write address with stale pre-trigger credit, and a new holdoff was lost.
+  The restart now takes priority; single-segment cores still keep their
+  rolling history contiguous, and restarting a capture that had already
+  triggered re-earns the pre-trigger window instead of reaching back across
+  the samples it never wrote. Likewise, with storage qualification and
+  `INPUT_PIPE ≥ 1` every arm drops the sample right after it, so such an arm
+  now re-earns the window too. Both HDLs; fixing it needs a bitstream
+  rebuild.
+
+- **ELA — `STATUS.done` after an ARM could describe the previous capture,
+  and a badly timed ARM could stop status updates.** A capture that
+  completed while an ARM was still crossing into the sample clock domain
+  set `done` after the ARM had cleared it, so the host read the previous
+  capture as the new one. Done is now tagged with the ARM / reset it
+  belongs to and a stale one is not reported. Separately, an ARM or reset
+  written on the one JTAG clock a capture-status update arrived dropped
+  that update's handshake, after which `done` and segment progress never
+  updated again until the core's reset inputs were asserted. Both HDLs;
+  fixing it needs a bitstream rebuild.
+
+- **hw_server — register access now clocks the JTAG idle it meant to.**
+  xsdb's `jtag sequence delay` waits without clocking TCK, so the idle
+  cycles meant to let a command land were never clocked. Every idle is now
+  `state IDLE <n>`, and every DR scan (register, block and pipelined reads,
+  bursts, and the bridges' raw scans) ends in an explicit UPDATE-DR, which
+  `-register` mode needs. The
+  warmup read that the hw_server transport discarded before identity and
+  status reads is gone, so each of those reads is one scan sequence, not two.
+  Not yet re-validated on Zynq UltraScale+ MPSoC (`-register` mode).
+
+- **Burst readout runs once.** Each burst used to be repeated until two
+  passes agreed (hw_server single-chain, and both Quartus burst paths), and
+  burst timestamps that did not count strictly forward were re-read through
+  the slow window, which also re-read valid captures spanning a full counter
+  period. On hw_server the stale passes came from the pointer write and the
+  scans running as separate JTAG transactions with no clocked idle between
+  them, both since fixed; repeated hardware stress on Arty A7 and DE25-Nano
+  showed no stale pass on any burst path. Each burst is now one pass instead
+  of at least two. Quartus register reads are likewise read once, not twice.
+
+- **Core-manager detection is deterministic.** A standalone ELA answers
+  `0xF000` from its DATA/timestamp window, so on a very deep core a sample
+  could read as the manager ID. The ID is now conclusive only when a
+  standalone core of the probed geometry cannot reach `0xF000`; otherwise the
+  rest of the manager block must match too, and a manager with descriptors
+  and two or more slots must latch a test write to `MGR_DESC_INDEX`
+  (restored afterwards, even when the readback fails, and then the failure
+  propagates without caching an answer), which a standalone core ignores.
+  Only a deep core whose live capture reproduces the register block of a
+  one-slot or descriptor-less manager can still fool it.
+  `Analyzer(..., manager=True/False)` states the topology outright.
+
+- **CLI.** `--trigger-value` accepts hex (`0x…`); `--depth` and the sample
+  width default to what the core reports instead of 1024/8.
+
 - **Docs — chapter 04's MPSoC note.** It still said only USER1 is reachable on
   Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.
   It now says that the hw_server transport's named-register mode reaches all
@@ -97,7 +302,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Docs — chapter 10 had drifted from the CLI.** It gave `openocd` as the
   default `--backend` (it is `hw_server`) and `8` as the `--sample-width`
-  default (it comes from the probe file, else 8), said `--format` follows the
+  default (it comes from the probe file, else the core), said `--format` follows the
   `--out` extension (it does not), and left out `--gui-config`,
   `--two-chain-burst`, `--startup-arm`, `--trigger-holdoff`, `--profile`,
   `--open-in` and the `axi-mon` subcommand. The tables are now generated.

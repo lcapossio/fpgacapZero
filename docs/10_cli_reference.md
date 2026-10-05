@@ -40,6 +40,7 @@ subcommand follows:
 | `--hardware NAME` | — | usb_blaster only: Quartus hardware name; default selects first USB-Blaster |
 | `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
 | `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
+| `--no-burst` | off | hw_server/usb_blaster: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: current/legacy slot) |
 | `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
@@ -211,10 +212,10 @@ Usage: `fcapz [global options] configure [options]`
 | `--pretrigger N` | `8` | Samples to keep before the trigger |
 | `--posttrigger N` | `16` | Samples to capture after the trigger |
 | `--trigger-mode {value_match,edge_detect,both}` | `value_match` | Trigger comparator mode (see chapter 05) |
-| `--trigger-value V` | `0` | Trigger compare value |
+| `--trigger-value V` | `0` | Trigger compare value (hex or decimal) |
 | `--trigger-mask M` | `0xff` | Trigger bit mask (hex or decimal) |
-| `--sample-width N` | — | Bits per sample, must match the core (default: the probe file's, else 8) |
-| `--depth N` | `1024` | Buffer depth in samples; must match the core |
+| `--sample-width N` | — | Bits per sample, must match the core (default: the probe file's, else the core's) |
+| `--depth N` | — | Buffer depth in samples (default: read from the core) |
 | `--sample-clock-hz HZ` | — | Sample clock rate, recorded in JSON exports; VCD time counts samples (default: the probe file's, else 100 MHz) |
 | `--channel N` | `0` | Probe mux channel index |
 | `--decimation N` | `0` | Sample decimation ratio (0=every cycle, N=every N+1); needs DECIM_EN=1 |

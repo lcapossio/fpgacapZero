@@ -23,7 +23,13 @@ from fcapz.analyzer import (
     expected_ela_version_reg,
 )
 from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
-from fcapz.transport import Transport
+from fcapz.transport import (
+    BurstIntegrityError,
+    BurstUnavailableError,
+    DataWindowError,
+    Transport,
+    check_data_window,
+)
 
 
 def _expected_eio_version_reg() -> int:
@@ -217,6 +223,147 @@ class ContinuousTransport(FakeTransport):
             elif value & 0x1:  # arm
                 self.events.append("arm")
                 self.regs[0x0008] = 0x4  # immediately "done" so capture() returns
+
+
+class ManagerDetectionTests(unittest.TestCase):
+    """0xF000 holds the manager ID when there is a manager; on a standalone
+    ELA it is DATA/timestamp window, which reads 0 past the capture."""
+
+    def _transport(self, *, depth: int, sample_w: int = 8, timestamp_w: int = 0,
+                   manager_block: bool = True, f000: int | None = None):
+        t = FakeTransport()
+        t.regs[0x000C] = sample_w
+        t.regs[0x0010] = depth
+        t.regs[0x00C4] = timestamp_w
+        if not manager_block:
+            t._manager_regs = {}
+        if f000 is not None:
+            t._manager_regs[0xF000] = f000
+        t.reads: list[int] = []
+        read_reg = t.read_reg
+
+        def tracked(addr: int) -> int:
+            t.reads.append(addr)
+            return read_reg(addr)
+
+        t.read_reg = tracked  # type: ignore[method-assign]
+        return t
+
+    def test_id_is_conclusive_when_no_window_reaches_0xf000(self):
+        t = self._transport(depth=1024, timestamp_w=32)
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertNotIn(0xF004, t.reads)  # the ID alone decided
+
+    def test_other_value_means_no_manager(self):
+        t = self._transport(depth=1024, manager_block=False)
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_standalone_sample_matching_the_id_is_not_a_manager(self):
+        # 16K x 32-bit: 0xF000 is sample 15296, which here reads as the ID.
+        t = self._transport(depth=16384, sample_w=32, manager_block=False,
+                            f000=CORE_MANAGER_CORE_ID)
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_core_behind_a_real_manager_is_detected(self):
+        t = self._transport(depth=16384, sample_w=32)
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertIn(0xF00C, t.reads)  # the manager block was checked
+
+    def test_deep_standalone_mimicking_the_block_is_not_a_manager(self):
+        # Captured samples that reproduce the whole two-slot manager block:
+        # only the DESC_INDEX write, which a standalone core ignores, tells.
+        t = self._transport(depth=16384, sample_w=32, manager_block=False)
+        t.regs.update({0xF000: CORE_MANAGER_CORE_ID, 0xF004: 2, 0xF008: 0,
+                       0xF00C: 0, 0xF010: 3, 0xF014: 0})
+        write_reg = t.write_reg
+
+        def standalone_write(addr: int, value: int) -> None:
+            if addr < 0x0100:
+                write_reg(addr, value)
+
+        t.write_reg = standalone_write  # type: ignore[method-assign]
+        self.assertFalse(Analyzer(t)._behind_manager())
+
+    def test_deep_core_behind_a_multi_slot_manager_keeps_desc_index(self):
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 3, 0xF010: 3, 0xF014: 2})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def tracked_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            write_reg(addr, value)
+
+        t.write_reg = tracked_write  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [(0xF014, 0), (0xF014, 2)])
+        self.assertEqual(t._manager_regs[0xF014], 2)
+
+    def _multi_slot_manager(self):
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 3, 0xF010: 3, 0xF014: 2})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def tracked_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            write_reg(addr, value)
+
+        t.write_reg = tracked_write  # type: ignore[method-assign]
+        return t, writes
+
+    def test_desc_index_is_restored_when_the_readback_fails(self):
+        t, writes = self._multi_slot_manager()
+        reads = {"desc": 0}
+        read_reg = t.read_reg
+
+        def failing(addr: int) -> int:
+            if addr == 0xF014:
+                reads["desc"] += 1
+                if reads["desc"] == 2:  # the readback after the probe write
+                    raise ConnectionError("JTAG read failed")
+            return read_reg(addr)
+
+        t.read_reg = failing  # type: ignore[method-assign]
+        analyzer = Analyzer(t)
+        with self.assertRaises(ConnectionError):
+            analyzer._behind_manager()
+        self.assertEqual(t._manager_regs[0xF014], 2)  # original index back
+        self.assertIsNone(analyzer._manager_found)  # nothing cached
+        self.assertTrue(analyzer._behind_manager())  # next call decides afresh
+
+    def test_a_missed_latch_means_no_manager(self):
+        t = self._transport(depth=16384, sample_w=32, manager_block=False)
+        t.regs.update({0xF000: CORE_MANAGER_CORE_ID, 0xF004: 2, 0xF008: 0,
+                       0xF00C: 0, 0xF010: 3, 0xF014: 0})
+        writes: list[tuple[int, int]] = []
+        write_reg = t.write_reg
+
+        def standalone_write(addr: int, value: int) -> None:
+            writes.append((addr, value))
+            if addr < 0x0100:
+                write_reg(addr, value)
+
+        t.write_reg = standalone_write  # type: ignore[method-assign]
+        self.assertFalse(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [(0xF014, 1), (0xF014, 0)])
+
+    def test_deep_core_behind_a_manager_without_descriptors_is_detected(self):
+        # MGR_CAPS bit 1 clear: DESC_INDEX is not implemented, so it is not
+        # written; the register block alone decides.
+        t = self._transport(depth=16384, sample_w=32)
+        t._manager_regs.update({0xF004: 2, 0xF010: 1})
+        writes: list[int] = []
+        t.write_reg = lambda addr, value: writes.append(addr)  # type: ignore[method-assign]
+        self.assertTrue(Analyzer(t)._behind_manager())
+        self.assertEqual(writes, [])
+
+    def test_explicit_topology_is_authoritative(self):
+        t = self._transport(depth=1024)
+        self.assertFalse(Analyzer(t, manager=False)._behind_manager())
+        t = self._transport(depth=1024, manager_block=False)
+        self.assertTrue(Analyzer(t, manager=True)._behind_manager())
+        self.assertNotIn(0xF000, t.reads)
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -457,6 +604,327 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(result.samples, [0x40, 0x41, 0x42])
         self.assertEqual(transport.slow_reads, [0x0100, 0x0104, 0x0108])
 
+    def _wide_capture(
+        self, *, managed: bool, capture_len: int, sample_burst: bool, slot_caps: int = 1,
+        instance: int | None = None, timestamp_w: int = 0, compare_caps: int | None = None,
+        mgr_count: int = 1, mgr_caps: int = 0x7,
+    ):
+        """Capture from a 256-bit x 2048 core whose DATA window is read as
+        32-bit words through a range-checked register window."""
+
+        class WideTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x000C] = 256          # SAMPLE_W
+                self.regs[0x0010] = 2048         # DEPTH
+                self.regs[0x001C] = capture_len  # CAPTURE_LEN
+                self.regs[0x00C4] = timestamp_w  # TIMESTAMP_W
+                if compare_caps is not None:
+                    self.regs[0x00E0] = compare_caps
+                if managed:
+                    self._manager_regs[0xF004] = mgr_count
+                    self._manager_regs[0xF010] = mgr_caps   # descriptors, burst start
+                    self._manager_regs[0xF014] = 0          # DESC_INDEX
+                    self._manager_regs[0xF01C] = slot_caps  # DESC_CAPS
+                else:
+                    del self._manager_regs[0xF000]  # no manager identity
+                self.window_reads: list[tuple[int, int]] = []
+                self.sample_bursts: list[tuple[int, int, int]] = []
+                self.ts_bursts: list[tuple[int, int, int]] = []
+
+            def read_block(self, addr: int, words: int):
+                check_data_window(addr, words, self.data_window_end)
+                self.window_reads.append((addr, words))
+                return [(i // 8) & 0xFFFFFFFF if i % 8 == 0 else 0 for i in range(words)]
+
+        if sample_burst:
+            def read_sample_block(self, base_addr: int, n_samples: int, sample_width: int):
+                self.sample_bursts.append((base_addr, n_samples, sample_width))
+                words = []
+                for s in range(n_samples):
+                    words.extend([s] + [0] * 7)
+                return words
+
+            def read_timestamp_block_single_chain(
+                self, base_addr: int, n_timestamps: int, timestamp_width: int
+            ):
+                self.ts_bursts.append((base_addr, n_timestamps, timestamp_width))
+                top = (1 << timestamp_width) - 1
+                return [(top - 1 + i) & top for i in range(n_timestamps)]  # wraps
+
+            WideTransport.read_sample_block = read_sample_block  # type: ignore[attr-defined]
+            WideTransport.read_timestamp_block_single_chain = (  # type: ignore[attr-defined]
+                read_timestamp_block_single_chain
+            )
+
+        transport = WideTransport()
+        analyzer = Analyzer(transport, instance=instance)
+        analyzer.connect()
+        analyzer.configure(replace(
+            self._make_cfg(), sample_width=256, depth=2048,
+            pretrigger=64, posttrigger=2048 - 65,
+        ))
+        return transport, analyzer
+
+    def test_wide_managed_capture_past_manager_block_is_refused(self):
+        """256 x 2048 behind a core manager: samples 1912+ would read the
+        manager's registers through the window, so the window path refuses."""
+        _, analyzer = self._wide_capture(
+            managed=True, capture_len=2048, sample_burst=False, instance=0
+        )
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
+
+    def test_wide_managed_capture_uses_sample_burst(self):
+        """The burst readout addresses RAM by sample, so it has no window limit."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=2048, sample_burst=True, instance=0
+        )
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 2048, 256)])
+        self.assertEqual(transport.window_reads, [])
+        self.assertEqual(result.samples, list(range(2048)))
+
+    def test_wide_slot_without_burst_skips_sample_burst(self):
+        """A manager slot without burst wiring reads zeros from the shared
+        burst engine, so its samples come from the register window."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, slot_caps=0, instance=0
+        )
+        window_only = []
+        transport.read_block = lambda addr, words: self.fail("read_block may burst")
+
+        def read_window_block(addr, words):
+            window_only.append((addr, words))
+            return [(i // 8) if i % 8 == 0 else 0 for i in range(words)]
+
+        transport.read_window_block = read_window_block
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)])
+        self.assertEqual(result.samples, list(range(16)))
+
+    def _window_only(self, transport):
+        window_only = []
+        transport.read_block = lambda addr, words: self.fail("read_block may burst")
+
+        def read_window_block(addr, words):
+            window_only.append((addr, words))
+            return [(i // 8) if i % 8 == 0 else 0 for i in range(words)]
+
+        transport.read_window_block = read_window_block
+        return window_only
+
+    def _record_burst_sync(self, transport):
+        """Wrap read_sample_block to record burst_start_sync at each burst."""
+        syncs: list[bool] = []
+        burst = transport.read_sample_block
+
+        def read_sample_block(base_addr, n_samples, sample_width):
+            syncs.append(transport.burst_start_sync)
+            return burst(base_addr, n_samples, sample_width)
+
+        transport.read_sample_block = read_sample_block
+        return syncs
+
+    def test_old_multi_slot_manager_bursts_with_start_sync(self):
+        """A multi-slot manager without MGR_CAPS bit 2 can hide the burst start
+        after a slot switch, so its bursts run with the start sync."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x3,
+        )
+        syncs = self._record_burst_sync(transport)
+        result = analyzer.capture(timeout=0.01)
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(syncs, [True, True])
+        self.assertEqual(transport.window_reads, [])
+        self.assertEqual(result.samples, list(range(16)))
+
+    def test_current_and_one_slot_managers_burst_without_start_sync(self):
+        for mgr_count, mgr_caps in ((2, 0x7), (1, 0x3)):
+            with self.subTest(mgr_count=mgr_count, mgr_caps=mgr_caps):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=16, sample_burst=True, instance=0,
+                    mgr_count=mgr_count, mgr_caps=mgr_caps,
+                )
+                transport.burst_start_sync = True  # stale from another session
+                syncs = self._record_burst_sync(transport)
+                analyzer.capture(timeout=0.01)
+                self.assertEqual(syncs, [False])
+
+    def test_active_slot_burst_caps_follow_a_slot_switch(self):
+        """With no slot selected, the active slot is re-read on every capture:
+        a switch to a burst slot must restore the burst, and a switch back
+        must drop it again."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=None,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        slot_caps = {0: 0x0, 1: 0x1}
+        read_reg = transport.read_reg
+
+        def read_with_slot_caps(addr):
+            if addr == 0xF01C:
+                return slot_caps[transport._manager_regs[0xF014]]
+            return read_reg(addr)
+
+        transport.read_reg = read_with_slot_caps
+        window_only = self._window_only(transport)
+        transport._manager_regs[0xF008] = 0
+        analyzer.capture(timeout=0.01)
+        transport._manager_regs[0xF008] = 1  # e.g. CoreManager.select_raw(1)
+        analyzer.capture(timeout=0.01)
+        transport._manager_regs[0xF008] = 0
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+        self.assertEqual(window_only, [(0x0100, 16 * 8)] * 2)
+
+    def test_descriptorless_manager_keeps_burst_for_a_selected_slot(self):
+        """Without MGR_CAPS bit 1 there are no descriptor registers to read,
+        selected slot or not: the burst stays on."""
+        for instance in (None, 0):
+            with self.subTest(instance=instance):
+                transport, analyzer = self._wide_capture(
+                    managed=True, capture_len=2048, sample_burst=True,
+                    instance=instance, mgr_count=2, mgr_caps=0x1,
+                )
+                transport._manager_regs[0xF01C] = 0  # unimplemented: reads 0
+                result = analyzer.capture(timeout=0.01)
+                self.assertEqual(transport.sample_bursts, [(0x0100, 2048, 256)])
+                self.assertEqual(len(result.samples), 2048)
+
+    def test_failed_sample_burst_reaches_the_caller(self):
+        """A burst that ran and failed is raised, never read around."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+        window_only = self._window_only(transport)
+
+        def fails(base_addr, n_samples, sample_width):
+            raise RuntimeError("JTAG node is not accessible")
+
+        transport.read_sample_block = fails
+        with self.assertRaisesRegex(RuntimeError, "not accessible"):
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(window_only, [])
+
+    def test_unavailable_sample_burst_reads_the_window(self):
+        """BurstUnavailableError is raised before any scan: the transport has
+        no burst for the request, so the DATA window is read word by word."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+
+        def unavailable(base_addr, n_samples, sample_width):
+            raise BurstUnavailableError("burst readout is off for this transport")
+
+        transport.read_sample_block = unavailable
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.window_reads, [(0x0100, 16 * 8)])
+        self.assertEqual(result.samples, list(range(16)))
+
+    def test_burst_integrity_error_reaches_the_caller(self):
+        """A burst that ran but came back malformed is a readout defect, not
+        a missing capability: capture() raises it instead of re-reading the
+        window."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+        )
+        window_only = self._window_only(transport)
+
+        def malformed(base_addr, n_samples, sample_width):
+            raise BurstIntegrityError("burst returned 15 samples, expected 16")
+
+        transport.read_sample_block = malformed
+        with self.assertRaises(BurstIntegrityError):
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(window_only, [])
+
+    def test_old_one_slot_manager_keeps_sample_burst(self):
+        """With one slot there is no slot switch, so no rotation to guard."""
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=1, mgr_caps=0x3,
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+
+    def test_current_multi_slot_manager_keeps_sample_burst(self):
+        transport, analyzer = self._wide_capture(
+            managed=True, capture_len=16, sample_burst=True, instance=0,
+            mgr_count=2, mgr_caps=0x7,
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 16, 256)])
+
+    def test_slot_selected_without_a_manager_keeps_sample_burst(self):
+        """Selecting slot 0 on a design with no core manager (as some GUI paths
+        do) must not read garbage descriptor caps and drop the burst."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=2040, sample_burst=True, instance=0
+        )
+        analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.sample_bursts, [(0x0100, 2040, 256)])
+
+    def test_default_slot_behind_manager_stops_at_manager_block(self):
+        """``instance=None`` still reads the manager's active slot, so the
+        window must stop at 0xF000 there too."""
+        _, analyzer = self._wide_capture(
+            managed=True, capture_len=2000, sample_burst=False, instance=None
+        )
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
+
+    def test_aliased_timestamp_base_refuses_every_window_read(self):
+        """On RTL that compared the timestamp base at 16 bits, a base of
+        0x10100 decodes as 0x0100: every DATA read would return timestamps."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=4, sample_burst=False, timestamp_w=32
+        )
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.window_reads, [])  # samples refused too
+
+    def test_full_width_ts_base_cap_lifts_the_alias_limit(self):
+        """COMPARE_CAPS bit 19 says the timestamp base is decoded at full
+        width, so the DATA window runs to the 16-bit address limit; without
+        it the window stops at the base's 16-bit alias (0x10100 -> 0x0100)."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=4, sample_burst=False, timestamp_w=32,
+            compare_caps=0x3_01FF | (1 << 19),
+        )
+        analyzer._set_data_window_end()
+        self.assertEqual(transport.data_window_end, 0x10000)
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=4, sample_burst=False, timestamp_w=32,
+            compare_caps=0x3_01FF,
+        )
+        analyzer._set_data_window_end()
+        self.assertEqual(transport.data_window_end, 0x0100)
+
+    def test_wide_48_bit_timestamps_use_burst_across_counter_wrap(self):
+        """Multi-word timestamps take the burst too, across a counter wrap."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=2048, sample_burst=True, timestamp_w=48
+        )
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(transport.ts_bursts, [(0x10100, 2048, 48)])
+        self.assertEqual(transport.window_reads, [])
+        self.assertEqual(result.timestamps[:3], [(1 << 48) - 2, (1 << 48) - 1, 0])
+
+    def test_wide_standalone_window_stops_only_at_address_wrap(self):
+        """Without a manager 0xF000..0xFFFF is still DATA; only the 16-bit wrap
+        (sample 2040 at 256 bits) is refused."""
+        transport, analyzer = self._wide_capture(
+            managed=False, capture_len=2040, sample_burst=False
+        )
+        self.assertEqual(len(analyzer.capture(timeout=0.01).samples), 2040)
+        self.assertEqual(transport.window_reads, [(0x0100, 2040 * 8)])
+        _, analyzer = self._wide_capture(managed=False, capture_len=2041, sample_burst=False)
+        with self.assertRaises(DataWindowError):
+            analyzer.capture(timeout=0.01)
+
     def test_capture_reads_32_bit_timestamps_via_burst_block(self):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
 
@@ -487,6 +955,71 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual(result.timestamps, [100, 101, 102])
         self.assertEqual(transport.timestamp_burst_args, (0x1100, 3, 32))
+
+    def test_old_multi_slot_manager_syncs_narrow_and_timestamp_bursts(self):
+        """The SAMPLE_W <= 32 burst and the timestamp burst on an old
+        multi-slot manager also run with the start sync."""
+
+        class OldManagerTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self._manager_regs[0xF004] = 2      # MGR_COUNT
+                self._manager_regs[0xF010] = 0x3    # MGR_CAPS without bit 2
+                self._manager_regs[0xF014] = 0      # DESC_INDEX
+                self._manager_regs[0xF01C] = 0x1    # DESC_CAPS: burst slot
+                self.data = [10, 11, 12]
+                self.bursts: list[tuple[str, bool]] = []
+
+            def read_block(self, addr, words):
+                if addr == 0x0100:
+                    self.bursts.append(("samples", self.burst_start_sync))
+                return super().read_block(addr, words)
+
+            def read_timestamp_block(self, addr, words, timestamp_width):
+                self.bursts.append(("timestamps", self.burst_start_sync))
+                return [100, 101, 102][:words]
+
+        transport = OldManagerTransport()
+        analyzer = Analyzer(transport, instance=0)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(result.timestamps, [100, 101, 102])
+        self.assertEqual(transport.bursts, [("samples", True), ("timestamps", True)])
+
+    def test_timestamp_burst_is_returned_as_read(self):
+        """Burst timestamps are not second-guessed: a capture spanning a full
+        counter period (here back to the same value) is valid and must not be
+        replaced by a window re-read."""
+
+        class TimestampBurstTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 32      # TIMESTAMP_W
+                self.data = [10, 11, 12]
+                self.block_reads: list[tuple[int, int]] = []
+
+            def read_timestamp_block(self, addr, words, timestamp_width):
+                return [7, (1 << 31) + 7, 7][:words]
+
+            def read_block(self, addr, words):
+                self.block_reads.append((addr, words))
+                return super().read_block(addr, words)
+
+        transport = TimestampBurstTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.timestamps, [7, (1 << 31) + 7, 7])
+        self.assertNotIn(0x1100, [addr for addr, _ in transport.block_reads])
 
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""

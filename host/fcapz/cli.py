@@ -147,10 +147,12 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
             else (
                 probe_file.sample_width
                 if probe_file is not None and probe_file.sample_width is not None
-                else 8
+                else getattr(args, "hw_sample_width", None) or 8
             )
         ),
-        depth=args.depth,
+        depth=args.depth if args.depth is not None else (
+            getattr(args, "hw_depth", None) or 1024
+        ),
         sample_clock_hz=(
             args.sample_clock_hz
             if args.sample_clock_hz is not None
@@ -184,17 +186,11 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     arguments.  An empty dict means "use transport defaults" (7-series
     single-device 6-bit IR, no bypass padding, no read retries).
 
-    MPSoC-specific fields (Zynq UltraScale+, ``xck*`` / ``xczu*``):
-      - ``ir_length=12`` — PL TAP IR width; xsdb auto-walks the DAP
-        portion of the chain's IR, so only the PL's 12 bits are shifted
-        by the host.
-      - ``dr_extra_bits=1`` + ``dr_extra_position="tdi"`` — the ARM DAP's
-        1-bit BYPASS register sits between TDI and the PL TAP's DR, so
-        every DR scan is 1 bit longer than the fcapz 49-bit frame and
-        the BYPASS bit sits at the TDI-side end of the 50-bit scan.
-        The captured token has the fcapz 49 bits at offset 0 and the
-        BYPASS bit trailing; the parser skips nothing at the front.
-        Verified by TDO trace on xck26 / KV260.
+    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
+    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
+    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
+    itself, so the host shifts plain fcapz frames.  The PL still sees one
+    extra shift clock per DR scan, which the RTL tolerates.
 
     The detection is purely a CLI-layer convenience and lives here, not
     in the transport, so the transport stays a dumb data-shifter.
@@ -243,6 +239,7 @@ def _make_transport(args: argparse.Namespace):
             hardware_name=getattr(args, "hardware", None),
             device_name=device_name,
             quartus_stp_path=getattr(args, "quartus_stp", None),
+            burst=not getattr(args, "no_burst", False),
         )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
@@ -250,6 +247,7 @@ def _make_transport(args: argparse.Namespace):
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
         single_chain_burst=not getattr(args, "two_chain_burst", False),
+        burst=not getattr(args, "no_burst", False),
         **_chain_shape_kwargs(fpga_name),
     )
 
@@ -306,6 +304,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--two-chain-burst",
         action="store_true",
         help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
+    )
+    p.add_argument(
+        "--no-burst",
+        action="store_true",
+        help=(
+            "hw_server/usb_blaster: the bitstream has no burst readout path "
+            "(e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture "
+            "through the register window. A failed burst is otherwise an error."
+        ),
     )
     p.add_argument(
         "--chain",
@@ -365,8 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
             help="Trigger comparator mode (see chapter 05)",
         )
         parser.add_argument(
-            "--trigger-value", type=int, default=0, metavar="V",
-            help="Trigger compare value",
+            "--trigger-value", type=lambda x: int(x, 0), default=0, metavar="V",
+            help="Trigger compare value (hex or decimal)",
         )
         parser.add_argument(
             "--trigger-mask", type=lambda x: int(x, 0), default=0xFF, metavar="M",
@@ -374,11 +381,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--sample-width", type=int, default=None, metavar="N",
-            help="Bits per sample, must match the core (default: the probe file's, else 8)",
+            help=(
+                "Bits per sample, must match the core "
+                "(default: the probe file's, else the core's)"
+            ),
         )
         parser.add_argument(
-            "--depth", type=int, default=1024, metavar="N",
-            help="Buffer depth in samples; must match the core",
+            "--depth", type=int, default=None, metavar="N",
+            help="Buffer depth in samples (default: read from the core)",
         )
         parser.add_argument(
             "--sample-clock-hz", type=int, default=None, metavar="HZ",
@@ -905,6 +915,11 @@ def main() -> int:
                     print(f"error: {err}", file=sys.stderr)
                     return 2
 
+        if args.depth is None or args.sample_width is None:
+            # Default to the selected core's real geometry rather than guessing.
+            hw = analyzer.probe()
+            args.hw_depth = int(hw["depth"])
+            args.hw_sample_width = int(hw["sample_width"])
         cfg = _build_config(args)
         analyzer.configure(cfg)
 
