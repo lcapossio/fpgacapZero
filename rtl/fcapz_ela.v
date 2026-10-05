@@ -1378,7 +1378,10 @@ module fcapz_ela #(
         if (sample_rst)
             trigger_out_r <= 1'b0;
         else
+            // One pulse per trigger: hits during the trigger-delay countdown
+            // are not evaluated, so they must not extend or repeat it.
             trigger_out_r <= (armed && !triggered && !capture_restart &&
+                              !trig_delay_pending &&
                               pretrigger_ready && trigger_holdoff_done &&
                               !sel_flush_active && trigger_hit) ? 1'b1 : 1'b0;
     end

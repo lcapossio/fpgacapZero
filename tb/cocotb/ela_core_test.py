@@ -1655,3 +1655,23 @@ async def config_written_after_arm_does_not_reach_armed_capture(dut):
     await ela.drive_counter(20)
     assert await ela.wait_done() & 0x4, "late external-trigger mode applied"
     assert await ela.read(ADDR_TRIG_EXT) == 2
+
+
+@cocotb.test()
+async def trigger_out_pulses_once_with_trigger_delay(dut):
+    """trigger_out is one pulse per trigger even while the trigger delay
+    counts down and the hit stays high."""
+    ela = await setup(dut)
+    await ela.write(ADDR_TRIG_DELAY, 4)
+    await ela.configure_value_capture(pre=0, post=1, value=3)
+    dut.probe_in.value = 0
+    await ela.arm()
+    high = []
+    for cycle in range(30):
+        dut.probe_in.value = 3 if 5 <= cycle < 15 else 0  # hit held 10 cycles
+        await RisingEdge(dut.sample_clk)
+        if int(dut.trigger_out.value):
+            high.append(cycle)
+    assert await ela.wait_done() & 0x4
+    assert len(high) == 1, f"trigger_out high on cycles {high}"
+    await ela.write(ADDR_TRIG_DELAY, 0)
