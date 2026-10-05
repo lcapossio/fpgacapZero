@@ -1,7 +1,10 @@
 # 10 — CLI reference
 
+> [!NOTE]
 > **Goal**: complete reference for the `fcapz` command-line tool.
-> Every subcommand, every flag, with copy-pasteable examples.
+> Every subcommand, every flag, with copy-pasteable examples.  The
+> usage lines and option tables are generated from the CLI itself
+> (`tools/gen_docs.py`), so they always match `fcapz --help`.
 >
 > **Audience**: anyone who wants to use fcapz from a shell instead
 > of writing Python.  Pre-read [chapter 03](03_first_capture.md) for
@@ -25,17 +28,23 @@ should land on your `PATH` after install.  If it doesn't, see
 These come **before** the subcommand and apply to whichever
 subcommand follows:
 
-| Flag | Default | Description |
+<!-- BEGIN GENERATED cli:global (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+| Option | Default | Description |
 |---|---|---|
-| `--backend {openocd,hw_server,usb_blaster}` | `openocd` | JTAG transport to use |
-| `--host HOST` | `127.0.0.1` | Transport host |
-| `--port PORT` | `6666` (openocd) or `3121` (hw_server) | Transport TCP port; ignored by `usb_blaster` |
-| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target name, or Quartus device name (`auto`, empty, or the default AMD/Xilinx value auto-selects the first `@1` device for `usb_blaster`) |
-| `--hardware HARDWARE` | auto | Quartus hardware name for `usb_blaster`; required if more than one Quartus JTAG cable is connected |
-| `--quartus-stp PATH` | PATH lookup | Path to `quartus_stp` for `usb_blaster` |
-| `--program BITFILE` | none | Program the FPGA with this bitfile before running the subcommand (hw_server only) |
-| `--chain N` | `1` | ELA control BSCAN USER chain for `probe`, `arm`, `configure`, and `capture` |
-| `--ela-instance N` | none | Core-manager ELA slot on the selected chain; omit for legacy single-ELA bitstreams or the current active slot |
+| `--gui-config PATH` | — | Path to gui.toml (default: per-user fpgacapzero config directory) |
+| `--backend {openocd,hw_server,usb_blaster}` | `hw_server` | JTAG transport to use |
+| `--host HOST` | `127.0.0.1` | Transport host (hw_server or OpenOCD) |
+| `--port PORT` | `6666` | Transport TCP port. Left at 6666, hw_server uses its own port 3121; usb_blaster ignores it |
+| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device) |
+| `--hardware NAME` | — | usb_blaster only: Quartus hardware name; default selects first USB-Blaster |
+| `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
+| `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
+| `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
+| `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: current/legacy slot) |
+| `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
+
+<!-- END GENERATED cli:global -->
 
 Examples:
 
@@ -68,28 +77,41 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 
 ## Subcommands at a glance
 
+<!-- BEGIN GENERATED cli:subcommands (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
 | Subcommand | What it does |
 |---|---|
-| `probe` | Read core identity registers (version, sample width, depth, features) |
-| `ela-list` | Read the core manager and probe every ELA slot on the selected chain |
+| `probe` | Read core identity registers |
+| `ela-list` | Read core manager and probe all ELA slots |
 | `arm` | Arm capture without configuring (advanced) |
+| `axi-mon` | Detect an AXI monitor; print its identity and probe map |
 | `configure` | Write capture configuration without arming |
-| `capture` | Configure + arm + capture + export to file |
+| `capture` | Configure, arm, capture and export to a file |
 | `eio-probe` | Read EIO core identity and widths |
-| `eio-read` | Read EIO input bus |
-| `eio-write` | Write EIO output bus |
+| `eio-read` | Read EIO input probes |
+| `eio-write` | Write EIO output probes |
 | `axi-read` | Single AXI read via JTAG-to-AXI bridge |
-| `axi-write` | Single AXI write |
-| `axi-dump` | Read a block of AXI words (auto-inc or burst) |
-| `axi-fill` | Fill a block of AXI memory with a pattern |
-| `axi-load` | Load a binary file into AXI memory |
+| `axi-write` | Single AXI write via JTAG-to-AXI bridge |
+| `axi-dump` | Read block of AXI words |
+| `axi-fill` | Fill AXI memory with a pattern |
+| `axi-load` | Load binary file into AXI memory |
 | `uart-send` | Send data to UART TX via JTAG-to-UART bridge |
-| `uart-recv` | Receive data from UART RX |
+| `uart-recv` | Receive data from UART RX via JTAG-to-UART bridge |
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |
+
+<!-- END GENERATED cli:subcommands -->
 
 ## `probe`
 
 Read the core's identity, version, and FEATURES registers:
+
+<!-- BEGIN GENERATED cli:probe (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] probe`
+
+No options of its own; the [global options](#global-options) apply.
+
+<!-- END GENERATED cli:probe -->
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t probe
@@ -131,50 +153,101 @@ Output (formatted JSON to stdout):
 host raises `RuntimeError: ELA core identity check failed` — see
 [chapter 17](17_troubleshooting.md).
 
+## `ela-list`
+
+Read the core manager on the selected `--chain` and probe every ELA slot behind
+it (example under [`probe`](#probe) above).
+
+<!-- BEGIN GENERATED cli:ela-list (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] ela-list`
+
+No options of its own; the [global options](#global-options) apply.
+
+<!-- END GENERATED cli:ela-list -->
+
+## `arm`
+
+Arm the core with the configuration it already holds, for example after a
+`configure`.
+
+<!-- BEGIN GENERATED cli:arm (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] arm`
+
+No options of its own; the [global options](#global-options) apply.
+
+<!-- END GENERATED cli:arm -->
+
+## `axi-mon`
+
+Detect an AXI monitor and print its identity and probe map; see
+[chapter 19](19_axi_monitor.md).
+
+<!-- BEGIN GENERATED cli:axi-mon (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-mon [--write-probe-file PATH]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--write-probe-file PATH` | — | Write the matching .prob probe map to PATH (use with capture --probe-file) |
+
+<!-- END GENERATED cli:axi-mon -->
+
 ## `capture` and `configure`
 
 `capture` is the headline subcommand.  `configure` is the same
 without arming or reading back — useful for one-shot pre-arm
 setup.  Both take the same options.
 
-### Required for `capture`
+### Options
 
-| Flag | Description |
-|---|---|
-| `--out FILE` | Output file path (extension determines format unless `--format` is set) |
+<!-- BEGIN GENERATED cli:configure (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
 
-### Capture/configure options (in alphabetical-ish order)
+Usage: `fcapz [global options] configure [options]`
 
-| Flag | Default | Description |
+| Option | Default | Description |
 |---|---|---|
-| `--pretrigger N` | `8` | Samples to keep before trigger |
-| `--posttrigger N` | `16` | Samples to capture after trigger |
-| `--trigger-mode MODE` | `value_match` | `value_match`, `edge_detect`, or `both` |
-| `--trigger-value V` | `0` | Trigger compare value (decimal or `0x` hex) |
-| `--trigger-mask M` | `0xFF` | Bit mask (hex) |
-| `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535).  Shifts the committed trigger sample N cycles after the trigger event. |
-| `--sample-width N` | `8` | Bits per sample (must match hardware) |
-| `--depth N` | `1024` | Buffer depth (must match hardware) |
-| `--sample-clock-hz N` | `100000000` | Sample clock for VCD timescale |
-| `--channel N` | `0` | Probe channel mux selector |
+| `--pretrigger N` | `8` | Samples to keep before the trigger |
+| `--posttrigger N` | `16` | Samples to capture after the trigger |
+| `--trigger-mode {value_match,edge_detect,both}` | `value_match` | Trigger comparator mode (see chapter 05) |
+| `--trigger-value V` | `0` | Trigger compare value |
+| `--trigger-mask M` | `0xff` | Trigger bit mask (hex or decimal) |
+| `--sample-width N` | — | Bits per sample, must match the core (default: the probe file's, else 8) |
+| `--depth N` | `1024` | Buffer depth in samples; must match the core |
+| `--sample-clock-hz HZ` | — | Sample clock rate, recorded in JSON exports; VCD time counts samples (default: the probe file's, else 100 MHz) |
+| `--channel N` | `0` | Probe mux channel index |
+| `--decimation N` | `0` | Sample decimation ratio (0=every cycle, N=every N+1); needs DECIM_EN=1 |
+| `--ext-trigger-mode {disabled,or,and}` | `disabled` | Combine the external trigger input with the comparators; needs EXT_TRIG_EN=1 |
+| `--probes SPEC` | — | Signal definitions: name:width:lsb,... (e.g. bus0:4:0,bus1:4:4) |
+| `--probe-file FILE` | — | Load probe definitions, and the sample width and clock if given, from a .prob sidecar |
+| `--trigger-sequence JSON` | — | JSON file path or inline JSON array of sequencer stages |
 | `--probe-sel N` | `0` | Runtime probe mux slice index |
-| `--probes SPEC` | none | Probe definitions: `name:width:lsb,name:width:lsb,...` |
-| `--probe-file FILE.prob` | none | Load probe definitions, sample width, and optional sample clock from a `.prob` sidecar |
-| `--decimation N` | `0` | Capture every N+1 cycles (requires `DECIM_EN=1`) |
-| `--ext-trigger-mode MODE` | `disabled` | `disabled`, `or`, `and` (requires `EXT_TRIG_EN=1`) |
-| `--stor-qual-mode N` | `0` | 0=disabled, 1=store-when-match, 2=store-when-no-match |
-| `--stor-qual-value V` | `0` | Storage qualification value |
-| `--stor-qual-mask M` | `0` | Storage qualification mask |
-| `--trigger-sequence JSON` | none | Multi-stage sequencer config: JSON file path or inline JSON array |
+| `--stor-qual-mode N` | `0` | Storage qualification mode: 0=disabled, 1=store-when-match, 2=store-when-no-match |
+| `--stor-qual-value V` | `0` | Storage qualification comparison value (hex or decimal) |
+| `--stor-qual-mask M` | `0` | Storage qualification mask (hex or decimal) |
+| `--startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
+| `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
+| `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
+| `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
+
+<!-- END GENERATED cli:configure -->
 
 ### `capture`-only options
 
-| Flag | Default | Description |
+<!-- BEGIN GENERATED cli:capture/configure (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Options `capture` has in addition to those of `configure`:
+
+| Option | Default | Description |
 |---|---|---|
-| `--out FILE` | required | Output file path |
-| `--format FMT` | `json` | `json`, `csv`, or `vcd` |
-| `--timeout SEC` | `10.0` | Wait this long for the trigger to fire |
-| `--summarize` | off | Print LLM-friendly capture summary to stdout after the capture |
+| `--timeout SEC` | `10.0` | Seconds to wait for the capture to complete (trigger and post-trigger samples) |
+| `--out FILE` | required | Output file |
+| `--format {json,csv,vcd}` | `json` | Export format (not inferred from the --out extension) |
+| `--summarize` | off | Print LLM-friendly capture summary to stdout |
+| `--open-in VIEWER` | — | After capture, open the dump in a waveform viewer (requires --format vcd). Names: gtkwave, surfer, wavetrace, custom (needs gui.toml custom_argv). |
+
+<!-- END GENERATED cli:capture/configure -->
 
 ### Examples
 
@@ -345,6 +418,18 @@ prefix).  See [chapter 05](05_ela_core.md) for the compare modes.
 
 ### `eio-probe`
 
+<!-- BEGIN GENERATED cli:eio-probe (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] eio-probe [--chain N] [--instance N] [--base-addr ADDR]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `3` | BSCANE2 USER chain |
+| `--instance N` | — | Managed core slot on the selected chain |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+
+<!-- END GENERATED cli:eio-probe -->
+
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t eio-probe
 {
@@ -356,6 +441,18 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t eio-probe
 
 ### `eio-read`
 
+<!-- BEGIN GENERATED cli:eio-read (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] eio-read [--chain N] [--instance N] [--base-addr ADDR]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `3` | BSCANE2 USER chain |
+| `--instance N` | — | Managed core slot on the selected chain |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+
+<!-- END GENERATED cli:eio-read -->
+
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t eio-read
 0xA7
@@ -363,7 +460,20 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t eio-read
 
 Always reads `probe_in`.
 
-### `eio-write VALUE`
+### `eio-write`
+
+<!-- BEGIN GENERATED cli:eio-write (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] eio-write [--chain N] [--instance N] [--base-addr ADDR] VALUE`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `3` | BSCANE2 USER chain |
+| `--instance N` | — | Managed core slot on the selected chain |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+| `VALUE` | required | Output value (hex or decimal) |
+
+<!-- END GENERATED cli:eio-write -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t eio-write 0x55
@@ -372,7 +482,7 @@ wrote 0x55
 
 `VALUE` accepts decimal or `0x` hex.
 
-All three EIO subcommands take `--chain N` (default 3) to override
+All three EIO subcommands take `--chain N` to override
 the BSCANE2 USER chain. For mixed-manager designs where EIO shares USER1,
 also pass `--instance N` to select the EIO slot before each register access.
 For a **shared-chain** EIO that is address-muxed onto another core's chain
@@ -390,9 +500,18 @@ fcapz --backend openocd --tap GW1NR-9C.tap eio-write --chain 1 --base-addr 0x800
 
 ## AXI subcommands
 
-All five AXI subcommands take `--chain N` (default 4).
+### `axi-read`
 
-### `axi-read --addr ADDR`
+<!-- BEGIN GENERATED cli:axi-read (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-read --addr ADDR [--chain N]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--addr ADDR` | required | AXI address (hex) |
+| `--chain N` | `4` | BSCANE2 USER chain |
+
+<!-- END GENERATED cli:axi-read -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -400,7 +519,20 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 0xDEADBEEF
 ```
 
-### `axi-write --addr ADDR --data DATA [--wstrb W]`
+### `axi-write`
+
+<!-- BEGIN GENERATED cli:axi-write (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-write --addr ADDR --data DATA [--wstrb W] [--chain N]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--addr ADDR` | required | AXI address (hex) |
+| `--data DATA` | required | Write data (hex) |
+| `--wstrb W` | `0xf` | Write strobe (hex, default 0xf) |
+| `--chain N` | `4` | BSCANE2 USER chain |
+
+<!-- END GENERATED cli:axi-write -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -408,10 +540,22 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 wrote 0x12345678 -> 0x40000000 (resp=0)
 ```
 
-`--wstrb` defaults to `0xF` (all 4 bytes).  Pass `0x3` to write only
-the low 2 bytes, etc.
+Pass `--wstrb 0x3` to write only the low 2 bytes, etc.
 
-### `axi-dump --addr ADDR --count N [--burst]`
+### `axi-dump`
+
+<!-- BEGIN GENERATED cli:axi-dump (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-dump --addr ADDR --count N [--chain N] [--burst]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--addr ADDR` | required | Start address (hex) |
+| `--count N` | required | Number of 32-bit words to read |
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--burst` | off | Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH) |
+
+<!-- END GENERATED cli:axi-dump -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -422,10 +566,24 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 ```
 
 `--burst` switches from auto-increment block read to AXI4 burst
-read.  Subject to `count <= FIFO_DEPTH` (the host enforces this
-and prints a clear error).
+read; the host refuses a count above the bridge's `FIFO_DEPTH` with a
+clear error.
 
-### `axi-fill --addr ADDR --count N --pattern P [--burst]`
+### `axi-fill`
+
+<!-- BEGIN GENERATED cli:axi-fill (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-fill --addr ADDR --count N --pattern P [--chain N] [--burst]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--addr ADDR` | required | Start address (hex) |
+| `--count N` | required | Number of 32-bit words to fill |
+| `--pattern P` | required | Fill pattern (hex) |
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--burst` | off | Use AXI4 burst transfers |
+
+<!-- END GENERATED cli:axi-fill -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -433,7 +591,20 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 filled 64 words @ 0x40000000
 ```
 
-### `axi-load --addr ADDR --file FILE [--burst]`
+### `axi-load`
+
+<!-- BEGIN GENERATED cli:axi-load (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-load --addr ADDR --file FILE [--chain N] [--burst]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--addr ADDR` | required | Start address (hex) |
+| `--file FILE` | required | Binary file to load (little-endian 32-bit words; a partial last word is zero-padded) |
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--burst` | off | Use AXI4 burst transfers |
+
+<!-- END GENERATED cli:axi-load -->
 
 ```bash
 $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -441,16 +612,26 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 loaded 4096 words @ 0x10000000
 ```
 
-The file is read as little-endian 32-bit words.  Trailing partial
-words are zero-padded.
-
 ## UART subcommands
-
-All three UART subcommands take `--chain N` (default 4).
 
 ### `uart-send`
 
-Sources of data (mutually exclusive, exactly one required):
+<!-- BEGIN GENERATED cli:uart-send (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] uart-send [--chain N] (--data TEXT | --file FILE | --hex HEX)`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--data TEXT` | — | String data to send |
+| `--file FILE` | — | Binary file to send |
+| `--hex HEX` | — | Hex-encoded bytes to send (e.g. 48656C6C6F) |
+
+Exactly one of `--data`, `--file`, `--hex` is required.
+
+<!-- END GENERATED cli:uart-send -->
+
+Send a string, hex bytes, or a file:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -463,7 +644,20 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
       uart-send --file firmware.bin
 ```
 
-### `uart-recv [--count N] [--timeout SEC] [--line]`
+### `uart-recv`
+
+<!-- BEGIN GENERATED cli:uart-recv (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] uart-recv [--chain N] [--count N] [--timeout SEC] [--line]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--count N` | `0` | Number of bytes to receive (0=all available) |
+| `--timeout SEC` | `1.0` | Idle timeout in seconds |
+| `--line` | off | Receive until newline |
+
+<!-- END GENERATED cli:uart-recv -->
 
 ```bash
 # Get up to 64 bytes with 2 s idle timeout
@@ -476,7 +670,18 @@ fcapz uart-recv --line
 fcapz uart-recv --count 0 --timeout 0.1
 ```
 
-### `uart-monitor [--timeout SEC]`
+### `uart-monitor`
+
+<!-- BEGIN GENERATED cli:uart-monitor (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] uart-monitor [--chain N] [--timeout SEC]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chain N` | `4` | BSCANE2 USER chain |
+| `--timeout SEC` | `0.5` | Per-poll timeout in seconds |
+
+<!-- END GENERATED cli:uart-monitor -->
 
 ```bash
 fcapz uart-monitor               # runs forever, Ctrl+C to stop

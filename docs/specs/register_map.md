@@ -292,10 +292,11 @@ polling required.
 | 2 | `error` — sticky, last operation got non-OKAY AXI response |
 | 3 | `fifo_notempty` — burst read FIFO has data available |
 
-**Note:** Timeout applies only to AXI handshake waits (wready, bvalid,
-arready, rvalid). Inter-beat timing in burst writes is host-paced via
-JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
-delay — the host sends a priming `BURST_RDATA` before reading N words.
+> [!NOTE]
+> Timeout applies only to AXI handshake waits (wready, bvalid,
+> arready, rvalid). Inter-beat timing in burst writes is host-paced via
+> JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
+> delay — the host sends a priming `BURST_RDATA` before reading N words.
 
 <a id="regmap-ejtag-axi-config"></a>
 ### Config registers (CMD_CONFIG)

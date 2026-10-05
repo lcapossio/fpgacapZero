@@ -1,5 +1,6 @@
 # 14 — Transports
 
+> [!NOTE]
 > **Goal**: understand the `Transport` abstract base class, the built-in
 > backends (AMD/Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
 > `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
@@ -140,6 +141,7 @@ raises rather than programming nothing.
 Verified on a chain carrying an Arty A7 (`xc7a100t`), a KV260 (`xck26`) and a
 ZCU-class board (`xczu7`) simultaneously, xsdb 2025.2.
 
+> [!NOTE]
 > **Fixed in this release.** Programming previously filtered `targets` by the
 > part name, which matches nothing on MPSoC. xsdb printed an error, the
 > transport discarded it, `fpga -file` loaded nothing, and the session then ran

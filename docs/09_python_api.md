@@ -1,5 +1,6 @@
 # 09 — Python API
 
+> [!NOTE]
 > **Goal**: complete reference for the `fcapz` Python package.  By
 > the end of this chapter you can drive every fcapz core
 > programmatically, integrate it into your own scripts and tests,
@@ -8,6 +9,9 @@
 >
 > **Audience**: junior FPGA dev who can write basic Python and has
 > read [chapter 02](02_install.md) so the package is installed.
+>
+> **Reference**: every public name with its full signature and docstring
+> is in the generated [Python API reference](specs/python_api.md).
 
 ## Package layout
 

@@ -36,6 +36,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `build_arty_vex` launcher. Hardware-validated on the Arty A7-100T (Vivado
   2025.2 + Vitis riscv gcc 13.4): full suite green on the vex bitstream.
 
+- **HTML user manual.** The Markdown manual in `docs/` now also builds into a
+  searchable HTML site with MkDocs and the Material theme (`mkdocs.yml`; install
+  with `pip install -e ".[docs]"`, then `mkdocs serve` or `mkdocs build`). The
+  Markdown stays the single source and still reads on GitHub: a build hook
+  points links that leave `docs/` at the repository. A new CI job runs
+  `mkdocs build --strict`, so a broken link, anchor or image anywhere in the
+  manual fails the pull request. The site is built only, not published.
+  The site has tabs, search suggestions, per-page edit
+  buttons and "last updated" dates, and the version in its title. Notes use
+  GitHub alerts (`> [!NOTE]`) and the block and state diagrams are `mermaid`,
+  both rendered on GitHub and in the site; Markdown only the site understands
+  fails the build, so the two renderings cannot diverge.
+
+- **Generated CLI tables and Python API reference.** `tools/gen_docs.py`
+  rebuilds chapter 10's usage lines and option tables from the CLI parser and
+  writes `docs/specs/python_api.md` (every public `fcapz` name with its
+  signature and docstring). CI and pytest fail when either is out of date, so
+  the manual follows the code. Every CLI option now has `--help` text, and the
+  public API's undocumented classes and methods have docstrings.
+
 ### Changed
 
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is
@@ -69,6 +89,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Docs — chapter 04's MPSoC note.** It still said only USER1 is reachable on
+  Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.
+  It now says that the hw_server transport's named-register mode reaches all
+  four USER chains, so `EIO_EN=1` is needed there only without that mode.
+
+- **Docs — chapter 10 had drifted from the CLI.** It gave `openocd` as the
+  default `--backend` (it is `hw_server`) and `8` as the `--sample-width`
+  default (it comes from the probe file, else 8), said `--format` follows the
+  `--out` extension (it does not), and left out `--gui-config`,
+  `--two-chain-burst`, `--startup-arm`, `--trigger-holdoff`, `--profile`,
+  `--open-in` and the `axi-mon` subcommand. The tables are now generated.
+
+- **Docs — the AXI monitor spec said no RTL exists.** Phase P1 ships for
+  AXI4-Lite (`rtl/fcapz_axi_mon.v`, chapter 19); the spec now says so.
 
 - **ELA — one stale sample after a soft reset with `INPUT_PIPE ≥ 1`.** Arming
   (and soft reset) cancelled the RAM write queued in the input pipeline while

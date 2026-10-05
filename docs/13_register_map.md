@@ -1,5 +1,6 @@
 # 13 — Register map
 
+> [!NOTE]
 > This chapter is a **stub**.  The canonical register map for every
 > fcapz core lives at [`specs/register_map.md`](specs/register_map.md)
 > and is the **ground truth** — when this chapter and the spec

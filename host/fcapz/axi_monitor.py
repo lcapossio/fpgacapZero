@@ -50,6 +50,7 @@ class AxiMonitorError(RuntimeError):
 
 @dataclass(frozen=True)
 class AxiGeometry:
+    """Shape of an AXI monitor's capture, read from its geometry register."""
     addr_w: int
     data_w: int
     id_w: int          # transaction-ID width (0 for AXI4-Lite — no AWID/ARID)
@@ -59,6 +60,7 @@ class AxiGeometry:
 
     @property
     def proto(self) -> str:
+        """Protocol name, e.g. ``AXI4LITE``."""
         return _PROTO_NAMES.get(self.proto_code, f"proto{self.proto_code}")
 
     @property
@@ -96,9 +98,14 @@ class AxiMonitor:
 
     @property
     def present(self) -> bool:
+        """``True`` if the core reports the AXI monitor identity."""
         return self.identity() is not None
 
     def geometry(self) -> AxiGeometry:
+        """Read the monitor's capture geometry.
+
+        Raises `AxiMonitorError` if the core is not an AXI monitor.
+        """
         ident = self.identity()
         if ident is None:
             raise AxiMonitorError("no AXI monitor on this core (AXI_MON_ID magic absent)")

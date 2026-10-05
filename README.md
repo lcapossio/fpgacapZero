@@ -104,7 +104,8 @@ fcapz --backend hw_server --port 3121 \
 The end-to-end walkthrough lives in
 **[First capture in 10 minutes](https://github.com/lcapossio/fpgacapZero/blob/main/docs/03_first_capture.md)**. For every command
 and flag, see the [CLI reference](https://github.com/lcapossio/fpgacapZero/blob/main/docs/10_cli_reference.md); for scripting, the
-[Python API](https://github.com/lcapossio/fpgacapZero/blob/main/docs/09_python_api.md) and [JSON-RPC server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/11_rpc_server.md).
+[Python API](https://github.com/lcapossio/fpgacapZero/blob/main/docs/09_python_api.md) (every signature in the
+[API reference](https://github.com/lcapossio/fpgacapZero/blob/main/docs/specs/python_api.md)) and [JSON-RPC server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/11_rpc_server.md).
 
 ## Add it to your design
 
@@ -172,7 +173,8 @@ tb/, sim/   Testbenches and simulation runners
 
 ## Project links
 
-- 📖 **[User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — the complete guide
+- 📖 **[User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — the complete guide; it also builds into a searchable
+  [HTML site](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md#reading-the-manual-as-html) (`mkdocs serve`)
 - 📝 **[CHANGELOG](https://github.com/lcapossio/fpgacapZero/blob/main/CHANGELOG.md)** — releases, with breaking changes called out
 - 🤝 **[CONTRIBUTING](https://github.com/lcapossio/fpgacapZero/blob/main/CONTRIBUTING.md)** — dev setup, testing, adding a board
 - 🐛 **[Troubleshooting](https://github.com/lcapossio/fpgacapZero/blob/main/docs/17_troubleshooting.md)** — common errors and fixes

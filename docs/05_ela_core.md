@@ -1,5 +1,6 @@
 # 05 — ELA core
 
+> [!NOTE]
 > **Goal**: deep dive on the Embedded Logic Analyzer.  By the end of
 > this chapter you will understand every trigger mode, every storage
 > option, and how the runtime knobs (decimation, segments, probe mux,
@@ -12,22 +13,16 @@
 
 ## The capture flow in one diagram
 
-```
-                  ┌──────────────┐
-arm_pulse  ──────►│   ARMED      │ ── trigger_hit ──┐
-                  │ (recording   │                  │
-                  │  pre-trig    │                  ▼
-                  │  history)    │           ┌──────────────┐
-                  └──────────────┘           │  TRIGGERED   │
-                                              │ (counting    │
-                                              │  posttrig)   │
-                                              └──────────────┘
-                                                     │
-                                                     │ post_count == posttrig_len
-                                                     ▼
-                                              ┌──────────────┐
-                                              │    DONE      │ ── host reads buffer ──►
-                                              └──────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "ARMED: recording pre-trigger history" as ARMED
+    state "TRIGGERED: counting post-trigger samples" as TRIGGERED
+    state "DONE: buffer holds the capture" as DONE
+    [*] --> ARMED: arm_pulse
+    ARMED --> TRIGGERED: trigger_hit
+    TRIGGERED --> DONE: posttrig_len samples stored
+    DONE --> [*]: host reads buffer
 ```
 
 The ELA is a circular buffer.  When you arm it, samples flow into a
@@ -659,6 +654,7 @@ cfg = CaptureConfig(
 )
 ```
 
+> [!IMPORTANT]
 > **Host-initiated captures on a startup-armed bitstream.** Because
 > `STARTUP_ARM=1` makes the core boot armed, it may already be armed — or even
 > triggered/done — before your host code runs. A bare `configure(cfg); arm()`

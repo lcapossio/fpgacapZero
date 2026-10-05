@@ -1,5 +1,6 @@
 # 04 — RTL integration
 
+> [!NOTE]
 > **Goal**: by the end of this chapter you can drop fcapz cores into
 > your own design.  You will know which wrapper to instantiate, what
 > every parameter does, how `fcapz_version.vh` fits in, and how to
@@ -54,6 +55,7 @@ the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
 PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
 lint-clean until a board-level smoke test is added for that family.
 
+> [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
 > primitive is byte-identical between 7-series, UltraScale, and
 > UltraScale+.  The `_xilinxus` files are 33-88 LOC each and
@@ -365,15 +367,17 @@ Two cases to use this mode:
 
 1. **Resource-constrained parts** with only one spare USER chain (ECP5
    designs with heavy logic, small Lattice / Gowin parts, etc.).
-2. **Zynq UltraScale+ MPSoC (xck26 / xczu*)** — this is the **required**
-   path on MPSoC, not an optional one.  The PL TAP on these parts
-   exposes only USER1 as a reachable chain through xsdb/hw_server at
-   the device-level target (USER2..USER4 either alias to USER1 or put
-   the TAP in BYPASS — see [chapter 14 "Zynq UltraScale+ MPSoC — known
-   limitation: USER1 only"](14_transports.md#zynq-ultrascale-mpsoc--known-limitation-user1-only)).
-   Set `EIO_EN=1` on the ELA wrapper, drop the standalone
-   `fcapz_eio_xilinxus` instance from your top level, and EIO will
-   ride-along on USER1.
+2. **Zynq UltraScale+ MPSoC (xck26 / xczu*) without named-register
+   IR mode.**  Through xsdb, raw hex IR opcodes reach only USER1 on
+   these parts (USER2..USER4 alias to USER1 or put the TAP in BYPASS).
+   The hw_server transport's named-register mode
+   (`use_register_ir=True`, which `fcapz --tap xck…` / `--tap xczu…`
+   selects automatically) reaches all four USER chains, so a standalone
+   `fcapz_eio_xilinxus` works there — see [chapter 14 "Zynq UltraScale+
+   MPSoC — how the JTAG chain works with xsdb"](14_transports.md#zynq-ultrascale-mpsoc--how-the-jtag-chain-works-with-xsdb).
+   Only when you drive the PL TAP without that mode, set `EIO_EN=1` on
+   the ELA wrapper, drop the standalone `fcapz_eio_xilinxus` instance
+   from your top level, and EIO will ride along on USER1.
 
 The wrapper adds a
 [`fcapz_regbus_mux`](../rtl/fcapz_regbus_mux.v) on the USER1 49-bit

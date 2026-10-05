@@ -57,6 +57,11 @@ Vivado/XSDB are optional and only needed for hardware tests.
 - Update the **user manual** when user-visible behaviour changes: the manual
   lives under `docs/` (chapter index: `docs/README.md`). Touch the chapters that
   describe what you changed (workflows, CLI, registers, GUI, transports, …).
+- Chapter 10's option tables and `docs/specs/python_api.md` are generated from
+  the CLI parser and the `fcapz` docstrings. After changing either, run
+  `python tools/gen_docs.py`; CI fails if they are out of date. Only
+  Markdown that GitHub renders belongs in `docs/`: `mkdocs build --strict`
+  (see `mkdocs.yml`) rejects site-only syntax and broken links.
 
 ---
 
@@ -470,7 +475,7 @@ Before pushing to a remote or opening a PR, confirm all of the following:
 - [ ] `README.md` updated if behaviour, CLI flags, or resource usage changed
 - [ ] User manual (`docs/`, see `docs/README.md`) updated if workflows, CLI,
       register maps, GUI, or other end-user documentation should reflect your
-      changes
+      changes; generated parts refreshed with `python tools/gen_docs.py`
 - [ ] CHANGELOG.md entry added for user-visible changes
 
 ---

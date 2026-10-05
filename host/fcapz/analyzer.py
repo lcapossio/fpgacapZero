@@ -183,6 +183,7 @@ def _validate_dual_compare(caps: int, stage: SequencerStage, context: str) -> No
 
 @dataclass
 class TriggerConfig:
+    """Comparator trigger: ``mode`` is ``value_match``, ``edge_detect`` or ``both``."""
     mode: str
     value: int
     mask: int
@@ -199,6 +200,7 @@ class ProbeSpec:
 
 @dataclass
 class CaptureConfig:
+    """Everything `Analyzer.configure` writes to the ELA before a capture."""
     pretrigger: int
     posttrigger: int
     trigger: TriggerConfig
@@ -227,6 +229,7 @@ class CaptureConfig:
 
 @dataclass
 class CaptureResult:
+    """One capture read back by `Analyzer.capture`, with the config that made it."""
     config: CaptureConfig
     samples: List[int] = field(default_factory=list)
     overflow: bool = False
@@ -275,6 +278,12 @@ def _selected_transaction(method):
 
 
 class Analyzer:
+    """Host controller for one ELA core.
+
+    ``chain`` is the BSCAN USER chain of its control interface and ``instance``
+    the core-manager slot to select before every access (``None`` for a
+    bitstream without a manager).
+    """
     def __init__(
         self,
         transport: Transport,
@@ -329,6 +338,7 @@ class Analyzer:
             self._select_instance()
 
     def connect(self) -> None:
+        """Connect the transport and select this analyzer's chain and slot."""
         with self.transport.transaction_lock():
             self._select_chain()
             self.transport.connect()
@@ -346,6 +356,12 @@ class Analyzer:
 
     @_selected_transaction
     def reset(self) -> None:
+        """Soft-reset the ELA capture state (CTRL reset bit).
+
+        The core re-arms at once if the runtime STARTUP_ARM register is set
+        (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
+        next step needs a verified idle core.
+        """
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
 
@@ -466,6 +482,11 @@ class Analyzer:
 
     @_selected_transaction
     def configure(self, config: CaptureConfig) -> None:
+        """Validate ``config`` and write it to the core; does not arm.
+
+        Raises `ValueError` if the window does not fit ``depth`` or a field is
+        out of range for the core.
+        """
         self._select_instance()
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
@@ -633,10 +654,12 @@ class Analyzer:
 
     @_selected_transaction
     def arm(self) -> None:
+        """Arm the core with the configuration it holds."""
         self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
+        """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first."""
         deadline = time.monotonic() + timeout
         read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
@@ -794,6 +817,11 @@ class Analyzer:
         return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
+        """Wait for the armed capture to finish and read it back.
+
+        Call `configure` and `arm` first.  Raises `TimeoutError` if the core
+        is not done within ``timeout`` seconds.
+        """
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
@@ -884,6 +912,7 @@ class Analyzer:
         )
 
     def export_json(self, result: CaptureResult) -> Dict:
+        """Return ``result`` as the JSON export dictionary (see chapter 15)."""
         cfg = result.config
         d: Dict = {
             "version": "1.0",
@@ -911,11 +940,13 @@ class Analyzer:
         return d
 
     def write_json(self, result: CaptureResult, out_path: str) -> None:
+        """Write ``result`` to ``out_path`` as JSON."""
         Path(out_path).write_text(
             json.dumps(self.export_json(result), indent=2), encoding="utf-8"
         )
 
     def export_csv_text(self, result: CaptureResult) -> str:
+        """Return ``result`` as CSV text: ``index,value`` (plus ``timestamp`` if present)."""
         if result.timestamps:
             lines = ["index,value,timestamp"]
             for i, (v, t) in enumerate(zip(result.samples, result.timestamps)):
@@ -927,9 +958,13 @@ class Analyzer:
         return "\n".join(lines) + "\n"
 
     def write_csv(self, result: CaptureResult, out_path: str) -> None:
+        """Write ``result`` to ``out_path`` as CSV."""
         Path(out_path).write_text(self.export_csv_text(result), encoding="ascii")
 
     def export_vcd_text(self, result: CaptureResult) -> str:
+        """Return ``result`` as VCD text: one signal per probe (a single ``sample``
+        signal without probes), plus ``timestamp`` when the core has one.
+        """
         cfg = result.config
         sig_w = cfg.sample_width
         # One time unit per stored sample: the viewer's x-axis then reads sample
@@ -996,6 +1031,7 @@ class Analyzer:
         return "\n".join(lines) + "\n"
 
     def write_vcd(self, result: CaptureResult, out_path: str) -> None:
+        """Write ``result`` to ``out_path`` as VCD."""
         Path(out_path).write_text(self.export_vcd_text(result), encoding="ascii")
 
     def export_vcd_text_segments(self, results: List[CaptureResult]) -> str:
