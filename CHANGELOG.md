@@ -70,6 +70,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Docs — chapter 04's MPSoC note.** It still said only USER1 is reachable on
+  Zynq UltraScale+ MPSoC and linked a chapter 14 section that no longer exists.
+  It now says that the hw_server transport's named-register mode reaches all
+  four USER chains, so `EIO_EN=1` is needed there only without that mode.
+
 - **ELA — one stale sample after a soft reset with `INPUT_PIPE ≥ 1`.** Arming
   (and soft reset) cancelled the RAM write queued in the input pipeline while
   the write pointer still advanced, so that address kept a sample one
