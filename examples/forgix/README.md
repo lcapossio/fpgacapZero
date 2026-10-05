@@ -127,13 +127,15 @@ build the stock loader.
 free-running counter as the probe source, so a capture should read back a ramp.
 
 A complete Efinity project is in [`efinity/`](efinity/) — pin assignments,
-constraints and bitstream settings included. Build it with:
+constraints and bitstream settings included. `efx_run` looks for the project
+file in the current directory, so build it from there:
 
 ```sh
-efx_run.bat efinity/forgix.xml --flow interface
-efx_run.bat efinity/forgix.xml --flow map
-efx_run.bat efinity/forgix.xml --flow pnr
-efx_run.bat efinity/forgix.xml --flow pgm     # -> outflow/forgix.hex
+cd efinity
+efx_run.bat forgix.xml --flow interface
+efx_run.bat forgix.xml --flow map
+efx_run.bat forgix.xml --flow pnr
+efx_run.bat forgix.xml --flow pgm     # -> efinity/outflow/forgix.hex
 ```
 
 The `pgm` flow emits an SPI **passive x1** `.hex`, which is what the RP2354
