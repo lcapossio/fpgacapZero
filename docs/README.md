@@ -65,7 +65,8 @@ and should be corrected.
   Python snippets; ```verilog``` are RTL.
 - File paths in the running text use `code formatting`. When a file
   path appears as a clickable link it always points at the file in
-  this repository (relative path).
+  this repository (a relative path; in the HTML build, the file's
+  page on GitHub).
 - "**HIGH / MEDIUM / LOW**" priority labels reflect maintainer triage
   and may evolve between releases.
 - "**BREAKING**" is used to flag a change that requires user action
@@ -83,6 +84,21 @@ and should be corrected.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.
+
+## Reading the manual as HTML
+
+The same Markdown builds into a searchable HTML site with
+[MkDocs](https://www.mkdocs.org/) and the Material theme.  From the
+repository root:
+
+```bash
+pip install -e ".[docs]"
+mkdocs serve            # live preview on http://127.0.0.1:8000
+mkdocs build --strict   # static site in site/
+```
+
+CI runs the strict build on every pull request, so a broken link or
+anchor anywhere in the manual fails the check.
 
 ## Project resources
 

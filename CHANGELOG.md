@@ -36,6 +36,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `build_arty_vex` launcher. Hardware-validated on the Arty A7-100T (Vivado
   2025.2 + Vitis riscv gcc 13.4): full suite green on the vex bitstream.
 
+- **HTML user manual.** The Markdown manual in `docs/` now also builds into a
+  searchable HTML site with MkDocs and the Material theme (`mkdocs.yml`; install
+  with `pip install -e ".[docs]"`, then `mkdocs serve` or `mkdocs build`). The
+  Markdown stays the single source and still reads on GitHub: a build hook
+  points links that leave `docs/` at the repository. A new CI job runs
+  `mkdocs build --strict`, so a broken link, anchor or image anywhere in the
+  manual fails the pull request. The site is built only, not published.
+
 ### Changed
 
 - **VexRiscv is now the default Arty A7 design.** `examples/arty_a7/build.py` is

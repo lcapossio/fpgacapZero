@@ -124,6 +124,23 @@ jobs:
       - name: Fail if the committed static bundle is stale
         run: git diff --exit-code -- host/fcapz/web/static
 
+  # ── 3c. HTML manual build ─────────────────────────────────────────
+  # Builds docs/ with MkDocs in strict mode: any broken page link, missing
+  # anchor, or link to a repository file that does not exist fails the job.
+  # Build check only; nothing is published.
+  docs-build:
+    name: HTML manual build (mkdocs --strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the docs extra
+        run: pip install ".[docs]"
+      - name: Build the manual
+        run: mkdocs build --strict
+
   # ── 4. Strict RTL lint (Verilator) ───────────────────────────────
   lint-rtl:
     name: Strict RTL lint (Verilator)
