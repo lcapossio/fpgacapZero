@@ -127,8 +127,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   general I/O in user mode per Efinix AN006 Table 3). Includes a reference top
   and a locally vendored patch (pinned upstream revision, applied to a local
   copy) that turns the RP2354 bitstream loader into a transparent USB-CDC
-  bridge after configuration. The README now says where to get the upstream
-  loader host tool. A clean checkout rebuilds a bitstream bit-identical to the
+  bridge after configuration. The README opens with a quick start that ends in
+  a CLI capture, checked on the board, and a matching Python example. It also
+  says where to get the upstream loader host tool. A clean checkout rebuilds a bitstream bit-identical to the
   one tested, and the vendored patch reproduces the firmware sources running on
   the board.
 - **Efinix (Trion / Titanium) ELA wrapper.** New `fcapz_ela_efinix` (Verilog +

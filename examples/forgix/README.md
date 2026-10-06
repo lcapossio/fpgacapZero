@@ -13,6 +13,43 @@ RTL and the host transport it uses are board- and vendor-agnostic. See
 [`docs/14_transports.md`](../../docs/14_transports.md#tapbridgetransport) for
 the general mechanism.
 
+## Quick start
+
+You need Efinity (2025.1 here), the Pico SDK with `picotool`, Python 3 and a
+clone of this repository. Each step links to its details below.
+
+1. **Build the bitstream.** Run the four Efinity flows in `efinity/`. The result
+   is `efinity/outflow/forgix.hex`. See
+   [Building the FPGA design](#building-the-fpga-design).
+2. **Patch and flash the RP2354 firmware**, once per board. Run
+   `firmware/apply_patch.py`, build it with the Pico SDK, back up the stock
+   loader, and flash the bridge. See
+   [Firmware](#firmware-the-rp2354-has-to-become-a-bridge).
+3. **Program the FPGA** with the upstream loader host tool, which is not
+   shipped here. Look for `DONE=high` in its output. The board's USB port is
+   now an fcapz link. This has to be repeated after every power-up or reset.
+4. **Install the host stack and capture:**
+
+   ```sh
+   pip install -e ".[serial]"    # from the repository root
+   fcapz list-ports              # find the board's port
+   fcapz --backend serial --serial-port COM5 probe
+   fcapz --backend serial --serial-port COM5 capture \
+       --pretrigger 8 --posttrigger 247 \
+       --trigger-value 0x80 --trigger-mask 0xFF \
+       --sample-clock-hz 32000000 --format vcd --out ramp.vcd
+   ```
+
+   Use `/dev/ttyACM0` on Linux. `probe` reports core id `19521` (`0x4C41`,
+   "LA"), 8-bit × 1024. The capture is a ramp from 120 to 119 through 255, with
+   the trigger value 0x80 at sample 8. Open `ramp.vcd` in GTKWave or any VCD
+   viewer. See [Capturing from the host](#capturing-from-the-host) for Python
+   and the web GUI.
+
+To start over, for example to load a new bitstream, reset the RP2354 by
+unplugging the board or running `picotool reboot -f`. That returns it to loader
+mode.
+
 ## Why this board needs it
 
 **The Forgix board gives the FPGA fabric no JTAG whatsoever.**
@@ -170,21 +207,45 @@ clean because it only covers `clk_in`.
 > can reach the fabric. `forgix_top` generates its own short power-on reset
 > instead.
 
-## Connecting from the host
+## Capturing from the host
+
+Install the host stack from the repository root with the `serial` extra, which
+adds pyserial: `pip install -e ".[serial]"`. Add `web` as well
+(`".[serial,web]"`) for the browser GUI. `fcapz list-ports` lists the serial
+ports; the board shows up as a USB serial device once it is in bridge mode.
+
+The CLI commands are in the [Quick start](#quick-start); the serial options are
+in the [CLI reference](../../docs/10_cli_reference.md#serial-byte-stream-tap-bridge).
+The same capture from Python:
 
 ```python
+from fcapz import Analyzer, CaptureConfig, TriggerConfig
 from fcapz.transport import SerialTapTransport
 
 t = SerialTapTransport("COM5", baudrate=1_000_000)    # /dev/ttyACM0 on Linux
-t.connect()
-print(t.num_chains, t.max_dr_bits)                    # identity from the bridge
-```
+a = Analyzer(t)
+a.connect()
+print(a.probe()["core_id"] == 0x4C41)                 # True: the ELA answers
 
-Needs pyserial: `pip install 'fpgacapzero[serial]'`.
+a.configure(CaptureConfig(
+    pretrigger=8, posttrigger=247,
+    trigger=TriggerConfig(mode="value_match", value=0x80, mask=0xFF),
+    sample_clock_hz=32_000_000,
+))
+a.arm()
+result = a.capture()
+print(result.samples[:12])                            # 120, 121, 122, ...
+a.close()
+```
 
 `connect()` probes the bridge for its `FCZU` identity before any register
 access, so pointing it at the wrong port fails with a clear message instead of
-returning garbage.
+returning garbage. `baudrate` must match the firmware's `FCAPZ_BRIDGE_BAUD_HZ`
+(1 Mbaud by default).
+
+In the web GUI (`fcapz-web`, see
+[docs/18_web_interface.md](../../docs/18_web_interface.md)), pick the
+**serial** backend and enter the port.
 
 ## Fitting the core in a T8
 
