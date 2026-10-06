@@ -180,27 +180,33 @@ returning garbage.
 Measured, not estimated — Efinity 2025.1, T8F49, C2 timing model,
 `optimization_level=TIMING_3`, placer seed 5, with [`forgix.sdc`](forgix.sdc)
 and the defaults in [`forgix_top.v`](forgix_top.v) (8-bit x 1024,
-`DUAL_COMPARE=0`, `BURST_W=64`):
+`DUAL_COMPARE=0`, `BURST_W=64`, `USER1_DATA_EN=0`):
 
 | | Used | Available | Share |
 |---|---:|---:|---:|
-| Logic elements | 2,174 | 7,384 | 29.4 % |
-| — LUTs/adders | 1,542 | 7,384 | 20.9 % |
-| — registers | 1,140 | 5,280 | 21.6 % |
+| Logic elements | 2,103 | 7,384 | 28.5 % |
+| — LUTs/adders | 1,468 | 7,384 | 19.9 % |
+| — registers | 1,163 | 5,280 | 22.0 % |
 | Memory blocks | 2 | 24 | 8.3 % |
 | Multipliers | 0 | 8 | 0 % |
 
-The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes at
-50 MHz: `clk_in` reaches 51.8 MHz, and the `tap_tck` domain 36.6 MHz against
-the 25 MHz it needs.
+The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes
+with margin at the board's 32 MHz: `clk_in` reaches 47.6 MHz, and the `tap_tck`
+domain 28.8 MHz against the 16 MHz it needs.
 
-> **The placer seed matters here.** The critical path is inside `fcapz_ela`,
-> and across seeds 1/3/5/9/12 `clk_in` lands anywhere between 49.4 and
-> 51.8 MHz — so some seeds miss 50 MHz by well under 1 %. If a build fails
-> timing by a tenth of a nanosecond, try another seed before changing the
-> design.
+`USER1_DATA_EN=0` drops the ELA's register-window sample readout, which this
+design never uses: samples come back over the burst chain. That saves 64 LE.
+The window then reads as zeros, so the host never falls back to it — a burst
+that fails raises instead (see [docs/14_transports.md](../../docs/14_transports.md)).
 
-Where it goes:
+> **The placer seed matters near a tight constraint.** The critical path is
+> inside `fcapz_ela`. When this design ran at 50 MHz, seeds 1/3/5/9/12 put
+> `clk_in` anywhere between 49.4 and 51.8 MHz, so some seeds missed by well
+> under 1 %. If a build fails timing by a tenth of a nanosecond, try another
+> seed before changing the design.
+
+Where it went, measured on the 2,174 LE build (before the bridge's receive
+timeout and `USER1_DATA_EN=0`):
 
 | Block | LUTs | FFs |
 |---|---:|---:|
@@ -268,8 +274,10 @@ firmware and the bitstream from [`efinity/`](efinity/):
 - ten consecutive captures were all clean, averaging **16 ms** per readback —
   against ~11 ms of ideal wire time for 1,068 bytes at 1 Mbaud.
 
-Timing and fit, measured: 2,118 LE (28.7 %), `clk_in` 45.2 MHz against the
-32 MHz it needs and `tap_tck` 30.5 MHz against 16 MHz.
+Timing and fit, measured: 2,103 LE (28.5 %), `clk_in` 47.6 MHz against the
+32 MHz it needs and `tap_tck` 28.8 MHz against 16 MHz. After a byte is lost
+mid-command, the link recovers without a reset: a truncated scan followed by
+`connect()` and a capture works first time.
 
 The firmware patch compiles with the Pico SDK (2.3.1, `PICO_BOARD=pico2`) and
 runs. The RTL and host transport are also covered by simulation and unit tests

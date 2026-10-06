@@ -88,7 +88,13 @@ module forgix_top #(
         // spare the logic.
         .DUAL_COMPARE(0),
         .TRIG_STAGES(1),
-        .BURST_W(64)
+        .BURST_W(64),
+        // Samples come back over the burst chain only.  The register-window
+        // path is a second, much slower readout that the host never uses
+        // while the burst chain is there, so drop it.  Window reads then
+        // return zeros -- which is why the host raises on a failed burst
+        // rather than re-reading through the window.
+        .USER1_DATA_EN(0)
     ) u_fcapz (
         .sample_clk(clk_in),
         .sample_rst(rst),

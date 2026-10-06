@@ -98,6 +98,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   register window. They now raise, like the JTAG transports. On a core built
   with `USER1_DATA_EN=0` the window reads zeros, so the fallback could turn a
   link fault into a capture of zeros. `read_window_block()` reads only the window.
+- **Forgix — register-window readout dropped (`USER1_DATA_EN=0`).** Samples
+  come back over the burst chain only, which saves 64 LE (2,103 LE, 28.5 %).
+  Verified on hardware: a burst returns the ramp, and a window read returns zeros.
 - **Forgix board example (Efinix Trion T8F49 + RP2354) — validated on
   hardware.** Ships a complete Efinity project (`examples/forgix/efinity/`)
   with the pin assignments worked out and confirmed: `clk_in` on B4 (32 MHz),
