@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .analyzer import (
     Analyzer,
@@ -708,6 +708,18 @@ class RpcServer:
         if include_summary:
             payload["summary"] = summarize(result, self._probe_defs(config))
         return payload
+
+    def session_transport_kind(self) -> Optional[str]:
+        """``transport_kind`` of the open session's link, or ``None``.
+
+        Lets a front end authorise a request against the session it will
+        actually act on, not just against what the request names: a
+        ``capture`` carries no backend, yet on a serial session it drives the
+        serial port.
+        """
+        if self._analyzer is None:
+            return None
+        return getattr(self._analyzer.transport, "transport_kind", "jtag")
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")

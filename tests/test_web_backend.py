@@ -578,22 +578,116 @@ def test_openocd_guard_localhost_only():
     assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
 
 
-def test_serial_guard_needs_a_token_for_remote_clients():
-    from fcapz.web.app import _serial_guard
+def test_serial_allowed_needs_a_token_for_remote_clients():
+    from fcapz.web.app import _serial_allowed
 
-    enum = {"cmd": "list_serial_ports"}
-    conn = {"cmd": "connect", "backend": "serial", "serial_port": "COM16"}
-    # Token-less server, remote client: enumeration and opening are both
-    # unauthenticated hardware access, so both are refused.
-    assert _serial_guard(enum, "10.0.0.5", None)["type"] == "PermissionError"
-    assert _serial_guard(conn, "10.0.0.5", None)["type"] == "PermissionError"
-    # Loopback is unaffected, and so is an authenticated remote client.
-    assert _serial_guard(enum, "127.0.0.1", None) is None
-    assert _serial_guard(conn, "127.0.0.1", None) is None
-    assert _serial_guard(enum, "10.0.0.5", "s3cret") is None
-    assert _serial_guard(conn, "10.0.0.5", "s3cret") is None
-    # The JTAG backends are untouched.
-    assert _serial_guard({"cmd": "connect", "backend": "openocd"}, "10.0.0.5", None) is None
+    assert not _serial_allowed("10.0.0.5", None)
+    assert _serial_allowed("127.0.0.1", None)
+    assert _serial_allowed("10.0.0.5", "s3cret")
+
+
+class FakeSerialTransport(FakeTransport):
+    transport_kind = "bytestream"
+
+
+_SERIAL = {"backend": "serial", "serial_port": "COM_TEST"}
+
+
+def _serial_app(monkeypatch, **app_kwargs):
+    """One app, a loopback client and a remote one (TestClient's own peer)."""
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req, **_: FakeSerialTransport()
+    )
+    app = create_app(**app_kwargs)
+    return TestClient(app, client=("127.0.0.1", 50000)), TestClient(app)
+
+
+def test_a_remote_client_cannot_name_a_serial_port(monkeypatch):
+    local, remote = _serial_app(monkeypatch)
+    for cmd, kw in (("list_serial_ports", {}), ("connect", _SERIAL)):
+        r = _rpc(remote, cmd, **kw).json()
+        assert r["ok"] is False and r["type"] == "PermissionError", cmd
+    assert _rpc(local, "connect", **_SERIAL).json()["ok"] is True
+
+
+def test_a_remote_client_cannot_drive_an_open_serial_session(monkeypatch):
+    """capture / probe / close name no backend, but on a serial session they
+    drive the serial port all the same."""
+    local, remote = _serial_app(monkeypatch)
+    assert _rpc(local, "connect", **_SERIAL).json()["ok"] is True
+
+    for cmd in ("probe", "capture", "rebind", "close"):
+        r = _rpc(remote, cmd).json()
+        assert r["ok"] is False and r["type"] == "PermissionError", cmd
+    # The JTAG backends cannot be used to close the serial session either.
+    r = _rpc(remote, "connect", **_GOWIN).json()
+    assert r["type"] == "PermissionError"
+    with remote.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": "probe"})
+        assert ws.receive_json()["type"] == "PermissionError"
+
+    assert _rpc(local, "probe").json()["ok"] is True
+
+
+def test_an_authenticated_remote_client_may_drive_a_serial_session(monkeypatch):
+    local, remote = _serial_app(monkeypatch, token="s3cret")
+    auth = {"Authorization": "Bearer s3cret"}
+    r = remote.post("/api/rpc", json={"cmd": "connect", **_SERIAL}, headers=auth)
+    assert r.json()["ok"] is True
+    r = remote.post("/api/rpc", json={"cmd": "probe"}, headers=auth)
+    assert r.json()["ok"] is True
+
+
+def test_a_jtag_session_is_not_serial_gated(monkeypatch):
+    c = _client(monkeypatch)
+    assert _rpc(c, "connect", **_GOWIN).json()["ok"] is True
+    assert _rpc(c, "probe").json()["ok"] is True
+
+
+# -- WebSocket Origin ---------------------------------------------------------
+
+def _ws_refused(client, origin, host="testserver"):
+    from starlette.websockets import WebSocketDisconnect
+
+    headers = {"origin": origin, "host": host}
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect("/api/ws", headers=headers) as ws:
+            ws.send_json({"cmd": "probe"})
+            ws.receive_json()
+    return exc.value.code == 1008
+
+
+def _ws_served(client, origin):
+    with client.websocket_connect("/api/ws", headers={"origin": origin}) as ws:
+        ws.send_json({"cmd": "connect", **_GOWIN})
+        return ws.receive_json()["ok"] is True
+
+
+def test_ws_refuses_a_cross_site_page(monkeypatch):
+    """CORS does not apply to WebSockets: without an Origin check any website
+    the user has open could drive a token-less loopback server.  The page's
+    handshake carries the server's real (loopback) Host, so the rebinding
+    check lets it through; only Origin gives it away."""
+    c = _local_client(monkeypatch, bind_host="127.0.0.1")
+    host = "127.0.0.1:7373"
+    assert _ws_refused(c, "https://evil.example", host)
+    assert _ws_refused(c, "null", host)
+
+
+def test_ws_serves_its_own_page_and_the_dev_proxy(monkeypatch):
+    c = _local_client(monkeypatch)
+    assert _ws_served(c, "http://testserver")         # same origin
+    assert _ws_served(c, "http://localhost:5173")     # Vite dev proxy
+
+
+def test_ws_loopback_origin_needs_a_loopback_client(monkeypatch):
+    c = _client(monkeypatch)                          # remote peer
+    assert _ws_refused(c, "http://localhost:5173")
+
+
+def test_ws_serves_a_configured_cors_origin(monkeypatch):
+    c = _client(monkeypatch, cors_origins=["https://ui.example"])
+    assert _ws_served(c, "https://ui.example")
 
 
 def test_is_loopback_forms():

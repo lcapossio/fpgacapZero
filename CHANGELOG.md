@@ -22,8 +22,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Serial backend — hardened after review.** Remote clients on a token-less web
   server can no longer enumerate or open serial ports (an unauthenticated way to
-  reset every board and probe on the host); loopback and authenticated remote
-  clients are unaffected. A failed handshake now closes the port instead of
+  reset every board and probe on the host), nor send any session command while
+  a serial session is open — checked under the session lock against the open
+  session, since `capture` or `close` names no backend; loopback and
+  authenticated remote clients are unaffected. A failed handshake now closes the port instead of
   leaking an exclusive handle, and a failed `connect` closes the transport the
   session never took ownership of. The burst chain is excluded from the generic
   core sweeps — it carries a streaming DR, not registers, and a magic word
@@ -236,6 +238,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Web — any website could drive a token-less server over the WebSocket.**
+  CORS does not cover WebSockets, and a page's handshake to
+  `ws://127.0.0.1:7373/api/ws` carries the real loopback `Host`, so the
+  anti-rebinding check let it through with the full API, OpenOCD control
+  included. `/api/ws` now requires the handshake's `Origin` to be the server's
+  own, a `--cors-origin`, or a loopback page on a loopback client (the Vite dev
+  proxy). Clients that send no `Origin` (scripts) are unchanged.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

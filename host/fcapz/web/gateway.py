@@ -27,6 +27,23 @@ _log = logging.getLogger("fcapz.web")
 _QUIET_CMDS = frozenset({"capture_status", "eio_read"})
 
 
+def _names_serial(req: Dict[str, Any]) -> bool:
+    """True for a request that enumerates or opens serial ports itself."""
+    return req.get("cmd") == "list_serial_ports" or req.get("backend") == "serial"
+
+
+def _serial_denied() -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "schema_version": _SCHEMA_VERSION,
+        "error": (
+            "Serial-port access from a remote client needs a server token "
+            "(start the server with --token)."
+        ),
+        "type": "PermissionError",
+    }
+
+
 class RpcGateway:
     """Thread-safe wrapper around one :class:`RpcServer`."""
 
@@ -54,16 +71,31 @@ class RpcGateway:
         self._server = server or RpcServer()
         self._lock = threading.RLock()
 
-    def call(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def call(
+        self, req: Dict[str, Any], *, serial_allowed: bool = True
+    ) -> Dict[str, Any]:
         """Dispatch one JSON-RPC request and return its response envelope.
 
         Errors are returned **in-band** as ``{"ok": false, ...}`` — exactly the
         shape ``fcapz.rpc.main`` emits — not raised, so every transport sees the
         same protocol.
+
+        ``serial_allowed=False`` refuses anything that reaches a serial port:
+        a request that names one, and -- checked under the lock, against the
+        session it would act on -- every session command while the open
+        session is a byte-stream link.  A ``capture`` or ``close`` carries no
+        backend field, so the request alone cannot say.
         """
         if req.get("cmd") in self._LOCK_FREE_CMDS:
+            if not serial_allowed and _names_serial(req):
+                return _serial_denied()
             return self._dispatch(req)
         with self._lock:
+            if not serial_allowed and (
+                _names_serial(req)
+                or self._server.session_transport_kind() == "bytestream"
+            ):
+                return _serial_denied()
             return self._dispatch(req)
 
     def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:

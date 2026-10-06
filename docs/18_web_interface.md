@@ -43,14 +43,21 @@ Serial ports get a rule of their own. `list_serial_ports` and a `connect` with
 `backend: "serial"` are refused for **remote** clients on a server started
 without `--token`, because opening a serial port asserts DTR/RTS — on a
 development machine that resets RP2040/RP2350 boards and disturbs JTAG probes
-and programmers, which all appear as serial ports too. Loopback clients are
-unaffected, and a remote client with a token may use them normally. (Enumeration
-itself never opens a port, on any path.)
+and programmers, which all appear as serial ports too. Once a serial session is
+open, the same remote clients are refused **every** session command (`probe`,
+`capture`, `close`, a `connect` that would replace it, …), since those drive the
+serial port even though they name no backend. Loopback clients are unaffected,
+and a remote client with a token may use them normally. (Enumeration itself
+never opens a port, on any path.)
 
 Cross-origin API access is **off by default** (the bundled UI is same-origin,
 and `npm run dev` proxies `/api`), so a random website cannot drive the board;
 enable it only if you serve the frontend from a different origin, with
-`--cors-origin`. When bound to a loopback address the server also rejects
+`--cors-origin`. CORS does not apply to WebSockets, so `/api/ws` checks the
+handshake's `Origin` itself: it must be the server's own origin, a
+`--cors-origin`, or a loopback page connecting from loopback (the dev proxy). A
+client that sends no `Origin` — a script rather than a browser — is governed by
+the token as before. When bound to a loopback address the server also rejects
 requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 
 | Flag | Default | Meaning |

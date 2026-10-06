@@ -22,6 +22,7 @@ import json
 import secrets
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import urlsplit
 
 from fastapi import (
     Depends,
@@ -95,8 +96,8 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
     return None
 
 
-def _serial_guard(req: dict, client_host: Optional[str], token: Optional[str]) -> Optional[dict]:
-    """Restrict serial-port access to loopback clients on a token-less server.
+def _serial_allowed(client_host: Optional[str], token: Optional[str]) -> bool:
+    """May this client reach serial ports?  Loopback, or any on a token server.
 
     Enumerating is harmless on its own -- ``list_serial_ports`` never opens a
     port -- but it hands a caller the exact device names, and a serial
@@ -110,33 +111,41 @@ def _serial_guard(req: dict, client_host: Optional[str], token: Optional[str]) -
     use stays available -- it just has to be authenticated.  Loopback clients
     are unaffected either way.
 
-    Returns an in-band error envelope to send back, or ``None`` to allow.
+    The answer is passed to :meth:`RpcGateway.call`, which enforces it under
+    the session lock: a request that names no backend (``capture``,
+    ``close``) still reaches the serial port when the open session is serial,
+    and only the gateway knows what the open session is.
     """
-    if token is not None or _is_loopback(client_host):
-        return None
-    cmd = req.get("cmd", "")
-    backend = req.get("backend", "")
-    is_serial = cmd == "list_serial_ports" or (
-        isinstance(backend, str) and backend == "serial"
-    )
-    if not is_serial:
-        return None
-    return {
-        "ok": False,
-        "schema_version": _SCHEMA_VERSION,
-        "error": (
-            "Serial-port access from a remote client needs a server token "
-            "(start the server with --token)."
-        ),
-        "type": "PermissionError",
-    }
+    return token is not None or _is_loopback(client_host)
 
 
-def _request_guard(
-    req: dict, client_host: Optional[str], token: Optional[str]
-) -> Optional[dict]:
-    """Every per-request origin check, in one place for both transports."""
-    return _openocd_guard(req, client_host) or _serial_guard(req, client_host, token)
+def _origin_ok(
+    origin: Optional[str],
+    host_header: Optional[str],
+    client_host: Optional[str],
+    allowed_origins: Iterable[str],
+) -> bool:
+    """Cross-site WebSocket gate.
+
+    CORS does not cover WebSockets: any page a browser has open can connect to
+    ``ws://127.0.0.1:7373/api/ws``, and its ``Host`` header is the real one,
+    so the rebinding check passes.  On a token-less loopback server that page
+    would get the whole API.  Browsers always send ``Origin`` on a WebSocket
+    handshake, so require it to be this server, a configured CORS origin, or
+    -- for the Vite dev proxy, which rewrites ``Host`` but not ``Origin`` -- a
+    loopback page reaching us from loopback.  No ``Origin`` at all is a
+    non-browser client (a script), which the token governs as before.
+    """
+    if origin is None:
+        return True
+    if origin in allowed_origins:
+        return True
+    parsed = urlsplit(origin)
+    if not parsed.hostname:  # "null": a sandboxed frame or a file:// page
+        return False
+    if host_header and parsed.netloc.lower() == host_header.strip().lower():
+        return True
+    return _is_loopback(parsed.hostname) and _is_loopback(client_host)
 
 
 def _host_name(host_header: Optional[str]) -> Optional[str]:
@@ -191,6 +200,7 @@ def create_app(
                 quartus_stp_path=quartus_stp_path,
             )
         )
+    cors_origins = tuple(cors_origins)
     app = FastAPI(title="fpgacapZero web", version="1")
     app.state.gateway = gateway
     # Capture fcapz backend logs into a ring buffer for the web Log tab, so
@@ -242,16 +252,26 @@ def create_app(
                 "error": "Host not allowed (possible DNS rebinding).",
                 "type": "PermissionError",
             }
-        blocked = _request_guard(
-            req, request.client.host if request.client else None, token
-        )
+        client_host = request.client.host if request.client else None
+        blocked = _openocd_guard(req, client_host)
         if blocked is not None:
             return blocked
-        return await run_in_threadpool(gateway.call, req)
+        return await run_in_threadpool(
+            gateway.call, req, serial_allowed=_serial_allowed(client_host, token)
+        )
 
     @app.websocket("/api/ws")
     async def ws(websocket: WebSocket):
+        client_host = websocket.client.host if websocket.client else None
         if not _host_header_ok(websocket.headers.get("host"), bind_host):
+            await websocket.close(code=1008)
+            return
+        if not _origin_ok(
+            websocket.headers.get("origin"),
+            websocket.headers.get("host"),
+            client_host,
+            cors_origins,
+        ):
             await websocket.close(code=1008)
             return
         if token is not None and not _token_ok(websocket.query_params.get("token"), token):
@@ -279,13 +299,15 @@ def create_app(
                         }
                     )
                     continue
-                blocked = _request_guard(
-                    req, websocket.client.host if websocket.client else None, token
-                )
+                blocked = _openocd_guard(req, client_host)
                 if blocked is not None:
                     await websocket.send_json(blocked)
                     continue
-                resp = await run_in_threadpool(gateway.call, req)
+                resp = await run_in_threadpool(
+                    gateway.call,
+                    req,
+                    serial_allowed=_serial_allowed(client_host, token),
+                )
                 await websocket.send_json(resp)
         except WebSocketDisconnect:
             return
