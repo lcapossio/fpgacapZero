@@ -828,9 +828,9 @@ class TapBridgeTransport(Transport):
     def _wire_time_s(self, nbytes: int) -> float:
         """Seconds *nbytes* take to cross the channel, at its line rate.
 
-        Sizes the wait for a long reply and the drain after a failed one.  A
-        channel that does not know its rate returns 0, and gets only the fixed
-        allowances.
+        Sizes the drain after a failed reply (see :meth:`_resync`).  A channel
+        that does not know its rate returns 0, and gets only the fixed
+        allowance.
         """
         return 0.0
 
@@ -1316,10 +1316,10 @@ class SerialTapTransport(TapBridgeTransport):
     bridges through to the fabric -- the transport does not care which.
     """
 
-    # Slack for a reply to start, on top of the time its bytes take on the
-    # wire (see _read_bytes).  The bridge answers as fast as the link drains,
-    # so a short allowance is plenty and keeps a dead link from stalling a
-    # capture.
+    # How long the link may stay silent before a reply is given up on (see
+    # _read_bytes); a long reply that keeps arriving is never cut short.  The
+    # bridge answers as fast as the link drains, so a short allowance is
+    # plenty and keeps a dead link from stalling a capture.
     DEFAULT_TIMEOUT = 2.0
     # 8N1: a start bit, eight data bits and a stop bit per byte.
     BITS_PER_BYTE = 10
@@ -1396,25 +1396,23 @@ class SerialTapTransport(TapBridgeTransport):
         self._ser.flush()
 
     def _read_bytes(self, count: int) -> bytes:
-        """Read *count* bytes, allowing for how long they take to arrive.
+        """Read *count* bytes, for as long as they keep arriving.
 
         pyserial's timeout bounds a whole read, so on its own it caps every
         reply at ``timeout`` however long: a 4 kB burst at 9,600 baud needs
-        over four seconds just on the wire.  The deadline here is ``timeout``
-        plus the reply's wire time, and reading carries on while bytes are
-        still arriving.  The port's own timeout is left alone -- changing it
-        reconfigures the port -- so a read that finds nothing at all still
-        returns after ``timeout`` of silence.
+        over four seconds just on the wire.  Nor can a deadline be sized for
+        it here -- the bridge streams a burst reply scan by scan, and how long
+        each scan takes depends on the fabric clock, which the host does not
+        know.  So ``timeout`` is how long the link may be *silent*: each read
+        returns what arrived within it, reading continues while anything did,
+        and a read that brings nothing ends the reply.
         """
-        deadline = time.monotonic() + self.timeout + self._wire_time_s(count)
         data = bytearray()
         while len(data) < count:
             chunk = self._ser.read(count - len(data))
             if not chunk:
                 break
             data += chunk
-            if time.monotonic() >= deadline:
-                break
         return bytes(data)
 
     def _discard_input(self) -> int:

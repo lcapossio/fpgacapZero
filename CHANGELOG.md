@@ -97,8 +97,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   transaction the host waits for 50 ms of silence and discards any late
   reply, so it is not read as the next command's header; a link that will not
   go quiet raises `ConnectionError` on every later command until reconnected.
-  The reply deadline is the timeout plus the reply's wire time at the
-  configured baud, so a long burst reply on a slow link is not cut short.
+  The serial `timeout` now bounds silence, not the whole reply: a reply is
+  read while its bytes keep arriving, so a long burst on a slow link or a slow
+  fabric clock is not cut short.
 - **Byte-stream TAP — a failed burst raises instead of falling back.**
   `SerialTapTransport.read_block()` / `read_timestamp_block()` used to catch a
   failed burst, switch burst off for the session and re-read through the

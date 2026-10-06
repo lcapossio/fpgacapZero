@@ -769,22 +769,26 @@ def test_a_reply_longer_than_one_read_timeout_is_still_read(fake_serial):
     assert t.read_block(ADDR_DATA_BASE, 200) == port.samples
 
 
-def test_the_reply_deadline_grows_with_the_reply(fake_serial, monkeypatch):
-    """timeout + wire time: 4,104 bytes at 9,600 baud is 4.3 s on the wire.
+def test_a_reply_is_read_while_it_keeps_arriving(fake_serial, monkeypatch):
+    """No wall-clock cap on a reply that is still arriving.
 
-    The clock reads 3 s after the first chunk -- past a flat 2 s timeout, well
-    inside 2 s plus the wire time -- so reading carries on to the end.
+    The bridge streams a burst reply scan by scan, at a pace set by the fabric
+    clock: 1 MHz with 64-bit samples takes ~16 s for 262 kB that need only
+    ~10.5 s on a 250 kbaud wire.  A deadline sized from the wire time would cut
+    that short; the clock here jumps a minute between chunks, and the read
+    still completes.  Only a read that brings nothing ends it.
     """
     fake_serial["obj"] = _TricklingPort(chunk=1_000)
-    t, port = _connect(fake_serial, baudrate=9_600, timeout=2.0)
-    clock = iter([0.0] + [3.0] * 10)
-    monkeypatch.setattr("fcapz.transport.time.monotonic", lambda: next(clock))
-    port._tx.extend(bytes(range(256)) * 16 + b"\x00" * 8)
+    t, port = _connect(fake_serial, baudrate=250_000, timeout=2.0)
+    minutes = iter(range(0, 6_000, 60))
+    monkeypatch.setattr(
+        "fcapz.transport.time.monotonic", lambda: float(next(minutes))
+    )
+    port._tx.extend(b"\x5A" * 4_104)
     assert len(t._read_bytes(4_104)) == 4_104
 
-    clock = iter([0.0] + [7.0] * 10)          # past timeout + wire time
-    port._tx.extend(b"\x00" * 4_104)
-    assert len(t._read_bytes(4_104)) == 1_000
+    port._tx.extend(b"\x5A" * 1_500)          # the link goes silent part way
+    assert len(t._read_bytes(4_104)) == 1_500
 
 
 # -- the protocol engine is PHY-agnostic ------------------------------------
