@@ -665,7 +665,7 @@ def test_a_bridge_error_status_does_not_resync(fake_serial, monkeypatch):
     """An error reply is complete and well framed: the link is in step."""
     t, _ = _connect(fake_serial)
     calls = []
-    monkeypatch.setattr(t, "_resync", lambda: calls.append(1))
+    monkeypatch.setattr(t, "_resync", lambda *_: calls.append(1))
     with pytest.raises(RuntimeError, match="chain out of range"):
         t.raw_dr_scan(0, 8, chain=9)
     assert calls == []
@@ -696,6 +696,95 @@ def test_resync_gives_up_on_a_link_that_never_goes_quiet(fake_serial, monkeypatc
     )
     t._resync()                   # returns rather than spinning forever
     assert port.in_waiting == 0
+
+
+def test_a_link_that_never_goes_quiet_refuses_further_commands(
+    fake_serial, monkeypatch
+):
+    """Past a failed resync, any reply could be the old command's tail."""
+    t, port = _connect(fake_serial)
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_MAX_ROUNDS", 3)
+    monkeypatch.setattr(
+        "fcapz.transport.time.sleep", lambda _s: port._tx.extend(b"\x55")
+    )
+    port._tx.extend(b"\x00\x00")
+    with pytest.raises(RuntimeError, match="bad reply framing"):
+        t.read_reg(0x0040)
+
+    sent = len(port._rx)
+    with pytest.raises(ConnectionError, match="out of step"):
+        t.read_reg(0x0040)
+    assert len(port._rx) == sent              # nothing went out
+
+    monkeypatch.setattr("fcapz.transport.time.sleep", lambda _s: None)
+    t.close()
+    t.connect()                               # reopening recovers
+    port.mem[0x0040] = 0x1234
+    assert t.read_reg(0x0040) == 0x1234
+
+
+def test_resync_allows_for_a_long_reply_still_on_the_wire(
+    fake_serial, monkeypatch
+):
+    """A burst reply on a slow link outlasts the fixed drain budget.
+
+    1,000 bytes at 9,600 baud take ~1 s to arrive; three 50 ms quiet periods
+    would give up a tenth of the way through and leave the link out of step.
+    """
+    t, port = _connect(fake_serial, baudrate=9_600)
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_QUIET_S", 0.05)
+    monkeypatch.setattr(TapBridgeTransport, "RESYNC_MAX_ROUNDS", 3)
+    trickle = [b"\x55" * 48] * 20 + [b""]
+    sleeps = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        port._tx.extend(trickle.pop(0))
+
+    monkeypatch.setattr("fcapz.transport.time.sleep", _sleep)
+    t._resync(1_000)
+    assert len(sleeps) == 21
+    assert not t._out_of_step
+    port.mem[0x0040] = 0x5678
+    assert t.read_reg(0x0040) == 0x5678
+
+
+class _TricklingPort(FakeTapPort):
+    """Hands back at most *chunk* bytes per read, as a slow link does when
+    pyserial's whole-read timeout expires part way through a reply."""
+
+    def __init__(self, chunk, **kwargs):
+        super().__init__(**kwargs)
+        self.chunk = chunk
+
+    def read(self, n):
+        return super().read(min(n, self.chunk))
+
+
+def test_a_reply_longer_than_one_read_timeout_is_still_read(fake_serial):
+    fake_serial["obj"] = _TricklingPort(chunk=3, max_dr_bits=64)
+    t, port = _connect(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = 8
+    port.samples = list(range(200))
+    assert t.read_block(ADDR_DATA_BASE, 200) == port.samples
+
+
+def test_the_reply_deadline_grows_with_the_reply(fake_serial, monkeypatch):
+    """timeout + wire time: 4,104 bytes at 9,600 baud is 4.3 s on the wire.
+
+    The clock reads 3 s after the first chunk -- past a flat 2 s timeout, well
+    inside 2 s plus the wire time -- so reading carries on to the end.
+    """
+    fake_serial["obj"] = _TricklingPort(chunk=1_000)
+    t, port = _connect(fake_serial, baudrate=9_600, timeout=2.0)
+    clock = iter([0.0] + [3.0] * 10)
+    monkeypatch.setattr("fcapz.transport.time.monotonic", lambda: next(clock))
+    port._tx.extend(bytes(range(256)) * 16 + b"\x00" * 8)
+    assert len(t._read_bytes(4_104)) == 4_104
+
+    clock = iter([0.0] + [7.0] * 10)          # past timeout + wire time
+    port._tx.extend(b"\x00" * 4_104)
+    assert len(t._read_bytes(4_104)) == 1_000
 
 
 # -- the protocol engine is PHY-agnostic ------------------------------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import math
 import os
 import queue
 import re
@@ -763,6 +764,10 @@ class TapBridgeTransport(Transport):
             None if burst_dr_bits is None else int(burst_dr_bits)
         )
         self._has_burst = bool(burst)
+        # Set when a failed transaction could not be drained: the next reply
+        # might be the tail of the old one, so nothing more is sent until the
+        # channel is reopened.
+        self._out_of_step = False
 
     transport_kind = "bytestream"
 
@@ -820,6 +825,15 @@ class TapBridgeTransport(Transport):
         :meth:`_resync` a single quiet wait."""
         return 0
 
+    def _wire_time_s(self, nbytes: int) -> float:
+        """Seconds *nbytes* take to cross the channel, at its line rate.
+
+        Sizes the wait for a long reply and the drain after a failed one.  A
+        channel that does not know its rate returns 0, and gets only the fixed
+        allowances.
+        """
+        return 0.0
+
     def _channel_name(self) -> str:
         """Short identifier for error messages (a port name, say)."""
         return type(self).__name__
@@ -828,6 +842,7 @@ class TapBridgeTransport(Transport):
     def connect(self) -> None:
         self._open()
         self._open_channel = True
+        self._out_of_step = False
         try:
             self._identify()
         except BaseException:
@@ -882,9 +897,16 @@ class TapBridgeTransport(Transport):
         """Send one command and return its reply payload.
 
         Raises ``RuntimeError`` on a bridge-reported error status or a short
-        read, and ``ConnectionError`` if the channel fails mid-transaction.
+        read, and ``ConnectionError`` if the channel fails mid-transaction or
+        an earlier failure left it out of step.
         """
         self._require_open()
+        if self._out_of_step:
+            raise ConnectionError(
+                f"link to {self._channel_name()} is out of step: a failed "
+                f"transaction kept talking past the resync, so a reply could "
+                f"belong to the wrong command. Reconnect to recover."
+            )
         try:
             self._write_bytes(command)
             header = self._read_bytes(2)
@@ -894,13 +916,13 @@ class TapBridgeTransport(Transport):
             ) from exc
 
         if len(header) < 2:
-            self._resync()
+            self._resync(2 + resp_bytes - len(header))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()} did not reply "
                 f"(got {len(header)} of 2 header bytes)"
             )
         if header[0] != self.SOF_RSP:
-            self._resync()
+            self._resync(2 + resp_bytes)
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: bad reply framing "
                 f"(expected SOF 0x{self.SOF_RSP:02X}, got 0x{header[0]:02X})"
@@ -919,31 +941,42 @@ class TapBridgeTransport(Transport):
             return b""
         payload = self._read_bytes(resp_bytes)
         if len(payload) < resp_bytes:
-            self._resync()
+            self._resync(resp_bytes - len(payload))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: short reply "
                 f"({len(payload)} of {resp_bytes} bytes)"
             )
         return payload
 
-    def _resync(self) -> None:
+    def _resync(self, outstanding: int = 0) -> None:
         """Bring the link back into step after a failed transaction.
 
         Waits for :attr:`RESYNC_QUIET_S` of silence, dropping anything that
-        arrives meanwhile.  Best effort: a channel error here is left for the
-        next transaction to report.
+        arrives meanwhile.  *outstanding* is how many reply bytes may still be
+        on the way; their wire time is added to the drain budget, so a long
+        reply on a slow link is drained rather than mistaken for a link that
+        never goes quiet.  If it still does not go quiet, the transport is
+        marked out of step and refuses further commands.  A channel error here
+        is left for the next transaction to report.
         """
+        rounds = self.RESYNC_MAX_ROUNDS
+        if self.RESYNC_QUIET_S > 0:
+            rounds += math.ceil(
+                self._wire_time_s(max(0, outstanding)) / self.RESYNC_QUIET_S
+            )
         try:
-            for _ in range(self.RESYNC_MAX_ROUNDS):
+            for _ in range(rounds):
                 time.sleep(self.RESYNC_QUIET_S)
                 if self._discard_input() == 0:
                     return
-            _tap_log.warning(
-                "%s did not go quiet after a failed transaction",
-                self._channel_name(),
-            )
         except OSError:
-            pass
+            return
+        self._out_of_step = True
+        _tap_log.warning(
+            "%s did not go quiet after a failed transaction; refusing further "
+            "commands until it is reconnected",
+            self._channel_name(),
+        )
 
     # -- Transport API ------------------------------------------------------
     def select_chain(self, chain: int) -> None:
@@ -1283,10 +1316,13 @@ class SerialTapTransport(TapBridgeTransport):
     bridges through to the fabric -- the transport does not care which.
     """
 
-    # A reply is at most SOF + status + ceil(MAX_DR_BITS/8) bytes; the bridge
-    # answers as fast as the link drains, so a short timeout is plenty and
-    # keeps a dead link from stalling a capture.
+    # Slack for a reply to start, on top of the time its bytes take on the
+    # wire (see _read_bytes).  The bridge answers as fast as the link drains,
+    # so a short allowance is plenty and keeps a dead link from stalling a
+    # capture.
     DEFAULT_TIMEOUT = 2.0
+    # 8N1: a start bit, eight data bits and a stop bit per byte.
+    BITS_PER_BYTE = 10
 
     def __init__(
         self,
@@ -1360,13 +1396,35 @@ class SerialTapTransport(TapBridgeTransport):
         self._ser.flush()
 
     def _read_bytes(self, count: int) -> bytes:
-        return self._ser.read(count)
+        """Read *count* bytes, allowing for how long they take to arrive.
+
+        pyserial's timeout bounds a whole read, so on its own it caps every
+        reply at ``timeout`` however long: a 4 kB burst at 9,600 baud needs
+        over four seconds just on the wire.  The deadline here is ``timeout``
+        plus the reply's wire time, and reading carries on while bytes are
+        still arriving.  The port's own timeout is left alone -- changing it
+        reconfigures the port -- so a read that finds nothing at all still
+        returns after ``timeout`` of silence.
+        """
+        deadline = time.monotonic() + self.timeout + self._wire_time_s(count)
+        data = bytearray()
+        while len(data) < count:
+            chunk = self._ser.read(count - len(data))
+            if not chunk:
+                break
+            data += chunk
+            if time.monotonic() >= deadline:
+                break
+        return bytes(data)
 
     def _discard_input(self) -> int:
         pending = self._ser.in_waiting
         if pending:
             self._ser.read(pending)
         return pending
+
+    def _wire_time_s(self, nbytes: int) -> float:
+        return nbytes * self.BITS_PER_BYTE / self.baudrate
 
 
 def find_quartus_stp(explicit: str | None = None) -> str | None:

@@ -383,7 +383,18 @@ has been quiet for `RESYNC_QUIET_S` (50 ms), discarding anything that arrives,
 before raising.  By then the bridge has dropped whatever it was waiting on,
 and a late reply cannot be read as the header of the next command.  The next
 command therefore starts clean, without a board reset.  A bridge error status
-is a complete reply, and needs no resync.
+is a complete reply, and needs no resync.  The drain allows for the failed
+reply's own wire time, so a long burst reply on a slow link is drained rather
+than given up on; a link that still will not go quiet leaves the transport
+**out of step**, and every later command raises `ConnectionError` until it is
+reconnected, since any reply could then be the tail of the old one.
+
+Each reply is given `timeout` (2 s by default) to start plus its wire time at
+the configured baud rate (10 bits a byte), and reading carries on while bytes
+are still arriving.  A burst reply is the whole readback in one piece -- 4 kB
+for a 4096-sample 8-bit capture -- so at 9,600 baud it needs over four
+seconds, which a flat timeout would cut short.  Through a USB-CDC bridge to an
+MCU (as on Forgix), pass the rate of the MCU-to-FPGA UART, the slowest hop.
 
 Corrupted bytes inside a command are not detected: they are parsed as data,
 like any other byte.  The timeout recovers lost bytes, not wrong ones.
