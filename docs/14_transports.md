@@ -283,6 +283,25 @@ reached on chain 1 at base offset `0x8000`
 (`EioController(t, chain=1, base_addr=0x8000)`).  See the
 [BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
 
+#### PolarFire over OpenOCD
+
+PolarFire and PolarFire SoC use this transport with
+`ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE` (USER1/USER2 = IR `0x20`/`0x21`).
+The CLI and board discovery select it for a tap name starting with `MPF`.
+
+- A device has one `UJTAG`, so a design gets one fcapz wrapper.  An EIO next
+  to the ELA rides on chain 1 at offset `0x8000` (`EIO_EN=1`), as on Gowin.
+- `UJTAG`'s JTAG pins must reach top-level ports; the wrappers pass them
+  through on their `*_pad_*` ports, and Libero binds those ports to the
+  dedicated pins.
+- On PolarFire SoC the MSS RISC-V debug module answers at IR `0x10`/`0x11`.
+  Declare only the FPGA TAP in the OpenOCD config (no RISC-V `target create`)
+  unless you also debug the MSS, and keep the fcapz IRs out of that range.
+- On Windows, Microchip's FlashPro driver owns the embedded FlashPro5's JTAG
+  channel, so OpenOCD's `ftdi` driver cannot open it.
+
+See the [Discovery Kit example](../examples/mpfs_disco_kit/README.md).
+
 ### `QuartusStpTransport`
 
 Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus
@@ -362,6 +381,7 @@ swap one for the other without changing the IR table.
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
+| Microchip PolarFire / PolarFire SoC | `OpenOcdTransport.IR_TABLE_POLARFIRE` | Auto-selected by the CLI for `--tap MPF...`; one `UJTAG` per device |
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
 TAP's DR, so every DR scan is one shift longer than the fcapz frame.
@@ -760,7 +780,8 @@ will differ.
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
 | `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
-**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9, but not yet
+**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9 and the PolarFire
+SoC Discovery Kit, but not yet
 benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
 to be slower than `hw_server` per scan because OpenOCD's TCL listener has
 limited batched-scan support, but the delta is not documented until somebody

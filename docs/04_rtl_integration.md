@@ -33,7 +33,8 @@ features they expose.
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
-| Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
+| Microchip PolarFire / PolarFire SoC | `_polarfire` | ✅ PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
+| Microchip SmartFusion2 / IGLOO2 | `_polarfire` | ❌ same `UJTAG` ports as PolarFire, not yet HW-validated |
 | Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
@@ -51,9 +52,10 @@ includes the ELA configuration matrix for small/scalable builds:
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
 Arty A7 hardware test validates the AMD/Xilinx 7-series reference bitstream and
-the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
-PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
-lint-clean until a board-level smoke test is added for that family.
+the BRS-100 smoke/stress path validates the Gowin wrapper. The DE25-Nano
+and PolarFire SoC Discovery Kit tests validate the Intel and PolarFire
+wrappers. ECP5 and UltraScale wrappers should be treated as RTL-implemented
+and lint-clean until a board-level smoke test is added for that family.
 
 > [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2

@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Microchip PolarFire — hardware-validated, with a Discovery Kit example.**
+  `examples/mpfs_disco_kit/` puts an 8-bit × 1024 ELA and a shared-chain EIO on
+  the PolarFire SoC Discovery Kit (MPFS095T), with a Libero batch flow
+  (`build.py --program`), an OpenOCD config for the on-board FlashPro5 and
+  hardware tests. All 11 hardware tests pass over OpenOCD. The host gains
+  `OpenOcdTransport.IR_TABLE_POLARFIRE` (USER1/USER2 = `0x20`/`0x21`), selected
+  for `MPF*` tap names by the CLI and board discovery and offered by the GUIs.
+  The `ftdi` path of the board config has not yet run on hardware: on Windows,
+  Microchip's FlashPro driver owns the JTAG channel.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -57,6 +67,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   public API's undocumented classes and methods have docstrings.
 
 ### Changed
+
+- **BREAKING (PolarFire wrappers): JTAG pad ports and new USER IR defaults.**
+  `fcapz_ela_polarfire`, `fcapz_eio_polarfire` and `jtag_tap_polarfire`
+  (Verilog and VHDL) gain `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`
+  and `tdo_pad_o`. Connect them to top-level ports of the same direction;
+  Libero binds them to the dedicated JTAG pins. `IR_USER1`/`IR_USER2` now
+  default to `0x20`/`0x21`, because on PolarFire SoC the MSS debug module
+  answers at the old `0x10`/`0x11`. No working design is affected: the old
+  wrapper could not elaborate in Libero (see Fixed).
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -112,6 +131,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **PolarFire — `UJTAG` instantiation.** `jtag_tap_polarfire` used per-bit
+  `UIREG0..7` ports and left out the JTAG pins, which do not match Libero's
+  `UJTAG`. It now uses the `UIREG[7:0]` bus and passes the pins through. The
+  simulation stub, which had copied the wrong port list, now matches Libero's.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
