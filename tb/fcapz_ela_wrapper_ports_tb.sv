@@ -60,12 +60,21 @@ module fcapz_ela_wrapper_ports_tb;
         .jtag2_sel(1'b0)
     );
 
+    fcapz_ela_intel #(
+        .SAMPLE_W(SAMPLE_W), .DEPTH(16), .PROBE_MUX_W(PROBE_MUX_W)
+    ) u_intel (
+        .sample_clk(clk), .sample_rst(rst),
+        .probe_in(probe),
+        .trigger_in(1'b0), .trigger_out(), .armed_out()
+    );
+
     initial begin
         #100 rst = 1'b0;
         #100;
         $display("\n=== probe_in reaches the core at full mux width ===");
         check("fcapz_ela_uart",   u_uart.u_ela.probe_in   === probe);
         check("fcapz_ela_efinix", u_efinix.u_ela.probe_in === probe);
+        check("fcapz_ela_intel",  u_intel.u_ela.probe_in  === probe);
 
         $display("\n=== Summary: %0d passed, %0d failed ===",
                  pass_count, fail_count);

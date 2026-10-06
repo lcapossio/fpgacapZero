@@ -240,6 +240,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Intel ELA wrapper — `PROBE_MUX_W` captured zeros above the first slice.**
+  `fcapz_ela_intel.v` forwarded `PROBE_MUX_W` to the core, whose `probe_in` is
+  then `PROBE_MUX_W` bits wide, but declared its own port as
+  `SAMPLE_W*NUM_CHANNELS`. Tools only warn and zero-pad that, so every mux
+  slice past the first read zeros. The port now matches the core, as on the
+  Xilinx wrappers. No shipped example sets `PROBE_MUX_W` on Intel. The ECP5,
+  Gowin and PolarFire wrappers and the VHDL Intel wrapper take no
+  `PROBE_MUX_W` and were not affected.
+
 - **hw_server and Quartus — burst readout decoded some sample widths wrong.**
   Samples were unpacked at a stride of `256 // (256 // SAMPLE_W)` bits,
   while `jtag_burst_read` packs them at `SAMPLE_W`. The two differ whenever
