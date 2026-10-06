@@ -8,6 +8,18 @@ export interface RpcResponse {
   [key: string]: unknown;
 }
 
+/** What the session is talking *through*, when the transport can say.
+ *  A plain JTAG probe reports nothing (null); the byte-stream TAP bridge
+ *  negotiates these on connect. */
+export interface LinkInfo {
+  kind: string;
+  channel: string;
+  proto_version: number;
+  num_chains: number;
+  max_dr_bits: number;
+  baudrate?: number;
+}
+
 export interface ConnectionParams {
   backend: string;
   host: string;
@@ -54,6 +66,13 @@ export interface Core {
 }
 
 /** A discovered fpgacapZero-compatible board (one OpenOCD tap that probed as an ELA). */
+/** One serial port as the server enumerated it (never opened). */
+export interface SerialPort {
+  device: string;
+  description: string;
+  hwid: string;
+}
+
 export interface Board {
   backend: string;
   host: string;

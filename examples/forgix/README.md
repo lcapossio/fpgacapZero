@@ -1,0 +1,357 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+-->
+
+# Forgix (Efinix Trion T8F49 + RP2354)
+
+fpgacapZero on the [Forgix board](https://forgix.tech/) — a Teensy-footprint
+board pairing an Efinix Trion T8F49 with a Raspberry Pi RP2354.
+
+This is a worked example of the generic UART TAP path, not a special case: the
+RTL and the host transport it uses are board- and vendor-agnostic. See
+[`docs/14_transports.md`](../../docs/14_transports.md#tapbridgetransport) for
+the general mechanism.
+
+## Quick start
+
+You need Efinity (2025.1 here), the Pico SDK with `picotool`, Python 3 and a
+clone of this repository. Each step links to its details below.
+
+1. **Build the bitstream.** Run the four Efinity flows in `efinity/`. The result
+   is `efinity/outflow/forgix.hex`. See
+   [Building the FPGA design](#building-the-fpga-design).
+2. **Patch and flash the RP2354 firmware**, once per board. Run
+   `firmware/apply_patch.py`, build it with the Pico SDK, back up the stock
+   loader, and flash the bridge. See
+   [Firmware](#firmware-the-rp2354-has-to-become-a-bridge).
+3. **Program the FPGA** with the upstream loader host tool, which is not
+   shipped here. Look for `DONE=high` in its output. The board's USB port is
+   now an fcapz link. This has to be repeated after every power-up or reset.
+4. **Install the host stack and capture:**
+
+   ```sh
+   pip install -e ".[serial]"    # from the repository root
+   fcapz list-ports              # find the board's port
+   fcapz --backend serial --serial-port COM5 probe
+   fcapz --backend serial --serial-port COM5 capture \
+       --pretrigger 8 --posttrigger 247 \
+       --trigger-value 0x80 --trigger-mask 0xFF \
+       --sample-clock-hz 32000000 --format vcd --out ramp.vcd
+   ```
+
+   Use `/dev/ttyACM0` on Linux. `probe` reports core id `19521` (`0x4C41`,
+   "LA"), 8-bit × 1024. The capture is a ramp from 120 to 119 through 255, with
+   the trigger value 0x80 at sample 8. Open `ramp.vcd` in GTKWave or any VCD
+   viewer. See [Capturing from the host](#capturing-from-the-host) for Python
+   and the web GUI.
+
+To start over, for example to load a new bitstream, reset the RP2354 by
+unplugging the board or running `picotool reboot -f`. That returns it to loader
+mode.
+
+## Why this board needs it
+
+**The Forgix board gives the FPGA fabric no JTAG whatsoever.**
+
+- The Trion T8 has no configuration flash. The RP2354 reconfigures it from
+  scratch at every power-up over a **passive SPI** link that is **write-only** —
+  there is no MISO (`FPGA_PIN_MISO` is `-1` in the stock firmware).
+- The T8's JTAG pins are not bonded out to a header pin, a test point, or a
+  connector. The board's only debug connector (J2, Tag-Connect TC2030) is
+  **ARM SWD for the RP2354**, not FPGA JTAG.
+
+So [`rtl/fcapz_ela_efinix.v`](../../rtl/fcapz_ela_efinix.v), which binds an
+Efinix device's hard JTAG User TAP blocks, **cannot be used on this board**.
+Wiring the JTAG pins out would not help either: the T8F49 package has no JTAG
+User TAP blocks at all. Efinity's Interface Designer lists no `JTAG_USER`
+resource for it, while the T8F81 and larger Trion packages have two. This
+example uses [`rtl/fcapz_ela_uart.v`](../../rtl/fcapz_ela_uart.v) instead,
+which drives the identical ELA core from a virtual TAP fed by a byte stream.
+
+## Wiring: none
+
+The bridge **reuses the configuration SPI pins**, which sit idle once `DONE`
+is high. No jumpers, no extra cable — just the USB-C lead.
+
+| Pin | During configuration | After `DONE` | Fabric signal |
+|---|---|---|---|
+| RP2354 GPIO2 → FPGA **CCK** | SPI clock | UART0 TX | `uart_rxd` |
+| RP2354 GPIO3 → FPGA **CDI** | SPI data in | UART0 RX | `uart_txd` |
+
+This works because **CCK and CDI are dual-purpose configuration pins**: Efinix
+[AN006](https://www.efinixinc.com/docs/an006-configuring-trion-fpgas-v6.6.pdf)
+Table 3 states they may be used as general I/O in user mode. Note that
+**CDONE is a _dedicated_ pin** (Table 2) and cannot be reused — which is why
+the return path is CDI rather than DONE.
+
+These are the assignments, confirmed by Efinity's own pinout report (it labels
+both balls "User IO/Configuration"):
+
+| Signal | GPIO resource | Ball |
+|---|---|---:|
+| `clk_in` (32 MHz) | `GPIOL_20_PLLIN` | B4 |
+| `uart_rxd` | `GPIOL_02_CCK` | F3 |
+| `uart_txd` | `GPIOL_04_CDI0` | F2 |
+| `led_armed_n` | `GPIOL_05_CDI5` | G1 |
+
+They are already made for you in [`efinity/`](efinity/) — you do not need to
+open the Interface Designer.
+
+> **Pad function gotcha.** GPIO2/GPIO3 reach UART0 TX/RX only through pad
+> function **11** (`UART_AUX`). The ordinary `GPIO_FUNC_UART` (function 2) maps
+> to UART0's **CTS/RTS** on these two pads, so using it yields a dead link
+> rather than a build error. The patch handles this.
+
+> **Contention window.** During configuration the RP2354 drives CDI; once the
+> T8 enters user mode the fabric drives it too. That is an output-vs-output
+> conflict, not just noise, so the firmware calls `spi_deinit()` and reassigns
+> the pads **the instant `DONE` is confirmed** — before the ACK is sent and
+> before the USB flush, either of which can block. The changeover is still not
+> simultaneous at both ends, so expect a few junk bytes right after
+> programming; send a `CMD_INFO` first and discard what precedes its reply.
+
+## Firmware: the RP2354 has to become a bridge
+
+The stock bitstream loader speaks a framed `FLDR` protocol on USB CDC and has
+no passthrough mode, so fcapz cannot reach the fabric through it. The patch in
+[`firmware/`](firmware/) adds one: after the FPGA reports `DONE`, the RP2354
+stops framing and becomes a transparent USB-CDC ↔ UART pipe.
+
+**Nothing in the upstream repository is modified.** The patch is vendored here
+and applied to a local copy, pinned to an upstream revision:
+
+```sh
+python examples/forgix/firmware/apply_patch.py          # fetch + patch locally
+python examples/forgix/firmware/apply_patch.py --check  # verify only
+```
+
+Then build with the Pico SDK and flash the resulting `.uf2` (BOOTSEL mode):
+
+```sh
+cmake -S <dest>/firmware/pico -B <dest>/firmware/pico/build \
+      -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=pico2
+cmake --build <dest>/firmware/pico/build
+```
+
+Flash it with `picotool`, which can force BOOTSEL over USB so you do not have
+to hold the button (take a backup first — this replaces the stock loader):
+
+```sh
+picotool save -a stock_loader_backup.uf2 -f     # keep the original
+picotool load forge_fpga_loader.uf2 -f -x       # flash and run
+```
+
+Then program the FPGA with the upstream host loader, which accepts the Efinity
+`.hex` directly. It is not shipped here. Get it from the
+[forgix_public](https://bitbucket.org/adiuvo-engineering/forgix_public)
+repository, in `BitStream_Loader/host`, at the revision `apply_patch.py` pins.
+It is used unmodified and needs only pyserial. Run it from that directory:
+
+```sh
+pip install pyserial
+python -m forge_loader.cli --port COM5 --file <fpgacapZero>/examples/forgix/efinity/outflow/forgix.hex
+# ... fpga programmed
+# FPGA pins: DONE=high, STATUS=high
+```
+
+Bridge mode is entered after a successful programming cycle and left only by
+resetting the board. That is deliberate: the T8 has to be reprogrammed at every
+power-up anyway, so a reset naturally returns you to loader mode — and it means
+no escape sequence exists that an fcapz scan payload could accidentally spell.
+
+Override the defaults at configure time: `FCAPZ_BRIDGE_PIN_TX`,
+`FCAPZ_BRIDGE_PIN_RX`, `FCAPZ_BRIDGE_BAUD_HZ`, or `FCAPZ_BRIDGE_ENABLE=0` to
+build the stock loader.
+
+## Building the FPGA design
+
+[`forgix_top.v`](forgix_top.v) instantiates `fcapz_ela_uart` with a
+free-running counter as the probe source, so a capture should read back a ramp.
+
+A complete Efinity project is in [`efinity/`](efinity/) — pin assignments,
+constraints and bitstream settings included. `efx_run` looks for the project
+file in the current directory, so build it from there:
+
+```sh
+cd efinity
+efx_run.bat forgix.xml --flow interface
+efx_run.bat forgix.xml --flow map
+efx_run.bat forgix.xml --flow pnr
+efx_run.bat forgix.xml --flow pgm     # -> efinity/outflow/forgix.hex
+```
+
+The `pgm` flow emits an SPI **passive x1** `.hex`, which is what the RP2354
+loader sends (it is the SPI master; the FPGA is the passive target).
+
+A build from a clean checkout reproduces the tested bitstream exactly. Only the
+`.hex` header differs, because it records the build time and project path.
+Efinity also rewrites the `last_change` timestamp in `forgix.xml`, so run
+`git checkout forgix.xml` in `efinity/` afterwards to keep your tree clean.
+
+[`forgix.sdc`](forgix.sdc) is not optional: `tap_tck` is generated inside the
+fabric, and Efinity does not infer a clock for it — without the
+`create_generated_clock` in there, that domain (roughly 940 flops plus both
+sample-RAM ports) is placed and routed but never timed, and the report looks
+clean because it only covers `clk_in`.
+
+> **`CLK_HZ` is 32 MHz**, matching the `clk_32m` signal in the vendor's own
+> reference design. The oscillator (ECS-2520MV) is a stocked family rather than
+> one frequency, so check your board if the link comes up garbled — a wrong
+> value produces noise, not a build error. `BAUD_RATE` must match
+> `FCAPZ_BRIDGE_BAUD_HZ` in the firmware; 32 MHz / 1 Mbaud divides exactly, so
+> there is no baud error at all.
+
+> **There is no user reset pin.** CRESET_N is a dedicated configuration pin
+> owned by the RP2354 and the JTAG pins are not bonded out, so nothing external
+> can reach the fabric. `forgix_top` generates its own short power-on reset
+> instead.
+
+## Capturing from the host
+
+Install the host stack from the repository root with the `serial` extra, which
+adds pyserial: `pip install -e ".[serial]"`. Add `web` as well
+(`".[serial,web]"`) for the browser GUI. `fcapz list-ports` lists the serial
+ports; the board shows up as a USB serial device once it is in bridge mode.
+
+The CLI commands are in the [Quick start](#quick-start); the serial options are
+in the [CLI reference](../../docs/10_cli_reference.md#serial-byte-stream-tap-bridge).
+The same capture from Python:
+
+```python
+from fcapz import Analyzer, CaptureConfig, TriggerConfig
+from fcapz.transport import SerialTapTransport
+
+t = SerialTapTransport("COM5", baudrate=1_000_000)    # /dev/ttyACM0 on Linux
+a = Analyzer(t)
+a.connect()
+print(a.probe()["core_id"] == 0x4C41)                 # True: the ELA answers
+
+a.configure(CaptureConfig(
+    pretrigger=8, posttrigger=247,
+    trigger=TriggerConfig(mode="value_match", value=0x80, mask=0xFF),
+    sample_clock_hz=32_000_000,
+))
+a.arm()
+result = a.capture()
+print(result.samples[:12])                            # 120, 121, 122, ...
+a.close()
+```
+
+`connect()` probes the bridge for its `FCZU` identity before any register
+access, so pointing it at the wrong port fails with a clear message instead of
+returning garbage. `baudrate` must match the firmware's `FCAPZ_BRIDGE_BAUD_HZ`
+(1 Mbaud by default).
+
+In the web GUI (`fcapz-web`, see
+[docs/18_web_interface.md](../../docs/18_web_interface.md)), pick the
+**serial** backend and enter the port.
+
+## Fitting the core in a T8
+
+Measured, not estimated — Efinity 2025.1, T8F49, C2 timing model,
+`optimization_level=TIMING_3`, placer seed 5, with [`forgix.sdc`](forgix.sdc)
+and the defaults in [`forgix_top.v`](forgix_top.v) (8-bit x 1024,
+`DUAL_COMPARE=0`, `BURST_W=64`, `USER1_DATA_EN=0`):
+
+| | Used | Available | Share |
+|---|---:|---:|---:|
+| Logic elements | 2,103 | 7,384 | 28.5 % |
+| — LUTs/adders | 1,468 | 7,384 | 19.9 % |
+| — registers | 1,163 | 5,280 | 22.0 % |
+| Memory blocks | 2 | 24 | 8.3 % |
+| Multipliers | 0 | 8 | 0 % |
+
+The sample buffer maps to `EFX_RAM_5K` blocks, not LUT memory. Timing closes
+with margin at the board's 32 MHz: `clk_in` reaches 47.6 MHz, and the `tap_tck`
+domain 28.8 MHz against the 16 MHz it needs.
+
+`USER1_DATA_EN=0` drops the ELA's register-window sample readout, which this
+design never uses: samples come back over the burst chain. That saves 64 LE.
+The window then reads as zeros, so the host never falls back to it — a burst
+that fails raises instead (see [docs/14_transports.md](../../docs/14_transports.md)).
+
+> **The placer seed matters near a tight constraint.** The critical path is
+> inside `fcapz_ela`. When this design ran at 50 MHz, seeds 1/3/5/9/12 put
+> `clk_in` anywhere between 49.4 and 51.8 MHz, so some seeds missed by well
+> under 1 %. If a build fails timing by a tenth of a nanosecond, try another
+> seed before changing the design.
+
+Where it went, measured on the 2,174 LE build (before the bridge's receive
+timeout and `USER1_DATA_EN=0`):
+
+| Block | LUTs | FFs |
+|---|---:|---:|
+| `fcapz_ela` | 552 | 639 |
+| `fcapz_tap_bridge` | 388 | 184 |
+| `jtag_burst_read` | 188 | 158 |
+| `jtag_reg_iface` | 81 | 99 |
+
+The transport used to cost more than the analyser it serves. It no longer does.
+
+Getting there took three rounds against the real tool, and every one of them
+was a wide structure in front of the 256-bit scan buffer that reads innocently
+in Verilog:
+
+- `scan_buf >> (BUF_W - scan_width)`, to justify the captured word, inferred a
+  full 256-bit **barrel shifter**.
+- `scan_buf[byte_index*8 +: 8] <= rx_data`, to place a payload byte, inferred a
+  **32-way byte demux** across all 256 bits.
+- Writing `scan_buf` from ten places in the FSM gave every bit a **wide
+  next-state mux**, since each write site is a separate function of the buffer.
+
+The first two are now shift registers with a few filler cycles; the third is
+one decoded datapath with a 3:1 mux and a shared fill value. Together they were
+**5,901 LE and Fmax 31 MHz** versus 2,744 LE and 51 MHz — the ELA core never
+moved.
+
+The fourth round was not a structure at all but a parameter. `BURST_W` was 256,
+copied from the hard-TAP wrappers, and it sets both this module's scan buffer
+and `jtag_burst_read`'s `sr`/`staging` pair. Once `CMD_BREAD` existed a wide DR
+stopped buying throughput (see below), so it went to 64 — the floor set by the
+49-bit control frame. That alone was **2,744 -> 2,174 LE and 1,726 -> 1,140
+registers**, most of it out of the burst engine.
+
+Turning `DUAL_COMPARE` back on, or widening `SAMPLE_W`, adds to the `fcapz_ela`
+row; the other three are fixed cost.
+
+## Throughput
+
+The UART is not the bottleneck it looks like. The T8's entire 122.88 kbit of
+BRAM is ~15 kB, so a full capture readback at 1 Mbaud takes well under a second.
+
+Readback goes through the ELA's burst chain (chain 2), which returns 8 8-bit
+samples per 64-bit scan — about **1.05 bytes per sample** on the wire, against
+~48 for the per-word control-chain path. A 1024-sample capture is ~1.07 kB
+rather than ~49 kB, or about 11 ms at 1 Mbaud.
+
+Widening the scan does not improve that. Every scan in a `CMD_BREAD` batch is
+packed samples under a single shared header, so the per-sample cost is
+essentially the sample itself at any width; going to 256 bits would cost
+~1,092 bytes rather than ~1,068, because the priming scan that gets discarded
+grows too. Width is a pure area decision on this transport, which is why it is
+64 here and 256 on the hard-TAP wrappers.
+
+## Status
+
+**Validated on real hardware.** On a Forgix board with the patched RP2354
+firmware and the bitstream from [`efinity/`](efinity/):
+
+- the FPGA configures over the RP2354 loader (`DONE=high, STATUS=high`);
+- `connect()` reads the bridge identity — 2 chains, 64-bit DRs, protocol 2;
+- the ELA identity registers read back correctly (core id `0x4C41` "LA",
+  8-bit x 1024, one trigger stage);
+- a 1024-sample capture returns a clean mod-256 ramp from the counter probe,
+  with **zero discontinuities**, over the burst chain;
+- ten consecutive captures were all clean, averaging **16 ms** per readback —
+  against ~11 ms of ideal wire time for 1,068 bytes at 1 Mbaud.
+
+Timing and fit, measured: 2,103 LE (28.5 %), `clk_in` 47.6 MHz against the
+32 MHz it needs and `tap_tck` 28.8 MHz against 16 MHz. After a byte is lost
+mid-command, the link recovers without a reset: a truncated scan followed by
+`connect()` and a capture works first time.
+
+The firmware patch compiles with the Pico SDK (2.3.1, `PICO_BOARD=pico2`) and
+runs. The RTL and host transport are also covered by simulation and unit tests
+([`tb/fcapz_uart_tap_tb.sv`](../../tb/fcapz_uart_tap_tb.sv),
+[`tests/test_serial_tap_transport.py`](../../tests/test_serial_tap_transport.py)).

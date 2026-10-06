@@ -145,7 +145,7 @@ readiness wait.
 ```json
 {
   "cmd": "connect",
-  "backend": "hw_server",     // or "openocd" / "usb_blaster"
+  "backend": "hw_server",     // or "openocd" / "usb_blaster" / "serial"
   "host": "127.0.0.1",
   "port": 3121,
   "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
@@ -165,7 +165,35 @@ For Quartus USB-Blaster, use:
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
+For the byte-stream TAP bridge ([chapter 14](14_transports.md)) there is no
+probe daemon, so no `host`/`port`/`tap` and no IR table:
+
+```json
+{
+  "cmd": "connect",
+  "backend": "serial",
+  "serial_port": "COM5",      // or "/dev/ttyACM0"; use list_serial_ports
+  "baudrate": 1000000         // optional, defaults to 1 Mbaud
+}
+```
+
+The serial session holds its port **exclusively**, so `eio_connect`,
+`eio_discover`, `axi_connect` and `uart_connect` — each of which opens a second
+transport alongside the analyzer's — are refused on this backend and report so.
+The chain carrying the burst reader's data DR is also excluded from every core
+sweep: it is a streaming interface, not a register one.
+
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1}`
+
+`transport_kind` is `"jtag"` for a link that reaches the fabric through a real
+TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
+semantics apply only to the former, which is why `ir_table` is **null** on a
+`serial` session — there is no IR there to preset.
+
+`link` describes what the session talks *through*, when the transport has
+something to report: `{"kind", "channel", "proto_version", "num_chains",
+"max_dr_bits"}` for the byte-stream bridge (plus `baudrate` over serial), and
+`null` for a JTAG probe, which negotiates nothing.
 
 `hw_server` and `usb_blaster` also take `"burst": false` for a bitstream with
 no burst readout path (the CLI's `--no-burst`); every capture is then read
@@ -183,6 +211,22 @@ core answers there, scans chain 2 and binds to the first core found (chains
 3/4 are never scanned — bridges there speak a different DR protocol and must
 not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
 session, e.g. to reach an AXI monitor directly.
+
+#### `list_serial_ports`
+
+Enumerate the server machine's serial ports, for the `serial` backend's port
+picker. Requires no connection and **never opens a port** — opening asserts
+DTR/RTS, which resets an RP2040/RP2350 and disturbs the JTAG probes and
+programmers that also appear in this list.
+
+```json
+{ "cmd": "list_serial_ports" }
+```
+
+Response: `{"ok": true, "ports": [{"device": "COM5", "description": "USB Serial Device (COM5)", "hwid": "USB VID:PID=2E8A:0009"}]}`,
+sorted by device name, and empty if pyserial is not installed. On a web server
+bound beyond loopback without a token, this and serial `connect` are refused for
+remote clients (see [chapter 18](18_web_interface.md)).
 
 #### `discover_boards`
 

@@ -33,12 +33,14 @@ subcommand follows:
 | Option | Default | Description |
 |---|---|---|
 | `--gui-config PATH` | — | Path to gui.toml (default: per-user fpgacapzero config directory) |
-| `--backend {openocd,hw_server,usb_blaster}` | `hw_server` | JTAG transport to use |
+| `--backend {openocd,hw_server,usb_blaster,serial}` | `hw_server` | Transport to use (serial is the byte-stream TAP bridge, not a JTAG probe) |
 | `--host HOST` | `127.0.0.1` | Transport host (hw_server or OpenOCD) |
 | `--port PORT` | `6666` | Transport TCP port. Left at 6666, hw_server uses its own port 3121; usb_blaster ignores it |
 | `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device) |
 | `--hardware NAME` | — | usb_blaster only: Quartus hardware name; default selects first USB-Blaster |
 | `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
+| `--serial-port PORT` | — | serial only: port of the TAP bridge, e.g. COM5 or /dev/ttyACM0 |
+| `--baud BAUD` | `1000000` | serial only: baud rate of the TAP bridge (default 1000000) |
 | `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
 | `--no-burst` | off | hw_server/usb_blaster: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
@@ -76,12 +78,34 @@ name starts with `@1`. The default AMD/Xilinx TAP values (`xc7a100t` and
 settings do not get passed to Quartus as literal device names. If the FPGA is
 elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 
+### Serial (byte-stream TAP bridge)
+
+Boards with no JTAG path to the fabric reach the host over a byte stream
+instead ([chapter 14](14_transports.md)). There is no probe daemon, so
+`--host`, `--port` and `--tap` do not apply and there is no IR table — chains
+are addressed by index.
+
+```bash
+fcapz list-ports                       # what is attached (opens nothing)
+fcapz --backend serial --serial-port COM5 probe
+fcapz --backend serial --serial-port /dev/ttyACM0 --baud 2000000 capture --format vcd --out ramp.vcd
+```
+
+`list-ports` deliberately never opens a port: opening one asserts DTR/RTS,
+which resets an RP2040/RP2350 and disturbs the JTAG probes and programmers that
+also enumerate as serial ports.
+
+Unlike the long-lived web session — where the analyzer holds the port and the
+EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
+`eio-*`, `axi-*` and `uart-*` work over `serial` too.
+
 ## Subcommands at a glance
 
 <!-- BEGIN GENERATED cli:subcommands (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
 
 | Subcommand | What it does |
 |---|---|
+| `list-ports` | List this machine's serial ports (for --backend serial) |
 | `probe` | Read core identity registers |
 | `ela-list` | Read core manager and probe all ELA slots |
 | `arm` | Arm capture without configuring (advanced) |
@@ -101,6 +125,20 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 | `uart-monitor` | Continuous UART receive (Ctrl+C to stop) |
 
 <!-- END GENERATED cli:subcommands -->
+
+## `list-ports`
+
+List this machine's serial ports, for picking the `--serial-port` of the
+[serial backend](#serial-byte-stream-tap-bridge). It needs no board and never
+opens a port (see above).
+
+<!-- BEGIN GENERATED cli:list-ports (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] list-ports`
+
+No options of its own; the [global options](#global-options) apply.
+
+<!-- END GENERATED cli:list-ports -->
 
 ## `probe`
 

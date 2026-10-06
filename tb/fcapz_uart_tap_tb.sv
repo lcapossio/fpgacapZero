@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+`timescale 1ns/1ps
+
+// UART virtual-TAP testbench.
+//
+// Drives fcapz_uart_tap from a behavioural 8N1 host UART and checks that the
+// TAP contract it synthesises is good enough to run the *real* jtag_reg_iface
+// behind it: identity, register write, register read-back, the 256-bit burst
+// width, the two error paths that must not desynchronise the link, and the
+// receive timeout that drops a command truncated mid-parse.
+
+module fcapz_uart_tap_tb;
+
+    localparam int CLK_HZ      = 50_000_000;
+    localparam int BAUD        = 1_000_000;
+    localparam int BIT_NS      = 1_000_000_000 / BAUD;
+    localparam int NCH         = 4;
+    localparam int MAX_DR_BITS = 256;
+    // Short enough to keep the run quick, long enough (20 byte times) that a
+    // healthy back-to-back command never trips it.
+    localparam int RX_TIMEOUT_US = 200;
+
+    logic clk  = 1'b0;
+    logic arst = 1'b1;
+    always #10 clk = ~clk;              // 50 MHz
+
+    logic host_tx = 1'b1;
+    wire  dut_tx;
+
+    wire            tck, tdi, capture, shift, update;
+    wire [NCH-1:0]  sel;
+    wire [NCH-1:0]  tdo;
+
+    int pass_count = 0;
+    int fail_count = 0;
+
+    task automatic check(input string name, input bit cond);
+        if (cond) begin
+            pass_count++;
+            $display("  PASS: %s", name);
+        end else begin
+            fail_count++;
+            $display("  FAIL: %s", name);
+        end
+    endtask
+
+    // ------------------------------------------------------------------
+    //  DUT + a real jtag_reg_iface on chain 1
+    // ------------------------------------------------------------------
+    fcapz_uart_tap #(
+        .CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD),
+        .NUM_CHAINS(NCH), .MAX_DR_BITS(MAX_DR_BITS),
+        .RX_TIMEOUT_US(RX_TIMEOUT_US)
+    ) dut (
+        .clk(clk), .arst(arst),
+        .uart_rxd(host_tx), .uart_txd(dut_tx),
+        .tck(tck), .tdi(tdi), .tdo(tdo),
+        .capture(capture), .shift(shift), .update(update), .sel(sel)
+    );
+
+    wire        reg_clk, reg_rst, reg_wr_en, reg_rd_en;
+    wire [15:0] reg_addr;
+    wire [31:0] reg_wdata;
+    logic [31:0] reg_rdata;
+
+    jtag_reg_iface u_reg (
+        .arst(arst),
+        .tck(tck), .tdi(tdi), .tdo(tdo[0]),
+        .capture(capture), .shift_en(shift), .update(update), .sel(sel[0]),
+        .reg_clk(reg_clk), .reg_rst(reg_rst),
+        .reg_wr_en(reg_wr_en), .reg_rd_en(reg_rd_en),
+        .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_rdata(reg_rdata)
+    );
+
+    // Chain 2 is a plain 256-bit shift register, standing in for the burst
+    // readout chain: whatever is shifted in comes back out one scan later.
+    logic [MAX_DR_BITS-1:0] burst_sr;
+    assign tdo[1] = burst_sr[0];
+    assign tdo[3:2] = 2'b00;
+
+    always_ff @(posedge tck or posedge arst) begin
+        if (arst)            burst_sr <= '0;
+        else if (sel[1] && shift) burst_sr <= {tdi, burst_sr[MAX_DR_BITS-1:1]};
+    end
+
+    logic [31:0] mem [0:15];
+    always_ff @(posedge reg_clk) if (reg_wr_en) mem[reg_addr[5:2]] <= reg_wdata;
+    always @(*) reg_rdata = mem[reg_addr[5:2]];
+
+    // ------------------------------------------------------------------
+    //  Behavioural host UART
+    // ------------------------------------------------------------------
+    task automatic send_byte(input logic [7:0] b);
+        host_tx = 1'b0; #(BIT_NS);
+        for (int i = 0; i < 8; i++) begin host_tx = b[i]; #(BIT_NS); end
+        host_tx = 1'b1; #(BIT_NS);
+    endtask
+
+    logic [7:0] rxbuf [0:255];   // a CMD_BREAD reply is 2 + count*32 bytes
+    int         rxn = 0;
+
+    initial forever begin
+        logic [7:0] b;
+        @(negedge dut_tx);
+        #(BIT_NS/2);
+        for (int i = 0; i < 8; i++) begin #(BIT_NS); b[i] = dut_tx; end
+        #(BIT_NS);
+        rxbuf[rxn] = b;
+        rxn++;
+    end
+
+    task automatic send_scan(input logic [7:0] chain,
+                             input logic [15:0] width,
+                             input logic [MAX_DR_BITS-1:0] payload);
+        int nb = (width + 7) / 8;
+        send_byte(8'h5A);
+        send_byte(8'h01);
+        send_byte(chain);
+        send_byte(width[7:0]);
+        send_byte(width[15:8]);
+        for (int i = 0; i < nb; i++) send_byte(payload[i*8 +: 8]);
+    endtask
+
+    // Wait for a reply of n bytes, with a bounded timeout so a desynchronised
+    // link fails loudly instead of hanging the run.
+    task automatic await_reply(input int n, input string what);
+        // Poll rather than wait(): a desynchronised link must fail loudly
+        // instead of hanging the run.  Budget ~40 bit times per expected byte.
+        int guard = n * 40 + 400;
+        while (rxn < n && guard > 0) begin
+            #(BIT_NS);
+            guard--;
+        end
+        if (rxn < n) begin
+            $display("  FAIL: %s timed out (rxn=%0d of %0d)", what, rxn, n);
+            fail_count++;
+        end else begin
+            #(BIT_NS);
+        end
+    endtask
+
+    logic [48:0] frame;
+    logic [31:0] got;
+    logic [MAX_DR_BITS-1:0] burst_payload, burst_got;
+
+    initial begin
+        for (int k = 0; k < 16; k++) mem[k] = 32'h0;
+        #200 arst = 1'b0;
+        #2000;
+
+        // ---- Test 1: CMD_INFO identity -------------------------------------
+        $display("\n=== Test 1: CMD_INFO ===");
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h03);
+        await_reply(11, "info");
+        check("SOF",        rxbuf[0] == 8'hA5);
+        check("status OK",  rxbuf[1] == 8'h00);
+        check("magic FCZU", {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
+        check("version",    rxbuf[6] == 8'h02);
+        check("num chains", rxbuf[7] == NCH);
+        check("max dr",     {rxbuf[9],rxbuf[8]} == MAX_DR_BITS);
+        check("phy extra",  rxbuf[10] == 8'h00);
+
+        // ---- Test 2: register write ----------------------------------------
+        $display("\n=== Test 2: register write ===");
+        frame = {1'b1, 16'h0010, 32'hDEADBEEF};
+        rxn = 0;
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "write");
+        check("status OK", rxbuf[1] == 8'h00);
+        // Must land on this scan, not the next one: jtag_reg_iface registers
+        // reg_wr_en on the update edge, so the TAP owes it trailing clocks.
+        check("write landed on this scan", mem[4] == 32'hDEADBEEF);
+
+        // ---- Test 3: register read-back ------------------------------------
+        $display("\n=== Test 3: register read-back ===");
+        frame = {1'b0, 16'h0010, 32'h0};
+        rxn = 0;
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "read addr");
+
+        rxn = 0;                                  // runtest between the halves
+        send_byte(8'h5A); send_byte(8'h02); send_byte(8'd8); send_byte(8'd0);
+        await_reply(2, "idle");
+        check("idle status OK", rxbuf[1] == 8'h00);
+
+        rxn = 0;
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "read data");
+        got = {rxbuf[5], rxbuf[4], rxbuf[3], rxbuf[2]};
+        check("read-back value", got == 32'hDEADBEEF);
+
+        // ---- Test 4: 256-bit burst width -----------------------------------
+        $display("\n=== Test 4: 256-bit burst scan ===");
+        burst_payload = {8'hC5, 120'h0, 8'h3C, 112'h0, 8'hA5};
+        rxn = 0;                                  // first scan loads the SR
+        send_scan(8'd2, 16'd256, burst_payload);
+        await_reply(2 + 32, "burst load");
+        rxn = 0;                                  // second shifts it back out
+        send_scan(8'd2, 16'd256, '0);
+        await_reply(2 + 32, "burst read");
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + i];
+        check("burst round-trip", burst_got == burst_payload);
+
+        // ---- Test 5: bad chain is reported, link stays in sync -------------
+        $display("\n=== Test 5: bad chain ===");
+        rxn = 0;
+        send_scan(8'd9, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(2, "bad chain");
+        check("bad chain status", rxbuf[1] == 8'h02);
+
+        // A one-byte payload is the tight case: the bridge latches the chain
+        // error and decides the payload is complete on the same byte, so a
+        // registered chain check would still read STAT_OK and emit a payload
+        // byte after the status.  Prove the reply is exactly two bytes by
+        // showing the next reply starts where it should.
+        rxn = 0;
+        send_scan(8'd9, 16'd8, {{(MAX_DR_BITS-8){1'b0}}, 8'h5A});
+        await_reply(2, "bad chain, one-byte payload");
+        check("narrow bad chain status", rxbuf[1] == 8'h02);
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h03);
+        await_reply(11, "info after narrow bad chain");
+        check("no stray payload byte", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00 &&
+                                       {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
+
+        // ---- Test 6: bad width must not deadlock ---------------------------
+        // A zero width implies a zero-byte payload; the parser must not sit
+        // waiting for a byte the host will never send.
+        $display("\n=== Test 6: bad width ===");
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        send_byte(8'h00); send_byte(8'h00);
+        await_reply(2, "bad width");
+        check("bad width status", rxbuf[1] == 8'h03);
+
+        // ---- Test 6b: CMD_BREAD streams several scans per command ----------
+        // The burst chain is a plain shift register in this bench, so loading
+        // it once and then reading N times must return the loaded word first
+        // and zeros after: enough to prove the scans really are consecutive
+        // and that one header covers all of them.
+        $display("\n=== Test 6b: CMD_BREAD ===");
+        burst_payload = {8'h77, 120'h0, 8'h11, 112'h0, 8'hEE};
+        rxn = 0;
+        send_scan(8'd2, 16'd256, burst_payload);
+        await_reply(2 + 32, "bread preload");
+
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h04);       // SOF, CMD_BREAD
+        send_byte(8'd2);                          // chain
+        send_byte(8'd0); send_byte(8'd1);         // width = 256
+        send_byte(8'd3); send_byte(8'd0);         // count = 3
+        await_reply(2 + 3*32, "bread");
+        check("bread status OK", rxbuf[1] == 8'h00);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + i];
+        check("bread scan 1 is the preloaded word", burst_got == burst_payload);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + 32 + i];
+        check("bread scan 2 shifted in zeros", burst_got == '0);
+        for (int i = 0; i < 32; i++) burst_got[i*8 +: 8] = rxbuf[2 + 64 + i];
+        check("bread scan 3 shifted in zeros", burst_got == '0);
+
+        // ---- Test 6c: CMD_BREAD rejects a bad chain without a payload ------
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h04);
+        send_byte(8'd9);                          // no such chain
+        send_byte(8'd0); send_byte(8'd1);
+        send_byte(8'd2); send_byte(8'd0);
+        await_reply(2, "bread bad chain");
+        check("bread bad chain status", rxbuf[1] == 8'h02);
+
+        // ---- Test 7: still usable after the error paths --------------------
+        $display("\n=== Test 7: recovery after errors ===");
+        frame = {1'b1, 16'h0014, 32'hCAFEF00D};
+        rxn = 0;
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "recovery write");
+        check("write after errors", mem[5] == 32'hCAFEF00D);
+
+        // ---- Test 8: a truncated header is dropped after the timeout -------
+        // SOF, CMD_SCAN, chain -- and then nothing.  Without the timeout the
+        // next command's SOF and opcode are parsed as this one's width
+        // (0x035A, out of range) and the INFO comes back as BAD_WIDTH.
+        $display("\n=== Test 8: receive timeout, truncated header ===");
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        #(RX_TIMEOUT_US * 1000 + 50_000);
+        check("truncated command sends no reply", rxn == 0);
+        send_byte(8'h5A); send_byte(8'h03);
+        await_reply(11, "info after truncated header");
+        check("info after timeout", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00 &&
+                                    {rxbuf[5],rxbuf[4],rxbuf[3],rxbuf[2]} == 32'h555A4346);
+
+        // ---- Test 9: a truncated payload never reaches the TAP -------------
+        // A register write to 0x18 with only three of its seven payload bytes:
+        // nothing may be written, nothing may come back, and the buffered
+        // bytes must not leak into the next scan.
+        $display("\n=== Test 9: receive timeout, truncated payload ===");
+        frame = {1'b1, 16'h0018, 32'h12345678};
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        send_byte(8'd49); send_byte(8'd0);
+        for (int i = 0; i < 3; i++) send_byte(frame[i*8 +: 8]);
+        #(RX_TIMEOUT_US * 1000 + 50_000);
+        check("truncated payload sends no reply", rxn == 0);
+        check("truncated payload writes nothing", mem[6] == 32'h0);
+
+        frame = {1'b1, 16'h001C, 32'h0BADF00D};
+        send_scan(8'd1, 16'd49, {{(MAX_DR_BITS-49){1'b0}}, frame});
+        await_reply(9, "write after truncated payload");
+        check("write after truncated payload", rxbuf[1] == 8'h00 &&
+                                               mem[7] == 32'h0BADF00D &&
+                                               mem[6] == 32'h0);
+
+        // ---- Test 10: a gap shorter than the timeout is not a stall --------
+        // Half the timeout, in the middle of the payload: the command must
+        // complete exactly as if its bytes had been back to back.
+        $display("\n=== Test 10: inter-byte gap inside the timeout ===");
+        frame = {1'b1, 16'h0020, 32'hFEEDC0DE};
+        rxn = 0;
+        send_byte(8'h5A); send_byte(8'h01); send_byte(8'd1);
+        send_byte(8'd49); send_byte(8'd0);
+        for (int i = 0; i < 7; i++) begin
+            send_byte(frame[i*8 +: 8]);
+            if (i == 3) #(RX_TIMEOUT_US * 1000 / 2);
+        end
+        await_reply(9, "write with a gap");
+        check("gap write status OK", rxbuf[0] == 8'hA5 && rxbuf[1] == 8'h00);
+        check("gap write landed", mem[8] == 32'hFEEDC0DE);
+
+        $display("\n=== Summary: %0d passed, %0d failed ===",
+                 pass_count, fail_count);
+        if (fail_count > 0)
+            $fatal(1, "UART TAP testbench: failures detected");
+        $finish;
+    end
+
+    initial begin
+        #20_000_000;
+        $fatal(1, "UART TAP testbench: global timeout");
+    end
+
+endmodule

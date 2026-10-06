@@ -1021,6 +1021,46 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(result.timestamps, [7, (1 << 31) + 7, 7])
         self.assertNotIn(0x1100, [addr for addr, _ in transport.block_reads])
 
+    def test_wide_timestamps_burst_when_the_transport_packs_them_whole(self):
+        """A 48-bit timestamp is one burst element on the TAP bridge.
+
+        Reading it through the register window instead returns zeros on a core
+        built with USER1_DATA_EN=0, so a transport that declares
+        timestamp_burst_max_width must get the burst.
+        """
+        stamps = [0x1234_5678_9ABC, 0x1234_5678_9ABD, 0xFFFF_0000_0001]
+
+        class WideTimestampTransport(FakeTransport):
+            timestamp_burst_max_width = 64
+
+            def __init__(self):
+                super().__init__()
+                self.regs[0x001C] = 3       # CAPTURE_LEN
+                self.regs[0x00C4] = 48      # TIMESTAMP_W
+                self.data = [10, 11, 12]
+                self.block_reads: list[int] = []
+                self.ts_widths: list[int] = []
+
+            def read_timestamp_block(self, addr, words, timestamp_width):
+                self.ts_widths.append(timestamp_width)
+                return stamps[:words]
+
+            def read_block(self, addr, words):
+                self.block_reads.append(addr)
+                return super().read_block(addr, words)
+
+        transport = WideTimestampTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        analyzer.arm()
+
+        result = analyzer.capture(timeout=0.01)
+
+        self.assertEqual(result.timestamps, stamps)
+        self.assertEqual(transport.ts_widths, [48])
+        self.assertEqual(transport.block_reads, [0x0100])   # samples only
+
     def test_vcd_shifts_hw_timestamps_to_zero(self) -> None:
         """Continuous / live reload: VCD # times must not use raw counter offsets."""
         from fcapz.analyzer import vcd_simulation_times

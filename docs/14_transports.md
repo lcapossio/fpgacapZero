@@ -48,8 +48,11 @@ fault mid-burst would otherwise come back as a slow, silent re-read.
 
 The 256-bit burst DR packs **whole samples** per scan, so `read_block`
 uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
-gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
-a session hops between an ELA and a monitor. Wider cores — notably the AXI
+gates on the selected core's `SAMPLE_W`, read fresh before every burst, so it
+is correct when a session hops between an ELA and a monitor or between
+core-manager slots. That width is also the unpacking stride — sample *i* sits
+at bit `i * SAMPLE_W` — so widths that do not divide 256 (24, 30, …) decode
+correctly. Wider cores — notably the AXI
 monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
 per scan, which returns each sample as 32-bit words for `capture()` to
 reassemble. A slot without burst wiring, or a request the burst engine
@@ -283,6 +286,208 @@ reached on chain 1 at base offset `0x8000`
 (`EioController(t, chain=1, base_addr=0x8000)`).  See the
 [BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
 
+#### Efinix (Trion / Titanium) over OpenOCD
+
+Efinix boards use this transport with
+`ir_table=OpenOcdTransport.IR_TABLE_EFINIX` (JTAG User TAP USER1/USER2 →
+chains 1/2).  The CLI auto-selects it for `--tap trion...`, `--tap titanium...`,
+or `--tap efinix...`; in code, pass it explicitly.
+
+Unlike Xilinx `BSCANE2` or Intel `sld_virtual_jtag`, the Efinix JTAG User TAP
+is **not an RTL primitive** — it is added as a block in the Efinity Interface
+Designer, which surfaces its signals as top-level ports.  Trion packages have
+**two** hard JTAG User TAP blocks (`JTAG_USER1`, `JTAG_USER2`), the Ti60F225
+has four, and the T8F49 package has none.  Add `JTAG_USER1` and `JTAG_USER2`
+and wire them to [`fcapz_ela_efinix`](../rtl/fcapz_ela_efinix.v)'s exposed
+`jtag1_*` (control) and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.  In an Interface
+Designer script (`.isf`), that is:
+
+```python
+for n in (1, 2):
+    design.create_block(f"jtag{n}", "JTAG")
+    design.assign_resource(f"jtag{n}", f"JTAG_USER{n}", "JTAG")
+    for sig in ("CAPTURE", "DRCK", "RESET", "RUNTEST", "SEL", "SHIFT",
+                "TCK", "TDI", "TMS", "UPDATE", "TDO"):
+        design.set_property(f"jtag{n}", sig, f"jtag{n}_{sig.lower()}", "JTAG")
+```
+
+The wrapper uses `TCK`, `TDI`, `TDO`, `CAPTURE`, `SHIFT`, `UPDATE` and `SEL`.
+`DRCK` is accepted but unused, and the burst chain ignores `UPDATE`, so
+synthesis reports those ports, plus any `RESET` / `RUNTEST` / `TMS` you wire
+up, as unconnected.  That is expected.  Constrain both `TCK` ports as clocks,
+asynchronous to the sample clock.
+
+`IR_TABLE_EFINIX = {1: 0x08, 2: 0x09}` matches the USER1/USER2 opcodes in the
+BSDL Efinity 2025.1 generates for the T20F256 and the Ti60F225.  The IR is
+4 bits on Trion and 5 bits on Titanium; OpenOCD takes that from the tap
+definition (`jtag newtap ... -irlen 4` or `-irlen 5`).
+
+> **Status.** The Verilog wrapper synthesizes, places and routes with Efinity
+> 2025.1 on a Trion T20F256 and a Titanium Ti60F225, and the VHDL wrapper on
+> the T20F256.  Both User TAP blocks bind and timing closes.  It has not run on
+> hardware yet.  That run still has to confirm that `TCK` reaches the fabric
+> free-running and that the strobes behave as on `BSCANE2`.
+
+### `TapBridgeTransport` (and `SerialTapTransport`)
+
+For boards that expose **no JTAG to the fabric at all**.  Instead of a hard TAP
+block the design instantiates
+[`fcapz_tap_bridge`](../rtl/fcapz_tap_bridge.v), which reproduces the
+fpgacapZero TAP contract (`tck`, `tdi`, `tdo`, `capture`, `shift`, `update`,
+`sel`) from a stream of bytes.  Everything behind it — `jtag_reg_iface`,
+`jtag_burst_read`, `fcapz_ela`, `fcapz_eio` — is bit-identical to the JTAG
+case, so this is a change of delivery, not of protocol.
+
+**Protocol and physical layer are separate on both sides**, so a new link type
+does not mean a new protocol:
+
+| Layer | RTL | Host |
+|---|---|---|
+| Protocol + TAP | `fcapz_tap_bridge.v` | `TapBridgeTransport` |
+| UART PHY | `fcapz_uart_tap.v` | `SerialTapTransport` |
+| ELA wrapper | `fcapz_ela_uart.v` | — |
+
+To add an SPI, USB-FIFO or TCP link, write the PHY on each side — an RTL module
+that produces the byte interface, and a `TapBridgeTransport` subclass
+implementing `_open`, `_close`, `_write_bytes` and `_read_bytes`.  The wire
+format, identity probe and register semantics come for free.
+
+```python
+from fcapz.transport import SerialTapTransport
+
+t = SerialTapTransport("COM5", baudrate=1_000_000)    # /dev/ttyACM0 on Linux
+t.connect()
+```
+
+Requires pyserial: `pip install 'fpgacapzero[serial]'`.
+
+Chain numbers are the RTL front-end's `sel[]` index (1-based), so unlike the
+JTAG transports there is **no IR table** — the chain travels in the command
+itself.  RPC sessions on this transport report `ir_table: null` rather than a
+preset name, for the same reason.  `fcapz_ela_uart` maps chain 1 to the control registers and chain 2 to
+the burst readout.
+
+`connect()` first asks the bridge for its identity (magic `FCZU`, protocol
+version, chain count, `MAX_DR_BITS`, and a PHY-defined byte), so a wrong port
+fails with a clear message rather than returning garbage.  `num_chains` and
+`max_dr_bits` are then available on the transport and enforced host-side
+before a scan is sent.  A failed identity probe **closes the port** — the wrong
+port on a development machine is usually a JTAG probe or a programmer, which is
+not hardware to keep an exclusive handle on.
+
+`link_info()` returns the negotiated bridge identity as a dict once connected
+(`kind`, `channel`, `proto_version`, `num_chains`, `max_dr_bits`, and `baudrate`
+over serial); the RPC `connect` reply carries it as `link`, so a UI can show
+what it is actually attached to.  JTAG transports negotiate nothing and return
+`None`.  `transport_kind` is `"bytestream"` here and `"jtag"` elsewhere.
+
+The burst chain is a streaming DR, not a register interface, so the transport
+reports it in `unprobeable_chains` and the generic core sweeps skip it.  A scan
+there would advance the burst reader's staging registers (harmless in practice —
+a real burst start reinitialises them) and, worse, burst data that happened to
+contain an ELA or EIO magic word would be reported as a core that is not there.
+
+One consequence of the exclusive port: the EIO, EJTAG-AXI and EJTAG-UART side
+controllers each open a **second** transport beside the analyzer's, which a JTAG
+probe daemon multiplexes but a serial link cannot.  They are refused on this
+backend rather than failing with the OS's port-in-use error.
+
+The wire protocol is documented in the header of `rtl/fcapz_tap_bridge.v`.  It
+is framed and status-coded, and the parser hunts for a start-of-frame byte
+between commands, which is what lets the link survive the junk a
+configuration-pin handover leaves behind.
+
+There is no frame length or checksum, so a lost byte is recovered by time
+instead.  If a command stalls mid-parse for `RX_TIMEOUT_US` (a
+`fcapz_uart_tap` / `fcapz_ela_uart` parameter, 10 ms by default; 0 turns it
+off; rounded up to whole clocks, and clamped at 2^31-2 of them), the bridge
+drops it and goes back to hunting for start-of-frame.  It
+does so silently, and always before the scan starts, so a dropped command
+never touches the TAP.  On the host side, a transaction that fails without a
+complete reply (no reply, a short one, or bad framing) waits until the link
+has been quiet for `RESYNC_QUIET_S` (50 ms), discarding anything that arrives,
+before raising.  By then the bridge has dropped whatever it was waiting on,
+and a late reply cannot be read as the header of the next command.  The next
+command therefore starts clean, without a board reset.  A bridge error status
+is a complete reply, and needs no resync.  The drain allows for the failed
+reply's own wire time, so a long burst reply on a slow link is drained rather
+than given up on; a link that still will not go quiet leaves the transport
+**out of step**, and every later command raises `ConnectionError` until it is
+reconnected, since any reply could then be the tail of the old one.
+
+`timeout` (2 s by default) is how long the link may be **silent**, not how
+long a reply may take: a reply is read for as long as its bytes keep arriving.
+A burst reply is the whole readback in one piece -- 4 kB for a 4096-sample
+8-bit capture, over four seconds at 9,600 baud -- and the bridge streams it
+scan by scan at a pace set by the fabric clock, which the host cannot know, so
+no fixed deadline would fit every build.  The drain after a failed reply does
+allow for its wire time at the configured baud (10 bits a byte); through a
+USB-CDC bridge to an MCU (as on Forgix), pass the rate of the MCU-to-FPGA UART,
+the slowest hop.
+
+Corrupted bytes inside a command are not detected: they are parsed as data,
+like any other byte.  The timeout recovers lost bytes, not wrong ones.
+
+#### Burst readback
+
+`read_block()` on the DATA window (`0x0100`) uses the ELA's burst chain, the
+same way the Xilinx and Intel transports do: one control-chain write to
+`BURST_PTR`, an idle for the staging word to fill, one priming scan that is
+discarded, then one wide scan per group of samples.  With a 64-bit DR and an
+8-bit core that is 8 samples per scan instead of one 32-bit word per *two*
+49-bit scans — about 1.05 bytes per sample on the wire against ~48.
+
+The scan width barely matters to that figure: a batched reply carries one
+packed DR per scan under a single header, so widening the DR mostly just moves
+the same bytes in bigger groups.  It does grow the discarded priming scan, so
+wider is fractionally *worse* on the wire as well as costing buffer in the
+fabric.  `fcapz_ela_uart` therefore defaults `BURST_W` to 64; the hard-TAP
+wrappers keep 256, where the scan engine is free silicon.
+
+All of those wide scans travel as **one** `CMD_BREAD` command and one reply
+(bridge protocol 2 and later).  That is not mainly a byte saving — it removes a
+USB CDC round trip per scan, and a 1024-sample readback is ~33 of them, which
+costs about as much as the bytes do.  A protocol-1 bridge is driven one scan at
+a time instead; the result is identical either way.
+
+The burst width defaults to the bridge's `MAX_DR_BITS`, since `fcapz_ela_uart`
+ties the two together (`MAX_DR_BITS(BURST_W)`); pass `burst_dr_bits` if a
+wrapper sizes them apart.  Per-word reads through the register window are used
+only when the burst is unavailable from the start: the bridge advertises fewer
+chains than `burst_data_chain`, or `burst=False` was passed to the constructor.
+A burst that runs and fails (a rejected wide scan, a short reply) raises, the
+same as on the JTAG transports, and is never read around through the window.
+The window is not a safe second try: a core built with `USER1_DATA_EN=0`
+answers it with zeros, which would turn a link fault into a capture of zeros.
+
+Unlike the hard-TAP burst, this one takes a core of **any width** up to the
+burst DR.  `jtag_burst_read` packs `BURST_W // SAMPLE_W` whole samples per
+scan, sample *i* at bit `i * SAMPLE_W`, so the host unpacks at a stride of
+`SAMPLE_W` itself — a 24-bit core on a 64-bit DR has two samples per scan, at
+bits 0 and 24, not 0 and 32.  `SAMPLE_W` is read from the selected core before
+every burst, never cached.  `read_block()` still returns 32-bit words, so a
+core wider than 32 bits comes back as `ceil(SAMPLE_W / 32)` words per sample,
+low word first, the same layout `read_sample_block()` returns and
+`Analyzer.capture()` reassembles.  Timestamps take the same path through
+`read_timestamp_block()`, one whole value per timestamp at any width up to the
+DR; `timestamp_burst_max_width` tells `Analyzer` how wide that is, so a
+48-bit timestamp is burst rather than read word by word through the window.
+`burst_start_sync` is honoured too: behind an older multi-slot core manager
+the burst writes `BURST_PTR`, runs one discarded burst scan, and writes it
+again before the prime.  Those are separate bridge commands rather than one
+JTAG sequence; the link has a single host, so nothing can come between them.
+
+> **Bandwidth.** A capture readback is bounded by the sample buffer, not the
+> link: a 15 kB buffer at 1 Mbaud drains in well under a second with burst
+> readback, and in roughly ten times that without it.  Small parts — the usual
+> reason a board has no spare JTAG — are exactly where this matters least.
+
+The two pins need not be a dedicated UART header.  On boards configured by a
+companion MCU they are often the **configuration pins themselves**, which go
+idle once configuration finishes;
+[`examples/forgix/`](../examples/forgix/README.md) is a worked example that
+reuses an Efinix Trion's CCK/CDI pins and needs no extra wiring at all.
+
 ### `QuartusStpTransport`
 
 Talks to Quartus Prime's `quartus_stp -s` Tcl shell and uses Quartus
@@ -362,6 +567,7 @@ swap one for the other without changing the IR table.
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
+| Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes match Efinity's BSDL for Trion and Titanium |
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
 TAP's DR, so every DR scan is one shift longer than the fcapz frame.

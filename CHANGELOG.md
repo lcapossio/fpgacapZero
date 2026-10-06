@@ -9,6 +9,142 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web GUI — `serial` backend.** The byte-stream TAP bridge is now selectable
+  in the browser, not just from the Python API. It takes a serial port and baud
+  rate in place of host/port/tap, and skips JTAG discovery entirely — the
+  bridge's own identity probe reports a wrong port instead of returning
+  garbage. Verified end to end against a Forgix board: `connect` -> `probe` ->
+  `capture` returns a clean 1,024-sample ramp. The port is picked from a list
+  the server enumerates (`list_serial_ports`), which identifies ports without
+  opening any of them — opening one asserts DTR and resets an RP2040/RP2350,
+  and a developer machine usually has unrelated JTAG cables and vendor probes
+  enumerated as serial ports too.
+
+- **Serial backend — hardened after review.** Remote clients on a token-less web
+  server can no longer enumerate or open serial ports (an unauthenticated way to
+  reset every board and probe on the host), nor send any session command while
+  a serial session is open — checked under the session lock against the open
+  session, since `capture` or `close` names no backend; loopback and
+  authenticated remote clients are unaffected. A failed handshake now closes the port instead of
+  leaking an exclusive handle, and a failed `connect` closes the transport the
+  session never took ownership of. The burst chain is excluded from the generic
+  core sweeps — it carries a streaming DR, not registers, and a magic word
+  appearing in burst data could otherwise be reported as a core. EIO/AXI/UART
+  side connections are refused with an explanation rather than an OS
+  port-in-use error, and both panels say so. Baud rates are validated
+  server-side. The port picker is a datalist, so the value is always visible and
+  a typed path still works.
+
+- **`connect` reports the link, not just the preset.** The reply carries
+  `transport_kind` (`jtag` / `bytestream`) and a `link` object with the
+  byte-stream bridge's negotiated protocol version, chain count, DR width and
+  baud rate, so the web GUI can show `COM16 @ 1,000,000 baud · bridge v2 · 2
+  chains · 64-bit max DR` instead of a stale JTAG host and port. `ir_table` is
+  now **null** on a serial session rather than the sentinel string `"serial"` —
+  it was occupying an IR-preset field with a value that is not a preset, and an
+  arbitrary one supplied by a client was echoed back unvalidated.
+
+- **CLI — `serial` backend and `fcapz list-ports`.** `--backend serial
+  --serial-port COM16 [--baud N]` drives the byte-stream TAP bridge from the
+  command line, and `list-ports` names the machine's serial ports without
+  opening any of them. One CLI run builds one transport, so `eio-*`, `axi-*`
+  and `uart-*` work over serial here even though the web session refuses them.
+  Baud validation is now shared by every front end
+  (`transport.validate_baudrate`).
+
+- **Web — Log tab.** Backend diagnostics (JTAG readback, connection, transport
+  warnings) are captured into a bounded ring and served at `GET /api/logs`; the
+  browser tails them in a Log panel that sits as an auto-hiding hover-drawer
+  under the waveform (pin it to keep it open), with Pause, Clear, and
+  auto-scroll. The RPC gateway logs each command with timing and the analyzer
+  logs burst-readback success/fallback, so the fast path is visible, not silent.
+- **Web — saved dock layouts.** The current panel arrangement auto-persists
+  across reloads, and a **Layout** menu saves, loads, and deletes named layouts
+  (localStorage).
+- **Web — connected FPGA shown on the Connection panel.** The status line now
+  leads with the actual device the backend opened (family/part + IDCODE), not
+  just the vendor.
+- **Virtual JTAG TAP over a byte stream — support for boards with no fabric
+  JTAG.** New `fcapz_tap_bridge` reproduces the fpgacapZero TAP contract
+  (`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel`) from a framed byte
+  stream, so `jtag_reg_iface`, `jtag_burst_read`, `fcapz_ela` and `fcapz_eio`
+  run unchanged with no hard TAP block. Protocol and physical layer are split
+  on both sides: `fcapz_uart_tap` is a UART PHY around the bridge, and the host
+  `SerialTapTransport` is a pyserial backend over a generic
+  `TapBridgeTransport` that owns the wire format, identity probe and register
+  semantics. A new link type (SPI, USB-FIFO, TCP) needs only a PHY on each
+  side. `fcapz_ela_uart` wraps it (chain 1 = control, chain 2 = burst), and
+  `read_block()`/`read_timestamp_block()` use that burst chain the same way the
+  Xilinx and Intel transports do — 8 8-bit samples per 64-bit scan, ~1.05
+  bytes per sample on the wire against ~48 for per-word reads. Bridge protocol
+  2 adds `CMD_BREAD`, which runs a whole burst's worth of scans under one
+  command and one reply, removing a USB round trip per scan — and with it the
+  reason to scan wide, since a batched reply packs samples under one shared
+  header at any width. `fcapz_ela_uart` therefore defaults `BURST_W` to 64
+  rather than the 256 the hard-TAP wrappers use, which on a Trion T8F49 is
+  ~620 fewer logic cells and ~590 fewer registers for a marginally *smaller*
+  byte count on the wire. Any `SAMPLE_W` or `TIMESTAMP_W` up to the burst DR
+  is read over the burst chain, unpacked at the core's own width (read before
+  every burst), so 20- or 48-bit cores and 48-bit timestamps need no window.
+  `burst_start_sync` is honoured, so a core behind an older multi-slot core
+  manager bursts the selected slot, as on the JTAG transports.
+  pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
+  by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
+  lint targets.
+- **Byte-stream TAP — recovers from a lost byte without a board reset.** A
+  command that stalls mid-parse for `RX_TIMEOUT_US` (10 ms by default, a
+  `fcapz_uart_tap` / `fcapz_ela_uart` parameter; 0 disables it) is dropped
+  silently, before its scan starts. Previously the parser waited for the
+  missing bytes and read the next command into them. After a failed
+  transaction the host waits for 50 ms of silence and discards any late
+  reply, so it is not read as the next command's header; a link that will not
+  go quiet raises `ConnectionError` on every later command until reconnected.
+  The serial `timeout` now bounds silence, not the whole reply: a reply is
+  read while its bytes keep arriving, so a long burst on a slow link or a slow
+  fabric clock is not cut short.
+- **Byte-stream TAP — a failed burst raises instead of falling back.**
+  `SerialTapTransport.read_block()` / `read_timestamp_block()` used to catch a
+  failed burst, switch burst off for the session and re-read through the
+  register window. They now raise, like the JTAG transports. On a core built
+  with `USER1_DATA_EN=0` the window reads zeros, so the fallback could turn a
+  link fault into a capture of zeros. `read_window_block()` reads only the window.
+- **Forgix — register-window readout dropped (`USER1_DATA_EN=0`).** Samples
+  come back over the burst chain only, which saves 64 LE (2,103 LE, 28.5 %).
+  Verified on hardware: a burst returns the ramp, and a window read returns zeros.
+- **Forgix board example (Efinix Trion T8F49 + RP2354) — validated on
+  hardware.** Ships a complete Efinity project (`examples/forgix/efinity/`)
+  with the pin assignments worked out and confirmed: `clk_in` on B4 (32 MHz),
+  `uart_rxd` on CCK/F3, `uart_txd` on CDI0/F2. On a real board the FPGA
+  configures, the bridge identity and ELA registers read back, and a
+  1024-sample capture returns a clean ramp over the burst chain in ~16 ms.
+- **Forgix board example (Efinix Trion T8F49 + RP2354).** The board exposes no
+  JTAG to the fabric at all — the T8 is configured over a write-only passive
+  SPI link and its JTAG pins are bonded out nowhere — and the T8F49 package has
+  no JTAG User TAP blocks, so `fcapz_ela_efinix` cannot be used on it.
+  `examples/forgix/` builds on the byte-stream TAP instead and
+  needs **no extra wiring**: it reuses the configuration SPI pins, which go
+  idle once `DONE` is high (CCK and CDI are dual-purpose pins, reusable as
+  general I/O in user mode per Efinix AN006 Table 3). Includes a reference top
+  and a locally vendored patch (pinned upstream revision, applied to a local
+  copy) that turns the RP2354 bitstream loader into a transparent USB-CDC
+  bridge after configuration. The README opens with a quick start that ends in
+  a CLI capture, checked on the board, and a matching Python example. It also
+  says where to get the upstream loader host tool. A clean checkout rebuilds a bitstream bit-identical to the
+  one tested, and the vendored patch reproduces the firmware sources running on
+  the board.
+- **Efinix (Trion / Titanium) ELA wrapper.** New `fcapz_ela_efinix` (Verilog +
+  VHDL) maps the two hard JTAG User TAP blocks a Trion device exposes onto the
+  control and burst chains. Because the Efinix JTAG User TAP is an Efinity
+  Interface Designer block (not an RTL primitive), the wrapper exposes the two
+  TAP port groups (`jtag1_*`, `jtag2_*`) for top-level wiring. Host support
+  rides the existing OpenOCD transport via a new `IR_TABLE_EFINIX` preset
+  (auto-selected for `--tap trion.../titanium.../efinix...`) wired into
+  discovery, RPC, and CLI; lint self-test targets added. The Verilog wrapper
+  synthesizes, places and routes in Efinity 2025.1 on a Trion T20F256 and a
+  Titanium Ti60F225 (the VHDL one on the T20F256), with both User TAP blocks
+  bound and timing met. The USER1/USER2 opcodes match Efinity's BSDL for both
+  families. Hardware validation is pending.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -112,6 +248,35 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Intel ELA wrapper — `PROBE_MUX_W` captured zeros above the first slice.**
+  `fcapz_ela_intel.v` forwarded `PROBE_MUX_W` to the core, whose `probe_in` is
+  then `PROBE_MUX_W` bits wide, but declared its own port as
+  `SAMPLE_W*NUM_CHANNELS`. Tools only warn and zero-pad that, so every mux
+  slice past the first read zeros. The port now matches the core, as on the
+  Xilinx wrappers. No shipped example sets `PROBE_MUX_W` on Intel. The ECP5,
+  Gowin and PolarFire wrappers and the VHDL Intel wrapper take no
+  `PROBE_MUX_W` and were not affected.
+
+- **hw_server and Quartus — burst readout decoded some sample widths wrong.**
+  Samples were unpacked at a stride of `256 // (256 // SAMPLE_W)` bits,
+  while `jtag_burst_read` packs them at `SAMPLE_W`. The two differ whenever
+  the width does not divide 256 (20, 22, 24, 26, 27, 29, 30, 31 bits), and
+  every sample after the first in each scan came back shifted. The width was
+  also cached for the life of the transport, so a session that changed core
+  or core-manager slot kept decoding at the first one's width. `SAMPLE_W` is
+  now read before every burst and used as the stride. Quartus `read_block()`
+  also no longer bursts a core wider than 32 bits, which returned whole
+  samples where 32-bit words were expected; such cores read with
+  `read_sample_block()`, as on hw_server.
+
+- **Web — any website could drive a token-less server over the WebSocket.**
+  CORS does not cover WebSockets, and a page's handshake to
+  `ws://127.0.0.1:7373/api/ws` carries the real loopback `Host`, so the
+  anti-rebinding check let it through with the full API, OpenOCD control
+  included. `/api/ws` now requires the handshake's `Origin` to be the server's
+  own, a `--cors-origin`, or a loopback page on a loopback client (the Vite dev
+  proxy). Clients that send no `Origin` (scripts) are unchanged.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
