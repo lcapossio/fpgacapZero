@@ -240,6 +240,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **hw_server and Quartus — burst readout decoded some sample widths wrong.**
+  Samples were unpacked at a stride of `256 // (256 // SAMPLE_W)` bits,
+  while `jtag_burst_read` packs them at `SAMPLE_W`. The two differ whenever
+  the width does not divide 256 (20, 22, 24, 26, 27, 29, 30, 31 bits), and
+  every sample after the first in each scan came back shifted. The width was
+  also cached for the life of the transport, so a session that changed core
+  or core-manager slot kept decoding at the first one's width. `SAMPLE_W` is
+  now read before every burst and used as the stride. Quartus `read_block()`
+  also no longer bursts a core wider than 32 bits, which returned whole
+  samples where 32-bit words were expected; such cores read with
+  `read_sample_block()`, as on hw_server.
+
 - **Web — any website could drive a token-less server over the WebSocket.**
   CORS does not cover WebSockets, and a page's handshake to
   `ws://127.0.0.1:7373/api/ws` carries the real loopback `Host`, so the

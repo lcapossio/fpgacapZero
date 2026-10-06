@@ -1947,7 +1947,12 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            return self._read_block_burst(words)
+            # Words, not samples: the burst returns one value per sample, so
+            # it stands in for the window only when a sample is one word.  A
+            # wider core reads with read_sample_block().
+            sample_w = self._burst_sample_width()
+            if sample_w <= 32:
+                return self._read_block_burst(words, element_width=sample_w)
         return self.read_window_block(addr, words)
 
     def read_window_block(self, addr: int, words: int) -> List[int]:
@@ -2009,14 +2014,17 @@ class QuartusStpTransport(Transport):
         """Declared by the ``burst`` constructor argument, never probed."""
         return self.burst
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def _burst_sample_width(self) -> int:
+        """The selected core's ``SAMPLE_W``, which is the burst stride.
+
+        Sample *i* sits at bit ``i * SAMPLE_W`` of each scan, so the width
+        itself is the stride -- ``256 // (256 // SAMPLE_W)`` is not, for any
+        width that does not divide 256.  Read fresh for every burst, never
+        cached, so a session that changes core or manager slot decodes the
+        one it has selected now.
+        """
+        sw = int(self.read_reg(0x000C))  # ADDR_SAMPLE_W
+        return sw if sw >= 1 else 8
 
     def _read_block_burst(
         self,
@@ -2025,13 +2033,9 @@ class QuartusStpTransport(Transport):
         timestamp: bool = False,
         element_width: int | None = None,
     ) -> List[int]:
-        if timestamp:
-            if element_width is None:
-                element_width = 32
-            per_scan = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            per_scan = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // per_scan
+        if element_width is None:
+            element_width = 32 if timestamp else self._burst_sample_width()
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + per_scan - 1) // per_scan
         prime_scans = 1
         ctrl_chain = self._active_chain
@@ -3115,8 +3119,10 @@ class XilinxHwServerTransport(Transport):
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
-            return self._burst_with_hint(words)
+        if addr == 0x0100 and self._burst_available:
+            sample_w = self._burst_sample_width()
+            if sample_w <= 32:
+                return self._burst_with_hint(words, element_width=sample_w)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
 
@@ -3136,26 +3142,20 @@ class XilinxHwServerTransport(Transport):
         """
         return self.burst
 
-    def _burst_sample_ok(self) -> bool:
-        """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
+    def _burst_sample_width(self) -> int:
+        """The selected core's ``SAMPLE_W``, which is the burst stride.
 
-        The burst engine returns whole samples; ``capture()`` only treats them
-        as such for ``SAMPLE_W <= 32`` (one 32-bit word per sample). Read fresh
-        (not cached) so a session that hops between an 8-bit ELA and a 160-bit
-        AXI monitor always gates on the *currently selected* core.
+        ``jtag_burst_read`` packs sample *i* at bit ``i * SAMPLE_W``, so the
+        width itself is the stride; ``256 // (256 // SAMPLE_W)`` is not, for
+        any width that does not divide 256 (24 gives 25).  Read fresh for every
+        burst: a session that hops between an 8-bit ELA and a 160-bit AXI
+        monitor, or between core-manager slots, must decode the core it has
+        selected *now*.  ``read_block`` bursts only ``SAMPLE_W <= 32`` (one
+        32-bit word per sample); a wider core reads with
+        :meth:`read_sample_block`.
         """
         sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
-        return sw < 1 or sw <= 32
-
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+        return sw if sw >= 1 else 8
 
     def _read_block_burst(
         self,
@@ -3177,13 +3177,9 @@ class XilinxHwServerTransport(Transport):
         line, so the sequence object is built over several xsdb sends and only
         the last one runs it.
         """
-        if timestamp and element_width is None:
-            element_width = 32
-        if element_width is not None:
-            sps = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            sps = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // sps
+        if element_width is None:
+            element_width = 32 if timestamp else self._burst_sample_width()
+        sps = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + sps - 1) // sps
         prime_scans = 1
 
@@ -3375,22 +3371,18 @@ class XilinxHwServerTransport(Transport):
         total_words: int,
         *,
         skip_scans: int = 0,
-        element_width: int | None = None,
+        element_width: int,
         expected_scans: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
-        samples (SAMPLE_W bits each, LSB first).
+        *element_width*-bit values, LSB first, at a stride of that width.
 
         With *expected_scans*, any other number of scan tokens raises
         :class:`BurstIntegrityError` rather than returning a short or
         misaligned burst.
         """
-        if element_width is None:
-            sps = self._burst_samples_per_scan
-            sw = self.BURST_DR_BITS // sps  # bits per sample
-        else:
-            sw = element_width
-            sps = max(1, self.BURST_DR_BITS // sw)
+        sw = element_width
+        sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         burst_offset = self._dr_data_offset()

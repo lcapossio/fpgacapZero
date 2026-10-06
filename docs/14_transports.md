@@ -48,8 +48,11 @@ fault mid-burst would otherwise come back as a slow, silent re-read.
 
 The 256-bit burst DR packs **whole samples** per scan, so `read_block`
 uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
-gates on the selected core's `SAMPLE_W`, read fresh, so it is correct when
-a session hops between an ELA and a monitor. Wider cores — notably the AXI
+gates on the selected core's `SAMPLE_W`, read fresh before every burst, so it
+is correct when a session hops between an ELA and a monitor or between
+core-manager slots. That width is also the unpacking stride — sample *i* sits
+at bit `i * SAMPLE_W` — so widths that do not divide 256 (24, 30, …) decode
+correctly. Wider cores — notably the AXI
 monitor (`SAMPLE_W=160`) — are read with `read_sample_block()`, one sample
 per scan, which returns each sample as 32-bit words for `capture()` to
 reassemble. A slot without burst wiring, or a request the burst engine
