@@ -1263,11 +1263,20 @@ class TapBridgeTransport(Transport):
             | (self.ADDR_BURST_PTR << 32)
             | (0x80000000 if timestamp else 0)
         )
-        self.raw_dr_scan(burst_frame, 49, chain=self._active_chain)
 
-        # 2. Let the update cross into the reader and the first staging word
-        #    fill before the next CAPTURE samples it.
-        self._runtest(self.BURST_PREFILL_IDLE_CYCLES)
+        def write_ptr() -> None:
+            self.raw_dr_scan(burst_frame, 49, chain=self._active_chain)
+            # 2. Let the update cross into the reader and the first staging
+            #    word fill before the next CAPTURE samples it.
+            self._runtest(self.BURST_PREFILL_IDLE_CYCLES)
+
+        write_ptr()
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync: one burst scan, whose capture
+            # brings the engine's copy of the start toggle level with the new
+            # owner's, then a second BURST_PTR write the engine cannot miss.
+            self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
+            write_ptr()
 
         # 3. One priming scan (staging is not loaded yet, so its CAPTURE is
         #    meaningless), then the real ones.  A version-2 bridge takes all of

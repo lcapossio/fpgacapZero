@@ -86,6 +86,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   byte count on the wire. Any `SAMPLE_W` or `TIMESTAMP_W` up to the burst DR
   is read over the burst chain, unpacked at the core's own width (read before
   every burst), so 20- or 48-bit cores and 48-bit timestamps need no window.
+  `burst_start_sync` is honoured, so a core behind an older multi-slot core
+  manager bursts the selected slot, as on the JTAG transports.
   pyserial is an optional extra (`pip install 'fpgacapzero[serial]'`). Covered
   by `tb/fcapz_uart_tap_tb.sv` and `tests/test_serial_tap_transport.py`, plus
   lint targets.

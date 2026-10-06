@@ -449,6 +449,10 @@ low word first, the same layout `read_sample_block()` returns and
 `read_timestamp_block()`, one whole value per timestamp at any width up to the
 DR; `timestamp_burst_max_width` tells `Analyzer` how wide that is, so a
 48-bit timestamp is burst rather than read word by word through the window.
+`burst_start_sync` is honoured too: behind an older multi-slot core manager
+the burst writes `BURST_PTR`, runs one discarded burst scan, and writes it
+again before the prime.  Those are separate bridge commands rather than one
+JTAG sequence; the link has a single host, so nothing can come between them.
 
 > **Bandwidth.** A capture readback is bounded by the sample buffer, not the
 > link: a 15 kB buffer at 1 Mbaud drains in well under a second with burst

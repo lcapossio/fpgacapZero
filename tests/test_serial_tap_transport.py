@@ -465,6 +465,29 @@ def test_sample_width_is_read_for_every_burst(fake_serial):
     assert t.read_block(ADDR_DATA_BASE, 4) == port.samples
 
 
+@pytest.mark.parametrize("sync", [False, True])
+def test_burst_start_sync_rewrites_the_pointer(fake_serial, sync):
+    """burst_start_sync: BURST_PTR, one burst scan, BURST_PTR again, then the
+    prime and the real scans -- the sequence the JTAG transports run for an
+    older multi-slot core manager.  The returned samples are unchanged."""
+    t, port = _connect_narrow(fake_serial)
+    port.samples = list(range(16))
+    t.burst_start_sync = sync
+    port.scans.clear()
+    assert t.read_block(ADDR_DATA_BASE, 16) == port.samples
+
+    # port.scans records every scan, the batched ones included.
+    assert len(port.breads) == 1                     # the real scans, batched
+    batched = port.breads[0][2]
+    wide = [i for i, scan in enumerate(port.scans) if scan == (2, 64)]
+    assert len(wide) == batched + (1 if sync else 0)
+    if sync:
+        ptr_writes = [i for i, scan in enumerate(port.scans) if scan == (1, 49)]
+        before = [i for i in ptr_writes if i < wide[0]]
+        after = [i for i in ptr_writes if wide[0] < i < wide[1]]
+        assert before and len(after) == 1            # PTR, sync scan, PTR
+
+
 def test_wide_timestamps_burst_whole(fake_serial):
     """A 48-bit timestamp is one burst element, not two window words."""
     t, port = _connect_narrow(fake_serial)
