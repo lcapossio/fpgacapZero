@@ -27,7 +27,8 @@
 //                 forever.  The host sends a command in one write, so its
 //                 bytes arrive back to back; 10 ms is far above any gap a
 //                 USB-serial bridge leaves inside one, and far below the
-//                 host transport's reply timeout.
+//                 host transport's reply timeout.  Rounded up to whole clocks
+//                 and clamped at 2^31-2 of them (~10 s at 200 MHz).
 
 module fcapz_uart_tap #(
     parameter CLK_HZ        = 50_000_000,
@@ -54,19 +55,26 @@ module fcapz_uart_tap #(
 );
 
     localparam BAUD_DIV = CLK_HZ / BAUD_RATE;
-    // Divide first: CLK_HZ * RX_TIMEOUT_US overflows 32-bit parameter maths
-    // at ordinary clock rates.  CLK_HZ is rounded down to whole MHz, which
-    // only makes the timeout slightly shorter.
-    localparam RX_TIMEOUT_CYC = (CLK_HZ / 1_000_000) * RX_TIMEOUT_US;
+    // ceil(CLK_HZ * RX_TIMEOUT_US / 1e6), in 64 bits: the product overflows
+    // 32-bit parameter maths at ordinary clock rates, and dividing first
+    // rounds CLK_HZ down to whole MHz (a 1.5 MHz clock would lose a third of
+    // the timeout).  Rounding up keeps it at least as long as asked.
+    localparam [63:0] RX_TIMEOUT_CYC64 =
+        (64'd1 * CLK_HZ * RX_TIMEOUT_US + 64'd999_999) / 64'd1_000_000;
+    // Clamped to what the bridge's 32-bit parameter maths takes, about 10 s
+    // at 200 MHz.  Unclamped, a longer one wraps negative and the bridge
+    // silently drops the timeout altogether.
+    localparam [63:0] RX_TIMEOUT_MAX = 64'h7FFF_FFFE;
+    localparam integer RX_TIMEOUT_CYC =
+        (RX_TIMEOUT_CYC64 > RX_TIMEOUT_MAX) ? RX_TIMEOUT_MAX[31:0]
+                                             : RX_TIMEOUT_CYC64[31:0];
 
     // synthesis translate_off
     initial begin
         if (CLK_HZ / BAUD_RATE < 4)
             $error("BAUD_RATE too high for CLK_HZ: divider must be >= 4");
-        if (RX_TIMEOUT_US > 0 && RX_TIMEOUT_US < 20 * 1_000_000 / BAUD_RATE)
+        if (RX_TIMEOUT_US > 0 && RX_TIMEOUT_CYC < 20 * BAUD_DIV)
             $error("RX_TIMEOUT_US must cover at least two bytes on the wire");
-        if (RX_TIMEOUT_US > 0 && CLK_HZ < 1_000_000)
-            $error("RX_TIMEOUT_US needs CLK_HZ >= 1 MHz");
     end
     // synthesis translate_on
 

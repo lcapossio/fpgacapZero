@@ -116,6 +116,13 @@ TESTBENCHES = {
             RTL / "jtag_reg_iface.v",
         ],
     ),
+    "fcapz_uart_tap_timeout": (
+        TB / "fcapz_uart_tap_timeout_tb.sv",
+        [
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_tap_bridge.v",
+        ],
+    ),
     "fcapz_core_manager": (
         TB / "fcapz_core_manager_tb.sv",
         [
@@ -159,6 +166,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_eio",
     "fcapz_uart_tap",
+    "fcapz_uart_tap_timeout",
     "fcapz_ela_wrapper_ports",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",

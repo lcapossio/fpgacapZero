@@ -374,7 +374,8 @@ configuration-pin handover leaves behind.
 There is no frame length or checksum, so a lost byte is recovered by time
 instead.  If a command stalls mid-parse for `RX_TIMEOUT_US` (a
 `fcapz_uart_tap` / `fcapz_ela_uart` parameter, 10 ms by default; 0 turns it
-off), the bridge drops it and goes back to hunting for start-of-frame.  It
+off; rounded up to whole clocks, and clamped at 2^31-2 of them), the bridge
+drops it and goes back to hunting for start-of-frame.  It
 does so silently, and always before the scan starts, so a dropped command
 never touches the TAP.  On the host side, a transaction that fails without a
 complete reply (no reply, a short one, or bad framing) waits until the link
