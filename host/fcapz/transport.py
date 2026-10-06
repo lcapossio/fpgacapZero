@@ -1045,39 +1045,41 @@ class TapBridgeTransport(Transport):
         return shifted_out & 0xFFFFFFFF
 
     def read_block(self, addr: int, words: int) -> List[int]:
+        """Read *words* 32-bit words at *addr*, bursting the DATA window.
+
+        A burst that runs and fails raises; it is never read around through
+        the register window, same as the JTAG transports.  The window is not
+        a safe second try: a core built with ``USER1_DATA_EN=0`` answers it
+        with zeros, which would turn a link error into a capture of zeros.
+        """
         if words <= 0:
             return []
         if addr == self.ADDR_DATA_BASE and self._burst_available:
-            try:
-                return self._read_block_burst(words)
-            except (ConnectionError, RuntimeError, ValueError) as exc:
-                _tap_log.warning(
-                    "TAP bridge burst readback failed (%s); falling back to "
-                    "per-word control-chain DATA reads",
-                    exc,
-                )
-                self._has_burst = False
+            return self._read_block_burst(words)
+        return self.read_window_block(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        """Per-word reads through the control-chain register window."""
+        if words <= 0:
+            return []
+        check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
     def read_timestamp_block(
         self, addr: int, words: int, timestamp_width: int
     ) -> List[int]:
-        """Read *words* timestamps, through the burst chain when it is usable."""
+        """Read *words* timestamps, through the burst chain when it is usable.
+
+        As with :meth:`read_block`, a burst that fails raises rather than
+        falling back to the window.
+        """
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            try:
-                return self._read_block_burst(
-                    words, timestamp=True, element_width=timestamp_width
-                )
-            except (ConnectionError, RuntimeError, ValueError) as exc:
-                _tap_log.warning(
-                    "TAP bridge timestamp burst failed (%s); falling back to "
-                    "per-word timestamp reads",
-                    exc,
-                )
-                self._has_burst = False
-        return [self.read_reg(addr + i * 4) for i in range(words)]
+            return self._read_block_burst(
+                words, timestamp=True, element_width=timestamp_width
+            )
+        return self.read_window_block(addr, words)
 
     # -- burst readback -----------------------------------------------------
     #
@@ -1183,7 +1185,7 @@ class TapBridgeTransport(Transport):
                 values.append((scan_value >> (sample_idx * element_width)) & mask)
 
         if len(values) != words:
-            raise RuntimeError(
+            raise BurstIntegrityError(
                 f"TAP bridge burst returned {len(values)} values, expected {words}"
             )
         return values

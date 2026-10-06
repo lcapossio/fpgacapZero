@@ -92,6 +92,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   missing bytes and read the next command into them. After a failed
   transaction the host waits for 50 ms of silence and discards any late
   reply, so it is not read as the next command's header.
+- **Byte-stream TAP — a failed burst raises instead of falling back.**
+  `SerialTapTransport.read_block()` / `read_timestamp_block()` used to catch a
+  failed burst, switch burst off for the session and re-read through the
+  register window. They now raise, like the JTAG transports. On a core built
+  with `USER1_DATA_EN=0` the window reads zeros, so the fallback could turn a
+  link fault into a capture of zeros. `read_window_block()` reads only the window.
 - **Forgix board example (Efinix Trion T8F49 + RP2354) — validated on
   hardware.** Ships a complete Efinity project (`examples/forgix/efinity/`)
   with the pin assignments worked out and confirmed: `clk_in` on B4 (32 MHz),

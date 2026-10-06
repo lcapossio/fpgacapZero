@@ -411,10 +411,14 @@ a time instead; the result is identical either way.
 
 The burst width defaults to the bridge's `MAX_DR_BITS`, since `fcapz_ela_uart`
 ties the two together (`MAX_DR_BITS(BURST_W)`); pass `burst_dr_bits` if a
-wrapper sizes them apart.  The path disables itself and falls back to per-word
-reads if the bridge advertises fewer chains than `burst_data_chain`, if a wide
-scan is rejected, or if `burst=False` is passed to the constructor.  Timestamps
-take the same path through `read_timestamp_block()`.
+wrapper sizes them apart.  Per-word reads through the register window are used
+only when the burst is unavailable from the start: the bridge advertises fewer
+chains than `burst_data_chain`, or `burst=False` was passed to the constructor.
+A burst that runs and fails (a rejected wide scan, a short reply) raises, the
+same as on the JTAG transports, and is never read around through the window.
+The window is not a safe second try: a core built with `USER1_DATA_EN=0`
+answers it with zeros, which would turn a link fault into a capture of zeros.
+Timestamps take the same path through `read_timestamp_block()`.
 
 > **Bandwidth.** A capture readback is bounded by the sample buffer, not the
 > link: a 15 kB buffer at 1 Mbaud drains in well under a second with burst

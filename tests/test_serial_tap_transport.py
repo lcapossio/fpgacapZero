@@ -17,6 +17,7 @@ import types
 import pytest
 
 from fcapz.transport import (
+    DataWindowError,
     SerialTapTransport,
     TapBridgeTransport,
     list_serial_ports,
@@ -436,24 +437,52 @@ def test_burst_can_be_disabled(fake_serial):
     assert t.read_block(ADDR_DATA_BASE, 4) == [0xC0, 0xC1, 0xC2, 0xC3]
 
 
-def test_a_failed_burst_falls_back_and_stays_disabled(fake_serial):
-    """A rejected wide scan must cost throughput, not the capture."""
+def test_a_failed_burst_raises_instead_of_reading_the_window(fake_serial):
+    """A burst that runs and fails is an error, not a cue to read the window.
+
+    The window is not a safe second try: a core built with USER1_DATA_EN=0
+    answers it with zeros, so a fallback would turn a link fault into a
+    capture of zeros.  Same policy as the JTAG transports.
+    """
     t, port = _connect(fake_serial)
     port.samples = list(range(32))
-    for i in range(2):
-        port.mem[ADDR_DATA_BASE + i * 4] = 0xD0 + i
 
     # The bridge now refuses chain 2 -- e.g. a bitstream whose ELA was built
     # without the burst chain, behind a bridge that still advertises it.
     port.num_chains = 1
+    with pytest.raises(RuntimeError, match="chain out of range"):
+        t.read_block(ADDR_DATA_BASE, 2)
 
-    assert t.read_block(ADDR_DATA_BASE, 2) == [0xD0, 0xD1]
-    assert t._has_burst is False
+    # Not latched off: once the chain answers again, the next read bursts.
+    port.num_chains = 4
+    port.breads.clear()
+    assert t.read_block(ADDR_DATA_BASE, 2) == [0, 1]
+    assert port.breads
 
-    # Still disabled on the next call: no retry storm per block.
-    port.scans.clear()
-    assert t.read_block(ADDR_DATA_BASE, 2) == [0xD0, 0xD1]
+
+def test_a_failed_timestamp_burst_raises(fake_serial):
+    t, port = _connect(fake_serial)
+    port.timestamps = list(range(4))
+    port.num_chains = 1
+    with pytest.raises(RuntimeError, match="chain out of range"):
+        t.read_timestamp_block(0x0200, 4, 32)
+
+
+def test_read_window_block_never_bursts(fake_serial):
+    t, port = _connect(fake_serial)
+    port.samples = list(range(32))
+    for i in range(2):
+        port.mem[ADDR_DATA_BASE + i * 4] = 0xD0 + i
+    assert t.read_window_block(ADDR_DATA_BASE, 2) == [0xD0, 0xD1]
+    assert port.breads == []
     assert all(chain == 1 for chain, _width in port.scans)
+
+
+def test_read_window_block_stops_at_the_window_end(fake_serial):
+    t, _ = _connect(fake_serial)
+    t.data_window_end = ADDR_DATA_BASE + 8
+    with pytest.raises(DataWindowError):
+        t.read_window_block(ADDR_DATA_BASE, 3)
 
 
 # -- raw scans --------------------------------------------------------------
