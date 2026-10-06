@@ -214,6 +214,10 @@ module fcapz_tap_bridge #(
     wire [15:0] rx_width       = {rx_data, scan_width[7:0]};
     wire [16:0] rx_width_plus7 = {1'b0, rx_width} + 17'd7;
     wire [13:0] rx_width_bytes = rx_width_plus7[16:3];
+    // scan_width widened to the bit-shift counter.  SHF_W reaches 17 when
+    // MAX_DR_BITS rounds up to a 65,536-bit buffer, one more than the 16-bit
+    // width carries.
+    wire [16:0] scan_width_x   = {1'b0, scan_width};
 
     // ------------------------------------------------------------------
     //  TAP drive
@@ -357,11 +361,16 @@ module fcapz_tap_bridge #(
         endcase
     end
 
+    // Shift through the concatenation rather than slicing scan_buf[BUF_W-1:8]:
+    // with MAX_DR_BITS = 8 that slice is [7:8], reversed and out of range.
+    wire [BUF_W+7:0] sb_cat8 = {sb_fill8, scan_buf};
+    wire [BUF_W:0]   sb_cat1 = {sb_fill1, scan_buf};
+
     always @(posedge clk or posedge arst) begin
         if (arst)          scan_buf <= {BUF_W{1'b0}};
         else if (sb_clear) scan_buf <= {BUF_W{1'b0}};
-        else if (sb_sh8)   scan_buf <= {sb_fill8, scan_buf[BUF_W-1:8]};
-        else if (sb_sh1)   scan_buf <= {sb_fill1, scan_buf[BUF_W-1:1]};
+        else if (sb_sh8)   scan_buf <= sb_cat8[BUF_W+7:8];
+        else if (sb_sh1)   scan_buf <= sb_cat1[BUF_W:1];
     end
 
     always @(posedge clk or posedge arst) begin
@@ -608,7 +617,7 @@ module fcapz_tap_bridge #(
                 // rotations; S_ALIGN brings it back down so byte 0 is DR bits
                 // [7:0].
                 byte_index <= {CNT_W{1'b0}};
-                shift_left <= BUF_W[SHF_W-1:0] - scan_width[SHF_W-1:0];
+                shift_left <= BUF_W[SHF_W-1:0] - scan_width_x[SHF_W-1:0];
                 state      <= S_ALIGN;
             end
 

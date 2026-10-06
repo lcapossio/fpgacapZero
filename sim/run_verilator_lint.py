@@ -198,6 +198,27 @@ TARGETS = (
         top="fcapz_tap_bridge",
         sources=(RTL / "fcapz_tap_bridge.v",),
     ),
+    # Both ends of MAX_DR_BITS: the byte shift of a one-byte buffer, and a
+    # 65,536-bit buffer whose bit-shift counter is wider than scan_width.
+    LintTarget(
+        name="fcapz_tap_bridge_dr8",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+        extra_flags=("-GMAX_DR_BITS=8",),
+    ),
+    LintTarget(
+        name="fcapz_tap_bridge_dr65535",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+        # A 64 Ki-bit buffer is the point of this target, and the width check
+        # against MAX_DR_BITS is constant-true when it is the 16-bit maximum.
+        extra_flags=(
+            "-GMAX_DR_BITS=65535",
+            "--replication-limit",
+            "65536",
+            "-Wno-CMPCONST",
+        ),
+    ),
     LintTarget(
         name="fcapz_uart_tap",
         top="fcapz_uart_tap",
