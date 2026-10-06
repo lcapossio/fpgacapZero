@@ -295,15 +295,38 @@ or `--tap efinix...`; in code, pass it explicitly.
 
 Unlike Xilinx `BSCANE2` or Intel `sld_virtual_jtag`, the Efinix JTAG User TAP
 is **not an RTL primitive** — it is added as a block in the Efinity Interface
-Designer, which surfaces its signals as top-level ports.  A Trion device has
-**two** hard JTAG User TAP blocks: add both and wire them to
-[`fcapz_ela_efinix`](../rtl/fcapz_ela_efinix.v)'s exposed `jtag1_*` (control)
-and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.
+Designer, which surfaces its signals as top-level ports.  Trion packages have
+**two** hard JTAG User TAP blocks (`JTAG_USER1`, `JTAG_USER2`), the Ti60F225
+has four, and the T8F49 package has none.  Add `JTAG_USER1` and `JTAG_USER2`
+and wire them to [`fcapz_ela_efinix`](../rtl/fcapz_ela_efinix.v)'s exposed
+`jtag1_*` (control) and `jtag2_*` (burst) port groups.  The ELA sits on chain 1.  In an Interface
+Designer script (`.isf`), that is:
 
-> **Provisional IR opcodes.** `IR_TABLE_EFINIX = {1: 0x08, 2: 0x09}` uses the
-> documented JTAG_USER1/USER2 defaults (JTAG Core User Guide, Table 3).  The
-> Trion T20 hard-TAP opcodes must be confirmed against the device BSDL /
-> hardware before this path is claimed as validated.
+```python
+for n in (1, 2):
+    design.create_block(f"jtag{n}", "JTAG")
+    design.assign_resource(f"jtag{n}", f"JTAG_USER{n}", "JTAG")
+    for sig in ("CAPTURE", "DRCK", "RESET", "RUNTEST", "SEL", "SHIFT",
+                "TCK", "TDI", "TMS", "UPDATE", "TDO"):
+        design.set_property(f"jtag{n}", sig, f"jtag{n}_{sig.lower()}", "JTAG")
+```
+
+The wrapper uses `TCK`, `TDI`, `TDO`, `CAPTURE`, `SHIFT`, `UPDATE` and `SEL`.
+`DRCK` is accepted but unused, and the burst chain ignores `UPDATE`, so
+synthesis reports those ports, plus any `RESET` / `RUNTEST` / `TMS` you wire
+up, as unconnected.  That is expected.  Constrain both `TCK` ports as clocks,
+asynchronous to the sample clock.
+
+`IR_TABLE_EFINIX = {1: 0x08, 2: 0x09}` matches the USER1/USER2 opcodes in the
+BSDL Efinity 2025.1 generates for the T20F256 and the Ti60F225.  The IR is
+4 bits on Trion and 5 bits on Titanium; OpenOCD takes that from the tap
+definition (`jtag newtap ... -irlen 4` or `-irlen 5`).
+
+> **Status.** The Verilog wrapper synthesizes, places and routes with Efinity
+> 2025.1 on a Trion T20F256 and a Titanium Ti60F225, and the VHDL wrapper on
+> the T20F256.  Both User TAP blocks bind and timing closes.  It has not run on
+> hardware yet.  That run still has to confirm that `TCK` reaches the fabric
+> free-running and that the strobes behave as on `BSCANE2`.
 
 ### `TapBridgeTransport` (and `SerialTapTransport`)
 
@@ -544,7 +567,7 @@ swap one for the other without changing the IR table.
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
-| Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes provisional pending T20 BSDL/hardware |
+| Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes match Efinity's BSDL for Trion and Titanium |
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
 TAP's DR, so every DR scan is one shift longer than the fcapz frame.

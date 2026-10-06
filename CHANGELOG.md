@@ -138,8 +138,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   TAP port groups (`jtag1_*`, `jtag2_*`) for top-level wiring. Host support
   rides the existing OpenOCD transport via a new `IR_TABLE_EFINIX` preset
   (auto-selected for `--tap trion.../titanium.../efinix...`) wired into
-  discovery, RPC, and CLI; lint self-test targets added. IR opcodes are
-  provisional and hardware validation on a Trion T20 is pending.
+  discovery, RPC, and CLI; lint self-test targets added. The Verilog wrapper
+  synthesizes, places and routes in Efinity 2025.1 on a Trion T20F256 and a
+  Titanium Ti60F225 (the VHDL one on the T20F256), with both User TAP blocks
+  bound and timing met. The USER1/USER2 opcodes match Efinity's BSDL for both
+  families. Hardware validation is pending.
 
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
