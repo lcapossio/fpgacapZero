@@ -43,6 +43,18 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.tap, "GW1NR-9C.tap")
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
+    def test_openocd_polarfire_ir(self) -> None:
+        c = ConnectionSettings(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="MPFS095T.tap",
+            ir_table="polarfire",
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE)
+
     def test_hw_server_port_remap_and_fpga_name(self) -> None:
         c = ConnectionSettings(
             backend="hw_server",

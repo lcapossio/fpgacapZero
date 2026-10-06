@@ -414,6 +414,10 @@ class OpenOcdTransport(Transport):
     # instantiate one GW_JTAG primitive each, so combining cores should use the
     # wrapper's address-muxed EIO_EN path unless the design shares the primitive.
     IR_TABLE_GOWIN: dict[int, int] = {1: 0x42, 2: 0x43}
+    # Microchip PolarFire / PolarFire SoC UJTAG: user IRs are 0x10..0x7F
+    # (8-bit IR).  The fcapz wrappers default to 0x20/0x21 because the
+    # PolarFire SoC MSS debug module owns 0x10/0x11.
+    IR_TABLE_POLARFIRE: dict[int, int] = {1: 0x20, 2: 0x21}
     # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this

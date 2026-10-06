@@ -32,6 +32,7 @@ const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s clien
 
 const VENDOR_NAMES: Record<string, string> = {
   gowin: "Gowin",
+  polarfire: "Microchip PolarFire",
   xilinx7: "AMD/Xilinx 7-series",
   ultrascale: "AMD/Xilinx UltraScale+",
   intel: "Intel/Altera",

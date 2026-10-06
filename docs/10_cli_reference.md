@@ -427,7 +427,7 @@ Usage: `fcapz [global options] eio-probe [--chain N] [--instance N] [--base-addr
 |---|---|---|
 | `--chain N` | `3` | BSCANE2 USER chain |
 | `--instance N` | — | Managed core slot on the selected chain |
-| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000) |
 
 <!-- END GENERATED cli:eio-probe -->
 
@@ -450,7 +450,7 @@ Usage: `fcapz [global options] eio-read [--chain N] [--instance N] [--base-addr 
 |---|---|---|
 | `--chain N` | `3` | BSCANE2 USER chain |
 | `--instance N` | — | Managed core slot on the selected chain |
-| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000) |
 
 <!-- END GENERATED cli:eio-read -->
 
@@ -471,7 +471,7 @@ Usage: `fcapz [global options] eio-write [--chain N] [--instance N] [--base-addr
 |---|---|---|
 | `--chain N` | `3` | BSCANE2 USER chain |
 | `--instance N` | — | Managed core slot on the selected chain |
-| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000) |
+| `--base-addr ADDR` | `0` | Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000) |
 | `VALUE` | required | Output value (hex or decimal) |
 
 <!-- END GENERATED cli:eio-write -->

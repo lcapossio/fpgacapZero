@@ -224,12 +224,12 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
 
 def _make_transport(args: argparse.Namespace):
     if args.backend == "openocd":
-        tap_name = args.tap.removesuffix(".tap")
-        ir_table = (
-            OpenOcdTransport.IR_TABLE_GOWIN
-            if tap_name.lower().startswith("gw")
-            else None
-        )
+        tap_name = args.tap.removesuffix(".tap").lower()
+        ir_table = None
+        if tap_name.startswith("gw"):
+            ir_table = OpenOcdTransport.IR_TABLE_GOWIN
+        elif tap_name.startswith("mpf"):
+            ir_table = OpenOcdTransport.IR_TABLE_POLARFIRE
         return OpenOcdTransport(
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
         )
@@ -540,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
@@ -560,7 +560,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
@@ -580,7 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
     eio_write.add_argument(
         "value", type=lambda x: int(x, 0), metavar="VALUE",

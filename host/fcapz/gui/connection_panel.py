@@ -102,6 +102,7 @@ class ConnectionPanel(QGroupBox):
         self._ir.addItem("AMD/Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
         self._ir.addItem("Gowin (OpenOCD)", "gowin")
+        self._ir.addItem("Microchip PolarFire (OpenOCD)", "polarfire")
 
         self._burst_path = QComboBox()
         self._burst_path.addItem("Single chain (default)", "single_chain")

@@ -726,6 +726,18 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
+    def test_openocd_polarfire_tap_uses_polarfire_ir_table(self):
+        for tap in ("MPFS095T.tap", "mpf300t.tap"):
+            args = argparse.Namespace(
+                backend="openocd",
+                host="127.0.0.1",
+                port=6666,
+                tap=tap,
+            )
+            t = _make_transport(args)
+            self.assertIsInstance(t, OpenOcdTransport)
+            self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE, tap)
+
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(
             backend="openocd",

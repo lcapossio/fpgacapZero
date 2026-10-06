@@ -352,6 +352,11 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_GOWIN)
         self.assertEqual(t.ir_table, {1: 0x42, 2: 0x43})
 
+    def test_ir_table_polarfire_preset(self):
+        """PolarFire UJTAG user IRs match the wrappers' 0x20/0x21 defaults."""
+        t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE)
+        self.assertEqual(t.ir_table, {1: 0x20, 2: 0x21})
+
     def test_ir_table_alias(self):
         """IR_TABLE_US is the same dict as IR_TABLE_XILINX_ULTRASCALE."""
         self.assertIs(

@@ -37,7 +37,8 @@ def ir_table_preset(name: str) -> dict[int, int]:
     Map a short preset name to an IR-length table for OpenOCD / hw_server transports.
 
     Aliases: ``xilinx7``, ``7series`` → 7-series table; ``ultrascale``, ``us`` → US+ table;
-    ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD only).
+    ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD only);
+    ``polarfire``, ``microchip`` → PolarFire UJTAG table (OpenOCD only).
     """
     key = name.strip().lower().replace("-", "_")
     if key in ("xilinx7", "7series", "series7"):
@@ -46,6 +47,8 @@ def ir_table_preset(name: str) -> dict[int, int]:
         return dict(OpenOcdTransport.IR_TABLE_US)
     if key in ("gowin", "gw"):
         return dict(OpenOcdTransport.IR_TABLE_GOWIN)
+    if key in ("polarfire", "microchip"):
+        return dict(OpenOcdTransport.IR_TABLE_POLARFIRE)
     raise ValueError(f"unknown ir_table preset {name!r}")
 
 

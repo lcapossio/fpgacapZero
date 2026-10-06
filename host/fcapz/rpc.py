@@ -330,6 +330,8 @@ class RpcServer:
         "us": OpenOcdTransport.IR_TABLE_US,
         "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+        "polarfire": OpenOcdTransport.IR_TABLE_POLARFIRE,
+        "microchip": OpenOcdTransport.IR_TABLE_POLARFIRE,
         "intel": None,
         "altera": None,
     }

@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from fcapz.analyzer import expected_ela_version_reg  # noqa: E402
 from fcapz.ejtagaxi import CMD_CONFIG  # noqa: E402
 from fcapz.rpc import RpcServer  # noqa: E402
-from fcapz.transport import Transport  # noqa: E402
+from fcapz.transport import OpenOcdTransport, Transport  # noqa: E402
 from fcapz.web import create_app  # noqa: E402
 
 
@@ -932,6 +932,15 @@ def test_list_cores_reports_axi_mon(monkeypatch):
 def test_ir_table_mapping():
     assert RpcServer._ir_table("xilinx7") is None
     assert RpcServer._ir_table("gowin") is not None
+    assert RpcServer._ir_table("polarfire") == OpenOcdTransport.IR_TABLE_POLARFIRE
+
+
+def test_discovery_infers_polarfire_from_tap_name():
+    from fcapz.analyzer import _DISCOVERY_IR_TABLES, _infer_ir_table_name
+
+    for tap in ("MPFS095T.tap", "mpf300t.tap"):
+        assert _infer_ir_table_name(tap) == "polarfire"
+    assert _DISCOVERY_IR_TABLES["polarfire"] == OpenOcdTransport.IR_TABLE_POLARFIRE
     assert RpcServer._ir_table("ultrascale") is not None
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")
