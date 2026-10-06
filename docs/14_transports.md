@@ -355,7 +355,7 @@ format, identity probe and register semantics come for free.
 ```python
 from fcapz.transport import SerialTapTransport
 
-t = SerialTapTransport("COM16", baudrate=1_000_000)   # /dev/ttyACM0 on Linux
+t = SerialTapTransport("COM5", baudrate=1_000_000)    # /dev/ttyACM0 on Linux
 t.connect()
 ```
 

@@ -409,7 +409,7 @@ export function ConnectionPanel({
         // bridge checks its own identity inside connect(), so a wrong port
         // reports that rather than returning garbage.
         if (!serialPort.trim()) {
-          setError("enter the serial port the board is on (e.g. COM16 or /dev/ttyACM0).");
+          setError("enter the serial port the board is on (e.g. COM5 or /dev/ttyACM0).");
           return;
         }
         await connectTo(serialPort.trim());
@@ -744,7 +744,7 @@ export function ConnectionPanel({
                 list="fcapz-serial-ports"
                 value={serialPort}
                 onChange={(e) => setSerialPort(e.target.value)}
-                placeholder="COM16, or /dev/ttyACM0"
+                placeholder="COM5, or /dev/ttyACM0"
               />
               <datalist id="fcapz-serial-ports">
                 {serialPorts.map((p) => (

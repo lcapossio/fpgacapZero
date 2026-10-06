@@ -39,7 +39,7 @@ subcommand follows:
 | `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device) |
 | `--hardware NAME` | — | usb_blaster only: Quartus hardware name; default selects first USB-Blaster |
 | `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
-| `--serial-port PORT` | — | serial only: port of the TAP bridge, e.g. COM16 or /dev/ttyACM0 |
+| `--serial-port PORT` | — | serial only: port of the TAP bridge, e.g. COM5 or /dev/ttyACM0 |
 | `--baud BAUD` | `1000000` | serial only: baud rate of the TAP bridge (default 1000000) |
 | `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
 | `--no-burst` | off | hw_server/usb_blaster: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
@@ -87,8 +87,8 @@ are addressed by index.
 
 ```bash
 fcapz list-ports                       # what is attached (opens nothing)
-fcapz --backend serial --serial-port COM16 probe
-fcapz --backend serial --serial-port /dev/ttyACM0 --baud 2000000 capture --out ramp.vcd
+fcapz --backend serial --serial-port COM5 probe
+fcapz --backend serial --serial-port /dev/ttyACM0 --baud 2000000 capture --format vcd --out ramp.vcd
 ```
 
 `list-ports` deliberately never opens a port: opening one asserts DTR/RTS,

@@ -172,7 +172,7 @@ probe daemon, so no `host`/`port`/`tap` and no IR table:
 {
   "cmd": "connect",
   "backend": "serial",
-  "serial_port": "COM16",     // or "/dev/ttyACM0"; use list_serial_ports
+  "serial_port": "COM5",      // or "/dev/ttyACM0"; use list_serial_ports
   "baudrate": 1000000         // optional, defaults to 1 Mbaud
 }
 ```
@@ -223,7 +223,7 @@ programmers that also appear in this list.
 { "cmd": "list_serial_ports" }
 ```
 
-Response: `{"ok": true, "ports": [{"device": "COM16", "description": "USB Serial Device (COM16)", "hwid": "USB VID:PID=2E8A:0009"}]}`,
+Response: `{"ok": true, "ports": [{"device": "COM5", "description": "USB Serial Device (COM5)", "hwid": "USB VID:PID=2E8A:0009"}]}`,
 sorted by device name, and empty if pyserial is not installed. On a web server
 bound beyond loopback without a token, this and serial `connect` are refused for
 remote clients (see [chapter 18](18_web_interface.md)).

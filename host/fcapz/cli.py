@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--serial-port",
         default=None,
         metavar="PORT",
-        help="serial only: port of the TAP bridge, e.g. COM16 or /dev/ttyACM0",
+        help="serial only: port of the TAP bridge, e.g. COM5 or /dev/ttyACM0",
     )
     p.add_argument(
         "--baud",
