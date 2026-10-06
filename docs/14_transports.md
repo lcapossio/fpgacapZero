@@ -418,7 +418,19 @@ A burst that runs and fails (a rejected wide scan, a short reply) raises, the
 same as on the JTAG transports, and is never read around through the window.
 The window is not a safe second try: a core built with `USER1_DATA_EN=0`
 answers it with zeros, which would turn a link fault into a capture of zeros.
-Timestamps take the same path through `read_timestamp_block()`.
+
+Unlike the hard-TAP burst, this one takes a core of **any width** up to the
+burst DR.  `jtag_burst_read` packs `BURST_W // SAMPLE_W` whole samples per
+scan, sample *i* at bit `i * SAMPLE_W`, so the host unpacks at a stride of
+`SAMPLE_W` itself — a 24-bit core on a 64-bit DR has two samples per scan, at
+bits 0 and 24, not 0 and 32.  `SAMPLE_W` is read from the selected core before
+every burst, never cached.  `read_block()` still returns 32-bit words, so a
+core wider than 32 bits comes back as `ceil(SAMPLE_W / 32)` words per sample,
+low word first, the same layout `read_sample_block()` returns and
+`Analyzer.capture()` reassembles.  Timestamps take the same path through
+`read_timestamp_block()`, one whole value per timestamp at any width up to the
+DR; `timestamp_burst_max_width` tells `Analyzer` how wide that is, so a
+48-bit timestamp is burst rather than read word by word through the window.
 
 > **Bandwidth.** A capture readback is bounded by the sample buffer, not the
 > link: a 15 kB buffer at 1 Mbaud drains in well under a second with burst

@@ -17,6 +17,7 @@ import types
 import pytest
 
 from fcapz.transport import (
+    BurstUnavailableError,
     DataWindowError,
     SerialTapTransport,
     TapBridgeTransport,
@@ -405,6 +406,81 @@ def test_burst_respects_the_hardware_sample_width(fake_serial):
     port.mem[ADDR_SAMPLE_W] = 16          # 16 samples per 256-bit scan
     port.samples = [(i * 1234) & 0xFFFF for i in range(48)]
     assert t.read_block(ADDR_DATA_BASE, 48) == port.samples
+
+
+def _connect_narrow(fake_serial, max_dr_bits=64):
+    """A bridge with a BURST_W-sized DR, as fcapz_ela_uart builds it."""
+    fake_serial["obj"] = FakeTapPort(max_dr_bits=max_dr_bits)
+    return _connect(fake_serial)
+
+
+@pytest.mark.parametrize("sample_w", [20, 24, 30, 31])
+def test_burst_unpacks_at_the_sample_width(fake_serial, sample_w):
+    """The stride is SAMPLE_W, even when it does not divide the DR.
+
+    A 64-bit DR holds two 24-bit samples, at bits 0 and 24.  Deriving the
+    stride as 64 // 2 = 32 decodes the second at bit 32 instead.
+    """
+    t, port = _connect_narrow(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = sample_w
+    mask = (1 << sample_w) - 1
+    port.samples = [(0x5A5A5A5A + i * 0x1F1F1F) & mask for i in range(7)]
+    assert t.read_block(ADDR_DATA_BASE, 7) == port.samples
+
+
+def test_wide_samples_come_back_as_32_bit_words(fake_serial):
+    """read_block() returns words, low word first, whatever SAMPLE_W is."""
+    t, port = _connect_narrow(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = 64
+    port.samples = [0x1111_1111_2222_2222, 0x3333_3333_4444_4444]
+    words = [0x2222_2222, 0x1111_1111, 0x4444_4444, 0x3333_3333]
+    assert t.read_block(ADDR_DATA_BASE, 4) == words
+    assert t.read_sample_block(ADDR_DATA_BASE, 2, 64) == words
+
+
+def test_wide_sample_word_count_need_not_be_whole_samples(fake_serial):
+    t, port = _connect_narrow(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = 48
+    port.samples = [0xAAAA_BBBB_CCCC, 0x1111_2222_3333]
+    assert t.read_block(ADDR_DATA_BASE, 3) == [0xBBBB_CCCC, 0xAAAA, 0x2222_3333]
+
+
+def test_read_sample_block_refuses_what_it_cannot_burst(fake_serial):
+    t, _ = _connect_narrow(fake_serial)
+    with pytest.raises(BurstUnavailableError):
+        t.read_sample_block(0x0200, 2, 64)
+    with pytest.raises(BurstUnavailableError):
+        t.read_sample_block(ADDR_DATA_BASE, 2, 65)     # wider than the DR
+
+
+def test_sample_width_is_read_for_every_burst(fake_serial):
+    """A cached SAMPLE_W would unpack the next core at the old stride."""
+    t, port = _connect_narrow(fake_serial)
+    port.mem[ADDR_SAMPLE_W] = 8
+    port.samples = [1, 2, 3, 4]
+    assert t.read_block(ADDR_DATA_BASE, 4) == [1, 2, 3, 4]
+
+    port.mem[ADDR_SAMPLE_W] = 16                       # another core selected
+    port.samples = [0x1001, 0x2002, 0x3003, 0x4004]
+    assert t.read_block(ADDR_DATA_BASE, 4) == port.samples
+
+
+def test_wide_timestamps_burst_whole(fake_serial):
+    """A 48-bit timestamp is one burst element, not two window words."""
+    t, port = _connect_narrow(fake_serial)
+    port.timestamp_width = 48
+    port.timestamps = [0x1234_5678_9ABC + i for i in range(5)]
+    assert t.timestamp_burst_max_width == 64
+    assert t.read_timestamp_block(0x0500, 5, 48) == port.timestamps
+    assert t.read_timestamp_block_single_chain(0x0500, 5, 48) == port.timestamps
+    assert port.breads
+
+
+def test_no_burst_means_no_wide_timestamp_burst(fake_serial):
+    t, _ = _connect(fake_serial, burst=False)
+    assert t.timestamp_burst_max_width == 0
+    with pytest.raises(BurstUnavailableError):
+        t.read_timestamp_block_single_chain(0x0500, 2, 48)
 
 
 def test_read_timestamp_block_uses_the_burst_chain(fake_serial):

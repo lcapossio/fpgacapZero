@@ -763,7 +763,6 @@ class TapBridgeTransport(Transport):
             None if burst_dr_bits is None else int(burst_dr_bits)
         )
         self._has_burst = bool(burst)
-        self._cached_sps: int | None = None
 
     transport_kind = "bytestream"
 
@@ -829,7 +828,6 @@ class TapBridgeTransport(Transport):
     def connect(self) -> None:
         self._open()
         self._open_channel = True
-        self._cached_sps = None
         try:
             self._identify()
         except BaseException:
@@ -1047,15 +1045,28 @@ class TapBridgeTransport(Transport):
     def read_block(self, addr: int, words: int) -> List[int]:
         """Read *words* 32-bit words at *addr*, bursting the DATA window.
 
-        A burst that runs and fails raises; it is never read around through
-        the register window, same as the JTAG transports.  The window is not
-        a safe second try: a core built with ``USER1_DATA_EN=0`` answers it
-        with zeros, which would turn a link error into a capture of zeros.
+        Words, not samples: a sample wider than 32 bits comes back as
+        ``ceil(SAMPLE_W / 32)`` words, low word first -- the layout
+        ``Analyzer.capture()`` reassembles.  A burst that runs and fails
+        raises; it is never read around through the register window, same as
+        the JTAG transports.  The window is not a safe second try: a core
+        built with ``USER1_DATA_EN=0`` answers it with zeros, which would turn
+        a link error into a capture of zeros.  Only a burst that cannot run
+        at all (:class:`BurstUnavailableError`, raised before any scan) falls
+        through to the window.
         """
         if words <= 0:
             return []
         if addr == self.ADDR_DATA_BASE and self._burst_available:
-            return self._read_block_burst(words)
+            sample_w = self._core_sample_width()
+            words_per = (sample_w + 31) // 32
+            try:
+                samples = self._read_block_burst(
+                    -(-words // words_per), element_width=sample_w
+                )
+            except BurstUnavailableError:
+                return self.read_window_block(addr, words)
+            return _split_words(samples, words_per)[:words]
         return self.read_window_block(addr, words)
 
     def read_window_block(self, addr: int, words: int) -> List[int]:
@@ -1065,21 +1076,72 @@ class TapBridgeTransport(Transport):
         check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples through the burst chain.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample, the flat layout ``Analyzer.capture()`` reassembles for a core
+        wider than 32 bits.  Raises :class:`BurstUnavailableError`, before any
+        scan, when the burst cannot carry the request, so the caller can read
+        the window instead; a burst that runs and fails raises anything else.
+        """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        if base_addr != self.ADDR_DATA_BASE:
+            raise BurstUnavailableError(
+                f"burst reads start at the DATA base, not 0x{base_addr:04X}"
+            )
+        samples = self._read_block_burst(n_samples, element_width=sample_width)
+        return _split_words(samples, (sample_width + 31) // 32)
+
+    @property
+    def timestamp_burst_max_width(self) -> int:
+        """Widest timestamp :meth:`read_timestamp_block` can return whole.
+
+        The burst engine packs whole timestamps into one DR, so anything up to
+        the burst width works; the JTAG transports stop at one 32-bit word.
+        ``Analyzer`` checks this before reading wide timestamps through the
+        window instead.
+        """
+        return self._burst_dr_bits if self._burst_available else 0
+
     def read_timestamp_block(
         self, addr: int, words: int, timestamp_width: int
     ) -> List[int]:
-        """Read *words* timestamps, through the burst chain when it is usable.
+        """Read *words* whole timestamps, through the burst chain when usable.
 
-        As with :meth:`read_block`, a burst that fails raises rather than
-        falling back to the window.
+        One value per timestamp, at any width up to the burst DR.  As with
+        :meth:`read_block`, a burst that fails raises rather than falling back
+        to the window.
         """
         if words <= 0:
             return []
         if self._burst_available and timestamp_width > 0:
-            return self._read_block_burst(
-                words, timestamp=True, element_width=timestamp_width
-            )
+            try:
+                return self._read_block_burst(
+                    words, timestamp=True, element_width=timestamp_width
+                )
+            except BurstUnavailableError:
+                pass
         return self.read_window_block(addr, words)
+
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Timestamps for a core wider than 32 bits.
+
+        ``Analyzer`` calls this for wide cores because on JTAG those are
+        single-chain and the two-chain burst cannot reach them.  Every core
+        behind this bridge has its own burst chain, at any width, so it is the
+        same burst as :meth:`read_timestamp_block`.
+        """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        return self._read_block_burst(
+            n_timestamps, timestamp=True, element_width=timestamp_width
+        )
 
     # -- burst readback -----------------------------------------------------
     #
@@ -1119,35 +1181,46 @@ class TapBridgeTransport(Transport):
             return False
         return self._burst_dr_bits >= 32
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        """Samples per wide scan, from the core's hardware SAMPLE_W."""
-        if self._cached_sps is None:
-            sw = self.read_reg(self.ADDR_SAMPLE_W)
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self._burst_dr_bits // sw)
-        return self._cached_sps
+    def _core_sample_width(self) -> int:
+        """The selected core's hardware SAMPLE_W.
+
+        Read on every burst rather than cached: it sets the unpacking stride,
+        and a stale value after the selected core changes would decode every
+        sample at the wrong offset with nothing to show for it.
+        """
+        sample_w = int(self.read_reg(self.ADDR_SAMPLE_W))
+        if sample_w < 1:
+            raise BurstUnavailableError(
+                f"core reports SAMPLE_W={sample_w}; cannot unpack a burst"
+            )
+        return sample_w
 
     def _read_block_burst(
         self,
-        words: int,
+        count: int,
         *,
+        element_width: int,
         timestamp: bool = False,
-        element_width: int | None = None,
     ) -> List[int]:
-        dr_bits = self._burst_dr_bits
-        if timestamp:
-            if element_width is None:
-                element_width = 32
-            per_scan = max(1, dr_bits // element_width)
-        else:
-            per_scan = self._burst_samples_per_scan
-            element_width = dr_bits // per_scan
-        if element_width < 1:
-            raise ValueError(f"burst element width {element_width} is not usable")
+        """Burst *count* whole elements (samples, or timestamps) of
+        *element_width* bits each.
 
-        n_scans = (words + per_scan - 1) // per_scan
+        ``jtag_burst_read`` packs ``BURST_W // element_width`` elements per
+        scan, element *i* at bits ``[i * element_width +: element_width]``,
+        so the stride is the element width itself -- not ``BURST_W`` divided
+        by the number that fit, which differs whenever the width does not
+        divide the DR.
+        """
+        if count <= 0:
+            return []
+        dr_bits = self._burst_dr_bits
+        if not 1 <= element_width <= dr_bits:
+            raise BurstUnavailableError(
+                f"{element_width}-bit elements do not fit the {dr_bits}-bit "
+                f"burst DR"
+            )
+        per_scan = dr_bits // element_width
+        n_scans = (count + per_scan - 1) // per_scan
         mask = (1 << element_width) - 1
 
         # 1. Arm the burst reader on the control chain.  Bit 31 asks for
@@ -1179,16 +1252,27 @@ class TapBridgeTransport(Transport):
 
         values: list[int] = []
         for scan_value in scans[1:]:
-            for sample_idx in range(per_scan):
-                if len(values) >= words:
+            for idx in range(per_scan):
+                if len(values) >= count:
                     break
-                values.append((scan_value >> (sample_idx * element_width)) & mask)
+                values.append((scan_value >> (idx * element_width)) & mask)
 
-        if len(values) != words:
+        if len(values) != count:
             raise BurstIntegrityError(
-                f"TAP bridge burst returned {len(values)} values, expected {words}"
+                f"TAP bridge burst returned {len(values)} values, expected {count}"
             )
         return values
+
+
+def _split_words(values: List[int], words_per: int) -> List[int]:
+    """Flatten each value into *words_per* 32-bit words, low word first."""
+    if words_per == 1:
+        return list(values)
+    return [
+        (value >> (32 * k)) & 0xFFFFFFFF
+        for value in values
+        for k in range(words_per)
+    ]
 
 
 class SerialTapTransport(TapBridgeTransport):
