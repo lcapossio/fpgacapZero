@@ -59,7 +59,9 @@ module fcapz_ela_uart #(
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
+    // Same width as the core's own port: the full mux input when
+    // PROBE_MUX_W is set, otherwise one SAMPLE_W slice per channel.
+    input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
     input  wire                          trigger_in,
     output wire                          trigger_out,
     output wire                          armed_out,
