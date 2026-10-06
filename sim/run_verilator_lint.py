@@ -334,6 +334,19 @@ TARGETS = (
         ),
     ),
     LintTarget(
+        name="fcapz_ela_polarfire_eio",
+        top="fcapz_ela_polarfire",
+        sources=(
+            SIM / "ujtag_stub.v",
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+            RTL / "fcapz_ela_polarfire.v",
+        ),
+        # Shared-chain EIO on USER1 (the only way to combine ELA + EIO, since
+        # a PolarFire device has one UJTAG).
+        extra_flags=("-GEIO_EN=1", "-GEIO_IN_W=2", "-GEIO_OUT_W=6"),
+    ),
+    LintTarget(
         name="fcapz_eio_polarfire",
         top="fcapz_eio_polarfire",
         sources=(

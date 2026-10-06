@@ -18,8 +18,8 @@ entity fcapz_ela_polarfire is
         TIMESTAMP_W    : natural := 0;
         STARTUP_ARM    : natural := 0;
         BURST_W        : positive := 256;
-        IR_USER1       : std_logic_vector(7 downto 0) := x"10";
-        IR_USER2       : std_logic_vector(7 downto 0) := x"11";
+        IR_USER1       : std_logic_vector(7 downto 0) := x"20";
+        IR_USER2       : std_logic_vector(7 downto 0) := x"21";
         EIO_EN         : natural := 0;
         EIO_IN_W       : positive := 1;
         EIO_OUT_W      : positive := 1;
@@ -32,7 +32,13 @@ entity fcapz_ela_polarfire is
         sample_rst    : in  std_logic;
         probe_in      : in  std_logic_vector(SAMPLE_W * NUM_CHANNELS - 1 downto 0);
         eio_probe_in  : in  std_logic_vector(EIO_IN_W - 1 downto 0);
-        eio_probe_out : out std_logic_vector(EIO_OUT_W - 1 downto 0)
+        eio_probe_out : out std_logic_vector(EIO_OUT_W - 1 downto 0);
+        -- JTAG pads (connect straight to top-level ports)
+        tck_pad_i     : in  std_logic;
+        tms_pad_i     : in  std_logic;
+        tdi_pad_i     : in  std_logic;
+        trstb_pad_i   : in  std_logic;
+        tdo_pad_o     : out std_logic
     );
 end entity fcapz_ela_polarfire;
 
@@ -58,6 +64,8 @@ begin
     u_tap : entity work.jtag_tap_polarfire
         generic map (IR_USER1 => IR_USER1, IR_USER2 => IR_USER2)
         port map (
+            tck_pad_i => tck_pad_i, tms_pad_i => tms_pad_i, tdi_pad_i => tdi_pad_i,
+            trstb_pad_i => trstb_pad_i, tdo_pad_o => tdo_pad_o,
             ch1_tck => tap1_tck, ch1_tdi => tap1_tdi, ch1_tdo => tap1_tdo,
             ch1_capture => tap1_capture, ch1_shift => tap1_shift,
             ch1_update => tap1_update, ch1_sel => tap1_sel,

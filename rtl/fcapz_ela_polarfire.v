@@ -10,6 +10,11 @@
 //   USER1 → control (49-bit register interface)
 //   USER2 → burst data readout (256-bit DR)
 //
+// UJTAG's JTAG pins must reach top-level ports: connect tck_pad_i,
+// tms_pad_i, tdi_pad_i, trstb_pad_i and tdo_pad_o straight to ports of
+// the same direction on your top level.  Libero binds them to the
+// dedicated JTAG pins; they need no PDC constraint.
+//
 // Only ONE UJTAG instance is allowed per device, so this wrapper
 // CANNOT coexist with fcapz_eio_polarfire (standalone) — to use ELA
 // and EIO together, set EIO_EN=1 on this wrapper to mux EIO onto
@@ -19,7 +24,9 @@
 // Usage:
 //   // ELA only
 //   fcapz_ela_polarfire #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
-//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals)
+//       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
+//       .tck_pad_i(TCK), .tms_pad_i(TMS), .tdi_pad_i(TDI),
+//       .trstb_pad_i(TRSTB), .tdo_pad_o(TDO)
 //   );
 //
 //   // ELA + EIO combined
@@ -27,7 +34,9 @@
 //       .EIO_EN(1), .EIO_IN_W(32), .EIO_OUT_W(32)
 //   ) u_ela (
 //       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
-//       .eio_probe_in(observe), .eio_probe_out(drive)
+//       .eio_probe_in(observe), .eio_probe_out(drive),
+//       .tck_pad_i(TCK), .tms_pad_i(TMS), .tdi_pad_i(TDI),
+//       .trstb_pad_i(TRSTB), .tdo_pad_o(TDO)
 //   );
 
 module fcapz_ela_polarfire #(
@@ -40,9 +49,10 @@ module fcapz_ela_polarfire #(
     parameter TIMESTAMP_W  = 0,
     parameter STARTUP_ARM  = 0,
     parameter BURST_W      = 256,
-    // PolarFire UJTAG IR opcodes (override if your BSDL differs).
-    parameter [7:0] IR_USER1 = 8'h10,
-    parameter [7:0] IR_USER2 = 8'h11,
+    // UJTAG user IR opcodes (16..127 are free; 0x10/0x11 belong to the
+    // PolarFire SoC MSS debug module, see jtag_tap_polarfire.v).
+    parameter [7:0] IR_USER1 = 8'h20,
+    parameter [7:0] IR_USER2 = 8'h21,
     // Optional EIO (shares USER1 via address mux)
     parameter EIO_EN       = 0,
     parameter EIO_IN_W     = 1,
@@ -56,7 +66,13 @@ module fcapz_ela_polarfire #(
     input  wire [SAMPLE_W*NUM_CHANNELS-1:0]  probe_in,
     // EIO ports (active when EIO_EN=1)
     input  wire [EIO_IN_W-1:0]               eio_probe_in,
-    output wire [EIO_OUT_W-1:0]              eio_probe_out
+    output wire [EIO_OUT_W-1:0]              eio_probe_out,
+    // JTAG pads (connect straight to top-level ports)
+    input  wire                              tck_pad_i,
+    input  wire                              tms_pad_i,
+    input  wire                              tdi_pad_i,
+    input  wire                              trstb_pad_i,
+    output wire                              tdo_pad_o
 );
 
     localparam PTR_W = $clog2(DEPTH);
@@ -89,6 +105,8 @@ module fcapz_ela_polarfire #(
         .IR_USER1(IR_USER1),
         .IR_USER2(IR_USER2)
     ) u_tap (
+        .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
+        .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),
         .ch1_tck(tap1_tck), .ch1_tdi(tap1_tdi), .ch1_tdo(tap1_tdo),
         .ch1_capture(tap1_capture), .ch1_shift(tap1_shift),
         .ch1_update(tap1_update), .ch1_sel(tap1_sel),

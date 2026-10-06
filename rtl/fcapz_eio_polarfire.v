@@ -11,19 +11,30 @@
 // fcapz_ela_polarfire wrapper instead.  This wrapper is for
 // EIO-only designs (no ELA).
 //
+// Connect the *_pad_* ports straight to top-level ports; Libero binds
+// them to the dedicated JTAG pins.
+//
 // Usage:
 //   fcapz_eio_polarfire #(.IN_W(32), .OUT_W(32)) u_eio (
-//       .probe_in(fabric_signals), .probe_out(driven_signals)
+//       .probe_in(fabric_signals), .probe_out(driven_signals),
+//       .tck_pad_i(TCK), .tms_pad_i(TMS), .tdi_pad_i(TDI),
+//       .trstb_pad_i(TRSTB), .tdo_pad_o(TDO)
 //   );
 
 module fcapz_eio_polarfire #(
     parameter IN_W      = 32,
     parameter OUT_W     = 32,
-    parameter [7:0] IR_USER1 = 8'h10,
-    parameter [7:0] IR_USER2 = 8'h11
+    parameter [7:0] IR_USER1 = 8'h20,
+    parameter [7:0] IR_USER2 = 8'h21
 ) (
     input  wire [IN_W-1:0]  probe_in,
-    output wire [OUT_W-1:0] probe_out
+    output wire [OUT_W-1:0] probe_out,
+    // JTAG pads (connect straight to top-level ports)
+    input  wire             tck_pad_i,
+    input  wire             tms_pad_i,
+    input  wire             tdi_pad_i,
+    input  wire             trstb_pad_i,
+    output wire             tdo_pad_o
 );
 
     // TAP signals — UJTAG primitive exposes both user chains; we only
@@ -45,6 +56,8 @@ module fcapz_eio_polarfire #(
         .IR_USER1(IR_USER1),
         .IR_USER2(IR_USER2)
     ) u_tap (
+        .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
+        .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),
         .ch1_tck(tap_tck), .ch1_tdi(tap_tdi), .ch1_tdo(tap_tdo),
         .ch1_capture(tap_capture), .ch1_shift(tap_shift),
         .ch1_update(tap_update), .ch1_sel(tap_sel),
