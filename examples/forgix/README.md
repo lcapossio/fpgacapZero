@@ -24,11 +24,13 @@ the general mechanism.
   connector. The board's only debug connector (J2, Tag-Connect TC2030) is
   **ARM SWD for the RP2354**, not FPGA JTAG.
 
-So [`rtl/fcapz_ela_efinix.v`](../../rtl/fcapz_ela_efinix.v), which binds the
-T8's hard JTAG User TAP blocks, **cannot be used on this board** — those TAPs
-are unreachable. This example uses
-[`rtl/fcapz_ela_uart.v`](../../rtl/fcapz_ela_uart.v) instead, which drives the
-identical ELA core from a virtual TAP fed by a byte stream.
+So [`rtl/fcapz_ela_efinix.v`](../../rtl/fcapz_ela_efinix.v), which binds an
+Efinix device's hard JTAG User TAP blocks, **cannot be used on this board**.
+Wiring the JTAG pins out would not help either: the T8F49 package has no JTAG
+User TAP blocks at all. Efinity's Interface Designer lists no `JTAG_USER`
+resource for it, while the T8F81 and larger Trion packages have two. This
+example uses [`rtl/fcapz_ela_uart.v`](../../rtl/fcapz_ela_uart.v) instead,
+which drives the identical ELA core from a virtual TAP fed by a byte stream.
 
 ## Wiring: none
 
@@ -104,10 +106,14 @@ picotool load forge_fpga_loader.uf2 -f -x       # flash and run
 ```
 
 Then program the FPGA with the upstream host loader, which accepts the Efinity
-`.hex` directly:
+`.hex` directly. It is not shipped here. Get it from the
+[forgix_public](https://bitbucket.org/adiuvo-engineering/forgix_public)
+repository, in `BitStream_Loader/host`, at the revision `apply_patch.py` pins.
+It is used unmodified and needs only pyserial. Run it from that directory:
 
 ```sh
-python -m forge_loader.cli --port COM16 --file efinity/outflow/forgix.hex
+pip install pyserial
+python -m forge_loader.cli --port COM5 --file <fpgacapZero>/examples/forgix/efinity/outflow/forgix.hex
 # ... fpga programmed
 # FPGA pins: DONE=high, STATUS=high
 ```
@@ -141,6 +147,11 @@ efx_run.bat forgix.xml --flow pgm     # -> efinity/outflow/forgix.hex
 The `pgm` flow emits an SPI **passive x1** `.hex`, which is what the RP2354
 loader sends (it is the SPI master; the FPGA is the passive target).
 
+A build from a clean checkout reproduces the tested bitstream exactly. Only the
+`.hex` header differs, because it records the build time and project path.
+Efinity also rewrites the `last_change` timestamp in `forgix.xml`, so run
+`git checkout forgix.xml` in `efinity/` afterwards to keep your tree clean.
+
 [`forgix.sdc`](forgix.sdc) is not optional: `tap_tck` is generated inside the
 fabric, and Efinity does not infer a clock for it — without the
 `create_generated_clock` in there, that domain (roughly 940 flops plus both
@@ -164,7 +175,7 @@ clean because it only covers `clk_in`.
 ```python
 from fcapz.transport import SerialTapTransport
 
-t = SerialTapTransport("COM16", baudrate=1_000_000)   # /dev/ttyACM0 on Linux
+t = SerialTapTransport("COM5", baudrate=1_000_000)    # /dev/ttyACM0 on Linux
 t.connect()
 print(t.num_chains, t.max_dr_bits)                    # identity from the bridge
 ```

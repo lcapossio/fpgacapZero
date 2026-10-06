@@ -119,15 +119,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   1024-sample capture returns a clean ramp over the burst chain in ~16 ms.
 - **Forgix board example (Efinix Trion T8F49 + RP2354).** The board exposes no
   JTAG to the fabric at all — the T8 is configured over a write-only passive
-  SPI link and its JTAG pins are bonded out nowhere — so `fcapz_ela_efinix`
-  cannot reach it. `examples/forgix/` builds on the byte-stream TAP instead and
+  SPI link and its JTAG pins are bonded out nowhere — and the T8F49 package has
+  no JTAG User TAP blocks, so `fcapz_ela_efinix` cannot be used on it.
+  `examples/forgix/` builds on the byte-stream TAP instead and
   needs **no extra wiring**: it reuses the configuration SPI pins, which go
   idle once `DONE` is high (CCK and CDI are dual-purpose pins, reusable as
   general I/O in user mode per Efinix AN006 Table 3). Includes a reference top
   and a locally vendored patch (pinned upstream revision, applied to a local
   copy) that turns the RP2354 bitstream loader into a transparent USB-CDC
-  bridge after configuration. Hardware validation pending; the firmware patch
-  is verified to apply but has not been compiled or run on a board.
+  bridge after configuration. The README now says where to get the upstream
+  loader host tool. A clean checkout rebuilds a bitstream bit-identical to the
+  one tested, and the vendored patch reproduces the firmware sources running on
+  the board.
 - **Efinix (Trion / Titanium) ELA wrapper.** New `fcapz_ela_efinix` (Verilog +
   VHDL) maps the two hard JTAG User TAP blocks a Trion device exposes onto the
   control and burst chains. Because the Efinix JTAG User TAP is an Efinity
