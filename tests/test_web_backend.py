@@ -680,6 +680,26 @@ def test_ws_serves_its_own_page_and_the_dev_proxy(monkeypatch):
     assert _ws_served(c, "http://localhost:5173")     # Vite dev proxy
 
 
+def test_ws_same_origin_means_scheme_host_and_port(monkeypatch):
+    """A plain-HTTP page on the same name is not the TLS server's origin."""
+    from fcapz.web.app import _origin_ok
+
+    def ok(origin, host, scheme):
+        return _origin_ok(origin, host, "10.0.0.5", (), scheme)
+
+    assert ok("https://board.example", "board.example", "wss")
+    assert ok("https://board.example:443", "board.example", "wss")
+    assert not ok("http://board.example", "board.example", "wss")
+    assert not ok("https://board.example", "board.example", "ws")
+    assert not ok("http://board.example:8080", "board.example", "ws")
+    assert not ok("http://board.example:bad", "board.example", "ws")
+    assert ok("http://[fd00::5]:7373", "[fd00::5]:7373", "ws")
+
+    c = _client(monkeypatch)                          # remote peer, ws://
+    assert _ws_refused(c, "https://testserver")
+    assert _ws_served(c, "http://testserver:80")
+
+
 def test_ws_loopback_origin_needs_a_loopback_client(monkeypatch):
     c = _client(monkeypatch)                          # remote peer
     assert _ws_refused(c, "http://localhost:5173")

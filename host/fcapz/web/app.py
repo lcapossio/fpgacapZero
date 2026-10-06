@@ -124,6 +124,7 @@ def _origin_ok(
     host_header: Optional[str],
     client_host: Optional[str],
     allowed_origins: Iterable[str],
+    ws_scheme: str = "ws",
 ) -> bool:
     """Cross-site WebSocket gate.
 
@@ -143,9 +144,35 @@ def _origin_ok(
     parsed = urlsplit(origin)
     if not parsed.hostname:  # "null": a sandboxed frame or a file:// page
         return False
-    if host_header and parsed.netloc.lower() == host_header.strip().lower():
+    if _same_origin(parsed, host_header, ws_scheme):
         return True
     return _is_loopback(parsed.hostname) and _is_loopback(client_host)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _same_origin(origin, host_header: Optional[str], ws_scheme: str) -> bool:
+    """Is the page at *origin* (a ``urlsplit`` result) this server?
+
+    Scheme, host and effective port must all match.  Comparing ``host:port``
+    alone would let a plain-HTTP page reach a ``wss://`` server on the same
+    name, since both default their port away.
+    """
+    page_scheme = {"ws": "http", "wss": "https"}.get(ws_scheme, ws_scheme)
+    if not host_header or origin.scheme.lower() != page_scheme:
+        return False
+    server = urlsplit("//" + host_header.strip())
+    try:
+        origin_port = origin.port or _DEFAULT_PORTS.get(page_scheme)
+        server_port = server.port or _DEFAULT_PORTS.get(page_scheme)
+    except ValueError:  # a malformed port
+        return False
+    return (
+        origin.hostname is not None
+        and origin.hostname == server.hostname
+        and origin_port == server_port
+    )
 
 
 def _host_name(host_header: Optional[str]) -> Optional[str]:
@@ -271,6 +298,7 @@ def create_app(
             websocket.headers.get("host"),
             client_host,
             cors_origins,
+            websocket.url.scheme,
         ):
             await websocket.close(code=1008)
             return

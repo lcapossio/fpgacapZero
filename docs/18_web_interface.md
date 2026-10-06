@@ -54,10 +54,10 @@ Cross-origin API access is **off by default** (the bundled UI is same-origin,
 and `npm run dev` proxies `/api`), so a random website cannot drive the board;
 enable it only if you serve the frontend from a different origin, with
 `--cors-origin`. CORS does not apply to WebSockets, so `/api/ws` checks the
-handshake's `Origin` itself: it must be the server's own origin, a
-`--cors-origin`, or a loopback page connecting from loopback (the dev proxy). A
-client that sends no `Origin` — a script rather than a browser — is governed by
-the token as before. When bound to a loopback address the server also rejects
+handshake's `Origin` itself: it must be the server's own origin (scheme, host
+and port), a `--cors-origin`, or a loopback page connecting from loopback (the
+dev proxy). A client that sends no `Origin` — a script rather than a browser —
+is governed by the token as before. When bound to a loopback address the server also rejects
 requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 
 | Flag | Default | Meaning |
