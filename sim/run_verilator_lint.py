@@ -210,12 +210,13 @@ TARGETS = (
         name="fcapz_tap_bridge_dr65535",
         top="fcapz_tap_bridge",
         sources=(RTL / "fcapz_tap_bridge.v",),
-        # A 64 Ki-bit buffer is the point of this target, and the width check
-        # against MAX_DR_BITS is constant-true when it is the 16-bit maximum.
+        # A 64 Ki-bit buffer is the point of this target, so its 64 Ki-bit
+        # replications are intended (WIDTHCONCAT flags any over 8 Ki; the
+        # --replication-limit option is newer than the CI Verilator), and the
+        # width check against MAX_DR_BITS is constant-true at the 16-bit maximum.
         extra_flags=(
             "-GMAX_DR_BITS=65535",
-            "--replication-limit",
-            "65536",
+            "-Wno-WIDTHCONCAT",
             "-Wno-CMPCONST",
         ),
     ),
