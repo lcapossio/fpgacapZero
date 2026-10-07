@@ -726,6 +726,18 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
+    def test_openocd_polarfire_tap_uses_polarfire_ir_table(self):
+        for tap in ("MPFS095T.tap", "mpf300t.tap"):
+            args = argparse.Namespace(
+                backend="openocd",
+                host="127.0.0.1",
+                port=6666,
+                tap=tap,
+            )
+            t = _make_transport(args)
+            self.assertIsInstance(t, OpenOcdTransport)
+            self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE, tap)
+
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(
             backend="openocd",
@@ -765,6 +777,53 @@ class MakeTransportTests(unittest.TestCase):
                 t = _make_transport(args)
                 self.assertIsInstance(t, QuartusStpTransport)
                 self.assertIsNone(t.device_name)
+
+    def test_openocd_bursts_by_default_only_for_polarfire(self):
+        parser = build_parser()
+        cases = (
+            ("MPFS095T.tap", [], True),
+            ("MPFS095T.tap", ["--no-burst"], False),
+            ("xc7a100t.tap", [], False),
+            ("xc7a100t.tap", ["--burst"], True),
+            ("GW1NR-9C.tap", [], False),
+        )
+        for tap, flags, burst in cases:
+            with self.subTest(tap=tap, flags=flags):
+                args = parser.parse_args(
+                    ["--backend", "openocd", "--tap", tap, *flags, "probe"]
+                )
+                t = _make_transport(args)
+                self.assertEqual(t.burst, burst)
+                self.assertTrue(t.single_chain_burst)
+        args = parser.parse_args(
+            ["--backend", "openocd", "--tap", "MPFS095T.tap", "--two-chain-burst", "probe"]
+        )
+        self.assertFalse(_make_transport(args).single_chain_burst)
+
+    def test_ftdi_backend_detects_family_unless_tap_given(self):
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+
+        parser = build_parser()
+        args = parser.parse_args(
+            ["--backend", "ftdi", "--hardware", "Embedded FlashPro5 A",
+             "--tck-mhz", "15", "probe"]
+        )
+        t = _make_transport(args)
+        self.assertIsInstance(t, FtdiMpsseTransport)
+        self.assertEqual(t.device, "Embedded FlashPro5 A")
+        self.assertEqual(t.tck_hz, 15e6)
+        self.assertEqual(t.ir_table, {})
+        self.assertIsNone(t._burst_arg)
+        args = parser.parse_args(
+            ["--backend", "ftdi", "--tap", "MPFS095T", "--no-burst", "probe"]
+        )
+        t = _make_transport(args)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE)
+        self.assertIs(t._burst_arg, False)
+        args = parser.parse_args(["--backend", "ftdi", "--burst", "probe"])
+        self.assertIs(_make_transport(args)._burst_arg, True)
+        args = parser.parse_args(["--backend", "ftdi", "--tap", "xcku040", "probe"])
+        self.assertEqual(_make_transport(args).ir_table, OpenOcdTransport.IR_TABLE_US)
 
     def test_no_burst_flag_declares_a_build_without_burst(self):
         parser = build_parser()

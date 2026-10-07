@@ -72,6 +72,7 @@ class ConnectionPanel(QGroupBox):
         self._backend.addItem("AMD/Xilinx hw_server", "hw_server")
         self._backend.addItem("OpenOCD", "openocd")
         self._backend.addItem("Intel Quartus JTAG", "usb_blaster")
+        self._backend.addItem("FTDI (direct JTAG)", "ftdi")
 
         self._host = QLineEdit()
         self._host.setPlaceholderText("127.0.0.1")
@@ -101,7 +102,10 @@ class ConnectionPanel(QGroupBox):
         self._ir = QComboBox()
         self._ir.addItem("AMD/Xilinx 7-series", "xilinx7")
         self._ir.addItem("UltraScale+", "ultrascale")
-        self._ir.addItem("Gowin (OpenOCD)", "gowin")
+        self._ir.addItem("Gowin", "gowin")
+        self._ir.addItem("Microchip PolarFire", "polarfire")
+        self._ir.addItem("Auto from IDCODE (FTDI)", "auto")
+        self._ir.currentIndexChanged.connect(self._refresh_burst_enabled)
 
         self._burst_path = QComboBox()
         self._burst_path.addItem("Single chain (default)", "single_chain")
@@ -110,16 +114,18 @@ class ConnectionPanel(QGroupBox):
         self._burst_path.setToolTip(
             "The bitstream's burst readout path. Single chain matches the default "
             "SINGLE_CHAIN_BURST=1 build; two chain is for SINGLE_CHAIN_BURST=0 "
-            "builds with the USER2 burst chain (hw_server only); none is for builds "
-            "with no burst path, read through the slower register window. A burst "
-            "that fails is reported, not read around.",
+            "builds with the USER2 burst chain; none is for builds with no burst "
+            "path, read through the slower register window. A burst that fails is "
+            "reported, not read around. OpenOCD reads by burst for PolarFire only; "
+            "FTDI follows the detected family (none for Gowin).",
         )
 
         self._hardware = QLineEdit()
         self._hardware.setPlaceholderText("auto or <board name> [USB-N]")
         self._hardware.setToolTip(
-            "Quartus hardware name, typically like '<board name> [USB-N]'. "
-            "Leave empty to auto-select when exactly one Quartus JTAG cable is present.",
+            "Quartus: hardware name, typically like '<board name> [USB-N]'. "
+            "FTDI: adapter channel description (e.g. 'Embedded FlashPro5 A') or "
+            "serial. Leave empty to auto-select when exactly one cable is present.",
         )
 
         self._quartus_stp = QLineEdit()
@@ -246,32 +252,54 @@ class ConnectionPanel(QGroupBox):
     def _backend_supports_scan(self) -> bool:
         return self._backend.currentData() in ("hw_server", "openocd")
 
-    def _on_backend_changed(self) -> None:
+    def _burst_path_applies(self) -> bool:
+        """OpenOCD reads by burst only with the PolarFire preset."""
+        if self._backend.currentData() == "openocd":
+            return self._ir.currentData() == "polarfire"
+        return True
+
+    def _refresh_burst_enabled(self) -> None:
+        self._burst_path.setEnabled(not self._connected and self._burst_path_applies())
+
+    def _apply_backend_state(self, editable: bool) -> None:
         backend = self._backend.currentData()
         is_hw = backend == "hw_server"
         is_usb = backend == "usb_blaster"
-        self._set_quartus_rows_visible(is_usb)
-        self._set_tcp_timeout_row_visible(not is_usb)
-        self._host.setEnabled(not is_usb)
-        self._port.setEnabled(not is_usb)
-        self._ir.setEnabled(not is_usb)
-        self._burst_path.setEnabled(backend != "openocd")
-        self._hardware.setEnabled(is_usb)
-        self._quartus_stp.setEnabled(is_usb)
-        self._quartus_row.setEnabled(is_usb)
-        self._tcp_timeout.setEnabled(not is_usb)
-        self._program_on_connect.setEnabled(is_hw)
-        self._program.setEnabled(is_hw)
-        self._scan_targets_btn.setEnabled(
-            self._backend_supports_scan() and not self._connected
-        )
-        if is_usb and self._tap_text() in QUARTUS_AUTO_DEVICE_TAPS:
+        is_ftdi = backend == "ftdi"
+        local = is_usb or is_ftdi
+        self._set_quartus_rows_visible(is_usb, hardware=local)
+        self._hardware_label.setText("FTDI adapter" if is_ftdi else "Quartus hardware")
+        self._set_tcp_timeout_row_visible(not local)
+        self._host.setEnabled(editable and not local)
+        self._port.setEnabled(editable and not local)
+        self._tap.setEnabled(editable and not is_ftdi)
+        self._ir.setEnabled(editable and not is_usb)
+        self._burst_path.setEnabled(editable and self._burst_path_applies())
+        self._hardware.setEnabled(editable and local)
+        self._quartus_stp.setEnabled(editable and is_usb)
+        self._quartus_row.setEnabled(editable and is_usb)
+        self._tcp_timeout.setEnabled(editable and not local)
+        self._program_on_connect.setEnabled(editable and is_hw)
+        self._program.setEnabled(editable and is_hw)
+        self._scan_targets_btn.setEnabled(editable and self._backend_supports_scan())
+
+    def _on_backend_changed(self) -> None:
+        backend = self._backend.currentData()
+        if backend == "ftdi":
+            auto = self._ir.findData("auto")
+            if auto >= 0:
+                self._ir.setCurrentIndex(auto)
+        elif self._ir.currentData() == "auto":
+            self._ir.setCurrentIndex(self._ir.findData("xilinx7"))
+        self._apply_backend_state(not self._connected)
+        if backend == "usb_blaster" and self._tap_text() in QUARTUS_AUTO_DEVICE_TAPS:
             self._set_tap_text("auto")
         self._refresh_timeout_row_state()
 
-    def _set_quartus_rows_visible(self, visible: bool) -> None:
-        self._hardware_label.setVisible(visible)
-        self._hardware.setVisible(visible)
+    def _set_quartus_rows_visible(self, visible: bool, *, hardware: bool | None = None) -> None:
+        hardware = visible if hardware is None else hardware
+        self._hardware_label.setVisible(hardware)
+        self._hardware.setVisible(hardware)
         self._quartus_stp_label.setVisible(visible)
         self._quartus_row.setVisible(visible)
 
@@ -463,10 +491,10 @@ class ConnectionPanel(QGroupBox):
     def _validate(self) -> str | None:
         backend = self._backend.currentData()
         host = self._host.text().strip()
-        if backend != "usb_blaster" and not host:
+        if backend not in ("usb_blaster", "ftdi") and not host:
             return "Host must not be empty."
         tap = self._tap_text()
-        if not tap:
+        if not tap and backend != "ftdi":
             return "TAP / target must not be empty."
         if backend == "usb_blaster":
             quartus = self._quartus_stp.text().strip()
@@ -537,26 +565,7 @@ class ConnectionPanel(QGroupBox):
         self._disconnect_btn.setEnabled(connected)
         editable = not connected
         self._backend.setEnabled(editable)
-        self._host.setEnabled(editable)
-        self._port.setEnabled(editable)
-        self._tap.setEnabled(editable)
-        self._ir.setEnabled(editable)
-        backend = self._backend.currentData()
-        is_hw = backend == "hw_server"
-        is_usb = backend == "usb_blaster"
-        self._set_quartus_rows_visible(is_usb)
-        self._set_tcp_timeout_row_visible(not is_usb)
-        self._host.setEnabled(editable and not is_usb)
-        self._port.setEnabled(editable and not is_usb)
-        self._ir.setEnabled(editable and not is_usb)
-        self._burst_path.setEnabled(editable and backend != "openocd")
-        self._hardware.setEnabled(editable and is_usb)
-        self._quartus_stp.setEnabled(editable and is_usb)
-        self._quartus_row.setEnabled(editable and is_usb)
-        self._scan_targets_btn.setEnabled(editable and self._backend_supports_scan())
-        self._program_on_connect.setEnabled(editable and is_hw)
-        self._program.setEnabled(editable and is_hw)
-        self._tcp_timeout.setEnabled(editable and not is_usb)
+        self._apply_backend_state(editable)
         hw_prog = editable and self._will_program_bitfile()
         self._hw_ready.setEnabled(hw_prog)
         self._post_program_ms.setEnabled(hw_prog)

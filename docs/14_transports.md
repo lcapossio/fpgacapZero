@@ -274,6 +274,29 @@ want to hard-code the name.  The helper `fcapz.transport.list_openocd_taps()`
 returns that list; the GUI's **Scan** button uses it to populate the TAP field
 for the OpenOCD backend.
 
+#### Burst readback over OpenOCD
+
+With `burst=True` the transport reads the ELA data window through the
+wrapper's 256-bit burst engine instead of one 49-bit register read per
+sample.  It writes `BURST_PTR`, then sends the burst scans as one Tcl
+script per 256 scans, collecting every `drscan` result with `lappend`, so
+a capture costs a few TCL round trips instead of two per sample.  On the
+PolarFire Discovery Kit (through a `remote_bitbang` adapter), 1024 8-bit
+samples come back in about 3.4 s instead of about 41 s.
+
+- **Default:** on for the PolarFire preset (`openocd_burst_default()`), off
+  otherwise.  The CLI's `--burst` / `--no-burst` and the RPC's `"burst"`
+  override it.  Gowin wrappers have no burst engine.  The ECP5 and Intel
+  wrappers burst on a second chain only (`single_chain_burst=False`, CLI
+  `--two-chain-burst`).  Burst over OpenOCD is hardware-validated on
+  PolarFire only.
+- `read_block` bursts only for cores with `SAMPLE_W <= 32`.  Wider samples
+  and timestamps go through `read_sample_block` / `read_timestamp_block`, as
+  on hw_server.
+- Any 49-bit scan between the `BURST_PTR` write and the last burst scan
+  ends a single-chain burst.  The whole burst therefore holds the
+  transport's socket lock.
+
 #### Gowin over OpenOCD
 
 Gowin boards use this transport with `ir_table=OpenOcdTransport.IR_TABLE_GOWIN`
@@ -282,6 +305,30 @@ pass it explicitly.  The ELA sits on chain 1; a shared-chain EIO (`EIO_EN=1`) is
 reached on chain 1 at base offset `0x8000`
 (`EioController(t, chain=1, base_addr=0x8000)`).  See the
 [BRS-100-GW1NR9 example](../examples/brs_100_gw1nr9/README.md).
+
+#### PolarFire over OpenOCD
+
+PolarFire and PolarFire SoC use this transport with
+`ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE` (USER1/USER2 = IR `0x20`/`0x21`).
+The CLI and board discovery select it for a tap name starting with `MPF`.
+
+- A device has one `UJTAG`, so a design gets one fcapz wrapper.  An EIO next
+  to the ELA rides on chain 1 at offset `0x8000` (`EIO_EN=1`), as on Gowin.
+- `UJTAG`'s JTAG pins must reach top-level ports; the wrappers pass them
+  through on their `*_pad_*` ports, and Libero binds those ports to the
+  dedicated pins.
+- On PolarFire SoC the MSS RISC-V debug module answers at IR `0x10`/`0x11`.
+  Declare only the FPGA TAP in the OpenOCD config (no RISC-V `target create`)
+  unless you also debug the MSS, and keep the fcapz IRs out of that range.
+- With the PolarFire preset, captures are read by burst (see above): on USER1
+  by default (`SINGLE_CHAIN_BURST=1`), or on USER2 for a
+  `SINGLE_CHAIN_BURST=0` build (`single_chain_burst=False`).
+- On Windows, Microchip's FlashPro driver owns the embedded FlashPro5's JTAG
+  channel, so OpenOCD's `ftdi` driver cannot open it.  Use
+  [`FtdiMpsseTransport`](#ftdimpssetransport) instead: it goes through that
+  same driver.
+
+See the [Discovery Kit example](../examples/mpfs_disco_kit/README.md).
 
 ### `QuartusStpTransport`
 
@@ -327,6 +374,68 @@ treat `auto`, an empty tap, `xc7a100t`, and `xc7a100t.tap` as auto for
 USB-Blaster so older AMD/Xilinx defaults do not get passed to Quartus as
 literal device names.
 
+### `FtdiMpsseTransport`
+
+Drives an FTDI MPSSE JTAG adapter directly through FTDI's D2XX library
+(`ftd2xx.dll`, `libftd2xx.so`), with no OpenOCD or vendor server in between.
+Each register access is one USB round trip.  A whole burst or register-window
+block takes a few USB transfers.
+
+```python
+from fcapz import FtdiMpsseTransport
+
+t = FtdiMpsseTransport()               # the single FlashPro / Digilent channel A
+# t = FtdiMpsseTransport("Embedded FlashPro5 A", tck_hz=15e6)
+t.connect()
+print(hex(t.idcode), t.family)         # 0xf8181cf polarfire (MPFS095T)
+```
+
+CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
+`--tck-mhz` sets the clock.
+
+- **Adapter.** `device` is a D2XX channel description (for example
+  `"Embedded FlashPro5 A"`) or a serial.  Left empty, the transport uses
+  the channel A of the one known adapter (FlashPro or Digilent).  If there
+  are several, it asks you to name one.  `list_ftdi_devices()` lists the
+  channels.  Known adapters get their pin layout (FlashPro5: nTRST on ADBUS4;
+  Digilent: buffer enable on ADBUS7).  For other adapters, pass
+  `layout=(value, direction)`.
+- **One device on the chain.** `connect()` reads the IDCODE chain and
+  measures the IR length.  Only single-device chains are supported.  The IR
+  table comes from the IDCODE: PolarFire (`0x20` / `0x21`), AMD/Xilinx
+  7-series (IR length 6) or Gowin.  For anything else, UltraScale included,
+  pass `ir_table=` (CLI: `--tap xcku…` / `xcvu…` / `xcau…` selects the
+  UltraScale table).
+- **Burst.** `burst` defaults to the family's wrapper default: on for
+  PolarFire and AMD/Xilinx (single chain), off for Gowin.  `burst=False`
+  (CLI `--no-burst`) reads through the pipelined register window instead.
+- **Clock.** `tck_hz` (default 6 MHz) becomes 30 MHz divided by an integer,
+  so 30 MHz at most.  `actual_tck_hz` reports the clock you got.
+- **Driver.** On Windows, FTDI-based cables (FlashPro5, Digilent) already run
+  on FTDI's D2XX driver, which installs `ftd2xx.dll`, so you swap no
+  drivers.  Each channel opens for one program at a time.  Close Libero's
+  programmer, FlashPro Express, hw_server or OpenOCD before connecting, and
+  disconnect before programming.  On Linux, install FTDI's D2XX library and
+  detach `ftdi_sio` from the adapter.  `$FCAPZ_D2XX_LIBRARY` names the
+  library explicitly.
+- **Sharing in one process.** Transports on the same channel in one Python
+  process share one handle: for example the ELA, EIO and bridge sessions of
+  the RPC server or the GUI.  The first transport's clock and layout apply,
+  and the channel closes with the last transport.
+
+Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
+
+| Operation | Time |
+|---|---|
+| connect | 0.13 s |
+| `read_reg` | 0.14 ms |
+| 1024-sample burst | 3 ms |
+| 1024 samples through the register window | 22 ms |
+
+All 11 board hardware tests pass on it.  On an Arty A7, the Digilent channel
+identifies the xc7a100t, but no fcapz core answered on the bitstream loaded
+at the time, so register and burst access on AMD/Xilinx remain unverified.
+
 ## IR table presets
 
 Different AMD/Xilinx families use different IR opcodes for the BSCANE2
@@ -362,6 +471,7 @@ swap one for the other without changing the IR table.
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
+| Microchip PolarFire / PolarFire SoC | `OpenOcdTransport.IR_TABLE_POLARFIRE` | Auto-selected by the CLI for `--tap MPF...`; one `UJTAG` per device |
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
 TAP's DR, so every DR scan is one shift longer than the fcapz frame.
@@ -760,7 +870,8 @@ will differ.
 | `burst_read()` (16 beats AXI) | uses batched DR where available |
 | `Analyzer.capture()` of 1024 samples (256-bit burst) | ~50 ms |
 
-**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9, but not yet
+**OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9 and the PolarFire
+SoC Discovery Kit, but not yet
 benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
 to be slower than `hw_server` per scan because OpenOCD's TCL listener has
 limited batched-scan support, but the delta is not documented until somebody

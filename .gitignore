@@ -67,6 +67,7 @@ tests/_tmp/
 examples/de25_nano/de25_nano_quartus/
 examples/de25_nano/de25_nano_vex_quartus/
 examples/de25_nano/output_files/
+examples/mpfs_disco_kit/libero/
 examples/de25_nano/captures/
 
 # Local-only working notes (per PROJECTS.md no_commit/ convention)

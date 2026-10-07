@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from fcapz.analyzer import expected_ela_version_reg  # noqa: E402
 from fcapz.ejtagaxi import CMD_CONFIG  # noqa: E402
 from fcapz.rpc import RpcServer  # noqa: E402
-from fcapz.transport import Transport  # noqa: E402
+from fcapz.transport import OpenOcdTransport, Transport  # noqa: E402
 from fcapz.web import create_app  # noqa: E402
 
 
@@ -932,6 +932,44 @@ def test_list_cores_reports_axi_mon(monkeypatch):
 def test_ir_table_mapping():
     assert RpcServer._ir_table("xilinx7") is None
     assert RpcServer._ir_table("gowin") is not None
+    assert RpcServer._ir_table("polarfire") == OpenOcdTransport.IR_TABLE_POLARFIRE
+
+
+def test_build_transport_openocd_burst_defaults():
+    rpc = RpcServer()
+    pf = rpc._build_transport({"backend": "openocd", "tap": "MPFS095T.tap"})
+    assert pf.burst and pf.single_chain_burst
+    assert not rpc._build_transport({"backend": "openocd", "tap": "xc7a100t.tap"}).burst
+    off = rpc._build_transport({"backend": "openocd", "tap": "MPFS095T.tap", "burst": False})
+    assert not off.burst
+    two = rpc._build_transport(
+        {"backend": "openocd", "tap": "xc7a100t.tap", "burst": True,
+         "single_chain_burst": False}
+    )
+    assert two.burst and not two.single_chain_burst
+
+
+def test_build_transport_ftdi():
+    from fcapz.ftdi_transport import FtdiMpsseTransport
+
+    rpc = RpcServer()
+    req = {"backend": "ftdi", "hardware": "Embedded FlashPro5 A", "tap": "auto"}
+    assert RpcServer._resolved_ir_name(req) == "auto"
+    t = rpc._build_transport(req)
+    assert isinstance(t, FtdiMpsseTransport)
+    assert t.device == "Embedded FlashPro5 A"
+    assert t.ir_table == {} and t._burst_arg is None
+    t = rpc._build_transport({"backend": "ftdi", "ir_table": "polarfire", "burst": False})
+    assert t.ir_table == OpenOcdTransport.IR_TABLE_POLARFIRE
+    assert t.device is None and t._burst_arg is False
+
+
+def test_discovery_infers_polarfire_from_tap_name():
+    from fcapz.analyzer import _DISCOVERY_IR_TABLES, _infer_ir_table_name
+
+    for tap in ("MPFS095T.tap", "mpf300t.tap"):
+        assert _infer_ir_table_name(tap) == "polarfire"
+    assert _DISCOVERY_IR_TABLES["polarfire"] == OpenOcdTransport.IR_TABLE_POLARFIRE
     assert RpcServer._ir_table("ultrascale") is not None
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")

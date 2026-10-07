@@ -145,7 +145,7 @@ readiness wait.
 ```json
 {
   "cmd": "connect",
-  "backend": "hw_server",     // or "openocd" / "usb_blaster"
+  "backend": "hw_server",     // or "openocd" / "usb_blaster" / "ftdi"
   "host": "127.0.0.1",
   "port": 3121,
   "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
@@ -167,10 +167,22 @@ For Quartus USB-Blaster, use:
 
 Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
 
-`hw_server` and `usb_blaster` also take `"burst": false` for a bitstream with
-no burst readout path (the CLI's `--no-burst`); every capture is then read
-through the register window. `hw_server` takes `"single_chain_burst": false`
-for a legacy two-chain build (the CLI's `--two-chain-burst`).
+For a direct FTDI cable (FlashPro5, Digilent), use `"backend": "ftdi"`.
+`hardware` optionally names the channel and `tck_mhz` sets the clock
+(default 6). The IR table comes from the device IDCODE, and `ir_table` in
+the response echoes the detected family:
+
+```json
+{"cmd": "connect", "backend": "ftdi", "hardware": "Embedded FlashPro5 A"}
+```
+
+Every backend takes `"burst": false` for a bitstream with no burst readout
+path (the CLI's `--no-burst`); every capture is then read through the
+register window. `"single_chain_burst": false` selects a legacy two-chain
+build (the CLI's `--two-chain-burst`). Without `burst`, `hw_server` and
+`usb_blaster` read by burst, `openocd` only for the PolarFire preset, and
+`ftdi` per detected family. `"burst": true` opts OpenOCD in for other
+presets.
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
 server infers the preset from the tap name (`gw*` → `gowin`,
@@ -257,7 +269,8 @@ Releases the transport.
 
 List JTAG targets before connecting (no active session needed). For
 `backend: "hw_server"` it returns the XSDB `jtag targets` names; for
-`backend: "openocd"` it returns the tap names (`jtag names`). `discover_boards`
+`backend: "openocd"` it returns the tap names (`jtag names`); for
+`backend: "ftdi"` it returns the FTDI channel descriptions. `discover_boards`
 is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
 
 ```json

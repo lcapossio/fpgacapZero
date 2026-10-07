@@ -130,6 +130,33 @@ class TestConnectionPanel(unittest.TestCase):
 
         self.assertEqual(p.connection_settings().tap, "auto")
 
+    def test_burst_path_enabled_for_openocd_polarfire(self) -> None:
+        p = ConnectionPanel()
+        p.load_from_settings(ConnectionSettings(backend="openocd", ir_table="polarfire"))
+        self.assertTrue(p._burst_path.isEnabled())
+        p._ir.setCurrentIndex(p._ir.findData("gowin"))
+        self.assertFalse(p._burst_path.isEnabled())
+
+    def test_ftdi_backend_fields(self) -> None:
+        p = ConnectionPanel()
+        p.load_from_settings(ConnectionSettings(backend="hw_server"))
+        p._backend.setCurrentIndex(p._backend.findData("ftdi"))
+        self.assertEqual(p._ir.currentData(), "auto")
+        self.assertFalse(p._host.isEnabled())
+        self.assertFalse(p._tap.isEnabled())
+        self.assertTrue(p._hardware.isEnabled())
+        self.assertFalse(p._hardware.isHidden())
+        self.assertTrue(p._quartus_row.isHidden())
+        self.assertTrue(p._burst_path.isEnabled())
+        self.assertEqual(p._hardware_label.text(), "FTDI adapter")
+        p._hardware.setText("Embedded FlashPro5 A")
+        out = p.connection_settings()
+        self.assertEqual((out.backend, out.ir_table), ("ftdi", "auto"))
+        self.assertEqual(out.hardware, "Embedded FlashPro5 A")
+        self.assertIsNone(p._validate())
+        p._backend.setCurrentIndex(p._backend.findData("openocd"))
+        self.assertEqual(p._ir.currentData(), "xilinx7")
+
     def test_quartus_rows_hidden_for_non_usb_backends(self) -> None:
         p = ConnectionPanel()
 

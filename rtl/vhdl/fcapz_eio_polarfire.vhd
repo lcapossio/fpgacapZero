@@ -8,12 +8,18 @@ entity fcapz_eio_polarfire is
     generic (
         IN_W     : positive := 32;
         OUT_W    : positive := 32;
-        IR_USER1 : std_logic_vector(7 downto 0) := x"10";
-        IR_USER2 : std_logic_vector(7 downto 0) := x"11"
+        IR_USER1 : std_logic_vector(7 downto 0) := x"20";
+        IR_USER2 : std_logic_vector(7 downto 0) := x"21"
     );
     port (
-        probe_in  : in  std_logic_vector(IN_W - 1 downto 0);
-        probe_out : out std_logic_vector(OUT_W - 1 downto 0)
+        probe_in    : in  std_logic_vector(IN_W - 1 downto 0);
+        probe_out   : out std_logic_vector(OUT_W - 1 downto 0);
+        -- JTAG pads (connect straight to top-level ports)
+        tck_pad_i   : in  std_logic;
+        tms_pad_i   : in  std_logic;
+        tdi_pad_i   : in  std_logic;
+        trstb_pad_i : in  std_logic;
+        tdo_pad_o   : out std_logic
     );
 end entity fcapz_eio_polarfire;
 
@@ -46,6 +52,11 @@ begin
             IR_USER2 => IR_USER2
         )
         port map (
+            tck_pad_i   => tck_pad_i,
+            tms_pad_i   => tms_pad_i,
+            tdi_pad_i   => tdi_pad_i,
+            trstb_pad_i => trstb_pad_i,
+            tdo_pad_o   => tdo_pad_o,
             ch1_tck     => tap_tck,
             ch1_tdi     => tap_tdi,
             ch1_tdo     => tap_tdo,

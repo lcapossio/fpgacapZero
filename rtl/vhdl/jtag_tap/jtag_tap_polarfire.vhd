@@ -5,12 +5,22 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- Microchip PolarFire / PolarFire SoC JTAG TAP wrapper (see
+-- rtl/jtag_tap/jtag_tap_polarfire.v).  UJTAG's TCK/TMS/TDI/TRSTB/TDO pins
+-- must reach top-level ports; they are passed through on the *_pad_* ports.
+-- USER1/USER2 default to 0x20/0x21: on PolarFire SoC the MSS debug module
+-- answers at 0x10/0x11.
 entity jtag_tap_polarfire is
     generic (
-        IR_USER1 : std_logic_vector(7 downto 0) := x"10";
-        IR_USER2 : std_logic_vector(7 downto 0) := x"11"
+        IR_USER1 : std_logic_vector(7 downto 0) := x"20";
+        IR_USER2 : std_logic_vector(7 downto 0) := x"21"
     );
     port (
+        tck_pad_i   : in  std_logic;
+        tms_pad_i   : in  std_logic;
+        tdi_pad_i   : in  std_logic;
+        trstb_pad_i : in  std_logic;
+        tdo_pad_o   : out std_logic;
         ch1_tck     : out std_logic;
         ch1_tdi     : out std_logic;
         ch1_tdo     : in  std_logic;
@@ -31,14 +41,12 @@ end entity jtag_tap_polarfire;
 architecture rtl of jtag_tap_polarfire is
     component UJTAG is
         port (
-            UIREG0 : out std_logic;
-            UIREG1 : out std_logic;
-            UIREG2 : out std_logic;
-            UIREG3 : out std_logic;
-            UIREG4 : out std_logic;
-            UIREG5 : out std_logic;
-            UIREG6 : out std_logic;
-            UIREG7 : out std_logic;
+            TCK    : in  std_logic;
+            TMS    : in  std_logic;
+            TDI    : in  std_logic;
+            TRSTB  : in  std_logic;
+            TDO    : out std_logic;
+            UIREG  : out std_logic_vector(7 downto 0);
             UTDI   : out std_logic;
             UDRCK  : out std_logic;
             UDRCAP : out std_logic;
@@ -68,14 +76,12 @@ begin
 
     u_ujtag : UJTAG
         port map (
-            UIREG0 => uireg(0),
-            UIREG1 => uireg(1),
-            UIREG2 => uireg(2),
-            UIREG3 => uireg(3),
-            UIREG4 => uireg(4),
-            UIREG5 => uireg(5),
-            UIREG6 => uireg(6),
-            UIREG7 => uireg(7),
+            TCK    => tck_pad_i,
+            TMS    => tms_pad_i,
+            TDI    => tdi_pad_i,
+            TRSTB  => trstb_pad_i,
+            TDO    => tdo_pad_o,
+            UIREG  => uireg,
             UTDI   => utdi,
             UDRCK  => udrck,
             UDRCAP => udrcap,

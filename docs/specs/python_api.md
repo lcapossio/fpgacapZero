@@ -665,10 +665,13 @@ OpenOcdTransport(
     ir_table: dict[int, int] | None = None,
     *,
     connect_timeout_sec: float = 5.0,
+    burst: bool = False,
+    single_chain_burst: bool = True,
+    burst_data_chain: int = 2,
 )
 ```
 
-Subclass of `Transport`.
+Subclass of `_ScanBurstMixin`, `Transport`.
 
 Drives the fpgacapZero BSCANE2 USER register interface via the OpenOCD
 TCL socket (default port 6666).
@@ -694,10 +697,12 @@ DEFAULT_IR_TABLE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX7 = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX_ULTRASCALE = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
+IR_TABLE_POLARFIRE = {1: 32, 2: 33}
 IR_TABLE_XILINX_ZYNQUS = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_US = {1: 36, 2: 37, 3: 38, 4: 39}
 USER1_IR = 2
 READ_IDLE_CYCLES = 20
+_SCANS_PER_SCRIPT = 256
 ```
 
 #### `OpenOcdTransport.connect`
@@ -772,10 +777,19 @@ fails.  Returns the raw 32-bit value (unsigned).
 read_block(addr: int, words: int) -> List[int]
 ```
 
-Read *words* consecutive 32-bit registers starting at *addr*.
+Read *words* registers; the DATA window of a narrow core goes
+through the burst DR when `burst` is on.
 
-Returns a list of *words* unsigned 32-bit integers.  Raises
-`RuntimeError` if not connected or on I/O failure.
+#### `OpenOcdTransport.read_window_block`
+
+```python
+read_window_block(addr: int, words: int) -> List[int]
+```
+
+Like `read_block`, but always through the register window,
+never a burst.  For a core-manager slot with no burst wiring, whose
+burst reads return zeros.  Transports whose `read_block` never
+bursts need not override it.
 
 ### `XilinxHwServerTransport`
 
@@ -1322,6 +1336,182 @@ Read *words* consecutive 32-bit registers starting at *addr*.
 
 Returns a list of *words* unsigned 32-bit integers.  Raises
 `RuntimeError` if not connected or on I/O failure.
+
+## `fcapz.ftdi_transport`
+
+### `FtdiMpsseTransport`
+
+```python
+FtdiMpsseTransport(
+    device: str | None = None,
+    *,
+    ir_table: dict[int, int] | None = None,
+    tck_hz: float = 6000000,
+    burst: bool | None = None,
+    single_chain_burst: bool = True,
+    burst_data_chain: int = 2,
+    layout: tuple[int, int] | None = None,
+    timeout_ms: int = 2000,
+)
+```
+
+Subclass of `_ScanBurstMixin`, `Transport`.
+
+fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
+
+`device` names the adapter channel by its D2XX description (for
+example `"Embedded FlashPro5 A"`) or serial; by default the single
+known JTAG adapter's channel A is used.  `ir_table` defaults to the
+family read from the device IDCODE: PolarFire (`0x20` / `0x21`),
+AMD/Xilinx 7-series (`0x02` / `0x03` / `0x22` / `0x23`; pass the
+UltraScale table explicitly) or Gowin.  `burst` defaults to that
+family's wrapper default (on for PolarFire and AMD/Xilinx, off for
+Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
+
+Transports on the same channel in one process share its handle (the
+first one's clock and layout apply); the channel closes with the last.
+
+Class constants:
+
+```python
+READ_IDLE_CYCLES = 20
+WRITE_IDLE_CYCLES = 8
+RAW_DR_IDLE_CYCLES = 8
+USER1_PIPE_PRIME_READS = 3
+MAX_DEVICES = 8
+_FLUSH_CMD_BYTES = 61440
+_FLUSH_READ_BYTES = 32768
+```
+
+#### `FtdiMpsseTransport.connect`
+
+```python
+connect() -> None
+```
+
+Open the transport connection.
+
+Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
+not on PATH, OpenOCD port not listening).  Raises `OSError` or
+`TimeoutError` for socket-level failures.
+
+#### `FtdiMpsseTransport.close`
+
+```python
+close() -> None
+```
+
+Close the transport.  Must be idempotent — safe to call multiple times.
+
+#### `FtdiMpsseTransport.opened_device`
+
+```python
+@property
+opened_device -> str | None
+```
+
+The connected device, for session labels: IDCODE and family.
+
+#### `FtdiMpsseTransport.select_chain`
+
+```python
+select_chain(chain: int) -> None
+```
+
+Select the transport-defined JTAG user chain for later accesses.
+
+For Xilinx/OpenOCD transports this is the BSCANE2 USER chain number
+mapped through the backend's IR table.  For virtual-JTAG transports it
+may be the vendor instance identifier, such as Intel's
+`sld_virtual_jtag` `instance_index`.
+
+Subclasses that support multi-chain access must override this.
+Raises `ValueError` if *chain* is invalid for that transport.
+Raises `NotImplementedError` on transports that only support a
+single fixed chain.
+
+#### `FtdiMpsseTransport.read_reg`
+
+```python
+read_reg(addr: int) -> int
+```
+
+Read a 32-bit register at *addr*.
+
+Raises `RuntimeError` if not connected or if the underlying I/O
+fails.  Returns the raw 32-bit value (unsigned).
+
+#### `FtdiMpsseTransport.write_reg`
+
+```python
+write_reg(addr: int, value: int) -> None
+```
+
+Write *value* (32-bit) to the register at *addr*.
+
+Raises `RuntimeError` if not connected or if the underlying I/O
+fails.
+
+#### `FtdiMpsseTransport.read_block`
+
+```python
+read_block(addr: int, words: int) -> List[int]
+```
+
+Read *words* registers; the DATA window of a narrow core goes
+through the burst DR when `burst` is on.
+
+#### `FtdiMpsseTransport.read_window_block`
+
+```python
+read_window_block(addr: int, words: int) -> List[int]
+```
+
+Pipelined register-window read, one batch per 512 words.
+
+Each scan captures the previous read's data and issues the next
+address; `USER1_PIPE_PRIME_READS` leading captures are discarded,
+as in `fcapz.transport.XilinxHwServerTransport`.
+
+#### `FtdiMpsseTransport.raw_dr_scan`
+
+```python
+raw_dr_scan(bits: int, width: int, *, chain: int | None = None) -> int
+```
+
+Perform a raw DR scan of *width* bits, shifting in *bits*.
+
+Returns the captured TDO value as an unsigned integer.  If *chain*
+is given it overrides the active chain for this scan only.  The chain
+value is transport-specific: Xilinx/OpenOCD transports use the
+user-chain number that maps through their IR table, while Intel
+Quartus/USB-Blaster uses the `sld_virtual_jtag` `instance_index`
+configured by the Intel RTL wrapper's `CHAIN` parameter.
+
+Subclasses that expose raw JTAG DR access must override this.
+Raises `NotImplementedError` on transports that do not support it.
+Raises `RuntimeError` if not connected or on I/O failure.
+
+#### `FtdiMpsseTransport.raw_dr_scan_batch`
+
+```python
+raw_dr_scan_batch(
+    scans: list[tuple[int, int]],
+    *,
+    chain: int | None = None,
+) -> list[int]
+```
+
+Perform multiple raw DR scans and return all captured TDO values.
+
+*scans* is a list of `(bits, width)` tuples.  Returns a list of
+captured values in the same order.
+
+Default implementation calls `raw_dr_scan` in a loop.
+Override for transports that support batched transfers (e.g. a
+single `jtag sequence` round-trip in XSDB).
+
+## `fcapz.transport`
 
 ### `connect_timing_logs_enabled`
 

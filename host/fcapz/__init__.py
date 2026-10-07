@@ -23,6 +23,7 @@ from .events import (
     frequency_estimate,
     summarize,
 )
+from .ftdi_transport import FtdiMpsseTransport
 from .probes import (
     PROBE_FILE_FORMAT,
     ProbeFile,
@@ -52,6 +53,7 @@ __all__ = [
     "OpenOcdTransport",
     "XilinxHwServerTransport",
     "VendorStubTransport",
+    "FtdiMpsseTransport",
     "connect_timing_logs_enabled",
     "find_edges",
     "find_rising_edges",

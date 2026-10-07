@@ -86,6 +86,23 @@ TESTBENCHES = {
             RTL / "fcapz_ela_xilinx7.v",
         ],
     ),
+    "fcapz_ela_polarfire": (
+        TB / "fcapz_ela_polarfire_tb.sv",
+        [
+            SIM / "ujtag_stub.v",
+            RTL / "reset_sync.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+            RTL / "fcapz_ela.v",
+            RTL / "jtag_pipe_iface.v",
+            RTL / "jtag_reg_iface.v",
+            RTL / "jtag_burst_read.v",
+            RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+            RTL / "fcapz_eio.v",
+            RTL / "fcapz_regbus_mux.v",
+            RTL / "fcapz_ela_polarfire.v",
+        ],
+    ),
     "fcapz_eio": (
         TB / "fcapz_eio_tb.sv",
         [
@@ -133,6 +150,7 @@ DEFAULT_TESTBENCHES = [
     "jtag_burst_read",
     "jtag_pipe_iface",
     "fcapz_ela_xilinx7_single_chain",
+    "fcapz_ela_polarfire",
     "fcapz_eio",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",

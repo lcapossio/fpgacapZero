@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+#
+# PolarFire SoC Discovery Kit (MPFS095T-1FCSG325E) fabric I/O.
+# Pins and bank voltages follow Microchip's Discovery Kit reference design
+# (MPFS_DISCOVERY_KIT_BOARD_MISC.pdc / _BANK_SETTINGS.pdc).  The JTAG pins
+# (TCK/TMS/TDI/TRSTB/TDO) are dedicated and are not constrained here.
+
+set_iobank -bank_name Bank0 -vcci 1.80 -fixed true -update_iostd true
+set_iobank -bank_name Bank1 -vcci 3.30 -fixed true -update_iostd true
+
+set_io -port_name REF_CLK_50MHz -pin_name R18  -fixed true -io_std LVCMOS18 -DIRECTION INPUT
+set_io -port_name SWITCH1       -pin_name T19  -fixed true -DIRECTION INPUT
+set_io -port_name SWITCH2       -pin_name U18  -fixed true -DIRECTION INPUT
+
+set_io -port_name LED1 -pin_name T18  -fixed true -DIRECTION OUTPUT
+set_io -port_name LED2 -pin_name V17  -fixed true -DIRECTION OUTPUT
+set_io -port_name LED3 -pin_name U20  -fixed true -DIRECTION OUTPUT
+set_io -port_name LED4 -pin_name U21  -fixed true -DIRECTION OUTPUT
+set_io -port_name LED5 -pin_name AA18 -fixed true -DIRECTION OUTPUT
+set_io -port_name LED6 -pin_name V16  -fixed true -DIRECTION OUTPUT
+set_io -port_name LED7 -pin_name U15  -fixed true -DIRECTION OUTPUT

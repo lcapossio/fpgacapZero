@@ -33,7 +33,8 @@ features they expose.
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
-| Microchip PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 | `_polarfire` | ❌ implemented in RTL, not yet HW-validated |
+| Microchip PolarFire / PolarFire SoC | `_polarfire` | ✅ PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
+| Microchip SmartFusion2 / IGLOO2 | `_polarfire` | ❌ same `UJTAG` ports as PolarFire, not yet HW-validated |
 | Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
@@ -51,9 +52,10 @@ includes the ELA configuration matrix for small/scalable builds:
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
 Arty A7 hardware test validates the AMD/Xilinx 7-series reference bitstream and
-the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
-PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
-lint-clean until a board-level smoke test is added for that family.
+the BRS-100 smoke/stress path validates the Gowin wrapper. The DE25-Nano
+and PolarFire SoC Discovery Kit tests validate the Intel and PolarFire
+wrappers. ECP5 and UltraScale wrappers should be treated as RTL-implemented
+and lint-clean until a board-level smoke test is added for that family.
 
 > [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
@@ -318,10 +320,11 @@ module fcapz_ela_xilinx7 #(
 | `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal AMD/Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. |
 | `WIDE_TRIG` | bit | 0/1 | Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
 | `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
-| `BURST_EN` | bit | 0/1 | AMD/Xilinx wrapper option to instantiate the legacy DATA_CHAIN burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
-| `SINGLE_CHAIN_BURST` | bit | 0/1 | AMD/Xilinx wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` instead of instantiating a second `BSCANE2`. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
+| `BURST_EN` | bit | 0/1 | AMD/Xilinx and PolarFire wrapper option to instantiate the legacy DATA_CHAIN (PolarFire: `IR_USER2`) burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
+| `SINGLE_CHAIN_BURST` | bit | 0/1 | AMD/Xilinx and PolarFire wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` (PolarFire: `IR_USER1`) instead of using a second USER chain. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
+| `IR_USER1` / `IR_USER2` | 8-bit | `0x10..0x7F` | PolarFire wrappers only, in place of `CTRL_CHAIN` / `DATA_CHAIN`: the `UJTAG` IR opcodes of the two chains. Default `0x20` / `0x21`, clear of the PolarFire SoC MSS debug module at `0x10` / `0x11`. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
 | `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_xilinx7` only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
