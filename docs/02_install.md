@@ -105,8 +105,8 @@ walkthrough.
 You need exactly one of the transports below.  If you have a
 AMD/Xilinx board and Vivado already installed, the hw_server path is the
 fast lane.  If you are on any other vendor or you do not want to
-install Vivado, use OpenOCD or Quartus USB-Blaster depending on the
-board and RTL wrapper.
+install Vivado, use OpenOCD, Quartus USB-Blaster or a direct FTDI
+connection depending on the board and RTL wrapper.
 
 ### Option A: AMD/Xilinx hw_server (recommended for AMD/Xilinx boards)
 
@@ -217,6 +217,29 @@ Intel `sld_virtual_jtag` instances through a USB-Blaster cable.
 `--tap auto` opens the first Quartus device whose name starts with
 `@1`.  If your FPGA is elsewhere in the JTAG chain, pass the exact
 Quartus device name with `--tap`.
+
+### Option D: direct FTDI (FlashPro5, Digilent)
+
+`--backend ftdi` drives an FTDI MPSSE JTAG cable directly through FTDI's
+D2XX library, with no OpenOCD or vendor server.  It covers the embedded
+FlashPro5 on Microchip PolarFire boards and Digilent's FTDI-based cables.
+
+1. **Get the D2XX library.**  On Windows it is already installed with the
+   cable's driver (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library
+   and detach `ftdi_sio` from the adapter.
+
+2. **Close whatever holds the cable** (Libero's programmer, FlashPro
+   Express, hw_server, OpenOCD): a channel opens for one program at a time.
+
+3. **Smoke test**:
+   ```bash
+   fcapz --backend ftdi probe
+   ```
+   The IR table comes from the device IDCODE.  With several adapters
+   plugged in, name the channel: `--hardware "Embedded FlashPro5 A"`.
+
+See [chapter 14](14_transports.md#ftdimpssetransport) for what this
+transport supports and what has been validated on hardware.
 
 ## Step 4: get a fpgacapZero bitstream onto an FPGA
 

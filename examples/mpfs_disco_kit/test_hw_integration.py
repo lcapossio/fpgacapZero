@@ -3,31 +3,33 @@
 
 """
 Integration tests for fpgacapZero on the Microchip PolarFire SoC Discovery Kit
-(MPFS095T), driven over OpenOCD.
+(MPFS095T), over OpenOCD or directly on the on-board FlashPro5 (``ftdi``).
 
-The OpenOCD transport does **not** program the FPGA, so before running you
-must have the board configured and OpenOCD up:
+Neither transport programs the FPGA, so first build and program the design
+(see README.md):
 
-  1. Build and program the design (see README.md):
-       python examples/mpfs_disco_kit/build.py --program
-  2. Start OpenOCD with the checked-in board config:
-       openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg
+    python examples/mpfs_disco_kit/build.py --program
 
-The reference design instantiates an 8-bit / 1024-deep ELA on UJTAG USER1/USER2
-(IR 0x20/0x21) and a shared-chain EIO (2 inputs = SWITCH1/SWITCH2 pressed,
-6 outputs = LED1..LED6) muxed onto USER1 at offset 0x8000.  The probe is a
-free-running 8-bit counter on the 50 MHz reference clock.
+The reference design instantiates an 8-bit / 1024-deep ELA on UJTAG USER1
+(IR 0x20; registers and burst readout) and a shared-chain EIO (2 inputs =
+SWITCH1/SWITCH2 pressed, 6 outputs = LED1..LED6) muxed onto USER1 at offset
+0x8000.  The probe is a free-running 8-bit counter on the 50 MHz reference
+clock.
 
 Environment variables
 ---------------------
 FPGACAP_SKIP_HW=1          Skip all hardware tests (CI default).
+FPGACAP_BACKEND=<name>     ``openocd`` (default) or ``ftdi``.
 FPGACAP_OPENOCD_PORT=<n>   OpenOCD TCL port.  Defaults to 6666.
 FPGACAP_OPENOCD_TAP=<tap>  TAP name.  Defaults to ``MPFS095T.tap``; ``auto``
                            also works (resolves via ``jtag names``).
+FPGACAP_FTDI_DEVICE=<name> ``ftdi`` only: adapter channel description or
+                           serial.  Defaults to the single known adapter.
 
 Run:
     openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg &
     python -m pytest examples/mpfs_disco_kit/test_hw_integration.py -v
+    FPGACAP_BACKEND=ftdi python -m pytest examples/mpfs_disco_kit/test_hw_integration.py -v
 """
 
 from __future__ import annotations
@@ -39,8 +41,10 @@ import unittest
 from pathlib import Path
 
 _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
+_BACKEND = os.environ.get("FPGACAP_BACKEND", "openocd").strip().lower()
 _PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "MPFS095T.tap")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or None
 
 # Shape of the Discovery Kit reference design.
 SAMPLE_W = 8
@@ -54,6 +58,10 @@ EIO_OUT_W = 6                # LED1..LED6
 
 
 def _make_transport():
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+
+        return FtdiMpsseTransport(device=_FTDI_DEVICE)
     from fcapz.transport import OpenOcdTransport
 
     return OpenOcdTransport(
@@ -61,27 +69,35 @@ def _make_transport():
         port=_PORT,
         tap=_TAP,
         ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE,
+        burst=True,
     )
+
+
+def _not_reachable_hint() -> str:
+    if _BACKEND == "ftdi":
+        return "connect the board's USB port and close Libero / FlashPro Express"
+    return "start: openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg"
 
 
 def _connect_analyzer_or_skip():
     """Return a connected, identity-verified Analyzer, or raise SkipTest.
 
-    Skips (rather than fails) when OpenOCD is not running or the board is not
-    configured with the fcapz design, so the suite is a no-op without hardware.
+    Skips (rather than fails) when the JTAG adapter is not reachable or the
+    board is not configured with the fcapz design, so the suite is a no-op
+    without hardware.
     """
     from fcapz.analyzer import Analyzer
 
     a = Analyzer(_make_transport(), chain=1)
     try:
         a.connect()
-        a.probe()  # raises RuntimeError if the ELA identity magic is wrong
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         a.close()
         raise unittest.SkipTest(
-            f"OpenOCD not reachable on port {_PORT} ({exc}); "
-            f"start: openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg"
+            f"{_BACKEND} JTAG not reachable ({exc}); {_not_reachable_hint()}"
         )
+    try:
+        a.probe()  # raises RuntimeError if the ELA identity magic is wrong
     except RuntimeError as exc:
         a.close()
         raise unittest.SkipTest(

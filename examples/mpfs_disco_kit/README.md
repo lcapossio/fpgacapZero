@@ -1,7 +1,8 @@
 # PolarFire SoC Discovery Kit example
 
 fpgacapZero on the Microchip **PolarFire SoC Discovery Kit** (MPFS-DISCO-KIT,
-MPFS095T-1FCSG325E), reached through the device's UJTAG user TAP over OpenOCD.
+MPFS095T-1FCSG325E), reached through the device's UJTAG user TAP from the
+on-board FlashPro5: directly (`--backend ftdi`) or through OpenOCD.
 The design uses the FPGA fabric only; the MSS (the RISC-V processor subsystem)
 is left unconfigured.
 
@@ -31,33 +32,40 @@ LSRAM, with timing met at 50 MHz.
    `SNPSLMD_LICENSE_FILE=1702@localhost`.
 
    Programming goes through the on-board (embedded) FlashPro5. Nothing else may
-   hold its JTAG channel at that moment: while OpenOCD is attached, Libero stops
-   with "No programmer is connected".
+   hold its JTAG channel at that moment: while fcapz or OpenOCD is attached,
+   Libero stops with "No programmer is connected".
 
-2. **Start OpenOCD** with the board config:
-
-   ```bash
-   openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg
-   ```
-
-3. **Capture**:
+2. **Capture** directly through the FlashPro5, with no OpenOCD (Windows or
+   Linux, see [Host access](#host-access)):
 
    ```bash
-   fcapz --backend openocd --tap MPFS095T.tap probe
-   fcapz --backend openocd --tap MPFS095T.tap capture \
+   fcapz --backend ftdi probe
+   fcapz --backend ftdi capture \
        --pretrigger 8 --posttrigger 23 --trigger-value 0x40 --trigger-mask 0xFF \
        --out ramp.vcd --format vcd
    ```
 
+   The transport reads the PolarFire IDCODE and picks the IR table and burst
+   readout itself. With other FTDI adapters plugged in (an Arty, say), name the
+   channel: `--hardware "Embedded FlashPro5 A"`.
+
+   Or through OpenOCD, started with the board config:
+
+   ```bash
+   openocd -f examples/mpfs_disco_kit/mpfs_disco_kit.cfg
+   fcapz --backend openocd --tap MPFS095T.tap probe
+   ```
+
    A tap name starting with `MPF` selects the PolarFire IR table
-   (`OpenOcdTransport.IR_TABLE_POLARFIRE`). In Python:
+   (`OpenOcdTransport.IR_TABLE_POLARFIRE`) and burst readout. In Python:
 
    ```python
+   from fcapz import FtdiMpsseTransport
    from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
    from fcapz.eio import EioController
-   from fcapz.transport import OpenOcdTransport
 
-   t = OpenOcdTransport(tap="MPFS095T.tap", ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE)
+   t = FtdiMpsseTransport()   # or OpenOcdTransport(tap="MPFS095T.tap",
+                              #   ir_table=OpenOcdTransport.IR_TABLE_POLARFIRE, burst=True)
    a = Analyzer(t, chain=1)
    a.connect()
    a.configure(CaptureConfig(pretrigger=8, posttrigger=23, sample_width=8, depth=1024,
@@ -71,31 +79,36 @@ LSRAM, with timing met at 50 MHz.
    a.close()
    ```
 
-4. **Hardware tests** (with OpenOCD running):
+3. **Hardware tests**, directly or with OpenOCD running:
 
    ```bash
-   python -m pytest examples/mpfs_disco_kit/test_hw_integration.py -v
+   FPGACAP_BACKEND=ftdi python -m pytest examples/mpfs_disco_kit/test_hw_integration.py -v
+   python -m pytest examples/mpfs_disco_kit/test_hw_integration.py -v   # OpenOCD
    ```
 
-## Host access on Windows
+## Host access
 
-`mpfs_disco_kit.cfg` uses OpenOCD's stock `ftdi` driver and
-`interface/microchip/embedded_flashpro5.cfg` (OpenOCD 0.12 or later). The
-on-board FlashPro5 is an FTDI FT4232H, and JTAG is on its channel A.
+The on-board FlashPro5 is an FTDI FT4232H, with JTAG on its channel A
+("Embedded FlashPro5 A").
 
-- **Linux:** OpenOCD opens channel A directly.
-- **Windows:** Microchip's FlashPro driver owns channel A, so OpenOCD's `ftdi`
-  driver cannot open it ("unable to open ftdi device"). Replacing the
-  channel-A driver with WinUSB (for example with Zadig) lets OpenOCD in, but
-  Libero and FlashPro Express then stop seeing the programmer until the
-  Microchip driver is restored.
+- **`--backend ftdi`** (`FtdiMpsseTransport`) drives channel A through FTDI's
+  D2XX library. On Windows that is the driver Microchip already installs for
+  the FlashPro5, so fcapz and Libero share the programmer, one at a time:
+  disconnect fcapz before programming. On Linux, install FTDI's D2XX library
+  and detach `ftdi_sio` from the adapter.
+- **OpenOCD:** `mpfs_disco_kit.cfg` uses OpenOCD's stock `ftdi` driver and
+  `interface/microchip/embedded_flashpro5.cfg` (OpenOCD 0.12 or later). On
+  Linux, OpenOCD opens channel A directly. On Windows, Microchip's FlashPro
+  driver owns channel A, so OpenOCD's `ftdi` driver cannot open it ("unable
+  to open ftdi device"). Replacing the channel-A driver with WinUSB (for
+  example with Zadig) lets OpenOCD in, but then Libero and FlashPro Express
+  no longer see the programmer until the Microchip driver is restored.
 
-**Validation status:** the RTL, the IR table and the whole host stack were
-validated on this board over OpenOCD, through a `remote_bitbang` adapter on
-Windows; all 11 hardware tests pass. `mpfs_disco_kit.cfg` itself, the `ftdi`
-path, has not yet been run on hardware. The single-chain burst engine was
-checked by hand on this board: 256-bit scans on IR `0x20` after a `BURST_PTR`
-write return the same samples as the register window. The wrapper's other
+**Validation status:** all 11 hardware tests pass on this board directly over
+`--backend ftdi` (in about 2 s), and over OpenOCD through a `remote_bitbang`
+adapter on Windows. `mpfs_disco_kit.cfg` itself, OpenOCD's `ftdi` path, has
+not yet been run on hardware. Both transports read captures by single-chain
+burst: 256-bit scans on IR `0x20` after a `BURST_PTR` write. The wrapper's other
 options (`SINGLE_CHAIN_BURST=0`, `EXT_TRIG_EN`, `DECIM_EN` and the rest) are
 covered in simulation (`tb/fcapz_ela_polarfire_tb.sv`) but not built for this
 board.
@@ -117,10 +130,9 @@ board.
   IRs.
 - **eNVM.** Programming this fabric-only design replaces whatever the device
   held before, including MSS firmware in eNVM.
-- **Readback speed.** `OpenOcdTransport` reads samples word by word through
-  the register window; it does not issue the wrapper's 256-bit burst scans
-  yet. Each sample costs one register read, so a full 1024-sample window takes
-  far longer than a short capture.
+- **Readback speed.** A full 1024-sample window reads back in about 3 ms over
+  `--backend ftdi`. Over OpenOCD with `remote_bitbang` it takes about 3.4 s,
+  against about 41 s through the register window before burst readout.
 - **Second chain.** The wrapper keeps burst data on USER1
   (`SINGLE_CHAIN_BURST=1`, the default). IR `0x21` (USER2) is used only by a
   `SINGLE_CHAIN_BURST=0` build.

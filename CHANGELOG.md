@@ -9,6 +9,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Direct FTDI JTAG transport (`--backend ftdi`).** `FtdiMpsseTransport`
+  drives an FTDI MPSSE cable through FTDI's D2XX library, with no OpenOCD or
+  vendor server. On Windows that is the driver the embedded FlashPro5 and
+  Digilent cables already use, so PolarFire boards need no driver swap. The
+  transport reads the IDCODE and IR length and picks the IR table (PolarFire,
+  AMD/Xilinx 7-series, Gowin) and the burst default from them. It is offered
+  by the CLI (`--hardware`, `--tck-mhz`), the RPC server, the desktop GUI and
+  the web UI. Sessions in one process share the channel. On the PolarFire
+  Discovery Kit all 11 hardware tests pass, a register read takes 0.14 ms and
+  a 1024-sample burst 3 ms. On an Arty A7 the Digilent channel identifies the
+  device; AMD/Xilinx register and burst access over this transport are not
+  yet hardware-validated.
+
+- **Burst readback over OpenOCD.** `OpenOcdTransport(burst=True)` reads
+  captures through the ELA's 256-bit burst engine, batching the scans into a
+  few Tcl scripts. It is on by default for the PolarFire preset only. Other
+  presets opt in with the CLI's new `--burst` or the RPC's `"burst": true`,
+  and `--two-chain-burst` / `--no-burst` now apply to OpenOCD as well. On
+  the PolarFire Discovery Kit a 1024-sample capture reads back in 3.4 s
+  instead of 41 s.
+
 - **Microchip PolarFire — hardware-validated, with a Discovery Kit example.**
   `examples/mpfs_disco_kit/` puts an 8-bit × 1024 ELA and a shared-chain EIO on
   the PolarFire SoC Discovery Kit (MPFS095T), with a Libero batch flow
@@ -16,8 +37,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hardware tests. All 11 hardware tests pass over OpenOCD. The host gains
   `OpenOcdTransport.IR_TABLE_POLARFIRE` (USER1/USER2 = `0x20`/`0x21`), selected
   for `MPF*` tap names by the CLI and board discovery and offered by the GUIs.
-  The `ftdi` path of the board config has not yet run on hardware: on Windows,
-  Microchip's FlashPro driver owns the JTAG channel.
+  The board config's OpenOCD `ftdi` path has not yet run on hardware: on
+  Windows, Microchip's FlashPro driver owns the JTAG channel.
 
 - **PolarFire ELA wrapper: the full parameter set.** `fcapz_ela_polarfire`
   (Verilog and VHDL) now offers everything `fcapz_ela_xilinx7` does:
