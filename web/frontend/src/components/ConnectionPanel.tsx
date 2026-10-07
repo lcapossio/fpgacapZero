@@ -6,7 +6,9 @@ import type { AxiMonInfo } from "../axiMon";
 import { defaultElaForDepth, useSession } from "../session";
 import type { ElaConfig } from "../session";
 
-const BACKENDS = ["openocd", "hw_server", "usb_blaster"];
+const BACKENDS = ["openocd", "hw_server", "usb_blaster", "ftdi"];
+// Backends with a locally attached cable and no host/port.
+const LOCAL_BACKENDS = ["usb_blaster", "ftdi"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
 const CONNECT_TIMEOUT = 6000;
 // Discovery probes every tap on a small sweep of TCL ports, so give it more
@@ -55,8 +57,8 @@ export function ConnectionPanel({
   const [backend, setBackend] = useState("openocd");
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("6666");
-  // USB-Blaster only: optional Quartus cable name (e.g. "DE25-Nano [USB-1]");
-  // blank auto-selects the sole attached cable. The quartus_stp path lives on
+  // USB-Blaster / FTDI only: optional Quartus cable name (e.g. "DE25-Nano
+  // [USB-1]") or FTDI channel description; blank auto-selects the sole cable. The quartus_stp path lives on
   // the server (auto-detected, or its --quartus-stp flag), never in the browser.
   const [hardware, setHardware] = useState("");
   const [token, setTok] = useState(getToken());
@@ -207,7 +209,7 @@ export function ConnectionPanel({
     // chains are an implementation detail the user never types.
     // USB-Blaster ignores host/port; it optionally takes a Quartus cable name.
     const reqParams: Record<string, unknown> = { backend, host, port: Number(port), tap };
-    if (backend === "usb_blaster" && hardware.trim()) reqParams.hardware = hardware.trim();
+    if (LOCAL_BACKENDS.includes(backend) && hardware.trim()) reqParams.hardware = hardware.trim();
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
     const c = await rpc("connect", reqParams, t, sig());
@@ -360,10 +362,12 @@ export function ConnectionPanel({
         }
         return;
       }
-      if (backend === "usb_blaster") {
+      if (LOCAL_BACKENDS.includes(backend)) {
         // No TCP scan/discovery: the cable is local. Connect with an auto tap
         // (first @1 device) — the server auto-detects quartus_stp and, with a
-        // blank cable field, the sole attached USB-Blaster.
+        // blank cable field, the sole attached USB-Blaster. FTDI reads the
+        // family from the IDCODE and, with a blank field, opens the sole
+        // FlashPro/Digilent channel A.
         await connectTo("auto");
         return;
       }
@@ -552,7 +556,9 @@ export function ConnectionPanel({
               </>
             )}
             {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
-            {connTarget.backend} {connTarget.host}:{connTarget.port}
+            {connTarget.backend}
+            {!LOCAL_BACKENDS.includes(connTarget.backend) &&
+              ` ${connTarget.host}:${connTarget.port}`}
           </p>
         )}
         <p className="muted">
@@ -642,7 +648,7 @@ export function ConnectionPanel({
             ))}
           </select>
         </label>
-        {backend !== "usb_blaster" && (
+        {!LOCAL_BACKENDS.includes(backend) && (
           <>
             <label>
               Host
@@ -664,14 +670,26 @@ export function ConnectionPanel({
             />
           </label>
         )}
-        <label>
-          {backend === "usb_blaster" ? "Device (optional)" : "Tap (optional)"}
-          <input
-            value={manualTap}
-            onChange={(e) => setManualTap(e.target.value)}
-            placeholder="auto-detected if blank"
-          />
-        </label>
+        {backend === "ftdi" && (
+          <label>
+            FTDI adapter (optional)
+            <input
+              value={hardware}
+              onChange={(e) => setHardware(e.target.value)}
+              placeholder='auto; e.g. "Embedded FlashPro5 A"'
+            />
+          </label>
+        )}
+        {backend !== "ftdi" && (
+          <label>
+            {backend === "usb_blaster" ? "Device (optional)" : "Tap (optional)"}
+            <input
+              value={manualTap}
+              onChange={(e) => setManualTap(e.target.value)}
+              placeholder="auto-detected if blank"
+            />
+          </label>
+        )}
         {needsToken && (
           <label>
             API token

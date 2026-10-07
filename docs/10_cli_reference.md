@@ -33,14 +33,16 @@ subcommand follows:
 | Option | Default | Description |
 |---|---|---|
 | `--gui-config PATH` | — | Path to gui.toml (default: per-user fpgacapzero config directory) |
-| `--backend {openocd,hw_server,usb_blaster}` | `hw_server` | JTAG transport to use |
+| `--backend {openocd,hw_server,usb_blaster,ftdi}` | `hw_server` | JTAG transport to use |
 | `--host HOST` | `127.0.0.1` | Transport host (hw_server or OpenOCD) |
 | `--port PORT` | `6666` | Transport TCP port. Left at 6666, hw_server uses its own port 3121; usb_blaster ignores it |
-| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device) |
-| `--hardware NAME` | — | usb_blaster only: Quartus hardware name; default selects first USB-Blaster |
+| `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device; ftdi: this default detects the family from the IDCODE) |
+| `--hardware NAME` | — | usb_blaster: Quartus hardware name (default: first USB-Blaster); ftdi: adapter channel description or serial (default: the one FlashPro/Digilent channel A found) |
 | `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
-| `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
-| `--no-burst` | off | hw_server/usb_blaster: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
+| `--tck-mhz MHZ` | `6.0` | ftdi only: JTAG clock in MHz (30 MHz / integer divisor; default 6) |
+| `--two-chain-burst` | off | hw_server/openocd/ftdi: use legacy ELA builds with 256-bit burst reads on USER2 |
+| `--burst` | off | openocd/ftdi: read captures by burst where the default is the register window (openocd bursts by default only for PolarFire; ftdi only for families whose wrapper builds a burst path) |
+| `--no-burst` | off | hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: current/legacy slot) |
 | `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |

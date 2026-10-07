@@ -26,6 +26,7 @@ from .openocd_launcher import OpenOcdLauncher
 from .probes import load_probe_file
 from .transport import (
     OpenOcdTransport,
+    openocd_burst_default,
     QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
@@ -334,6 +335,8 @@ class RpcServer:
         "microchip": OpenOcdTransport.IR_TABLE_POLARFIRE,
         "intel": None,
         "altera": None,
+        # FTDI: read the family from the IDCODE at connect.
+        "auto": None,
     }
 
     @classmethod
@@ -356,6 +359,10 @@ class RpcServer:
         # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
         if req.get("backend") == "usb_blaster":
             return "intel"
+        # The FTDI transport reads the family from the IDCODE; connect echoes
+        # the detected one.
+        if req.get("backend") == "ftdi":
+            return "auto"
         return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
@@ -431,12 +438,26 @@ class RpcServer:
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
         ir = self._ir_table(self._resolved_ir_name(req))
+        burst = req.get("burst")
+        single_chain_burst = bool(req.get("single_chain_burst", True))
         if backend == "openocd":
             return OpenOcdTransport(
                 host=host,
                 port=int(req.get("port", 6666)),
                 tap=req.get("tap", "xc7a100t.tap"),
                 ir_table=ir,
+                burst=openocd_burst_default(ir) if burst is None else bool(burst),
+                single_chain_burst=single_chain_burst,
+            )
+        if backend == "ftdi":
+            from .ftdi_transport import FtdiMpsseTransport
+
+            return FtdiMpsseTransport(
+                device=req.get("hardware") or None,
+                ir_table=ir,
+                tck_hz=float(req.get("tck_mhz", 6.0)) * 1e6,
+                burst=None if burst is None else bool(burst),
+                single_chain_burst=single_chain_burst,
             )
         if backend == "hw_server":
             return XilinxHwServerTransport(
@@ -691,8 +712,11 @@ class RpcServer:
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
             # shows the connected device, not just the vendor.
+            ir_name = self._resolved_ir_name(req)
+            if ir_name == "auto":
+                ir_name = getattr(analyzer.transport, "family", None) or ir_name
             return self._ok(
-                ir_table=self._resolved_ir_name(req),
+                ir_table=ir_name,
                 chain=analyzer.bscan_chain,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
@@ -737,6 +761,11 @@ class RpcServer:
                     timeout_sec=_wait_sec(req, "timeout", 10.0),
                 )
                 return self._ok(backend="hw_server", targets=targets)
+            if backend == "ftdi":
+                from .ftdi_transport import list_ftdi_devices
+
+                targets = [d.description for d in list_ftdi_devices() if d.description]
+                return self._ok(backend="ftdi", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
 
         if cmd == "discover_boards":
