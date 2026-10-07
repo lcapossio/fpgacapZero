@@ -347,6 +347,34 @@ TARGETS = (
         extra_flags=("-GEIO_EN=1", "-GEIO_IN_W=2", "-GEIO_OUT_W=6"),
     ),
     LintTarget(
+        name="fcapz_ela_polarfire_two_chain_full",
+        top="fcapz_ela_polarfire",
+        sources=(
+            SIM / "ujtag_stub.v",
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+            RTL / "fcapz_ela_polarfire.v",
+        ),
+        # USER2 burst engine with every optional ELA feature switched on.
+        extra_flags=(
+            "-GSINGLE_CHAIN_BURST=0", "-GDECIM_EN=1", "-GEXT_TRIG_EN=1",
+            "-GTIMESTAMP_W=32", "-GNUM_SEGMENTS=4", "-GPROBE_MUX_W=32",
+            "-GSTOR_QUAL=1", "-GTRIG_STAGES=4", "-GREL_COMPARE=1",
+            "-GDEFAULT_TRIG_EXT=1",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_ela_polarfire_no_burst",
+        top="fcapz_ela_polarfire",
+        sources=(
+            SIM / "ujtag_stub.v",
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+            RTL / "fcapz_ela_polarfire.v",
+        ),
+        extra_flags=("-GSINGLE_CHAIN_BURST=0", "-GBURST_EN=0"),
+    ),
+    LintTarget(
         name="fcapz_eio_polarfire",
         top="fcapz_eio_polarfire",
         sources=(

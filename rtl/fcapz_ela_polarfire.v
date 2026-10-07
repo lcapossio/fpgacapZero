@@ -3,12 +3,19 @@
 
 `timescale 1ns/1ps
 
-// fpgacapZero ELA wrapper for Microchip PolarFire (and PolarFire SoC,
-// SmartFusion2, IGLOO2 — all share the same UJTAG primitive).
+// fpgacapZero ELA wrapper for Microchip PolarFire and PolarFire SoC
+// (SmartFusion2 / IGLOO2 share the same UJTAG port list).
 //
-// PolarFire UJTAG provides 2 user instructions on a single primitive:
-//   USER1 → control (49-bit register interface)
-//   USER2 → burst data readout (256-bit DR)
+// Single-instantiation wrapper: bundles the ELA core, register interface,
+// burst read engine and the UJTAG TAP.  It has the same parameters and
+// ports as fcapz_ela_xilinx7, except that IR_USER1 / IR_USER2 select the
+// UJTAG user instructions instead of CTRL_CHAIN / DATA_CHAIN.
+//
+//   SINGLE_CHAIN_BURST=1 (default): register access and burst readout both
+//     on USER1 (jtag_pipe_iface); USER2 is unused.
+//   SINGLE_CHAIN_BURST=0, BURST_EN=1: registers on USER1, 256-bit burst
+//     readout on USER2 (jtag_burst_read).
+//   SINGLE_CHAIN_BURST=0, BURST_EN=0: registers on USER1 only.
 //
 // UJTAG's JTAG pins must reach top-level ports: connect tck_pad_i,
 // tms_pad_i, tdi_pad_i, trstb_pad_i and tdo_pad_o straight to ports of
@@ -25,6 +32,8 @@
 //   // ELA only
 //   fcapz_ela_polarfire #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
 //       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
+//       .trigger_in(1'b0), .trigger_out(), .armed_out(),
+//       .eio_probe_in(1'b0), .eio_probe_out(),
 //       .tck_pad_i(TCK), .tms_pad_i(TMS), .tdi_pad_i(TDI),
 //       .trstb_pad_i(TRSTB), .tdo_pad_o(TDO)
 //   );
@@ -34,6 +43,7 @@
 //       .EIO_EN(1), .EIO_IN_W(32), .EIO_OUT_W(32)
 //   ) u_ela (
 //       .sample_clk(clk), .sample_rst(rst), .probe_in(signals),
+//       .trigger_in(1'b0), .trigger_out(), .armed_out(),
 //       .eio_probe_in(observe), .eio_probe_out(drive),
 //       .tck_pad_i(TCK), .tms_pad_i(TMS), .tdi_pad_i(TDI),
 //       .trstb_pad_i(TRSTB), .tdo_pad_o(TDO)
@@ -46,14 +56,21 @@ module fcapz_ela_polarfire #(
     parameter STOR_QUAL    = 0,
     parameter INPUT_PIPE   = 0,
     parameter NUM_CHANNELS = 1,
+    parameter DECIM_EN     = 0,
+    parameter EXT_TRIG_EN  = 0,
     parameter TIMESTAMP_W  = 0,
+    parameter NUM_SEGMENTS = 1,
+    parameter PROBE_MUX_W  = 0,
     parameter STARTUP_ARM  = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
     parameter BURST_W      = 256,
+    parameter BURST_EN     = 1,   // 0=omit the USER2 burst path
+    parameter SINGLE_CHAIN_BURST = 1, // 1=burst readout on USER1
     // UJTAG user IR opcodes (16..127 are free; 0x10/0x11 belong to the
     // PolarFire SoC MSS debug module, see jtag_tap_polarfire.v).
     parameter [7:0] IR_USER1 = 8'h20,
     parameter [7:0] IR_USER2 = 8'h21,
-    // Optional EIO (shares USER1 via address mux)
+    // Optional EIO (shares USER1 via address mux; host talks to EIO at 0x8000+)
     parameter EIO_EN       = 0,
     parameter EIO_IN_W     = 1,
     parameter EIO_OUT_W    = 1,
@@ -63,7 +80,10 @@ module fcapz_ela_polarfire #(
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0]  probe_in,
+    input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
+    input  wire                              trigger_in,
+    output wire                              trigger_out,
+    output wire                              armed_out,
     // EIO ports (active when EIO_EN=1)
     input  wire [EIO_IN_W-1:0]               eio_probe_in,
     output wire [EIO_OUT_W-1:0]              eio_probe_out,
@@ -76,6 +96,8 @@ module fcapz_ela_polarfire #(
 );
 
     localparam PTR_W = $clog2(DEPTH);
+    // Segment depth for burst read ring-wrap (equals DEPTH when unsegmented).
+    localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
 
     // TAP signals — single UJTAG primitive exposing both chains
     wire tap1_tck, tap1_tdi, tap1_tdo;
@@ -83,7 +105,7 @@ module fcapz_ela_polarfire #(
     wire tap2_tck, tap2_tdi, tap2_tdo;
     wire tap2_capture, tap2_shift, tap2_update, tap2_sel;
 
-    // Register bus (from jtag_reg_iface)
+    // Register bus
     wire        jtag_clk, jtag_rst;
     wire        jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
@@ -121,23 +143,41 @@ module fcapz_ela_polarfire #(
         .srst(jtag_rst_ctrl)
     );
 
-    reset_sync u_rst_sync_data (
-        .clk(tap2_tck),
-        .arst(sample_rst),
-        .srst(jtag_rst_data)
-    );
-
-    // ---- Register interface (USER1) ----
-    jtag_reg_iface u_reg (
-        .arst(jtag_rst_ctrl),
-        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
-        .capture(tap1_capture), .shift_en(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel),
-        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
-        .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
-        .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
-        .reg_rdata(jtag_rdata)
-    );
+    // ---- Register / single-chain pipe interface (USER1) ----
+    generate
+        if (SINGLE_CHAIN_BURST != 0) begin : g_pipe_iface
+            jtag_pipe_iface #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH),
+                .BURST_PTR_ADDR(16'h002C)
+            ) u_pipe (
+                .arst(jtag_rst_ctrl),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .capture(tap1_capture), .shift_en(tap1_shift),
+                .update(tap1_update), .sel(tap1_sel),
+                .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+                .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
+                .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
+                .reg_rdata(jtag_rdata),
+                .mem_addr(burst_rd_addr),
+                .mem_active(burst_rd_active),
+                .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_ptr_in(burst_start_ptr)
+            );
+        end else begin : g_reg_iface
+            jtag_reg_iface u_reg (
+                .arst(jtag_rst_ctrl),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .capture(tap1_capture), .shift_en(tap1_shift),
+                .update(tap1_update), .sel(tap1_sel),
+                .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+                .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
+                .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
+                .reg_rdata(jtag_rdata)
+            );
+        end
+    endgenerate
 
     // ---- ELA + optional EIO via address mux ----
     generate
@@ -149,8 +189,6 @@ module fcapz_ela_polarfire #(
             wire        eio_rd_en_unused;
             wire [15:0] eio_addr_i;
             wire [31:0] eio_wdata_i, eio_rdata_i;
-            wire        ela_trigger_out_unused;
-            wire        ela_armed_out_unused;
 
             fcapz_regbus_mux u_mux (
                 .addr(jtag_addr), .wr_en(jtag_wr_en), .rd_en(jtag_rd_en),
@@ -165,15 +203,16 @@ module fcapz_ela_polarfire #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM),
+                .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
+                .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
                 .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
                 .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(1'b0),
-                .trigger_out(ela_trigger_out_unused),
-                .armed_out(ela_armed_out_unused),
+                .trigger_in(trigger_in), .trigger_out(trigger_out), .armed_out(armed_out),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(ela_wr_en), .jtag_rd_en(ela_rd_en),
                 .jtag_addr(ela_addr), .jtag_wdata(ela_wdata),
@@ -193,22 +232,20 @@ module fcapz_ela_polarfire #(
                 .jtag_rdata(eio_rdata_i)
             );
         end else begin : g_ela_only
-            wire ela_trigger_out_unused;
-            wire ela_armed_out_unused;
-
             fcapz_ela #(
                 .SAMPLE_W(SAMPLE_W), .DEPTH(DEPTH),
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
-                .TIMESTAMP_W(TIMESTAMP_W), .STARTUP_ARM(STARTUP_ARM),
+                .DECIM_EN(DECIM_EN), .EXT_TRIG_EN(EXT_TRIG_EN),
+                .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
+                .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
+                .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
                 .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
                 .USER1_DATA_EN(USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
-                .trigger_in(1'b0),
-                .trigger_out(ela_trigger_out_unused),
-                .armed_out(ela_armed_out_unused),
+                .trigger_in(trigger_in), .trigger_out(trigger_out), .armed_out(armed_out),
                 .jtag_clk(jtag_clk), .jtag_rst(jtag_rst),
                 .jtag_wr_en(jtag_wr_en), .jtag_rd_en(jtag_rd_en),
                 .jtag_addr(jtag_addr), .jtag_wdata(jtag_wdata),
@@ -224,20 +261,39 @@ module fcapz_ela_polarfire #(
         end
     endgenerate
 
-    // ---- Burst read engine (USER2) ----
-    jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
-        .DEPTH(DEPTH), .BURST_W(BURST_W)
-    ) u_burst (
-        .arst(jtag_rst_data),
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
-        .capture(tap2_capture), .shift_en(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel),
-        .mem_addr(burst_rd_addr),
-        .mem_active(burst_rd_active),
-        .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
-        .burst_start(burst_start), .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_start_ptr)
-    );
+    // ---- Optional USER2 burst read engine ----
+    generate
+        if (BURST_EN != 0 && SINGLE_CHAIN_BURST == 0) begin : g_burst
+            reset_sync u_rst_sync_data (
+                .clk(tap2_tck),
+                .arst(sample_rst),
+                .srst(jtag_rst_data)
+            );
+
+            jtag_burst_read #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
+            ) u_burst (
+                .arst(jtag_rst_data),
+                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+                .capture(tap2_capture), .shift_en(tap2_shift),
+                .update(tap2_update), .sel(tap2_sel),
+                .mem_addr(burst_rd_addr),
+                .mem_active(burst_rd_active),
+                .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
+                .burst_start(burst_start), .burst_timestamp(burst_timestamp),
+                .burst_ptr_in(burst_start_ptr)
+            );
+        end else begin : g_no_user2
+            // USER2 is unused: tie its TDO off so UJTAG shifts zeros there.
+            assign tap2_tdo = 1'b0;
+            assign jtag_rst_data = 1'b0;
+            if (SINGLE_CHAIN_BURST == 0) begin : g_no_burst
+                assign burst_rd_addr = {PTR_W{1'b0}};
+                assign burst_rd_active = 1'b0;
+            end
+            // Otherwise the single-chain pipe owns the burst memory read address.
+        end
+    endgenerate
 
 endmodule
