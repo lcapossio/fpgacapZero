@@ -48,6 +48,7 @@ set hdl_files [list \
     "${rtl}/fcapz_ela.v" \
     "${rtl}/fcapz_eio.v" \
     "${rtl}/fcapz_regbus_mux.v" \
+    "${rtl}/jtag_pipe_iface.v" \
     "${rtl}/jtag_reg_iface.v" \
     "${rtl}/jtag_burst_read.v" \
     "${rtl}/jtag_tap/jtag_tap_polarfire.v" \

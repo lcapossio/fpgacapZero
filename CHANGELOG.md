@@ -19,6 +19,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   The `ftdi` path of the board config has not yet run on hardware: on Windows,
   Microchip's FlashPro driver owns the JTAG channel.
 
+- **PolarFire ELA wrapper: the full parameter set.** `fcapz_ela_polarfire`
+  (Verilog and VHDL) now offers everything `fcapz_ela_xilinx7` does:
+  decimation, external trigger, timestamps, segments, probe mux, and burst
+  readout on USER1 (`SINGLE_CHAIN_BURST=1`, the default) or USER2. A new
+  testbench, `tb/fcapz_ela_polarfire_tb.sv`, drives it through `UJTAG`.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -74,8 +80,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `tdo_pad_o`. Connect them to top-level ports of the same direction;
   Libero binds them to the dedicated JTAG pins. `IR_USER1`/`IR_USER2` now
   default to `0x20`/`0x21`, because on PolarFire SoC the MSS debug module
-  answers at the old `0x10`/`0x11`. No working design is affected: the old
-  wrapper could not elaborate in Libero (see Fixed).
+  answers at the old `0x10`/`0x11`. `fcapz_ela_polarfire` also gains
+  `trigger_in`, `trigger_out` and `armed_out`; tie `trigger_in` low when it is
+  unused. No working design is affected: the old wrapper could not elaborate
+  in Libero (see Fixed).
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on

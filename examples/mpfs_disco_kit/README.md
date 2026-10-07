@@ -7,13 +7,13 @@ is left unconfigured.
 
 | Core | Where | What it sees |
 |------|-------|--------------|
-| ELA, 8-bit × 1024 | UJTAG USER1 (IR `0x20`) control, USER2 (IR `0x21`) burst data | free-running 8-bit counter on the 50 MHz reference clock |
+| ELA, 8-bit × 1024 | UJTAG USER1 (IR `0x20`): registers and burst data | free-running 8-bit counter on the 50 MHz reference clock |
 | EIO, 2 in / 6 out | USER1, register offset `0x8000` | in: SWITCH1 / SWITCH2 pressed; out: LED1..LED6 |
 
 LED7 blinks at about 1.5 Hz once the fabric is configured. Holding SWITCH1
 resets the sample domain.
 
-Built with Libero SoC 2025.2: about 1,400 4LUTs + 1,400 DFFs (1.5 %) and one
+Built with Libero SoC 2025.2: about 1,700 4LUTs + 1,400 DFFs (under 2 %) and one
 LSRAM, with timing met at 50 MHz.
 
 ## Quick start
@@ -93,7 +93,12 @@ on-board FlashPro5 is an FTDI FT4232H, and JTAG is on its channel A.
 **Validation status:** the RTL, the IR table and the whole host stack were
 validated on this board over OpenOCD, through a `remote_bitbang` adapter on
 Windows; all 11 hardware tests pass. `mpfs_disco_kit.cfg` itself, the `ftdi`
-path, has not yet been run on hardware.
+path, has not yet been run on hardware. The single-chain burst engine was
+checked by hand on this board: 256-bit scans on IR `0x20` after a `BURST_PTR`
+write return the same samples as the register window. The wrapper's other
+options (`SINGLE_CHAIN_BURST=0`, `EXT_TRIG_EN`, `DECIM_EN` and the rest) are
+covered in simulation (`tb/fcapz_ela_polarfire_tb.sv`) but not built for this
+board.
 
 ## Things to know about PolarFire
 
@@ -112,10 +117,13 @@ path, has not yet been run on hardware.
   IRs.
 - **eNVM.** Programming this fabric-only design replaces whatever the device
   held before, including MSS firmware in eNVM.
-- **Readback speed.** `OpenOcdTransport` reads samples word by word over
-  USER1; it does not use the USER2 burst chain yet. Each sample costs one
-  register read, so a full 1024-sample window takes far longer than a short
-  capture.
+- **Readback speed.** `OpenOcdTransport` reads samples word by word through
+  the register window; it does not issue the wrapper's 256-bit burst scans
+  yet. Each sample costs one register read, so a full 1024-sample window takes
+  far longer than a short capture.
+- **Second chain.** The wrapper keeps burst data on USER1
+  (`SINGLE_CHAIN_BURST=1`, the default). IR `0x21` (USER2) is used only by a
+  `SINGLE_CHAIN_BURST=0` build.
 
 ## Files
 

@@ -297,6 +297,10 @@ The CLI and board discovery select it for a tap name starting with `MPF`.
 - On PolarFire SoC the MSS RISC-V debug module answers at IR `0x10`/`0x11`.
   Declare only the FPGA TAP in the OpenOCD config (no RISC-V `target create`)
   unless you also debug the MSS, and keep the fcapz IRs out of that range.
+- `OpenOcdTransport` reads samples through the 49-bit register window.  The
+  ELA wrapper's burst engine (on USER1 by default, `SINGLE_CHAIN_BURST=1`;
+  on USER2 with `SINGLE_CHAIN_BURST=0`) is built but not used by this
+  transport yet.
 - On Windows, Microchip's FlashPro driver owns the embedded FlashPro5's JTAG
   channel, so OpenOCD's `ftdi` driver cannot open it.
 
