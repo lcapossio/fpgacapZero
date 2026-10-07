@@ -822,6 +822,8 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIs(t._burst_arg, False)
         args = parser.parse_args(["--backend", "ftdi", "--burst", "probe"])
         self.assertIs(_make_transport(args)._burst_arg, True)
+        args = parser.parse_args(["--backend", "ftdi", "--tap", "xcku040", "probe"])
+        self.assertEqual(_make_transport(args).ir_table, OpenOcdTransport.IR_TABLE_US)
 
     def test_no_burst_flag_declares_a_build_without_burst(self):
         parser = build_parser()

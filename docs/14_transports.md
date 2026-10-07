@@ -404,7 +404,8 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   measures the IR length.  Only single-device chains are supported.  The IR
   table comes from the IDCODE: PolarFire (`0x20` / `0x21`), AMD/Xilinx
   7-series (IR length 6) or Gowin.  For anything else, UltraScale included,
-  pass `ir_table=`.
+  pass `ir_table=` (CLI: `--tap xcku…` / `xcvu…` / `xcau…` selects the
+  UltraScale table).
 - **Burst.** `burst` defaults to the family's wrapper default: on for
   PolarFire and AMD/Xilinx (single chain), off for Gowin.  `burst=False`
   (CLI `--no-burst`) reads through the pipelined register window instead.
@@ -432,8 +433,8 @@ Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 | 1024 samples through the register window | 22 ms |
 
 All 11 board hardware tests pass on it.  On an Arty A7, the Digilent channel
-identifies the xc7a100t.  Register and burst access over this transport have
-not yet been run against an AMD/Xilinx bitstream.
+identifies the xc7a100t, but no fcapz core answered on the bitstream loaded
+at the time, so register and burst access on AMD/Xilinx remain unverified.
 
 ## IR table presets
 

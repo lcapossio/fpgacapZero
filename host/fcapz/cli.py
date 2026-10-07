@@ -229,6 +229,8 @@ _DEFAULT_TAP = "xc7a100t.tap"
 def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
     """IR table preset implied by an OpenOCD TAP / device name prefix."""
     tap_name = tap.removesuffix(".tap").lower()
+    if tap_name.startswith(("xcku", "xcvu", "xcau")):
+        return OpenOcdTransport.IR_TABLE_US
     if tap_name.startswith("gw"):
         return OpenOcdTransport.IR_TABLE_GOWIN
     if tap_name.startswith("mpf"):
