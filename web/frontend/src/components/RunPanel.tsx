@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RpcCancelled, downloadText, parseProbesText, rpc } from "../api";
 import type { Identity } from "../api";
 import { describeElaTrigger } from "../signalTrigger";
+import { asAxiDecode } from "../axiTxn";
 import { useSession } from "../session";
 import { vcdTimeAtSample } from "../vcdTime";
 
@@ -167,6 +168,9 @@ export function RunPanel({
       format: identity.sample_width > SAFE_SAMPLE_BITS ? "vcd" : "json",
       include_vcd: true,
       include_csv: true,
+      // Ignored unless the probe map is an AXI monitor's, and computed from
+      // samples the server already has -- no extra JTAG traffic.
+      decode_axi: true,
     };
   }
 
@@ -177,6 +181,7 @@ export function RunPanel({
         vcd: r.vcd,
         csv: typeof r.csv === "string" ? r.csv : undefined,
         json: r.result,
+        axi: asAxiDecode(r.axi),
         sampleCount: r.sample_count as number | string | undefined,
         // The trigger sample is the `pretrigger`-th stored sample; the VCD emits
         // one `#time` line per sample in order, so its time is that line's — for
@@ -243,6 +248,7 @@ export function RunPanel({
             format: p.format,
             include_vcd: true,
             include_csv: true,
+            decode_axi: true,
           },
           POLL_TIMEOUT * 1000 + readbackBudgetMs(identityRef.current) + 6000,
           sig,

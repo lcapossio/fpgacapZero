@@ -103,11 +103,25 @@ def load_probe_file(path: str | Path) -> ProbeFile:
 
     p = Path(path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{p}: invalid JSON: {exc}") from exc
+        text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(f"{p}: {exc}") from exc
+    return load_probe_text(text, source=p)
+
+
+def load_probe_text(text: str, *, source: str | Path = "<probe file>") -> ProbeFile:
+    """Validate ``.prob`` contents already read from somewhere.
+
+    Split out from :func:`load_probe_file` so a caller that must control the
+    read itself -- the MCP server, which has to confine the path before the
+    bytes are touched -- does not have to hand a path to a second opener.
+    """
+
+    p = source
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{p}: invalid JSON: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ValueError(f"{p}: expected a JSON object")

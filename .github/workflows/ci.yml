@@ -84,8 +84,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y iverilog libegl1 libgl1
-      - name: Install package (dev + GUI deps for mocked Qt tests)
-        run: pip install -e ".[dev,gui]"
+      - name: Install package (dev + GUI deps for mocked Qt tests, MCP SDK)
+        run: pip install -e ".[dev,gui,mcp]"
       - name: Run full unit test suite
         run: pytest tests/ -v --tb=short
       - name: Run JTAG readback pipeline regression tests

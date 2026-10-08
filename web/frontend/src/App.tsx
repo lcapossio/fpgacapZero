@@ -10,6 +10,7 @@ import { ElaPanel } from "./components/ElaPanel";
 import { EioPanel } from "./components/EioPanel";
 import { AxiPanel } from "./components/AxiPanel";
 import { AxiMonPanel } from "./components/AxiMonPanel";
+import { AxiTxnPanel } from "./components/AxiTxnPanel";
 import { LogOverlay } from "./components/LogOverlay";
 import { SurferView } from "./components/SurferView";
 import {
@@ -56,6 +57,9 @@ function AxiDock(_: IDockviewPanelProps) {
 }
 function AxiMonDock(_: IDockviewPanelProps) {
   return <AxiMonPanel />;
+}
+function AxiTxnDock(_: IDockviewPanelProps) {
+  return <AxiTxnPanel />;
 }
 /** Capture cores (plain ELAs and AXI monitors) in stable tab order. */
 function captureCores(cores: Core[]): Core[] {
@@ -201,6 +205,7 @@ const components = {
   eio: EioDock,
   axi: AxiDock,
   axi_mon: AxiMonDock,
+  axi_txn: AxiTxnDock,
   viewer: ViewerDock,
 };
 
@@ -212,6 +217,7 @@ const PANELS: { id: keyof typeof components; title: string }[] = [
   { id: "eio", title: "EIO" },
   { id: "axi", title: "AXI" },
   { id: "axi_mon", title: "AXI Mon" },
+  { id: "axi_txn", title: "AXI Txn" },
   { id: "viewer", title: "Viewer" },
 ];
 
@@ -257,6 +263,12 @@ function buildDefaultLayout(api: DockviewApi) {
     title: "AXI Mon",
     position: { referencePanel: "ela", direction: "within" },
   });
+  api.addPanel({
+    id: "axi_txn",
+    component: "axi_txn",
+    title: "AXI Txn",
+    position: { referencePanel: "ela", direction: "within" },
+  });
   // Show Connection (not Cores) in its group, and select ELA at startup
   // (panels added later in a group would otherwise win).
   api.getPanel("connection")?.api.setActive();
@@ -274,7 +286,7 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (api.getPanel(id)) return;
   const title = PANELS.find((p) => p.id === id)?.title;
   if (id === "viewer") {
-    const anchor = firstOpen(api, ["connection", "ela", "eio", "axi", "axi_mon"]);
+    const anchor = firstOpen(api, ["connection", "ela", "eio", "axi", "axi_mon", "axi_txn"]);
     api.addPanel({
       id,
       component: id,
@@ -287,7 +299,8 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
   if (id === "connection" || id === "cores") {
     // Connection and Cores stack together when either survives.
     const sibling = firstOpen(api, id === "connection" ? ["cores"] : ["connection"]);
-    const anchor = sibling ?? firstOpen(api, ["ela", "eio", "axi", "axi_mon", "viewer"]);
+    const anchor =
+      sibling ?? firstOpen(api, ["ela", "eio", "axi", "axi_mon", "axi_txn", "viewer"]);
     api.addPanel({
       id,
       component: id,
@@ -303,8 +316,9 @@ function restorePanel(api: DockviewApi, id: (typeof PANELS)[number]["id"]) {
     });
     return;
   }
-  // ELA / EIO / AXI / AXI Mon: stack with their sibling config tabs when any survive.
-  const sibling = firstOpen(api, ["ela", "eio", "axi", "axi_mon"]);
+  // ELA / EIO / AXI / AXI Mon / AXI Txn: stack with their sibling config
+  // tabs when any survive.
+  const sibling = firstOpen(api, ["ela", "eio", "axi", "axi_mon", "axi_txn"]);
   const anchor = sibling ?? firstOpen(api, ["connection", "viewer"]);
   api.addPanel({
     id,

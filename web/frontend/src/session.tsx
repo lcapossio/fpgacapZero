@@ -2,12 +2,16 @@ import { createContext, useContext, useMemo, useRef, useState } from "react";
 import type { MutableRefObject, ReactNode } from "react";
 import type { ConnectionParams, Core, Identity } from "./api";
 import type { AxiMonInfo } from "./axiMon";
+import type { AxiDecode } from "./axiTxn";
 
 /** The latest ELA capture, shared from the Run panel to the Viewer panels. */
 export interface CaptureState {
   vcd: string;
   csv?: string;
   json?: unknown;
+  /** AXI4-Lite transactions decoded from this capture, when its probe map
+   *  was an AXI monitor's. Undefined for every other core. */
+  axi?: AxiDecode;
   sampleCount?: number | string;
   /** VCD time of the trigger sample (the pretrigger-th stored sample), read
    *  from the VCD itself so it's correct for timestamped and plain captures

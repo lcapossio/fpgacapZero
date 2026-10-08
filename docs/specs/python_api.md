@@ -542,6 +542,14 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `Transport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
+
 #### `Transport.read_reg`
 
 ```python
@@ -728,6 +736,14 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `OpenOcdTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
+
 #### `OpenOcdTransport.select_chain`
 
 ```python
@@ -789,6 +805,7 @@ XilinxHwServerTransport(
     ir_table: dict[int, int] | None = None,
     ready_probe_addr: int | None = 0,
     ready_probe_timeout: float = 2.0,
+    read_timeout_sec: float | None = None,
     *,
     post_program_delay_ms: int = 200,
     ready_poll_interval_sec: float = 0.02,
@@ -837,6 +854,7 @@ DR_BITS = 49
 BURST_DR_BITS = 256
 ADDR_BURST_PTR = 44
 READ_IDLE_CYCLES = 20
+PROGRAM_TIMEOUT_SEC = 600.0
 RAW_DR_IDLE_CYCLES = 8
 USER1_PIPE_PRIME_READS = 3
 _SENTINEL = '<<XSDB_DONE>>'
@@ -887,6 +905,14 @@ close_fast() -> None
 ```
 
 Kill `xsdb` quickly for console interrupt; normal `close` may wait 5s.
+
+#### `XilinxHwServerTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
 
 #### `XilinxHwServerTransport.select_chain`
 
@@ -1411,6 +1437,88 @@ Produce a structured summary of the capture for LLM consumption.
 
 Returns a dict with overview stats, value ranges, edge counts, and
 notable patterns for each probe (or the raw sample if no probes).
+
+## `fcapz.axi_decode`
+
+### `AxiTransaction`
+
+```python
+@dataclass
+class AxiTransaction
+```
+
+One reconstructed AXI4-Lite read or write.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `index` | `int` | required |  |
+| `kind` | `str` | required | "write" \| "read" |
+| `addr` | <code>int &#124; None</code> | `None` |  |
+| `prot` | <code>int &#124; None</code> | `None` |  |
+| `data` | <code>int &#124; None</code> | `None` |  |
+| `strb` | <code>int &#124; None</code> | `None` |  |
+| `resp` | <code>str &#124; None</code> | `None` |  |
+| `addr_cycle` | <code>int &#124; None</code> | `None` |  |
+| `data_cycle` | <code>int &#124; None</code> | `None` |  |
+| `resp_cycle` | <code>int &#124; None</code> | `None` |  |
+| `addr_stall` | `int` | `0` |  |
+| `data_stall` | `int` | `0` |  |
+| `resp_stall` | `int` | `0` |  |
+| `flags` | `list[str]` | `list()` |  |
+
+#### `AxiTransaction.latency`
+
+```python
+@property
+latency -> int | None
+```
+
+Cycles from the first request beat to the response.
+
+#### `AxiTransaction.to_json`
+
+```python
+to_json(addr_digits: int, data_digits: int) -> dict[str, Any]
+```
+
+Compact, JSON-number-safe form (wide values as hex strings).
+
+### `decode_axi`
+
+```python
+decode_axi(
+    samples: Sequence[int],
+    probes: Sequence[Any],
+    *,
+    decimation: int = 0,
+    storage_qualified: bool = False,
+) -> dict[str, Any]
+```
+
+Reconstruct AXI4-Lite transactions from a capture's samples.
+
+`probes` is the monitor's probe map (objects with `name`/`width`/
+`lsb`). Raises `ValueError` if the map is not an AXI one.
+
+`decimation` and `storage_qualified` describe how the capture was
+taken. Reassembly reads the sample stream as consecutive bus cycles: a
+beat's position *is* its cycle, and a response pairs with the oldest
+request still queued. Decimation and storage qualification both break
+that -- a handshake that was never stored cannot be distinguished from
+one that never happened, so a dropped response silently shifts every
+later pairing onto the wrong address, and "latency" becomes a count of
+stored samples. There is no way to recover the missing beats after the
+fact, so such a capture is refused rather than misread.
+
+### `looks_like_axi`
+
+```python
+looks_like_axi(probe_names: Iterable[str]) -> bool
+```
+
+True when a probe map carries every AXI4-Lite handshake signal.
+
+## `fcapz.events`
 
 ### `ProbeDefinition`
 
