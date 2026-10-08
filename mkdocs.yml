@@ -123,6 +123,7 @@ nav:
       - 17 Troubleshooting: 17_troubleshooting.md
       - 18 Web interface: 18_web_interface.md
       - 19 AXI monitor: 19_axi_monitor.md
+      - 20 MCP server: 20_mcp_server.md
   - Reference specs:
       - Architecture: specs/architecture.md
       - Register map: specs/register_map.md

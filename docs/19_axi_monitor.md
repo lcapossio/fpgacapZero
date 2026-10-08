@@ -183,7 +183,7 @@ flags), which is usually what you actually wanted to read. Capture with
 `--decimation 0` and no storage qualification: reassembly needs every bus
 cycle, and a capture that stored only some of them is refused rather than
 decoded onto the wrong addresses. See
-[`axi-decode`](10_cli_reference.md#axi-decode-capture---probe-file-p---only-anomalies---kind-k---limit-n---json).
+[`axi-decode`](10_cli_reference.md#axi-decode).
 
 ## From the web UI
 
