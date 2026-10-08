@@ -1,5 +1,6 @@
 # 12 — Desktop GUI (`fcapz-gui`)
 
+> [!NOTE]
 > **Goal**: install, launch, and use the PySide6 desktop GUI.  By
 > the end of this chapter you will know what every panel does, how
 > the embedded waveform preview interacts with external viewers
@@ -91,6 +92,7 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `AMD/Xilinx UltraScale / UltraScale+`, or `Gowin (OpenOCD)`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
 
+> [!NOTE]
 > **Gowin boards** connect over the **OpenOCD** backend (the FTDI/Gowin cable
 > driven by an already-running `openocd`): set Backend = `openocd`, Port `6666`,
 > TAP = your tap name or `auto`, IR table = **Gowin (OpenOCD)**. The ELA tab

@@ -1,5 +1,6 @@
 # 05 — ELA core
 
+> [!NOTE]
 > **Goal**: deep dive on the Embedded Logic Analyzer.  By the end of
 > this chapter you will understand every trigger mode, every storage
 > option, and how the runtime knobs (decimation, segments, probe mux,
@@ -12,22 +13,16 @@
 
 ## The capture flow in one diagram
 
-```
-                  ┌──────────────┐
-arm_pulse  ──────►│   ARMED      │ ── trigger_hit ──┐
-                  │ (recording   │                  │
-                  │  pre-trig    │                  ▼
-                  │  history)    │           ┌──────────────┐
-                  └──────────────┘           │  TRIGGERED   │
-                                              │ (counting    │
-                                              │  posttrig)   │
-                                              └──────────────┘
-                                                     │
-                                                     │ post_count == posttrig_len
-                                                     ▼
-                                              ┌──────────────┐
-                                              │    DONE      │ ── host reads buffer ──►
-                                              └──────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "ARMED: recording pre-trigger history" as ARMED
+    state "TRIGGERED: counting post-trigger samples" as TRIGGERED
+    state "DONE: buffer holds the capture" as DONE
+    [*] --> ARMED: arm_pulse
+    ARMED --> TRIGGERED: trigger_hit
+    TRIGGERED --> DONE: posttrig_len samples stored
+    DONE --> [*]: host reads buffer
 ```
 
 The ELA is a circular buffer.  When you arm it, samples flow into a
@@ -41,11 +36,30 @@ In single-segment builds, pre-trigger history rolls even before `arm()`,
 so a trigger that arrives immediately after arming can still return real
 history. Segmented capture mode has separate per-segment bookkeeping and
 does not use this rolling pre-arm path. That single-segment history is
-not reset by `arm()`: back-to-back captures can include samples from
-before the latest arm, including the previous capture tail, until new
-samples overwrite them. Pulse `sample_rst` between captures if each
-capture must be fully independent. The rolling writes also mean the BRAM
+not reset by `arm()`, so samples taken before the latest arm can legally
+appear in the pre-trigger window — but only while they form one
+unbroken run with the samples after it.  Arms that break that run start
+the pre-trigger window afresh: one that switches channel or probe slice,
+one with storage qualification on and `INPUT_PIPE>=1` (the registered
+qualifier restarts, so the next sample is not stored), and one that
+restarts a capture which had already triggered.
+
+Sample writes stop while a completed capture is being read out, which
+puts a hole in that history. The core therefore drops its pre-trigger
+credit when a capture completes, and the next arm must accumulate
+`pretrigger` fresh samples before a trigger can commit, so a readout no
+longer splices two moments into one window. The cost is that a
+one-shot trigger arriving within `pretrigger` stored samples of a
+re-arm is not captured at all. If you need such a trigger caught,
+configure a shorter `pretrigger`. The rolling writes also mean the BRAM
 write port has idle sample-clock activity in single-segment builds.
+
+An `ARM` (or soft reset) that arrives while a capture is still running
+restarts it on the sample clock it lands: the running capture neither
+commits a trigger, completes, nor advances a segment on that clock.
+`STATUS.done` after an `ARM` describes only the capture that `ARM`
+started; a capture that completed while the `ARM` was crossing into the
+sample clock domain is not reported.
 
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
@@ -61,7 +75,9 @@ timestamps are enabled, the timestamp counter is not delayed by the same
 number of stages; each timestamp marks the cycle when the pipelined sample
 is written, not the original external `probe_in` cycle. In practice the
 reported timestamp is later than the external probe event by `INPUT_PIPE`
-sample-clock cycles.
+sample-clock cycles, plus one for the registered compare stage when
+`INPUT_PIPE>=1`.  A core with `EXT_TRIG_EN=1` and `INPUT_PIPE=0` behaves
+as `INPUT_PIPE=1` (see External trigger I/O below).
 
 The trigger sample sits at index `pretrigger` in the captured array
 (0-indexed).  So if you `--pretrigger 8 --posttrigger 16`, you get
@@ -299,7 +315,7 @@ samples accurately.
 With `INPUT_PIPE>=1`, timestamps are aligned to the stored, pipelined sample
 stream. Relative spacing between stored samples is still accurate, but the
 absolute timestamp for an external `probe_in` event is offset by the input
-pipeline depth.
+pipeline depth plus the registered compare stage (`INPUT_PIPE + 1` clocks).
 
 ## External trigger I/O (`EXT_TRIG_EN=1`)
 
@@ -307,8 +323,10 @@ The ELA exposes `trigger_in` and `trigger_out` ports when built with
 `EXT_TRIG_EN=1`.  These let you:
 
 - **`trigger_out`** — pulse high for one cycle when the ELA's
-  internal trigger fires.  Wire it to a pin / LED / another ELA's
-  `trigger_in`.
+  internal trigger fires.  With a trigger delay it pulses on the
+  trigger event, not on the delayed commit, and hits during the
+  countdown do not pulse it again.  Wire it to a pin / LED / another
+  ELA's `trigger_in`.
 - **`trigger_in`** — combine an external signal with the internal
   trigger logic.  Modes: disabled (default), OR, AND.
 
@@ -330,6 +348,17 @@ cfg = CaptureConfig(
     ext_trigger_mode = 1,         # 0=disabled, 1=OR, 2=AND
 )
 ```
+
+`trigger_in` passes through a 2-flop synchronizer, and the core matches
+the probe path to it: a `trigger_in` pulse sampled on the same clock as a
+probe value marks that value, and in AND mode the internal compare and
+`trigger_in` refer to the same sample.  With `INPUT_PIPE>=1` the core
+delays `trigger_in` further to match the deeper probe path.  With
+`INPUT_PIPE=0` and `EXT_TRIG_EN=1` the core is built as `INPUT_PIPE=1`
+(one probe input stage plus the registered compare, so the probe path is
+as long as the synchronizer), at the cost of `SAMPLE_W` flops and that
+setting's latency.  An asynchronous
+`trigger_in` has an inherent one-clock uncertainty either way.
 
 The reference Arty A7 design ties `trigger_in` to an EIO-controlled
 fabric signal, so you can manually fire the trigger from the host
@@ -469,7 +498,7 @@ Manager registers:
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
 | `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
@@ -648,6 +677,7 @@ cfg = CaptureConfig(
 )
 ```
 
+> [!IMPORTANT]
 > **Host-initiated captures on a startup-armed bitstream.** Because
 > `STARTUP_ARM=1` makes the core boot armed, it may already be armed — or even
 > triggered/done — before your host code runs. A bare `configure(cfg); arm()`
@@ -782,6 +812,14 @@ You can use both at once if you really want to (one ELA observing N
 channels of M signals each), but in practice pick the one that fits
 your bus naturally.
 
+When an arm changes the selection, the probe pipeline still holds a few
+samples of the old one.  For those clocks (the probe pipeline length plus
+up to two) the core neither stores samples nor evaluates the trigger, an
+external trigger included, so no old-selection sample is captured,
+compared, or taken as the previous sample of an edge.  A single-segment
+core also drops its pre-arm history and refills the pre-trigger window from
+the new selection.  An arm that keeps the selection starts at once.
+
 ## Reading the FEATURES register
 
 When you call `Analyzer.probe()`, the host queries the `FEATURES`
@@ -803,7 +841,7 @@ info = analyzer.probe()
 #   "timestamp_width": 32,
 #   "num_segments": 4,
 #   "probe_mux_w": 0,
-#   "compare_caps": 0x301C3,
+#   "compare_caps": 0xB01C3,
 #   "compare_modes": [0, 1, 6, 7, 8],
 #   "has_dual_compare": True,
 # }

@@ -163,6 +163,7 @@ class EioController:
         return (self._base_addr | offset) & 0xFFFF
 
     def close(self) -> None:
+        """Close the JTAG transport."""
         self._t.close()
 
     # ------------------------------------------------------------------

@@ -1,5 +1,6 @@
 # 09 — Python API
 
+> [!NOTE]
 > **Goal**: complete reference for the `fcapz` Python package.  By
 > the end of this chapter you can drive every fcapz core
 > programmatically, integrate it into your own scripts and tests,
@@ -8,6 +9,9 @@
 >
 > **Audience**: junior FPGA dev who can write basic Python and has
 > read [chapter 02](02_install.md) so the package is installed.
+>
+> **Reference**: every public name with its full signature and docstring
+> is in the generated [Python API reference](specs/python_api.md).
 
 ## Package layout
 
@@ -165,6 +169,21 @@ a.connect()                  # selects chain 1, validates ELA core_id
 # ... do work ...
 a.close()                    # releases the transport
 ```
+
+`Analyzer(transport, chain=1, instance=None, manager=None)`: `instance`
+selects a core-manager slot.  `manager` says whether the ELA sits behind a
+core manager; the default `None` detects it from the manager ID at `0xF000`.
+That ID decides on its own unless a standalone core of the probed geometry
+decodes `0xF000` inside its DATA/timestamp windows (more than 15296 words of
+samples plus timestamps).  Then the rest of the manager block must match
+too, and a manager with descriptors (`MGR_CAPS` bit 1) and two or more
+slots must also latch a test write to `MGR_DESC_INDEX`, which a standalone
+core ignores.  The index is restored afterwards even if a read fails; the
+failure then propagates and no answer is kept, so the next call decides
+afresh.  Only a deep core whose live
+capture reproduces the whole register block of a one-slot or
+descriptor-less manager can still fool detection.  Pass `manager=True` or `False` to
+state the topology outright.
 
 ### `probe() -> dict`
 

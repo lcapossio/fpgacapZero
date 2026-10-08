@@ -55,7 +55,25 @@ def env_int(name: str, default: int) -> int:
 
 SAMPLE_W = env_int("ELA_PARAM_SAMPLE_W", 8)
 DEPTH = env_int("ELA_PARAM_DEPTH", 16)
+INPUT_PIPE = env_int("ELA_PARAM_INPUT_PIPE", 0)
+TRIG_STAGES = env_int("ELA_PARAM_TRIG_STAGES", 1)
+DUAL_COMPARE = env_int("ELA_PARAM_DUAL_COMPARE", 1)
+DECIM_EN = env_int("ELA_PARAM_DECIM_EN", 0)
+STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
+EXT_TRIG_EN = env_int("ELA_PARAM_EXT_TRIG_EN", 0)
+# An external trigger_in pulse marks the probe sample driven alongside it: the
+# core matches trigger_in to the probe path, and builds one input stage when
+# INPUT_PIPE = 0 so that path is as long as the 2-FF synchronizer.
+EXT_TRIG_MARK_OFFSET = 0
+# Probe-path register stages the core actually builds (see PROBE_PIPE in RTL).
+PROBE_PIPE = INPUT_PIPE if INPUT_PIPE or not EXT_TRIG_EN else 1
 TIMESTAMP_W = env_int("ELA_PARAM_TIMESTAMP_W", 0)
+NUM_SEGMENTS = env_int("ELA_PARAM_NUM_SEGMENTS", 1)
+NUM_CHANNELS = env_int("ELA_PARAM_NUM_CHANNELS", 1)
+PROBE_MUX_W = env_int("ELA_PARAM_PROBE_MUX_W", 0)
+STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
+# Register that selects the probe slice / channel latched on arm.
+SEL_ADDR = 0x00AC if PROBE_MUX_W else 0x00A0  # ADDR_PROBE_SEL / ADDR_CHAN_SEL
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
 TS_WORDS = (TIMESTAMP_W + 31) // 32 if TIMESTAMP_W > 0 else 0
 ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4
@@ -73,6 +91,9 @@ class ElaFunctionalCoverage:
             "value_trigger": 0,
             "edge_trigger": 0,
             "overflow": 0,
+            "oversize_length": 0,
+            "oversize_length_sum": 0,
+            "posttrigger_at_depth": 0,
             "decim_zero": 0,
             "decim_every4": 0,
             "decimation": 0,
@@ -88,6 +109,10 @@ class ElaFunctionalCoverage:
             "segmented_rearm_pulses": 0,
             "probe_mux": 0,
             "probe_mux_slice0": 0,
+            "channel_switch": 0,
+            "channel_switch_edge": 0,
+            "channel_switch_history": 0,
+            "rearm_restart": 0,
             "trigger_delay": 0,
             "trigger_delay_zero": 0,
             "startup_arm": 0,
@@ -107,6 +132,7 @@ class ElaFunctionalCoverage:
             "rolling_prehistory": 0,
             "rolling_rearm_history": 0,
             "randomized_value_capture": 0,
+            "trigger_alignment": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -136,8 +162,8 @@ class ElaDriver:
     def __init__(self, dut) -> None:
         self.dut = dut
 
-    async def start(self) -> None:
-        cocotb.start_soon(Clock(self.dut.sample_clk, 10, unit="ns").start())
+    async def start(self, *, sample_period_ns: int = 10) -> None:
+        cocotb.start_soon(Clock(self.dut.sample_clk, sample_period_ns, unit="ns").start())
         cocotb.start_soon(Clock(self.dut.jtag_clk, 14, unit="ns").start())
         self.dut.sample_rst.value = 1
         self.dut.jtag_rst.value = 1
@@ -235,10 +261,24 @@ class ElaDriver:
         return [await self.read(base + i * 4) for i in range(count)]
 
 
-async def setup(dut) -> ElaDriver:
+async def setup(dut, *, sample_period_ns: int = 10) -> ElaDriver:
     ela = ElaDriver(dut)
-    await ela.start()
+    await ela.start(sample_period_ns=sample_period_ns)
     return ela
+
+
+async def free_running_counter(dut, *, start: int = 0) -> None:
+    """Drive probe_in with a counter that advances every sample clock, so any
+    captured window must count up by exactly one per stored sample."""
+    value = start
+    while True:
+        dut.probe_in.value = value & 0xFF
+        await RisingEdge(dut.sample_clk)
+        value += 1
+
+
+def counter_steps(window: list[int]) -> list[int]:
+    return [(window[i] - window[i - 1]) & 0xFF for i in range(1, len(window))]
 
 
 @cocotb.test()
@@ -374,6 +414,96 @@ async def overflow_and_reset(dut):
     status = await ela.read(ADDR_STATUS)
     assert status == 0
     FUNCTIONAL_COVERAGE.hit("reset")
+
+
+@cocotb.test()
+async def oversize_length_is_reported_not_truncated(dut):
+    """A length of DEPTH must raise overflow, not wrap around.
+
+    The host rejects pre+post+1 > depth, so this is only reachable by a JTAG
+    master writing the register directly -- which is exactly what the overflow
+    flag is for.  DEPTH is the first value that needs more bits than a sample
+    pointer, so a core that narrows the length to pointer width sees 0 here,
+    computes a small capture_len and reports no overflow at all.
+
+    Scoped deliberately to DEPTH rather than "DEPTH or more": a value at or
+    above 2**LEN_W exceeds the length field in *both* cores and wraps in both,
+    so that is agreed behaviour rather than a defect.
+    """
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, DEPTH)
+    await ela.write(ADDR_POSTTRIG, 0)
+    assert await ela.read(ADDR_PRETRIG) == DEPTH, "register readback must keep the full write"
+    await ela.arm()
+    # overflow latches in the arm block from pretrig_len_sync2, so poll rather
+    # than assume the CDC has settled by any particular sample -- the sibling
+    # overflow_and_reset test polls for the same reason.
+    status = 0
+    for _ in range(120):
+        await ela.wait_sample(1)
+        status = await ela.read(ADDR_STATUS)
+        if status & 0x8:
+            break
+    assert status & 0x8, (
+        f"pretrigger={DEPTH} with depth={DEPTH} must set overflow, got 0x{status:08x}"
+    )
+    FUNCTIONAL_COVERAGE.hit("oversize_length")
+
+
+@cocotb.test()
+async def oversize_length_sum_still_reports_overflow(dut):
+    """pre=DEPTH, post=DEPTH-1 overflows the *sum*, not just one field.
+
+    pre+post+1 is 2*DEPTH here, which needs one bit more than a length field
+    holds. A core that computes the overflow comparison at length width wraps
+    that sum to 0 and clears overflow -- reporting the request as fine. The
+    sibling test above uses post=0 and cannot catch this.
+    """
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, DEPTH)
+    await ela.write(ADDR_POSTTRIG, DEPTH - 1)
+    await ela.arm()
+    status = 0
+    for _ in range(120):
+        await ela.wait_sample(1)
+        status = await ela.read(ADDR_STATUS)
+        if status & 0x8:
+            break
+    assert status & 0x8, (
+        f"pre={DEPTH} post={DEPTH - 1} (sum {2 * DEPTH}) must set overflow, "
+        f"got 0x{status:08x}"
+    )
+    FUNCTIONAL_COVERAGE.hit("oversize_length_sum")
+
+
+@cocotb.test()
+async def posttrigger_at_depth_still_completes(dut):
+    """A posttrigger of DEPTH must still terminate the capture.
+
+    The post-trigger counter is loaded from posttrig_len, so it needs the same
+    width as a length: one bit narrower cannot hold DEPTH.
+    """
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, DEPTH)
+    await ela.write(ADDR_TRIG_MODE, 1)
+    await ela.write(ADDR_TRIG_VALUE, 0)
+    await ela.write(ADDR_TRIG_MASK, 0)
+    await ela.arm()
+    await ela.drive_counter(4 * DEPTH + 16)
+    status = 0
+    for _ in range(4 * DEPTH + 120):
+        await ela.wait_sample(1)
+        status = await ela.read(ADDR_STATUS)
+        if status & 0x4:
+            break
+    assert status & 0x4, (
+        f"posttrigger={DEPTH} never completed, last status=0x{status:08x}"
+    )
+    FUNCTIONAL_COVERAGE.hit("posttrigger_at_depth")
 
 
 @cocotb.test()
@@ -523,6 +653,192 @@ async def segmented_capture(dut):
 
 
 @cocotb.test()
+async def segment_restart_keeps_the_first_sample(dut):
+    """The first sample after a segment completes can trigger the next one.
+    With pretrigger 0, post 3 and a trigger on low bits == 3, every segment's
+    first sample matches, so the windows tile the counter with no gap."""
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=0, post=3, value=3, mask=0x03)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    firsts = []
+    for seg in range(NUM_SEGMENTS):
+        await ela.write(ADDR_SEG_SEL, seg)
+        window = [s & 0xFF for s in await ela.read_samples(4)]
+        assert counter_steps(window) == [1, 1, 1], f"segment {seg} window {window}"
+        firsts.append(window[0])
+    assert counter_steps(firsts) == [4] * (NUM_SEGMENTS - 1), f"segment starts {firsts}"
+    FUNCTIONAL_COVERAGE.hit("segments")
+
+
+def _slices(*values: int) -> int:
+    """Pack per-slice/channel probe values, slice 0 in the low bits."""
+    return sum((v & ((1 << SAMPLE_W) - 1)) << (i * SAMPLE_W) for i, v in enumerate(values))
+
+
+async def _slices_counter(dut) -> None:
+    """Slice 0 counts with bit 7 clear, slice 1 the same count with it set."""
+    value = 0
+    while True:
+        dut.probe_in.value = _slices(value & 0x7F, (value & 0x7F) | 0x80)
+        await RisingEdge(dut.sample_clk)
+        value += 1
+
+
+@cocotb.test()
+async def channel_switch_ignores_old_channel_samples(dut):
+    """After an arm that switches channel, samples of the old channel still in
+    the probe pipeline must not reach the new trigger configuration."""
+    ela = await setup(dut)
+    dut.probe_in.value = _slices(5, 7)
+    await ela.wait_sample(12)  # slice 0, selected since reset, fills the pipe
+    await ela.write(SEL_ADDR, 1)
+    await ela.configure_value_capture(pre=0, post=0, value=5)
+    await ela.arm()
+    await ela.wait_sample(30)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"old-channel sample triggered, status=0x{status:x}"
+    dut.probe_in.value = _slices(5, 5)
+    assert await ela.wait_done() & 0x4
+    FUNCTIONAL_COVERAGE.hit("channel_switch")
+
+
+@cocotb.test()
+async def channel_switch_is_not_an_edge(dut):
+    """The step from the old channel's last sample to the new channel's first
+    is not an edge on the probe."""
+    ela = await setup(dut)
+    dut.probe_in.value = _slices(0x00, 0xFF)
+    await ela.wait_sample(12)
+    await ela.write(SEL_ADDR, 1)
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_TRIG_MODE, 2)  # changed, under the mask
+    await ela.write(ADDR_TRIG_VALUE, 0)
+    await ela.write(ADDR_TRIG_MASK, 0x01)
+    await ela.arm()
+    await ela.wait_sample(30)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"channel switch read as an edge, status=0x{status:x}"
+    dut.probe_in.value = _slices(0x00, 0xFE)
+    assert await ela.wait_done() & 0x4
+    FUNCTIONAL_COVERAGE.hit("channel_switch_edge")
+
+
+@cocotb.test()
+async def channel_switch_drops_old_prearm_history(dut):
+    """Single-segment cores keep rolling pre-arm history in the old channel; an
+    arm that switches channel must re-earn the pre-trigger window from the new
+    one, so every captured sample is a new-channel (bit 7 set) sample."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(_slices_counter(dut))
+    # A capture on slice 0 latches pre=6; the soft reset then returns to idle,
+    # where the prefill rolls slice-0 history and earns the pre-trigger credit.
+    await ela.configure_value_capture(pre=6, post=1, value=0, mask=0)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    await ela.reset_core()
+    await ela.wait_sample(40)
+    await ela.write(SEL_ADDR, 1)
+    await ela.configure_value_capture(pre=6, post=1, value=0x80, mask=0x80)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(8)]
+    assert all(s & 0x80 for s in window), f"old-channel samples in window {window}"
+    steps = [(window[i] - window[i - 1]) & 0x7F for i in range(1, len(window))]
+    assert steps == [1] * 7, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("channel_switch_history")
+
+
+@cocotb.test()
+async def channel_switch_rearm_drops_old_credit(dut):
+    """A re-arm that switches channel while the capture is still earning its
+    pre-trigger window must not keep the old channel's credit, the sample
+    stored on the re-arm edge included."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(_slices_counter(dut))
+    # Slice 0 never has bit 7 set, so this capture keeps filling its window.
+    await ela.configure_value_capture(pre=12, post=1, value=0x80, mask=0x80)
+    await ela.write(SEL_ADDR, 0)
+    await ela.arm()
+    await ela.write(SEL_ADDR, 1)  # the arm above is still earning its window
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(14)]
+    assert all(s & 0x80 for s in window), f"old-channel samples in window {window}"
+    steps = [(window[i] - window[i - 1]) & 0x7F for i in range(1, len(window))]
+    assert steps == [1] * 13, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("channel_switch_history")
+
+
+@cocotb.test()
+async def rearm_mid_capture_restarts_cleanly(dut):
+    """An ARM that lands while a capture is running restarts it on that clock:
+    the running capture must not commit a trigger, complete, or move the write
+    pointer over the restart, and STATUS.done must report only the new
+    capture.  The re-arm is swept across the running capture (and the jtag /
+    sample clock phases) so it meets every edge of it."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    # The old trigger matches once per 16 samples, so the swept re-arm meets
+    # every clock of the old capture, post=0's write-free completion clock
+    # included.
+    for pre, post in ((1, 2), (2, 0)):
+        size = pre + post + 1
+        for phase in range(72):
+            await ela.reset_core()
+            await ela.configure_value_capture(pre=pre, post=post, value=1, mask=0x0F)
+            if STOR_QUAL:
+                # Qualifier that keeps every counter sample (bit 0 always
+                # changes), so any hole in the window is the core's.
+                await ela.write(ADDR_SQ_MODE, 8)
+                await ela.write(ADDR_SQ_VALUE, 0)
+                await ela.write(ADDR_SQ_MASK, 0x01)
+            await ela.arm()
+            await ela.wait_sample(phase % 24)
+            await ela.write(ADDR_TRIG_VALUE, 3)
+            await ela.arm()
+            assert await ela.wait_done(400) & 0x4, f"post {post} phase {phase}: no done"
+            for seg in range(NUM_SEGMENTS):
+                await ela.write(ADDR_SEG_SEL, seg)
+                await ela.read(ADDR_SEG_SEL)
+                window = [s & 0xFF for s in await ela.read_samples(size)]
+                where = f"post {post} phase {phase} segment {seg} window {window}"
+                assert counter_steps(window) == [1] * (size - 1), where
+                assert window[pre] & 0x0F == 3, f"old trigger: {where}"
+    counter.cancel()
+    FUNCTIONAL_COVERAGE.hit("rearm_restart")
+
+
+@cocotb.test()
+async def soft_reset_drops_idle_prefill_credit(dut):
+    """A soft reset during idle prefill restarts the ring and its pre-trigger
+    credit.  With registered storage qualification the reset also drops the
+    next sample, so credit kept across it would splice the window."""
+    ela = await setup(dut)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    pre = 96
+    await ela.configure_value_capture(pre=pre, post=0, value=0, mask=0)
+    await ela.write(ADDR_SQ_MODE, 8)  # CHANGED on bit 0: keeps every sample
+    await ela.write(ADDR_SQ_MASK, 0x01)
+    await ela.arm()  # latch pre and the qualifier
+    await ela.reset_core()  # idle prefill, pre_count still below pre
+    await ela.wait_sample(20)
+    await ela.write(ADDR_SQ_MODE, 0)  # the next arm has no qualifier bubble
+    await ela.write(ADDR_CTRL, 0x2)
+    await ela.arm()
+    assert await ela.wait_done(400) & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(pre + 1)]
+    assert counter_steps(window) == [1] * pre, f"window {window}"
+    FUNCTIONAL_COVERAGE.hit("rearm_restart")
+
+
+@cocotb.test()
 async def probe_mux_slice_selection(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_PROBE_MUX_W) == 32
@@ -587,7 +903,9 @@ async def trigger_delay_startup_and_holdoff(dut):
     await ela.write(ADDR_TRIG_HOLDOFF, 4)
     assert await ela.read(ADDR_TRIG_HOLDOFF) == 4
     await ela.reset_core()
-    await ela.configure_value_capture(pre=0, post=2, value=3)
+    # Holdoff counts cycles at the comparator; the probe pipeline lets earlier
+    # counter values reach it after the window, so pick one still inside.
+    await ela.configure_value_capture(pre=0, post=2, value=3 - PROBE_PIPE)
     await ela.arm()
     await ela.drive_counter(16)
     status = await ela.read(ADDR_STATUS)
@@ -719,6 +1037,29 @@ async def wide_sample_readback(dut):
 
 
 @cocotb.test()
+async def deep_timestamp_base_does_not_alias_data(dut):
+    """A deep wide core puts the timestamp window base past 0xFFFF.  Every
+    16-bit register address is then below it, so DATA window reads must
+    return sample words, never timestamps (a base compared as 16 bits wraps
+    onto ADDR_DATA_BASE).  COMPARE_CAPS bit 19 advertises the full-width
+    compare."""
+    assert TIMESTAMP_W > 0 and ADDR_TS_DATA_BASE > 0xFFFF
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 19)
+    words = [0xA500_0033] + [0xA500_0000 | (i << 16) | 0x5A5A for i in range(1, WORDS_PER_SAMPLE)]
+    sample = sum(w << (32 * i) for i, w in enumerate(words))
+    await ela.configure_value_capture(pre=0, post=2, value=0x33, mask=0xFF)
+    await ela.arm()
+    ela.dut.probe_in.value = sample
+    await ela.wait_sample(8)
+    assert await ela.wait_done() & 0x4
+    for idx in (0, 2):
+        base = ADDR_DATA_BASE + idx * WORDS_PER_SAMPLE * 4
+        got = [await ela.read(base + 4 * i) for i in range(WORDS_PER_SAMPLE)]
+        assert got == words, f"sample {idx}: {[hex(w) for w in got]}"
+
+
+@cocotb.test()
 async def wide_trigger_upper_bit(dut):
     """WIDE_TRIG: program comparator A above bit 31 through the WIDE window and
     prove the trigger fires on a high bit the 32-bit register path can't reach.
@@ -759,7 +1100,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0002_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -786,7 +1127,7 @@ async def config_user1_disabled(dut):
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0002_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -808,7 +1149,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x0003_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 1)
@@ -915,8 +1256,10 @@ async def rolling_prehistory_and_rearm(dut):
     assert await ela.read(ADDR_STATUS) & 0x4
     first = await ela.read_samples(10)
     assert first[0] & 0xFF == 24
-    assert first[8] & 0xFF == 30
-    assert first[9] & 0xFF == 31
+    # The pulse spans probe values 27..29; the pre-trigger window has only
+    # filled by 29, the last of them, so that is the marked sample.
+    assert first[8] & 0xFF == 29
+    assert first[9] & 0xFF == 30
     FUNCTIONAL_COVERAGE.hit("rolling_prehistory")
 
     ela.dut.probe_in.value = 80
@@ -929,8 +1272,444 @@ async def rolling_prehistory_and_rearm(dut):
         ela.dut.trigger_in.value = 1 if 2 <= cycle <= 4 else 0
     await ela.wait_sample(40)
     assert await ela.read(ADDR_STATUS) & 0x4
-    second = await ela.read_samples(10)
-    assert (second[0] & 0xFF) == (first[9] & 0xFF)
-    assert second[8] & 0xFF >= 88
-    assert second[9] & 0xFF == ((second[8] & 0xFF) + 1) & 0xFF
+    # Writes were frozen for the whole readout of the first capture, so the
+    # rolling history has a hole in it.  The core must re-earn pretrig_len
+    # fresh samples before a trigger can commit, which makes the second
+    # window one contiguous run holding nothing from before the re-arm.
+    second = await ela.read_samples(11)
+    window = [s & 0xFF for s in second]
+    # The probe is only advanced by the loop below, so it sits at 86 for the
+    # few sample clocks the JTAG arm write takes: a held value is faithful
+    # data, not a seam.  A splice shows up as a *gap* -- a step of neither 0
+    # nor 1 -- so that is what to forbid.
+    steps = [(window[i] - window[i - 1]) & 0xFF for i in range(1, len(window))]
+    assert all(d in (0, 1) for d in steps), (
+        f"second capture window is spliced: {window} (steps {steps})"
+    )
+    # drive_counter(6, start=80) leaves the probe at 86 when arm() is issued,
+    # so the floor is 86: a floor of 80 would admit the pre-arm samples 80..85
+    # this is meant to exclude, and the pre-fix window started at ~31.
+    assert window[0] >= 86, (
+        f"second capture window reaches back before the re-arm: {window} "
+        f"(first capture ended at {first[9] & 0xFF})"
+    )
     FUNCTIONAL_COVERAGE.hit("rolling_rearm_history")
+
+
+# -- Verilog/VHDL parity regressions ------------------------------------------
+# Each of these checks the captured window itself, not just completion: the
+# divergences they cover all completed normally and returned the wrong data.
+
+
+@cocotb.test()
+async def segmented_windows_are_contiguous(dut):
+    """Arming must restart segment 0 at address 0 even while idle prefill is
+    storing; otherwise segment 0 mixes pre-arm samples into its window."""
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=2, post=1, value=0, mask=0)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.wait_sample(30)
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    for seg in range(4):
+        await ela.write(ADDR_SEG_SEL, seg)
+        window = [s & 0xFF for s in await ela.read_samples(4)]
+        assert counter_steps(window) == [1, 1, 1], f"segment {seg} window {window}"
+    FUNCTIONAL_COVERAGE.hit("segments")
+
+
+@cocotb.test()
+async def sequencer_final_stage_counts_to_target(dut):
+    """A final stage with count target 2 triggers on its second hit."""
+    ela = await setup(dut)
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, (2 << 16) | 0x1000)  # final, target 2, EQ
+    await ela.write(ADDR_SEQ_BASE + 4, 3)
+    await ela.write(ADDR_SEQ_BASE + 8, 0x03)
+    await ela.arm()
+    await ela.drive_counter(32)
+    assert await ela.wait_done() & 0x4
+    # Hits at 3 and 7; the second one is the trigger sample.
+    assert await ela.read(ADDR_DATA_BASE) & 0xFF == 7
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+async def _final_stage_hits_after_holdoff(ela, target: int, hits: tuple[int, ...]) -> int | None:
+    """Arm a final stage matching low nibble 3 behind an 8-cycle holdoff and put
+    its hits at the given sample cycles after arm.  Every sample carries its
+    cycle number in the high nibble; returns that of the trigger sample, or
+    None if the capture never triggered."""
+    dut = ela.dut
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, (target << 16) | 0x1000)  # final, EQ
+    await ela.write(ADDR_SEQ_BASE + 4, 3)
+    await ela.write(ADDR_SEQ_BASE + 8, 0x0F)
+    await ela.write(ADDR_TRIG_HOLDOFF, 8)
+    dut.probe_in.value = 0
+    await ela.arm()
+    for cycle in range(40):
+        dut.probe_in.value = ((cycle & 0xF) << 4) | (3 if cycle in hits else 0)
+        await RisingEdge(dut.sample_clk)
+    dut.probe_in.value = 0
+    if not await ela.read(ADDR_STATUS) & 0x4:
+        return None
+    return (await ela.read(ADDR_DATA_BASE) & 0xFF) >> 4
+
+
+@cocotb.test()
+async def sequencer_next_stage_ignores_previous_stage_match(dut):
+    """Stage 0 matches 5 and advances to stage 1, which matches 7.  A second 5
+    straight after the first is a stage-0 match only; it must not fire the
+    final stage."""
+    ela = await setup(dut)
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, 1 << 10)  # EQ, next stage 1
+    await ela.write(ADDR_SEQ_BASE + 4, 5)
+    await ela.write(ADDR_SEQ_BASE + 8, 0xFF)
+    await ela.write(ADDR_SEQ_BASE + 20, 0x1000)  # EQ, final
+    await ela.write(ADDR_SEQ_BASE + 24, 7)
+    await ela.write(ADDR_SEQ_BASE + 28, 0xFF)
+    dut.probe_in.value = 0
+    await ela.arm()
+    for cycle in range(40):
+        dut.probe_in.value = 5 if cycle in (10, 11) else 0
+        await RisingEdge(dut.sample_clk)
+    await ela.wait_sample(8)
+    assert not await ela.read(ADDR_STATUS) & 0x6, "a stage-0 match fired stage 1"
+    for cycle in range(8):
+        dut.probe_in.value = 7 if cycle == 2 else 0
+        await RisingEdge(dut.sample_clk)
+    assert await ela.wait_done() & 0x4
+    assert await ela.read(ADDR_DATA_BASE) & 0xFF == 7
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+def _seq_reference(stages: list[dict], symbols: list[int]) -> int | None:
+    """Cycle reference for the trigger sequencer on EQ predicates.
+
+    Each sample is checked against the stage active when that sample is
+    decided.  Returns the index of the sample that fires the final stage, or
+    None.  Mirrors the RTL priority: a final stage's hit with its count
+    reached triggers; a non-final one advances (count reset); any other stage
+    hit only counts; a miss keeps the count.
+    """
+    state = 0
+    counter = 0
+    for i, sym in enumerate(symbols):
+        st = stages[state]
+        a = sym == st["va"]
+        b = sym == st["vb"] if DUAL_COMPARE else False
+        hit = (a, b, a and b, a or b)[st["combine"] if DUAL_COMPARE else 0]
+        if not hit:
+            continue
+        reached = st["count"] == 0 or counter + 1 >= st["count"]
+        if st["final"] and reached:
+            return i
+        if reached:
+            state, counter = st["next"], 0
+        else:
+            counter += 1
+    return None
+
+
+@cocotb.test()
+async def sequencer_matches_cycle_reference(dut):
+    """Random sequencer programs against the cycle reference: adjacent-stage
+    matches, identical adjacent predicates, backward jumps, self-loops, counts
+    and A/B combine.  Symbols 1..3 sit in the low nibble (EQ, mask 0x0F); the
+    high nibble carries the sample index so the stored trigger sample names
+    the sample that fired."""
+    ela = await setup(dut)
+    rng = random.Random(0x5E9 + INPUT_PIPE * 31 + TRIG_STAGES)
+    lead = 8 + INPUT_PIPE
+    fired = 0
+    for trial in range(30):
+        stages = []
+        for idx in range(TRIG_STAGES):
+            stages.append({
+                "va": rng.randint(1, 3),
+                "vb": rng.randint(1, 3),
+                "combine": rng.randint(0, 3),
+                "next": rng.randrange(TRIG_STAGES),
+                "final": rng.random() < (0.5 if idx else 0.15),
+                "count": rng.choice((0, 1, 1, 2, 3)),
+            })
+        if not any(st["final"] for st in stages):
+            stages[rng.randrange(TRIG_STAGES)]["final"] = True
+        symbols = [rng.choice((0, 1, 2, 3)) for _ in range(24)]
+        expected = _seq_reference(stages, symbols)
+
+        await ela.reset_core()
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 0)
+        for idx, st in enumerate(stages):
+            cfg = ((st["combine"] << 8) | (st["next"] << 10)  # modes A/B = 0 (EQ)
+                   | (int(st["final"]) << 12) | (st["count"] << 16))
+            base = ADDR_SEQ_BASE + idx * 20
+            await ela.write(base + 0, cfg)
+            await ela.write(base + 4, st["va"])
+            await ela.write(base + 8, 0x0F)
+            await ela.write(base + 12, st["vb"])
+            await ela.write(base + 16, 0x0F)
+        dut.probe_in.value = 0
+        await ela.arm()
+        for _ in range(lead):
+            await RisingEdge(dut.sample_clk)
+        for i, sym in enumerate(symbols):
+            dut.probe_in.value = ((i & 0xF) << 4) | sym
+            await RisingEdge(dut.sample_clk)
+        dut.probe_in.value = 0
+        await ela.wait_sample(8 + INPUT_PIPE)
+        status = await ela.read(ADDR_STATUS)
+        program = (stages, symbols)
+        if expected is None:
+            assert not status & 0x6, f"trial {trial}: fired, reference did not: {program}"
+            continue
+        fired += 1
+        assert status & 0x4, f"trial {trial}: reference fires at {expected}: {program}"
+        got = await ela.read(ADDR_DATA_BASE) & 0xFF
+        want = ((expected & 0xF) << 4) | symbols[expected]
+        assert got == want, f"trial {trial}: stored 0x{got:02x}, want 0x{want:02x}: {program}"
+    assert fired >= 8, f"only {fired} of 30 random programs fired"
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+@cocotb.test()
+async def sequencer_counts_first_hit_after_holdoff(dut):
+    """A hit that can trigger a count-1 final stage is also counted by a
+    count-2 one.  With INPUT_PIPE >= 1 the hit that first clears the holdoff
+    was compared while the holdoff still ran; the count must follow the
+    registered hit, as the trigger does."""
+    ela = await setup(dut)
+    # Find the first cycle after arm at which a single hit triggers.
+    for first in range(24):
+        anchor = await _final_stage_hits_after_holdoff(ela, 1, (first,))
+        if anchor is not None:
+            break
+    else:
+        raise AssertionError("no single hit triggered within 24 cycles of arm")
+    assert first > 0, "the holdoff did not hold off the first hit"
+    latency = (anchor - first) & 0xF
+    # Count 2 with its first hit on that cycle: the second hit triggers.
+    second = first + 5
+    anchor = await _final_stage_hits_after_holdoff(ela, 2, (first, second))
+    assert anchor is not None, f"hit at cycle {first} was not counted"
+    assert anchor == (second + latency) & 0xF, (first, second, latency, anchor)
+    FUNCTIONAL_COVERAGE.hit("sequencer")
+
+
+@cocotb.test()
+async def input_pipe_depth_sets_capture_latency(dut):
+    """An external pulse marks the probe sample driven alongside it at every
+    INPUT_PIPE depth, including 0."""
+    ela = await setup(dut)
+    await ela.write(ADDR_TRIG_EXT, 1)  # OR: the external pulse alone triggers
+    await ela.configure_value_capture(pre=0, post=3, value=0xFF, mask=0xFF)
+    dut.trigger_in.value = 0
+    await ela.arm()
+    pulse_at = 40
+    for cycle in range(64):
+        dut.probe_in.value = cycle
+        dut.trigger_in.value = 1 if cycle == pulse_at else 0
+        await RisingEdge(dut.sample_clk)
+    dut.trigger_in.value = 0
+    assert await ela.wait_done() & 0x4
+    window = [s & 0xFF for s in await ela.read_samples(4)]
+    dut._log.info("INPUT_PIPE=%d pulse at %d window %s", INPUT_PIPE, pulse_at, window)
+    assert counter_steps(window) == [1, 1, 1], window
+    assert window[0] == pulse_at + EXT_TRIG_MARK_OFFSET, window
+
+
+@cocotb.test()
+async def input_pipe_keeps_the_write_queued_at_arm(dut):
+    """The input pipe is a delay, not a filter: the sample queued for the RAM
+    on the arm edge must still be written, as it is with INPUT_PIPE=0, or the
+    pre-trigger history keeps a stale word where it should have gone."""
+    ela = await setup(dut)
+    await ela.write(ADDR_PRETRIG, 10)
+    await ela.write(ADDR_POSTTRIG, 2)
+    await ela.write(ADDR_TRIG_MODE, 1)
+    await ela.write(ADDR_TRIG_VALUE, 0xFF)
+    await ela.write(ADDR_TRIG_MASK, 0xFF)
+    await ela.write(ADDR_TRIG_EXT, 1)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    # pretrig_len is latched on arm, so idle prefill only builds usable history
+    # once an earlier arm has latched it: capture once, soft-reset, then let
+    # the idle core refill the pre-trigger window from before the next arm.
+    dut.trigger_in.value = 1
+    await ela.arm()
+    assert await ela.wait_done() & 0x4
+    dut.trigger_in.value = 0
+    await ela.reset_core()
+    await ela.wait_sample(30)
+    # Held across the arm so the trigger commits within a few samples of it,
+    # which puts the arm edge inside the pre-trigger window.
+    dut.trigger_in.value = 1
+    await ela.arm()
+    await ela.wait_sample(4)
+    dut.trigger_in.value = 0
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(13)]
+    assert counter_steps(window) == [1] * 12, f"window has a stale word: {window}"
+
+
+async def _counter_window(ela, *, pre: int, post: int, value: int, cycles: int = 120) -> list[int]:
+    """Capture a free-running 8-bit counter triggered on ``value``."""
+    await ela.configure_value_capture(pre=pre, post=post, value=value)
+    await ela.arm()
+    await ela.drive_counter(cycles)
+    assert await ela.wait_done() & 0x4
+    return [s & 0xFF for s in await ela.read_samples(pre + post + 1)]
+
+
+@cocotb.test()
+async def trigger_marks_the_matched_sample(dut):
+    """samples[pretrig] is the sample the trigger compare matched, at every
+    INPUT_PIPE depth, with trigger delay, storage qualification, decimation
+    and the external trigger in AND mode."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+
+    window = await _counter_window(ela, pre=4, post=3, value=0x40)
+    assert window[4] == 0x40 and counter_steps(window) == [1] * 7, window
+
+    await ela.reset_core()
+    await ela.write(ADDR_TRIG_DELAY, 3)
+    window = await _counter_window(ela, pre=4, post=3, value=0x40)
+    assert window[4] == 0x43 and counter_steps(window) == [1] * 7, window
+    await ela.write(ADDR_TRIG_DELAY, 0)
+
+    if STOR_QUAL:
+        # Store odd samples only (NEQ against bit 0 clear).
+        await ela.reset_core()
+        await ela.write(ADDR_SQ_MODE, 1)
+        await ela.write(ADDR_SQ_VALUE, 0)
+        await ela.write(ADDR_SQ_MASK, 1)
+        window = await _counter_window(ela, pre=3, post=3, value=0x41)
+        assert window[3] == 0x41 and counter_steps(window) == [2] * 6, window
+        await ela.write(ADDR_SQ_MODE, 0)
+        FUNCTIONAL_COVERAGE.hit("storage_qualifier")
+
+    if DECIM_EN:
+        # The commit force-stores the anchor whatever phase the divider has.
+        await ela.reset_core()
+        await ela.write(ADDR_DECIM, 3)
+        window = await _counter_window(ela, pre=2, post=2, value=0x41)
+        assert window[2] == 0x41, window
+        await ela.write(ADDR_DECIM, 0)
+        FUNCTIONAL_COVERAGE.hit("decimation")
+
+    if EXT_TRIG_EN:
+        # AND: the compare matches 0x30..0x3F; the pulse picks one of them.
+        await ela.reset_core()
+        await ela.write(ADDR_TRIG_EXT, 2)
+        await ela.configure_value_capture(pre=2, post=2, value=0x30, mask=0xF0)
+        dut.trigger_in.value = 0
+        await ela.arm()
+        pulse_at = 0x36 - EXT_TRIG_MARK_OFFSET
+        for cycle in range(96):
+            dut.probe_in.value = cycle
+            dut.trigger_in.value = 1 if cycle == pulse_at else 0
+            await RisingEdge(dut.sample_clk)
+        dut.trigger_in.value = 0
+        assert await ela.wait_done() & 0x4
+        window = [s & 0xFF for s in await ela.read_samples(5)]
+        assert window[2] == 0x36 and counter_steps(window) == [1] * 4, window
+        await ela.write(ADDR_TRIG_EXT, 0)
+        FUNCTIONAL_COVERAGE.hit("external_trigger_and")
+
+    FUNCTIONAL_COVERAGE.hit("trigger_alignment")
+
+
+@cocotb.test()
+async def config_written_after_arm_does_not_reach_armed_capture(dut):
+    """Arm latches decimation and trigger mode from their synchronised copies.
+    With the sample clock slower than JTAG, a write landing just after ARM is
+    still unsynchronised when arm takes effect and must not apply to it."""
+    ela = await setup(dut, sample_period_ns=30)
+    await ela.write(ADDR_TRIG_EXT, 0)
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=0, post=2, value=0, mask=0)
+    dut.trigger_in.value = 0
+
+    if DECIM_EN:
+        await ela.wait_sample(4)
+        await ela.write(ADDR_CTRL, 0x1)  # ARM
+        await ela.write(ADDR_DECIM, 3)  # would store every 4th sample
+        await ela.drive_counter(20)
+        assert await ela.wait_done() & 0x4
+        window = [s & 0xFF for s in await ela.read_samples(3)]
+        assert counter_steps(window) == [1, 1], f"late decimation applied: {window}"
+        await ela.write(ADDR_DECIM, 0)
+        await ela.reset_core()
+
+    await ela.wait_sample(4)
+    await ela.write(ADDR_CTRL, 0x1)  # ARM
+    await ela.write(ADDR_TRIG_EXT, 2)  # AND with trigger_in, which stays low
+    await ela.drive_counter(20)
+    assert await ela.wait_done() & 0x4, "late external-trigger mode applied"
+    assert await ela.read(ADDR_TRIG_EXT) == 2
+
+
+async def _arm_offset_after_soft_reset(ela, decim_during_reset: int, phase: int) -> int:
+    """Soft-reset a decimating capture `phase` samples after arm, let the idle
+    prefill run, then arm a match-anything capture.  Returns how far past the
+    arm the trigger sample sits, which is short only if the prefill built
+    pre-trigger history."""
+    dut = ela.dut
+    await ela.reset_core()
+    await ela.write(ADDR_DECIM, decim_during_reset)
+    await ela.configure_value_capture(pre=10, post=1, value=1, mask=0xFF)
+    dut.probe_in.value = 0  # never 1: this capture is still running at reset
+    await ela.arm()
+    await ela.wait_sample(phase)
+    await ela.reset_core()
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=10, post=1, value=0, mask=0)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.wait_sample(40)  # idle prefill
+    await ela.arm()
+    armed_at = int(dut.probe_in.value)
+    assert await ela.wait_done() & 0x4
+    counter.cancel()
+    window = [s & 0xFF for s in await ela.read_samples(12)]
+    assert counter_steps(window) == [1] * 11, window
+    return ((window[10] - armed_at + 128) & 0xFF) - 128  # signed
+
+
+@cocotb.test()
+async def soft_reset_does_not_stall_decimated_prefill(dut):
+    """A soft reset mid-decimation must leave the idle prefill running, as it
+    does after a reset taken with the decimation counter at zero."""
+    ela = await setup(dut)
+    expected = await _arm_offset_after_soft_reset(ela, 0, 0)
+    assert expected < 10, f"no pre-arm history even without decimation ({expected})"
+    for phase in range(4):  # ratio 3: covers every decimation counter value
+        offset = await _arm_offset_after_soft_reset(ela, 3, phase)
+        assert offset == expected, (phase, offset, expected)
+
+
+@cocotb.test()
+async def trigger_out_pulses_once_with_trigger_delay(dut):
+    """trigger_out is one pulse per trigger even while the trigger delay
+    counts down and the hit stays high."""
+    ela = await setup(dut)
+    await ela.write(ADDR_TRIG_DELAY, 4)
+    await ela.configure_value_capture(pre=0, post=1, value=3)
+    dut.probe_in.value = 0
+    await ela.arm()
+    high = []
+    for cycle in range(30):
+        dut.probe_in.value = 3 if 5 <= cycle < 15 else 0  # hit held 10 cycles
+        await RisingEdge(dut.sample_clk)
+        if int(dut.trigger_out.value):
+            high.append(cycle)
+    assert await ela.wait_done() & 0x4
+    assert len(high) == 1, f"trigger_out high on cycles {high}"
+    await ela.write(ADDR_TRIG_DELAY, 0)

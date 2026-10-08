@@ -325,11 +325,16 @@ module fcapz_ela_tb;
 
     always @(posedge sample_clk) begin
         if (!sample_rst) begin
-            // post_count must not exceed posttrig_len+1
+            // The registered zero/one flags must always match post_left
+            assert (dut.post_left_zero == (dut.post_left == 0) &&
+                    dut.post_left_one == (dut.post_left == 1))
+                else $error("ASSERT: post_left %0d flags zero=%0b one=%0b",
+                            dut.post_left, dut.post_left_zero, dut.post_left_one);
+            // post_left counts down from posttrig_len
             if (dut.armed && dut.triggered) begin
-                assert (dut.post_count <= dut.posttrig_len + 1)
-                    else $error("ASSERT: post_count %0d > posttrig_len+1 %0d",
-                                dut.post_count, dut.posttrig_len + 1);
+                assert (dut.post_left <= dut.posttrig_len)
+                    else $error("ASSERT: post_left %0d > posttrig_len %0d",
+                                dut.post_left, dut.posttrig_len);
             end
         end
     end

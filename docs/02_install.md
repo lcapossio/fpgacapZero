@@ -1,5 +1,6 @@
 # 02 — Installation
 
+> [!NOTE]
 > **Goal**: by the end of this chapter you will have the `fcapz`
 > command-line tool on your `PATH`, the Python package importable as
 > `import fcapz`, and a working JTAG transport (Vivado hw_server,

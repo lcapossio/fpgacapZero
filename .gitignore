@@ -71,3 +71,9 @@ examples/de25_nano/captures/
 
 # Local-only working notes (per PROJECTS.md no_commit/ convention)
 no_commit/
+
+# Formal-parity scratch dirs (sim/run_formal_hdl_parity.py works in the repo root)
+.formal_hdl_*/
+
+# HTML manual build output (mkdocs build)
+/site/

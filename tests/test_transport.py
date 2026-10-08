@@ -9,7 +9,13 @@ hardware or network connection required.
 
 from __future__ import annotations
 
+import os
+import queue
+import re
+import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -17,12 +23,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fcapz.transport import (
+    BurstIntegrityError,
+    BurstUnavailableError,
+    DataWindowError,
+    check_data_window,
     find_quartus_stp,
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
     QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
+    _StpSession,
     parse_xsdb_jtag_targets,
 )
 
@@ -32,6 +43,15 @@ ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _install_session(t, proc, out=None):
+    """Publish a mocked ``quartus_stp`` session on *t*, as connect() would."""
+    session = _StpSession(proc)
+    if out is not None:
+        session.out = out
+    t._session = session
+    return session
+
 
 class ConcreteTransport(Transport):
     """Minimal concrete Transport for ABC contract tests."""
@@ -67,9 +87,21 @@ class XsdbTargetParserTests(unittest.TestCase):
 
     def test_parse_jtag_targets_prefers_fpga_device_names(self) -> None:
         raw = """
-          1  Digilent Arty A7-100T 210319B26DC2A
+          1  Digilent Arty A7-100T 0123456789ABC
              2  xc7a100t (idcode 13631093 irlen 6 fpga)
-          3  Xilinx X-MLCC-01 XFL11Y1YXRV0A
+          3  Xilinx X-MLCC-01 XFL0000000000
+             4  xck26 (idcode 04724093 irlen 12 fpga)
+             5  arm_dap (idcode 5ba00477 irlen 4)
+        """
+        self.assertEqual(parse_xsdb_jtag_targets(raw), ["xc7a100t", "xck26"])
+
+    def test_parse_jtag_targets_keeps_the_selected_fpga(self) -> None:
+        # xsdb's real output once xc7a100t is selected: the marker follows
+        # the number.  Dropping it hid the selected board from connect().
+        raw = """
+          1  Digilent Arty A7-100T 0123456789ABC
+             2* xc7a100t (idcode 13631093 irlen 6 fpga)
+          3  Xilinx X-MLCC-01 XFL0000000000
              4  xck26 (idcode 04724093 irlen 12 fpga)
              5  arm_dap (idcode 5ba00477 irlen 4)
         """
@@ -126,6 +158,22 @@ class XsdbTargetParserTests(unittest.TestCase):
 # Transport ABC contract
 # ---------------------------------------------------------------------------
 
+class DataWindowCheckTests(unittest.TestCase):
+    def test_limits(self):
+        check_data_window(0x0100, (0xF000 - 0x0100) // 4, 0xF000)  # ends at 0xEFFC
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, (0xF000 - 0x0100) // 4 + 1, 0xF000)
+        check_data_window(0x0100, (0x10000 - 0x0100) // 4)  # ends at 0xFFFC
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, (0x10000 - 0x0100) // 4 + 1)
+        # A read starting at or past the end is refused too; an empty one is not.
+        with self.assertRaises(DataWindowError):
+            check_data_window(0xF000, 8, 0xF000)
+        with self.assertRaises(DataWindowError):
+            check_data_window(0x0100, 1, 0x0100)
+        check_data_window(0x0100, 0, 0x0100)
+
+
 class TransportAbcTests(unittest.TestCase):
     """Verify that Transport ABC exposes the expected interface."""
 
@@ -177,18 +225,19 @@ class TransportAbcTests(unittest.TestCase):
         self.assertEqual(t.read_reg_stable(0x000C), 0x1234)
         self.assertEqual(calls, [0x000C])
 
-    def test_xsdb_read_reg_stable_discards_warmup_read(self):
-        """hw_server overrides stable reads to discard one stale pipeline value."""
+    def test_xsdb_read_reg_stable_reads_once(self):
+        """hw_server reads commit with UPDATE-DR and clock idle TCKs, so a
+        stable read needs no discarded warmup scan."""
         calls: list[int] = []
         t = XilinxHwServerTransport()
 
         def fake_read_reg(addr: int) -> int:
             calls.append(addr)
-            return 0x10 if len(calls) == 1 else 0x20
+            return 0x20
 
         t.read_reg = fake_read_reg  # type: ignore[method-assign]
         self.assertEqual(t.read_reg_stable(0x000C), 0x20)
-        self.assertEqual(calls, [0x000C, 0x000C])
+        self.assertEqual(calls, [0x000C])
 
 
 # ---------------------------------------------------------------------------
@@ -456,22 +505,18 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
         self.assertEqual(t.last_script.count("-length 49"), 1)
 
-    def test_read_sample_block_raises_when_stream_unstable(self):
-        # Alternating payloads never converge across the stability retries ->
-        # raise, so the caller falls back to the per-word path, not garbage.
-        prime = "0" * 256
-        a = prime + " " + "1" * 256
-        b = prime + " " + "0" * 256
-        payloads = iter([a, b, a, b])
+    def test_read_sample_block_single_chain_short_reply_is_an_integrity_error(self):
+        # Prime scan plus one sample scan, but two samples requested.
+        payload = " ".join(["0" * 256, "1" * 256])
 
         class FakeQuartus(QuartusStpTransport):
             def _send(self, script):
-                return next(payloads)
+                return payload
 
         t = FakeQuartus()
         t.select_chain(5)
-        with self.assertRaises(RuntimeError):
-            t.read_sample_block(0x0100, 1, 160)
+        with self.assertRaises(BurstIntegrityError):
+            t.read_sample_block(0x0100, 2, 160)
 
     def test_read_timestamp_block_single_chain_sets_timestamp_bit(self):
         # Four 32-bit timestamps pack into one 256-bit scan (8 per scan), plus
@@ -509,7 +554,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.poll.return_value = None
         proc.kill = MagicMock()
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
+        _install_session(t, proc)
         with self.assertRaises(TimeoutError):
             t._send("puts hello")
         proc.kill.assert_called_once()
@@ -522,9 +567,9 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
-        t._stdout_lines.put("ERROR: virtual dr failed\n")
-        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        session = _install_session(t, proc)
+        session.out.put("ERROR: virtual dr failed\n")
+        session.out.put(f"{QuartusStpTransport._SENTINEL}\n")
         with self.assertRaisesRegex(RuntimeError, "virtual dr failed"):
             t._send("device_virtual_dr_shift")
 
@@ -534,9 +579,9 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
-        t._stdout_lines.put("tcl> tcl> 0001\n")
-        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        session = _install_session(t, proc)
+        session.out.put("tcl> tcl> 0001\n")
+        session.out.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
         self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
 
     def test_send_strips_quartus_continuation_prompts_and_raises_error(self):
@@ -545,11 +590,11 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
-        t._stdout_lines.put("> > > 1\n")
-        t._stdout_lines.put("> > ERROR: virtual dr shift failed\n")
-        t._stdout_lines.put("> >     while executing device_virtual_dr_shift\n")
-        t._stdout_lines.put(f"> {QuartusStpTransport._SENTINEL}\n")
+        session = _install_session(t, proc)
+        session.out.put("> > > 1\n")
+        session.out.put("> > ERROR: virtual dr shift failed\n")
+        session.out.put("> >     while executing device_virtual_dr_shift\n")
+        session.out.put(f"> {QuartusStpTransport._SENTINEL}\n")
         with self.assertRaisesRegex(RuntimeError, "while executing"):
             t._send("device_virtual_dr_shift")
 
@@ -576,9 +621,9 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
-        t._stdout_lines.put("ERROR: The specified virtual JTAG instance cannot be found.\n")
-        t._stdout_lines.put(f"{QuartusStpTransport._SENTINEL}\n")
+        session = _install_session(t, proc)
+        session.out.put("ERROR: The specified virtual JTAG instance cannot be found.\n")
+        session.out.put(f"{QuartusStpTransport._SENTINEL}\n")
         with self.assertRaisesRegex(RuntimeError, "No fpgacapZero-compatible cores") as ctx:
             t._send("device_virtual_dr_shift")
         msg = str(ctx.exception)
@@ -591,7 +636,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport()
-        t._proc = proc
+        _install_session(t, proc)
         with self.assertRaises(ValueError):
             t._send(f"puts {QuartusStpTransport._SENTINEL}")
 
@@ -705,10 +750,10 @@ class QuartusStpTransportTests(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.poll.return_value = None
         t = QuartusStpTransport(read_timeout_sec=0.01)
-        t._proc = proc
-        t._stdout_lines.put("tcl> 0\n")
-        t._stdout_lines.put("tcl> 0001\n")
-        t._stdout_lines.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        session = _install_session(t, proc)
+        session.out.put("tcl> 0\n")
+        session.out.put("tcl> 0001\n")
+        session.out.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
         self.assertEqual(t._send("device_virtual_dr_shift"), "0001")
 
     def test_read_block_uses_one_lock_window(self):
@@ -732,7 +777,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         sample_width_reads: list[int] = []
 
         class FakeQuartus(QuartusStpTransport):
-            def read_reg_verified(self, addr):
+            def read_reg(self, addr):
                 sample_width_reads.append(addr)
                 return 8
 
@@ -744,7 +789,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         t.select_chain(5)
         self.assertEqual(t.read_block(0x0100, 5), [1, 2, 3, 4, 5])
         self.assertEqual(sample_width_reads, [0x000C])
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 1)
         self.assertIn("-instance_index 5", scripts[0])
         self.assertIn("-instance_index 7", scripts[0])
         self.assertIn("device_run_test_idle -num_clocks 123", scripts[0])
@@ -764,41 +809,8 @@ class QuartusStpTransportTests(unittest.TestCase):
         t = FakeQuartus()
         t._cached_sps = 32
         self.assertEqual(t._read_block_burst(33), list(range(33)))
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 1)  # one pass, no repeat
         self.assertEqual(scripts[0].count("-length 256"), 3)
-
-    def test_quartus_burst_requires_stable_repeated_readback(self):
-        prime = self._quartus_burst_token([0xAA] * 32)
-        responses = [
-            f"{prime} {self._quartus_burst_token([0x10] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x20] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x30] * 32)}",
-            f"{prime} {self._quartus_burst_token([0x40] * 32)}",
-        ]
-
-        class FakeQuartus(QuartusStpTransport):
-            def _send(self, _script):
-                return responses.pop(0)
-
-        t = FakeQuartus()
-        t._cached_sps = 32
-        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-            t._read_block_burst(8)
-
-    def test_quartus_burst_accepts_first_stale_then_stable_pair(self):
-        prime = self._quartus_burst_token([0xAA] * 32)
-        stale = f"{prime} {self._quartus_burst_token([0xEE] * 32)}"
-        fresh = f"{prime} {self._quartus_burst_token(list(range(32)))}"
-        responses = [stale, fresh, fresh]
-
-        class FakeQuartus(QuartusStpTransport):
-            def _send(self, _script):
-                return responses.pop(0)
-
-        t = FakeQuartus()
-        t._cached_sps = 32
-        self.assertEqual(t._read_block_burst(8), list(range(8)))
-        self.assertEqual(responses, [])
 
     def test_quartus_timestamp_burst_primes_and_selects_timestamp_stream(self):
         scripts: list[str] = []
@@ -819,7 +831,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
         self.assertEqual(scripts[0].count("-length 256"), 2)
 
-    def test_quartus_read_block_falls_back_and_disables_failed_burst(self):
+    def test_quartus_failed_burst_is_raised_not_read_around(self):
         scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
@@ -829,17 +841,14 @@ class QuartusStpTransportTests(unittest.TestCase):
 
         t = FakeQuartus()
         t._read_block_burst = MagicMock(side_effect=RuntimeError("DATA_CHAIN missing"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "DATA_CHAIN missing"):
+            t.read_block(0x0100, 2)
+        with self.assertRaisesRegex(RuntimeError, "DATA_CHAIN missing"):
+            t.read_timestamp_block(0x1100, 2, 32)
+        self.assertTrue(t._burst_available)  # still declared, never probed
+        self.assertEqual(scripts, [])
 
-        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
-            self.assertEqual(t.read_block(0x0100, 2), [1, 2])
-        self.assertIn("falling back", "\n".join(logs.output))
-        self.assertFalse(t._burst_available)
-
-        self.assertEqual(t.read_block(0x0100, 2), [1, 2])
-        t._read_block_burst.assert_called_once_with(2)
-        self.assertEqual(len(scripts), 2)
-
-    def test_quartus_timestamp_block_falls_back_and_disables_failed_burst(self):
+    def test_quartus_without_burst_reads_the_window(self):
         scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
@@ -847,19 +856,56 @@ class QuartusStpTransportTests(unittest.TestCase):
                 scripts.append(script)
                 return f"{4:049b} {5:049b}"
 
-        t = FakeQuartus()
-        t._read_block_burst = MagicMock(side_effect=RuntimeError("timestamp missing"))  # type: ignore[method-assign]
+        t = FakeQuartus(burst=False)
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
+        self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
+        self.assertEqual(t.read_block(0x0100, 2), [4, 5])
+        t._read_block_burst.assert_not_called()
+        self.assertEqual(len(scripts), 2)
+        for call in (
+            lambda: t.read_sample_block(0x0100, 2, 64),
+            lambda: t.read_timestamp_block_single_chain(0x1100, 2, 32),
+        ):
+            with self.assertRaises(BurstUnavailableError):
+                call()
 
-        with self.assertLogs("fcapz.transport.quartus_stp", level="WARNING") as logs:
-            self.assertEqual(t.read_timestamp_block(0x1100, 2, 32), [4, 5])
-        self.assertIn("timestamp burst readback failed", "\n".join(logs.output))
-        self.assertFalse(t._burst_available)
-        t._read_block_burst.assert_called_once_with(
-            2,
-            timestamp=True,
-            element_width=32,
-        )
+    def _quartus_sync_script(self, *, sync: bool, single_chain: bool) -> str:
+        scripts: list[str] = []
+        n = 4
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return " ".join(["0" * 256] * (n + 1))
+
+        t = FakeQuartus()
+        t.burst_start_sync = sync
+        if single_chain:
+            t.read_sample_block(0x0100, n, 256)
+        else:
+            t._cached_sps = 32
+            t._read_block_burst(n)
         self.assertEqual(len(scripts), 1)
+        return scripts[0]
+
+    def test_quartus_burst_start_sync_rewrites_the_pointer(self):
+        """burst_start_sync adds one unreturned burst scan and a second
+        BURST_PTR write ahead of the prime; the returned scans are unchanged."""
+        for single_chain in (False, True):
+            with self.subTest(single_chain=single_chain):
+                plain = self._quartus_sync_script(sync=False, single_chain=single_chain)
+                synced = self._quartus_sync_script(sync=True, single_chain=single_chain)
+                self.assertNotIn("_sync", plain)
+                self.assertEqual(plain.count("-length 49"), 1)
+                self.assertEqual(synced.count("-length 49"), 2)
+                self.assertEqual(
+                    synced.count("-length 256"), plain.count("-length 256") + 1
+                )
+                self.assertEqual(synced.count("lappend"), plain.count("lappend"))
+                sync_at = synced.index("_sync")
+                ptr_writes = [m.start() for m in re.finditer("-length 49", synced)]
+                self.assertLess(ptr_writes[0], sync_at)
+                self.assertLess(sync_at, ptr_writes[1])
 
     def test_read_block_zero_words_is_noop(self):
         class FakeQuartus(QuartusStpTransport):
@@ -892,10 +938,516 @@ class QuartusStpTransportTests(unittest.TestCase):
         finally:
             t.close()
 
+    # -- close() must not return while quartus_stp still holds the cable -----
+
+    @staticmethod
+    def _fake_quartus(name="fake_quartus_stp.py", **kwargs):
+        return QuartusStpTransport(
+            quartus_stp_argv=[sys.executable, str(ROOT / "tests" / "fixtures" / name), "-s"],
+            read_timeout_sec=5.0,
+            **kwargs,
+        )
+
+    def test_quartus_close_waits_for_the_process_to_exit(self):
+        """A second connection cannot open the USB-Blaster while the first
+        quartus_stp is alive, so close() must not return before it is gone."""
+        t = self._fake_quartus()
+        t.connect()
+        proc = t._proc
+        self.assertIsNotNone(proc)
+        t.close()
+        self.assertIsNotNone(proc.poll(), "close() returned with quartus_stp still running")
+        self.assertIsNone(t._proc)
+        t.close()  # idempotent, per the Transport contract
+
+    def test_quartus_close_actually_sends_close_device(self):
+        """close() must run Quartus' own teardown, not just kill the process.
+
+        _send refuses to talk to a poisoned transport, so marking the session
+        closed before the teardown silently skips close_device and leaves the
+        cable to be freed by process exit alone -- with the failure swallowed
+        by close()'s own except.
+        """
+        sent = []
+
+        class Spy(QuartusStpTransport):
+            def _send(self, script, **kwargs):
+                try:
+                    out = super()._send(script, **kwargs)
+                except Exception as exc:
+                    sent.append((type(exc).__name__, script))
+                    raise
+                sent.append(("OK", script))
+                return out
+
+        t = Spy(
+            quartus_stp_argv=[
+                sys.executable,
+                str(ROOT / "tests" / "fixtures" / "fake_quartus_stp.py"),
+                "-s",
+            ],
+            read_timeout_sec=5.0,
+        )
+        t.connect()
+        t.close()
+        teardown = [(kind, s) for kind, s in sent if "close_device" in s]
+        self.assertEqual(len(teardown), 1, f"close_device not attempted: {sent}")
+        self.assertEqual(
+            teardown[0][0], "OK", f"close_device was attempted but failed: {teardown}"
+        )
+
+    def test_quartus_close_kills_a_process_that_ignores_exit(self):
+        t = self._fake_quartus("fake_quartus_stp_stubborn.py")
+        t.CLOSE_GRACE_SEC = 0.3
+        t.CLOSE_TERM_SEC = 0.3
+        t.CLOSE_KILL_SEC = 2.0
+        t.connect()
+        proc = t._proc
+        t.close()
+        self.assertIsNotNone(proc.poll(), "close() left an unkillable quartus_stp running")
+
+    def test_quartus_close_then_connect_starts_a_clean_session(self):
+        """The reconnect path a script takes when it opens a second session."""
+        t = self._fake_quartus()
+        t.connect()
+        first = t._proc
+        t.close()
+        t.connect()
+        try:
+            self.assertIsNot(t._proc, first)
+            self.assertEqual(t.read_reg(0x20), 0x12345678)
+        finally:
+            t.close()
+
+    def test_quartus_close_is_bounded_while_another_request_holds_the_io_lock(self):
+        """A stalled request elsewhere must not stop close() reaching kill.
+
+        The graceful teardown needs the I/O lock; if another thread's request
+        is stuck holding it, close() has to give up on that and escalate
+        rather than wait for the lock forever.
+        """
+        t = self._fake_quartus()
+        t.CLOSE_GRACE_SEC = 0.3
+        t.CLOSE_TERM_SEC = 0.5
+        t.CLOSE_KILL_SEC = 1.0
+        t.connect()
+        proc = t._proc
+        t._stp_io_lock.acquire()  # a request on another thread, stalled
+        try:
+            closer = threading.Thread(target=t.close, daemon=True)
+            closer.start()
+            closer.join(timeout=5)
+            self.assertFalse(closer.is_alive(), "close() blocked on the I/O lock")
+            self.assertIsNotNone(proc.poll(), "close() returned with quartus_stp alive")
+        finally:
+            t._stp_io_lock.release()
+
+    def test_quartus_send_deadline_is_not_reset_by_chatter(self):
+        """With a timeout, output that never contains the sentinel must not
+        keep a request alive: the deadline covers the whole response."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=30.0)
+        session = _install_session(t, proc)
+        stop = threading.Event()
+
+        def chatter():
+            while not stop.is_set():
+                session.out.put("tcl> still working\n")
+                stop.wait(0.01)
+
+        feeder = threading.Thread(target=chatter, daemon=True)
+        feeder.start()
+        outcome = []
+
+        def request():
+            try:
+                t._send("puts hello", timeout=0.2)
+                outcome.append("returned")
+            except TimeoutError:
+                outcome.append("timeout")
+
+        try:
+            worker = threading.Thread(target=request, daemon=True)
+            worker.start()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), "chatter kept resetting the deadline")
+            self.assertEqual(outcome, ["timeout"])
+        finally:
+            stop.set()
+            feeder.join(timeout=2)
+
+    def test_quartus_stale_timeout_does_not_kill_the_replacement_session(self):
+        """A request that times out on the old session must retire THAT
+        session only, and reap it, even if connect() has already installed a
+        new one on the transport."""
+        old = MagicMock()
+        old.poll.return_value = None
+        new = MagicMock()
+        new.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=0.3)
+        _install_session(t, old)
+        sent = threading.Event()
+        old.stdin.flush.side_effect = lambda: sent.set()
+        outcome = []
+
+        def request():
+            try:
+                t._send("puts hello")
+                outcome.append("returned")
+            except TimeoutError:
+                outcome.append("timeout")
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        self.assertTrue(sent.wait(timeout=5), "request never reached the old session")
+        # What connect() does while that request is still waiting.
+        replacement = _install_session(t, new)
+        worker.join(timeout=5)
+
+        self.assertEqual(outcome, ["timeout"])
+        old.kill.assert_called()
+        new.kill.assert_not_called()
+        self.assertIs(t._session, replacement, "the stale timeout detached the new session")
+        self.assertFalse(replacement.dead, "the stale timeout marked the new session dead")
+        old.wait.assert_called()  # reaped, not just signalled
+        old.stdout.close.assert_called()
+
+    def test_quartus_connect_retires_a_session_still_open(self):
+        """connect() on an open transport must not leak the previous process,
+        which would otherwise keep holding the cable with nothing to close it."""
+        t = self._fake_quartus()
+        t.connect()
+        first = t._proc
+        t.connect()
+        try:
+            self.assertIsNotNone(first.poll(), "the replaced quartus_stp is still running")
+            self.assertEqual(t.read_reg(0x20), 0x12345678)
+        finally:
+            t.close()
+
+    def test_quartus_connect_failure_does_not_orphan_the_process(self):
+        """A failed open must not leave quartus_stp holding the cable."""
+        leaked = []
+
+        class FailingOpen(QuartusStpTransport):
+            def _open_device_script(self):
+                leaked.append(self._proc)
+                raise RuntimeError("cable busy")
+
+        t = FailingOpen(
+            quartus_stp_argv=[
+                sys.executable,
+                str(ROOT / "tests" / "fixtures" / "fake_quartus_stp.py"),
+                "-s",
+            ],
+            read_timeout_sec=5.0,
+        )
+        with self.assertRaises(RuntimeError):
+            t.connect()
+        self.assertIsNone(t._proc)
+        self.assertEqual(len(leaked), 1)
+        self.assertIsNotNone(leaked[0].poll(), "connect() failure orphaned quartus_stp")
+
+    # -- review repros: each failed against the previous lifecycle design ----
+
+    def test_quartus_late_response_is_not_read_as_the_next_request(self):
+        """A request that times out may still get its answer later.  The next
+        request must refuse the session rather than take that answer as its
+        own -- it would return another register's value."""
+        retiring = threading.Event()
+
+        class Spy(QuartusStpTransport):
+            def _retire_session(self, *args):
+                retiring.set()
+                super()._retire_session(*args)
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = Spy(read_timeout_sec=5.0)
+        session = _install_session(t, proc)
+        outcome = []
+
+        def request_a():
+            try:
+                t._send("puts A", timeout=0.2)
+                outcome.append("returned")
+            except TimeoutError:
+                outcome.append("timeout")
+
+        # Holding the lifecycle lock stalls A between releasing the I/O lock
+        # and retiring its session: the window in which B can get in.
+        t._life_lock.acquire()
+        try:
+            a = threading.Thread(target=request_a, daemon=True)
+            a.start()
+            self.assertTrue(retiring.wait(timeout=5), "request A never timed out")
+            session.out.put(f"tcl> {0x11111111:049b}\n")  # A's late answer
+            session.out.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+            with self.assertRaisesRegex(RuntimeError, "reconnect"):
+                t._send("puts B")
+        finally:
+            t._life_lock.release()
+        a.join(timeout=5)
+        self.assertEqual(outcome, ["timeout"])
+
+    def test_quartus_close_cancels_a_connect_stuck_in_its_handshake(self):
+        """The GUI cancels a connect by calling close() from another thread.
+        An open_device that keeps printing without ever finishing must not
+        make that close() wait for the connect to give up by itself."""
+        t = self._fake_quartus("fake_quartus_stp_chatty.py")
+        t.read_timeout_sec = 30.0
+        t.CLOSE_GRACE_SEC = 0.3
+        t.CLOSE_TERM_SEC = 0.3
+        t.CLOSE_KILL_SEC = 1.0
+        outcome = []
+
+        def connect():
+            try:
+                t.connect()
+                outcome.append("connected")
+            except Exception as exc:
+                outcome.append(type(exc).__name__)
+
+        connector = threading.Thread(target=connect, daemon=True)
+        connector.start()
+        deadline = time.monotonic() + 5
+        while t._proc is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        proc = t._proc
+        self.assertIsNotNone(proc, "connect() never started quartus_stp")
+        self.addCleanup(proc.kill)
+        closer = threading.Thread(target=t.close, daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+        self.assertFalse(closer.is_alive(), "close() waited on the stuck connect()")
+        connector.join(timeout=5)
+        self.assertFalse(connector.is_alive(), "connect() never unwound")
+        self.assertEqual(len(outcome), 1)
+        self.assertNotEqual(outcome, ["connected"])
+        self.assertIsNotNone(proc.poll(), "the cancelled quartus_stp is still running")
+        self.assertIsNone(t._proc)
+
+    def test_quartus_concurrent_closes_both_return_and_reap(self):
+        """A second close() arriving while the first is still tearing down
+        waits its turn or kills the session; either way both return and the
+        process is gone."""
+        t = self._fake_quartus("fake_quartus_stp_stubborn.py")
+        t.CLOSE_GRACE_SEC = 1.5
+        t.CLOSE_TERM_SEC = 0.3
+        t.CLOSE_KILL_SEC = 1.0
+        t.connect()
+        proc = t._proc
+        self.addCleanup(proc.kill)
+        first = threading.Thread(target=t.close, daemon=True)
+        second = threading.Thread(target=t.close, daemon=True)
+        first.start()
+        time.sleep(0.1)
+        second.start()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        self.assertFalse(first.is_alive() or second.is_alive(), "a close() never returned")
+        self.assertIsNotNone(proc.poll(), "quartus_stp survived two closes")
+        self.assertIsNone(t._proc)
+
+    def test_quartus_close_returns_while_a_child_holds_the_output_pipes(self):
+        """If quartus_stp leaves a child holding its stdout/stderr, the drain
+        threads never see EOF.  Closing a pipe one of them is still reading
+        blocks, so close() must leave that pipe open rather than hang."""
+        pid_file = Path(tempfile.mkdtemp()) / "child.pid"
+        t = QuartusStpTransport(
+            quartus_stp_argv=[
+                sys.executable,
+                str(ROOT / "tests" / "fixtures" / "fake_quartus_stp_spawner.py"),
+                str(pid_file),
+            ],
+            read_timeout_sec=5.0,
+        )
+        t.CLOSE_JOIN_SEC = 0.2
+        t.connect()
+        child = int(pid_file.read_text())
+        self.addCleanup(os.kill, child, signal.SIGTERM)
+        proc = t._proc
+        closer = threading.Thread(target=t.close, daemon=True)
+        closer.start()
+        closer.join(timeout=10)
+        self.assertFalse(closer.is_alive(), "close() blocked on a pipe still being read")
+        self.assertIsNotNone(proc.poll())
+        self.assertIsNone(t._proc)
+
+    def test_quartus_failed_drain_thread_start_does_not_leak_the_process(self):
+        """The session is not published until its threads run, so a failure
+        starting them must reap the process itself: no close() can find it."""
+        real_start = threading.Thread.start
+        real_popen = subprocess.Popen
+        starts = []
+        spawned = []
+
+        def flaky_start(thread):
+            starts.append(thread)
+            if len(starts) == 2:
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        def recording_popen(*args, **kwargs):
+            spawned.append(real_popen(*args, **kwargs))
+            return spawned[-1]
+
+        t = self._fake_quartus("fake_quartus_stp_stubborn.py")
+        with patch.object(threading.Thread, "start", flaky_start), patch.object(
+            subprocess, "Popen", recording_popen
+        ):
+            with self.assertRaisesRegex(RuntimeError, "can't start new thread"):
+                t.connect()
+        self.assertEqual(len(spawned), 1)
+        self.addCleanup(spawned[0].kill)
+        self.assertIsNotNone(spawned[0].poll(), "the unpublished quartus_stp is still running")
+        self.assertIsNone(t._proc)
+
+    def test_quartus_interrupted_request_leaves_no_answer_for_the_next(self):
+        """A request interrupted after sending (Ctrl+C) may still get its
+        answer.  The next request must refuse the session, not read it."""
+
+        class Interrupting:
+            def __init__(self):
+                self.q = queue.Queue()
+                self.interrupted = False
+
+            def put(self, item):
+                self.q.put(item)
+
+            def get(self, timeout=None):
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise KeyboardInterrupt
+                return self.q.get(timeout=timeout)
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=1.0)
+        out = Interrupting()
+        _install_session(t, proc, out=out)
+        with self.assertRaises(KeyboardInterrupt):
+            t._send("puts A")
+        out.put(f"tcl> {0x11111111:049b}\n")  # A's answer, arriving late
+        out.put(f"tcl> {QuartusStpTransport._SENTINEL}\n")
+        with self.assertRaisesRegex(RuntimeError, "reconnect"):
+            t._send("puts B")
+
+    def test_quartus_request_during_reconnect_sees_one_whole_session(self):
+        """A request that arrives the instant a reconnect makes its session
+        visible must get the new process together with the new output queue,
+        never the new process with the old queue."""
+        raced = []
+
+        class Racing(QuartusStpTransport):
+            armed = False
+
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                if self.armed and name == "_session" and value is not None:
+                    self.armed = False
+                    worker = threading.Thread(target=self._race, daemon=True)
+                    worker.start()
+                    worker.join(timeout=10)
+
+            def _race(self):
+                try:
+                    raced.append(self.read_reg(0x20))
+                except Exception as exc:
+                    raced.append(exc)
+
+        t = Racing(
+            quartus_stp_argv=[
+                sys.executable,
+                str(ROOT / "tests" / "fixtures" / "fake_quartus_stp.py"),
+                "-s",
+            ],
+            read_timeout_sec=5.0,
+        )
+        t.connect()
+        try:
+            t.armed = True
+            t.connect()  # retires the first session, then publishes a new one
+            self.assertEqual(len(raced), 1, "the racing request never ran")
+            self.assertNotIsInstance(raced[0], ConnectionError, repr(raced[0]))
+            self.assertEqual(t.opened_device, "FAKE_FPGA")
+            self.assertEqual(t.read_reg(0x20), 0x12345678)
+        finally:
+            t.close()
+
+    def test_quartus_send_deadline_holds_while_output_is_queued(self):
+        """Queue.get(timeout=0) still returns a queued line, so a deadline
+        enforced only through get() never fires while output is backed up."""
+
+        class Endless:
+            """An output queue that is never empty and never has the sentinel."""
+
+            def get(self, timeout=None):
+                time.sleep(0.001)
+                return "tcl> still working\n"
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=30.0)
+        _install_session(t, proc, out=Endless())
+        outcome = []
+
+        def request():
+            try:
+                t._send("puts hello", timeout=0.2)
+                outcome.append("returned")
+            except TimeoutError:
+                outcome.append("timeout")
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "queued output kept the request past its deadline")
+        self.assertEqual(outcome, ["timeout"])
+        proc.kill.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # XilinxHwServerTransport failure modes
 # ---------------------------------------------------------------------------
+
+class _FakeXsdbProc:
+    """Minimal stand-in for the piped xsdb process.
+
+    ``_send`` only needs a stdin to write to and reply lines to read, so a
+    canned list of reply lines is enough to exercise the framing and the
+    ``check=True`` error path without launching Vivado.  Install it with
+    ``_install_fake_xsdb``: ``_send`` reads the transport's stdout queue, which
+    a reader thread fills from the real pipe.
+    """
+
+    def __init__(self, reply_lines):
+        self.written = []
+        self._replies = list(reply_lines)
+        self.stdin = self
+        self.stdout = self
+
+    # stdin side
+    def write(self, data):
+        self.written.append(data)
+
+    def flush(self):
+        return None
+
+    # stdout side
+    def readline(self):
+        if not self._replies:
+            return ""
+        return self._replies.pop(0) + "\n"
+
+
+def _install_fake_xsdb(t, reply_lines):
+    t._proc = _FakeXsdbProc(reply_lines)
+    for line in reply_lines:
+        t._stdout_lines.put(line + "\n")
+    return t._proc
+
 
 class XilinxHwServerConnectFailureTests(unittest.TestCase):
     """XilinxHwServerTransport failure modes — subprocess mocks."""
@@ -1049,20 +1601,150 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t._parse_bits_u32("some garbage output without bit string")
 
+    # -- fpga -file target selection (debug-target namespace) ----------------
+    #
+    # Ground truth for these comes from a real chain with an Arty A7 (xc7a100t),
+    # a KV260 (xck26) and a ZCU-class board (xczu7) attached at once, xsdb
+    # 2025.2.  `targets` there is:
+    #     1  xc7a100t                <- standalone FPGA: named for the part
+    #     2  PS TAP  / 3 PMU / 4 PL  <- xck26
+    #     5  PSU / 6 RPU / 9 APU ...
+    #    14  PS TAP  / 15 PMU / 16 PL <- xczu7
+    # There is no node named `xck26` anywhere in it.
+
+    def _fake_mpsoc_send(self, calls, part="xck26"):
+        """A _send that accepts only the MPSoC-shaped configuration filter."""
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            calls.append(tcl)
+            if tcl.startswith("targets -set -filter"):
+                ok = f'jtag_device_name =~ "{part}"' in tcl and 'name =~ "PS TAP"' in tcl
+                if not ok:
+                    raise RuntimeError(f'xsdb rejected {tcl!r}: no targets found')
+            return ""
+
+        return fake_send
+
+    def test_config_target_on_mpsoc_selects_ps_tap_not_the_part_name(self):
+        """On MPSoC the part name matches no debug target; PS TAP is the one.
+
+        Regression: program() used to filter `targets` by the part name, which
+        matches nothing on ZynqMP.  xsdb printed an error, _send swallowed it,
+        `fpga -file` then programmed nothing, and the session carried on
+        against whatever was already in the FPGA -- wrong data, no error.
+        """
+        t = XilinxHwServerTransport(fpga_name="xck26")
+        calls: list[str] = []
+        t._send = self._fake_mpsoc_send(calls)  # type: ignore[method-assign]
+        t._select_config_target()
+        sel = [c for c in calls if c.startswith("targets -set -filter")]
+        self.assertTrue(sel)
+        self.assertIn('name =~ "PS TAP"', sel[-1])
+        # Scoped to the board: two MPSoC boards each contribute a "PS TAP".
+        self.assertIn('jtag_device_name =~ "xck26"', sel[-1])
+
+    def test_config_target_on_standalone_fpga_uses_the_part_name(self):
+        """7-series/UltraScale: the device node IS named for the part."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t")
+        calls: list[str] = []
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            calls.append(tcl)
+            if tcl.startswith("targets -set -filter") and 'name =~ "PS TAP"' in tcl:
+                raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t._select_config_target()
+        sel = [c for c in calls if c.startswith("targets -set -filter")]
+        # Tried the MPSoC shape first, then fell back to the part name.
+        self.assertEqual(len(sel), 2)
+        self.assertIn('name =~ "xc7a100t"', sel[-1])
+
+    def test_config_target_absent_raises_instead_of_programming_nothing(self):
+        """No match on either shape must fail loudly, never silently."""
+        t = XilinxHwServerTransport(fpga_name="xcvu9p")
+
+        def fake_send(tcl: str, *, check: bool = False) -> str:
+            if tcl.startswith("targets -set -filter"):
+                raise RuntimeError("xsdb rejected: no targets found")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(ConnectionError) as caught:
+            t._select_config_target()
+        self.assertIn("nothing", str(caught.exception))
+        self.assertIn("xcvu9p", str(caught.exception))
+
+    def test_program_checks_both_the_selection_and_the_load(self):
+        """program() must run its two xsdb commands with check=True.
+
+        Both fail by *printing* a message; unchecked, a bad bitstream looks
+        exactly like a good one.
+        """
+        t = XilinxHwServerTransport(fpga_name="xck26")
+        seen: list[tuple[str, bool]] = []
+
+        budgets: dict[str, float | None] = {}
+
+        def fake_send(
+            tcl: str, *, check: bool = False, timeout_sec: float | None = None
+        ) -> str:
+            seen.append((tcl, check))
+            budgets[tcl] = timeout_sec
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        t.program("C:/tmp/design.bit")
+        # The load gets its own long budget; a bitstream takes minutes.
+        self.assertGreaterEqual(
+            budgets["fpga -file {C:/tmp/design.bit}"], t.PROGRAM_TIMEOUT_SEC
+        )
+        checked = {tcl: chk for tcl, chk in seen}
+        self.assertTrue(
+            all(chk for tcl, chk in seen if tcl.startswith(("targets -set", "fpga -file")))
+        )
+        self.assertIn("fpga -file {C:/tmp/design.bit}", checked)
+
+    def test_send_check_raises_on_an_xsdb_error_line(self):
+        """check=True turns a printed xsdb error into an exception."""
+        t = XilinxHwServerTransport()
+        _install_fake_xsdb(t, [f"{t._ERR_MARKER} no targets found", t._SENTINEL])
+        with self.assertRaises(RuntimeError) as caught:
+            t._send("targets -set -filter {name =~ \"nope\"}", check=True)
+        self.assertIn("no targets found", str(caught.exception))
+
+    def test_send_check_is_quiet_on_success(self):
+        """A successful checked command returns empty and raises nothing."""
+        t = XilinxHwServerTransport()
+        _install_fake_xsdb(t, [t._SENTINEL])
+        self.assertEqual(t._send("targets -set -filter {x}", check=True), "")
+
+    def test_send_without_check_keeps_swallowing(self):
+        """Default behaviour is unchanged: output is returned, not inspected."""
+        t = XilinxHwServerTransport()
+        _install_fake_xsdb(t, ["some output", t._SENTINEL])
+        self.assertEqual(t._send("puts [jtag targets]"), "some output")
+
     def test_select_fpga_target_selects_present_target(self):
         """_select_fpga_target() sets the filter when the target is present."""
         t = XilinxHwServerTransport(fpga_name="xc7a100t")
         calls: list[str] = []
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             calls.append(tcl)
             return "  1  xc7a100t\n  2  xck26\n" if tcl == "puts [jtag targets]" else ""
 
         t._send = fake_send  # type: ignore[method-assign]
         t._select_fpga_target()
-        self.assertTrue(
-            any("jtag targets -set -filter" in c and "xc7a100t" in c for c in calls)
-        )
+        sel = [c for c in calls if c.startswith("jtag targets -set")]
+        self.assertEqual(len(sel), 1)
+        self.assertIn('-filter {name =~ "xc7a100t"}', sel[0])
+        # No xsdb-side polling: a target that just left the list must fail
+        # the select, not be waited for.
+        self.assertIn("-timeout 0", sel[0])
+        # The selected node is confirmed with a scan before it is used.
+        self.assertEqual(calls[-1], t._NODE_CHECK_TCL)
 
     def test_select_fpga_target_waits_out_empty_chain(self):
         """A transiently empty chain is polled until the target appears."""
@@ -1070,7 +1752,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         listings = iter(["", "", "  1  xc7a100t\n"])  # empty, empty, then present
         polls = {"n": 0}
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             if tcl == "puts [jtag targets]":
                 polls["n"] += 1
                 return next(listings, "  1  xc7a100t\n")
@@ -1081,11 +1763,78 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
             t._select_fpga_target()
         self.assertGreaterEqual(polls["n"], 3)  # rode out the empty window
 
+    def test_default_target_wait_outlasts_a_cable_rescan(self):
+        """The default deadline outlasts the 6.2 s worst cable rescan seen."""
+        self.assertGreaterEqual(XilinxHwServerTransport().target_wait_timeout, 8.0)
+
+    def test_select_fpga_target_raises_node_not_accessible_at_once(self):
+        """Once no cable is closed, a target that does not answer is an
+        error, not a rescan to wait out."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        checks = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl == t._NODE_CHECK_TCL:
+                checks["n"] += 1
+                raise RuntimeError("xsdb rejected: JTAG node is not accessible")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep") as sleep:
+            with self.assertRaises(RuntimeError) as cm:
+                t._select_fpga_target()
+        self.assertIn("not accessible", str(cm.exception))
+        self.assertEqual(checks["n"], 1)
+        sleep.assert_not_called()
+
+    def test_select_fpga_target_raises_a_select_error_at_once(self):
+        """A select that fails (two boards matching the filter, say) will not
+        fix itself: raised, not waited."""
+        t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=5.0)
+        selects = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xc7a100t\n  2  xc7a100t\n"
+            if tcl.startswith("jtag targets -set"):
+                selects["n"] += 1
+                raise RuntimeError("xsdb rejected: target list contains more than one entry")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep") as sleep:
+            with self.assertRaises(RuntimeError) as cm:
+                t._select_fpga_target()
+        self.assertIn("more than one", str(cm.exception))
+        self.assertEqual(selects["n"], 1)
+        sleep.assert_not_called()
+
+    def test_select_fpga_target_raises_other_scan_errors_at_once(self):
+        """Any other scan error surfaces at once too."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        checks = {"n": 0}
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            if tcl == "puts [jtag targets]":
+                return "  1  xczu7\n"
+            if tcl == t._NODE_CHECK_TCL:
+                checks["n"] += 1
+                raise RuntimeError("xsdb rejected: invalid register name")
+            return ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                t._select_fpga_target()
+        self.assertEqual(checks["n"], 1)
+
     def test_select_fpga_target_times_out_with_clear_error(self):
         """A never-appearing target fails with a message naming what is visible."""
         t = XilinxHwServerTransport(fpga_name="xc7a100t", target_wait_timeout=0.05)
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             return "  1  xck26\n" if tcl == "puts [jtag targets]" else ""  # never the Arty
 
         t._send = fake_send  # type: ignore[method-assign]
@@ -1094,6 +1843,76 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                 t._select_fpga_target()
         self.assertIn("xc7a100t", str(cm.exception))
         self.assertIn("xck26", str(cm.exception))
+
+    def test_select_fpga_target_waits_for_a_cable_release_to_finish(self):
+        """While hw_server reports a cable closed, a release is under way and
+        the cable still open will close too: nothing is listed, selected or
+        scanned until none is reported closed."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=5.0)
+        releases = iter(["Arty\nKV260", "Arty\nKV260\nZCU106", ""])
+        calls: list[tuple[str, bool]] = []
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            calls.append((tcl, check))
+            if tcl == t._CLOSED_CABLES_TCL:
+                return next(releases, "")
+            return "  1  xczu7\n" if tcl == "puts [jtag targets]" else ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with patch("fcapz.transport.time.sleep"):
+            t._select_fpga_target()
+        sent = [tcl for tcl, _ in calls]
+        self.assertEqual(sent[:3], [t._CLOSED_CABLES_TCL] * 3)
+        self.assertNotIn(t._CLOSED_CABLES_TCL, sent[3:])
+        self.assertTrue(all(chk for tcl, chk in calls if tcl == t._CLOSED_CABLES_TCL))
+        self.assertEqual(sent[-1], t._NODE_CHECK_TCL)
+
+    def test_a_release_unfinished_at_the_deadline_is_an_error(self):
+        """A cable still closed at the deadline means the release has not
+        ended: the target on a cable still open may yet drop out, so nothing
+        is selected and connect fails, naming the cable."""
+        t = XilinxHwServerTransport(fpga_name="xczu7", target_wait_timeout=0.0)
+        calls: list[str] = []
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            calls.append(tcl)
+            if tcl == t._CLOSED_CABLES_TCL:
+                return "Digilent Arty A7-100T 0123456789ABC\n"
+            return "  1  xczu7\n" if tcl == "puts [jtag targets]" else ""
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(ConnectionError) as cm:
+            t._select_fpga_target()
+        self.assertIn("Digilent Arty A7-100T", str(cm.exception))
+        self.assertEqual(calls, [t._CLOSED_CABLES_TCL])
+
+    def test_closed_cables_query_names_only_cleanly_closed_cables(self):
+        """Run the query in a real Tcl interpreter against xsdb-shaped target
+        properties: a closed cable and one still initializing are reported;
+        an open cable, a device, and a cable in an error state are not."""
+        try:
+            import tkinter
+        except ImportError:
+            self.skipTest("tkinter (Tcl) not available")
+        try:
+            tcl = tkinter.Tcl()
+        except tkinter.TclError as exc:
+            self.skipTest(f"Tcl not usable: {exc}")
+        tcl.eval(
+            "set ::out {}\n"
+            "rename puts _puts\n"
+            "proc puts {s} { lappend ::out $s }\n"
+            "proc jtag {args} { return [list "
+            "[dict create level 0 name {Digilent Arty} is_open 0 is_active 1 state {}] "
+            "[dict create level 1 name xc7a100t is_open 0 is_active 1 state {}] "
+            "[dict create level 0 name {Xilinx FT232H} is_open 1 is_active 1 state {}] "
+            "[dict create level 0 name {Bad Cable} is_open 0 is_active 1 "
+            "state {error: open failed}] "
+            "[dict create level 0 name {New Cable} is_open 1 is_active 1 "
+            "state {initializing: scanning}] ] }"
+        )
+        tcl.eval(XilinxHwServerTransport._CLOSED_CABLES_TCL)
+        self.assertEqual(tcl.eval("set ::out"), "{Digilent Arty} {New Cable}")
 
     def test_parse_bits_u32_extracts_value(self):
         """_parse_bits_u32() correctly decodes a 32-bit value from LSB-first string."""
@@ -1157,7 +1976,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         fresh0 = self._burst_token(list(range(32)))
         fresh1 = self._burst_token(list(range(32, 64)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh0} {fresh1}"
 
@@ -1177,7 +1996,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh}"
 
@@ -1190,45 +2009,6 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-hex 6 02", sent[0])
         self.assertIn("-bits 256", sent[0])
 
-    def test_single_chain_burst_requires_stable_repeated_readback(self):
-        """Single-chain retry rejects streams that never produce a stable pair."""
-        t = XilinxHwServerTransport()
-        t._cached_sps = 32
-        prime = self._burst_token([0xAA] * 32)
-        responses = [
-            f"{prime} {self._burst_token([0x10] * 32)}",
-            f"{prime} {self._burst_token([0x20] * 32)}",
-            f"{prime} {self._burst_token([0x30] * 32)}",
-            f"{prime} {self._burst_token([0x40] * 32)}",
-        ]
-
-        def fake_send(_tcl: str) -> str:
-            return responses.pop(0)
-
-        t._send = fake_send  # type: ignore[method-assign]
-
-        with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-            t._read_block_burst(8)
-
-    def test_single_chain_burst_accepts_first_stale_then_stable_pair(self):
-        """A one-transaction stale read is tolerated only after stability."""
-        t = XilinxHwServerTransport()
-        t._cached_sps = 32
-        prime = self._burst_token([0xAA] * 32)
-        stale = f"{prime} {self._burst_token([0xEE] * 32)}"
-        fresh = f"{prime} {self._burst_token(list(range(32)))}"
-        responses = [stale, fresh, fresh]
-
-        def fake_send(_tcl: str) -> str:
-            return responses.pop(0)
-
-        t._send = fake_send  # type: ignore[method-assign]
-
-        vals = t._read_block_burst(8)
-
-        self.assertEqual(vals, list(range(8)))
-        self.assertEqual(responses, [])
-
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)
@@ -1237,7 +2017,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {fresh}"
 
@@ -1249,19 +2029,173 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertIn("-hex 6 03", sent[0])
         self.assertIn("-bits 256", sent[0])
 
-    def test_read_block_falls_back_when_user2_burst_missing(self):
-        """Single-chain ELA builds can fall back to the USER1 DATA window."""
+    def test_failed_burst_is_raised_with_a_hint(self):
+        """A failed burst is raised, never read around; the message says which
+        option declares the build's actual burst path."""
+        for single_chain, hint in ((True, "--two-chain-burst"), (False, "BURST_EN=0")):
+            with self.subTest(single_chain=single_chain):
+                t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+                t._read_block_burst = MagicMock(side_effect=RuntimeError("USER2 unavailable"))  # type: ignore[method-assign]
+                t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+                for call in (
+                    lambda: t.read_block(0x0100, 3),
+                    lambda: t.read_timestamp_block(0x2100, 3, 32),
+                    lambda: t.read_sample_block(0x0100, 3, 64),
+                    lambda: t.read_timestamp_block_single_chain(0x2100, 3, 32),
+                ):
+                    with self.assertRaises(RuntimeError) as cm:
+                        call()
+                    text = str(cm.exception)
+                    self.assertIn("USER2 unavailable", text)
+                    self.assertIn(hint, text)
+                    self.assertIn("--no-burst", text)
+                t._read_block_user1.assert_not_called()
+
+    def test_typed_burst_errors_pass_through_unchanged(self):
         t = XilinxHwServerTransport()
+        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        for error in (BurstIntegrityError("short"), DataWindowError("past the end")):
+            with self.subTest(error=type(error).__name__):
+                t._read_block_burst = MagicMock(side_effect=error)  # type: ignore[method-assign]
+                with self.assertRaises(type(error)) as cm:
+                    t.read_block(0x0100, 3)
+                self.assertIs(cm.exception, error)
 
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("USER2 unavailable")
+    def _fake_xsdb_sequence(self, tokens: list[str], sent: list[str]):
+        """xsdb stand-in: a ``jtag sequence`` collects scans across sends and
+        prints one token per captured scan only when it is run."""
+        state = {"captures": 0}
 
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
-        t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            if "[jtag sequence]" in tcl:
+                state["captures"] = 0
+            state["captures"] += tcl.count("-capture")
+            if "run -bits" not in tcl:
+                return ""
+            n = state["captures"]
+            state["captures"] = 0
+            return " ".join(tokens[:n])
 
-        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
-        self.assertFalse(t._has_burst)
-        t._read_block_user1.assert_called_once_with(0x0100, 3)
+        return fake_send
+
+    def test_read_sample_block_builds_deep_burst_over_several_sends(self):
+        """A deep wide-sample burst is added to the sequence over several xsdb
+        sends (the BURST_PTR write in the first) and run once, and the words
+        come back little-endian per sample."""
+        t = XilinxHwServerTransport()
+        n = 600  # + 1 prime scan = 601 scans -> 256 + 256 + 89
+        tokens = [self._burst_token([0xDEAD], 256)] + [
+            self._burst_token([(s << 224) | (0xA5 << 32) | s], 256) for s in range(n)
+        ]
+        sent: list[str] = []
+        t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+        words = t.read_sample_block(0x0100, n, 256)
+
+        self.assertEqual(len(sent), 3)  # one pass, no repeat
+        self.assertIn("-bits 49", sent[0])  # BURST_PTR write in the first send
+        self.assertNotIn("-bits 49", sent[1])
+        self.assertEqual(len(words), n * 8)
+        self.assertEqual(words[8 * 5:8 * 6], [5, 0xA5, 0, 0, 0, 0, 0, 5 << 0])
+        self.assertEqual(words[8 * 599 + 7], 599)
+
+    def test_burst_is_one_jtag_sequence_from_write_to_last_scan(self):
+        """No other scan may reach the chain between the BURST_PTR write and
+        the last burst scan: on the MPSoC hw_server can scan the PL between
+        two sequence runs, and the pipe then decodes that scan as a register
+        command and leaves burst mode.  So each pass creates one sequence and
+        runs it once, in its last send, after every scan was added.  The
+        burst is read in that single pass, not repeated."""
+        for register_ir in (False, True):
+            with self.subTest(use_register_ir=register_ir):
+                t = XilinxHwServerTransport(use_register_ir=register_ir)
+                n = 600
+                tokens = [self._burst_token([s], 256) for s in range(n + 1)]
+                sent: list[str] = []
+                t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                t.read_sample_block(0x0100, n, 256)
+
+                self.assertEqual(len(sent), 3)
+                body = "; ".join(sent)
+                self.assertEqual(body.count("[jtag sequence]"), 1)
+                self.assertEqual(body.count(" run"), 1)
+                self.assertNotIn(" delete", "; ".join(sent[:-1]))
+                self.assertIn("run -bits", sent[-1])
+                self.assertLess(body.index("-bits 49"), body.index("-capture"))
+                self.assertEqual(body.count("-capture"), n + 1)
+
+    def test_read_sample_block_rejects_short_stream(self):
+        t = XilinxHwServerTransport()
+        t._read_block_burst = MagicMock(return_value=[1, 2])  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            t.read_sample_block(0x0100, 3, 256)
+
+    def test_narrow_burst_one_scan_short_is_raised(self):
+        """A narrow-core burst that comes back a scan short is a readout
+        defect: it is raised, not hidden behind a DATA-window re-read."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        stale = self._burst_token([0xEE] * 32)
+        fresh = self._burst_token(list(range(32)))
+        # 33 samples need 2 scans + 1 prime; only 2 tokens come back.
+        t._send = MagicMock(return_value=f"{stale} {fresh}")  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=list(range(33)))  # type: ignore[method-assign]
+        with self.assertRaises(BurstIntegrityError):
+            t.read_block(0x0100, 33)
+        t._read_block_user1.assert_not_called()
+        self.assertTrue(t.burst)  # the capability is not in question
+
+    def test_short_timestamp_burst_is_raised(self):
+        t = XilinxHwServerTransport()
+        stale = self._burst_token([0xEE] * 8, sample_w=32)
+        t._send = MagicMock(return_value=stale)  # type: ignore[method-assign]
+        t._read_block_user1 = MagicMock(return_value=[0] * 8)  # type: ignore[method-assign]
+        with self.assertRaises(BurstIntegrityError):
+            t.read_timestamp_block(0x2100, 8, 32)  # 1 scan + 1 prime expected
+        t._read_block_user1.assert_not_called()
+
+    def test_burst_with_extra_scans_is_refused(self):
+        """More scans than were queued means the output is not this burst."""
+        t = XilinxHwServerTransport()
+        t._cached_sps = 32
+        tok = self._burst_token(list(range(32)))
+        t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
+        with self.assertRaises(BurstIntegrityError):
+            t._read_block_burst(8)  # 1 scan + 1 prime expected
+
+    def test_deep_burst_checks_every_send(self):
+        """An error while an early send builds the sequence is raised, not
+        hidden behind the last send's partial run."""
+        t = XilinxHwServerTransport()
+        n = 600
+        tokens = [self._burst_token([s], 256) for s in range(n + 1)]
+        sent: list[str] = []
+        inner = self._fake_xsdb_sequence(tokens, sent)
+        checks: list[bool] = []
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            checks.append(check)
+            if len(sent) == 1:  # the second send fails; xsdb only prints it
+                sent.append(tcl)
+                if check:
+                    raise RuntimeError("xsdb rejected: JTAG node is not accessible")
+                return ""  # its scans never joined the sequence
+            return inner(tcl)
+
+        t._send = fake_send  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            t._read_block_burst(n, element_width=256)
+        self.assertEqual(checks, [True, True])
+
+    def test_window_read_past_address_space_is_refused(self):
+        """The pipelined DATA-window path must not wrap a read past 0x10000."""
+        t = XilinxHwServerTransport()
+        t._send = MagicMock(return_value="")  # type: ignore[method-assign]
+        with self.assertRaises(DataWindowError):
+            t._read_block_user1(0x0100, 16384)
+        t._send.assert_not_called()
 
     def test_wide_sample_core_skips_burst_readback(self):
         """SAMPLE_W>32 (e.g. the 160-bit AXI monitor) must NOT use the
@@ -1305,7 +2239,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport()
         sent: list[str] = []
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return ""
 
@@ -1316,46 +2250,66 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # 8 words fit one _BLOCK_CHUNK -> a single pipelined _send, not 8+.
         self.assertEqual(len(sent), 1)
 
-    def test_burst_sample_gate_defaults_open_when_width_unreadable(self):
-        """If SAMPLE_W can't be read, keep the prior fast-path behavior."""
+    def test_burst_sample_gate_raises_when_width_unreadable(self):
+        """An unreadable SAMPLE_W is a link fault, not a reason to guess."""
         t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(side_effect=RuntimeError("not connected"))
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            t._burst_sample_ok()
 
-        def boom():
-            raise RuntimeError("not connected")
-
-        t.read_reg_stable = MagicMock(side_effect=lambda addr: boom())
-        self.assertTrue(t._burst_sample_ok())
-
-    def test_single_chain_burst_fallback_logs_migration_hint(self):
-        """Default single-chain failure should point legacy users at two-chain mode."""
-        t = XilinxHwServerTransport()
-
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("single-chain burst readback did not stabilize")
-
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
+    def test_without_burst_reads_the_window(self):
+        """burst=False declares a build with no burst path: read the window."""
+        t = XilinxHwServerTransport(burst=False)
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
         t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
+        self.assertEqual(t.read_timestamp_block(0x2100, 3, 32), [1, 2, 3])
+        t._read_block_burst.assert_not_called()
+        for call in (
+            lambda: t.read_sample_block(0x0100, 2, 64),
+            lambda: t.read_timestamp_block_single_chain(0x2100, 2, 32),
+        ):
+            with self.assertRaises(BurstUnavailableError):
+                call()
 
-        with self.assertLogs("fcapz.transport.hw_server", level="WARNING") as logs:
-            self.assertEqual(t.read_block(0x0100, 3), [1, 2, 3])
-
-        text = "\n".join(logs.output)
-        self.assertIn("SINGLE_CHAIN_BURST=0", text)
-        self.assertIn("--two-chain-burst", text)
-
-    def test_timestamp_block_falls_back_when_burst_missing(self):
-        """Timestamp burst failures also disable fast burst reads."""
+    def test_sample_burst_outside_the_engine_is_unavailable(self):
         t = XilinxHwServerTransport()
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
+        for base, width in ((0x0200, 64), (0x0100, 0), (0x0100, 257)):
+            with self.assertRaises(BurstUnavailableError):
+                t.read_sample_block(base, 2, width)
+        t._read_block_burst.assert_not_called()
 
-        def fail_burst(*args, **kwargs):
-            raise RuntimeError("burst unavailable")
-
-        t._read_block_burst = fail_burst  # type: ignore[method-assign]
-        t._read_block_user1 = MagicMock(return_value=[4, 5])  # type: ignore[method-assign]
-
-        self.assertEqual(t.read_timestamp_block(0x2100, 2, 32), [4, 5])
-        self.assertFalse(t._has_burst)
-        t._read_block_user1.assert_called_once_with(0x2100, 2)
+    def test_burst_start_sync_rewrites_the_pointer(self):
+        """burst_start_sync adds one uncaptured burst scan and a second
+        BURST_PTR write ahead of the prime, in the same sequence; the captured
+        scans, and so the parse, are unchanged."""
+        for single_chain in (True, False):
+            for sync in (False, True):
+                with self.subTest(single_chain=single_chain, sync=sync):
+                    t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                    t.burst_start_sync = sync
+                    n = 4
+                    tokens = [self._burst_token([0xEE], 256)] + [
+                        self._burst_token([s], 256) for s in range(n)
+                    ]
+                    sent: list[str] = []
+                    t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                    words = t.read_sample_block(0x0100, n, 256)
+                    self.assertEqual(words[::8], list(range(n)))
+                    body = "; ".join(sent)
+                    self.assertEqual(body.count("[jtag sequence]"), 1)
+                    self.assertEqual(body.count("-capture"), n + 1)
+                    self.assertEqual(body.count("-bits 49"), 2 if sync else 1)
+                    self.assertEqual(
+                        body.count("-bits 256"), n + 1 + (1 if sync else 0)
+                    )
+                    if sync:
+                        ptr = [m.start() for m in re.finditer("-bits 49", body)]
+                        first_burst = body.index("-bits 256")
+                        self.assertLess(ptr[0], first_burst)
+                        self.assertLess(first_burst, ptr[1])
+                        self.assertLess(ptr[1], body.index("-capture"))
 
     def test_timestamp_burst_primes_before_returned_scan(self):
         """Timestamp burst reads also discard the first fill scan."""
@@ -1364,7 +2318,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         stale = self._burst_token([0xEE] * 8, sample_w=32)
         first = self._burst_token(list(range(8)), sample_w=32)
 
-        def fake_send(tcl: str) -> str:
+        def fake_send(tcl: str, check: bool = False) -> str:
             sent.append(tcl)
             return f"{stale} {first}"
 
@@ -1376,23 +2330,27 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
 
     def test_user1_block_read_has_idle_before_each_capture(self):
-        """USER1 pipelined reads leave CDC time before every captured word."""
+        """USER1 pipelined reads clock idle TCKs before every captured word."""
         t = XilinxHwServerTransport()
 
         tcl = t._burst_read_tcl(0x0100, 0, 4)
 
         self.assertEqual(
-            tcl.count(f"delay {t.READ_IDLE_CYCLES}"),
+            tcl.count(f"state IDLE {t.READ_IDLE_CYCLES}"),
             1 + t.USER1_PIPE_PRIME_READS + 3,
         )
-        # xsdb 2025.2 requires `delay` to follow IDLE/PAUSE/RESET, so every
-        # capture-and-delay pair parks the TAP in IDLE. The final scan has no
-        # trailing delay and stays in DRUPDATE.
+        # `delay` only waits; it clocks no TCK, so the TCK-domain core would
+        # get no time from it.
+        self.assertNotIn(" delay ", tcl)
+        # Every address-bearing scan fires an explicit UPDATE-DR (the
+        # -state IDLE shortcut is unreliable through MPSoC -register IR);
+        # the final flush scan has no trailing idle.
+        self.assertNotIn("-state IDLE -", tcl)
         self.assertEqual(
-            tcl.count("drshift -state IDLE -capture"),
-            t.USER1_PIPE_PRIME_READS + 3,
+            tcl.count("drshift -state DRUPDATE -capture"),
+            t.USER1_PIPE_PRIME_READS + 3 + 1,
         )
-        self.assertEqual(tcl.count("drshift -state DRUPDATE -capture"), 1)
+        self.assertEqual(tcl.count("drshift -state DRUPDATE -bits"), 1)
 
     def test_default_chain_shape_emits_6bit_ir_and_49bit_dr(self):
         """Default (7-series single-device) chain stays at -hex 6 / -bits 49."""
@@ -1449,14 +2407,58 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertNotIn("-bits 50", tcl)
 
     def test_register_ir_write_uses_drupdate(self):
-        """Writes in register mode use -state DRUPDATE + split sequence."""
+        """Writes in register mode use -state DRUPDATE then idle TCKs."""
         t = XilinxHwServerTransport(use_register_ir=True)
         t._active_chain = 1
         tcl = t._write_reg_tcl(t._frame_bits(0x14, 0xCAFE, True))
         self.assertIn("-register user1", tcl)
         self.assertIn("-state DRUPDATE", tcl)
-        self.assertIn("state IDLE", tcl)
-        self.assertIn(f"delay {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+        self.assertIn(f"state IDLE {t.WRITE_IDLE_CYCLES_REGISTER}", tcl)
+        self.assertNotIn(" delay ", tcl)
+
+    def test_register_read_clocks_idle_after_explicit_update(self):
+        """A register read commits its command with UPDATE-DR and gives the
+        core real TCKs (``state IDLE n``), not a clockless ``delay``."""
+        for register_ir in (False, True):
+            t = XilinxHwServerTransport(use_register_ir=register_ir)
+            t._active_chain = 1
+            tcl = t._read_reg_tcl(t._frame_bits(addr=0x10, data=0, write=False))
+            cmd, capture = tcl.split(f"state IDLE {t.READ_IDLE_CYCLES}")
+            self.assertIn("drshift -state DRUPDATE -bits", cmd)
+            self.assertIn("-capture", capture)
+            self.assertNotIn(" delay ", tcl)
+
+    def test_every_command_scan_fires_explicit_update(self):
+        """Raw scans, the burst BURST_PTR write and pipelined register reads
+        end each command scan in DRUPDATE and then clock idle TCKs; the
+        -state IDLE shortcut is unreliable through MPSoC -register IR."""
+        for register_ir in (False, True):
+            t = XilinxHwServerTransport(use_register_ir=register_ir)
+            t._active_chain = 1
+            scripts: list[str] = []
+
+            def send(tcl, scripts=scripts, t=t, check=False):
+                scripts.append(tcl)
+                return " ".join(["0" * t._user_dr_bits(t.BURST_DR_BITS)] * 4)
+
+            t._send = send  # type: ignore[method-assign]
+            t.raw_dr_scan(0, 49)
+            t.raw_dr_scan_batch([(0, 49), (1, 49)])
+            t._parse_burst_bits = MagicMock(return_value=[0])  # type: ignore[method-assign]
+            t._read_block_burst(1, element_width=32)
+            t._parse_block_bits = MagicMock(return_value=[0, 0])  # type: ignore[method-assign]
+            t.read_reg = MagicMock(return_value=0)  # type: ignore[method-assign]
+            t.read_regs_pipelined_user1([0x0, 0x4])
+            for tcl in scripts:
+                self.assertNotIn("-state IDLE -", tcl)
+                self.assertNotIn(" delay ", tcl)
+            raw, batch, burst, piped = scripts
+            self.assertIn(f"state IDLE {t.RAW_DR_IDLE_CYCLES}", raw)
+            self.assertEqual(batch.count(f"state IDLE {t.RAW_DR_IDLE_CYCLES}"), 2)
+            head, scans = burst.split("state IDLE", 1)
+            self.assertIn("drshift -state DRUPDATE -bits", head)
+            self.assertIn("-capture", scans)
+            self.assertEqual(piped.count(f"state IDLE {t.READ_IDLE_CYCLES}"), 2)
 
     def test_register_ir_forces_dr_extra_bits_zero(self):
         """use_register_ir overrides dr_extra_bits to 0."""
@@ -1534,7 +2536,7 @@ class TclInjectionTests(unittest.TestCase):
         # (the path is interpolated inside TCL braces which disable substitution).
         t = XilinxHwServerTransport(
             fpga_name="xc7a100t",
-            bitfile=r"C:\Projects\fpgacapZero\examples\arty_a7\arty_a7_top.bit",
+            bitfile=r"C:\work\design\arty_a7_top.bit",
         )
         self.assertIn("\\", t.bitfile)
 

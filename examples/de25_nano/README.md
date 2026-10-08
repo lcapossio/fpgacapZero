@@ -62,6 +62,9 @@ is the same shared subsystem the Arty A7 VexRiscv variant uses.
 - `LEDR[7:0]` are active-low and driven from EIO outputs, with `LEDR[0]`
   also showing a heartbeat.
 - EIO output bits 4-6 feed the ELA external-trigger test hooks.
+- EIO input bits 15:8 count the clocks the ELA `trigger_out` was high
+  (saturating at 255); EIO output bit 7 clears the count. The hardware tests
+  use it to check that `trigger_out` is one clock per trigger.
 
 Pin assignments come from the Terasic DE25-Nano user manual:
 `CLOCK1_50` is `PIN_V16`, `KEY[0]`/`KEY[1]` are `PIN_C8`/`PIN_C11`,

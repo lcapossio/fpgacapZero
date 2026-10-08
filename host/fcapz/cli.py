@@ -150,10 +150,12 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
             else (
                 probe_file.sample_width
                 if probe_file is not None and probe_file.sample_width is not None
-                else 8
+                else getattr(args, "hw_sample_width", None) or 8
             )
         ),
-        depth=args.depth,
+        depth=args.depth if args.depth is not None else (
+            getattr(args, "hw_depth", None) or 1024
+        ),
         sample_clock_hz=(
             args.sample_clock_hz
             if args.sample_clock_hz is not None
@@ -187,17 +189,11 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     arguments.  An empty dict means "use transport defaults" (7-series
     single-device 6-bit IR, no bypass padding, no read retries).
 
-    MPSoC-specific fields (Zynq UltraScale+, ``xck*`` / ``xczu*``):
-      - ``ir_length=12`` — PL TAP IR width; xsdb auto-walks the DAP
-        portion of the chain's IR, so only the PL's 12 bits are shifted
-        by the host.
-      - ``dr_extra_bits=1`` + ``dr_extra_position="tdi"`` — the ARM DAP's
-        1-bit BYPASS register sits between TDI and the PL TAP's DR, so
-        every DR scan is 1 bit longer than the fcapz 49-bit frame and
-        the BYPASS bit sits at the TDI-side end of the 50-bit scan.
-        The captured token has the fcapz 49 bits at offset 0 and the
-        BYPASS bit trailing; the parser skips nothing at the front.
-        Verified by TDO trace on xck26 / KV260.
+    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
+    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
+    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
+    itself, so the host shifts plain fcapz frames.  The PL still sees one
+    extra shift clock per DR scan, which the RTL tolerates.
 
     The detection is purely a CLI-layer convenience and lives here, not
     in the transport, so the transport stays a dumb data-shifter.
@@ -246,6 +242,7 @@ def _make_transport(args: argparse.Namespace):
             hardware_name=getattr(args, "hardware", None),
             device_name=device_name,
             quartus_stp_path=getattr(args, "quartus_stp", None),
+            burst=not getattr(args, "no_burst", False),
         )
     fpga_name = args.tap.removesuffix(".tap") if hasattr(args, "tap") else "xc7a100t"
     port = args.port if args.port != 6666 else 3121
@@ -253,6 +250,7 @@ def _make_transport(args: argparse.Namespace):
     return XilinxHwServerTransport(
         host=args.host, port=port, fpga_name=fpga_name, bitfile=bitfile,
         single_chain_burst=not getattr(args, "two_chain_burst", False),
+        burst=not getattr(args, "no_burst", False),
         **_chain_shape_kwargs(fpga_name),
     )
 
@@ -270,19 +268,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=["openocd", "hw_server", "usb_blaster"],
         default="hw_server",
+        help="JTAG transport to use",
     )
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=_tcp_port, default=6666)
-    p.add_argument("--tap", default="xc7a100t.tap", help="OpenOCD TAP name / hw_server FPGA target")
+    p.add_argument(
+        "--host", default="127.0.0.1", help="Transport host (hw_server or OpenOCD)"
+    )
+    p.add_argument(
+        "--port",
+        type=_tcp_port,
+        default=6666,
+        metavar="PORT",
+        help=(
+            "Transport TCP port. Left at 6666, hw_server uses its own port 3121; "
+            "usb_blaster ignores it"
+        ),
+    )
+    p.add_argument(
+        "--tap",
+        default="xc7a100t.tap",
+        help=(
+            "OpenOCD TAP name, hw_server FPGA target, or Quartus device name "
+            "(usb_blaster: auto, empty, or this default selects the first device)"
+        ),
+    )
     p.add_argument(
         "--hardware",
         default=None,
+        metavar="NAME",
         help="usb_blaster only: Quartus hardware name; default selects first USB-Blaster",
     )
     p.add_argument(
         "--quartus-stp",
         default=None,
-        help="usb_blaster only: path to quartus_stp executable",
+        metavar="PATH",
+        help="usb_blaster only: path to quartus_stp executable (default: found on PATH)",
     )
     p.add_argument(
         "--two-chain-burst",
@@ -290,15 +309,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
     )
     p.add_argument(
+        "--no-burst",
+        action="store_true",
+        help=(
+            "hw_server/usb_blaster: the bitstream has no burst readout path "
+            "(e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture "
+            "through the register window. A failed burst is otherwise an error."
+        ),
+    )
+    p.add_argument(
         "--chain",
         type=int,
         default=1,
-        help="ELA control BSCAN USER chain (default 1)",
+        metavar="N",
+        help="ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture",
     )
     p.add_argument(
         "--ela-instance",
         type=int,
         default=None,
+        metavar="N",
         help="Core-manager ELA slot on the selected chain (default: current/legacy slot)",
     )
     p.add_argument(
@@ -315,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
-    sub.add_parser("arm", help="Arm capture")
+    sub.add_parser("arm", help="Arm capture without configuring (advanced)")
 
     p_axi_mon = sub.add_parser(
         "axi-mon", help="Detect an AXI monitor; print its identity and probe map"
@@ -344,8 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     axi_decode.add_argument("--json", action="store_true", help="Emit the decode as JSON")
 
-    cfg = sub.add_parser("configure", help="Write capture configuration")
-    cap = sub.add_parser("capture", help="Configure, arm, capture, export")
+    cfg = sub.add_parser("configure", help="Write capture configuration without arming")
+    cap = sub.add_parser("capture", help="Configure, arm, capture and export to a file")
     cap.add_argument(
         "--decode-axi",
         action="store_true",
@@ -353,53 +383,91 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     for parser in [cfg, cap]:
-        parser.add_argument("--pretrigger", type=int, default=8)
-        parser.add_argument("--posttrigger", type=int, default=16)
+        parser.add_argument(
+            "--pretrigger", type=int, default=8, metavar="N",
+            help="Samples to keep before the trigger",
+        )
+        parser.add_argument(
+            "--posttrigger", type=int, default=16, metavar="N",
+            help="Samples to capture after the trigger",
+        )
         parser.add_argument(
             "--trigger-mode",
             choices=["value_match", "edge_detect", "both"],
             default="value_match",
+            help="Trigger comparator mode (see chapter 05)",
         )
-        parser.add_argument("--trigger-value", type=int, default=0)
-        parser.add_argument("--trigger-mask", type=lambda x: int(x, 0), default=0xFF)
-        parser.add_argument("--sample-width", type=int, default=None)
-        parser.add_argument("--depth", type=int, default=1024)
-        parser.add_argument("--sample-clock-hz", type=int, default=None)
-        parser.add_argument("--channel", type=int, default=0, help="Probe mux channel index")
         parser.add_argument(
-            "--decimation", type=int, default=0,
-            help="Sample decimation ratio (0=every cycle, N=every N+1)",
+            "--trigger-value", type=lambda x: int(x, 0), default=0, metavar="V",
+            help="Trigger compare value (hex or decimal)",
+        )
+        parser.add_argument(
+            "--trigger-mask", type=lambda x: int(x, 0), default=0xFF, metavar="M",
+            help="Trigger bit mask (hex or decimal)",
+        )
+        parser.add_argument(
+            "--sample-width", type=int, default=None, metavar="N",
+            help=(
+                "Bits per sample, must match the core "
+                "(default: the probe file's, else the core's)"
+            ),
+        )
+        parser.add_argument(
+            "--depth", type=int, default=None, metavar="N",
+            help="Buffer depth in samples (default: read from the core)",
+        )
+        parser.add_argument(
+            "--sample-clock-hz", type=int, default=None, metavar="HZ",
+            help=(
+                "Sample clock rate, recorded in JSON exports; VCD time counts samples "
+                "(default: the probe file's, else 100 MHz)"
+            ),
+        )
+        parser.add_argument(
+            "--channel", type=int, default=0, metavar="N", help="Probe mux channel index"
+        )
+        parser.add_argument(
+            "--decimation", type=int, default=0, metavar="N",
+            help="Sample decimation ratio (0=every cycle, N=every N+1); needs DECIM_EN=1",
         )
         parser.add_argument(
             "--ext-trigger-mode", default="disabled",
             choices=["disabled", "or", "and"],
-            help="Ext trigger: disabled, or, and",
+            help="Combine the external trigger input with the comparators; needs EXT_TRIG_EN=1",
         )
         parser.add_argument(
             "--probes",
             default=None,
+            metavar="SPEC",
             help="Signal definitions: name:width:lsb,... (e.g. bus0:4:0,bus1:4:4)",
         )
         parser.add_argument(
             "--probe-file",
             default=None,
-            help="Path to a .prob probe sidecar file",
+            metavar="FILE",
+            help=(
+                "Load probe definitions, and the sample width and clock if given, "
+                "from a .prob sidecar"
+            ),
         )
         parser.add_argument(
             "--trigger-sequence",
             default=None,
+            metavar="JSON",
             help="JSON file path or inline JSON array of sequencer stages",
         )
         parser.add_argument(
             "--probe-sel",
             type=int,
             default=0,
-            help="Runtime probe mux slice index (default 0)",
+            metavar="N",
+            help="Runtime probe mux slice index",
         )
         parser.add_argument(
             "--stor-qual-mode",
             type=int,
             default=0,
+            metavar="N",
             help="Storage qualification mode: 0=disabled, "
             "1=store-when-match, 2=store-when-no-match",
         )
@@ -407,12 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
             "--stor-qual-value",
             type=lambda x: int(x, 0),
             default=0,
+            metavar="V",
             help="Storage qualification comparison value (hex or decimal)",
         )
         parser.add_argument(
             "--stor-qual-mask",
             type=lambda x: int(x, 0),
             default=0,
+            metavar="M",
             help="Storage qualification mask (hex or decimal)",
         )
         parser.add_argument(
@@ -428,6 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--trigger-holdoff",
             type=_uint16,
             default=0,
+            metavar="N",
             help=(
                 "Ignore trigger hits for N sample-clock cycles after arm or "
                 "segmented auto-rearm. Distinct from --trigger-delay, which "
@@ -438,6 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--trigger-delay",
             type=_uint16,
             default=0,
+            metavar="N",
             help=(
                 "Post-trigger delay in sample-clock cycles (0..65535). "
                 "Shifts the committed trigger sample N cycles after the "
@@ -451,9 +523,15 @@ def build_parser() -> argparse.ArgumentParser:
             help="Use named probe list from gui.toml section [probe_profiles.NAME]",
         )
 
-    cap.add_argument("--timeout", type=_positive_float, default=10.0)
-    cap.add_argument("--out", required=True)
-    cap.add_argument("--format", choices=["json", "csv", "vcd"], default="json")
+    cap.add_argument(
+        "--timeout", type=_positive_float, default=10.0, metavar="SEC",
+        help="Seconds to wait for the capture to complete (trigger and post-trigger samples)",
+    )
+    cap.add_argument("--out", required=True, metavar="FILE", help="Output file")
+    cap.add_argument(
+        "--format", choices=["json", "csv", "vcd"], default="json",
+        help="Export format (not inferred from the --out extension)",
+    )
     cap.add_argument(
         "--summarize",
         action="store_true",
@@ -472,122 +550,163 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- EIO subcommands ---------------------------------------------------
     eio_probe = sub.add_parser("eio-probe", help="Read EIO core identity and widths")
-    eio_probe.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_probe.add_argument(
+        "--chain", type=int, default=3, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     eio_probe.add_argument(
         "--instance",
         type=int,
         default=None,
+        metavar="N",
         help="Managed core slot on the selected chain",
     )
     eio_probe.add_argument(
         "--base-addr",
         type=lambda x: int(x, 0),
         default=0,
+        metavar="ADDR",
         help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
-    eio_read.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_read.add_argument(
+        "--chain", type=int, default=3, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     eio_read.add_argument(
         "--instance",
         type=int,
         default=None,
+        metavar="N",
         help="Managed core slot on the selected chain",
     )
     eio_read.add_argument(
         "--base-addr",
         type=lambda x: int(x, 0),
         default=0,
+        metavar="ADDR",
         help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
-    eio_write.add_argument("--chain", type=int, default=3, help="BSCANE2 USER chain (default 3)")
+    eio_write.add_argument(
+        "--chain", type=int, default=3, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     eio_write.add_argument(
         "--instance",
         type=int,
         default=None,
+        metavar="N",
         help="Managed core slot on the selected chain",
     )
     eio_write.add_argument(
         "--base-addr",
         type=lambda x: int(x, 0),
         default=0,
+        metavar="ADDR",
         help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
     )
-    eio_write.add_argument("value", type=lambda x: int(x, 0), help="Output value (hex or decimal)")
+    eio_write.add_argument(
+        "value", type=lambda x: int(x, 0), metavar="VALUE",
+        help="Output value (hex or decimal)",
+    )
 
     # -- AXI subcommands ---------------------------------------------------
     axi_read = sub.add_parser("axi-read", help="Single AXI read via JTAG-to-AXI bridge")
     axi_read.add_argument(
-        "--addr", type=lambda x: int(x, 0), required=True,
+        "--addr", type=lambda x: int(x, 0), required=True, metavar="ADDR",
         help="AXI address (hex)",
     )
-    axi_read.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
+    axi_read.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
 
     axi_write = sub.add_parser("axi-write", help="Single AXI write via JTAG-to-AXI bridge")
     axi_write.add_argument(
-        "--addr", type=lambda x: int(x, 0), required=True,
+        "--addr", type=lambda x: int(x, 0), required=True, metavar="ADDR",
         help="AXI address (hex)",
     )
     axi_write.add_argument(
-        "--data", type=lambda x: int(x, 0), required=True,
+        "--data", type=lambda x: int(x, 0), required=True, metavar="DATA",
         help="Write data (hex)",
     )
     axi_write.add_argument(
-        "--wstrb", type=lambda x: int(x, 0), default=0xF,
+        "--wstrb", type=lambda x: int(x, 0), default=0xF, metavar="W",
         help="Write strobe (hex, default 0xf)",
     )
-    axi_write.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
+    axi_write.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
 
     axi_dump = sub.add_parser("axi-dump", help="Read block of AXI words")
     axi_dump.add_argument(
-        "--addr", type=lambda x: int(x, 0), required=True,
+        "--addr", type=lambda x: int(x, 0), required=True, metavar="ADDR",
         help="Start address (hex)",
     )
     axi_dump.add_argument(
-        "--count", type=_positive_int, required=True,
+        "--count", type=_positive_int, required=True, metavar="N",
         help="Number of 32-bit words to read",
     )
-    axi_dump.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
-    axi_dump.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
+    axi_dump.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
+    axi_dump.add_argument(
+        "--burst", action="store_true",
+        help="Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH)",
+    )
 
     axi_fill = sub.add_parser("axi-fill", help="Fill AXI memory with a pattern")
     axi_fill.add_argument(
-        "--addr", type=lambda x: int(x, 0), required=True,
+        "--addr", type=lambda x: int(x, 0), required=True, metavar="ADDR",
         help="Start address (hex)",
     )
     axi_fill.add_argument(
-        "--count", type=_positive_int, required=True,
+        "--count", type=_positive_int, required=True, metavar="N",
         help="Number of 32-bit words to fill",
     )
     axi_fill.add_argument(
-        "--pattern", type=lambda x: int(x, 0), required=True,
+        "--pattern", type=lambda x: int(x, 0), required=True, metavar="P",
         help="Fill pattern (hex)",
     )
-    axi_fill.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
+    axi_fill.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     axi_fill.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
 
     axi_load = sub.add_parser("axi-load", help="Load binary file into AXI memory")
     axi_load.add_argument(
-        "--addr", type=lambda x: int(x, 0), required=True,
+        "--addr", type=lambda x: int(x, 0), required=True, metavar="ADDR",
         help="Start address (hex)",
     )
     axi_load.add_argument(
-        "--file", type=argparse.FileType("rb"), required=True,
-        help="Binary file to load",
+        "--file", type=argparse.FileType("rb"), required=True, metavar="FILE",
+        help="Binary file to load (little-endian 32-bit words; a partial last word is zero-padded)",
     )
-    axi_load.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
+    axi_load.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     axi_load.add_argument("--burst", action="store_true", help="Use AXI4 burst transfers")
 
     # -- UART subcommands -------------------------------------------------
     uart_send = sub.add_parser("uart-send", help="Send data to UART TX via JTAG-to-UART bridge")
-    uart_send.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
+    uart_send.add_argument(
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
     uart_send_src = uart_send.add_mutually_exclusive_group(required=True)
-    uart_send_src.add_argument("--data", type=str, help="String data to send")
-    uart_send_src.add_argument("--file", type=argparse.FileType("rb"), help="Binary file to send")
+    uart_send_src.add_argument("--data", type=str, metavar="TEXT", help="String data to send")
     uart_send_src.add_argument(
-        "--hex", type=str,
+        "--file", type=argparse.FileType("rb"), metavar="FILE", help="Binary file to send"
+    )
+    uart_send_src.add_argument(
+        "--hex", type=str, metavar="HEX",
         help="Hex-encoded bytes to send (e.g. 48656C6C6F)",
     )
 
@@ -595,21 +714,27 @@ def build_parser() -> argparse.ArgumentParser:
         "uart-recv",
         help="Receive data from UART RX via JTAG-to-UART bridge",
     )
-    uart_recv.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
     uart_recv.add_argument(
-        "--count", type=_non_negative_int, default=0,
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
+    uart_recv.add_argument(
+        "--count", type=_non_negative_int, default=0, metavar="N",
         help="Number of bytes to receive (0=all available)",
     )
     uart_recv.add_argument(
-        "--timeout", type=_positive_float, default=1.0,
-        help="Receive timeout in seconds",
+        "--timeout", type=_positive_float, default=1.0, metavar="SEC",
+        help="Idle timeout in seconds",
     )
     uart_recv.add_argument("--line", action="store_true", help="Receive until newline")
 
     uart_monitor = sub.add_parser("uart-monitor", help="Continuous UART receive (Ctrl+C to stop)")
-    uart_monitor.add_argument("--chain", type=int, default=4, help="BSCANE2 USER chain (default 4)")
     uart_monitor.add_argument(
-        "--timeout", type=_positive_float, default=0.5,
+        "--chain", type=int, default=4, metavar="N",
+        help="BSCANE2 USER chain",
+    )
+    uart_monitor.add_argument(
+        "--timeout", type=_positive_float, default=0.5, metavar="SEC",
         help="Per-poll timeout in seconds",
     )
 
@@ -958,6 +1083,11 @@ def main() -> int:
                     print(f"error: {err}", file=sys.stderr)
                     return 2
 
+        if args.depth is None or args.sample_width is None:
+            # Default to the selected core's real geometry rather than guessing.
+            hw = analyzer.probe()
+            args.hw_depth = int(hw["depth"])
+            args.hw_sample_width = int(hw["sample_width"])
         cfg = _build_config(args)
         analyzer.configure(cfg)
 

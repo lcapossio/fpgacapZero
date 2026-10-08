@@ -36,9 +36,10 @@ module de25_nano_vex_top (
     reg [SAMPLE_W-1:0] counter = {SAMPLE_W{1'b0}};
     reg [25:0] heartbeat_div = 26'd0;
     reg heartbeat = 1'b0;
-    wire [7:0] eio_probe_in;
+    wire [15:0] eio_probe_in;
     wire [7:0] eio_probe_out;
-    wire trigger_out_unused;
+    wire ela_trigger_out;
+    reg [7:0] trig_out_cycles = 8'h00;
     wire ela_armed;
     wire axi_mon_trig_out_unused;
     wire axi_mon_armed_unused;
@@ -177,6 +178,7 @@ module de25_nano_vex_top (
             armed_test_active <= 1'b0;
             armed_test_pulse <= 1'b0;
             armed_test_gate <= 1'b0;
+            trig_out_cycles <= 8'h00;
         end else begin
             counter <= counter + 1'b1;
             eio_out_sync1 <= eio_probe_out;
@@ -202,6 +204,13 @@ module de25_nano_vex_top (
                     armed_test_active <= 1'b0;
             end
 
+            // Test hook: clocks the ELA trigger_out was high since EIO
+            // out[7] last cleared the count (saturating); EIO in[15:8].
+            if (eio_out_sync2[7])
+                trig_out_cycles <= 8'h00;
+            else if (ela_trigger_out && trig_out_cycles != 8'hFF)
+                trig_out_cycles <= trig_out_cycles + 1'b1;
+
             if (heartbeat_div == 26'd24_999_999) begin
                 heartbeat_div <= 26'd0;
                 heartbeat <= ~heartbeat;
@@ -211,7 +220,7 @@ module de25_nano_vex_top (
         end
     end
 
-    assign eio_probe_in = {SW, ~KEY, counter[1:0]};
+    assign eio_probe_in = {trig_out_cycles, SW, ~KEY, counter[1:0]};
     assign ela_fresh_arm_w = ela_armed && !ela_armed_d;
     assign trigger_in_w = eio_out_sync2[4] | armed_test_pulse | armed_test_gate;
 
@@ -232,12 +241,12 @@ module de25_nano_vex_top (
         .sample_rst(por_rst),
         .probe_in(counter),
         .trigger_in(trigger_in_w),
-        .trigger_out(trigger_out_unused),
+        .trigger_out(ela_trigger_out),
         .armed_out(ela_armed)
     );
 
     fcapz_eio_intel #(
-        .IN_W(8),
+        .IN_W(16),
         .OUT_W(8),
         .CHAIN(3)
     ) u_eio (

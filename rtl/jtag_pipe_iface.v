@@ -10,6 +10,12 @@
 // host writes BURST_PTR.  One BSCAN chain carries both control packets and
 // high-throughput data packets.
 //
+// A scan is a register command when it is at least 49 and fewer than BURST_W
+// shifts long; the command is the last 49 bits shifted in.  The physical
+// count is 49 plus one bit per other TAP in BYPASS on the chain (e.g. the ARM
+// DAP on Zynq UltraScale+ MPSoC), so it must not be matched exactly.  Burst
+// scans saturate the shift counter at BURST_W and never execute a command.
+//
 // When SEG_DEPTH is smaller than DEPTH, burst_ptr_in is interpreted as a
 // segment base pointer.  The low segment-offset bits must be zero; simulation
 // fails loudly on a misaligned pointer so bad host/wrapper plumbing cannot
@@ -71,6 +77,9 @@ module jtag_pipe_iface #(
     generate
         if (SEG_DEPTH != 0 && (SEG_DEPTH & (SEG_DEPTH - 1)) != 0) begin : g_bad_seg_depth
             SEG_DEPTH_must_be_power_of_two invalid();
+        end
+        if (BURST_W <= 49) begin : g_bad_burst_w
+            BURST_W_must_exceed_49 invalid();
         end
     endgenerate
 
@@ -187,7 +196,7 @@ module jtag_pipe_iface #(
                     if (shift_cnt != BURST_SCAN_BITS)
                         shift_cnt <= shift_cnt + 1'b1;
                 end else if (update) begin
-                    if (shift_cnt == REG_SCAN_BITS) begin
+                    if (shift_cnt >= REG_SCAN_BITS && shift_cnt < BURST_SCAN_BITS) begin
                         if (cmd_sr[48]) begin
                             reg_addr <= cmd_sr[47:32];
                             reg_wdata <= cmd_sr[31:0];

@@ -1,5 +1,6 @@
 # 19 — AXI monitor
 
+> [!NOTE]
 > **Goal**: capture and trigger on an AXI4-Lite interface over JTAG —
 > a portable, vendor-agnostic AXI bus monitor. By the end
 > of this chapter you will know how to instantiate the monitor, what it
@@ -150,7 +151,7 @@ events (each one combinational, one sample wide) are:
 | 4 | `r_hs` | `RVALID & RREADY` |
 | 5 | `b_err` | `BVALID & BRESP[1]` (SLVERR/DECERR) |
 | 6 | `r_err` | `RVALID & RRESP[1]` |
-| 7 | `any_err` | `b_err \| r_err` |
+| 7 | `any_err` | <code>b_err &#124; r_err</code> |
 
 With `DECODE_EN=1` the capture width grows to **160 bits** (events + the 152-bit
 channel block shifted up by 8), `CAP_FLAGS` bit0 reads back `1`, and the host

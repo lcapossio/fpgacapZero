@@ -82,6 +82,22 @@ TARGETS: tuple[Target, ...] = (
         (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
     ),
     Target(
+        "jtag_pipe_iface_padded",
+        "jtag_pipe_iface",
+        (RTL / "jtag_pipe_iface.v",),
+        "jtag_pipe_iface_padded_chain",
+        {"SAMPLE_W": 8, "TIMESTAMP_W": 32, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 1024},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
+    ),
+    Target(
+        "jtag_pipe_iface_padded_w56",
+        "jtag_pipe_iface",
+        (RTL / "jtag_pipe_iface.v",),
+        "jtag_pipe_iface_padded_chain",
+        {"SAMPLE_W": 8, "TIMESTAMP_W": 32, "DEPTH": 1024, "BURST_W": 56, "SEG_DEPTH": 1024},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
+    ),
+    Target(
         "fcapz_eio",
         "fcapz_eio",
         (RTL / "fcapz_eio.v",),
@@ -101,7 +117,7 @@ TARGETS: tuple[Target, ...] = (
         "fcapz_core_manager",
         "fcapz_core_manager",
         (RTL / "fcapz_core_manager.v",),
-        "fcapz_core_manager_mux",
+        ("fcapz_core_manager_mux", "fcapz_core_manager_burst_start_per_write"),
         {
             "NUM_SLOTS": 3,
             "SAMPLE_W": 8,
@@ -258,6 +274,16 @@ COVERAGE_TARGETS = {
         "JTAG_PIPE_COCOTB_COVERAGE_JSON",
         "JTAG_PIPE_COCOTB_RUN",
     ),
+    "jtag_pipe_iface_padded": (
+        "jtag_pipe_iface",
+        "JTAG_PIPE_COCOTB_COVERAGE_JSON",
+        "JTAG_PIPE_COCOTB_RUN",
+    ),
+    "jtag_pipe_iface_padded_w56": (
+        "jtag_pipe_iface",
+        "JTAG_PIPE_COCOTB_COVERAGE_JSON",
+        "JTAG_PIPE_COCOTB_RUN",
+    ),
     "fcapz_async_fifo_equiv": (
         "fcapz_async_fifo_equiv",
         "ASYNC_FIFO_COCOTB_COVERAGE_JSON",
@@ -376,6 +402,8 @@ def run_target(target: Target, args: argparse.Namespace, hdl: str) -> tuple[str,
         "FCAPZ_COCOTB_TARGET": target.name,
         "FCAPZ_COCOTB_HDL": hdl,
     }
+    if "BURST_W" in target.parameters:
+        extra_env["FCAPZ_COCOTB_BURST_W"] = str(target.parameters["BURST_W"])
     if coverage_json is not None:
         assert coverage_info is not None
         _, json_env_var, run_env_var = coverage_info
