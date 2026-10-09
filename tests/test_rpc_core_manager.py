@@ -30,7 +30,7 @@ class FakeManagedBoard:
         self.direct = {}  # chain -> registers of a core with no manager
         self.absent = set()  # chains whose scans fail (no such instance)
         self.active = 0
-        self.slots = [self._ela(0x00), self._ela(0xA5), self._eio()]
+        self.slots = [self._ela(0x11), self._ela(0xA5), self._eio(), self._eio(0x3C)]
         self.manager = {
             0xF000: _VERSION | 0x434D,  # "CM"
             0xF004: len(self.slots),
@@ -45,8 +45,8 @@ class FakeManagedBoard:
                 0x00A4: 1, 0x0008: 0x4, 0x0014: tag}
 
     @staticmethod
-    def _eio():
-        return {0x0000: _VERSION | EIO_CORE_ID, 0x0004: 8, 0x0008: 8, 0x0010: 0x5A}
+    def _eio(value=0x5A):
+        return {0x0000: _VERSION | EIO_CORE_ID, 0x0004: 8, 0x0008: 8, 0x0010: value}
 
 
 class FakeManagedTransport(Transport):
@@ -121,6 +121,7 @@ class CoreManagerSessionTests(unittest.TestCase):
 
     def ela_tag(self):
         """PRETRIG_LEN of the ELA the session reaches -- the fake's slot tag."""
+        self.srv.handle({"cmd": "probe"})  # the session selects its slot
         return self.srv._analyzer.transport.read_reg(0x0014)  # noqa: SLF001
 
     def test_connect_binds_the_lowest_ela_slot_explicitly(self):
@@ -138,7 +139,7 @@ class CoreManagerSessionTests(unittest.TestCase):
         self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x5A)
         # The ELA re-selects its slot: it reads the ELA, not the EIO.
         self.assertEqual(self.srv.handle({"cmd": "probe"})["probe"]["core_id"], ELA_CORE_ID)
-        self.assertEqual(self.ela_tag(), 0x00)
+        self.assertEqual(self.ela_tag(), 0x11)
         self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x5A)
         # One transport for the board, not one per core.
         self.assertEqual(len(self.srv.transports), 1)
@@ -178,7 +179,17 @@ class CoreManagerSessionTests(unittest.TestCase):
         r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})
         self.assertEqual((r["chain"], r["instance"]), (1, 2))
         self.assertEqual(len(self.srv.transports), 1)
-        self.assertEqual(self.ela_tag(), 0x00)
+        self.assertEqual(self.ela_tag(), 0x11)
+
+    def test_eio_discover_after_slot_use_reaches_the_slot_it_reports(self):
+        self.connect()
+        self.srv.handle({"cmd": "eio_connect", "instance": 3})
+        self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x3C)
+        r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})
+        self.assertEqual(r["instance"], 2)
+        self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x5A)
+        self.assertEqual(self.srv.handle({"cmd": "probe"})["probe"]["core_id"], ELA_CORE_ID)
+        self.assertEqual(self.ela_tag(), 0x11)
 
     def test_rebind_switches_ela_slots_without_reconnecting(self):
         self.connect()
@@ -206,10 +217,10 @@ class CoreManagerSessionTests(unittest.TestCase):
         cores = self.srv.handle({"cmd": "list_cores", "slots": True})["cores"]
         self.assertEqual(
             [(c["type"], c["chain"], c["instance"]) for c in cores],
-            [("ela", 1, 0), ("ela", 1, 1), ("eio", 1, 2)],
+            [("ela", 1, 0), ("ela", 1, 1), ("eio", 1, 2), ("eio", 1, 3)],
         )
         self.assertEqual(cores[2]["info"], {"in_w": 8, "out_w": 8})
-        self.assertEqual(self.ela_tag(), 0x00)
+        self.assertEqual(self.ela_tag(), 0x11)
 
     def test_plain_list_cores_keeps_the_manager_ela_after_a_hop(self):
         self.board.direct[2] = _plain_ela(0x77)
@@ -237,7 +248,7 @@ class CoreManagerSessionTests(unittest.TestCase):
 
     def test_an_instance_less_eio_on_a_manager_chain_is_refused(self):
         self.connect()
-        with self.assertRaisesRegex(ValueError, r"pass instance \(EIO slots: \[2\]\)"):
+        with self.assertRaisesRegex(ValueError, r"pass instance \(EIO slots: \[2, 3\]\)"):
             self.srv.handle({"cmd": "eio_connect", "chain": 1})
         self.assertEqual(len(self.srv.transports), 1)
 
