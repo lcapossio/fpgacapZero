@@ -231,10 +231,12 @@ class RpcServer:
         """The board *fields* name, with _build_transport's defaults filled in."""
         backend = fields.get("backend", "hw_server")
         if backend == "usb_blaster":
+            tap = str(fields.get("tap", "auto"))
             return {
                 "backend": backend,
                 "hardware": fields.get("hardware"),
-                "tap": str(fields.get("tap", "auto")),
+                # The spellings _build_transport treats as "pick the device".
+                "tap": "auto" if tap in ("", "auto", "xc7a100t.tap") else tap,
             }
         openocd = backend == "openocd"
         return {

@@ -149,6 +149,19 @@ class CoreManagerSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "session's board"):
             self.srv.handle({"cmd": "eio_connect", "tap": "xc7a35t", "instance": 2})
 
+    def test_usb_blaster_auto_tap_spellings_name_one_board(self):
+        self.connect(backend="usb_blaster", hardware="cable", tap="xc7a100t.tap")
+        for tap in ("auto", ""):
+            with self.subTest(tap=tap):
+                r = self.srv.handle({
+                    "cmd": "eio_connect", "backend": "usb_blaster",
+                    "hardware": "cable", "tap": tap, "instance": 2,
+                })
+                self.assertEqual(r["instance"], 2)
+        with self.assertRaisesRegex(ValueError, "session's board"):
+            self.srv.handle({"cmd": "eio_connect", "backend": "usb_blaster",
+                             "hardware": "other cable", "instance": 2})
+
     def test_eio_discover_finds_the_slot_on_the_session_transport(self):
         self.connect()
         r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})
