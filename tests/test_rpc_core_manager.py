@@ -25,7 +25,10 @@ _VERSION = expected_ela_version_reg() & 0xFFFF0000
 class FakeManagedBoard:
     """Hardware state shared by every transport opened on the board."""
 
-    def __init__(self):
+    def __init__(self, manager_chain=1):
+        self.manager_chain = manager_chain
+        self.direct = {}  # chain -> registers of a core with no manager
+        self.absent = set()  # chains whose scans fail (no such instance)
         self.active = 0
         self.slots = [self._ela(0x00), self._ela(0xA5), self._eio()]
         self.manager = {
@@ -62,28 +65,36 @@ class FakeManagedTransport(Transport):
         self.chain = int(chain)
 
     def _space(self, addr):
-        if self.chain != 1:
-            return {}  # nothing on the other chains
+        if self.chain in self.board.absent:
+            raise OSError(f"no chain {self.chain}")
+        if self.chain != self.board.manager_chain:
+            return self.board.direct.get(self.chain, {})
         if addr >= 0xF000:
             return self.board.manager
         return self.board.slots[self.board.active]
 
     def read_reg(self, addr: int) -> int:
-        if self.chain == 1 and addr == _MGR_ACTIVE:
+        self._space(addr)  # an absent chain fails every access
+        managed = self.chain == self.board.manager_chain
+        if managed and addr == _MGR_ACTIVE:
             return self.board.active
-        if self.chain == 1 and addr == 0xF018:
+        if managed and addr == 0xF018:
             index = self.board.manager[0xF014]
             return self.board.slots[index][0x0000] & 0xFFFF
         return self._space(addr).get(addr, 0)
 
     def write_reg(self, addr: int, value: int) -> None:
-        if self.chain == 1 and addr == _MGR_ACTIVE:
+        if self.chain == self.board.manager_chain and addr == _MGR_ACTIVE:
             self.board.active = int(value)
         else:
             self._space(addr)[addr] = value
 
     def read_block(self, addr: int, words: int):
         return [0] * words
+
+
+def _plain_ela(tag):
+    return FakeManagedBoard._ela(tag)  # noqa: SLF001
 
 
 class Harness(RpcServer):
@@ -199,6 +210,63 @@ class CoreManagerSessionTests(unittest.TestCase):
         )
         self.assertEqual(cores[2]["info"], {"in_w": 8, "out_w": 8})
         self.assertEqual(self.ela_tag(), 0x00)
+
+    def test_plain_list_cores_keeps_the_manager_ela_after_a_hop(self):
+        self.board.direct[2] = _plain_ela(0x77)
+        self.connect()
+        self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})  # slot 2
+        self.assertEqual(self.srv.handle({"cmd": "rebind", "chain": 2})["instance"], None)
+        # The manager still points at the EIO: chain 1 is listed by its ELA.
+        plain = self.srv.handle({"cmd": "list_cores"})["cores"]
+        self.assertIn(("ela", 1, 0), [(c["type"], c["chain"], c["instance"]) for c in plain])
+        self.assertEqual(self.ela_tag(), 0x77)
+
+    def test_plain_list_cores_reports_no_unbound_eio_on_a_manager_chain(self):
+        self.board.direct[2] = _plain_ela(0x77)
+        self.connect()
+        self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})  # slot 2
+        self.srv.handle({"cmd": "eio_close"})
+        self.srv.handle({"cmd": "rebind", "chain": 2})
+        # The manager still points at the EIO; an unbound probe would list it
+        # as a direct EIO with no instance.
+        plain = self.srv.handle({"cmd": "list_cores"})["cores"]
+        self.assertEqual(
+            [(c["type"], c["chain"], c["instance"]) for c in plain],
+            [("ela", 2, None), ("ela", 1, 0)],
+        )
+
+    def test_an_instance_less_eio_on_a_manager_chain_is_refused(self):
+        self.connect()
+        with self.assertRaisesRegex(ValueError, r"pass instance \(EIO slots: \[2\]\)"):
+            self.srv.handle({"cmd": "eio_connect", "chain": 1})
+        self.assertEqual(len(self.srv.transports), 1)
+
+    def test_eio_discover_finds_a_manager_on_another_chain(self):
+        self.board.manager_chain = 2
+        self.connect(chain=2)
+        r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server"})
+        self.assertEqual((r["chain"], r["instance"]), (2, 2))
+        self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x5A)
+        self.assertEqual(self.srv.handle({"cmd": "probe"})["probe"]["core_id"], ELA_CORE_ID)
+        self.assertEqual(len(self.srv.transports), 1)
+
+    def test_eio_discover_skips_chains_the_backend_cannot_reach(self):
+        # No manager anywhere, and chain 1 cannot be selected (a usb_blaster
+        # design without virtual-JTAG instance 1): the scan falls back to the
+        # direct probe instead of failing.
+        self.board.manager_chain = None
+        self.board.direct[2] = _plain_ela(0x77)
+        self.board.direct[3] = self.board._eio()  # noqa: SLF001
+        self.board.absent.add(1)
+        self.connect(chain=2)
+        r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [3]})
+        self.assertEqual((r["chain"], r["instance"]), (3, None))
+
+    def test_rebind_to_the_current_chain_keeps_the_slot(self):
+        self.connect(instance=1)
+        r = self.srv.handle({"cmd": "rebind", "chain": 1})
+        self.assertEqual((r["chain"], r["instance"]), (1, 1))
+        self.assertEqual(self.ela_tag(), 0xA5)
 
 
 if __name__ == "__main__":

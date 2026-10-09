@@ -127,8 +127,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   have written ELA registers into the EIO. An unbound ELA session also drove
   whichever slot the manager last pointed at, so a `connect` after EIO use
   could autodetect past the ELA onto the next chain. EIO slots now share the
-  session's connection, and a session on a manager chain always binds an
-  explicit ELA slot.
+  session's connection, a session on a manager chain always binds an
+  explicit ELA slot, and `eio_connect` without `instance` refuses a manager
+  chain of the session's board.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

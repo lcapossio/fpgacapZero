@@ -256,8 +256,10 @@ Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "instance": null, "
 
 Behind a core manager, `"instance"` switches between ELA slots on the same
 chain (`{"cmd": "rebind", "instance": 1}`; `chain` then defaults to the
-current one). Rebinding to a manager chain without `instance` binds its
-lowest ELA slot, as [`connect`](#connect) does.
+current one). Moving to another manager chain without `instance` binds its
+lowest ELA slot, as [`connect`](#connect) does; naming the chain the session
+is already on, without `instance`, keeps the current slot and its
+configuration.
 
 #### `close`
 
@@ -537,11 +539,14 @@ must be on the session's board; any connection fields the request gives must
 match the session's. Sharing the connection is what keeps the ELA and the EIO
 apart: the manager selects one slot at a time, and a second connection would
 move it behind the session's back. `eio_close` leaves that connection open.
+Without `"instance"`, a chain of the session's board that has a core manager
+is refused, and the error lists its EIO slots.
 
 #### `eio_discover`
 
 Find the EIO without knowing where it sits. On the session's board, core-manager
-EIO slots are tried first (and attached as with `instance` above); otherwise
+EIO slots are tried first, on any chain the session can scan (and attached as
+with `instance` above); otherwise
 the server opens its own connection and tries each chain in the IR table at
 base addresses `0x0000` and `0x8000`.
 

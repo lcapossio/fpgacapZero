@@ -181,6 +181,15 @@ class RpcServer:
                 slots.append((slot, int(transport.read_reg_stable(0x0000))))
         return slots
 
+    @classmethod
+    def _scan_manager_slots(cls, transport: Transport, chain: int):
+        """_manager_slots for a scan: a chain the backend cannot reach (an
+        absent virtual-JTAG instance, a chain outside the IR table) has none."""
+        try:
+            return cls._manager_slots(transport, chain)
+        except (OSError, RuntimeError, ValueError, NotImplementedError):
+            return None
+
     def _bind_ela(self, transport: Transport, chain: int, instance: Any) -> Analyzer:
         """An Analyzer on *chain*, bound to an explicit slot behind a manager.
 
@@ -316,8 +325,12 @@ class RpcServer:
         eio = self._eio
         if eio is None:
             transport = analyzer.transport
+            # Not on a manager chain: an instance-less probe there reads
+            # whichever slot is selected and would report a manager EIO as a
+            # direct one ("slots" lists those).
+            direct = [c for c in (1, 2) if self._scan_manager_slots(transport, c) is None]
             try:
-                eio = discover_eio(transport, chains=(1, 2))
+                eio = discover_eio(transport, chains=direct) if direct else None
             except Exception:
                 eio = None
             try:
@@ -350,7 +363,9 @@ class RpcServer:
             if chain == analyzer.bscan_chain:
                 continue
             try:
-                other = Analyzer(analyzer.transport, chain=chain)
+                # Bound like connect binds it: unbound, a manager chain reads
+                # whichever slot is selected -- perhaps an EIO.
+                other = self._bind_ela(analyzer.transport, chain, None)
                 ident = other.probe_optional()
             except Exception:
                 ident = None
@@ -363,7 +378,7 @@ class RpcServer:
                     "name": _CORE_NAMES.get(ident["core_id"], "Logic Analyzer"),
                     "core_id": ident["core_id"],
                     "chain": chain,
-                    "instance": None,
+                    "instance": other.instance,
                     "base_addr": 0,
                     "version_major": ident["version_major"],
                     "version_minor": ident["version_minor"],
@@ -373,10 +388,7 @@ class RpcServer:
         if slots:
             managed: Dict[int, list[tuple[int, int]]] = {}
             for chain in dict.fromkeys((analyzer.bscan_chain, *_ELA_SCAN_CHAINS)):
-                try:
-                    found = self._manager_slots(analyzer.transport, chain)
-                except Exception:
-                    found = None
+                found = self._scan_manager_slots(analyzer.transport, chain)
                 if found is not None:
                     managed[chain] = found
             if managed:
@@ -1091,6 +1103,14 @@ class RpcServer:
                 self._eio, self._eio_shared = eio, True
             else:
                 chain = int(req.get("chain", 3))
+                if self._on_session_board(req):
+                    found = self._scan_manager_slots(analyzer.transport, chain)
+                    if found is not None:
+                        eio_slots = [s for s, v in found if v & 0xFFFF == EIO_CORE_ID]
+                        raise ValueError(
+                            f"chain {chain} has a core manager; pass instance "
+                            f"(EIO slots: {eio_slots})"
+                        )
                 self._eio = EioController(
                     self._build_transport(req), chain=chain, base_addr=base_addr
                 )
@@ -1106,15 +1126,25 @@ class RpcServer:
         if cmd == "eio_discover":
             self._drop_eio()
             if self._on_session_board(req):
-                # EIO slots behind the session's core manager first, on the
-                # session's transport (see _manager_slots).
-                found = self._manager_slots(analyzer.transport, 1) or []
-                eio_slots = [s for s, version in found if version & 0xFFFF == EIO_CORE_ID]
-                eio = (
-                    discover_eio(analyzer.transport, chains=(), instances=eio_slots)
-                    if eio_slots
-                    else None
-                )
+                # EIO slots behind a core manager first, on the session's
+                # transport (see _manager_slots).
+                eio = None
+                for chain in dict.fromkeys((analyzer.bscan_chain, *_ELA_SCAN_CHAINS)):
+                    found = self._scan_manager_slots(analyzer.transport, chain) or []
+                    for slot, version in found:
+                        if version & 0xFFFF != EIO_CORE_ID:
+                            continue
+                        candidate = EioController(
+                            analyzer.transport, chain=chain, instance=slot
+                        )
+                        try:
+                            candidate.attach()
+                        except (OSError, RuntimeError, ValueError, NotImplementedError):
+                            continue
+                        eio = candidate
+                        break
+                    if eio is not None:
+                        break
                 if eio is not None:
                     self._eio, self._eio_shared = eio, True
                     return self._ok(
