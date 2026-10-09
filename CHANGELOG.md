@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **RPC — core-manager slots.** `connect` and `rebind` take `instance` to bind
+  an ELA slot behind a core manager (`fcapz_debug_multi_*`), so a second ELA
+  is reachable and `rebind` switches ELA slots without reconnecting.
+  `eio_connect` takes `instance` too (its chain then defaults to 1), and
+  `eio_discover` finds manager EIO slots first. `list_cores` entries gain
+  `instance`, and `"slots": true` lists every slot of a manager.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -112,6 +119,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **RPC — an EIO slot session could take over the ELA session.** A core
+  manager selects one slot at a time, but `eio_connect` with `instance` opened
+  a second connection that moved the selection behind the ELA session's back:
+  the ELA's next `probe` read the EIO's identity, and a `configure` would
+  have written ELA registers into the EIO. An unbound ELA session also drove
+  whichever slot the manager last pointed at, so a `connect` after EIO use
+  could autodetect past the ELA onto the next chain. EIO slots now share the
+  session's connection, and a session on a manager chain always binds an
+  explicit ELA slot.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

@@ -165,7 +165,7 @@ For Quartus USB-Blaster, use:
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "chain": 1, "instance": null}`
 
 `hw_server` and `usb_blaster` also take `"burst": false` for a bitstream with
 no burst readout path (the CLI's `--no-burst`); every capture is then read
@@ -183,6 +183,15 @@ core answers there, scans chain 2 and binds to the first core found (chains
 3/4 are never scanned — bridges there speak a different DR protocol and must
 not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
 session, e.g. to reach an AXI monitor directly.
+
+`instance` echoes the core-manager slot the session bound to, or `null` for a
+core reached directly. A core manager (for example
+`fcapz_debug_multi_xilinx7`) puts several ELAs and EIOs behind one USER chain
+and selects one at a time; on such a chain the session always binds an
+explicit slot -- the lowest ELA slot unless the request passes `"instance"`.
+Passing `"instance"` for a chain without a manager, or naming a slot that is
+not an ELA, is an error. [`list_cores`](#list_cores) with `"slots": true`
+lists the slots.
 
 #### `discover_boards`
 
@@ -242,8 +251,13 @@ are left untouched.
 {"cmd": "rebind", "chain": 2}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
+Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "instance": null, "probe": { ... }}`
 — `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
+
+Behind a core manager, `"instance"` switches between ELA slots on the same
+chain (`{"cmd": "rebind", "instance": 1}`; `chain` then defaults to the
+current one). Rebinding to a manager chain without `instance` binds its
+lowest ELA slot, as [`connect`](#connect) does.
 
 #### `close`
 
@@ -362,7 +376,8 @@ Enumerate the fcapz cores present on the connected target. Always reports the
 connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
 USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
 clients can list everything and offer a switch. Each entry has `type`, `name`,
-`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+`core_id`, `chain`, `instance` (the core-manager slot, `null` for a core
+reached directly), `base_addr`, `version_major`/`version_minor`, and a
 type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
 monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
 `axi_mon`).
@@ -370,6 +385,11 @@ monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
 ```json
 {"cmd": "list_cores"}
 ```
+
+With `"slots": true`, every slot of a core manager on a scanned chain is
+listed -- each ELA and EIO with its `instance` -- in place of that chain's
+default entries. It is opt-in because a client that switches cores by
+`chain` alone would take a second ELA slot for the ELA it already has.
 
 Response:
 ```json
@@ -509,7 +529,27 @@ unbounded timeouts could starve all clients.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3, "base_addr": 0, "instance": null}`
+
+For an EIO in a core-manager slot, pass `"instance"` (`chain` then defaults
+to 1). The EIO is then driven over the ELA session's own connection, so it
+must be on the session's board; any connection fields the request gives must
+match the session's. Sharing the connection is what keeps the ELA and the EIO
+apart: the manager selects one slot at a time, and a second connection would
+move it behind the session's back. `eio_close` leaves that connection open.
+
+#### `eio_discover`
+
+Find the EIO without knowing where it sits. On the session's board, core-manager
+EIO slots are tried first (and attached as with `instance` above); otherwise
+the server opens its own connection and tries each chain in the IR table at
+base addresses `0x0000` and `0x8000`.
+
+```json
+{"cmd": "eio_discover", "backend": "hw_server", "port": 3121, "tap": "xc7a100t"}
+```
+
+Response: `{"ok": true, "schema_version": "1.1", "discovered": true, "in_w": 8, "out_w": 8, "chain": 1, "base_addr": 0, "instance": 2}`
 
 #### `eio_close`
 

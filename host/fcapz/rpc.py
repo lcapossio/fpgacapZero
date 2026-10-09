@@ -9,8 +9,10 @@ import traceback
 from typing import Any, Dict
 
 from .analyzer import (
+    ELA_CORE_ID,
     Analyzer,
     CaptureConfig,
+    CoreManager,
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
@@ -18,7 +20,7 @@ from .analyzer import (
     discover_boards,
 )
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
-from .eio import EioController, discover_eio
+from .eio import EIO_CORE_ID, EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
@@ -44,6 +46,9 @@ _MAX_DISCOVERY_PORTS = 64
 # full wait, so a handful of huge timeouts would pin every worker and hang the
 # server for all clients. 300 s is far above any legitimate interactive wait.
 _MAX_WAIT_SEC = 300.0
+
+# Request fields that name the board a transport opens (see _build_transport).
+_TARGET_FIELDS = ("backend", "host", "port", "tap", "hardware")
 
 
 def _wait_sec(req: Dict[str, Any], key: str, default: float) -> float:
@@ -86,6 +91,13 @@ class RpcServer:
     ):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
+        # True when the EIO controller rides on the ELA session's transport (a
+        # core-manager slot); closing the EIO must then leave the transport.
+        self._eio_shared = False
+        # The board the ELA session opened: the fields the connect request
+        # gave, and the same fields with _build_transport's defaults filled in.
+        self._target_fields: Dict[str, Any] = {}
+        self._target: Dict[str, Any] | None = None
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
@@ -125,24 +137,161 @@ class RpcServer:
                     pass
 
         _shut(self._analyzer)
-        _shut(self._eio)
+        _shut(None if self._eio_shared else self._eio)
         _shut(self._axi if self._axi is not None else self._axi_transport)
         _shut(self._uart if self._uart is not None else self._uart_transport)
         self._analyzer = None
         self._eio = None
+        self._eio_shared = False
+        self._target_fields = {}
+        self._target = None
         self._axi = None
         self._axi_transport = None
         self._uart = None
         self._uart_transport = None
 
-    def _list_cores(self, analyzer: Analyzer) -> list[Dict[str, Any]]:
+    def _drop_eio(self) -> None:
+        """Forget the EIO controller, closing its transport only if it owns one."""
+        if self._eio is not None and not self._eio_shared:
+            self._eio.close()
+        self._eio = None
+        self._eio_shared = False
+
+    # ---- core-manager slots ------------------------------------------------
+    # A core manager puts several cores (ELAs, EIOs) behind one USER chain, and
+    # its MGR_ACTIVE register picks which one the chain's register window
+    # reaches. That register is shared hardware, but the "slot already
+    # selected" cache lives on the transport object. So every controller that
+    # selects a slot rides on the ELA session's transport: a second transport
+    # would move MGR_ACTIVE behind the session's back, and the ELA would then
+    # read -- or configure -- another core.
+
+    @staticmethod
+    def _manager_slots(transport: Transport, chain: int) -> list[tuple[int, int]] | None:
+        """``[(slot, VERSION), ...]`` for the core manager on *chain*, or None."""
+        if not Analyzer(transport, chain=chain)._behind_manager():  # noqa: SLF001
+            return None
+        manager = CoreManager(transport, chain=chain)
+        slots = []
+        for slot in range(int(manager.probe()["num_slots"])):
+            # VERSION at 0x0000 carries every fcapz core's identity, so this
+            # needs no descriptor table.
+            with transport.transaction_lock():
+                manager.select_raw(slot)
+                slots.append((slot, int(transport.read_reg_stable(0x0000))))
+        return slots
+
+    def _bind_ela(self, transport: Transport, chain: int, instance: Any) -> Analyzer:
+        """An Analyzer on *chain*, bound to an explicit slot behind a manager.
+
+        An unbound Analyzer never writes MGR_ACTIVE, so it drives whichever
+        core the manager last pointed at. ``instance`` None picks the lowest
+        ELA slot.
+        """
+        slots = self._manager_slots(transport, chain)
+        if slots is None:
+            if instance is not None:
+                raise ValueError(f"chain {chain} has no core manager; omit instance")
+            return Analyzer(transport, chain=chain)
+        ela_slots = [slot for slot, version in slots if version & 0xFFFF == ELA_CORE_ID]
+        if instance is None:
+            if not ela_slots:
+                raise RuntimeError(f"the core manager on chain {chain} has no ELA slot")
+            instance = ela_slots[0]
+        elif int(instance) not in ela_slots:
+            raise ValueError(
+                f"slot {instance} on chain {chain} is not an ELA; ELA slots: {ela_slots}"
+            )
+        analyzer = Analyzer(transport, chain=chain, instance=int(instance), manager=True)
+        analyzer.select_instance(int(instance))
+        return analyzer
+
+    def _connect_ela(self, transport: Transport, requested: Any, instance: Any) -> Analyzer:
+        if requested is not None or instance is not None:
+            return self._bind_ela(
+                transport, int(requested) if requested is not None else 1, instance
+            )
+        # No chain given: the default chain, else autodetect on the
+        # conservative scan set (USER1/2 -- bridges on 3/4 speak a different DR
+        # protocol and must not see stray shifts). The slot is bound before
+        # the probe: a manager left pointing at an EIO slot would otherwise
+        # read as "no ELA here".
+        for chain in (1, 2):
+            try:
+                analyzer = self._bind_ela(transport, chain, None)
+            except RuntimeError:  # a manager with no ELA slot
+                continue
+            if analyzer.probe_optional() is not None:
+                return analyzer
+        # Nothing ELA-like: stay on chain 1 for the side cores.
+        return Analyzer(transport, chain=1)
+
+    @staticmethod
+    def _resolved_target(fields: Dict[str, Any]) -> Dict[str, Any]:
+        """The board *fields* name, with _build_transport's defaults filled in."""
+        backend = fields.get("backend", "hw_server")
+        if backend == "usb_blaster":
+            return {
+                "backend": backend,
+                "hardware": fields.get("hardware"),
+                "tap": str(fields.get("tap", "auto")),
+            }
+        openocd = backend == "openocd"
+        return {
+            "backend": backend,
+            "host": fields.get("host", "127.0.0.1"),
+            "port": int(fields.get("port", 6666 if openocd else 3121)),
+            "tap": fields.get("tap", "xc7a100t.tap" if openocd else "xc7a100t"),
+        }
+
+    @staticmethod
+    def _given_target_fields(req: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: req[k] for k in _TARGET_FIELDS if req.get(k) is not None}
+
+    def _on_session_board(self, req: Dict[str, Any]) -> bool:
+        """Whether *req* names the ELA session's board; fields it omits match."""
+        if self._target is None:
+            return False
+        fields = {**self._target_fields, **self._given_target_fields(req)}
+        return self._resolved_target(fields) == self._target
+
+    def _slot_entry(self, transport: Transport, chain: int, slot: int, version: int):
+        """list_cores entry for one manager slot."""
+        core_id = version & 0xFFFF
+        entry: Dict[str, Any] = {
+            "type": "unknown",
+            "name": _CORE_NAMES.get(core_id, f"core 0x{core_id:04X}"),
+            "core_id": core_id,
+            "chain": chain,
+            "instance": slot,
+            "base_addr": 0,
+            "version_major": (version >> 24) & 0xFF,
+            "version_minor": (version >> 16) & 0xFF,
+            "info": {},
+        }
+        if core_id == ELA_CORE_ID:
+            ela = Analyzer(transport, chain=chain, instance=slot, manager=True)
+            entry.update(type="ela", info=ela.probe())
+        elif core_id == EIO_CORE_ID:
+            eio = EioController(transport, chain=chain, instance=slot)
+            eio.attach()
+            entry.update(type="eio", info={"in_w": eio.in_w, "out_w": eio.out_w})
+        return entry
+
+    def _list_cores(
+        self, analyzer: Analyzer, *, slots: bool = False
+    ) -> list[Dict[str, Any]]:
         """Enumerate the fcapz cores reachable on the connected session.
 
         Always reports the connected ELA; adds the EIO if one is discoverable
         (reusing an already-attached controller, else a read-only probe that
-        restores chain 1). Other core types (AXI/UART/core-manager) are not yet
-        auto-scanned here. Each entry: ``{type, name, core_id, chain, base_addr,
-        version_major, version_minor, info}``.
+        restores chain 1). Other core types (AXI/UART) are not yet auto-scanned
+        here. Each entry: ``{type, name, core_id, chain, instance, base_addr,
+        version_major, version_minor, info}``; ``instance`` is the core-manager
+        slot, None for a core reached directly. With ``slots``, every slot of
+        a core manager on a scanned chain is listed in place of that chain's
+        entries -- opt-in, because a client that switches cores by chain alone
+        would mistake ELA slot 1 for the ELA it already has.
         """
         cores: list[Dict[str, Any]] = []
         try:
@@ -155,6 +304,7 @@ class RpcServer:
                 "name": _CORE_NAMES.get(ela["core_id"], "Logic Analyzer"),
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
+                "instance": analyzer.instance,
                 "base_addr": 0,
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
@@ -178,6 +328,7 @@ class RpcServer:
                 "name": _CORE_NAMES.get(eio.core_id, "Embedded I/O"),
                 "core_id": eio.core_id,
                 "chain": eio.bscan_chain,
+                "instance": eio.instance,
                 "base_addr": eio._base_addr,  # noqa: SLF001 - report discovered offset
                 "version_major": eio.version_major,
                 "version_minor": eio.version_minor,
@@ -210,12 +361,28 @@ class RpcServer:
                     "name": _CORE_NAMES.get(ident["core_id"], "Logic Analyzer"),
                     "core_id": ident["core_id"],
                     "chain": chain,
+                    "instance": None,
                     "base_addr": 0,
                     "version_major": ident["version_major"],
                     "version_minor": ident["version_minor"],
                     "info": ident,
                 }
             cores.append(entry)
+        if slots:
+            managed: Dict[int, list[tuple[int, int]]] = {}
+            for chain in dict.fromkeys((analyzer.bscan_chain, *_ELA_SCAN_CHAINS)):
+                try:
+                    found = self._manager_slots(analyzer.transport, chain)
+                except Exception:
+                    found = None
+                if found is not None:
+                    managed[chain] = found
+            if managed:
+                cores = [
+                    self._slot_entry(analyzer.transport, chain, slot, version)
+                    for chain, found in managed.items()
+                    for slot, version in found
+                ] + [core for core in cores if core["chain"] not in managed]
         try:
             analyzer.transport.select_chain(analyzer.bscan_chain)
         except NotImplementedError:
@@ -243,6 +410,7 @@ class RpcServer:
             "name": _CORE_NAMES[AXI_MON_MAGIC],
             "core_id": AXI_MON_MAGIC,
             "chain": analyzer.bscan_chain,
+            "instance": None,
             "base_addr": 0,
             "version_major": ela_ident["version_major"],
             "version_minor": ela_ident["version_minor"],
@@ -670,21 +838,22 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
-            analyzer = Analyzer(
-                self._build_transport(req),
-                chain=int(requested) if requested is not None else 1,
-            )
-            analyzer.connect()
-            if requested is None and analyzer.probe_optional() is None:
-                # No chain given and no ELA on the default chain: autodetect on
-                # the conservative scan set (USER1/2 — bridges on 3/4 speak a
-                # different DR protocol and must not see stray shifts).
-                for chain in (2,):
-                    alt = Analyzer(analyzer.transport, chain=chain)
-                    if alt.probe_optional() is not None:
-                        analyzer = alt
-                        break
+            transport = self._build_transport(req)
+            Analyzer(
+                transport, chain=int(requested) if requested is not None else 1
+            ).connect()
+            try:
+                analyzer = self._connect_ela(transport, requested, req.get("instance"))
+            except Exception:
+                # A refused instance must not leak the transport just opened.
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                raise
             self._analyzer = analyzer
+            self._target_fields = self._given_target_fields(req)
+            self._target = self._resolved_target(self._target_fields)
             # Echo the resolved preset/chain so a client that omitted them can
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
@@ -692,6 +861,7 @@ class RpcServer:
             return self._ok(
                 ir_table=self._resolved_ir_name(req),
                 chain=analyzer.bscan_chain,
+                instance=analyzer.instance,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
 
@@ -704,14 +874,20 @@ class RpcServer:
             # untouched — a chain hop on the ELA control interface is unrelated.
             analyzer = self._ensure_analyzer()
             requested = req.get("chain")
-            if requested is None:
-                raise ValueError("rebind requires a chain")
-            new_chain = int(requested)
-            if new_chain != analyzer.bscan_chain:
-                # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+            new_instance = req.get("instance")
+            if requested is None and new_instance is None:
+                raise ValueError("rebind requires a chain or an instance")
+            new_chain = analyzer.bscan_chain if requested is None else int(requested)
+            if new_chain != analyzer.bscan_chain or (
+                new_instance is not None and int(new_instance) != analyzer.instance
+            ):
+                # Keep the SAME transport; point a fresh Analyzer at the new
+                # tap -- or, behind a core manager, the new ELA slot.
+                self._analyzer = self._bind_ela(analyzer.transport, new_chain, new_instance)
             return self._ok(
-                chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
+                chain=self._analyzer.bscan_chain,
+                instance=self._analyzer.instance,
+                probe=self._analyzer.probe(),
             )
 
         if cmd == "close":
@@ -810,7 +986,8 @@ class RpcServer:
             return self._ok(probe=analyzer.probe())
 
         if cmd == "list_cores":
-            return self._ok(cores=self._list_cores(analyzer))
+            slots = self._validated_bool(req.get("slots", False), field="slots")
+            return self._ok(cores=self._list_cores(analyzer, slots=slots))
 
         if cmd == "axi_mon_probe":
             # Detect an AXI monitor and return its geometry + the bundled
@@ -891,29 +1068,61 @@ class RpcServer:
             return self._ok(**analyzer.status())
 
         if cmd == "eio_connect":
-            if self._eio is not None:
-                self._eio.close()
-            chain = int(req.get("chain", 3))
+            self._drop_eio()
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            self._eio = EioController(
-                self._build_transport(req),
-                chain=chain,
-                base_addr=base_addr,
-                instance=None if instance is None else int(instance),
-            )
-            self._eio.connect()
+            if instance is not None:
+                # A core-manager slot: attach on the session's transport (see
+                # _manager_slots), which only names the session's own board.
+                if not self._on_session_board(req):
+                    raise ValueError(
+                        "an EIO instance must be on the connected ELA session's board"
+                    )
+                chain = int(req.get("chain", 1))
+                eio = EioController(
+                    analyzer.transport,
+                    chain=chain,
+                    base_addr=base_addr,
+                    instance=int(instance),
+                )
+                eio.attach()
+                self._eio, self._eio_shared = eio, True
+            else:
+                chain = int(req.get("chain", 3))
+                self._eio = EioController(
+                    self._build_transport(req), chain=chain, base_addr=base_addr
+                )
+                self._eio.connect()
             return self._ok(
                 in_w=self._eio.in_w,
                 out_w=self._eio.out_w,
                 chain=chain,
                 base_addr=base_addr,
+                instance=self._eio.instance,
             )
 
         if cmd == "eio_discover":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            self._drop_eio()
+            if self._on_session_board(req):
+                # EIO slots behind the session's core manager first, on the
+                # session's transport (see _manager_slots).
+                found = self._manager_slots(analyzer.transport, 1) or []
+                eio_slots = [s for s, version in found if version & 0xFFFF == EIO_CORE_ID]
+                eio = (
+                    discover_eio(analyzer.transport, chains=(), instances=eio_slots)
+                    if eio_slots
+                    else None
+                )
+                if eio is not None:
+                    self._eio, self._eio_shared = eio, True
+                    return self._ok(
+                        discovered=True,
+                        in_w=eio.in_w,
+                        out_w=eio.out_w,
+                        chain=eio.bscan_chain,
+                        base_addr=eio._base_addr,  # noqa: SLF001
+                        instance=eio.instance,
+                    )
             transport = self._build_transport(req)
             transport.connect()
             try:
@@ -933,6 +1142,7 @@ class RpcServer:
                     out_w=eio.out_w,
                     chain=eio.bscan_chain,
                     base_addr=eio._base_addr,  # noqa: SLF001 - report discovered offset
+                    instance=None,
                 )
             except Exception:
                 try:
@@ -942,9 +1152,7 @@ class RpcServer:
                 raise
 
         if cmd == "eio_close":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            self._drop_eio()
             return self._ok()
 
         if cmd == "eio_read":
