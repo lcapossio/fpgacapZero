@@ -448,11 +448,36 @@ fcapz_debug_multi_xilinx7 #(
 );
 ```
 
-The lower-level `fcapz_core_manager` is also available if you already have
-custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
-yourself.  At this revision the packaged multi-core wrapper is AMD/Xilinx
-7-series only; other vendors still use their single-core wrappers until
-equivalent debug-manager wrappers are added.
+The hub is built in three layers, and only the outermost one is
+vendor-specific:
+
+| Layer | What it holds |
+|---|---|
+| `fcapz_debug_multi_core` | The manager plus the ELA/EIO slots, on the 49-bit register bus and the burst bus. No JTAG at all. |
+| `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tdo` out): reset synchroniser, `jtag_pipe_iface`, then the core. |
+| `fcapz_debug_multi_<vendor>` | One `jtag_tap_<vendor>` on `CTRL_CHAIN` feeding `fcapz_debug_multi`. |
+
+Packaged vendor shells (all share the parameter and port list shown above):
+
+| Wrapper | TAP | `CTRL_CHAIN` means |
+|---|---|---|
+| `fcapz_debug_multi_xilinx7` | `BSCANE2` | USER chain 1..4 |
+| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | USER chain 1..4 |
+| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `sld_instance_index` |
+
+Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  To bring
+the hub to another vendor, write a shell that instantiates that vendor's
+`jtag_tap_<vendor>` and `fcapz_debug_multi`; the manager, slots and pipe are
+already covered by the shared simulation and parity checks.  The lower-level
+`fcapz_core_manager` is still available if you want to wire the manager and
+`fcapz_ela` slots to custom plumbing yourself.
+
+On Intel the hub reads bursts back through its own virtual JTAG instance.  The
+USB-Blaster transport normally reads ELA bursts from a separate data instance,
+so the host sends a managed slot's burst to the hub's instance instead; this is
+automatic.  The DE25-Nano `manager` variant
+(`python examples/de25_nano/build.py --variant manager`) is the hardware
+reference: two ELAs and two EIOs on instance 1, EJTAG-AXI on instance 4.
 
 Each managed ELA has its own `ela_sample_clk[i]` and `ela_sample_rst[i]`.
 Use `{NUM_ELAS{clk}}` / `{NUM_ELAS{rst}}` when every ELA samples the same
@@ -500,7 +525,7 @@ Manager registers:
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
 | `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
-| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
+| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
 
 Host-side, select the ELA instance explicitly:
@@ -522,7 +547,9 @@ ela1 = Analyzer(transport, instance=1)
 
 Multiple `Analyzer` objects can share one transport session; each analyzer
 re-selects its configured manager slot before probe, configure, arm, status
-polling, and readback. Do not run captures from two Python threads against
+polling, and readback. The host reads `MGR_ACTIVE` back after each switch and
+retries the write if the slot did not change, since a switch that follows a
+burst can be dropped while the pipe refills. Do not run captures from two Python threads against
 the same transport at the same time. The transport serializes low-level I/O,
 but capture workflows still share FPGA JTAG bandwidth and should be sequenced
 deliberately.

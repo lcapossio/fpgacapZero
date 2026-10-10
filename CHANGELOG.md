@@ -9,6 +9,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Core manager on every vendor.** The multi-core hub is now three layers:
+  `fcapz_debug_multi_core` (manager and ELA/EIO slots, no JTAG),
+  `fcapz_debug_multi` (TAP signals, reset sync and the JTAG pipe) and a thin
+  vendor shell that only adds the TAP primitive. New shells
+  `fcapz_debug_multi_xilinxus` (UltraScale `BSCANE2`) and
+  `fcapz_debug_multi_intel` (`sld_virtual_jtag`, `CTRL_CHAIN` is the instance
+  index) join `fcapz_debug_multi_xilinx7`, which keeps its parameters, ports
+  and behaviour. Each has a VHDL twin. cocotb drives all three shells at their
+  TAP primitives in both HDLs, static and formal parity cover the new layers,
+  and an old-vs-new simulation of the Xilinx-7 wrapper matched. The layers are
+  in every Arty build, the LiteX source lists and `core.json`.
+
+- **DE25-Nano — core-manager variant.** `de25_nano_manager_top` puts two ELAs
+  and two EIOs behind one `fcapz_debug_multi_intel` hub on instance 1, with
+  EJTAG-AXI on instance 4 (`python examples/de25_nano/build.py --variant
+  manager`). `test_hw_manager.py` covers slot enumeration, captures with
+  timestamps across many burst packets, slot switches after a burst, both EIO
+  slots and the bridge.
+
+- **Host — managed bursts on USB-Blaster.** The Quartus transport reads ELA
+  bursts from a separate data instance, but a managed hub bursts on its own
+  instance. The analyzer now sends a managed slot's burst and timestamp reads
+  through the hub's instance (`Transport.burst_on_data_chain` marks
+  transports that need this) instead of the data instance.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -57,6 +82,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   public API's undocumented classes and methods have docstrings.
 
 ### Changed
+
+- **Formal parity — vector parameters.** `sim/run_formal_hdl_parity.py`
+  accepts bit-string parameters (such as a per-slot burst mask), and a
+  manifest without a `formal` section is checked for interface parity only.
+  The manager proof now also runs with a mixed burst mask.
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -112,6 +142,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Core manager — a slot switch right after a burst could be dropped.** After
+  a burst the JTAG pipe refills its burst buffer on the next scan, and the
+  manager ignores an `MGR_ACTIVE` write while that refill runs. With narrow
+  samples (1-5 bits) the refill outlasted the scan, so the next analyzer kept
+  talking to the previous slot. The host now reads `MGR_ACTIVE` back after each
+  switch and writes it again, up to three times.
+
+- **Core manager — VHDL defaults and EIO-only builds.** The VHDL
+  `fcapz_debug_multi_xilinx7` defaulted `NUM_EIOS` to 1 and `ELA_PORT_COUNT`
+  to 2 instead of following `EIO_EN` and `NUM_ELAS` like the Verilog, and
+  rejected `NUM_ELAS=0`. Both HDLs now agree, and an EIO-only hub elaborates.
+
+- **Core manager — Verilator width warnings.** The replicated per-slot
+  parameter defaults are now built from 32-bit slices, which clears
+  `WIDTHCONCAT` at every parameter set.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
