@@ -1186,11 +1186,152 @@ class ManagerSelectConfirmTests(unittest.TestCase):
         self.assertEqual(t.active_writes, [2])
 
     def test_design_without_a_manager_gives_up_and_caches(self):
-        # A slot selected on a standalone core: ACTIVE never reads back.
+        # A slot selected on a standalone core: ACTIVE never reads back and
+        # 0xF000 is not a manager, so the chain is remembered as standalone.
         t = self._DroppingTransport(drops=99)
+        t._manager_regs[0xF000] = 0x1234
         t.select_manager_instance_cached(1, 0xF008, 1)
         t.select_manager_instance_cached(1, 0xF008, 1)
         self.assertEqual(t.active_writes, [1, 1, 1])
+
+    def test_manager_that_never_takes_the_slot_raises(self):
+        t = self._DroppingTransport(drops=99)
+        t._manager_regs[0xF004] = 4
+        with self.assertRaisesRegex(RuntimeError, "did not select slot 1"):
+            t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [1, 1, 1])
+        # Nothing was cached: the next call tries again.
+        t.drops = 0
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.read_reg(0xF008), 1)
+
+    def test_slot_past_the_count_raises(self):
+        class _RangeChecked(FakeTransport):
+            def write_reg(self, addr, value):
+                if addr == 0xF008 and int(value) >= self._manager_regs[0xF004]:
+                    return  # the manager rejects an out-of-range slot
+                super().write_reg(addr, value)
+
+        t = _RangeChecked()
+        t._manager_regs[0xF004] = 3
+        with self.assertRaisesRegex(RuntimeError, "it has 3 slot"):
+            t.select_manager_instance_cached(1, 0xF008, 99)
+        self.assertEqual(t.read_reg(0xF008), 0)
+
+    def test_negative_slot_raises(self):
+        t = self._DroppingTransport(drops=0)
+        with self.assertRaises(ValueError):
+            t.select_manager_instance_cached(1, 0xF008, -1)
+        self.assertEqual(t.active_writes, [])
+
+    def test_slot_moved_behind_the_cache_is_selected_again(self):
+        # An ELA sample reset (or another session) moves ACTIVE after the
+        # host selected slot 2: the next select reads it back and rewrites.
+        t = self._DroppingTransport(drops=0)
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        t._manager_regs[0xF008] = 0
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(t.active_writes, [2, 2])
+        self.assertEqual(t.read_reg(0xF008), 2)
+
+
+class _SlottedManagerTransport(FakeTransport):
+    """Manager with descriptors over per-slot register banks."""
+
+    def __init__(self, cores: list[int], *, desc_sticks: bool = True):
+        super().__init__()
+        self._manager_regs.update({0xF004: len(cores), 0xF010: 0x3, 0xF014: 0})
+        self._cores = cores
+        self._desc_sticks = desc_sticks
+        self._slots = [dict(self.regs) if c == ELA_CORE_ID else {} for c in cores]
+
+    def read_reg(self, addr: int) -> int:
+        idx = self._manager_regs[0xF014]
+        if addr == 0xF018:
+            return self._cores[idx] if idx < len(self._cores) else 0
+        if addr == 0xF01C:
+            return 0
+        if addr in self._manager_regs:
+            return self._manager_regs[addr]
+        return self._slots[self._active_ela].get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        if addr == 0xF014 and not self._desc_sticks:
+            return
+        if addr == 0xF008:
+            self._active_ela = int(value)
+            self._manager_regs[addr] = int(value)
+            return
+        if addr in self._manager_regs:
+            self._manager_regs[addr] = int(value)
+            return
+        self._slots[self._active_ela][addr] = value
+
+    def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+        return [self.read_reg(a) for a in addrs]
+
+
+class ManagerSlotStrictnessTests(unittest.TestCase):
+    def test_slot_info_rejects_a_slot_past_the_count(self):
+        manager = ElaManager(_SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID]))
+        with self.assertRaises(ValueError):
+            manager.slot_info(2)
+        with self.assertRaises(ValueError):
+            manager.slot_info(-1)
+
+    def test_slot_info_raises_when_the_descriptor_index_does_not_take(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID], desc_sticks=False)
+        manager = ElaManager(t)
+        self.assertEqual(manager.slot_info(0)["core_id"], ELA_CORE_ID)
+        with self.assertRaises(RuntimeError):
+            manager.slot_info(1)
+
+    def test_slot_info_without_descriptors_reports_zeros(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID])
+        t._manager_regs[0xF010] = 0x1
+        info = ElaManager(t).slot_info(1)
+        self.assertEqual((info["core_id"], info["capabilities"]), (0, 0))
+        self.assertEqual(t._manager_regs[0xF014], 0)  # index untouched
+
+    def test_probe_all_raises_when_a_described_ela_does_not_answer(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID, EIO_CORE_ID])
+        t._slots[1] = {}  # slot 1 claims to be an ELA but reads as zeros
+        with self.assertRaises(RuntimeError):
+            ElaManager(t).probe_all()
+
+    def test_probe_all_skips_slots_described_as_other_cores(self):
+        t = _SlottedManagerTransport([EIO_CORE_ID, ELA_CORE_ID])
+        infos = ElaManager(t).probe_all()
+        self.assertEqual([i["instance"] for i in infos], [1])
+
+    def test_probe_all_without_descriptors_skips_slots_that_do_not_probe(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID])
+        t._manager_regs[0xF010] = 0x1
+        infos = ElaManager(t).probe_all()
+        self.assertEqual([i["instance"] for i in infos], [0])
+
+    def test_switching_slots_drops_the_old_slot_configuration(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID])
+        t._slots[1][0x00C4] = 32  # TIMESTAMP_W on slot 1 only
+        analyzer = Analyzer(t, instance=0)
+        analyzer.connect()
+        analyzer.configure(AnalyzerTests._make_cfg(self))
+        analyzer.select_instance(0)  # same slot: configuration kept
+        self.assertIsNotNone(analyzer._config)
+        analyzer.select_instance(1)
+        self.assertIsNone(analyzer._config)
+        self.assertEqual(analyzer._hw_timestamp_w, 0)
+        analyzer.configure(AnalyzerTests._make_cfg(self))
+        self.assertEqual(analyzer._hw_timestamp_w, 32)
+
+    def test_manager_with_more_than_256_deep_slots_is_detected(self):
+        # A 256-bit x 2048 slot's DATA window would reach 0xF000 on a
+        # standalone core, so the whole manager block is checked.
+        t = _SlottedManagerTransport([ELA_CORE_ID] * 300)
+        t._slots[0].update({0x000C: 256, 0x0010: 2048})
+        analyzer = Analyzer(t)
+        self.assertTrue(analyzer._behind_manager())
+        self.assertEqual(ElaManager(t).probe()["num_slots"], 300)
 
 
 class ManagedDataChainBurstTests(unittest.TestCase):

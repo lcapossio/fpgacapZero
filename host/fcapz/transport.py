@@ -203,6 +203,9 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
 #: it stops confirming a slot switch (see there).
 MANAGER_SELECT_ATTEMPTS = 3
 
+# VERSION[15:0] of a core manager at 0xF000 (ASCII "CM").
+_CORE_MANAGER_ID = 0x434D
+
 
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
@@ -245,31 +248,60 @@ class Transport(ABC):
         active_addr: int,
         instance: int,
     ) -> None:
-        """Write a core-manager active slot only when the transport changed.
+        """Make *instance* the core manager's active slot on *chain*.
 
-        The active manager slot is a sticky hardware register.  Host controllers
-        sharing one transport use this cache under :meth:`transaction_lock` to
-        avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-        agree on which slot was last selected.
+        The active slot is a sticky hardware register that something else can
+        move: an ELA sample reset resets the manager to slot 0, and another
+        host session can select its own slot.  So the slot is always read back
+        before it is trusted, and written only when it differs.  Call under
+        :meth:`transaction_lock`.
+
+        Raises ``ValueError`` for a negative slot and ``RuntimeError`` when a
+        core manager answers on *chain* but does not take the slot (out of
+        range, or still refusing after :data:`MANAGER_SELECT_ATTEMPTS`
+        writes).  A chain with no manager never reads the slot back; it is
+        remembered as standalone and not written again.
         """
-        key = (int(chain), int(instance))
-        if self.__dict__.get("_fcapz_manager_active_cache") == key:
+        chain = int(chain)
+        instance = int(instance)
+        if instance < 0:
+            raise ValueError(f"core-manager slot must be >= 0, got {instance}")
+        standalone = self.__dict__.setdefault("_fcapz_manager_standalone_chains", set())
+        if chain in standalone:
+            return
+        cached = self.__dict__.get("_fcapz_manager_active_cache")
+        if cached == (chain, instance) and int(self.read_reg(active_addr)) == instance:
             return
         # The manager ignores an ACTIVE write while its burst engine loads.
         # After a burst the pipe preloads once more, at the next scan's
-        # capture, for ~256 / SAMPLE_W TCKs, so a switch straight after a
-        # narrow (SAMPLE_W <= 5) burst can be dropped.  Read the slot back and
-        # write again: two rounds outlast the longest preload.  A design with
-        # no manager never reads the slot back; it is cached as before.
+        # capture, for ~256 / SAMPLE_W TCKs, so on bitstreams built before
+        # the burst owner was made stable a switch straight after a narrow
+        # (SAMPLE_W <= 5) burst can be dropped.  Write again: two rounds
+        # outlast the longest preload.
         for _ in range(MANAGER_SELECT_ATTEMPTS):
-            self.write_reg(active_addr, int(instance))
-            if int(self.read_reg(active_addr)) == int(instance):
-                break
-        self.__dict__["_fcapz_manager_active_cache"] = key
+            self.write_reg(active_addr, instance)
+            if int(self.read_reg(active_addr)) == instance:
+                self.__dict__["_fcapz_manager_active_cache"] = (chain, instance)
+                return
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
+        base = active_addr & 0xFF00
+        if (int(self.read_reg(base)) & 0xFFFF) != _CORE_MANAGER_ID:
+            standalone.add(chain)
+            return
+        count = int(self.read_reg(base + 0x4))
+        detail = (
+            f"it has {count} slot(s)"
+            if instance >= count
+            else f"ACTIVE still reads {int(self.read_reg(active_addr))}"
+        )
+        raise RuntimeError(
+            f"core manager on chain {chain} did not select slot {instance}: {detail}"
+        )
 
     def invalidate_manager_instance_cache(self) -> None:
         """Forget the cached core-manager active slot selection."""
         self.__dict__.pop("_fcapz_manager_active_cache", None)
+        self.__dict__.pop("_fcapz_manager_standalone_chains", None)
 
     @abstractmethod
     def connect(self) -> None:

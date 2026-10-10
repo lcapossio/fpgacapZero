@@ -368,10 +368,19 @@ class Analyzer:
         """Select a core-manager slot for subsequent analyzer operations.
 
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
-        behavior for bitstreams without a manager.
+        behavior for bitstreams without a manager.  Moving to another slot
+        drops the capture configuration: call :meth:`configure` again.
         """
         with self.transport.transaction_lock():
-            self._instance = None if instance is None else int(instance)
+            new_instance = None if instance is None else int(instance)
+            if new_instance != self._instance:
+                # The configuration and geometry belong to the old slot; a
+                # capture read with them would misread the new slot's data.
+                self._config = None
+                self._hw_timestamp_w = 0
+                self._hw_num_segments = 1
+                self._hw_compare_caps = 0
+            self._instance = new_instance
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
@@ -873,7 +882,7 @@ class Analyzer:
         active = int(read(_ADDR_MGR_ACTIVE))
         stride = int(read(_ADDR_MGR_STRIDE))
         caps = int(read(_ADDR_MGR_CAPS))
-        return 1 <= count <= 256 and active < count and stride == 0 and bool(caps & 0x1)
+        return 1 <= count <= 0xFFFF and active < count and stride == 0 and bool(caps & 0x1)
 
     @staticmethod
     def _desc_index_writable(read, write) -> bool:
@@ -1619,14 +1628,36 @@ class CoreManager:
             return info
 
     def slot_info(self, instance: int) -> Dict:
-        """Return descriptor info for one slot when the manager supports it."""
+        """Return descriptor info for one slot.
+
+        Raises ``ValueError`` for a slot outside the manager's count and
+        ``RuntimeError`` when the descriptor index does not take the slot.  A
+        manager without descriptors (``MGR_CAPS`` bit 1 clear) reports core ID
+        and capabilities 0.
+        """
+        instance = int(instance)
         with self.transport.transaction_lock():
             self._select_chain()
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+            read = self.transport.read_reg
+            count = int(read(_ADDR_MGR_COUNT))
+            if not 0 <= instance < count:
+                raise ValueError(
+                    f"slot {instance} is out of range: the manager on chain "
+                    f"{self._chain} has {count} slot(s)"
+                )
+            if not int(read(_ADDR_MGR_CAPS)) & 0x2:
+                return {"instance": instance, "core_id": 0, "capabilities": 0}
+            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, instance)
+            selected = int(read(_ADDR_MGR_DESC_INDEX))
+            if selected != instance:
+                raise RuntimeError(
+                    f"core manager on chain {self._chain} did not select "
+                    f"descriptor {instance} (DESC_INDEX reads {selected})"
+                )
             return {
-                "instance": int(instance),
-                "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-                "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+                "instance": instance,
+                "core_id": int(read(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
+                "capabilities": int(read(_ADDR_MGR_DESC_CAPS)),
             }
 
     def select_raw(self, instance: int) -> None:
@@ -1657,17 +1688,28 @@ class CoreManager:
         ]
 
     def probe_all(self) -> list[Dict]:
-        """Probe every LA slot and include the slot index in each dict."""
+        """Probe every LA slot and include the slot index in each dict.
+
+        With descriptors the slot type decides, and a failed probe of an LA
+        slot is raised, not skipped.  A manager without descriptors gives no
+        type, so a slot whose probe fails is taken to be another core.
+        """
+        info = self.probe()
+        has_descriptors = bool(info["capabilities"] & 0x2)
         out: list[Dict] = []
-        for idx, analyzer in enumerate(self.analyzers()):
-            try:
-                info = analyzer.probe()
-            except RuntimeError:
+        for idx in range(max(0, int(info["num_slots"]))):
+            if has_descriptors and self.slot_info(idx)["core_id"] != ELA_CORE_ID:
                 continue
-            else:
-                info["instance"] = idx
-                info["chain"] = self._chain
-                out.append(info)
+            analyzer = Analyzer(self.transport, chain=self._chain, instance=idx)
+            try:
+                slot = analyzer.probe()
+            except RuntimeError:
+                if has_descriptors:
+                    raise
+                continue
+            slot["instance"] = idx
+            slot["chain"] = self._chain
+            out.append(slot)
         return out
 
 

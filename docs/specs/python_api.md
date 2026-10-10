@@ -54,7 +54,8 @@ select_instance(instance: int | None) -> None
 Select a core-manager slot for subsequent analyzer operations.
 
 `None` leaves the active slot untouched and preserves legacy direct-ELA
-behavior for bitstreams without a manager.
+behavior for bitstreams without a manager.  Moving to another slot
+drops the capture configuration: call `configure` again.
 
 #### `Analyzer.connect`
 
@@ -507,12 +508,19 @@ higher-level register sequences so one controller cannot switch
 select_manager_instance_cached(chain: int, active_addr: int, instance: int) -> None
 ```
 
-Write a core-manager active slot only when the transport changed.
+Make *instance* the core manager's active slot on *chain*.
 
-The active manager slot is a sticky hardware register.  Host controllers
-sharing one transport use this cache under `transaction_lock` to
-avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-agree on which slot was last selected.
+The active slot is a sticky hardware register that something else can
+move: an ELA sample reset resets the manager to slot 0, and another
+host session can select its own slot.  So the slot is always read back
+before it is trusted, and written only when it differs.  Call under
+`transaction_lock`.
+
+Raises `ValueError` for a negative slot and `RuntimeError` when a
+core manager answers on *chain* but does not take the slot (out of
+range, or still refusing after `MANAGER_SELECT_ATTEMPTS`
+writes).  A chain with no manager never reads the slot back; it is
+remembered as standalone and not written again.
 
 #### `Transport.invalidate_manager_instance_cache`
 
