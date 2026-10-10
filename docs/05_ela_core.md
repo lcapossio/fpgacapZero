@@ -503,7 +503,10 @@ fcapz_debug_multi_xilinx7 #(
 ) u_debug (...);
 ```
 
-The scalar parameters remain the defaults for existing designs.  Per-slot
+The scalar parameters remain the defaults for existing designs.  Each scalar
+is widened to a 32-bit lane before it is replicated into the per-slot vectors,
+so pass it as a plain integer or a literal no wider than 32 bits
+(`.SAMPLE_W(8)` or `.SAMPLE_W(8'd8)`, not `.SAMPLE_W(64'd8)`).  Per-slot
 vectors exist for ELA sample width, depth, trigger stages, storage
 qualification, input pipe, channel count, decimation, external trigger,
 timestamp width, segment count, probe mux width, startup arm, default external
