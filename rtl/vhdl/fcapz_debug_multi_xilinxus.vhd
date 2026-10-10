@@ -31,7 +31,7 @@ entity fcapz_debug_multi_xilinxus is
         STARTUP_ARM      : natural := 0;
         DEFAULT_TRIG_EXT : natural := 0;
         BURST_W          : positive := 256;
-        CTRL_CHAIN       : positive := 1;  -- BSCANE2 USER chain  -- BSCANE2 USER chain
+        CTRL_CHAIN       : positive := 1;  -- BSCANE2 USER chain
         REL_COMPARE      : natural := 0;
         DUAL_COMPARE     : natural := 1;
         USER1_DATA_EN    : natural := 1;
