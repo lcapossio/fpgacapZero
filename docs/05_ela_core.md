@@ -542,12 +542,32 @@ Manager registers:
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
 
-Host-side, select the ELA instance explicitly:
+Host-side, list what the hub holds, then select the ELA instance explicitly:
 
 ```bash
+fcapz --backend hw_server --tap xc7a100t discover
 fcapz --backend hw_server --tap xc7a100t ela-list
 fcapz --backend hw_server --tap xc7a100t --ela-instance 1 probe
 ```
+
+`discover` (and `fcapz.discovery.discover_cores()`, and the RPC `discover`
+command) needs no chain.  It reads `VERSION` at `0x0000` on every USER chain
+(on Intel, `sld_virtual_jtag` instances 1-8), and reads further only on a
+chain that answers `"LA"` or `"IO"`.  That first read is safe on a chain
+nobody has identified: a register read below `0x2000` lands as a NOP in the
+command field of the EJTAG-AXI and EJTAG-UART bridges, while a read of
+`0xF000` would be a burst command on the AXI bridge and a write of
+`MGR_ACTIVE` its reset.  On a manager it lists every slot, whatever slot is
+active, and leaves `MGR_ACTIVE` as it found it.  Chains that answer neither
+get the bridges' own identity reads.  The host's slot selection follows the
+same rule: it writes `MGR_ACTIVE` on a chain only after `0x0000` and the
+manager block have answered.
+
+`Analyzer.probe()` reads whatever slot is active and fails on an EIO.
+`Analyzer.probe_optional()` does not: when the analyzer has no slot of its
+own and the hub's active slot is not an ELA (an EIO left selected, say), it
+selects the first ELA slot and keeps it.  The GUI connects to the first slot
+the descriptors call an ELA.
 
 ```python
 transport = XilinxHwServerTransport(fpga_name="xc7a100t")

@@ -360,12 +360,14 @@ Response:
 
 Enumerate the fcapz cores present on the connected target. Always reports the
 connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
-USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
-clients can list everything and offer a switch. Each entry has `type`, `name`,
+USER chains (1, 2 and 5) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. When the connected chain is a
+core manager, the manager (`type` `manager`) and its other slots are listed
+too, each with its slot in `instance`. Each entry has `type`, `name`,
 `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
-type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
-monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
-`axi_mon`).
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
+manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
+sample_width}` for `axi_mon`).
 
 ```json
 {"cmd": "list_cores"}
@@ -384,6 +386,23 @@ Response:
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
+```
+
+#### `discover`
+
+List every fcapz core on the session, chain by chain, as
+`fcapz.discovery.discover_cores()` does: register cores (ELA, EIO, AXI
+monitor, a core manager and each of its slots) and the EJTAG-AXI and
+EJTAG-UART bridges.  Each chain is read only at `0x0000` until it answers as
+an ELA or EIO, which the bridges see as a NOP.  Optional `chains` narrows the
+sweep (default USER1-4, or `sld_virtual_jtag` instances 1-8);
+`"bridges": false` skips the bridge identity reads.  Entries have the
+`list_cores` fields plus `instance` (manager slot or `null`); bridge `type`s
+are `ejtag_axi` and `ejtag_uart`.  The session's chain is selected again
+afterwards and a manager's active slot is left as it was.
+
+```json
+{"cmd": "discover", "chains": [1, 4]}
 ```
 
 #### `configure`

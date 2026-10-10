@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Host — core discovery.** `fcapz discover`, the RPC `discover` command and
+  `fcapz.discovery.discover_cores()` list every fcapz core without being told
+  a chain: ELAs, EIOs, AXI monitors, a core manager and each of its slots, and
+  the EJTAG-AXI and EJTAG-UART bridges. A chain is read only at `0x0000`, a
+  NOP on both bridges, until it answers as an ELA or EIO. A new bench,
+  `fcapz_bridge_discovery`, shifts those scans into both bridges and checks
+  that nothing moves. `list_cores` now lists the manager and its slots.
+
 - **Core manager on every vendor.** The multi-core hub is now three layers:
   `fcapz_debug_multi_core` (manager and ELA/EIO slots, no JTAG),
   `fcapz_debug_multi` (TAP signals, reset sync and the JTAG pipe) and a thin
@@ -82,6 +90,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   public API's undocumented classes and methods have docstrings.
 
 ### Changed
+
+- **Host — an EIO left active no longer hides a hub's ELAs.**
+  `Analyzer.probe_optional()` on a core manager whose active slot is not an
+  ELA selects the first ELA slot (when the analyzer has no slot of its own),
+  so the RPC connect and the GUI find the hub. `probe()` still reads only the
+  active slot. The GUI connects to the first slot the descriptors call an ELA
+  instead of slot 0.
 
 - **Formal parity — vector parameters.** `sim/run_formal_hdl_parity.py`
   accepts bit-string parameters (such as a per-slot burst mask), and a
@@ -158,6 +173,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Host — slot selection could reset an EJTAG-AXI bridge.** Selecting a
+  manager slot wrote `MGR_ACTIVE` (`0xF008`) before checking that the chain
+  held a manager; on an EJTAG-AXI bridge that frame is `CMD_RESET`. The host
+  now writes only after `0x0000` answers as an ELA or EIO and `0xF000` as a
+  manager. Likewise `discover_eio()` read `0x8000`, an AXI read command on the
+  bridge, on chains it had not identified. Neither path met a bridge on the
+  default chains.
 
 - **Core manager — a slot switch right after a burst could be dropped.** After
   a burst the JTAG pipe refills its burst buffer on the next scan, and the

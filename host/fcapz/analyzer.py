@@ -15,6 +15,7 @@ from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import (
     REG_ADDR_SPACE_END,
+    REGISTER_PIPE_CORE_IDS,
     BurstUnavailableError,
     OpenOcdTransport,
     Transport,
@@ -1405,13 +1406,38 @@ class Analyzer:
         Use this when the host should stay connected for subsidiary BSCAN cores
         (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
         not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
+
+        Unlike :meth:`probe`, this can switch a core manager's slot.  When the
+        analyzer has no slot of its own (``instance`` is ``None``) and the chain
+        is a manager whose active slot is not an ELA, for instance an EIO left
+        selected, it selects the manager's first ELA slot and keeps it, so
+        ``instance`` is set afterwards.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
-            self._read_ela_probe_registers_raw()
-        )
-        if (version & 0xFFFF) != _ELA_CORE_ID:
+        raw = self._read_ela_probe_registers_raw()
+        if (raw[0] & 0xFFFF) != _ELA_CORE_ID:
+            slot = self._first_ela_slot_behind_manager(raw[0])
+            if slot is None:
+                return None
+            self.select_instance(slot)
+            raw = self._read_ela_probe_registers_raw()
+            if (raw[0] & 0xFFFF) != _ELA_CORE_ID:
+                return None
+        return self._probe_dict_from_raw(*raw)
+
+    def _first_ela_slot_behind_manager(self, version: int) -> Optional[int]:
+        """First ELA slot of a manager on this chain, or ``None``.
+
+        *version* is what ``0x0000`` read.  Only a chain that answered as an
+        fcapz register core is asked for the manager block (see
+        :func:`~fcapz.transport.register_pipe_identity`).
+        """
+        if self._instance is not None or (version & 0xFFFF) not in REGISTER_PIPE_CORE_IDS:
             return None
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        try:
+            core_ids = CoreManager(self.transport, chain=self._chain).slot_core_ids()
+        except RuntimeError:
+            return None
+        return next((i for i, c in enumerate(core_ids) if c == _ELA_CORE_ID), None)
 
     def probe(self) -> Dict:
         """Read the ELA identity and feature registers.
@@ -1629,6 +1655,29 @@ class CoreManager:
                 "capabilities": caps,
             }
             return info
+
+    def slot_core_ids(self) -> List[int]:
+        """Return the core ID (``VERSION[15:0]``) of every slot, in order.
+
+        Read from the descriptors when the manager has them (``MGR_CAPS``
+        bit 1).  Without them, each slot is selected in turn and its VERSION
+        read, and the slot that was active is selected again.  Raises
+        ``RuntimeError`` if no manager answers on this chain.
+        """
+        with self.transport.transaction_lock():
+            info = self.probe()
+            count = int(info["num_slots"])
+            if info["capabilities"] & 0x2:
+                return [int(self.slot_info(i)["core_id"]) for i in range(count)]
+            select = self.transport.select_manager_instance_cached
+            core_ids: List[int] = []
+            try:
+                for idx in range(count):
+                    select(self._chain, _ADDR_MGR_ACTIVE, idx)
+                    core_ids.append(int(self.transport.read_reg(_ADDR_VERSION)) & 0xFFFF)
+            finally:
+                select(self._chain, _ADDR_MGR_ACTIVE, int(info["active"]))
+            return core_ids
 
     def slot_info(self, instance: int) -> Dict:
         """Return descriptor info for one slot.

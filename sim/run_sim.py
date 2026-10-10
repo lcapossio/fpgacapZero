@@ -123,6 +123,16 @@ TESTBENCHES = {
             RTL / "fcapz_axi_interconnect.v",
         ],
     ),
+    "fcapz_bridge_discovery": (
+        TB / "fcapz_bridge_discovery_tb.sv",
+        [
+            TB / "axi4_test_slave.v",
+            RTL / "fcapz_ejtagaxi.v",
+            RTL / "fcapz_ejtaguart.v",
+            RTL / "fcapz_async_fifo.v",
+            TB / "xpm_fifo_async_stub.v",
+        ],
+    ),
 }
 
 DEFAULT_TESTBENCHES = [
@@ -138,6 +148,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_core_manager_legacy_burst",
     "chan_mux",
     "fcapz_axi_interconnect",
+    "fcapz_bridge_discovery",
 ]
 
 LINT_TARGETS = [

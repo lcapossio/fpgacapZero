@@ -18,6 +18,7 @@ from .analyzer import (
     discover_boards,
 )
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
+from .discovery import discover_cores
 from .eio import EioController, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -31,6 +32,7 @@ from .transport import (
     XilinxHwServerTransport,
     list_openocd_taps,
     list_xilinx_hw_server_targets,
+    register_pipe_identity,
 )
 
 _SCHEMA_VERSION = "1.1"
@@ -154,8 +156,10 @@ class RpcServer:
 
         Always reports the connected ELA; adds the EIO if one is discoverable
         (reusing an already-attached controller, else a read-only probe that
-        restores chain 1). Other core types (AXI/UART/core-manager) are not yet
-        auto-scanned here. Each entry: ``{type, name, core_id, chain, base_addr,
+        restores chain 1). When the connected chain is a core manager, the
+        manager and its other slots are listed too, each with its ``instance``.
+        Bridges are not scanned here; the ``discover`` command scans every
+        chain. Each entry: ``{type, name, core_id, chain, base_addr,
         version_major, version_minor, info}``.
         """
         cores: list[Dict[str, Any]] = []
@@ -170,12 +174,40 @@ class RpcServer:
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
                 "base_addr": 0,
+                "instance": analyzer.instance,
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
                 "info": ela,
             })
 
+        # A core manager on the connected chain: list it and its other slots.
+        # The manager block is read only once 0x0000 has answered as an ELA
+        # or EIO: the session may be on a bridge chain, where 0xF000 is a
+        # burst command.
+        slots: list[Dict[str, Any]] = []
+        try:
+            transport = analyzer.transport
+            if (
+                register_pipe_identity(transport, analyzer.bscan_chain) is not None
+                and analyzer._behind_manager()  # noqa: SLF001
+            ):
+                slots = discover_cores(
+                    transport, chains=(analyzer.bscan_chain,), bridges=False
+                )
+        except Exception:
+            slots = []
+        for entry in slots:
+            if (
+                ela is not None
+                and entry["type"] in ("ela", "axi_mon")
+                and entry["instance"] == analyzer.instance
+            ):
+                continue
+            cores.append(entry)
+
         eio = self._eio
+        if eio is None and any(e["type"] == "eio" for e in slots):
+            eio = False  # the manager's EIO slots are listed above
         if eio is None:
             transport = analyzer.transport
             try:
@@ -186,7 +218,7 @@ class RpcServer:
                 transport.invalidate_manager_instance_cache()
             except Exception:
                 pass
-        if eio is not None:
+        if eio:
             cores.append({
                 "type": "eio",
                 "name": _CORE_NAMES.get(eio.core_id, "Embedded I/O"),
@@ -825,6 +857,25 @@ class RpcServer:
 
         if cmd == "list_cores":
             return self._ok(cores=self._list_cores(analyzer))
+
+        if cmd == "discover":
+            # Every fcapz core on the session, chain by chain: register cores
+            # (ELA, EIO, core manager slots, AXI monitor) and the bridges.
+            # `chains` narrows the sweep; the session's chain is restored.
+            raw = req.get("chains")
+            try:
+                found = discover_cores(
+                    analyzer.transport,
+                    chains=tuple(int(c) for c in raw) if raw else None,
+                    bridges=bool(req.get("bridges", True)),
+                )
+            finally:
+                try:
+                    analyzer.transport.select_chain(analyzer.bscan_chain)
+                except NotImplementedError:
+                    pass
+                analyzer.transport.invalidate_manager_instance_cache()
+            return self._ok(cores=found)
 
         if cmd == "axi_mon_probe":
             # Detect an AXI monitor and return its geometry + the bundled

@@ -328,6 +328,12 @@ Use this when the host should stay connected for subsidiary BSCAN cores
 (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
 not present the `'LA'` core id.  JTAG/transport errors still propagate.
 
+Unlike `probe`, this can switch a core manager's slot.  When the
+analyzer has no slot of its own (`instance` is `None`) and the chain
+is a manager whose active slot is not an ELA, for instance an EIO left
+selected, it selects the manager's first ELA slot and keeps it, so
+`instance` is set afterwards.
+
 #### `Analyzer.probe`
 
 ```python
@@ -519,8 +525,12 @@ before it is trusted, and written only when it differs.  Call under
 Raises `ValueError` for a negative slot and `RuntimeError` when a
 core manager answers on *chain* but does not take the slot (out of
 range, or still refusing after `MANAGER_SELECT_ATTEMPTS`
-writes).  A chain with no manager never reads the slot back; it is
-remembered as standalone and not written again.
+writes).  The first time it meets a chain it reads `0x0000` and then
+the manager VERSION, and writes nothing unless both answer: an
+`MGR_ACTIVE` write is the reset command of an EJTAG-AXI bridge (see
+`register_pipe_identity`).  A chain with an fcapz core but no
+manager is remembered as standalone and not written; a chain with
+neither is left alone and checked again next time.
 
 #### `Transport.invalidate_manager_instance_cache`
 
@@ -624,6 +634,16 @@ Subclasses that support multi-chain access must override this.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `Transport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `Transport.raw_dr_scan`
 
@@ -743,6 +763,16 @@ select_chain(chain: int) -> None
 ```
 
 Select BSCANE2 USER chain for subsequent register accesses.
+
+#### `OpenOcdTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `OpenOcdTransport.raw_dr_scan`
 
@@ -903,6 +933,16 @@ select_chain(chain: int) -> None
 ```
 
 Select BSCANE2 USER chain for subsequent register accesses.
+
+#### `XilinxHwServerTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `XilinxHwServerTransport.raw_dr_scan`
 
@@ -1099,6 +1139,7 @@ CLOSE_TERM_SEC = 2.0
 CLOSE_KILL_SEC = 2.0
 CLOSE_JOIN_SEC = 1.0
 CLOSE_CONTEND_SEC = 0.5
+DISCOVERY_INSTANCES = (1, 2, 3, 4, 5, 6, 7, 8)
 ```
 
 #### `QuartusStpTransport.connect`
@@ -1150,6 +1191,16 @@ Subclasses that support multi-chain access must override this.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `QuartusStpTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `QuartusStpTransport.raw_dr_scan`
 
@@ -1689,6 +1740,32 @@ AxiMonitorError
 Subclass of `RuntimeError`.
 
 Raised when an AXI monitor is required but absent or unsupported.
+
+## `fcapz.discovery`
+
+### `discover_cores`
+
+```python
+discover_cores(
+    transport: Transport,
+    *,
+    chains: Optional[Iterable[int]] = None,
+    bridges: bool = True,
+) -> List[Dict[str, Any]]
+```
+
+List every fcapz core reachable on an open *transport*.
+
+*chains* defaults to `fcapz.transport.Transport.discovery_chains`.
+Each entry is `{type, name, core_id, chain, base_addr, instance,
+version_major, version_minor, info}`, where `type` is `"ela"`,
+`"axi_mon"`, `"eio"`, `"manager"`, `"ejtag_uart"`,
+`"ejtag_axi"` or `"unknown"` (a manager slot of another core type),
+and `instance` is the manager slot or `None`.  A manager's active slot
+is left as it was found.  Set *bridges* to `False` to skip the bridge
+identity reads on chains no register core answered.  Chains the transport
+cannot select, such as a missing `sld_virtual_jtag` instance, are
+skipped; connection errors propagate.  Chain 1 is selected on return.
 
 ## `fcapz.eio`
 
