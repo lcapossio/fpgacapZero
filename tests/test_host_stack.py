@@ -1338,6 +1338,55 @@ class ManagerSlotStrictnessTests(unittest.TestCase):
         self.assertEqual(ElaManager(t).probe()["num_slots"], 300)
 
 
+class RpcSharedEioTests(unittest.TestCase):
+    """An EIO on a core-manager slot must share the analyzer's transport:
+    two transports would each cache ACTIVE and race the hub (BUG-222)."""
+
+    def _server(self):
+        from fcapz.rpc import RpcServer
+
+        hub = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID])
+        hub._slots[1] = {0x0000: _expected_eio_version_reg(), 0x0004: 8, 0x0008: 8}
+        hub.closed = 0
+
+        def close():
+            hub.closed += 1
+
+        hub.close = close
+        built: list = []
+
+        def build(req):
+            if not built:
+                built.append(hub)
+                return hub
+            other = FakeVioTransport()
+            built.append(other)
+            return other
+
+        server = RpcServer()
+        server._build_transport = build  # type: ignore[method-assign]
+        return server, hub, built
+
+    def test_managed_eio_uses_the_analyzer_transport(self):
+        server, hub, built = self._server()
+        self.assertTrue(server.handle({"cmd": "connect", "chain": 1})["ok"])
+        reply = server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual((reply["in_w"], reply["out_w"]), (8, 8))
+        self.assertEqual(built, [hub])
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+        server.handle({"cmd": "eio_close"})
+        self.assertEqual(hub.closed, 0)  # the analyzer's session stays open
+        server.handle({"cmd": "close"})
+        self.assertEqual(hub.closed, 1)
+
+    def test_unmanaged_eio_gets_its_own_transport(self):
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        server.handle({"cmd": "eio_connect", "chain": 3})
+        self.assertEqual(len(built), 2)
+        self.assertIsNot(built[1], hub)
+
+
 class ManagedDataChainBurstTests(unittest.TestCase):
     """A core manager bursts on its own chain, so behind a transport whose
     two-chain burst targets a separate data chain a managed slot reads through

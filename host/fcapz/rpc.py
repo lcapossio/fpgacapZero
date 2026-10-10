@@ -86,6 +86,9 @@ class RpcServer:
     ):
         self._analyzer: Analyzer | None = None
         self._eio: EioController | None = None
+        # True when the EIO borrows the analyzer's transport (a core-manager
+        # slot): dropping it must not close the analyzer's session.
+        self._eio_shared = False
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
@@ -107,6 +110,14 @@ class RpcServer:
             raise RuntimeError("not connected")
         return self._analyzer
 
+    def _drop_eio(self) -> None:
+        """Forget the EIO session, closing its transport only if it owns one."""
+        eio, shared = self._eio, self._eio_shared
+        self._eio = None
+        self._eio_shared = False
+        if eio is not None and not shared:
+            eio.close()
+
     def _close_all(self) -> None:
         """Full session teardown: analyzer plus any EIO/AXI/UART transports.
 
@@ -124,8 +135,11 @@ class RpcServer:
                 except Exception:
                     pass
 
-        _shut(self._analyzer)
+        if self._eio_shared:
+            self._eio = None  # the analyzer's transport, closed just below
+            self._eio_shared = False
         _shut(self._eio)
+        _shut(self._analyzer)
         _shut(self._axi if self._axi is not None else self._axi_transport)
         _shut(self._uart if self._uart is not None else self._uart_transport)
         self._analyzer = None
@@ -891,18 +905,33 @@ class RpcServer:
             return self._ok(**analyzer.status())
 
         if cmd == "eio_connect":
-            if self._eio is not None:
-                self._eio.close()
+            self._drop_eio()
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            self._eio = EioController(
-                self._build_transport(req),
+            # A core-manager slot shares the hub's ACTIVE register with the
+            # analyzer, so it goes through the analyzer's transport: one lock
+            # and one slot cache.  A second transport would race it.
+            shared = instance is not None and self._analyzer is not None
+            eio = EioController(
+                self._analyzer.transport if shared else self._build_transport(req),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
             )
-            self._eio.connect()
+            try:
+                if shared:
+                    eio.attach()
+                else:
+                    eio.connect()
+            except Exception:
+                if not shared:
+                    try:
+                        eio.close()
+                    except Exception:
+                        pass
+                raise
+            self._eio, self._eio_shared = eio, shared
             return self._ok(
                 in_w=self._eio.in_w,
                 out_w=self._eio.out_w,
@@ -911,9 +940,7 @@ class RpcServer:
             )
 
         if cmd == "eio_discover":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            self._drop_eio()
             transport = self._build_transport(req)
             transport.connect()
             try:
@@ -942,9 +969,7 @@ class RpcServer:
                 raise
 
         if cmd == "eio_close":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            self._drop_eio()
             return self._ok()
 
         if cmd == "eio_read":
