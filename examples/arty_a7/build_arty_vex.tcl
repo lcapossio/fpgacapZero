@@ -63,6 +63,8 @@ set src_list [list \
     $root/rtl/trig_compare.v \
     $root/rtl/fcapz_ela.v \
     $root/rtl/fcapz_core_manager.v \
+    $root/rtl/fcapz_debug_multi_core.v \
+    $root/rtl/fcapz_debug_multi.v \
     $root/rtl/fcapz_debug_multi_xilinx7.v \
     $root/rtl/fcapz_ela_xilinx7.v \
     $root/rtl/jtag_reg_iface.v \
