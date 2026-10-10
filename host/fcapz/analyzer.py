@@ -771,10 +771,11 @@ class Analyzer:
         # Wide, single-chain cores (the 160-bit AXI monitor) keep their timestamp
         # window on the same BSCAN instance as their samples, so the two-chain
         # DATA_CHAIN burst below can never reach it -- read it the same way the
-        # samples were (see _read_data_words).  Gated on sw>32 and the slot's
-        # burst capability to mirror that sample-path decision exactly.
+        # samples were (see _read_data_words).  So does a managed slot behind a
+        # transport whose two-chain burst cannot reach it.  Gated exactly like
+        # that sample-path decision.
         has_burst = self._selected_slot_has_burst()
-        if sw > 32 and has_burst:
+        if (sw > 32 and has_burst) or self._managed_burst_off_chain(has_burst):
             ts_single = getattr(
                 self.transport, "read_timestamp_block_single_chain", None
             )
@@ -801,6 +802,21 @@ class Analyzer:
         else:
             raw = self.transport.read_block(ts_base, ts_word_count)
         return _join_timestamp_words(raw, ts_words_per, mask)
+
+    def _managed_burst_off_chain(self, has_burst: bool) -> bool:
+        """Return whether the transport's two-chain burst would miss this slot.
+
+        A core manager bursts on its own chain (jtag_pipe_iface).  A transport
+        whose ``read_block`` bursts on a separate data chain
+        (:attr:`Transport.burst_on_data_chain`, the USB-Blaster) never reaches
+        it, so a burst-capable managed slot takes the single-chain burst at
+        every sample width, not only the wide ones.
+        """
+        return (
+            has_burst
+            and getattr(self.transport, "burst_on_data_chain", False)
+            and self._behind_manager()
+        )
 
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
@@ -942,7 +958,8 @@ class Analyzer:
         # before the burst-slot question because it holds regardless of how the
         # core is presented (standalone or behind the core manager).
         has_burst = self._selected_slot_has_burst()
-        if sw > 32:
+        managed_off_chain = self._managed_burst_off_chain(has_burst)
+        if sw > 32 or managed_off_chain:
             # A manager slot without burst wiring reads zeros from the shared
             # burst engine, so only the window path is safe there.
             sample_burst = getattr(self.transport, "read_sample_block", None)
@@ -964,7 +981,7 @@ class Analyzer:
                     return words
             # The pipelined word path (fast on hw_server; slow per-word on
             # quartus_stp when its DATA_CHAIN burst can't reach this core).
-            if not has_burst:
+            if not has_burst or managed_off_chain:
                 return self.transport.read_window_block(_ADDR_DATA_BASE, total_words)
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         if has_burst:

@@ -332,6 +332,13 @@ class Transport(ABC):
     #: again: that second toggle the engine cannot miss.
     burst_start_sync: bool = False
 
+    #: True when :meth:`read_block` and ``read_timestamp_block`` burst on a
+    #: separate data chain (the unmanaged two-chain ELA's DATA_CHAIN).  A core
+    #: manager answers bursts only on its own chain, so
+    #: :class:`~fcapz.analyzer.Analyzer` then reads a managed slot through the
+    #: single-chain ``read_sample_block`` / ``read_timestamp_block_single_chain``.
+    burst_on_data_chain: bool = False
+
     def select_chain(self, chain: int) -> None:
         """Select the transport-defined JTAG user chain for later accesses.
 
@@ -667,6 +674,8 @@ class QuartusStpTransport(Transport):
     # fcapz Intel wrappers set sld_ir_width=1 and drive ir_out=0, so the
     # virtual IR value is currently fixed at zero.
     VIRTUAL_IR_VALUE = 0
+    # read_block / read_timestamp_block burst on burst_data_chain.
+    burst_on_data_chain = True
     _SENTINEL = "<<FCAPZ_QUARTUS_STP_DONE>>"
     # close() teardown budget.  The healthy path costs none of it -
     # quartus_stp exits promptly on stdin EOF - and only a wedged process

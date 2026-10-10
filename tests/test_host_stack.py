@@ -1107,6 +1107,112 @@ class AnalyzerTests(unittest.TestCase):
         self.assertTrue(analyzer.probe()["has_wide_trigger"])
 
 
+class DataChainBurstTransport(FakeTransport):
+    """A USB-Blaster-like transport: ``read_block`` and ``read_timestamp_block``
+    burst on a separate data chain, ``read_sample_block`` and
+    ``read_timestamp_block_single_chain`` on the active chain."""
+
+    burst_on_data_chain = True
+
+    def __init__(self, *, sample_w: int, managed: bool, slot_caps: int = 1,
+                 timestamp_w: int = 0, capture_len: int = 3):
+        super().__init__()
+        self.regs[0x000C] = sample_w
+        self.regs[0x001C] = capture_len
+        self.regs[0x00C4] = timestamp_w
+        if managed:
+            self._manager_regs[0xF004] = 3
+            self._manager_regs[0xF010] = 0x7
+            self._manager_regs[0xF014] = 0
+            self._manager_regs[0xF01C] = slot_caps
+        else:
+            del self._manager_regs[0xF000]
+        self.calls: list[tuple] = []
+        self.sample_burst_unavailable = False
+
+    def read_block(self, addr, words):
+        self.calls.append(("read_block", addr, words))
+        return [0x10 + i for i in range(words)]
+
+    def read_window_block(self, addr, words):
+        self.calls.append(("window", addr, words))
+        return [0x20 + i for i in range(words)]
+
+    def read_timestamp_block(self, addr, words, timestamp_width):
+        self.calls.append(("ts_data_chain", addr, words, timestamp_width))
+        return [100 + i for i in range(words)]
+
+    def read_sample_block(self, base_addr, n_samples, sample_width):
+        if self.sample_burst_unavailable:
+            raise BurstUnavailableError("burst readout is off")
+        self.calls.append(("sample_burst", base_addr, n_samples, sample_width))
+        words_per = (sample_width + 31) // 32
+        return [s if w == 0 else 0 for s in range(n_samples) for w in range(words_per)]
+
+    def read_timestamp_block_single_chain(self, base_addr, n_timestamps, timestamp_width):
+        self.calls.append(("ts_burst", base_addr, n_timestamps, timestamp_width))
+        return [200 + i for i in range(n_timestamps)]
+
+
+class ManagedDataChainBurstTests(unittest.TestCase):
+    """A core manager bursts on its own chain, so behind a transport whose
+    two-chain burst targets a separate data chain a managed slot reads through
+    the single-chain burst at every sample width."""
+
+    def _capture(self, transport, sample_w):
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(CaptureConfig(
+            pretrigger=1, posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=7, mask=0xFF),
+            sample_width=sample_w, depth=1024,
+        ))
+        return analyzer.capture(timeout=0.01)
+
+    def test_managed_slot_bursts_on_its_own_chain_at_every_width(self):
+        for sample_w in (8, 24, 32, 64):
+            with self.subTest(sample_w=sample_w):
+                t = DataChainBurstTransport(sample_w=sample_w, managed=True)
+                result = self._capture(t, sample_w)
+                self.assertEqual(t.calls, [("sample_burst", 0x0100, 3, sample_w)])
+                self.assertEqual(result.samples, [0, 1, 2])
+
+    def test_managed_timestamps_burst_on_its_own_chain(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True, timestamp_w=32)
+        result = self._capture(t, 8)
+        self.assertEqual(
+            [c[0] for c in t.calls], ["sample_burst", "ts_burst"]
+        )
+        self.assertEqual(result.timestamps, [200, 201, 202])
+
+    def test_unavailable_managed_burst_reads_the_window_not_the_data_chain(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True)
+        t.sample_burst_unavailable = True
+        result = self._capture(t, 8)
+        self.assertEqual(t.calls, [("window", 0x0100, 3)])
+        self.assertEqual(result.samples, [0x20, 0x21, 0x22])
+
+    def test_managed_slot_without_burst_reads_the_window(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True, slot_caps=0)
+        self._capture(t, 8)
+        self.assertNotIn("sample_burst", [c[0] for c in t.calls])
+        self.assertNotIn("read_block", [c[0] for c in t.calls])
+
+    def test_standalone_ela_keeps_the_data_chain_burst(self):
+        t = DataChainBurstTransport(sample_w=8, managed=False, timestamp_w=32)
+        result = self._capture(t, 8)
+        self.assertEqual(
+            [c[0] for c in t.calls], ["read_block", "ts_data_chain"]
+        )
+        self.assertEqual(result.samples, [0x10, 0x11, 0x12])
+
+    def test_same_chain_transport_keeps_read_block_for_a_managed_slot(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True)
+        t.burst_on_data_chain = False  # hw_server single-chain burst
+        self._capture(t, 8)
+        self.assertEqual(t.calls, [("read_block", 0x0100, 3)])
+
+
 class SequencerTests(unittest.TestCase):
     """Tests for trigger sequencer register writes via configure()."""
 

@@ -505,6 +505,26 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
         self.assertEqual(t.last_script.count("-length 49"), 1)
 
+    def test_read_sample_block_single_chain_packs_narrow_samples_at_their_width(self):
+        # A managed 24-bit ELA: ten samples per 256-bit scan at 24-bit offsets
+        # (jtag_pipe_iface), so twelve samples take two scans after the prime.
+        samples = [0xA00000 + i for i in range(12)]
+        scans = [0, 0]
+        for i, s in enumerate(samples):
+            scans[i // 10] |= s << (24 * (i % 10))
+        payload = " ".join(["0" * 256] + [f"{v:0256b}" for v in scans])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(1)  # the manager's instance
+        self.assertEqual(t.read_sample_block(0x0100, len(samples), 24), samples)
+        self.assertNotIn("-instance_index 2", t.last_script)
+        self.assertEqual(t.last_script.count("-length 256"), 3)
+
     def test_read_sample_block_single_chain_short_reply_is_an_integrity_error(self):
         # Prime scan plus one sample scan, but two samples requested.
         payload = " ".join(["0" * 256, "1" * 256])
