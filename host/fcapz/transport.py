@@ -199,6 +199,11 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
         )
 
 
+#: ACTIVE writes :meth:`Transport.select_manager_instance_cached` makes before
+#: it stops confirming a slot switch (see there).
+MANAGER_SELECT_ATTEMPTS = 3
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -250,7 +255,16 @@ class Transport(ABC):
         key = (int(chain), int(instance))
         if self.__dict__.get("_fcapz_manager_active_cache") == key:
             return
-        self.write_reg(active_addr, int(instance))
+        # The manager ignores an ACTIVE write while its burst engine loads.
+        # After a burst the pipe preloads once more, at the next scan's
+        # capture, for ~256 / SAMPLE_W TCKs, so a switch straight after a
+        # narrow (SAMPLE_W <= 5) burst can be dropped.  Read the slot back and
+        # write again: two rounds outlast the longest preload.  A design with
+        # no manager never reads the slot back; it is cached as before.
+        for _ in range(MANAGER_SELECT_ATTEMPTS):
+            self.write_reg(active_addr, int(instance))
+            if int(self.read_reg(active_addr)) == int(instance):
+                break
         self.__dict__["_fcapz_manager_active_cache"] = key
 
     def invalidate_manager_instance_cache(self) -> None:

@@ -1154,6 +1154,45 @@ class DataChainBurstTransport(FakeTransport):
         return [200 + i for i in range(n_timestamps)]
 
 
+class ManagerSelectConfirmTests(unittest.TestCase):
+    """A manager drops an ACTIVE write while its burst engine still loads,
+    which happens right after a narrow burst; the host reads the slot back."""
+
+    class _DroppingTransport(FakeTransport):
+        def __init__(self, drops: int):
+            super().__init__()
+            self.drops = drops
+            self.active_writes: list[int] = []
+
+        def write_reg(self, addr, value):
+            if addr == 0xF008:
+                self.active_writes.append(int(value))
+                if self.drops:
+                    self.drops -= 1
+                    return
+            super().write_reg(addr, value)
+
+    def test_dropped_switch_is_written_again(self):
+        t = self._DroppingTransport(drops=2)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [1, 1, 1])
+        self.assertEqual(t.read_reg(0xF008), 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)  # cached now
+        self.assertEqual(len(t.active_writes), 3)
+
+    def test_switch_that_lands_is_written_once(self):
+        t = self._DroppingTransport(drops=0)
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(t.active_writes, [2])
+
+    def test_design_without_a_manager_gives_up_and_caches(self):
+        # A slot selected on a standalone core: ACTIVE never reads back.
+        t = self._DroppingTransport(drops=99)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [1, 1, 1])
+
+
 class ManagedDataChainBurstTests(unittest.TestCase):
     """A core manager bursts on its own chain, so behind a transport whose
     two-chain burst targets a separate data chain a managed slot reads through
