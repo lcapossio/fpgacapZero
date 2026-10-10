@@ -155,9 +155,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to 2 instead of following `EIO_EN` and `NUM_ELAS` like the Verilog, and
   rejected `NUM_ELAS=0`. Both HDLs now agree, and an EIO-only hub elaborates.
 
-- **Core manager — Verilator width warnings.** The replicated per-slot
-  parameter defaults are now built from 32-bit slices, which clears
-  `WIDTHCONCAT` at every parameter set.
+- **Core manager — sized parameter overrides and width warnings.** The
+  replicated per-slot defaults now widen each scalar to 32 bits before
+  replicating it. A sized override such as `.SAMPLE_W(8'd8)` used to pack as
+  8-bit fields, so with two or more ELA slots the per-slot widths and depths
+  were wrong and elaboration failed. This also clears Verilator `WIDTHCONCAT`.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
