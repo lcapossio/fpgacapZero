@@ -47,6 +47,7 @@
     "burst_start_ptr":{ "direction": "output", "width": "log2(DEPTH)","description": "Circular buffer start pointer for burst" }
   },
   "files": [
+    "rtl/fcapz_version.vh",
     "rtl/fcapz_ela.v",
     "rtl/fcapz_core_manager.v",
     "rtl/fcapz_debug_multi_core.v",

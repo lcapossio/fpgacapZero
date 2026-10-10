@@ -13,7 +13,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RTL = ROOT / "rtl"
 
 # Vendor primitives are not RTL sources; their simulation stubs stand in.
 STUBS = {
@@ -31,14 +30,24 @@ class CoreManifestTests(unittest.TestCase):
         missing = [str(s) for s in sources if not s.exists()]
         self.assertEqual(missing, [], "core.json lists files that do not exist")
         with tempfile.TemporaryDirectory(prefix="core-manifest-") as tmpdir:
+            # Stage only the manifest's files, so a missing header or module
+            # cannot be found elsewhere in the repository.
+            staged = Path(tmpdir) / "src"
+            for rel in manifest["files"]:
+                dest = staged / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / rel, dest)
+            include_dirs = sorted({str((staged / rel).parent) for rel in manifest["files"]})
+            verilog = [str(staged / rel) for rel in manifest["files"] if rel.endswith(".v")]
             for vendor, stub in STUBS.items():
                 top = f"fcapz_debug_multi_{vendor}"
                 with self.subTest(top=top):
                     self.assertIn(f"rtl/{top}.v", manifest["files"])
                     result = subprocess.run(
-                        ["iverilog", "-g2012", "-I", str(RTL), "-s", top,
-                         "-o", str(Path(tmpdir) / f"{vendor}.vvp"), str(stub)]
-                        + [str(s) for s in sources],
+                        ["iverilog", "-g2012", "-s", top,
+                         "-o", str(Path(tmpdir) / f"{vendor}.vvp")]
+                        + [arg for d in include_dirs for arg in ("-I", d)]
+                        + [str(stub)] + verilog,
                         capture_output=True,
                         text=True,
                     )
