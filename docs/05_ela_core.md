@@ -465,17 +465,24 @@ Packaged vendor shells (all share the parameter and port list shown above):
 | `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | USER chain 1..4 |
 | `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `sld_instance_index` |
 
-Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  To bring
-the hub to another vendor, write a shell that instantiates that vendor's
-`jtag_tap_<vendor>` and `fcapz_debug_multi`; the manager, slots and pipe are
-already covered by the shared simulation and parity checks.  The lower-level
+Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  A new
+vendor needs only a shell when its `jtag_tap_<vendor>` presents the same single
+`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel` interface, as the ECP5 and
+PolarFire wrappers do; the manager, slots and pipe are already covered by the
+shared simulation and parity checks, but that TAP's CAPTURE/UPDATE timing still
+needs a board test.  Gowin's TAP has separate `shift_in`/`shift_out` strobes,
+which the shared pipe does not take, so a Gowin hub needs its own adapter: a
+register-only one can drive `fcapz_debug_multi_core` with `BURST_EN=0`, and
+every slot is then read through its register window.  UltraScale reuses the
+Xilinx 7 TAP code and has no board test yet.  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
 `fcapz_ela` slots to custom plumbing yourself.
 
 On Intel the hub reads bursts back through its own virtual JTAG instance.  The
 USB-Blaster transport normally reads ELA bursts from a separate data instance,
 so the host sends a managed slot's burst to the hub's instance instead; this is
-automatic.  The DE25-Nano `manager` variant
+automatic, as it is for a Xilinx session opened with `single_chain_burst=False`
+(`--two-chain-burst`).  The DE25-Nano `manager` variant
 (`python examples/de25_nano/build.py --variant manager`) is the hardware
 reference: two ELAs and two EIOs on instance 1, EJTAG-AXI on instance 4.
 
@@ -516,7 +523,11 @@ Fast 256-bit burst readout is available only for managed ELA slots whose
 `SAMPLE_W`, `DEPTH`, `TIMESTAMP_W`, and `NUM_SEGMENTS` match the wrapper's
 max/default burst-pipe shape.  Heterogeneous slots still work through the
 normal 49-bit DATA window; the host checks the manager descriptor and falls
-back automatically.
+back automatically.  Such a slot is readable only through that window, so
+elaboration fails if it sets `USER1_DATA_EN=0` or if its DATA and timestamp
+window, `0x0100 + DEPTH * (ceil(SAMPLE_W/32) + ceil(TIMESTAMP_W/32)) * 4`,
+runs past the manager registers at `0xF000` (about 15k words).  `BURST_W` must
+stay 256, the host's burst scan width.
 
 Manager registers:
 
@@ -524,7 +535,7 @@ Manager registers:
 |---|---|
 | `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
-| `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. A `BURST_PTR` write binds the burst to the active slot; a later `MGR_ACTIVE` write, even one during a burst, moves register accesses only, and the burst stays on its owner until the next `BURST_PTR` write. Writes of a slot at or past `MGR_COUNT` are ignored. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
 | `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
@@ -551,16 +562,20 @@ ela1 = Analyzer(transport, instance=1)
 Multiple `Analyzer` objects can share one transport session; each analyzer
 re-selects its configured manager slot before probe, configure, arm, status
 polling, and readback. The host reads `MGR_ACTIVE` back after each switch and
-retries the write if the slot did not change, since a switch that follows a
-burst can be dropped while the pipe refills. Do not run captures from two Python threads against
-the same transport at the same time. The transport serializes low-level I/O,
-but capture workflows still share FPGA JTAG bandwidth and should be sequenced
-deliberately.
+raises when a manager does not take the slot, or the slot is past
+`MGR_COUNT`.  It writes up to three times first: bitstreams built before this
+release drop a switch that lands while the pipe refills after a burst.
+Moving an `Analyzer` to another slot with `select_instance()` drops its capture
+configuration, so call `configure()` again.  Do not run captures from two
+Python threads against the same transport at the same time. The transport
+serializes low-level I/O, but capture workflows still share FPGA JTAG bandwidth
+and should be sequenced deliberately.
 
-The first manager implementation assumes homogeneous burst shape across slots
-(`SAMPLE_W`, `TIMESTAMP_W`, and `DEPTH` match). If we need heterogeneous ELAs,
-the manager should grow per-slot metadata and mux to a maximum-width burst
-pipe, or we should group different shapes under separate manager instances.
+`MGR_ACTIVE` is state in the hub, not in the host, so one host session should
+own a hub at a time.  Inside one process, share one transport: the GUI and the
+RPC server already route a managed EIO through the analyzer's transport.  Two
+processes driving the same hub at once (two CLI runs, or the GUI and a script)
+can switch the slot under each other.
 
 Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
 Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected

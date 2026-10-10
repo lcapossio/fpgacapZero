@@ -86,6 +86,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Formal parity — vector parameters.** `sim/run_formal_hdl_parity.py`
   accepts bit-string parameters (such as a per-slot burst mask), and a
   manifest without a `formal` section is checked for interface parity only.
+
+- **Core manager — slots the host cannot read fail elaboration.** A slot off
+  the burst engine's shape is read only through its register window, so a
+  design now fails elaboration when such a slot sets `USER1_DATA_EN=0`, or when
+  its DATA and timestamp window runs past the manager registers at `0xF000`
+  (about 15k words). `BURST_W` other than 256 is rejected too. These designs
+  built before but could not be read back. Both HDLs.
+
+- **Host — manager slot selection fails loudly.** Selecting a slot past
+  `MGR_COUNT`, a negative slot, or one the manager does not take now raises
+  instead of leaving the previous slot selected. `slot_info()` checks the
+  range and confirms `MGR_DESC_INDEX`; `probe_all()` uses the descriptors to
+  skip non-ELA slots and reports an ELA slot that does not answer. Moving an
+  `Analyzer` to another slot with `select_instance()` drops its capture
+  configuration, so call `configure()` again. A manager with more than 256
+  slots is detected.
   The manager proof now also runs with a mixed burst mask.
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
@@ -148,7 +164,34 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   manager ignores an `MGR_ACTIVE` write while that refill runs. With narrow
   samples (1-5 bits) the refill outlasted the scan, so the next analyzer kept
   talking to the previous slot. The host now reads `MGR_ACTIVE` back after each
-  switch and writes it again, up to three times.
+  switch and writes it again, up to three times. The manager now takes that
+  write once a burst owner is bound (see the next entry), so on a new bitstream
+  the first write lands; the host loop stays for older bitstreams.
+
+- **Core manager — a slot switch could move a pending burst.** Each time the
+  burst engine started loading, the manager rebound the burst to the active
+  slot, so an `MGR_ACTIVE` write between the `BURST_PTR` write and the burst
+  read the new slot's memory from the old slot's pointer. The `BURST_PTR` write
+  now binds the owner until the next one; a burst with no `BURST_PTR` write
+  since reset still binds the active slot once. The host's sequence never hit
+  this, but custom plumbing on `fcapz_core_manager` could. Both HDLs.
+
+- **Host — bursts of 24-, 26-, 27- or 31-bit samples unpacked wrong.** Both
+  the hw_server and USB-Blaster transports unpacked a burst at
+  `256 // (256 // SAMPLE_W)` bits per sample, wider than the packing whenever
+  `SAMPLE_W` does not divide 256, so each sample picked up bits of the next
+  one. They now unpack at `SAMPLE_W`, read for every burst, so a
+  slot switch cannot leave the previous slot's width behind.
+
+- **Host — two-chain Xilinx sessions sent managed bursts to USER2.** With
+  `single_chain_burst=False` (`--two-chain-burst`) every burst went to USER2,
+  which a core manager does not answer. Managed slots now burst on the hub's
+  own chain, as on the USB-Blaster.
+
+- **RPC — a managed EIO raced the analyzer.** `eio_connect` with a manager
+  slot opened a second transport, whose cached active slot went stale when the
+  analyzer switched slots. It now shares the analyzer's transport, and
+  `eio_close` leaves that session open.
 
 - **Core manager — VHDL defaults and EIO-only builds.** The VHDL
   `fcapz_debug_multi_xilinx7` defaulted `NUM_EIOS` to 1 and `ELA_PORT_COUNT`
