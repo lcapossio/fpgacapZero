@@ -105,3 +105,66 @@ class DebugMultiParamCheckTests(unittest.TestCase):
                         self.assertNotIn("fcapz_debug_multi:", output, output)
                     else:
                         self.assertIn(f"fcapz_debug_multi: {expected}", output, output)
+
+
+SIZED_HARNESS = """`timescale 1ns/1ps
+module sized_top;
+    fcapz_debug_multi_{vendor} #(
+        .NUM_ELAS({n}), .EIO_EN(1), .SAMPLE_W(8'd8), .DEPTH(11'd1024),
+        .TIMESTAMP_W(6'd32), .EIO_IN_W(4'd8), .EIO_OUT_W(4'd8)
+    ) dut (
+        .ela_sample_clk({{{n}{{1'b0}}}}), .ela_sample_rst({{{n}{{1'b0}}}}),
+        .ela_trigger_in({{{n}{{1'b0}}}})
+    );
+    initial begin
+        #1 $display("SLOTS %h %h %h %h", dut.ELA_SAMPLE_WS, dut.ELA_DEPTHS,
+                    dut.ELA_TIMESTAMP_WS, dut.EIO_IN_WS);
+        $finish;
+    end
+endmodule
+"""
+
+SHELL_TAPS = {
+    "xilinx7": [RTL / "jtag_tap" / "jtag_tap_xilinx7.v", ROOT / "sim" / "bscane2_stub.v"],
+    "xilinxus": [
+        RTL / "jtag_tap" / "jtag_tap_xilinxus.v",
+        RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+        ROOT / "sim" / "bscane2_stub.v",
+    ],
+    "intel": [RTL / "jtag_tap" / "jtag_tap_intel.v", ROOT / "sim" / "sld_virtual_jtag_stub.v"],
+}
+
+
+@unittest.skipUnless(shutil.which("iverilog"), "iverilog not on PATH")
+@unittest.skipUnless(shutil.which("vvp"), "vvp not on PATH")
+class DebugMultiSizedOverrideTests(unittest.TestCase):
+    """Sized scalar overrides (``.SAMPLE_W(8'd8)``) still fill 32-bit slots."""
+
+    def test_sized_scalars_replicate_into_32_bit_slots(self):
+        layers = [s for s in SOURCES if "jtag_tap" not in s.parts and s.parent != ROOT / "sim"]
+        layers = [s for s in layers if s.name != "fcapz_debug_multi_xilinx7.v"]
+        with tempfile.TemporaryDirectory(prefix="debug-multi-sized-") as tmpdir:
+            for vendor, taps in SHELL_TAPS.items():
+                for n in (1, 2):
+                    with self.subTest(vendor=vendor, num_elas=n):
+                        top = Path(tmpdir) / f"{vendor}{n}.v"
+                        top.write_text(SIZED_HARNESS.format(vendor=vendor, n=n), encoding="utf-8")
+                        vvp = Path(tmpdir) / f"{vendor}{n}.vvp"
+                        sources = [RTL / f"fcapz_debug_multi_{vendor}.v", *layers, *taps]
+                        compile_result = subprocess.run(
+                            ["iverilog", "-g2012", "-I", str(RTL), "-s", "sized_top",
+                             "-o", str(vvp), str(top)] + [str(s) for s in sources],
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            compile_result.returncode, 0,
+                            f"iverilog compilation failed:\n{compile_result.stderr}",
+                        )
+                        sim = subprocess.run(
+                            ["vvp", "-n", str(vvp)], capture_output=True, text=True, timeout=120
+                        )
+                        expected = "SLOTS {} {} {} 00000008".format(
+                            "00000008" * n, "00000400" * n, "00000020" * n
+                        )
+                        self.assertIn(expected, sim.stdout, sim.stdout + sim.stderr)
