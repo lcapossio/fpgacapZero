@@ -20,7 +20,7 @@ from .analyzer import (
     discover_boards,
 )
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
-from .eio import EIO_CORE_ID, EioController, discover_eio
+from .eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
@@ -1160,9 +1160,7 @@ class RpcServer:
             try:
                 chains = req.get("chains")
                 chains = (
-                    [int(c) for c in chains]
-                    if chains
-                    else sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+                    [int(c) for c in chains] if chains else default_eio_chains(transport)
                 )
                 eio = discover_eio(transport, chains=chains)
                 if eio is None:

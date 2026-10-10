@@ -259,6 +259,19 @@ class EioController:
         return f"EioController(in_w={self.in_w}, out_w={self.out_w})"
 
 
+# Transports without an IR table address Intel virtual-JTAG instances. The
+# fcapz Intel wrappers put the ELA/EIO on 1-3 and the EJTAG bridges on 4
+# (AXI) and 5 (UART), whose different DR protocol must not see stray scans.
+_INSTANCE_SCAN = (1, 2, 3)
+
+
+def default_eio_chains(transport: Transport) -> list[int]:
+    """The chains to probe for an EIO when the caller names none: the
+    transport's IR-table chains, else the Intel wrappers' ELA/EIO instances."""
+    table = getattr(transport, "ir_table", None)
+    return sorted(table) if table else list(_INSTANCE_SCAN)
+
+
 def discover_eio(
     transport: Transport,
     *,

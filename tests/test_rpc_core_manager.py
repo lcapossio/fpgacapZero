@@ -273,6 +273,17 @@ class CoreManagerSessionTests(unittest.TestCase):
         r = self.srv.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [3]})
         self.assertEqual((r["chain"], r["instance"]), (3, None))
 
+    def test_eio_discover_without_an_ir_table_scans_the_instances(self):
+        # The DE25 shape: Quartus virtual JTAG has no IR table, the ELA is
+        # instance 1 and the EIO instance 3 (BUG-219).
+        self.board.manager_chain = None
+        self.board.direct[1] = _plain_ela(0x77)
+        self.board.direct[3] = self.board._eio()  # noqa: SLF001
+        self.connect()
+        r = self.srv.handle({"cmd": "eio_discover", "backend": "usb_blaster"})
+        self.assertEqual((r["chain"], r["instance"]), (3, None))
+        self.assertEqual(self.srv.handle({"cmd": "eio_read"})["value"], 0x5A)
+
     def test_rebind_to_the_current_chain_keeps_the_slot(self):
         self.connect(instance=1)
         r = self.srv.handle({"cmd": "rebind", "chain": 1})

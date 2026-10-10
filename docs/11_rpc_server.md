@@ -547,8 +547,11 @@ is refused, and the error lists its EIO slots.
 Find the EIO without knowing where it sits. On the session's board, core-manager
 EIO slots are tried first, on any chain the session can scan (and attached as
 with `instance` above); otherwise
-the server opens its own connection and tries each chain in the IR table at
-base addresses `0x0000` and `0x8000`.
+the server opens its own connection and tries each chain in `"chains"` at
+base addresses `0x0000` and `0x8000`. Without `"chains"` it tries every chain
+in the transport's IR table, or, on `usb_blaster` (no IR table), virtual-JTAG
+instances 1-3, where the Intel wrappers put the ELA and EIO; the bridges on 4
+and 5 are left alone.
 
 ```json
 {"cmd": "eio_discover", "backend": "hw_server", "port": 3121, "tap": "xc7a100t"}

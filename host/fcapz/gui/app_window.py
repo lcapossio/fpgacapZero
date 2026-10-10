@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
-from ..eio import EIO_CORE_ID, EioController, discover_eio
+from ..eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
 from .branding import GUI_DISPLAY_TITLE
@@ -1226,8 +1226,9 @@ class MainWindow(QMainWindow):
     def _discover_eio(self, transport, eio_slots) -> EioController | None:
         """Probe known locations for the EIO core; never raise into the UI."""
         try:
-            chains = sorted(getattr(transport, "ir_table", {}).keys()) or [1]
-            return discover_eio(transport, chains=chains, instances=eio_slots or None)
+            return discover_eio(
+                transport, chains=default_eio_chains(transport), instances=eio_slots or None
+            )
         except Exception:  # noqa: BLE001 - discovery must not break the UI
             _log.exception("EIO discovery failed")
             return None
