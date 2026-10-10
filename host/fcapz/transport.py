@@ -221,6 +221,33 @@ MANAGER_SELECT_ATTEMPTS = 3
 # VERSION[15:0] of a core manager at 0xF000 (ASCII "CM").
 _CORE_MANAGER_ID = 0x434D
 
+#: VERSION[15:0] at ``0x0000`` of the cores that speak the 49-bit register
+#: protocol: an ELA (``"LA"``) or an EIO (``"IO"``).  A core manager presents
+#: its active slot there.
+REGISTER_PIPE_CORE_IDS = (0x4C41, 0x494F)
+
+
+def register_pipe_identity(transport: "Transport", chain: int) -> int | None:
+    """Return VERSION at ``0x0000`` on *chain* if an fcapz register core answers.
+
+    Returns ``None`` when the chain answers anything else.  Only ``0x0000`` is
+    read.  A read frame for an address below ``0x2000`` puts command 0 (NOP) in
+    the command field of the EJTAG-AXI and EJTAG-UART bridges, so this is safe
+    on a chain nobody has identified.  Higher addresses are not: a read of
+    ``0xF000`` is a burst-data command on the bridge, and a write of
+    ``0xF008`` is its reset.  Read anything else only after this returns a
+    value.  Raises the transport's error for a chain it cannot select, such as
+    a missing ``sld_virtual_jtag`` instance.
+    """
+    with transport.transaction_lock():
+        try:
+            transport.select_chain(int(chain))
+        except NotImplementedError:
+            if int(chain) != 1:
+                raise
+        version = int(transport.read_reg(0x0000))
+    return version if (version & 0xFFFF) in REGISTER_PIPE_CORE_IDS else None
+
 
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
@@ -274,8 +301,12 @@ class Transport(ABC):
         Raises ``ValueError`` for a negative slot and ``RuntimeError`` when a
         core manager answers on *chain* but does not take the slot (out of
         range, or still refusing after :data:`MANAGER_SELECT_ATTEMPTS`
-        writes).  A chain with no manager never reads the slot back; it is
-        remembered as standalone and not written again.
+        writes).  The first time it meets a chain it reads ``0x0000`` and then
+        the manager VERSION, and writes nothing unless both answer: an
+        ``MGR_ACTIVE`` write is the reset command of an EJTAG-AXI bridge (see
+        :func:`register_pipe_identity`).  A chain with an fcapz core but no
+        manager is remembered as standalone and not written; a chain with
+        neither is left alone and checked again next time.
         """
         chain = int(chain)
         instance = int(instance)
@@ -284,6 +315,15 @@ class Transport(ABC):
         standalone = self.__dict__.setdefault("_fcapz_manager_standalone_chains", set())
         if chain in standalone:
             return
+        managers = self.__dict__.setdefault("_fcapz_manager_chains", set())
+        base = active_addr & 0xFF00
+        if chain not in managers:
+            if (int(self.read_reg(0x0000)) & 0xFFFF) not in REGISTER_PIPE_CORE_IDS:
+                return
+            if (int(self.read_reg(base)) & 0xFFFF) != _CORE_MANAGER_ID:
+                standalone.add(chain)
+                return
+            managers.add(chain)
         cached = self.__dict__.get("_fcapz_manager_active_cache")
         if cached == (chain, instance) and int(self.read_reg(active_addr)) == instance:
             return
@@ -299,10 +339,6 @@ class Transport(ABC):
                 self.__dict__["_fcapz_manager_active_cache"] = (chain, instance)
                 return
         self.__dict__.pop("_fcapz_manager_active_cache", None)
-        base = active_addr & 0xFF00
-        if (int(self.read_reg(base)) & 0xFFFF) != _CORE_MANAGER_ID:
-            standalone.add(chain)
-            return
         count = int(self.read_reg(base + 0x4))
         detail = (
             f"it has {count} slot(s)"
@@ -317,6 +353,7 @@ class Transport(ABC):
         """Forget the cached core-manager active slot selection."""
         self.__dict__.pop("_fcapz_manager_active_cache", None)
         self.__dict__.pop("_fcapz_manager_standalone_chains", None)
+        self.__dict__.pop("_fcapz_manager_chains", None)
 
     @abstractmethod
     def connect(self) -> None:
@@ -415,6 +452,13 @@ class Transport(ABC):
         single fixed chain.
         """
         raise NotImplementedError
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        """Chains :func:`~fcapz.discovery.discover_cores` looks at by default.
+
+        USER1-4 here; transports narrow it to the chains they can select.
+        """
+        return (1, 2, 3, 4)
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan of *width* bits, shifting in *bits*.
@@ -583,6 +627,9 @@ class OpenOcdTransport(Transport):
         if chain not in self.ir_table:
             raise ValueError(f"chain {chain} not in ir_table {self.ir_table}")
         self._active_chain = chain
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        return tuple(sorted(self.ir_table))
 
     def _select_ir(self, chain: int | None = None) -> None:
         ir = self.ir_table[chain if chain is not None else self._active_chain]
@@ -1071,6 +1118,13 @@ class QuartusStpTransport(Transport):
         if chain < 1:
             raise ValueError(f"virtual JTAG instance index must be >= 1, got {chain}")
         self._active_chain = chain
+
+    #: ``sld_virtual_jtag`` instance indices discovery tries.  A missing
+    #: instance fails its first scan without shifting anything.
+    DISCOVERY_INSTANCES = tuple(range(1, 9))
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        return self.DISCOVERY_INSTANCES
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         if width < 1:
@@ -2249,6 +2303,11 @@ class XilinxHwServerTransport(Transport):
         elif chain not in self.ir_table:
             raise ValueError(f"chain {chain} not in ir_table {self.ir_table}")
         self._active_chain = chain
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        if self.use_register_ir:
+            return (1, 2, 3, 4)
+        return tuple(sorted(self.ir_table))
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via XSDB jtag sequence (irscan + drscan)."""

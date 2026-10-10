@@ -1189,14 +1189,34 @@ class ManagerSelectConfirmTests(unittest.TestCase):
         t.select_manager_instance_cached(1, 0xF008, 2)
         self.assertEqual(t.active_writes, [2])
 
-    def test_design_without_a_manager_gives_up_and_caches(self):
-        # A slot selected on a standalone core: ACTIVE never reads back and
-        # 0xF000 is not a manager, so the chain is remembered as standalone.
+    def test_design_without_a_manager_is_cached_and_never_written(self):
+        # A slot selected on a standalone core: 0x0000 answers "LA" but
+        # 0xF000 is not a manager, so the chain is remembered as standalone
+        # before any ACTIVE write.
         t = self._DroppingTransport(drops=99)
         t._manager_regs[0xF000] = 0x1234
+        reads: list[int] = []
+        orig_read = t.read_reg
+        t.read_reg = lambda addr: (reads.append(addr), orig_read(addr))[1]
         t.select_manager_instance_cached(1, 0xF008, 1)
         t.select_manager_instance_cached(1, 0xF008, 1)
-        self.assertEqual(t.active_writes, [1, 1, 1])
+        self.assertEqual(t.active_writes, [])
+        self.assertEqual(reads, [0x0000, 0xF000])
+
+    def test_chain_without_a_register_core_is_never_written(self):
+        # A bridge chain: 0x0000 does not answer "LA" or "IO".  Only that
+        # read is sent -- 0xF000 is a burst command on the EJTAG-AXI bridge
+        # and an ACTIVE write its reset -- and the chain is checked again on
+        # the next call, since a hub held in reset reads 0 too.
+        t = self._DroppingTransport(drops=0)
+        t.regs[0x0000] = 0
+        reads: list[int] = []
+        orig_read = t.read_reg
+        t.read_reg = lambda addr: (reads.append(addr), orig_read(addr))[1]
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [])
+        self.assertEqual(reads, [0x0000, 0x0000])
 
     def test_manager_that_never_takes_the_slot_raises(self):
         t = self._DroppingTransport(drops=99)
@@ -1247,7 +1267,9 @@ class _SlottedManagerTransport(FakeTransport):
         self._manager_regs.update({0xF004: len(cores), 0xF010: 0x3, 0xF014: 0})
         self._cores = cores
         self._desc_sticks = desc_sticks
-        self._slots = [dict(self.regs) if c == ELA_CORE_ID else {} for c in cores]
+        self._slots = [
+            dict(self.regs) if c == ELA_CORE_ID else {0x0000: c} for c in cores
+        ]
 
     def read_reg(self, addr: int) -> int:
         idx = self._manager_regs[0xF014]
@@ -2043,6 +2065,7 @@ class EioControllerTests(unittest.TestCase):
             orig_write(addr, value)
 
         t.write_reg = traced_write  # type: ignore[method-assign]
+        t.regs[0xF000] = 0x434D  # manager VERSION ("CM")
         eio = EioController(t, chain=1, instance=2)
 
         eio.connect()

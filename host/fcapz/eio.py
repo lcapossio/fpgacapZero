@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
-from .transport import Transport
+from .transport import Transport, register_pipe_identity
 
 # ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
 # a valid bitstream.  Same encoding scheme as the ELA core's "LA" magic.
@@ -273,9 +273,12 @@ def discover_eio(
     chain 1), then every ``chains`` x ``bases`` combination, attaching the
     first location whose identity register reads the EIO magic (``0x494F``).
 
-    ``EioController.attach`` only reads and restores chain 1, so probing a
-    wrong location is harmless — non-matches (wrong chain, ELA magic,
-    unprogrammed FPGA) raise and are skipped.  Returns the attached
+    ``EioController.attach`` only reads and restores chain 1, and
+    non-matches (wrong chain, ELA magic, unprogrammed FPGA) raise and are
+    skipped.  A base other than ``0x0000`` is read only on a chain whose
+    ``0x0000`` answered as an fcapz register core: on an EJTAG-AXI bridge a
+    read of ``0x8000`` is an AXI read command (see
+    :func:`~fcapz.transport.register_pipe_identity`).  Returns the attached
     controller, or ``None`` if no EIO core responds anywhere.
     """
     candidates: list[dict[str, int]] = []
@@ -285,11 +288,28 @@ def discover_eio(
         {"chain": int(c), "base_addr": int(b)} for c in chains for b in bases
     )
     seen: set[tuple] = set()
+    register_chains: dict[int, bool] = {}
     for kw in candidates:
         key = tuple(sorted(kw.items()))
         if key in seen:
             continue
         seen.add(key)
+        chain = kw["chain"]
+        if kw.get("base_addr", 0) != 0:
+            if chain not in register_chains:
+                try:
+                    register_chains[chain] = (
+                        register_pipe_identity(transport, chain) is not None
+                    )
+                except (OSError, RuntimeError, ValueError, NotImplementedError):
+                    register_chains[chain] = False
+                finally:
+                    try:
+                        transport.select_chain(1)
+                    except (NotImplementedError, ValueError):
+                        pass
+            if not register_chains[chain]:
+                continue
         eio = EioController(transport, **kw)
         try:
             eio.attach()
