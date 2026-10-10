@@ -39,6 +39,13 @@
             "SAMPLE_W": 4,
             "TIMESTAMP_W": 4,
             "DEPTH": 16
+          },
+          {
+            "NUM_SLOTS": 3,
+            "SAMPLE_W": 4,
+            "TIMESTAMP_W": 4,
+            "DEPTH": 16,
+            "SLOT_HAS_BURST": "011"
           }
         ]
       }

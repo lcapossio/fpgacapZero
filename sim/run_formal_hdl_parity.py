@@ -15,7 +15,8 @@ This is the repo-local Layer 0/Layer 2 slice of the translateHDL parity ladder:
 
 Manifest files are JSON documents with a ``.yml`` suffix so they stay compatible
 with the translateHDL parity-manifest convention without adding PyYAML as a CI
-dependency.
+dependency.  A manifest without a ``formal`` section is checked at Layer 0
+only.  A parameter value given as a string is a vector's bits, MSB first.
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "jtag_pipe_iface.yml",
     ROOT / "sim" / "parity" / "fcapz_async_fifo.yml",
     ROOT / "sim" / "parity" / "fcapz_core_manager.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_core.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
     ROOT / "sim" / "parity" / "fcapz_axi_mon.yml",
@@ -242,6 +245,16 @@ def check_interface(manifest_path: Path, manifest: dict[str, Any]) -> bool:
     return ok
 
 
+def param_int(value: int | str) -> int:
+    """A manifest parameter as an integer; a string is a vector's bits, MSB first."""
+    return int(value, 2) if isinstance(value, str) else int(value)
+
+
+def ghdl_generic(value: int | str) -> str:
+    # GHDL takes a vector generic override only as a bit string.
+    return value if isinstance(value, str) else str(int(value))
+
+
 def ghdl_synth(
     manifest_path: Path,
     side: dict[str, Any],
@@ -258,7 +271,7 @@ def ghdl_synth(
         )
         if code != 0:
             return False
-    generics = [f"-g{name}={int(value)}" for name, value in params.items()]
+    generics = [f"-g{name}={ghdl_generic(value)}" for name, value in params.items()]
     synth_options = [str(opt) for opt in side.get("synth_options", [])]
     code, output_text = run(
         [
@@ -354,7 +367,7 @@ def yosys_read_verilog(
     joined = " ".join(source.as_posix() for source in sources)
     cmds = [f"read_verilog -sv -defer -I{RTL.as_posix()} {joined}"]
     if params:
-        sets = " ".join(f"-set {name} {int(value)}" for name, value in params.items())
+        sets = " ".join(f"-set {name} {param_int(value)}" for name, value in params.items())
         cmds.append(f"chparam {sets} {side['top']}")
     cmds.append(f"hierarchy -check -top {side['top']}")
     return cmds
@@ -524,7 +537,12 @@ def prove_config(
 def run_manifest(manifest_path: Path) -> bool:
     manifest = load_manifest(manifest_path)
     ok = check_interface(manifest_path, manifest)
-    formal = manifest["formal"]
+    formal = manifest.get("formal")
+    if formal is None:
+        # A composition of cores that each have their own proof; its
+        # behavior is covered by the shared cocotb regression.
+        print(f"[formal-parity] {manifest['name']}: interface only, no proof configured")
+        return ok
     induct_depth = int(formal.get("induct_depth", 20))
     bounded_depth = int(formal.get("bounded_depth", 0))
     yosys = find_tool("yosys", "yowasp-yosys")
