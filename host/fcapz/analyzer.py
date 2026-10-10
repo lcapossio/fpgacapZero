@@ -784,13 +784,15 @@ class Analyzer:
         # transport whose two-chain burst cannot reach it.  Gated exactly like
         # that sample-path decision.
         has_burst = self._selected_slot_has_burst()
-        if (sw > 32 and has_burst) or self._managed_burst_off_chain(has_burst):
+        managed_off_chain = self._managed_burst_off_chain(has_burst)
+        if (sw > 32 and has_burst) or managed_off_chain:
             ts_single = getattr(
                 self.transport, "read_timestamp_block_single_chain", None
             )
             if callable(ts_single):
+                kwargs = {"on_control_chain": True} if managed_off_chain else {}
                 try:
-                    raw = ts_single(ts_base, total, self._hw_timestamp_w)
+                    raw = ts_single(ts_base, total, self._hw_timestamp_w, **kwargs)
                 except BurstUnavailableError as exc:
                     _log.info("timestamp burst unavailable (%s); reading the window", exc)
                 else:
@@ -975,8 +977,9 @@ class Analyzer:
             if sample_burst is not None and has_burst:
                 words_per_sample = (sw + 31) // 32
                 n_samples = total_words // words_per_sample
+                kwargs = {"on_control_chain": True} if managed_off_chain else {}
                 try:
-                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw)
+                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw, **kwargs)
                 except BurstUnavailableError as exc:
                     # Raised before any scan: this session has no burst for
                     # the request.  A burst that ran and failed propagates.

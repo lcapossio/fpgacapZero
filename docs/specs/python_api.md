@@ -977,13 +977,32 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `XilinxHwServerTransport.burst_on_data_chain`
+
+```python
+@property
+burst_on_data_chain -> bool
+```
+
+A two-chain session (`single_chain_burst=False`) bursts on USER2,
+which a core manager never answers.
+
 #### `XilinxHwServerTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via the burst DR.
+
+With *on_control_chain* the scans stay on the control chain even on a
+two-chain session: a core manager answers bursts only there.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample, the flat layout `Analyzer.capture()` reassembles.  This is the
@@ -1003,6 +1022,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = False,
 ) -> List[int]
 ```
 
@@ -1223,10 +1244,19 @@ Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
 #### `QuartusStpTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = True,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via single-chain burst on the active chain.
+
+*on_control_chain* is accepted for the shared signature; this reader
+always bursts on the active chain.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample — the exact flat layout `Analyzer.capture()` reassembles.
@@ -1253,6 +1283,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = True,
 ) -> List[int]
 ```
 

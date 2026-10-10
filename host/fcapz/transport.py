@@ -397,7 +397,8 @@ class Transport(ABC):
     #: separate data chain (the unmanaged two-chain ELA's DATA_CHAIN).  A core
     #: manager answers bursts only on its own chain, so
     #: :class:`~fcapz.analyzer.Analyzer` then reads a managed slot through the
-    #: single-chain ``read_sample_block`` / ``read_timestamp_block_single_chain``.
+    #: single-chain ``read_sample_block`` / ``read_timestamp_block_single_chain``,
+    #: passing ``on_control_chain=True`` so they burst on the active chain.
     burst_on_data_chain: bool = False
 
     def select_chain(self, chain: int) -> None:
@@ -1313,9 +1314,13 @@ class QuartusStpTransport(Transport):
         return values
 
     def read_sample_block(
-        self, base_addr: int, n_samples: int, sample_width: int
+        self, base_addr: int, n_samples: int, sample_width: int,
+        *, on_control_chain: bool = True,
     ) -> List[int]:
         """Read *n_samples* whole samples via single-chain burst on the active chain.
+
+        *on_control_chain* is accepted for the shared signature; this reader
+        always bursts on the active chain.
 
         Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
         sample — the exact flat layout ``Analyzer.capture()`` reassembles.
@@ -1350,7 +1355,8 @@ class QuartusStpTransport(Transport):
         return words
 
     def read_timestamp_block_single_chain(
-        self, base_addr: int, n_timestamps: int, timestamp_width: int
+        self, base_addr: int, n_timestamps: int, timestamp_width: int,
+        *, on_control_chain: bool = True,
     ) -> List[int]:
         """Read per-sample timestamps via single-chain burst on the active chain.
 
@@ -2349,6 +2355,12 @@ class XilinxHwServerTransport(Transport):
         sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
         return sw < 1 or sw <= 32
 
+    @property
+    def burst_on_data_chain(self) -> bool:  # type: ignore[override]
+        """A two-chain session (``single_chain_burst=False``) bursts on USER2,
+        which a core manager never answers."""
+        return not self.single_chain_burst
+
     def _burst_sample_width(self) -> int:
         """Bits per sample in a burst scan: the selected core's SAMPLE_W, read
         for every burst so a slot switch cannot leave a stale width."""
@@ -2360,8 +2372,12 @@ class XilinxHwServerTransport(Transport):
         *,
         timestamp: bool = False,
         element_width: int | None = None,
+        on_control_chain: bool = False,
     ) -> List[int]:
         """Read *words* samples via the 256-bit burst DR.
+
+        The scans go on the control chain on a single-chain session or with
+        *on_control_chain* (a core manager), otherwise on USER2.
 
         The BURST_PTR write, the staging-fill idle and every 256-bit DR scan
         are ONE ``jtag sequence``, run once.  Nothing else can reach the chain
@@ -2396,7 +2412,9 @@ class XilinxHwServerTransport(Transport):
         user_total = self._user_dr_bits(self.DR_BITS)
         ctrl_chain = self._active_chain
         ir1_cmd = self._irshift_tcl("_bq", chain=ctrl_chain)
-        burst_chain = ctrl_chain if self.single_chain_burst else 2
+        burst_chain = (
+            ctrl_chain if (self.single_chain_burst or on_control_chain) else 2
+        )
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         # The BURST_PTR write ends in an explicit UPDATE-DR, like every
@@ -2464,9 +2482,13 @@ class XilinxHwServerTransport(Transport):
         return ["; ".join(s) for s in sends]
 
     def read_sample_block(
-        self, base_addr: int, n_samples: int, sample_width: int
+        self, base_addr: int, n_samples: int, sample_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
         """Read *n_samples* whole samples via the burst DR.
+
+        With *on_control_chain* the scans stay on the control chain even on a
+        two-chain session: a core manager answers bursts only there.
 
         Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
         sample, the flat layout ``Analyzer.capture()`` reassembles.  This is the
@@ -2492,7 +2514,9 @@ class XilinxHwServerTransport(Transport):
             )
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
-        samples = self._burst_with_hint(n_samples, element_width=sample_width)
+        samples = self._burst_with_hint(
+            n_samples, element_width=sample_width, on_control_chain=on_control_chain
+        )
         if len(samples) != n_samples:
             raise BurstIntegrityError(
                 f"sample burst returned {len(samples)} samples, expected {n_samples}"
@@ -2505,7 +2529,8 @@ class XilinxHwServerTransport(Transport):
         return words
 
     def read_timestamp_block_single_chain(
-        self, base_addr: int, n_timestamps: int, timestamp_width: int
+        self, base_addr: int, n_timestamps: int, timestamp_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
         """Read one timestamp per captured sample via the burst DR.
 
@@ -2521,7 +2546,8 @@ class XilinxHwServerTransport(Transport):
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
         values = self._burst_with_hint(
-            n_timestamps, timestamp=True, element_width=timestamp_width
+            n_timestamps, timestamp=True, element_width=timestamp_width,
+            on_control_chain=on_control_chain,
         )
         if len(values) != n_timestamps:
             raise BurstIntegrityError(

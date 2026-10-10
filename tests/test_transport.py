@@ -1953,6 +1953,38 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
+    def test_two_chain_session_reports_bursts_on_a_data_chain(self):
+        self.assertTrue(XilinxHwServerTransport(single_chain_burst=False).burst_on_data_chain)
+        self.assertFalse(XilinxHwServerTransport().burst_on_data_chain)
+
+    def test_two_chain_session_bursts_a_managed_slot_on_its_own_chain(self):
+        """A core manager on USER3 answers bursts only on USER3, so a
+        two-chain session must not move the scans to USER2."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t.select_chain(3)
+        t._burst_sample_width = lambda: 8
+        sent: list[str] = []
+        stale = self._burst_token([0] * 4, 64)
+        fresh = self._burst_token([0x1234_5678_9ABC_DEF0, 1, 2, 3], 64)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+        user2 = t._irshift_tcl("_bq", chain=2)
+        user3 = t._irshift_tcl("_bq", chain=3)
+
+        words = t.read_sample_block(0x0100, 4, 64, on_control_chain=True)
+
+        self.assertEqual(words[:2], [0x9ABC_DEF0, 0x1234_5678])
+        self.assertNotIn(user2, sent[0])
+        self.assertEqual(sent[0].count(user3), 3)  # BURST_PTR + 2 scans
+
+        sent.clear()
+        t.read_sample_block(0x0100, 4, 64)
+        self.assertIn(user2, sent[0])  # an unmanaged two-chain core: USER2
+
     def test_single_chain_burst_uses_active_chain_for_wide_scans(self):
         """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()

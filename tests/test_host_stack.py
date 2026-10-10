@@ -1128,6 +1128,7 @@ class DataChainBurstTransport(FakeTransport):
         else:
             del self._manager_regs[0xF000]
         self.calls: list[tuple] = []
+        self.on_control_chain: list[bool] = []
         self.sample_burst_unavailable = False
 
     def read_block(self, addr, words):
@@ -1142,15 +1143,18 @@ class DataChainBurstTransport(FakeTransport):
         self.calls.append(("ts_data_chain", addr, words, timestamp_width))
         return [100 + i for i in range(words)]
 
-    def read_sample_block(self, base_addr, n_samples, sample_width):
+    def read_sample_block(self, base_addr, n_samples, sample_width, *, on_control_chain=False):
         if self.sample_burst_unavailable:
             raise BurstUnavailableError("burst readout is off")
         self.calls.append(("sample_burst", base_addr, n_samples, sample_width))
+        self.on_control_chain.append(on_control_chain)
         words_per = (sample_width + 31) // 32
         return [s if w == 0 else 0 for s in range(n_samples) for w in range(words_per)]
 
-    def read_timestamp_block_single_chain(self, base_addr, n_timestamps, timestamp_width):
+    def read_timestamp_block_single_chain(self, base_addr, n_timestamps, timestamp_width,
+                                          *, on_control_chain=False):
         self.calls.append(("ts_burst", base_addr, n_timestamps, timestamp_width))
+        self.on_control_chain.append(on_control_chain)
         return [200 + i for i in range(n_timestamps)]
 
 
@@ -1364,6 +1368,12 @@ class ManagedDataChainBurstTests(unittest.TestCase):
             [c[0] for c in t.calls], ["sample_burst", "ts_burst"]
         )
         self.assertEqual(result.timestamps, [200, 201, 202])
+        self.assertEqual(t.on_control_chain, [True, True])
+
+    def test_unmanaged_wide_core_keeps_the_transport_routing(self):
+        t = DataChainBurstTransport(sample_w=64, managed=False, timestamp_w=32)
+        self._capture(t, 64)
+        self.assertEqual(t.on_control_chain, [False, False])
 
     def test_unavailable_managed_burst_reads_the_window_not_the_data_chain(self):
         t = DataChainBurstTransport(sample_w=8, managed=True)
