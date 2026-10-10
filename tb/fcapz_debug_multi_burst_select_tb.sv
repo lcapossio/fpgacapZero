@@ -6,10 +6,11 @@
 // A core-manager slot switch right after a burst. The pipe stays in burst
 // mode until a register command updates, so the switch scan's capture starts
 // one more preload (~256/SAMPLE_W TCKs). With narrow samples that preload
-// still runs when the ACTIVE write commits, and the manager ignores the
-// write. The host confirms the selection by reading ACTIVE back and writes
-// again (Transport.select_manager_instance_cached); this bench checks that
-// its three attempts land the switch at every width.
+// still runs when the ACTIVE write commits. The burst owner is bound by then,
+// so the manager takes the write: the first one must land at every width.
+// The host still confirms by reading ACTIVE back and writing again
+// (Transport.select_manager_instance_cached), which older bitstreams that
+// dropped the write during a preload need; the loop below mirrors it.
 
 module fcapz_debug_multi_burst_select_tb #(
     parameter SAMPLE_W = 4
@@ -84,6 +85,7 @@ module fcapz_debug_multi_burst_select_tb #(
         $display("SAMPLE_W=%0d: first ACTIVE write %s, %0d write(s)", SAMPLE_W,
                  first_write_landed ? "landed" : "ignored", writes);
         check("ACTIVE switch lands after a burst", active == 32'd1);
+        check("first ACTIVE write after a burst lands", first_write_landed == 1);
 
         $display("=== fcapz_debug_multi_burst_select SAMPLE_W=%0d: %0d passed, %0d failed ===",
                  SAMPLE_W, pass_count, fail_count);

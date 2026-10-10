@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""A core-manager slot switch straight after a burst lands within the host's
-confirmed-select attempts at every sample width (tb/fcapz_debug_multi_burst_select_tb.sv)."""
+"""A core-manager slot switch straight after a burst lands on the first ACTIVE
+write at every sample width (tb/fcapz_debug_multi_burst_select_tb.sv).  The
+bench keeps the host's confirmed-select loop, which older bitstreams need."""
 
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ SOURCES = [
     RTL / "fcapz_eio.v",
 ]
 
-# 1 bit: the longest preload; 4: dropped first write; 8: lands first time
+# 1 bit: the longest preload; 4: dropped the first write before BUG-227; 8: short preload
 SAMPLE_WIDTHS = (1, 4, 8)
 
 
@@ -65,3 +66,4 @@ class DebugMultiBurstSelectRtlTests(unittest.TestCase):
                     self.assertEqual(sim.returncode, 0, f"simulation failed:\n{output}")
                     self.assertIn(f"SAMPLE_W={sample_w}: ", output, output)
                     self.assertIn(" 0 failed ===", output, output)
+                    self.assertIn("landed, 1 write(s)", output, output)

@@ -114,14 +114,21 @@ begin
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= '1';
                 burst_start_r <= not burst_start_r;
-            elsif burst_rd_active = '1' and burst_rd_active_d = '0' then
+            elsif burst_rd_active = '1' and burst_rd_active_d = '0' and
+                  burst_owner_valid = '0' then
+                -- A burst with no BURST_PTR write since reset binds the active
+                -- slot once.  Later preloads keep the bound owner: an ACTIVE
+                -- write between bursts must not move the burst to another slot.
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= '1';
             end if;
 
             if jtag_wr_en = '1' then
                 if jtag_addr = ADDR_MGR_ACTIVE then
-                    if requested_idx_valid = '1' and burst_rd_active = '0' then
+                    -- Once an owner is bound the burst mux follows it, not
+                    -- ACTIVE, so a switch during a preload is safe to take.
+                    if requested_idx_valid = '1' and
+                       (burst_owner_valid = '1' or burst_rd_active = '0') then
                         active_idx <= resize(unsigned(jtag_wdata), IDX_W);
                     end if;
                 elsif jtag_addr = ADDR_MGR_DESC_INDEX then

@@ -102,14 +102,19 @@ module fcapz_core_manager #(
                 // Same edge the slot latches its start pointer and toggles
                 // its own flag, so pointer and event reach the pipe together.
                 burst_start_r <= ~burst_start_r;
-            end else if (burst_rd_active && !burst_rd_active_d) begin
+            end else if (burst_rd_active && !burst_rd_active_d && !burst_owner_valid) begin
+                // A burst with no BURST_PTR write since reset binds the active
+                // slot once.  Later preloads keep the bound owner: an ACTIVE
+                // write between bursts must not move the burst to another slot.
                 burst_owner_idx <= active_idx;
                 burst_owner_valid <= 1'b1;
             end
 
             if (jtag_wr_en) begin
                 if (jtag_addr == ADDR_MGR_ACTIVE) begin
-                    if (requested_idx_valid && !burst_rd_active)
+                    // Once an owner is bound the burst mux follows it, not
+                    // ACTIVE, so a switch during a preload is safe to take.
+                    if (requested_idx_valid && (burst_owner_valid || !burst_rd_active))
                         active_idx <= jtag_wdata[IDX_W-1:0];
                 end else if (jtag_addr == ADDR_MGR_DESC_INDEX) begin
                     if (requested_idx_valid)

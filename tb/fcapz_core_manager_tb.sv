@@ -220,6 +220,25 @@ module fcapz_core_manager_case #(
         write_reg(16'hF014, NUM_SLOTS + 1);
         read_reg(16'hF014, NUM_SLOTS - 1, "out-of-range descriptor write NUM_SLOTS+1 ignored");
 
+        // The BURST_PTR write binds the burst owner: an ACTIVE switch before
+        // the burst starts must not move it, and an ACTIVE write while the
+        // bound burst loads is taken.
+        if (NUM_SLOTS >= 2 && SLOT_HAS_BURST[0]) begin
+            write_reg(16'hF008, 0);
+            write_reg(16'h002C, 0);
+            write_reg(16'hF008, 1);
+            read_reg(16'hF008, 1, "ACTIVE switch after BURST_PTR");
+            @(negedge clk);
+            burst_rd_active = 1'b1;
+            @(negedge clk);
+            expect_bits({{(8-NUM_SLOTS){1'b0}}, slot_burst_rd_active}, 8'h01,
+                        "burst stays on the BURST_PTR owner after an ACTIVE switch");
+            write_reg(16'hF008, 0);
+            read_reg(16'hF008, 0, "ACTIVE write lands while the bound burst loads");
+            @(negedge clk);
+            burst_rd_active = 1'b0;
+        end
+
         if (errors == 0) begin
             $display("fcapz_core_manager_tb slots%0d PASS", CASE_ID);
             done = 1'b1;
