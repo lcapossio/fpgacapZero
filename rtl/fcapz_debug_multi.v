@@ -96,6 +96,14 @@ module fcapz_debug_multi #(
     wire burst_timestamp;
     wire [PTR_W-1:0] burst_start_ptr;
 
+    // The host shifts 256-bit burst scans (Transport.BURST_DR_BITS).
+    initial begin
+        if (BURST_W != 256) begin
+            $error("fcapz_debug_multi: BURST_W %0d is not 256, the host burst scan width",
+                   BURST_W);
+        end
+    end
+
     reset_sync u_rst_sync_ctrl (
         .clk(tck),
         .arst(debug_arst),

@@ -98,6 +98,12 @@ architecture rtl of fcapz_debug_multi is
     signal burst_start, burst_timestamp : std_logic;
     signal burst_start_ptr : std_logic_vector(PTR_W - 1 downto 0);
 begin
+    -- The host shifts 256-bit burst scans (Transport.BURST_DR_BITS).
+    assert BURST_W = 256
+        report "fcapz_debug_multi BURST_W " & integer'image(BURST_W) &
+               " is not 256, the host burst scan width"
+        severity failure;
+
     debug_arst <= '1' when ela_sample_rst /= (ela_sample_rst'range => '0') else '0';
 
     u_rst_sync_ctrl : entity work.reset_sync

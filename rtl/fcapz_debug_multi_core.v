@@ -218,6 +218,9 @@ module fcapz_debug_multi_core #(
                 (ELA_PROBE_MUX_W > 0) ? ELA_PROBE_MUX_W : ELA_SAMPLE_W*ELA_NUM_CHANNELS_I;
             localparam integer ELA_PTR_W = $clog2(ELA_DEPTH);
             localparam integer ELA_TS_W_SAFE = (ELA_TIMESTAMP_W > 0) ? ELA_TIMESTAMP_W : 1;
+            // End of the slot's DATA + timestamp register window (fcapz_ela).
+            localparam integer ELA_WINDOW_END = 32'h0100 + ELA_DEPTH *
+                (((ELA_SAMPLE_W + 31) / 32) + ((ELA_TIMESTAMP_W + 31) / 32)) * 4;
             wire [ELA_SAMPLE_W-1:0] ela_burst_rd_data;
             wire [ELA_TS_W_SAFE-1:0] ela_burst_rd_ts_data;
             wire [ELA_PTR_W-1:0] ela_burst_start_ptr;
@@ -238,6 +241,16 @@ module fcapz_debug_multi_core #(
                 if (ELA_PTR_W > PTR_W) begin
                     $error("fcapz_debug_multi: ELA %0d DEPTH %0d exceeds scalar DEPTH %0d",
                            i, ELA_DEPTH, DEPTH);
+                end
+                // Without burst the capture is read only through the register
+                // window, which must exist and stay below the manager's 0xF000.
+                if (!SLOT_HAS_BURST[i] && ELA_USER1_DATA_EN == 0) begin
+                    $error("fcapz_debug_multi: ELA %0d has no burst and USER1_DATA_EN=0, so its capture cannot be read",
+                           i);
+                end
+                if (!SLOT_HAS_BURST[i] && ELA_USER1_DATA_EN != 0 && ELA_WINDOW_END > 32'hF000) begin
+                    $error("fcapz_debug_multi: ELA %0d has no burst and its DATA window ends at 0x%0h, past the manager registers at 0xF000",
+                           i, ELA_WINDOW_END);
                 end
             end
 
