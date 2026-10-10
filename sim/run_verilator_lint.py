@@ -69,6 +69,19 @@ ELA_WRAPPER_SOURCES = (
     RTL / "fcapz_regbus_mux.v",
 )
 
+DEBUG_MULTI_CORE_SOURCES = (
+    *ELA_CORE,
+    *EIO_CORE,
+    RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_debug_multi_core.v",
+)
+
+DEBUG_MULTI_SOURCES = (
+    *DEBUG_MULTI_CORE_SOURCES,
+    RTL / "jtag_pipe_iface.v",
+    RTL / "fcapz_debug_multi.v",
+)
+
 EJTAG_AXI_WRAPPER_SOURCES = (
     RTL / "reset_sync.v",
     RTL / "jtag_pipe_iface.v",
@@ -234,6 +247,47 @@ TARGETS = (
             *ELA_WRAPPER_SOURCES,
             RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
             RTL / "fcapz_ela_xilinx7.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_core",
+        top="fcapz_debug_multi_core",
+        sources=DEBUG_MULTI_CORE_SOURCES,
+    ),
+    LintTarget(
+        name="fcapz_debug_multi",
+        top="fcapz_debug_multi",
+        sources=DEBUG_MULTI_SOURCES,
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_xilinx7",
+        top="fcapz_debug_multi_xilinx7",
+        sources=(
+            SIM / "bscane2_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "fcapz_debug_multi_xilinx7.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_xilinxus",
+        top="fcapz_debug_multi_xilinxus",
+        sources=(
+            SIM / "bscane2_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "jtag_tap" / "jtag_tap_xilinxus.v",
+            RTL / "fcapz_debug_multi_xilinxus.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_intel",
+        top="fcapz_debug_multi_intel",
+        sources=(
+            SIM / "sld_virtual_jtag_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_intel.v",
+            RTL / "fcapz_debug_multi_intel.v",
         ),
     ),
     LintTarget(

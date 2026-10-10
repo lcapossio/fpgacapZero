@@ -50,6 +50,57 @@ _VHDL_ELA_SRC = (
     RTL / "vhdl" / "core" / "fcapz_ela.vhd",
 )
 
+_DEBUG_MULTI_TAP_SRC = {
+    "xilinx7": ((SIM / "bscane2_stub.v", RTL / "jtag_tap" / "jtag_tap_xilinx7.v"),
+                (SIM / "bscane2_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinx7.vhd")),
+    "xilinxus": ((SIM / "bscane2_stub.v", RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+                  RTL / "jtag_tap" / "jtag_tap_xilinxus.v"),
+                 (SIM / "bscane2_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinx7.vhd",
+                  RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinxus.vhd")),
+    "intel": ((SIM / "sld_virtual_jtag_stub.v", RTL / "jtag_tap" / "jtag_tap_intel.v"),
+              (SIM / "sld_virtual_jtag_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_intel.vhd")),
+}
+
+
+def _debug_multi_target(vendor: str) -> Target:
+    """One fcapz_debug_multi_<vendor> shell driven at its TAP primitive's pins."""
+    tap_v, tap_vhdl = _DEBUG_MULTI_TAP_SRC[vendor]
+    return Target(
+        f"fcapz_debug_multi_{vendor}",
+        f"fcapz_debug_multi_{vendor}",
+        (*tap_v,
+         RTL / "reset_sync.v",
+         RTL / "dpram.v",
+         RTL / "trig_compare.v",
+         RTL / "fcapz_ela.v",
+         RTL / "fcapz_eio.v",
+         RTL / "jtag_pipe_iface.v",
+         RTL / "fcapz_core_manager.v",
+         RTL / "fcapz_debug_multi_core.v",
+         RTL / "fcapz_debug_multi.v",
+         RTL / f"fcapz_debug_multi_{vendor}.v"),
+        "fcapz_debug_multi_wrapper",
+        # Default slot shape (tb/cocotb/core_test.py's _DEBUG_MULTI_* constants)
+        # with a nondefault chain. GHDL's top-level overrides do not
+        # re-evaluate dependent generic defaults (ELA_DEPTHS from DEPTH, ...)
+        # and cannot set vector generics, so only CTRL_CHAIN, which nothing
+        # depends on, is overridden.
+        {"CTRL_CHAIN": 3},
+        (*_VHDL_CORE_PKGS,
+         *tap_vhdl,
+         RTL / "vhdl" / "core" / "reset_sync.vhd",
+         RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+         RTL / "vhdl" / "core" / "trig_compare.vhd",
+         RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+         RTL / "vhdl" / "core" / "fcapz_eio.vhd",
+         RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd",
+         RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
+         RTL / "vhdl" / "core" / "fcapz_debug_multi_core.vhd",
+         RTL / "vhdl" / "core" / "fcapz_debug_multi.vhd",
+         RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd"),
+    )
+
+
 TARGETS: tuple[Target, ...] = (
     Target("trig_compare_light", "trig_compare", _TRIG_COMPARE_SRC,
            "trig_compare_light", {"W": 8, "REL_COMPARE": 0},
@@ -192,6 +243,9 @@ TARGETS: tuple[Target, ...] = (
          RTL / "vhdl" / "core" / "fcapz_regbus_mux.vhd",
          RTL / "vhdl" / "fcapz_ela_xilinx7.vhd"),
     ),
+    _debug_multi_target("xilinx7"),
+    _debug_multi_target("xilinxus"),
+    _debug_multi_target("intel"),
     Target(
         "fcapz_async_fifo_equiv",
         "fcapz_async_fifo_equiv_wrap",

@@ -1086,6 +1086,182 @@ async def fcapz_ela_xilinx7_single_chain(dut):
         prev = cur
 
 
+# fcapz_debug_multi_<vendor> shells as the fcapz_debug_multi_* targets in
+# sim/run_cocotb.py build them: default slots (two 8-bit ELAs, DEPTH 1024,
+# one 1-bit EIO) on a nondefault chain.
+_DEBUG_MULTI_CHAIN = 3
+_DEBUG_MULTI_SAMPLE_W = 8
+_DEBUG_MULTI_DEPTH = 1024
+
+
+def _debug_multi_primitive(dut):
+    """Return (primitive, pin names, chain parameter name) for the shell's TAP stub."""
+    vendor = os.environ.get("FCAPZ_COCOTB_TARGET", "").rsplit("_", 1)[-1]
+    if vendor == "intel":
+        # sld_virtual_jtag has no sel; jtag_tap_intel ties it high.
+        pins = dict(tck="tck", tdi="tdi", capture="virtual_state_cdr",
+                    shift="virtual_state_sdr", update="virtual_state_udr", sel=None)
+        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index"
+    pins = dict(tck="TCK", tdi="TDI", capture="CAPTURE", shift="SHIFT",
+                update="UPDATE", sel="SEL")
+    ctrl = dut.u_tap_ctrl.u_tap if vendor == "xilinxus" else dut.u_tap_ctrl
+    return ctrl.u_bscan, pins, "JTAG_CHAIN"
+
+
+@cocotb.test()
+async def fcapz_debug_multi_wrapper(dut):
+    prim, pins, chain_param = _debug_multi_primitive(dut)
+    pin = {role: getattr(prim, name) for role, name in pins.items() if name}
+    intel = pins["sel"] is None
+    rng = random.Random(0x5EED)
+
+    if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
+        assert int(getattr(prim, chain_param).value) == _DEBUG_MULTI_CHAIN
+
+    for role in ("tck", "tdi", "capture", "shift", "update", "sel"):
+        if role in pin:
+            pin[role].value = 0
+    dut.ela_sample_clk.value = 0
+    dut.ela_sample_rst.value = 0b11
+    dut.ela_probe_in.value = 0
+    dut.ela_trigger_in.value = 0
+    dut.eio_probe_in.value = 0
+
+    async def sample_clocks() -> None:
+        # Both ELAs on one clock; ELA0 counts up, ELA1 counts down.
+        up = down = 0
+        while True:
+            dut.ela_sample_clk.value = 0b11
+            await Timer(3, unit="ns")
+            dut.ela_sample_clk.value = 0b00
+            if int(dut.ela_sample_rst.value):
+                up = down = 0
+            else:
+                up = (up + 1) & 0xFF
+                down = (down - 1) & 0xFF
+            dut.ela_probe_in.value = (down << _DEBUG_MULTI_SAMPLE_W) | up
+            await Timer(3, unit="ns")
+
+    async def tck_tick() -> None:
+        pin["tck"].value = 0
+        await Timer(5, unit="ns")
+        pin["tck"].value = 1
+        await Timer(1, unit="ns")
+        pin["tck"].value = 0
+        await Timer(4, unit="ns")
+
+    async def idle(n: int) -> None:
+        # On Intel, TCK keeps running for the other virtual JTAG instances
+        # while this one's states are low; tdi carries their traffic.
+        for role in ("capture", "shift", "update", "sel"):
+            if role in pin:
+                pin[role].value = 0
+        for _ in range(n):
+            pin["tdi"].value = rng.getrandbits(1) if intel else 0
+            await tck_tick()
+        pin["tdi"].value = 0
+
+    async def scan(bits: int, frame: int = 0) -> int:
+        captured = 0
+        if "sel" in pin:
+            pin["sel"].value = 1
+        pin["capture"].value = 1
+        await tck_tick()
+        pin["capture"].value = 0
+        pin["shift"].value = 1
+        for i in range(bits):
+            pin["tdi"].value = (frame >> i) & 1
+            if int(dut.tap_tdo.value):
+                captured |= 1 << i
+            await tck_tick()
+        pin["shift"].value = 0
+        pin["tdi"].value = 0
+        pin["update"].value = 1
+        await tck_tick()
+        pin["update"].value = 0
+        if "sel" in pin:
+            pin["sel"].value = 0
+        return captured
+
+    async def read(addr: int) -> int:
+        await scan(49, make_frame(addr, 0, False))
+        await idle(2)
+        data = await scan(49, make_frame(addr, 0, False)) & 0xFFFF_FFFF
+        await idle(2)
+        return data
+
+    async def write(addr: int, data: int) -> None:
+        await scan(49, make_frame(addr, data, True))
+        await idle(8)
+
+    cocotb.start_soon(sample_clocks())
+    await idle(8)
+    await Timer(60, unit="ns")
+    dut.ela_sample_rst.value = 0
+    await idle(12)
+
+    # Manager identity and slot descriptors
+    assert await read(0xF000) & 0xFFFF == 0x434D
+    assert await read(0xF004) == 3
+    assert await read(0xF010) == 7
+    for slot, (core, burst) in enumerate(((0x4C41, 1), (0x4C41, 1), (0x494F, 0))):
+        await write(0xF014, slot)
+        assert await read(0xF018) == core, f"slot {slot} core id"
+        assert await read(0xF01C) == burst, f"slot {slot} burst capability"
+
+    # Each ELA: capture, then two burst packets, then straight back to the
+    # register path by switching ACTIVE.
+    pretrig, posttrig = 8, 40
+    capture_len = pretrig + posttrig + 1
+    per_packet = 256 // _DEBUG_MULTI_SAMPLE_W
+    for slot, step in ((0, 1), (1, -1)):
+        await write(0xF008, slot)
+        assert await read(0xF008) == slot
+        assert await read(0x000C) == _DEBUG_MULTI_SAMPLE_W
+        await write(0x0014, pretrig)
+        await write(0x0018, posttrig)
+        await write(0x0020, 1)
+        await write(0x0024, 0x80)
+        await write(0x0028, 0xFF)
+        await write(0x0004, 1)
+        status = 0
+        for _ in range(200):
+            await idle(8)
+            status = await read(0x0008)
+            if status & 0x4:
+                break
+        assert status & 0x4, f"slot {slot} never reached DONE"
+        assert await read(0x001C) == capture_len
+
+        await write(0x002C, 0)
+        await idle(160)
+        await scan(256)  # priming scan
+        first = await scan(256)
+        second = await scan(256)
+        samples = [sample_at(first, i) for i in range(per_packet)]
+        samples += [sample_at(second, i) for i in range(capture_len - per_packet)]
+        for i in range(1, capture_len):
+            assert samples[i] == (samples[i - 1] + step) & 0xFF, \
+                f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+
+        await write(0xF008, 1 - slot)
+        assert await read(0xF008) == 1 - slot
+        assert await read(0x0010) == _DEBUG_MULTI_DEPTH
+
+    # EIO slot
+    await write(0xF008, 2)
+    assert await read(0x0004) == 1
+    assert await read(0x0008) == 1
+    for level in (1, 0):
+        await write(0x0100, level)
+        await idle(8)
+        assert int(dut.eio_probe_out.value) == level
+        dut.eio_probe_in.value = level
+        await idle(8)
+        assert await read(0x0010) == level
+
+
 @cocotb.test()
 async def fcapz_async_fifo_equiv(dut):
     cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
