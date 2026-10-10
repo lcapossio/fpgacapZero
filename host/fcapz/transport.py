@@ -181,6 +181,21 @@ class BurstUnavailableError(RuntimeError):
     """
 
 
+def _burst_element_width(sample_w: int, burst_bits: int) -> int:
+    """Bits per sample in a burst scan for a core reporting *sample_w*.
+
+    jtag_burst_read packs ``burst_bits // SAMPLE_W`` samples at a stride of
+    exactly ``SAMPLE_W`` (sample 0 in the low bits), so a width that does not
+    divide the scan leaves unused high bits rather than widening each sample.
+    A width of 0 (no core answering) reads as 8; one wider than the scan is
+    clamped to it.
+    """
+    sample_w = int(sample_w)
+    if sample_w < 1:
+        return 8
+    return min(sample_w, burst_bits)
+
+
 def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
     """Refuse a register-window read of *words* 32-bit words at *addr* that
     would run past *end*.
@@ -1200,14 +1215,10 @@ class QuartusStpTransport(Transport):
         """Declared by the ``burst`` constructor argument, never probed."""
         return self.burst
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def _burst_sample_width(self) -> int:
+        """Bits per sample in a burst scan: the selected core's SAMPLE_W, read
+        for every burst so a slot switch cannot leave a stale width."""
+        return _burst_element_width(self.read_reg(0x000C), self.BURST_DR_BITS)
 
     def _read_block_burst(
         self,
@@ -1221,8 +1232,8 @@ class QuartusStpTransport(Transport):
                 element_width = 32
             per_scan = max(1, self.BURST_DR_BITS // element_width)
         else:
-            per_scan = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // per_scan
+            element_width = self._burst_sample_width()
+            per_scan = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + per_scan - 1) // per_scan
         prime_scans = 1
         ctrl_chain = self._active_chain
@@ -2338,15 +2349,10 @@ class XilinxHwServerTransport(Transport):
         sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
         return sw < 1 or sw <= 32
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def _burst_sample_width(self) -> int:
+        """Bits per sample in a burst scan: the selected core's SAMPLE_W, read
+        for every burst so a slot switch cannot leave a stale width."""
+        return _burst_element_width(self.read_reg_stable(0x000C), self.BURST_DR_BITS)
 
     def _read_block_burst(
         self,
@@ -2370,11 +2376,9 @@ class XilinxHwServerTransport(Transport):
         """
         if timestamp and element_width is None:
             element_width = 32
-        if element_width is not None:
-            sps = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            sps = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // sps
+        if element_width is None:
+            element_width = self._burst_sample_width()
+        sps = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + sps - 1) // sps
         prime_scans = 1
 
@@ -2577,11 +2581,9 @@ class XilinxHwServerTransport(Transport):
         misaligned burst.
         """
         if element_width is None:
-            sps = self._burst_samples_per_scan
-            sw = self.BURST_DR_BITS // sps  # bits per sample
-        else:
-            sw = element_width
-            sps = max(1, self.BURST_DR_BITS // sw)
+            element_width = self._burst_sample_width()
+        sw = element_width
+        sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         burst_offset = self._dr_data_offset()
