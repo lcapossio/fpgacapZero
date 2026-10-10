@@ -71,6 +71,7 @@
     "rtl/fcapz_eio_intel.v",
     "rtl/fcapz_eio_gowin.v",
     "rtl/jtag_tap/jtag_tap_xilinx7.v",
+    "rtl/jtag_tap/jtag_tap_xilinxus.v",
     "rtl/jtag_tap/jtag_tap_ecp5.v",
     "rtl/jtag_tap/jtag_tap_intel.v",
     "rtl/jtag_tap/jtag_tap_gowin.v",
