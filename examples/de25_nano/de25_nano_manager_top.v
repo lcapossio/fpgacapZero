@@ -18,6 +18,9 @@
 //
 // This mirrors the Arty A7 USER1 hub (fcapz_debug_multi_xilinx7): the same
 // vendor-free fcapz_debug_multi layers, with only the TAP shell swapped.
+// Unlike the Arty, the hub sets TLR_RESET_EN: quartus_stp keeps the TAP out
+// of Test-Logic-Reset during a session, so a Test-Logic-Reset here means a
+// new session, and it cancels any burst the last one left open.
 
 module de25_nano_manager_top (
     input  wire       CLOCK1_50,
@@ -84,7 +87,8 @@ module de25_nano_manager_top (
         .DEFAULT_TRIG_EXT(2),
         .CTRL_CHAIN   (1),
         .EIO_IN_W     (8),
-        .EIO_OUT_W    (8)
+        .EIO_OUT_W    (8),
+        .TLR_RESET_EN (1)
     ) u_debug (
         .ela_sample_clk ({CLOCK1_50, CLOCK1_50}),
         .ela_sample_rst ({por_rst, por_rst}),

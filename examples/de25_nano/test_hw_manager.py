@@ -269,6 +269,50 @@ class TestManagedCapture(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestManagerResets(unittest.TestCase):
+    """The reset registers, and no Test-Logic-Reset inside a session."""
+
+    def test_captures_leave_resets_alone(self):
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+        from fcapz.registers import ADDR_MGR_EPOCH, ADDR_MGR_SLOT_EPOCH, ADDR_MGR_TLR_COUNT
+
+        ADDR_MGR_CAPS = 0xF010
+        ADDR_MGR_DESC_INDEX = 0xF014
+        t = _make_transport()
+
+        def regs():
+            with t.transaction_lock():
+                t.select_chain(MANAGER_CHAIN)
+                epochs = []
+                for slot in range(4):
+                    t.write_reg(ADDR_MGR_DESC_INDEX, slot)
+                    epochs.append(t.read_reg(ADDR_MGR_SLOT_EPOCH))
+                return (t.read_reg(ADDR_MGR_CAPS), t.read_reg(ADDR_MGR_EPOCH),
+                        t.read_reg(ADDR_MGR_TLR_COUNT), epochs)
+
+        try:
+            t.connect()
+            caps, epoch, tlr, slot_epochs = regs()
+            # Bits 0-5, plus bit 6: this hub is built with TLR_RESET_EN.
+            self.assertEqual(caps, 0x7F)
+            ela = Analyzer(t, chain=MANAGER_CHAIN, instance=0)
+            for value in (0x30, 0x31, 0x32):
+                ela.configure(CaptureConfig(
+                    pretrigger=4, posttrigger=8,
+                    trigger=TriggerConfig(mode="value_match", value=value, mask=0xFF),
+                    sample_width=8, depth=1024,
+                ))
+                ela.force_idle()
+                ela.arm()
+                result = ela.capture(timeout=5.0)
+                self.assertEqual(result.samples[4] & 0xFF, value)
+            # A Test-Logic-Reset inside the session would cancel bursts.
+            self.assertEqual(regs(), (caps, epoch, tlr, slot_epochs))
+        finally:
+            t.close()
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestManagedEio(unittest.TestCase):
     """EIO slots 2 and 3 behind the hub."""
 
