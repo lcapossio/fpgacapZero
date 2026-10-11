@@ -217,6 +217,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **EIO discovery missed an Intel EIO.** With no chains given, `eio_discover`
+  (RPC) and the desktop GUI's EIO auto-attach tried the transport's IR-table
+  chains, and `usb_blaster` has none, so only instance 1 was tried and the
+  DE25-Nano EIO on instance 3 was never found. They now try instances 1-3.
+
 - **JTAG pipe — a register command after a burst could read stale data.** In
   burst mode, the Capture-DR of every scan starts a preload of the next burst
   word, which runs for `256 / SAMPLE_W + 1` TCK cycles (257 for 1-bit

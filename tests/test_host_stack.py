@@ -22,7 +22,7 @@ from fcapz.analyzer import (
     TriggerConfig,
     expected_ela_version_reg,
 )
-from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
+from fcapz.eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from fcapz.transport import (
     BurstIntegrityError,
     BurstUnavailableError,
@@ -2015,6 +2015,32 @@ class DiscoverEioTests(unittest.TestCase):
         """No EIO anywhere -> None (e.g. EIO_EN=0 bitstream)."""
         t = FakeDiscoveryTransport(eio_chain=9, eio_base=0x0, ir_table={1: 1, 2: 2})
         self.assertIsNone(discover_eio(t, chains=(1, 2)))
+
+    def test_default_chains_follow_the_ir_table(self):
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={4: 4, 1: 1, 3: 3})
+        self.assertEqual(default_eio_chains(t), [1, 3, 4])
+
+    def test_rpc_eio_discover_without_an_ir_table_scans_the_instances(self):
+        """The DE25 shape: Quartus virtual JTAG has no IR table and the EIO is
+        instance 3 (BUG-219)."""
+        from fcapz.rpc import RpcServer
+
+        class VirtualJtag(FakeDiscoveryTransport):
+            def select_chain(self, chain):
+                self._active_chain = chain
+
+        t = VirtualJtag(eio_chain=3, eio_base=0x0, ir_table={})
+        server = RpcServer()
+        server._analyzer = Analyzer(FakeTransport())  # an ELA session is open
+        server._build_transport = lambda req: t  # type: ignore[method-assign]
+        reply = server.handle({"cmd": "eio_discover", "backend": "usb_blaster"})
+        self.assertEqual(reply["chain"], 3)
+
+    def test_default_chains_without_an_ir_table_stop_below_the_bridges(self):
+        """Intel virtual JTAG: ELA/EIO instances 1-3, never the bridges on 4/5."""
+        self.assertEqual(default_eio_chains(object()), [1, 2, 3])
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={})
+        self.assertEqual(default_eio_chains(t), [1, 2, 3])
 
 
 class EioControllerTests(unittest.TestCase):

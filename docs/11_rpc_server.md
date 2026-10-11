@@ -547,6 +547,20 @@ leaves out are the session's, and any it names (`backend`, `host`, `port`,
 `tap`, `hardware`) must match.  A request for another board opens its own
 transport, with the session's values for the fields it leaves out.
 
+#### `eio_discover`
+
+Find the EIO without knowing its chain: the server opens its own connection
+and tries each chain in `"chains"` at base addresses `0x0000` and `0x8000`.
+Without `"chains"` it tries every chain in the transport's IR table, or, on
+`usb_blaster` (no IR table), virtual-JTAG instances 1-3, where the Intel
+wrappers put the ELA and EIO; the bridges on 4 and 5 are left alone.
+
+```json
+{"cmd": "eio_discover", "backend": "usb_blaster", "hardware": "DE25-Nano [USB-1]"}
+```
+
+Response: as `eio_connect`, plus `"discovered": true` and the `base_addr` found.
+
 #### `eio_close`
 
 ```json
