@@ -267,6 +267,49 @@ class TestManagedCapture(unittest.TestCase):
         finally:
             t.close()
 
+    def test_data_offset_moves_the_window(self):
+        """DATA_OFFSET k makes window word i read word i + k, timestamps too."""
+        from fcapz.analyzer import Analyzer, CaptureConfig, TriggerConfig
+
+        ADDR_DATA_BASE = 0x0100
+        ADDR_DATA_OFFSET = 0x00F4
+        ts_first = 1024  # DEPTH words of 8-bit samples, then the timestamps.
+        t = _make_transport()
+        try:
+            t.connect()
+            a = Analyzer(t, chain=MANAGER_CHAIN, instance=0)
+            a.configure(CaptureConfig(
+                pretrigger=4, posttrigger=60,
+                trigger=TriggerConfig(mode="value_match", value=0x50, mask=0xFF),
+                sample_width=8, depth=1024,
+            ))
+            self.assertTrue(a._hw_compare_caps & (1 << 20), hex(a._hw_compare_caps))
+            a.force_idle()
+            a.arm()
+            a.capture(timeout=5.0)
+            with t.transaction_lock():
+                a._select_instance()
+
+                def window(offset, first, n):
+                    t.write_reg(ADDR_DATA_OFFSET, offset)
+                    return [t.read_reg(ADDR_DATA_BASE + 4 * (first + i)) for i in range(n)]
+
+                try:
+                    samples = window(0, 0, 40)
+                    stamps = window(0, ts_first, 40)
+                    # Live data, so a match is not two reads of a constant.
+                    self.assertGreater(len(set(samples)), 1, samples)
+                    self.assertGreater(len(set(stamps)), 1, stamps)
+                    self.assertEqual(window(17, 0, 20), samples[17:37])
+                    self.assertEqual(window(ts_first + 9, 0, 20), stamps[9:29])
+                    self.assertEqual(t.read_reg(ADDR_DATA_OFFSET), ts_first + 9)
+                    self.assertEqual(window(0xFFFF_FFFF, 0, 4), [0, 0, 0, 0])
+                finally:
+                    t.write_reg(ADDR_DATA_OFFSET, 0)
+                self.assertEqual(window(0, 0, 40), samples)
+        finally:
+            t.close()
+
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestManagerResets(unittest.TestCase):
