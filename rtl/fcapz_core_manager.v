@@ -16,7 +16,9 @@
 // pipe's last-seen copy, so it is the pipe's own reset (power-up, or TAP
 // Test-Logic-Reset).  Slots are reset only through their own domains
 // (slot_rst_req); the epoch counters below survive every reset so the host can
-// tell that one happened.
+// tell that one happened.  They count both edges of a reset, so an odd epoch
+// means that reset is held now, and a reset still held when the host looked
+// changes the epoch again on release.
 
 module fcapz_core_manager #(
     parameter NUM_SLOTS = 2,
@@ -200,7 +202,7 @@ module fcapz_core_manager #(
             burst_start_r <= ~burst_start_r;
     end
 
-    // One-cycle reset requests; the epochs count each reset's release.
+    // One-cycle reset requests; the epochs count both edges of each reset.
     always @(posedge jtag_clk) begin
         mgr_rst_req <= ctrl_wr && jtag_wdata[0];
         for (i = 0; i < NUM_SLOTS; i = i + 1)
@@ -208,11 +210,11 @@ module fcapz_core_manager #(
                 && (jtag_wdata[2] || (jtag_wdata[1] && desc_idx == i[IDX_W-1:0]));
 
         mgr_rst_d <= mgr_rst;
-        if (mgr_rst_d && !mgr_rst)
+        if (mgr_rst_d != mgr_rst)
             mgr_epoch <= mgr_epoch + 16'd1;
         slot_rst_d <= slot_rst;
         for (i = 0; i < NUM_SLOTS; i = i + 1)
-            if (slot_rst_d[i] && !slot_rst[i])
+            if (slot_rst_d[i] != slot_rst[i])
                 slot_epoch[i*16 +: 16] <= slot_epoch[i*16 +: 16] + 16'd1;
         tlr_d <= tlr;
         if (tlr && !tlr_d)

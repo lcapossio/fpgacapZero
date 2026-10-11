@@ -209,7 +209,8 @@ begin
         end if;
     end process;
 
-    -- One-cycle reset requests; the epochs count each reset's release.
+    -- One-cycle reset requests; the epochs count both edges of each reset,
+    -- so an odd epoch means that reset is held now.
     p_counters : process(jtag_clk)
     begin
         if rising_edge(jtag_clk) then
@@ -224,12 +225,12 @@ begin
             end loop;
 
             mgr_rst_d <= mgr_rst;
-            if mgr_rst_d = '1' and mgr_rst = '0' then
+            if mgr_rst_d /= mgr_rst then
                 mgr_epoch <= mgr_epoch + 1;
             end if;
             slot_rst_d <= slot_rst;
             for i in 0 to NUM_SLOTS - 1 loop
-                if slot_rst_d(i) = '1' and slot_rst(i) = '0' then
+                if slot_rst_d(i) /= slot_rst(i) then
                     slot_epoch((i + 1) * 16 - 1 downto i * 16) <= std_logic_vector(
                         unsigned(slot_epoch((i + 1) * 16 - 1 downto i * 16)) + 1);
                 end if;

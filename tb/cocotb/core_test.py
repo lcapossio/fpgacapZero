@@ -1054,13 +1054,15 @@ async def fcapz_core_manager_resets(dut):
     assert await manager_read(dut, 0xF024) == 0xA5A5_0001
     await manager_write(dut, 0xF008, 1)
 
-    # A slot's own reset counts in its epoch only.
+    # A slot's own reset counts in its epoch only, at both edges: odd while
+    # it is held (BUG-235).
     dut.slot_rst.value = 0b010
     await FallingEdge(dut.jtag_clk)
     await FallingEdge(dut.jtag_clk)
+    assert [await slot_epoch(s) for s in range(3)] == [base[0], base[1] + 1, base[2]]
     dut.slot_rst.value = 0
     await FallingEdge(dut.jtag_clk)
-    assert [await slot_epoch(s) for s in range(3)] == [base[0], base[1] + 1, base[2]]
+    assert [await slot_epoch(s) for s in range(3)] == [base[0], base[1] + 2, base[2]]
 
     # MGR_CTRL: bit 1 requests DESC_INDEX's slot, bit 2 every slot, one
     # cycle each; MGR_CTRL reads 0.
@@ -1083,7 +1085,7 @@ async def fcapz_core_manager_resets(dut):
     await manager_write(dut, 0xF028, 0x1)
     await FallingEdge(dut.jtag_clk)
     await FallingEdge(dut.jtag_clk)
-    assert await manager_read(dut, 0xF020) == epoch + 1
+    assert await manager_read(dut, 0xF020) == epoch + 2
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xF014) == 0
     assert await manager_read(dut, 0xF024) == 0
@@ -1108,8 +1110,8 @@ async def fcapz_core_manager_resets(dut):
     assert (header >> 32) & 0xFFFF_FFFF == 0xB
     assert (header >> 64) & 1 == 1
     assert (header >> 65) & 0x7FFF == 0
-    assert (header >> 80) & 0xFFFF == epoch + 1
-    assert (header >> 96) & 0xFFFF == base[1] + 1
+    assert (header >> 80) & 0xFFFF == epoch + 2
+    assert (header >> 96) & 0xFFFF == base[1] + 2
     assert (header >> 112) & 0xFFFF_FFFF == 0x1234
     assert (header >> 144) & 0xFFFF == 8
 
@@ -1122,7 +1124,7 @@ async def fcapz_core_manager_resets(dut):
     assert int(dut.burst_start.value) == 0
     assert await manager_read(dut, 0xF008) == 1
     assert await manager_read(dut, 0xF024) == 0x1234
-    assert await manager_read(dut, 0xF020) == epoch + 1
+    assert await manager_read(dut, 0xF020) == epoch + 2
 
 
 @cocotb.test()
@@ -1540,7 +1542,7 @@ async def fcapz_debug_multi_resets(dut):
     assert await tb.read(0xF024) == 0xC0FFEE, "MGR_OWNER lost to a slot reset"
     assert await tb.read(0xF020) == mgr_epoch, "a slot reset reset the hub"
     assert int(dut.eio_probe_out.value) == 1, "EIO output lost to a slot reset"
-    assert await tb.slot_epochs() == [e0 + 1, e1, e2]
+    assert await tb.slot_epochs() == [e0 + 2, e1, e2]
     tb.hold[1] = None
     # ELA 0 captures again after its reset.
     capture_len = await tb.capture(0)
@@ -1553,14 +1555,14 @@ async def fcapz_debug_multi_resets(dut):
     await tb.idle(40)
     assert await tb.read(0xF028) == 0
     assert await tb.read(0x0008) & 0x7 == 0, "ELA 1 not reset by MGR_CTRL bit 1"
-    assert await tb.slot_epochs() == [e0 + 1, e1 + 1, e2]
+    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2]
     assert await tb.read(0xF008) == 1
     assert int(dut.eio_probe_out.value) == 1
 
     # Bit 2 resets every slot, the EIO outputs included, but not the hub.
     await tb.write(0xF028, 0x4)
     await tb.idle(40)
-    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2 + 1]
+    assert await tb.slot_epochs() == [e0 + 4, e1 + 4, e2 + 2]
     assert int(dut.eio_probe_out.value) == 0
     assert await tb.read(0xF008) == 1
     assert await tb.read(0xF020) == mgr_epoch
@@ -1571,12 +1573,12 @@ async def fcapz_debug_multi_resets(dut):
     await tb.write(0xF014, 1)
     await tb.write(0xF028, 0x1)
     await tb.idle(8)
-    assert await tb.read(0xF020) == mgr_epoch + 1
+    assert await tb.read(0xF020) == mgr_epoch + 2
     assert await tb.read(0xF008) == 0
     assert await tb.read(0xF014) == 0
     assert await tb.read(0xF024) == 0
     assert int(dut.eio_probe_out.value) == 1
-    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2 + 1]
+    assert await tb.slot_epochs() == [e0 + 4, e1 + 4, e2 + 2]
 
 
 @cocotb.test()
