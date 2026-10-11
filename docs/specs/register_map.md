@@ -68,7 +68,7 @@ in that bridge’s section.
 | `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). |
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
-| `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset. See [DATA window readout](#regmap-data-user1). |
+| `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. |
 
 <a id="regmap-seq-cfg"></a>
@@ -177,10 +177,10 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` and `MGR_SLOT_EPOCH` reads, and the slot `MGR_CTRL` bit 1 resets. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
-| `0xF020` | MGR_EPOCH | RO | `[15:0]` counts releases of the hub reset (`MGR_CTRL` bit 0, or the power-up reset after its first release); `[31:16]` read 0. The power-up value is 0 and the power-up itself is not counted, so a hub that came up normally reads 1. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF020` | MGR_EPOCH | RO | `[15:0]` counts both edges of the hub reset (`MGR_CTRL` bit 0, or the power-up reset): odd while it is held, even once it is released, so each reset adds 2. `[31:16]` read 0. The power-up value is 0, so a hub that came up normally reads 2. Never reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF024` | MGR_OWNER | RW | Owner token of the host session using the hub. Advisory: the hub never acts on it. The host writes a random nonzero token when it first selects a slot on the chain, warns if another nonzero token was there, and writes 0 when it closes. Cleared by the hub reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF028` | MGR_CTRL | WO | Reads 0. Write 1s to: bit 0 reset the hub (`MGR_ACTIVE`, `MGR_DESC_INDEX`, `MGR_OWNER` and the burst owner, but no slot); bit 1 reset the `MGR_DESC_INDEX` slot; bit 2 reset every slot. A slot reset is the slot's own reset: an ELA's sample and register sides together, an EIO's outputs. Present when `MGR_CAPS[5]=1`. |
-| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts releases of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2). Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts both edges of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2): odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF030` | MGR_TLR_COUNT | RO | `[15:0]` counts entries of the TAP into Test-Logic-Reset. Never reset. Present when `MGR_CAPS[5]=1`. |
 
 Selection sequence:
@@ -214,7 +214,14 @@ when the JTAG server keeps the TAP out of Test-Logic-Reset between scans:
 Xilinx `hw_server`/`xsdb` walks it through Test-Logic-Reset many times a second
 while a session is open, which would cancel bursts.  The epochs and
 `MGR_TLR_COUNT` are never reset, so a host compares them before and after an
-operation to learn that a reset happened in between.
+operation to learn that a reset happened in between; because an epoch counts
+both edges, it also differs when a reset was asserted and not yet released.
+The Python host reads a slot's epoch before and after `configure()`, refuses
+to configure a slot held in reset, and checks the epoch again at `arm()` and
+around the readout: a slot reset in between puts the ELA back at its build
+defaults, so the capture is not the one configured.  On a hub with
+`MGR_CAPS[6]` it also compares `MGR_TLR_COUNT` across each burst and readout,
+since a Test-Logic-Reset there cancels a burst after its header was checked.
 
 [↑ Top](#regmap-top)
 
@@ -254,10 +261,15 @@ operation to learn that a reset happened in between.
   | `[143:112]` | `MGR_OWNER` |
   | `[159:144]` | The hub's burst `SAMPLE_W` |
 
-  The host raises `BurstIntegrityError` when the priming scan is not a header
-  for the slot and window it asked for, and when `MGR_EPOCH` or the slot's
-  `MGR_SLOT_EPOCH` read after the burst differ from the header's: the hub or
-  the slot was reset under the burst.
+  The host reads `SEG_START` (the pointer the `BURST_PTR` write latches) and
+  `SAMPLE_W` just before the burst, and raises `BurstIntegrityError` when the
+  priming scan is not a header for that slot, window, start pointer and sample
+  width, when the slot epoch is odd (the slot is held in reset), and when
+  `MGR_EPOCH` or the slot's `MGR_SLOT_EPOCH` read after the burst differ from
+  the header's: the hub or the slot was reset under the burst.  A start
+  pointer that moved means the capture was re-armed or another session
+  changed `SEG_SEL` in between.  An `MGR_OWNER` other than 0 or the session's
+  own token is logged as a warning, not refused (the token is advisory).
 - Effective delivery rate depends on the host transport and cable;
   the burst path returns multiple words per 256-bit DR scan to amortise round trips.
 

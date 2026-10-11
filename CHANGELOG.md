@@ -10,14 +10,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Core manager — resets a host can see, and a checked burst header.** New
-  manager registers: `MGR_EPOCH` and `MGR_SLOT_EPOCH` count releases of the hub
-  and per-slot resets, `MGR_TLR_COUNT` counts TAP Test-Logic-Reset entries
-  (all never reset), `MGR_OWNER` holds an advisory owner token, and `MGR_CTRL`
-  resets the hub, one slot or every slot. The priming scan of a burst now
-  carries a header (magic, slot, start pointer, window, both epochs, owner)
-  instead of a stale word. The host checks it, re-reads the epochs after the
-  burst, and raises `BurstIntegrityError` when the burst is not the one it
-  asked for or a reset hit it. The host writes its owner token when it first
+  manager registers: `MGR_EPOCH` and `MGR_SLOT_EPOCH` count both edges of the
+  hub and per-slot resets (odd while a reset is held), `MGR_TLR_COUNT` counts
+  TAP Test-Logic-Reset entries (all never reset), `MGR_OWNER` holds an
+  advisory owner token, and `MGR_CTRL` resets the hub, one slot or every slot.
+  The priming scan of a burst now carries a header (magic, slot, start
+  pointer, window, both epochs, owner, sample width) instead of a stale word.
+  The host checks every field against what it read before the burst,
+  re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
+  `MGR_TLR_COUNT`) after it, and raises `BurstIntegrityError` when the burst
+  is not the one it asked for or a reset hit it. `Analyzer` holds the slot
+  epoch from `configure()` through the readout and raises
+  `ManagerResetError` when the slot was reset in between. The host writes its owner token when it first
   selects a slot, warns about another token, and clears it on close. The hub
   shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
   the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
@@ -29,7 +33,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   behind a core manager: a deep core without burst readout could not be read
   in full, and the hub refused to build one. The new `DATA_OFFSET` register
   (`0x00F4`, `COMPARE_CAPS` bit 20) adds a word offset to every window read,
-  and the host pages reads past the limit through it. Reads keep no side
+  and the host pages reads past the limit through it. Arming or resetting the
+  ELA sets it back to 0, so an offset a host left behind cannot shift the
+  next capture. Reads keep no side
   effects, so every transport's window readers work unchanged. The hub's
   `0xF000` elaboration check is gone. Both HDLs.
 
@@ -206,6 +212,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **JTAG pipe — a register command after a burst could read stale data.** In
+  burst mode, the Capture-DR of every scan starts a preload of the next burst
+  word, which runs for `256 / SAMPLE_W + 1` TCK cycles (257 for 1-bit
+  samples), longer than a 49-bit register scan. A register command that
+  followed went out while the preload still held the ELA's DATA window, and
+  read 0. Every register command now ends the preload its own Capture-DR
+  started. Both HDLs.
+
+- **Host — a burst-wired slot behind a transport that does not burst.**
+  OpenOCD, and hw_server for some sample widths, read `read_block(0x0100)`
+  through the register window. The analyzer handed them the whole capture
+  anyway, so a deep one overran the window instead of being paged. Transports
+  now say whether they burst (`Transport.bursts_data_window()`), and the
+  analyzer pages whenever they do not.
+
+- **RPC — the analyzer ignored `connect(instance=...)`.** The session read
+  whichever slot was active, so an EIO in another slot of the same hub took it
+  over. `connect` and `rebind` now bind the slot, and a managed `eio_connect`
+  pins an unbound session to the slot it reads. A managed `eio_connect` also
+  shares the session's transport only when it names the same board.
 
 - **Core manager — one ELA's reset could phantom-arm another.** Any ELA's
   `ela_sample_rst` reset the whole hub's JTAG side: `MGR_ACTIVE`, every EIO

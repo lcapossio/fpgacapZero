@@ -553,10 +553,10 @@ Manager registers:
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor and `MGR_SLOT_EPOCH` reads, and for `MGR_CTRL` bit 1. |
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
-| `0xF020` | MGR_EPOCH | RO | Releases of the hub reset; never reset. |
+| `0xF020` | MGR_EPOCH | RO | Both edges of the hub reset (odd while held); never reset. |
 | `0xF024` | MGR_OWNER | RW | Advisory owner token of the host session. |
 | `0xF028` | MGR_CTRL | WO | Bit 0 resets the hub, bit 1 the `MGR_DESC_INDEX` slot, bit 2 every slot. |
-| `0xF02C` | MGR_SLOT_EPOCH | RO | Releases of the `MGR_DESC_INDEX` slot's reset; never reset. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | Both edges of the `MGR_DESC_INDEX` slot's reset (odd while held); never reset. |
 | `0xF030` | MGR_TLR_COUNT | RO | TAP Test-Logic-Reset entries; never reset. |
 
 Each slot resets alone: an ELA's `ela_sample_rst` resets that ELA only, and no

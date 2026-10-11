@@ -42,13 +42,25 @@ path for timestamp data.
   and in the same JTAG transaction, one burst-length scan that is not
   returned and a second `BURST_PTR` write (see `MGR_CAPS` in
   [`register_map.md`](register_map.md)).
-- `burst_header_slot: int | None` (attribute, default `None`) — set by the
-  analyzer before a burst through a core manager with `MGR_CAPS` bit 4: the
-  slot the burst must come from.  The transport decodes the priming scan as a
-  `BurstHeader` and raises `BurstIntegrityError` unless it is a header for
-  that slot and window; the header is kept in `last_burst_header`, and the
-  analyzer compares its epochs with `MGR_EPOCH` / `MGR_SLOT_EPOCH` after the
-  burst.  The analyzer clears both after every read.
+- `burst_expect: BurstExpectation | None` (attribute, default `None`) — set
+  by the analyzer before a burst through a core manager with `MGR_CAPS` bit 4:
+  what the burst header must say.  `BurstExpectation(slot, start_ptr,
+  sample_w, tlr_count=None)` holds the slot, `SEG_START` and `SAMPLE_W` read
+  just before the burst, and, on a hub with `MGR_CAPS` bit 6, `MGR_TLR_COUNT`.
+  The transport decodes the priming scan as a `BurstHeader` and raises
+  `BurstIntegrityError` unless it is a header for that slot, window, start
+  pointer and sample width with an even slot epoch; another session's
+  `MGR_OWNER` token is logged as a warning.  The header is kept in
+  `last_burst_header`, and the analyzer compares its epochs with `MGR_EPOCH`
+  / `MGR_SLOT_EPOCH`, and `tlr_count` with `MGR_TLR_COUNT`, after the burst.
+  The analyzer clears both after every read.
+- `bursts_data_window(*, timestamp=False) -> bool` — whether
+  `read_block(0x0100, ...)` (with `timestamp`, `read_timestamp_block`) runs a
+  burst rather than reading the register window.  A window read ends at
+  `data_window_end`, so the analyzer pages it through `DATA_OFFSET` when it
+  would pass the end; a burst does not.  The base returns `False`; the
+  hw_server and Quartus transports return whether they would burst, and
+  decide their own `read_block` with it.
 - `release_manager_ownership()` — writes 0 to `MGR_OWNER` on each manager
   where this session wrote its token and the token is still there.  The
   token is written the first time the session selects a slot on a manager

@@ -45,6 +45,18 @@ instance -> int | None
 
 Core-manager slot selected before accesses, or `None` for legacy direct mode.
 
+#### `Analyzer.pin_active_slot`
+
+```python
+pin_active_slot() -> None
+```
+
+Bind an analyzer with no selected slot to the slot the core manager
+has active now, so another controller that moves `MGR_ACTIVE` on the
+same transport (an EIO in another slot) does not move this analyzer.
+The configuration is kept: the slot is the same.  No effect without a
+manager or with a slot already selected.
+
 #### `Analyzer.select_instance`
 
 ```python
@@ -184,6 +196,9 @@ arm() -> None
 ```
 
 Arm the core with the configuration it holds.
+
+Raises `ManagerResetError` if the core's slot was reset since
+`configure`: it would arm its build defaults.
 
 #### `Analyzer.wait_done`
 
@@ -629,6 +644,19 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `Transport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `Transport.select_chain`
 
 ```python
@@ -1029,6 +1057,19 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `XilinxHwServerTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `XilinxHwServerTransport.burst_on_data_chain`
 
 ```python
@@ -1273,6 +1314,19 @@ Read a 32-bit register at *addr*.
 
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
+
+#### `QuartusStpTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
 
 #### `QuartusStpTransport.read_block`
 

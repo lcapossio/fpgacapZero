@@ -184,6 +184,12 @@ core answers there, scans chain 2 and binds to the first core found (chains
 not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
 session, e.g. to reach an AXI monitor directly.
 
+`"instance"` binds the session to a core-manager slot: the analyzer selects
+it before every access, so an EIO in another slot of the same hub cannot move
+it.  Without it the session reads whichever slot the hub has active; a later
+`eio_connect` with an `instance` on the same chain then binds it to the slot
+active at that moment.
+
 #### `discover_boards`
 
 Find fpgacapZero-compatible boards across running OpenOCD instances (OpenOCD
@@ -241,6 +247,10 @@ are left untouched.
 ```json
 {"cmd": "rebind", "chain": 2}
 ```
+
+`"instance"` selects a core-manager slot (`null` for none).  Left out, a
+rebind to the same chain keeps the session's slot and one to another chain
+selects none.
 
 Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
 — `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
@@ -529,6 +539,13 @@ unbounded timeouts could starve all clients.
 ```
 
 Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+
+With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
+session's transport, so the two keep one lock and one cache of the hub's
+active slot, provided the request names the same board: connection fields it
+leaves out are the session's, and any it names (`backend`, `host`, `port`,
+`tap`, `hardware`) must match.  A request for another board opens its own
+transport.
 
 #### `eio_close`
 
