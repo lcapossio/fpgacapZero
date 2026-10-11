@@ -13,6 +13,7 @@ from fcapz import _version_tuple
 from fcapz.analyzer import (
     CORE_MANAGER_CORE_ID,
     Analyzer,
+    CaptureChangedError,
     CaptureConfig,
     ManagerResetError,
     TriggerConfig,
@@ -255,13 +256,15 @@ _SEG_START = 0x00C8
 
 
 class EpochElaTransport(Transport):
-    """An 8-bit ELA in slot 0 of a core manager with epochs (MGR_CAPS bit 3).
+    """8-bit ELAs behind a core manager with epochs (MGR_CAPS bit 3).  Every
+    slot reads the same registers; ``slots`` sets MGR_COUNT.
 
     ``hooks`` maps a register address to a function run when that address is
     written (or, for the DATA window, read): tests reset the slot there.
     """
 
-    def __init__(self, *, caps: int = 0x0B, slot_caps: int = 0, bursting: bool = False):
+    def __init__(self, *, caps: int = 0x0B, slot_caps: int = 0, bursting: bool = False,
+                 slots: int = 1):
         ver = ((_version_tuple()[0] & 0xFF) << 24) | ((_version_tuple()[1] & 0xFF) << 16)
         self.regs = {
             0x0000: ver | 0x4C41, 0x0008: 0x4, 0x000C: 8, 0x0010: 16,
@@ -269,9 +272,9 @@ class EpochElaTransport(Transport):
             0x00C4: 0, 0x00E0: 0x3_01FF, _SEG_START: 0x2A,
         }
         self.manager = {
-            0xF000: ver | CORE_MANAGER_CORE_ID, 0xF004: 1, 0xF008: 0,
+            0xF000: ver | CORE_MANAGER_CORE_ID, 0xF004: slots, 0xF008: 0,
             0xF00C: 0, 0xF010: caps, 0xF014: 0, 0xF01C: slot_caps,
-            ADDR_MGR_SLOT_EPOCH: 2, ADDR_MGR_TLR_COUNT: 0,
+            ADDR_MGR_EPOCH: 2, ADDR_MGR_SLOT_EPOCH: 2, ADDR_MGR_TLR_COUNT: 0,
         }
         self.bursting = bursting
         self.hooks: dict[int, object] = {}
@@ -289,6 +292,11 @@ class EpochElaTransport(Transport):
 
     def reset_slot(self, edges: int = 2) -> None:
         self.manager[ADDR_MGR_SLOT_EPOCH] += edges
+
+    def reset_hub(self) -> None:
+        """MGR_CTRL bit 0: MGR_ACTIVE back to 0, no slot reset."""
+        self.manager[ADDR_MGR_EPOCH] += 2
+        self.manager[0xF008] = 0
 
     def read_reg(self, addr):
         self.reads.append(addr)
@@ -373,8 +381,97 @@ class SlotEpochAcrossCaptureTests(unittest.TestCase):
         self.a.configure(epoch_config())
         self.a.arm()
         self.t.hooks[0x0100] = self.t.reset_slot
-        with self.assertRaisesRegex(ManagerResetError, "after the readout"):
+        with self.assertRaisesRegex(ManagerResetError, "during the readout"):
             self.a.capture(timeout=0.01)
+
+    def test_failed_configure_leaves_no_config(self):
+        """A configure that raises may have written part of the new config:
+        the old one is not kept to arm and read unchecked (BUG-239)."""
+        self.a.configure(epoch_config())
+        self.t.hooks[0x0024] = self.t.reset_slot
+        with self.assertRaises(ManagerResetError):
+            self.a.configure(epoch_config())
+        with self.assertRaisesRegex(RuntimeError, "configure"):
+            self.a.capture(timeout=0.01)
+
+    def test_reset_while_waiting_is_reported_not_timed_out(self):
+        """A slot reset clears DONE, so the wait would time out (BUG-244)."""
+        self.a.configure(epoch_config())
+        self.a.arm()
+        self.t.regs[0x0008] = 0  # STATUS: reset, not done
+        self.t.reset_slot()
+        with self.assertRaisesRegex(ManagerResetError, "while waiting"):
+            self.a.capture(timeout=0.01)
+
+    def test_plain_timeout_still_times_out(self):
+        self.a.configure(epoch_config())
+        self.a.arm()
+        self.t.regs[0x0008] = 0
+        with self.assertRaises(TimeoutError):
+            self.a.capture(timeout=0.01)
+
+    def test_capture_moved_during_readout_raises(self):
+        """Another session's SEG_SEL, or a re-arm, moves SEG_START: samples and
+        timestamps would come from different captures (BUG-242)."""
+        self.a.configure(epoch_config())
+        self.a.arm()
+
+        def move():
+            self.t.regs[_SEG_START] = 0x30
+
+        self.t.hooks[0x0100] = move
+        with self.assertRaisesRegex(CaptureChangedError, "SEG_START"):
+            self.a.capture(timeout=0.01)
+
+
+class HubResetTests(unittest.TestCase):
+    """A hub reset (MGR_CTRL bit 0) resets no slot but moves MGR_ACTIVE to 0:
+    reads after it, until the next select, go to slot 0 (BUG-240)."""
+
+    def setUp(self):
+        self.t = EpochElaTransport(slots=2)
+        self.a = Analyzer(self.t, instance=1)
+        self.a.connect()
+        self.a.configure(epoch_config())
+        self.a.arm()
+
+    def test_hub_reset_before_readout_reselects_the_slot(self):
+        self.t.reset_hub()
+        self.assertEqual(self.a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+        self.assertEqual(self.t.manager[0xF008], 1)
+
+    def test_hub_reset_during_readout_raises(self):
+        self.t.hooks[0x0100] = self.t.reset_hub
+        with self.assertRaisesRegex(ManagerResetError, "during the readout"):
+            self.a.capture(timeout=0.01)
+        # The next select reads MGR_ACTIVE back: the retry reads slot 1.
+        self.assertEqual(self.a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+        self.assertEqual(self.t.manager[0xF008], 1)
+
+    def test_hub_reset_during_configure_raises(self):
+        self.t.hooks[0x0024] = self.t.reset_hub
+        with self.assertRaisesRegex(ManagerResetError, "while it was configured"):
+            self.a.configure(epoch_config())
+
+
+class UnboundSlotTests(unittest.TestCase):
+    """With no instance the analyzer reads the hub's active slot: the
+    baseline records which one (BUG-241)."""
+
+    def setUp(self):
+        self.t = EpochElaTransport(slots=2)
+        self.a = Analyzer(self.t)
+        self.a.connect()
+        self.a.configure(epoch_config())
+
+    def test_other_active_slot_with_the_same_epoch_raises(self):
+        self.t.manager[0xF008] = 1
+        with self.assertRaisesRegex(ManagerResetError, "active slot is 1"):
+            self.a.arm()
+
+    def test_same_slot_passes(self):
+        self.a.arm()
+        self.a.capture(timeout=0.01)
 
     def test_configure_again_recovers(self):
         self.a.configure(epoch_config())

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, NamedTuple, Optional, Sequence
 
 from ._version import _version_tuple
 from .registers import (
@@ -311,6 +311,30 @@ class ManagerResetError(RuntimeError):
     """
 
 
+class CaptureChangedError(RuntimeError):
+    """The capture under a readout changed while it was read: it was re-armed,
+    or another session selected another segment (``SEG_START`` moved), so the
+    samples and timestamps read may come from different captures."""
+
+
+class _SlotState(NamedTuple):
+    """The core-manager slot an analyzer reads, with ``MGR_SLOT_EPOCH`` of
+    that slot and ``MGR_EPOCH``."""
+
+    slot: int
+    slot_epoch: int
+    hub_epoch: int
+
+
+class _Readout(NamedTuple):
+    """What :meth:`Analyzer._readout_end` compares with at the end of a
+    readout."""
+
+    state: _SlotState | None
+    tlr_count: int | None
+    start_ptr: int | None
+
+
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -385,8 +409,10 @@ class Analyzer:
         # MGR_DESC_CAPS per slot index.
         self._manager_slot_caps: dict[int, int] = {}
         self._manager_found: bool | None = None
-        # MGR_SLOT_EPOCH when configure() finished; None without epochs.
-        self._config_slot_epoch: int | None = None
+        # Slot state when configure() finished; None without epochs.
+        self._config_state: _SlotState | None = None
+        # SEG_START of the readout in progress, for its burst headers.
+        self._readout_start_ptr: int | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -441,7 +467,7 @@ class Analyzer:
                 # The configuration and geometry belong to the old slot; a
                 # capture read with them would misread the new slot's data.
                 self._config = None
-                self._config_slot_epoch = None
+                self._config_state = None
                 self._hw_timestamp_w = 0
                 self._hw_num_segments = 1
                 self._hw_compare_caps = 0
@@ -600,9 +626,15 @@ class Analyzer:
         """Validate ``config`` and write it to the core; does not arm.
 
         Raises `ValueError` if the window does not fit ``depth`` or a field is
-        out of range for the core.
+        out of range for the core, and :class:`ManagerResetError` if the
+        core's core-manager slot is held in reset, or was reset (or, with no
+        ``instance``, the hub's active slot moved) while it was written.  A
+        configure that raises leaves the analyzer unconfigured: the core may
+        hold part of the new configuration.
         """
         self._select_instance()
+        self._config = None
+        self._config_state = None
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
         if config.pretrigger + config.posttrigger + 1 > config.depth:
@@ -621,13 +653,14 @@ class Analyzer:
         self._validate_probes(config.probes, config.sample_width)
 
         # Writes to a slot held in reset are lost; a reset during them loses
-        # some.  The epoch before and after says which (BUG-234/235).
-        self._config_slot_epoch = None
-        epoch_before = self._slot_epoch()
-        if epoch_before is not None and epoch_before & 1:
+        # some, and a hub reset sends the rest to slot 0.  The slot state
+        # before and after says which (BUG-234/235/240).
+        state_before = self._slot_state()
+        if state_before is not None and state_before.slot_epoch & 1:
             raise ManagerResetError(
-                f"the ELA's core-manager slot is held in reset (MGR_SLOT_EPOCH "
-                f"{epoch_before} is odd): a configuration written now is lost"
+                f"the ELA's core-manager slot {state_before.slot} is held in reset "
+                f"(MGR_SLOT_EPOCH {state_before.slot_epoch} is odd): a "
+                "configuration written now is lost"
             )
 
         # Validate host config against the synthesized core to avoid silent
@@ -739,13 +772,15 @@ class Analyzer:
                 self.transport.write_reg(base + 12, stage.value_b)
                 self.transport.write_reg(base + 16, stage.mask_b)
 
-        epoch_after = self._slot_epoch()
-        if epoch_after != epoch_before:
+        state_after = self._slot_state()
+        if state_after != state_before:
             raise ManagerResetError(
-                f"the ELA's core-manager slot was reset while it was configured "
-                f"(MGR_SLOT_EPOCH {epoch_before} before, {epoch_after} after)"
+                "the ELA's core manager changed while it was configured (slot, "
+                f"slot epoch, hub epoch {tuple(state_before)} before, "
+                f"{tuple(state_after)} after): a reset, or another controller's "
+                "slot select, sent some writes elsewhere"
             )
-        self._config_slot_epoch = epoch_after
+        self._config_state = state_after
         self._config = config
 
     @_selected_transaction
@@ -797,11 +832,16 @@ class Analyzer:
         :meth:`configure`: it would arm its build defaults.
         """
         self._select_instance()
-        self._check_configured_epoch("at arm")
+        self._check_configured_state("at arm")
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
-        """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first."""
+        """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first.
+
+        A slot reset clears DONE, so a configured analyzer checks for one
+        before it reports the timeout, and raises :class:`ManagerResetError`
+        instead.
+        """
         deadline = time.monotonic() + timeout
         read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
@@ -811,6 +851,10 @@ class Analyzer:
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
+        if self._config_state is not None:
+            with self.transport.transaction_lock():
+                self._select_instance()
+                self._check_configured_state("while waiting for the capture")
         return False
 
     def status(self) -> dict[str, bool]:
@@ -1083,7 +1127,11 @@ class Analyzer:
                 stable = self.transport.read_reg_stable
                 self.transport.burst_expect = BurstExpectation(
                     slot=slot,
-                    start_ptr=int(stable(_ADDR_SEG_START)),
+                    start_ptr=(
+                        self._readout_start_ptr
+                        if self._readout_start_ptr is not None
+                        else int(stable(_ADDR_SEG_START))
+                    ),
                     sample_w=int(stable(_ADDR_SAMPLE_W)) & 0xFFFF,
                     tlr_count=self._tlr_count(),
                 )
@@ -1124,10 +1172,15 @@ class Analyzer:
                 f"(hub/slot) at its start, {epoch}/{slot_epoch} after"
             )
 
-    def _slot_epoch(self) -> int | None:
-        """``MGR_SLOT_EPOCH`` of this analyzer's slot (odd while it is held in
-        reset); ``None`` without a core manager that has epochs (``MGR_CAPS``
-        bit 3).  Call with this analyzer selected."""
+    def _slot_state(self) -> _SlotState | None:
+        """The slot this analyzer reads (its ``instance``, else the hub's
+        active slot), that slot's ``MGR_SLOT_EPOCH`` (odd while it is held in
+        reset) and ``MGR_EPOCH``; ``None`` without a core manager that has
+        epochs (``MGR_CAPS`` bit 3).  Call with this analyzer selected.
+
+        A hub reset resets no slot but moves ``MGR_ACTIVE`` to 0, which sends
+        the reads that follow, until the next select, to slot 0: the hub
+        epoch says one happened."""
         if not self._behind_manager():
             return None
         read = self.transport.read_reg
@@ -1135,11 +1188,12 @@ class Analyzer:
             self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
         if not self._manager_caps[0] & MGR_CAP_EPOCH_OWNER:
             return None
+        hub_epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
         slot = self._instance
         if slot is None:
             slot = int(read(_ADDR_MGR_ACTIVE))
         self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-        return int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF
+        return _SlotState(slot, int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF, hub_epoch)
 
     def _tlr_count(self) -> int | None:
         """``MGR_TLR_COUNT`` on a hub whose Test-Logic-Reset resets the JTAG
@@ -1154,39 +1208,76 @@ class Analyzer:
             return None
         return int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
 
-    def _check_configured_epoch(self, when: str) -> None:
-        """Raise :class:`ManagerResetError` if the slot was reset since
-        :meth:`configure`."""
-        if self._config_slot_epoch is None:
-            return
-        epoch = self._slot_epoch()
-        if epoch is not None and epoch != self._config_slot_epoch:
+    def _check_configured_state(self, when: str) -> _SlotState | None:
+        """Raise :class:`ManagerResetError` unless this analyzer still reads
+        the slot :meth:`configure` wrote, not reset since.  A hub reset alone
+        leaves the slot's configuration, and every select reads ``MGR_ACTIVE``
+        back, so the baseline follows it.  Returns the state now."""
+        now = self._slot_state()
+        base = self._config_state
+        if base is None or now is None:
+            return now
+        if now.slot != base.slot:
             raise ManagerResetError(
-                f"the ELA's core-manager slot was reset since configure() "
-                f"(MGR_SLOT_EPOCH {self._config_slot_epoch} then, {epoch} {when}): "
-                "it is back at its build defaults; call configure() again"
+                f"the core manager's active slot is {now.slot} {when}, not slot "
+                f"{base.slot} that configure() wrote: another controller "
+                "selected it, or the hub was reset.  Give the analyzer its slot "
+                "(instance=) and call configure() again"
             )
+        if now.slot_epoch != base.slot_epoch:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot {base.slot} was reset since "
+                f"configure() (MGR_SLOT_EPOCH {base.slot_epoch} then, "
+                f"{now.slot_epoch} {when}): it is back at its build defaults; "
+                "call configure() again"
+            )
+        self._config_state = now
+        return now
 
-    def _readout_begin(self) -> int | None:
-        """Start of a readout: raise :class:`ManagerResetError` if the slot was
-        reset since :meth:`configure`; return the ``MGR_TLR_COUNT`` baseline
-        for :meth:`_readout_end`."""
-        self._check_configured_epoch("before the readout")
-        return self._tlr_count()
+    def _readout_begin(self, seg_idx: int | None = None) -> _Readout:
+        """Start of a readout: check the slot (:meth:`_check_configured_state`),
+        select segment *seg_idx*, and record what :meth:`_readout_end`
+        compares: the slot state, ``MGR_TLR_COUNT`` and ``SEG_START``, which
+        the readout's burst headers must also carry."""
+        state = self._check_configured_state("before the readout")
+        if seg_idx is not None:
+            self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
+        start = None
+        if state is not None:
+            start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
+        self._readout_start_ptr = start
+        return _Readout(state, self._tlr_count(), start)
 
-    def _readout_end(self, tlr_before: int | None) -> None:
-        """End of a readout: raise :class:`ManagerResetError` if the slot was
-        reset, or a protocol-resetting Test-Logic-Reset happened, during it.
-        Samples and timestamps may then come from different captures, or from
-        the build defaults, and a window read may have lost a command."""
-        tlr_after = self._tlr_count()
-        if tlr_after != tlr_before:
+    def _readout_end(self, begin: _Readout) -> None:
+        """End of a readout: raise when anything recorded at its start
+        changed.  The samples and timestamps may then come from different
+        captures or slots, or from the build defaults, and a window read may
+        have lost a command."""
+        self._readout_start_ptr = None
+        tlr = self._tlr_count()
+        if tlr != begin.tlr_count:
             raise ManagerResetError(
                 f"the TAP passed through Test-Logic-Reset during the readout "
-                f"(MGR_TLR_COUNT {tlr_before} before, {tlr_after} after), which "
+                f"(MGR_TLR_COUNT {begin.tlr_count} before, {tlr} after), which "
                 "resets this hub's JTAG protocol"
             )
-        self._check_configured_epoch("after the readout")
+        if begin.state is None:
+            return
+        now = self._slot_state()
+        if now != begin.state:
+            raise ManagerResetError(
+                "the core manager changed during the readout (slot, slot epoch, "
+                f"hub epoch {tuple(begin.state)} before, {tuple(now)} after): a "
+                "reset, or another controller's slot select, may have mixed in "
+                "another slot's data or the build defaults"
+            )
+        start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
+        if start != begin.start_ptr:
+            raise CaptureChangedError(
+                f"SEG_START moved from {begin.start_ptr} to {start} during the "
+                "readout: the core was re-armed, or another session selected "
+                "another segment"
+            )
 
     def _read_data_block(self, total_words: int) -> list[int]:
         """DATA words from a slot with burst wiring: ``read_block`` when the
@@ -1256,7 +1347,11 @@ class Analyzer:
         """Wait for the armed capture to finish and read it back.
 
         Call `configure` and `arm` first.  Raises `TimeoutError` if the core
-        is not done within ``timeout`` seconds.
+        is not done within ``timeout`` seconds.  Behind a core manager with
+        epochs, raises :class:`ManagerResetError` if the slot was reset (or,
+        with no ``instance``, the hub's active slot moved) since
+        :meth:`configure` or during the readout, and
+        :class:`CaptureChangedError` if the capture changed under it.
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
@@ -1265,39 +1360,7 @@ class Analyzer:
 
         with self.transport.transaction_lock():
             self._select_instance()
-            tlr = self._readout_begin()
-            read_reg = self.transport.read_reg_stable
-            status = read_reg(_ADDR_STATUS)
-            fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-            reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
-            if 0 < reported_total <= self._config.depth:
-                total = reported_total
-            else:
-                total = fallback_total
-            sw = self._config.sample_width
-            words_per_sample = (sw + 31) // 32
-            raw = self._read_data_words(total * words_per_sample)
-            mask = (1 << sw) - 1
-            if words_per_sample == 1:
-                samples = [v & mask for v in raw]
-            else:
-                # Wide samples: reassemble from 32-bit chunks.
-                samples = []
-                for i in range(0, len(raw), words_per_sample):
-                    val = 0
-                    for j in range(min(words_per_sample, len(raw) - i)):
-                        val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
-                    samples.append(val & mask)
-
-            timestamps = self._read_timestamps(total)
-            self._readout_end(tlr)
-
-        return CaptureResult(
-            config=self._config,
-            samples=samples,
-            overflow=bool(status & _STATUS_OVERFLOW),
-            timestamps=timestamps,
-        )
+            return self._read_capture(None)
 
     def wait_all_segments_done(
         self, timeout: float = 10.0, poll_interval: float = 0.05
@@ -1307,16 +1370,20 @@ class Analyzer:
 
     @_selected_transaction
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
-        """Read back data from a specific segment after all segments are done."""
+        """Read back data from a specific segment after all segments are done.
+
+        Raises like :meth:`capture`."""
         self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
-        tlr = self._readout_begin()
+        return self._read_capture(seg_idx)
 
-        # Select segment for readback.  seg_start_ptr[seg_sel] is read
-        # directly by the burst engine (stable after all_seg_done).
-        self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
-
+    def _read_capture(self, seg_idx: int | None) -> CaptureResult:
+        """Read the finished capture: segment *seg_idx* (selected through
+        SEG_SEL; the burst engine reads seg_start_ptr[seg_sel], stable after
+        all_seg_done), or with ``None`` whichever SEG_SEL selects.  Call with
+        this analyzer selected, in a transaction."""
+        readout = self._readout_begin(seg_idx)
         read_reg = self.transport.read_reg_stable
         status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
@@ -1325,7 +1392,6 @@ class Analyzer:
             total = reported_total
         else:
             total = fallback_total
-
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
         raw = self._read_data_words(total * words_per_sample)
@@ -1333,6 +1399,7 @@ class Analyzer:
         if words_per_sample == 1:
             samples = [v & mask for v in raw]
         else:
+            # Wide samples: reassemble from 32-bit chunks.
             samples = []
             for i in range(0, len(raw), words_per_sample):
                 val = 0
@@ -1341,14 +1408,14 @@ class Analyzer:
                 samples.append(val & mask)
 
         timestamps = self._read_timestamps(total)
-        self._readout_end(tlr)
+        self._readout_end(readout)
 
         return CaptureResult(
             config=self._config,
             samples=samples,
             overflow=bool(status & _STATUS_OVERFLOW),
             timestamps=timestamps,
-            segment=seg_idx,
+            segment=0 if seg_idx is None else seg_idx,
         )
 
     def export_json(self, result: CaptureResult) -> Dict:
