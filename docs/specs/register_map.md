@@ -216,10 +216,16 @@ while a session is open, which would cancel bursts.  The epochs and
 `MGR_TLR_COUNT` are never reset, so a host compares them before and after an
 operation to learn that a reset happened in between; because an epoch counts
 both edges, it also differs when a reset was asserted and not yet released.
-The Python host reads a slot's epoch before and after `configure()`, refuses
-to configure a slot held in reset, and checks the epoch again at `arm()` and
-around the readout: a slot reset in between puts the ELA back at its build
-defaults, so the capture is not the one configured.  On a hub with
+The Python host reads the slot it uses (its `instance`, else `MGR_ACTIVE`),
+that slot's epoch and `MGR_EPOCH` before and after `configure()`, refuses to
+configure a slot held in reset, and checks them again at `arm()`, when a wait
+for the capture times out, and before and after the readout: a slot reset in
+between puts the ELA back at its build defaults, so the capture is not the one
+configured, and a hub reset during a readout sends the reads after it to slot
+0.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
+also compared across the readout, and every burst header in it must carry the
+same start pointer, so samples and timestamps come from one capture and one
+segment.  On a hub with
 `MGR_CAPS[6]` it also compares `MGR_TLR_COUNT` across each burst and readout,
 since a Test-Logic-Reset there cancels a burst after its header was checked.
 

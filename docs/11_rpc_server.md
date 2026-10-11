@@ -545,7 +545,7 @@ session's transport, so the two keep one lock and one cache of the hub's
 active slot, provided the request names the same board: connection fields it
 leaves out are the session's, and any it names (`backend`, `host`, `port`,
 `tap`, `hardware`) must match.  A request for another board opens its own
-transport.
+transport, with the session's values for the fields it leaves out.
 
 #### `eio_close`
 

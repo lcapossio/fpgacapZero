@@ -172,7 +172,11 @@ configure(config: CaptureConfig) -> None
 Validate `config` and write it to the core; does not arm.
 
 Raises `ValueError` if the window does not fit `depth` or a field is
-out of range for the core.
+out of range for the core, and `ManagerResetError` if the
+core's core-manager slot is held in reset, or was reset (or, with no
+`instance`, the hub's active slot moved) while it was written.  A
+configure that raises leaves the analyzer unconfigured: the core may
+hold part of the new configuration.
 
 #### `Analyzer.immediate_variant`
 
@@ -208,6 +212,10 @@ wait_done(timeout: float = 10.0, poll_interval: float = 0.05) -> bool
 
 Poll STATUS until the capture is done; `False` if `timeout` expires first.
 
+A slot reset clears DONE, so a configured analyzer checks for one
+before it reports the timeout, and raises `ManagerResetError`
+instead.
+
 #### `Analyzer.status`
 
 ```python
@@ -230,7 +238,11 @@ capture(timeout: float = 10.0) -> CaptureResult
 Wait for the armed capture to finish and read it back.
 
 Call `configure` and `arm` first.  Raises `TimeoutError` if the core
-is not done within `timeout` seconds.
+is not done within `timeout` seconds.  Behind a core manager with
+epochs, raises `ManagerResetError` if the slot was reset (or,
+with no `instance`, the hub's active slot moved) since
+`configure` or during the readout, and
+`CaptureChangedError` if the capture changed under it.
 
 #### `Analyzer.wait_all_segments_done`
 
@@ -247,6 +259,8 @@ capture_segment(seg_idx: int, timeout: float = 10.0) -> CaptureResult
 ```
 
 Read back data from a specific segment after all segments are done.
+
+Raises like `capture`.
 
 #### `Analyzer.export_json`
 

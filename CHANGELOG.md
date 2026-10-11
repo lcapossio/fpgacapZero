@@ -19,9 +19,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   The host checks every field against what it read before the burst,
   re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
   `MGR_TLR_COUNT`) after it, and raises `BurstIntegrityError` when the burst
-  is not the one it asked for or a reset hit it. `Analyzer` holds the slot
-  epoch from `configure()` through the readout and raises
-  `ManagerResetError` when the slot was reset in between. The host writes its owner token when it first
+  is not the one it asked for or a reset hit it. `Analyzer` holds its slot,
+  the slot epoch and the hub epoch from `configure()` through the readout and
+  raises `ManagerResetError` when the slot was reset, the hub was reset during
+  a readout, or (with no `instance`) the active slot moved; a wait that times
+  out after a slot reset says so. A failed `configure()` leaves the analyzer
+  unconfigured. `CaptureChangedError` reports a capture whose `SEG_START`
+  moved during its readout. The host writes its owner token when it first
   selects a slot, warns about another token, and clears it on close. The hub
   shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
   the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
