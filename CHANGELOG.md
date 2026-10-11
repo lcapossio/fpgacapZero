@@ -24,6 +24,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   TAP through Test-Logic-Reset between scans. `MGR_CAPS` bits 3-6 report each feature. Both HDLs,
   all three vendor shells.
 
+- **ELA — `DATA_OFFSET` pages the DATA window.** The DATA and timestamp
+  windows are register addresses, so they ended at `0xFFFF`, or at `0xF000`
+  behind a core manager: a deep core without burst readout could not be read
+  in full, and the hub refused to build one. The new `DATA_OFFSET` register
+  (`0x00F4`, `COMPARE_CAPS` bit 20) adds a word offset to every window read,
+  and the host pages reads past the limit through it. Reads keep no side
+  effects, so every transport's window readers work unchanged. The hub's
+  `0xF000` elaboration check is gone. Both HDLs.
+
 - **Formal parity — power-up values.** The Verilog/VHDL parity proofs matched
   registers by name and assumed equal states, so they never compared
   power-up values. Each configuration now also compares the state of every

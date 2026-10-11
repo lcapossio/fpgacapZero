@@ -536,10 +536,10 @@ Fast 256-bit burst readout is available only for managed ELA slots whose
 max/default burst-pipe shape.  Heterogeneous slots still work through the
 normal 49-bit DATA window; the host checks the manager descriptor and falls
 back automatically.  Such a slot is readable only through that window, so
-elaboration fails if it sets `USER1_DATA_EN=0` or if its DATA and timestamp
-window, `0x0100 + DEPTH * (ceil(SAMPLE_W/32) + ceil(TIMESTAMP_W/32)) * 4`,
-runs past the manager registers at `0xF000` (about 15k words).  `BURST_W` must
-stay 256, the host's burst scan width.
+elaboration fails if it sets `USER1_DATA_EN=0`.  Words past the manager
+registers at `0xF000` (about 15k words in) are read in pages through
+`DATA_OFFSET` (see the register map).  `BURST_W` must stay 256, the host's
+burst scan width.
 
 Manager registers:
 
