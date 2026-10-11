@@ -132,6 +132,10 @@ _COMPARE_CAPS_WIDE_TRIG = 1 << 18
 # COMPARE_CAPS bit 19: the timestamp window base is decoded at full width.
 # Cores without it decode a base past 0x10000 at its low 16 bits.
 _COMPARE_CAPS_TS_BASE_FULL = 1 << 19
+# COMPARE_CAPS bit 20: DATA_OFFSET, a word offset added to every DATA /
+# timestamp window read, pages the windows past the 16-bit address space.
+_COMPARE_CAPS_DATA_OFFSET = 1 << 20
+_ADDR_DATA_OFFSET = 0x00F4
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -664,6 +668,9 @@ class Analyzer:
         self.transport.write_reg(_ADDR_STARTUP_ARM, int(bool(config.startup_arm)))
         self.transport.write_reg(_ADDR_TRIG_HOLDOFF, config.trigger_holdoff)
         self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
+        if raw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
+            # A paged read puts it back to 0, but not one cut short.
+            self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
         if config.stor_qual_mode:
             self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
             self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
@@ -834,15 +841,46 @@ class Analyzer:
                     return [v & mask for v in raw]
             # The two-chain burst can't reach a single-chain core, so skip it and
             # read the timestamp words directly (deterministic, just slower).
-            raw = self.transport.read_block(ts_base, ts_word_count)
+            raw = self._read_window(
+                ts_base, ts_word_count, self.transport.read_block,
+                self.transport.read_window_block,
+            )
             return _join_timestamp_words(raw, ts_words_per, mask)
 
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
         if ts_words_per == 1 and callable(timestamp_burst) and has_burst:
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
-            raw = self.transport.read_block(ts_base, ts_word_count)
+            raw = self._read_window(
+                ts_base, ts_word_count, self.transport.read_block,
+                self.transport.read_window_block,
+            )
         return _join_timestamp_words(raw, ts_words_per, mask)
+
+    def _read_window(self, addr: int, words: int, read, page_read) -> list[int]:
+        """Read *words* DATA / timestamp window words from window address *addr*.
+
+        *read(addr, words)* reads them where the 16-bit address reaches, which
+        ends at ``transport.data_window_end``.  Past it, a core with
+        DATA_OFFSET (COMPARE_CAPS bit 20) is read in pages: each page sets
+        DATA_OFFSET to its first word and reads ``0x0100`` on with
+        *page_read*, a reader that never bursts (``read_block(0x0100)`` may),
+        and DATA_OFFSET goes back to 0 after.  A core without it is left to
+        *read*, which raises :class:`DataWindowError`.
+        """
+        end = min(self.transport.data_window_end, REG_ADDR_SPACE_END)
+        if addr + 4 * words <= end or not self._hw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
+            return read(addr, words)
+        page = (end - _ADDR_DATA_BASE) // 4
+        first = (addr - _ADDR_DATA_BASE) // 4
+        out: list[int] = []
+        try:
+            for start in range(0, words, page):
+                self.transport.write_reg(_ADDR_DATA_OFFSET, first + start)
+                out.extend(page_read(_ADDR_DATA_BASE, min(page, words - start)))
+        finally:
+            self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
+        return out
 
     def _managed_burst_off_chain(self, has_burst: bool) -> bool:
         """Return whether the transport's two-chain burst would miss this slot.
@@ -1047,14 +1085,21 @@ class Analyzer:
             # The pipelined word path (fast on hw_server; slow per-word on
             # quartus_stp when its DATA_CHAIN burst can't reach this core).
             if not has_burst or managed_off_chain:
-                return self.transport.read_window_block(_ADDR_DATA_BASE, total_words)
+                window_block = self.transport.read_window_block
+                return self._read_window(_ADDR_DATA_BASE, total_words, window_block, window_block)
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         if has_burst:
             return self.transport.read_block(_ADDR_DATA_BASE, total_words)
         # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
-        check_data_window(_ADDR_DATA_BASE, total_words, self.transport.data_window_end)
+        return self._read_window(
+            _ADDR_DATA_BASE, total_words, self._read_window_words, self._read_window_words
+        )
+
+    def _read_window_words(self, addr: int, words: int) -> list[int]:
+        """Read window words one register read each."""
+        check_data_window(addr, words, self.transport.data_window_end)
         read = self.transport.read_reg_stable
-        return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
+        return [int(read(addr + i * 4)) for i in range(words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
         """Wait for the armed capture to finish and read it back.
