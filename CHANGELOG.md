@@ -221,6 +221,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (RPC) and the desktop GUI's EIO auto-attach tried the transport's IR-table
   chains, and `usb_blaster` has none, so only instance 1 was tried and the
   DE25-Nano EIO on instance 3 was never found. They now try instances 1-3.
+  On the session's board, RPC `eio_discover` also finds an EIO in a
+  core-manager slot and attaches it on the session's transport, as
+  `eio_connect` with `instance` does.
 
 - **JTAG pipe — a register command after a burst could read stale data.** In
   burst mode, the Capture-DR of every scan starts a preload of the next burst

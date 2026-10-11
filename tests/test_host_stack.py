@@ -1487,6 +1487,17 @@ class RpcSharedEioTests(unittest.TestCase):
             {"host": "10.0.0.2", "port": 3122, "tap": "xc7a35t"},
         )
 
+    def test_eio_discover_attaches_a_manager_slot_on_the_session(self):
+        """A managed EIO is found in its slot and shares the session's
+        transport (BUG-219 on the manager build)."""
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        reply = server.handle({"cmd": "eio_discover", "chains": [1]})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+        self.assertEqual(built, [hub])
+        self.assertTrue(server._eio_shared)
+        self.assertEqual(server._analyzer.instance, 0)  # pinned to its slot
+
     def test_managed_eio_naming_the_same_target_shares(self):
         server, hub, built = self._server()
         server.handle({"cmd": "connect", "chain": 1, "host": "127.0.0.1"})

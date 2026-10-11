@@ -500,6 +500,31 @@ class RpcServer:
         merged = {**base, **self._target_fields(req)}
         return self._resolved_target(merged) == self._resolved_target(base)
 
+    @staticmethod
+    def _manager_eio_slot(analyzer: Analyzer, req: Dict[str, Any]) -> tuple[int, int] | None:
+        """The (chain, slot) of the first EIO in a core-manager slot on the
+        session's transport, on ``req["chains"]`` or the transport's
+        discovery chains; ``None`` if there is none.  The session's chain is
+        selected again after."""
+        raw = req.get("chains")
+        transport = analyzer.transport
+        try:
+            found = discover_cores(
+                transport,
+                chains=tuple(int(c) for c in raw) if raw else None,
+                bridges=False,
+            )
+        finally:
+            try:
+                transport.select_chain(analyzer.bscan_chain)
+            except NotImplementedError:
+                pass
+            transport.invalidate_manager_instance_cache()
+        for entry in found:
+            if entry["type"] == "eio" and entry["instance"] is not None:
+                return int(entry["chain"]), int(entry["instance"])
+        return None
+
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
@@ -1058,6 +1083,25 @@ class RpcServer:
 
         if cmd == "eio_discover":
             self._drop_eio()
+            # On the session's board, an EIO in a core-manager slot is
+            # attached as eio_connect does with its instance: through the
+            # session's transport, after pinning an unbound analyzer.
+            slot = self._manager_eio_slot(analyzer, req) if self._same_target(req) else None
+            if slot is not None:
+                chain, instance = slot
+                if chain == analyzer.bscan_chain:
+                    analyzer.pin_active_slot()
+                eio = EioController(analyzer.transport, chain=chain, instance=instance)
+                eio.attach()
+                self._eio, self._eio_shared = eio, True
+                return self._ok(
+                    discovered=True,
+                    in_w=eio.in_w,
+                    out_w=eio.out_w,
+                    chain=chain,
+                    base_addr=0,
+                    instance=instance,
+                )
             transport = self._build_transport(req)
             transport.connect()
             try:
