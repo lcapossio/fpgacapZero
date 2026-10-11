@@ -21,6 +21,10 @@
 // fails loudly on a misaligned pointer so bad host/wrapper plumbing cannot
 // silently read the wrong segment window.
 //
+// A register command also ends the preload its own Capture-DR started in
+// burst mode: the read it issues uses the same memory port, and a narrow sample
+// takes longer to preload than the 49-bit scan lasts.
+//
 // The first scan of a burst only primes the pipeline: its data were not loaded
 // yet.  With HEADER_EN it carries burst_header instead, sampled at that scan's
 // Capture-DR, so the host can check which burst it is about to read.
@@ -206,6 +210,7 @@ module jtag_pipe_iface #(
                         shift_cnt <= shift_cnt + 1'b1;
                 end else if (update) begin
                     if (shift_cnt >= REG_SCAN_BITS && shift_cnt < BURST_SCAN_BITS) begin
+                        loading <= 1'b0;
                         if (cmd_sr[48]) begin
                             reg_addr <= cmd_sr[47:32];
                             reg_wdata <= cmd_sr[31:0];

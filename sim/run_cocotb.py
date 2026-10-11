@@ -132,6 +132,14 @@ TARGETS: tuple[Target, ...] = (
         (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
     ),
     Target(
+        "jtag_pipe_iface_narrow",
+        "jtag_pipe_iface",
+        (RTL / "jtag_pipe_iface.v",),
+        "jtag_pipe_iface_register_ends_preload",
+        {"SAMPLE_W": 1, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 1024},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd"),
+    ),
+    Target(
         "jtag_pipe_iface_segmented",
         "jtag_pipe_iface",
         (RTL / "jtag_pipe_iface.v",),

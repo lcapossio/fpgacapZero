@@ -207,6 +207,9 @@ begin
                     -- TAPs on the chain pad the physical shift count.
                     if shift_cnt >= to_unsigned(49, SHIFT_CTR_W) and
                        shift_cnt < to_unsigned(BURST_W, SHIFT_CTR_W) then
+                        -- A register command ends the burst preload its own
+                        -- Capture-DR started: its read needs the memory port.
+                        loading <= '0';
                         reg_addr_r <= cmd_sr(47 downto 32);
                         if cmd_sr(48) = '1' then
                             reg_wdata_r <= cmd_sr(31 downto 0);

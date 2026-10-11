@@ -477,6 +477,58 @@ async def jtag_pipe_iface_protocol(dut):
     JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_read_second")
 
 
+@cocotb.test()
+async def jtag_pipe_iface_register_ends_preload(dut):
+    """A register command ends the preload its Capture-DR started (BUG-233).
+
+    With 1-bit samples a scan preloads 256 words, far longer than a 49-bit
+    register scan, so without the abort the read it issues meets a busy
+    memory port (the ELA then answers 0)."""
+    assert len(dut.sample_data) == 1
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
+    collisions: list[tuple[int, int]] = []
+
+    async def bus() -> None:
+        while True:
+            await RisingEdge(dut.tck)
+            dut.sample_data.value = int(dut.mem_addr.value) & 1
+            if int(dut.reg_wr_en.value) and int(dut.reg_addr.value) == 0x002C:
+                dut.burst_ptr_in.value = 0
+                dut.burst_start.value = 0 if int(dut.burst_start.value) else 1
+            access = int(dut.reg_rd_en.value) or int(dut.reg_wr_en.value)
+            if access and int(dut.mem_active.value):
+                collisions.append((int(dut.reg_addr.value), int(dut.reg_wr_en.value)))
+
+    cocotb.start_soon(bus())
+    dut.arst.value = 1
+    for name in ("tdi", "capture", "shift_en", "update", "sel", "burst_start",
+                 "burst_timestamp", "burst_ptr_in", "timestamp_data"):
+        getattr(dut, name).value = 0
+    dut.reg_rdata.value = 0x1234_5678
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+
+    def check_bits(scan: int, start: int) -> None:
+        for i in range(256):
+            assert (scan >> i) & 1 == (start + i) & 1, f"bit {i} of the burst from {start}"
+
+    for command in (make_frame(0x0100, 0, False), make_frame(0x0024, 7, True)):
+        await scan_reg(dut, make_frame(0x002C, 0, True))
+        await idle_tap(dut, 300)
+        await scan_burst(dut)                      # priming
+        check_bits(await scan_burst(dut), 0)       # its Capture-DR starts a preload
+        await scan_reg(dut, command)               # ... this command must end
+        await idle_tap(dut, 4)
+        assert collisions == [], f"register access during a burst preload: {collisions}"
+    # The aborted preload leaves nothing behind: the next burst starts clean.
+    await scan_reg(dut, make_frame(0x002C, 0, True))
+    await idle_tap(dut, 300)
+    await scan_burst(dut)
+    check_bits(await scan_burst(dut), 0)
+    check_bits(await scan_burst(dut), 256)
+
+
 async def pipe_command_monitor(dut, events: list) -> None:
     """Record every register-bus strobe as (kind, addr, wdata)."""
     while True:
