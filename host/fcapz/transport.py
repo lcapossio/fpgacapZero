@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import shutil
 import socket
 import sys
@@ -16,7 +17,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 
-from typing import IO, List
+from typing import IO, List, NamedTuple
 
 # Character whitelist for the JTAG target filter (XSDB `jtag targets -set
 # -filter {name =~ "..."}`).  This value is interpolated inside a
@@ -41,6 +42,7 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
+_log = logging.getLogger(__name__)
 # xsdb marks the selected target with ``*``, after its number in ``jtag
 # targets`` (``2* xc7a100t``) and before it in ``targets`` (``* 2  ...``).
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\*?\s+(.+?)\s*$")
@@ -170,6 +172,40 @@ class BurstIntegrityError(RuntimeError):
     """
 
 
+class BurstHeader(NamedTuple):
+    """The header a core manager loads into the priming scan of a burst.
+
+    Present when ``MGR_CAPS`` bit 4 is set.  The epochs are the low 16 bits of
+    ``MGR_EPOCH`` and the owner slot's ``MGR_SLOT_EPOCH`` when the burst
+    started.
+    """
+
+    slot: int
+    start_ptr: int
+    timestamp: bool
+    mgr_epoch: int
+    slot_epoch: int
+    owner: int
+    sample_w: int
+
+    MAGIC = 0x4248  # "BH"
+
+    @classmethod
+    def parse(cls, scan: int) -> "BurstHeader | None":
+        """Decode a priming scan; ``None`` when it is not a burst header."""
+        if scan & 0xFFFF != cls.MAGIC or (scan >> 65) & 0x7FFF or scan >> 160:
+            return None
+        return cls(
+            slot=(scan >> 16) & 0xFFFF,
+            start_ptr=(scan >> 32) & 0xFFFF_FFFF,
+            timestamp=bool((scan >> 64) & 1),
+            mgr_epoch=(scan >> 80) & 0xFFFF,
+            slot_epoch=(scan >> 96) & 0xFFFF,
+            owner=(scan >> 112) & 0xFFFF_FFFF,
+            sample_w=(scan >> 144) & 0xFFFF,
+        )
+
+
 class BurstUnavailableError(RuntimeError):
     """This session cannot burst-read the request at all.
 
@@ -293,8 +329,9 @@ class Transport(ABC):
         """Make *instance* the core manager's active slot on *chain*.
 
         The active slot is a sticky hardware register that something else can
-        move: an ELA sample reset resets the manager to slot 0, and another
-        host session can select its own slot.  So the slot is always read back
+        move: a hub reset (power-up, ``MGR_CTRL`` bit 0, or any ELA sample
+        reset on bitstreams before per-slot resets) returns it to slot 0, and
+        another host session can select its own slot.  So the slot is always read back
         before it is trusted, and written only when it differs.  Call under
         :meth:`transaction_lock`.
 
@@ -324,6 +361,7 @@ class Transport(ABC):
                 standalone.add(chain)
                 return
             managers.add(chain)
+            self._claim_manager(chain, base)
         cached = self.__dict__.get("_fcapz_manager_active_cache")
         if cached == (chain, instance) and int(self.read_reg(active_addr)) == instance:
             return
@@ -348,6 +386,67 @@ class Transport(ABC):
         raise RuntimeError(
             f"core manager on chain {chain} did not select slot {instance}: {detail}"
         )
+
+    def _claim_manager(self, chain: int, base: int) -> None:
+        """Write this session's owner token to the manager at *base* on *chain*.
+
+        Only managers with ``MGR_OWNER`` (``MGR_CAPS`` bit 3).  The token is
+        advisory: a token of another session is reported, not obeyed, since
+        a session that exited without closing leaves its token behind too.
+        Call with *chain* selected.
+        """
+        if not int(self.read_reg(base + 0x10)) & 0x08:
+            return
+        token = self.__dict__.setdefault("_fcapz_owner_token", secrets.randbits(31) | 1)
+        owner = int(self.read_reg(base + 0x24))
+        if owner not in (0, token):
+            _log.warning(
+                "core manager on chain %d carries owner token 0x%08X: another "
+                "host session may be using it, or one exited without closing",
+                chain,
+                owner,
+            )
+        self.write_reg(base + 0x24, token)
+        self.__dict__.setdefault("_fcapz_owned_managers", set()).add((chain, base))
+
+    def release_manager_ownership(self) -> None:
+        """Clear this session's owner token from the managers it claimed.
+
+        A manager whose ``MGR_OWNER`` holds another value (another session
+        took it, or the hub was reset) is left alone.
+        """
+        token = self.__dict__.get("_fcapz_owner_token")
+        owned = self.__dict__.pop("_fcapz_owned_managers", set())
+        if token is None or not owned:
+            return
+        with self.transaction_lock():
+            for chain, base in sorted(owned):
+                try:
+                    self.select_chain(chain)
+                except NotImplementedError:
+                    if chain != 1:
+                        continue
+                if int(self.read_reg(base + 0x24)) == token:
+                    self.write_reg(base + 0x24, 0)
+
+    def _release_ownership_on_close(self) -> None:
+        """:meth:`release_manager_ownership` for ``close()``, best effort.
+
+        Skipped while another thread holds the transaction lock: a close must
+        not wait on a scan in flight.  A failure is logged, and the close goes
+        on.
+        """
+        if not self.__dict__.get("_fcapz_owned_managers"):
+            return
+        lock = self.transaction_lock()
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            self.release_manager_ownership()
+        except Exception as exc:  # noqa: BLE001 - closing anyway
+            _log.warning("could not clear MGR_OWNER: %s", exc)
+        finally:
+            lock.release()
 
     def invalidate_manager_instance_cache(self) -> None:
         """Forget the cached core-manager active slot selection."""
@@ -429,6 +528,40 @@ class Transport(ABC):
     #: engine's copy match the new owner's toggle), and writes ``BURST_PTR``
     #: again: that second toggle the engine cannot miss.
     burst_start_sync: bool = False
+
+    #: Set by :class:`~fcapz.analyzer.Analyzer` before a burst through a core
+    #: manager that loads a burst header into the priming scan (``MGR_CAPS``
+    #: bit 4): the slot the burst must come from.  A bursting transport then
+    #: checks the priming scan (:meth:`_check_burst_header`) and keeps the
+    #: header in :attr:`last_burst_header`.  ``None``: no header expected.
+    burst_header_slot: int | None = None
+
+    #: The header of the last checked burst, for the epoch check after it.
+    last_burst_header: BurstHeader | None = None
+
+    def _check_burst_header(self, prime_scan: int, *, timestamp: bool) -> None:
+        """Check a burst's priming scan against :attr:`burst_header_slot`.
+
+        Raises :class:`BurstIntegrityError` when the scan is not the header of
+        a burst from that slot and window: the data that follow would belong
+        to another burst, another slot, or no burst at all.
+        """
+        slot = self.burst_header_slot
+        if slot is None:
+            return
+        header = BurstHeader.parse(prime_scan)
+        if header is None:
+            raise BurstIntegrityError(
+                f"burst priming scan is not a burst header ({prime_scan:#x}): "
+                "the hub did not start this burst"
+            )
+        if header.slot != slot or header.timestamp != timestamp:
+            raise BurstIntegrityError(
+                f"burst header is for slot {header.slot} "
+                f"({'timestamps' if header.timestamp else 'samples'}), expected "
+                f"slot {slot} ({'timestamps' if timestamp else 'samples'})"
+            )
+        self.last_burst_header = header
 
     #: True when :meth:`read_block` and ``read_timestamp_block`` burst on a
     #: separate data chain (the unmanaged two-chain ELA's DATA_CHAIN).  A core
@@ -603,6 +736,7 @@ class OpenOcdTransport(Transport):
 
     def close(self) -> None:
         if self._sock:
+            self._release_ownership_on_close()
             try:
                 self._sock.close()
             except OSError:
@@ -906,6 +1040,8 @@ class QuartusStpTransport(Transport):
         _quartus_log.info("Opened Quartus JTAG device %s", opened_device)
 
     def close(self) -> None:
+        if self._session is not None:
+            self._release_ownership_on_close()
         self._acquire_life_lock_killing()
         try:
             self._close_locked()
@@ -1334,8 +1470,14 @@ class QuartusStpTransport(Transport):
                 error="__fcapz_burst_error",
             )
         )
+        tokens = captured.split()
+        if tokens and self.burst_data_chain == ctrl_chain:
+            self._check_burst_header(
+                self._shift_string_to_int(tokens[0], self.BURST_DR_BITS),
+                timestamp=timestamp,
+            )
         return self._parse_burst_tokens(
-            captured.split(),
+            tokens,
             words,
             skip_scans=prime_scans,
             element_width=element_width,
@@ -1479,8 +1621,14 @@ class QuartusStpTransport(Transport):
                 error="__fcapz_scb_error",
             )
         )
+        tokens = captured.split()
+        if tokens:
+            self._check_burst_header(
+                self._shift_string_to_int(tokens[0], self.BURST_DR_BITS),
+                timestamp=timestamp,
+            )
         return self._parse_single_chain_burst(
-            captured.split(),
+            tokens,
             n_elements,
             element_width,
             skip_scans=prime_scans,
@@ -2258,6 +2406,7 @@ class XilinxHwServerTransport(Transport):
 
     def close(self) -> None:
         if self._proc and self._proc.stdin:
+            self._release_ownership_on_close()
             try:
                 self._proc.stdin.write("exit\n")
                 self._proc.stdin.flush()
@@ -2518,6 +2667,7 @@ class XilinxHwServerTransport(Transport):
             skip_scans=prime_scans,
             element_width=element_width,
             expected_scans=n_scans + prime_scans,
+            header_timestamp=timestamp if burst_chain == ctrl_chain else None,
         )
 
     # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
@@ -2657,13 +2807,16 @@ class XilinxHwServerTransport(Transport):
         skip_scans: int = 0,
         element_width: int | None = None,
         expected_scans: int | None = None,
+        header_timestamp: bool | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
 
         With *expected_scans*, any other number of scan tokens raises
         :class:`BurstIntegrityError` rather than returning a short or
-        misaligned burst.
+        misaligned burst.  With *header_timestamp* (the burst ran on the
+        hub's chain), the first skipped scan is checked as the burst header
+        (:meth:`_check_burst_header`).
         """
         if element_width is None:
             element_width = self._burst_sample_width()
@@ -2680,6 +2833,11 @@ class XilinxHwServerTransport(Transport):
             if set(token) - {"0", "1"}:
                 continue
             if scan_idx < skip_scans:
+                if scan_idx == 0 and header_timestamp is not None:
+                    self._check_burst_header(
+                        self._bits_to_int(token, burst_offset, self.BURST_DR_BITS),
+                        timestamp=header_timestamp,
+                    )
                 scan_idx += 1
                 continue
             scan_idx += 1

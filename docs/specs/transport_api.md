@@ -29,7 +29,9 @@ path for timestamp data.
   request at all, raised before any scan (burst off, a non-DATA base, or a
   sample width outside 1..256).  The analyzer then reads the register window.
 - `BurstIntegrityError(RuntimeError)` — a burst ran but returned the wrong
-  number of scans or values.  Raised to the caller.
+  number of scans or values, its priming scan was not the burst header the
+  analyzer expected, or the hub or slot was reset under it (epochs changed).
+  Raised to the caller.
 - Any other exception from a burst propagates; nothing reads around it.
 - `burst: bool = True` (constructor of the hw_server and Quartus transports) —
   declares whether the bitstream has a burst path.  It is never probed:
@@ -40,6 +42,20 @@ path for timestamp data.
   and in the same JTAG transaction, one burst-length scan that is not
   returned and a second `BURST_PTR` write (see `MGR_CAPS` in
   [`register_map.md`](register_map.md)).
+- `burst_header_slot: int | None` (attribute, default `None`) — set by the
+  analyzer before a burst through a core manager with `MGR_CAPS` bit 4: the
+  slot the burst must come from.  The transport decodes the priming scan as a
+  `BurstHeader` and raises `BurstIntegrityError` unless it is a header for
+  that slot and window; the header is kept in `last_burst_header`, and the
+  analyzer compares its epochs with `MGR_EPOCH` / `MGR_SLOT_EPOCH` after the
+  burst.  The analyzer clears both after every read.
+- `release_manager_ownership()` — writes 0 to `MGR_OWNER` on each manager
+  where this session wrote its token and the token is still there.  The
+  token is written the first time the session selects a slot on a manager
+  with `MGR_CAPS` bit 3; a different nonzero token found there is logged as a
+  warning, not obeyed.  The hw_server, Quartus and OpenOCD transports call
+  it from `close()` (not `close_fast()`), unless a scan is in flight on
+  another thread.
 
 ## Implementations
 

@@ -517,8 +517,9 @@ select_manager_instance_cached(chain: int, active_addr: int, instance: int) -> N
 Make *instance* the core manager's active slot on *chain*.
 
 The active slot is a sticky hardware register that something else can
-move: an ELA sample reset resets the manager to slot 0, and another
-host session can select its own slot.  So the slot is always read back
+move: a hub reset (power-up, `MGR_CTRL` bit 0, or any ELA sample
+reset on bitstreams before per-slot resets) returns it to slot 0, and
+another host session can select its own slot.  So the slot is always read back
 before it is trusted, and written only when it differs.  Call under
 `transaction_lock`.
 
@@ -531,6 +532,17 @@ the manager VERSION, and writes nothing unless both answer: an
 `register_pipe_identity`).  A chain with an fcapz core but no
 manager is remembered as standalone and not written; a chain with
 neither is left alone and checked again next time.
+
+#### `Transport.release_manager_ownership`
+
+```python
+release_manager_ownership() -> None
+```
+
+Clear this session's owner token from the managers it claimed.
+
+A manager whose `MGR_OWNER` holds another value (another session
+took it, or the hub was reset) is left alone.
 
 #### `Transport.invalidate_manager_instance_cache`
 

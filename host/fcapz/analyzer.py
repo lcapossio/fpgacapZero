@@ -12,10 +12,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from ._version import _version_tuple
-from .registers import ADDR_MGR_ACTIVE
+from .registers import (
+    ADDR_MGR_ACTIVE,
+    ADDR_MGR_EPOCH,
+    ADDR_MGR_SLOT_EPOCH,
+    MGR_CAP_BURST_HEADER,
+)
 from .transport import (
     REG_ADDR_SPACE_END,
     REGISTER_PIPE_CORE_IDS,
+    BurstHeader,
+    BurstIntegrityError,
     BurstUnavailableError,
     OpenOcdTransport,
     Transport,
@@ -290,6 +297,27 @@ def _selected_transaction(method):
         with self.transport.transaction_lock():
             self._select_instance()
             return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _burst_epoch_checked(method):
+    """Check the epochs of a header-checked burst after it (see
+    :meth:`Analyzer._check_burst_epochs`), then drop the header expectation so
+    no later burst on this transport inherits it."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        transport = self.transport
+        transport.last_burst_header = None
+        try:
+            result = method(self, *args, **kwargs)
+            header = transport.last_burst_header
+            if header is not None:
+                self._check_burst_epochs(header)
+            return result
+        finally:
+            transport.burst_header_slot = None
+            transport.last_burst_header = None
 
     return wrapper
 
@@ -765,6 +793,7 @@ class Analyzer:
         self.transport.data_window_end = end
 
     @_selected_transaction
+    @_burst_epoch_checked
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
         self._select_instance()
@@ -932,6 +961,7 @@ class Analyzer:
         """
         with self.transport.transaction_lock():
             self.transport.burst_start_sync = False
+            self.transport.burst_header_slot = None
             if not self._behind_manager():
                 return True
             self._select_chain()
@@ -949,6 +979,10 @@ class Analyzer:
             slot = self._instance
             if slot is None:
                 slot = int(read(_ADDR_MGR_ACTIVE))
+            # The hub then loads a header into the burst's priming scan; the
+            # transport checks it (Transport.burst_header_slot).
+            if mgr_caps & MGR_CAP_BURST_HEADER:
+                self.transport.burst_header_slot = slot
             caps = self._manager_slot_caps.get(slot)
             if caps is None:
                 self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
@@ -956,7 +990,25 @@ class Analyzer:
                 self._manager_slot_caps[slot] = caps
             return bool(caps & 0x1)
 
+    def _check_burst_epochs(self, header: BurstHeader) -> None:
+        """Raise when the hub or the burst's slot was reset during the burst.
+
+        The header holds both epochs as the burst started.  A reset after that
+        changes the capture under the burst, which the scans cannot show.
+        """
+        read = self.transport.read_reg
+        epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
+        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, header.slot)
+        slot_epoch = int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF
+        if (epoch, slot_epoch) != (header.mgr_epoch, header.slot_epoch):
+            raise BurstIntegrityError(
+                f"slot {header.slot} or its core manager was reset during the "
+                f"burst: epochs {header.mgr_epoch}/{header.slot_epoch} "
+                f"(hub/slot) at its start, {epoch}/{slot_epoch} after"
+            )
+
     @_selected_transaction
+    @_burst_epoch_checked
     def _read_data_words(self, total_words: int) -> list[int]:
         self._set_data_window_end()
         sw = self._config.sample_width if self._config else 8
