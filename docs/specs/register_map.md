@@ -148,9 +148,9 @@ B-combine sequencer configurations.
 
 When multiple debug cores share one USER chain, the manager owns
 `0xF000..0xF0FF`. All other addresses retain the active core's native
-register map at `0x0000` and are routed to the selected slot. Reset selects
-slot 0, preserving legacy host behavior for designs whose first slot is an
-ELA.
+register map at `0x0000` and are routed to the selected slot. A hub reset
+selects slot 0, preserving legacy host behavior for designs whose first slot
+is an ELA.
 
 The manager identity is `0x434D`, ASCII `"CM"`, from `fcapz_core_manager`.
 `fcapz_debug_multi_xilinx7` uses this same manager for ELA-only and mixed
@@ -163,10 +163,15 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
 | `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. Burst readback latches the active slot when `BURST_PTR` is written, then routes burst control/data through that owner instead of the live `MGR_ACTIVE` value. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
-| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported; bit 2 = the manager raises the burst start on every `BURST_PTR` write. A manager with two or more slots and bit 2 clear predates that fix: it passes on the owner slot's own start toggle, which after a slot switch can equal the burst reader's last-seen copy, so the start is missed and the burst reads the new slot from the previous burst's pointer. On such a manager the host syncs the start first: after the `BURST_PTR` write it runs one burst scan, whose capture copies the new owner's toggle, then writes `BURST_PTR` again, a start the reader cannot miss. |
-| `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` reads. Present when `MGR_CAPS[1]=1`. |
+| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported; bit 2 = the manager raises the burst start on every `BURST_PTR` write. A manager with two or more slots and bit 2 clear predates that fix: it passes on the owner slot's own start toggle, which after a slot switch can equal the burst reader's last-seen copy, so the start is missed and the burst reads the new slot from the previous burst's pointer. On such a manager the host syncs the start first: after the `BURST_PTR` write it runs one burst scan, whose capture copies the new owner's toggle, then writes `BURST_PTR` again, a start the reader cannot miss. Bit 3 = `MGR_EPOCH`, `MGR_OWNER` and `MGR_SLOT_EPOCH` present; bit 4 = the priming scan of a burst carries the burst header (see [Burst header](#regmap-burst-header)); bit 5 = `MGR_CTRL` and `MGR_TLR_COUNT` present, and each slot resets alone; bit 6 = the TAP's Test-Logic-Reset also resets the burst protocol (`TLR_RESET_EN`). |
+| `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` and `MGR_SLOT_EPOCH` reads, and the slot `MGR_CTRL` bit 1 resets. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
+| `0xF020` | MGR_EPOCH | RO | `[15:0]` counts releases of the hub reset (`MGR_CTRL` bit 0, or the power-up reset after its first release); `[31:16]` read 0. The power-up value is 0 and the power-up itself is not counted, so a hub that came up normally reads 1. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF024` | MGR_OWNER | RW | Owner token of the host session using the hub. Advisory: the hub never acts on it. The host writes a random nonzero token when it first selects a slot on the chain, warns if another nonzero token was there, and writes 0 when it closes. Cleared by the hub reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF028` | MGR_CTRL | WO | Reads 0. Write 1s to: bit 0 reset the hub (`MGR_ACTIVE`, `MGR_DESC_INDEX`, `MGR_OWNER` and the burst owner, but no slot); bit 1 reset the `MGR_DESC_INDEX` slot; bit 2 reset every slot. A slot reset is the slot's own reset: an ELA's sample and register sides together, an EIO's outputs. Present when `MGR_CAPS[5]=1`. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts releases of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2). Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF030` | MGR_TLR_COUNT | RO | `[15:0]` counts entries of the TAP into Test-Logic-Reset. Never reset. Present when `MGR_CAPS[5]=1`. |
 
 Selection sequence:
 
@@ -178,6 +183,28 @@ Selection sequence:
 
 Burst readback is valid only for ELA slots. If the active slot is EIO, the
 mixed manager returns idle/zero burst controls.
+
+<a id="regmap-manager-resets"></a>
+### Resets (`MGR_CAPS[5]=1`)
+
+Each slot resets alone. An ELA's `ela_sample_rst` (or `MGR_CTRL` bit 1/2)
+resets that ELA's sample side and, synchronised to TCK, its register side; it
+reaches no other slot, no EIO output and no manager register. The hub's own
+reset is the power-up reset, which follows the slots' sample resets only until
+it is first released, plus `MGR_CTRL` bit 0. Before per-slot resets, any ELA's
+sample reset reset the whole hub: `MGR_ACTIVE`, every EIO output, and the
+register side of every ELA, which made another ELA that had been armed once see
+a phantom arm and re-arm over its capture.
+
+The burst protocol (the JTAG pipe and the manager's burst start) resets on the
+power-up reset, and, when the hub is built with `TLR_RESET_EN=1` (`MGR_CAPS[6]`),
+whenever the TAP passes through Test-Logic-Reset, so a host that restarts in
+the middle of a burst cannot leave the pipe in burst mode.  Enable it only
+when the JTAG server keeps the TAP out of Test-Logic-Reset between scans:
+Xilinx `hw_server`/`xsdb` walks it through Test-Logic-Reset many times a second
+while a session is open, which would cancel bursts.  The epochs and
+`MGR_TLR_COUNT` are never reset, so a host compares them before and after an
+operation to learn that a reset happened in between.
 
 [↑ Top](#regmap-top)
 
@@ -199,6 +226,28 @@ mixed manager returns idle/zero burst controls.
   packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
   via this path and discards the priming scan.
 - Read pointer auto-increments; staging buffer is pre-filled during the SHIFT phase.
+
+<a id="regmap-burst-header"></a>
+- **Burst header** (`MGR_CAPS[4]=1`): a core manager that sets this bit loads a
+  160-bit header into the priming scan instead of the stale staging word, so
+  the host can check which burst it is about to read.  Bits `[255:160]` are 0.
+
+  | Bits | Field |
+  |------|-------|
+  | `[15:0]` | Magic `0x4248` (ASCII `"BH"`) |
+  | `[31:16]` | Burst owner slot |
+  | `[63:32]` | Start pointer of the burst |
+  | `[64]` | `BURST_PTR` bit 31: 1 = timestamp window |
+  | `[79:65]` | 0 |
+  | `[95:80]` | `MGR_EPOCH[15:0]` |
+  | `[111:96]` | `MGR_SLOT_EPOCH[15:0]` of the owner slot |
+  | `[143:112]` | `MGR_OWNER` |
+  | `[159:144]` | The hub's burst `SAMPLE_W` |
+
+  The host raises `BurstIntegrityError` when the priming scan is not a header
+  for the slot and window it asked for, and when `MGR_EPOCH` or the slot's
+  `MGR_SLOT_EPOCH` read after the burst differ from the header's: the hub or
+  the slot was reset under the burst.
 - Effective delivery rate depends on the host transport and cable;
   the burst path returns multiple words per 256-bit DR scan to amortise round trips.
 

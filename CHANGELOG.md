@@ -9,6 +9,30 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Core manager — resets a host can see, and a checked burst header.** New
+  manager registers: `MGR_EPOCH` and `MGR_SLOT_EPOCH` count releases of the hub
+  and per-slot resets, `MGR_TLR_COUNT` counts TAP Test-Logic-Reset entries
+  (all never reset), `MGR_OWNER` holds an advisory owner token, and `MGR_CTRL`
+  resets the hub, one slot or every slot. The priming scan of a burst now
+  carries a header (magic, slot, start pointer, window, both epochs, owner)
+  instead of a stale word. The host checks it, re-reads the epochs after the
+  burst, and raises `BurstIntegrityError` when the burst is not the one it
+  asked for or a reset hit it. The host writes its owner token when it first
+  selects a slot, warns about another token, and clears it on close. The hub
+  shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
+  the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
+  TAP through Test-Logic-Reset between scans. `MGR_CAPS` bits 3-6 report each feature. Both HDLs,
+  all three vendor shells.
+
+- **Formal parity — power-up values.** The Verilog/VHDL parity proofs matched
+  registers by name and assumed equal states, so they never compared
+  power-up values. Each configuration now also compares the state of every
+  register after the reset the proofs assume, which covers the registers the
+  reset does not clear (counters, synchronisers). GHDL keeps the power-up
+  value of an async-reset flop on an alias that yosys `proc` drops, so the
+  check keeps it under its own attribute first. `reset_sync` is compared
+  without a reset, since its power-up value is its contract.
+
 - **Host — core discovery.** `fcapz discover`, the RPC `discover` command and
   `fcapz.discovery.discover_cores()` list every fcapz core without being told
   a chain: ELAs, EIOs, AXI monitors, a core manager and each of its slots, and
@@ -173,6 +197,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **Core manager — one ELA's reset could phantom-arm another.** Any ELA's
+  `ela_sample_rst` reset the whole hub's JTAG side: `MGR_ACTIVE`, every EIO
+  output, and the register side of every ELA. Another ELA's arm and reset
+  commands cross to its sample clock as toggles, and only their JTAG halves
+  were reset, so an ELA armed an odd number of times saw a phantom arm and
+  re-armed over a capture the host had not read. Each ELA now resets its
+  sample and register sides together from its own reset, and the hub resets
+  only at power-up or from `MGR_CTRL` bit 0. A cocotb test reproduces the
+  phantom arm on the old wiring on all three shells. Both HDLs.
+
+- **`reset_sync` (Verilog) powered up released.** The VHDL synchroniser powers
+  up asserted; the Verilog one had no power-up value, so it came up 0 and a
+  design whose reset input was never asserted was never reset. It now powers
+  up asserted too. Found by the new formal power-up check.
 
 - **Host — slot selection could reset an EJTAG-AXI bridge.** Selecting a
   manager slot wrote `MGR_ACTIVE` (`0xF008`) before checking that the chain

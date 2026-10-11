@@ -454,7 +454,7 @@ vendor-specific:
 | Layer | What it holds |
 |---|---|
 | `fcapz_debug_multi_core` | The manager plus the ELA/EIO slots, on the 49-bit register bus and the burst bus. No JTAG at all. |
-| `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tdo` out): reset synchroniser, `jtag_pipe_iface`, then the core. |
+| `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tlr`, `tdo` out): hub resets (`fcapz_hub_reset`), `jtag_pipe_iface`, then the core. |
 | `fcapz_debug_multi_<vendor>` | One `jtag_tap_<vendor>` on `CTRL_CHAIN` feeding `fcapz_debug_multi`. |
 
 Packaged vendor shells (all share the parameter and port list shown above):
@@ -489,8 +489,20 @@ reference: two ELAs and two EIOs on instance 1, EJTAG-AXI on instance 4.
 Each managed ELA has its own `ela_sample_clk[i]` and `ela_sample_rst[i]`.
 Use `{NUM_ELAS{clk}}` / `{NUM_ELAS{rst}}` when every ELA samples the same
 domain, or pass different clocks and resets to capture unrelated fabric
-domains behind one USER chain.  The wrapper resets the shared JTAG pipe when
-any ELA reset is asserted.
+domains behind one USER chain.  `ela_sample_rst[i]` resets ELA `i` alone:
+its sample side, and its register side through a TCK synchroniser.  The shared
+JTAG pipe and the manager reset at power-up and stay reset until the ELA
+resets are first released; later ELA resets do not reach them.  With `TLR_RESET_EN=1` the shell
+also resets the burst protocol whenever the TAP passes through
+Test-Logic-Reset, so a host that restarts mid-burst cannot leave the pipe in
+burst mode.  Enable it only behind a JTAG server that leaves the TAP out of
+Test-Logic-Reset between scans, and check with `MGR_TLR_COUNT` first.  Quartus
+`quartus_stp` does (the count stays put for a whole session); Xilinx
+`hw_server`/`xsdb` does not: with a session open it walks the TAP through
+Test-Logic-Reset many times a second between the host's scans (about 170 with
+Vivado 2025.2), which would cancel bursts.  Leave `TLR_RESET_EN=0` on Xilinx
+boards.  `MGR_TLR_COUNT` is 16 bits and wraps, so behind `hw_server` it only
+says something across a short interval.
 
 Each ELA can also override the scalar/default wrapper settings with packed
 per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the
@@ -537,10 +549,20 @@ Manager registers:
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
 | `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. A `BURST_PTR` write binds the burst to the active slot; a later `MGR_ACTIVE` write, even one during a burst, moves register accesses only, and the burst stays on its owner until the next `BURST_PTR` write. Writes of a slot at or past `MGR_COUNT` are ignored. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
-| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write; bit 3 epochs and `MGR_OWNER`; bit 4 burst header; bit 5 `MGR_CTRL` and per-slot resets; bit 6 Test-Logic-Reset resets the burst protocol (see the register map). |
+| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor and `MGR_SLOT_EPOCH` reads, and for `MGR_CTRL` bit 1. |
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
+| `0xF020` | MGR_EPOCH | RO | Releases of the hub reset; never reset. |
+| `0xF024` | MGR_OWNER | RW | Advisory owner token of the host session. |
+| `0xF028` | MGR_CTRL | WO | Bit 0 resets the hub, bit 1 the `MGR_DESC_INDEX` slot, bit 2 every slot. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | Releases of the `MGR_DESC_INDEX` slot's reset; never reset. |
+| `0xF030` | MGR_TLR_COUNT | RO | TAP Test-Logic-Reset entries; never reset. |
+
+Each slot resets alone: an ELA's `ela_sample_rst` resets that ELA only, and no
+longer `MGR_ACTIVE`, the EIO outputs or the other ELAs.  `TLR_RESET_EN=1` on
+the hub shell makes the TAP's Test-Logic-Reset also reset the burst protocol.
+See [Resets](specs/register_map.md#regmap-manager-resets) in the register map.
 
 Host-side, list what the hub holds, then select the ELA instance explicitly:
 
