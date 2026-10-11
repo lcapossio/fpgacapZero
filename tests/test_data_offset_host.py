@@ -21,11 +21,13 @@ class ElaWindowTransport(Transport):
 
     Window word ``k`` (DATA words first, then timestamp words) reads as
     ``0x1000_0000 + k``.  DATA_OFFSET moves every window read by its value,
-    as the RTL does.
+    as the RTL does.  *burst* is the slot's burst wiring (``DESC_CAPS``);
+    *bursting* whether this transport bursts ``read_block(0x0100)`` at all
+    (OpenOCD does not; hw_server not for some sample widths).
     """
 
     def __init__(self, *, sample_w, depth, timestamp_w=0, data_offset=True,
-                 managed=False, burst=False):
+                 managed=False, burst=False, bursting=None):
         self.sample_w, self.depth, self.timestamp_w = sample_w, depth, timestamp_w
         self.words_per_sample = (sample_w + 31) // 32
         self.ts_words = (timestamp_w + 31) // 32
@@ -52,6 +54,7 @@ class ElaWindowTransport(Transport):
                 0xF004: 1, 0xF008: 0, 0xF00C: 0, 0xF010: 0x3, 0xF014: 0,
                 0xF01C: int(burst),  # DESC_CAPS
             }
+        self.bursting = burst if bursting is None else bursting
         self.offset = 0
         self.offsets_written: list[int] = []
         self.window_reads: list[tuple[int, int]] = []
@@ -92,8 +95,11 @@ class ElaWindowTransport(Transport):
         elif addr < 0x0100:
             self.regs[addr] = value
 
+    def bursts_data_window(self, *, timestamp=False):
+        return self.bursting
+
     def read_block(self, addr, words):
-        if addr == 0x0100:  # a burst on the real transports: no window limit
+        if addr == 0x0100 and self.bursting:  # a burst: no window limit
             self.burst_reads += 1
             return [self._window_word(addr + 4 * i) for i in range(words)]
         return self.read_window_block(addr, words)
@@ -159,6 +165,27 @@ class DataOffsetTests(unittest.TestCase):
         self.assertIn(16384 + page, t.offsets_written)
         self.assertEqual(t.offset, 0)
         self.assertEqual(t.burst_reads, 0)
+
+    def test_burst_slot_on_a_bursting_transport_is_one_burst(self):
+        t = ElaWindowTransport(sample_w=8, depth=16384, managed=True, burst=True)
+        result = capture(t, instance=0)
+        self.assertEqual(result.samples, [(0x1000_0000 + k) & 0xFF for k in range(16384)])
+        self.assertEqual(t.burst_reads, 1)
+        self.assertEqual(t.window_reads, [])
+        self.assertEqual(t.offsets_written, [0])  # configure only
+
+    def test_burst_slot_on_a_transport_that_does_not_burst_is_paged(self):
+        """The slot has burst wiring but the transport reads read_block(0x0100)
+        through the window: it is paged like a slot without wiring, not left to
+        overrun the window (BUG-237)."""
+        t = ElaWindowTransport(sample_w=8, depth=16384, managed=True, burst=True,
+                               bursting=False)
+        result = capture(t, instance=0)
+        self.assertEqual(result.samples, [(0x1000_0000 + k) & 0xFF for k in range(16384)])
+        self.assertEqual(t.burst_reads, 0)
+        page = (0xF000 - 0x0100) // 4
+        self.assertEqual(t.offsets_written, [0, 0, page, 0])
+        self.assertEqual(t.offset, 0)
 
     def test_offset_restored_when_a_page_fails(self):
         t = ElaWindowTransport(sample_w=256, depth=2048, managed=True)

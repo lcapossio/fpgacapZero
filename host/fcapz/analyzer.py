@@ -16,11 +16,15 @@ from .registers import (
     ADDR_MGR_ACTIVE,
     ADDR_MGR_EPOCH,
     ADDR_MGR_SLOT_EPOCH,
+    ADDR_MGR_TLR_COUNT,
     MGR_CAP_BURST_HEADER,
+    MGR_CAP_EPOCH_OWNER,
+    MGR_CAP_TLR_RESET,
 )
 from .transport import (
     REG_ADDR_SPACE_END,
     REGISTER_PIPE_CORE_IDS,
+    BurstExpectation,
     BurstHeader,
     BurstIntegrityError,
     BurstUnavailableError,
@@ -295,6 +299,18 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
     return list(range(n))
 
 
+class ManagerResetError(RuntimeError):
+    """A reset on the core manager invalidated the operation.
+
+    Either the ELA's slot was reset after :meth:`Analyzer.configure`, so the
+    core went back to its build defaults and a capture armed or read since is
+    not the one configured (call ``configure()`` again), or, on a hub whose
+    Test-Logic-Reset resets the JTAG protocol (``MGR_CAPS`` bit 6), the TAP
+    passed through Test-Logic-Reset during a readout, which can drop a
+    register command.
+    """
+
+
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -317,10 +333,10 @@ def _burst_epoch_checked(method):
             result = method(self, *args, **kwargs)
             header = transport.last_burst_header
             if header is not None:
-                self._check_burst_epochs(header)
+                self._check_burst_epochs(header, transport.burst_expect)
             return result
         finally:
-            transport.burst_header_slot = None
+            transport.burst_expect = None
             transport.last_burst_header = None
 
     return wrapper
@@ -369,6 +385,8 @@ class Analyzer:
         # MGR_DESC_CAPS per slot index.
         self._manager_slot_caps: dict[int, int] = {}
         self._manager_found: bool | None = None
+        # MGR_SLOT_EPOCH when configure() finished; None without epochs.
+        self._config_slot_epoch: int | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -410,6 +428,7 @@ class Analyzer:
                 # The configuration and geometry belong to the old slot; a
                 # capture read with them would misread the new slot's data.
                 self._config = None
+                self._config_slot_epoch = None
                 self._hw_timestamp_w = 0
                 self._hw_num_segments = 1
                 self._hw_compare_caps = 0
@@ -588,6 +607,16 @@ class Analyzer:
 
         self._validate_probes(config.probes, config.sample_width)
 
+        # Writes to a slot held in reset are lost; a reset during them loses
+        # some.  The epoch before and after says which (BUG-234/235).
+        self._config_slot_epoch = None
+        epoch_before = self._slot_epoch()
+        if epoch_before is not None and epoch_before & 1:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot is held in reset (MGR_SLOT_EPOCH "
+                f"{epoch_before} is odd): a configuration written now is lost"
+            )
+
         # Validate host config against the synthesized core to avoid silent
         # mismatch between CLI defaults and FPGA bitstream parameters.
         _read = self.transport.read_reg_stable
@@ -697,6 +726,13 @@ class Analyzer:
                 self.transport.write_reg(base + 12, stage.value_b)
                 self.transport.write_reg(base + 16, stage.mask_b)
 
+        epoch_after = self._slot_epoch()
+        if epoch_after != epoch_before:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot was reset while it was configured "
+                f"(MGR_SLOT_EPOCH {epoch_before} before, {epoch_after} after)"
+            )
+        self._config_slot_epoch = epoch_after
         self._config = config
 
     @_selected_transaction
@@ -742,8 +778,13 @@ class Analyzer:
 
     @_selected_transaction
     def arm(self) -> None:
-        """Arm the core with the configuration it holds."""
+        """Arm the core with the configuration it holds.
+
+        Raises :class:`ManagerResetError` if the core's slot was reset since
+        :meth:`configure`: it would arm its build defaults.
+        """
         self._select_instance()
+        self._check_configured_epoch("at arm")
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
@@ -848,7 +889,12 @@ class Analyzer:
             return _join_timestamp_words(raw, ts_words_per, mask)
 
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        if ts_words_per == 1 and callable(timestamp_burst) and has_burst:
+        if (
+            ts_words_per == 1
+            and callable(timestamp_burst)
+            and has_burst
+            and self.transport.bursts_data_window(timestamp=True)
+        ):
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
             raw = self._read_window(
@@ -999,7 +1045,7 @@ class Analyzer:
         """
         with self.transport.transaction_lock():
             self.transport.burst_start_sync = False
-            self.transport.burst_header_slot = None
+            self.transport.burst_expect = None
             if not self._behind_manager():
                 return True
             self._select_chain()
@@ -1018,9 +1064,16 @@ class Analyzer:
             if slot is None:
                 slot = int(read(_ADDR_MGR_ACTIVE))
             # The hub then loads a header into the burst's priming scan; the
-            # transport checks it (Transport.burst_header_slot).
+            # transport checks it (Transport.burst_expect).  SEG_START reads
+            # the pointer the BURST_PTR write latches.
             if mgr_caps & MGR_CAP_BURST_HEADER:
-                self.transport.burst_header_slot = slot
+                stable = self.transport.read_reg_stable
+                self.transport.burst_expect = BurstExpectation(
+                    slot=slot,
+                    start_ptr=int(stable(_ADDR_SEG_START)),
+                    sample_w=int(stable(_ADDR_SAMPLE_W)) & 0xFFFF,
+                    tlr_count=self._tlr_count(),
+                )
             caps = self._manager_slot_caps.get(slot)
             if caps is None:
                 self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
@@ -1028,13 +1081,26 @@ class Analyzer:
                 self._manager_slot_caps[slot] = caps
             return bool(caps & 0x1)
 
-    def _check_burst_epochs(self, header: BurstHeader) -> None:
-        """Raise when the hub or the burst's slot was reset during the burst.
+    def _check_burst_epochs(
+        self, header: BurstHeader, expect: BurstExpectation | None = None
+    ) -> None:
+        """Raise when the hub or the burst's slot was reset during the burst,
+        or (``expect.tlr_count``) a Test-Logic-Reset cancelled it.
 
         The header holds both epochs as the burst started.  A reset after that
-        changes the capture under the burst, which the scans cannot show.
+        changes the capture under the burst, which the scans cannot show.  A
+        cancel after the priming scan turns the remaining scans into register
+        data, which the scans cannot show either.
         """
         read = self.transport.read_reg
+        if expect is not None and expect.tlr_count is not None:
+            tlr = int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
+            if tlr != expect.tlr_count:
+                raise BurstIntegrityError(
+                    f"the TAP passed through Test-Logic-Reset during the burst "
+                    f"from slot {header.slot} (MGR_TLR_COUNT {expect.tlr_count} "
+                    f"before, {tlr} after), which cancels a burst on this hub"
+                )
         epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
         self.transport.write_reg(_ADDR_MGR_DESC_INDEX, header.slot)
         slot_epoch = int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF
@@ -1044,6 +1110,78 @@ class Analyzer:
                 f"burst: epochs {header.mgr_epoch}/{header.slot_epoch} "
                 f"(hub/slot) at its start, {epoch}/{slot_epoch} after"
             )
+
+    def _slot_epoch(self) -> int | None:
+        """``MGR_SLOT_EPOCH`` of this analyzer's slot (odd while it is held in
+        reset); ``None`` without a core manager that has epochs (``MGR_CAPS``
+        bit 3).  Call with this analyzer selected."""
+        if not self._behind_manager():
+            return None
+        read = self.transport.read_reg
+        if self._manager_caps is None:
+            self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
+        if not self._manager_caps[0] & MGR_CAP_EPOCH_OWNER:
+            return None
+        slot = self._instance
+        if slot is None:
+            slot = int(read(_ADDR_MGR_ACTIVE))
+        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
+        return int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF
+
+    def _tlr_count(self) -> int | None:
+        """``MGR_TLR_COUNT`` on a hub whose Test-Logic-Reset resets the JTAG
+        protocol (``MGR_CAPS`` bit 6), else ``None``: elsewhere a
+        Test-Logic-Reset (hw_server issues them all the time) disturbs nothing."""
+        if not self._behind_manager():
+            return None
+        read = self.transport.read_reg
+        if self._manager_caps is None:
+            self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
+        if not self._manager_caps[0] & MGR_CAP_TLR_RESET:
+            return None
+        return int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
+
+    def _check_configured_epoch(self, when: str) -> None:
+        """Raise :class:`ManagerResetError` if the slot was reset since
+        :meth:`configure`."""
+        if self._config_slot_epoch is None:
+            return
+        epoch = self._slot_epoch()
+        if epoch is not None and epoch != self._config_slot_epoch:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot was reset since configure() "
+                f"(MGR_SLOT_EPOCH {self._config_slot_epoch} then, {epoch} {when}): "
+                "it is back at its build defaults; call configure() again"
+            )
+
+    def _readout_begin(self) -> int | None:
+        """Start of a readout: raise :class:`ManagerResetError` if the slot was
+        reset since :meth:`configure`; return the ``MGR_TLR_COUNT`` baseline
+        for :meth:`_readout_end`."""
+        self._check_configured_epoch("before the readout")
+        return self._tlr_count()
+
+    def _readout_end(self, tlr_before: int | None) -> None:
+        """End of a readout: raise :class:`ManagerResetError` if the slot was
+        reset, or a protocol-resetting Test-Logic-Reset happened, during it.
+        Samples and timestamps may then come from different captures, or from
+        the build defaults, and a window read may have lost a command."""
+        tlr_after = self._tlr_count()
+        if tlr_after != tlr_before:
+            raise ManagerResetError(
+                f"the TAP passed through Test-Logic-Reset during the readout "
+                f"(MGR_TLR_COUNT {tlr_before} before, {tlr_after} after), which "
+                "resets this hub's JTAG protocol"
+            )
+        self._check_configured_epoch("after the readout")
+
+    def _read_data_block(self, total_words: int) -> list[int]:
+        """DATA words from a slot with burst wiring: ``read_block`` when the
+        transport bursts it, else the register window, paged past its end."""
+        if self.transport.bursts_data_window():
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        window_block = self.transport.read_window_block
+        return self._read_window(_ADDR_DATA_BASE, total_words, window_block, window_block)
 
     @_selected_transaction
     @_burst_epoch_checked
@@ -1087,9 +1225,9 @@ class Analyzer:
             if not has_burst or managed_off_chain:
                 window_block = self.transport.read_window_block
                 return self._read_window(_ADDR_DATA_BASE, total_words, window_block, window_block)
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+            return self._read_data_block(total_words)
         if has_burst:
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+            return self._read_data_block(total_words)
         # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
         return self._read_window(
             _ADDR_DATA_BASE, total_words, self._read_window_words, self._read_window_words
@@ -1114,6 +1252,7 @@ class Analyzer:
 
         with self.transport.transaction_lock():
             self._select_instance()
+            tlr = self._readout_begin()
             read_reg = self.transport.read_reg_stable
             status = read_reg(_ADDR_STATUS)
             fallback_total = self._config.pretrigger + self._config.posttrigger + 1
@@ -1138,6 +1277,7 @@ class Analyzer:
                     samples.append(val & mask)
 
             timestamps = self._read_timestamps(total)
+            self._readout_end(tlr)
 
         return CaptureResult(
             config=self._config,
@@ -1158,6 +1298,7 @@ class Analyzer:
         self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
+        tlr = self._readout_begin()
 
         # Select segment for readback.  seg_start_ptr[seg_sel] is read
         # directly by the burst engine (stable after all_seg_done).
@@ -1187,6 +1328,7 @@ class Analyzer:
                 samples.append(val & mask)
 
         timestamps = self._read_timestamps(total)
+        self._readout_end(tlr)
 
         return CaptureResult(
             config=self._config,

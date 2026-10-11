@@ -929,6 +929,9 @@ class AnalyzerTests(unittest.TestCase):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
 
         class TimestampBurstTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -961,6 +964,9 @@ class AnalyzerTests(unittest.TestCase):
         multi-slot manager also run with the start sync."""
 
         class OldManagerTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -996,6 +1002,9 @@ class AnalyzerTests(unittest.TestCase):
         replaced by a window re-read."""
 
         class TimestampBurstTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -1113,6 +1122,9 @@ class DataChainBurstTransport(FakeTransport):
     ``read_timestamp_block_single_chain`` on the active chain."""
 
     burst_on_data_chain = True
+
+    def bursts_data_window(self, *, timestamp=False):
+        return True
 
     def __init__(self, *, sample_w: int, managed: bool, slot_caps: int = 1,
                  timestamp_w: int = 0, capture_len: int = 3):

@@ -206,6 +206,24 @@ class BurstHeader(NamedTuple):
         )
 
 
+class BurstExpectation(NamedTuple):
+    """What the header of the next burst must say (:attr:`Transport.burst_expect`).
+
+    ``start_ptr`` is ``SEG_START`` read just before the burst: the pointer the
+    ``BURST_PTR`` write latches, so another value means the capture or the
+    segment selection changed in between.  ``sample_w`` is the slot's
+    ``SAMPLE_W``.  ``tlr_count`` is ``MGR_TLR_COUNT`` before the burst on a hub
+    whose Test-Logic-Reset cancels bursts (``MGR_CAPS`` bit 6), else ``None``:
+    a cancel after the priming scan leaves the header valid and turns the rest
+    of the burst into register data, so only the count shows it.
+    """
+
+    slot: int
+    start_ptr: int
+    sample_w: int
+    tlr_count: int | None = None
+
+
 class BurstUnavailableError(RuntimeError):
     """This session cannot burst-read the request at all.
 
@@ -513,6 +531,15 @@ class Transport(ABC):
         bursts need not override it."""
         return self.read_block(addr, words)
 
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        """Whether ``read_block(0x0100, ...)`` (with *timestamp*,
+        ``read_timestamp_block``) runs a burst rather than reading the
+        register window.  A burst is not limited by
+        :attr:`data_window_end`; a window read is, so the analyzer pages it
+        (``DATA_OFFSET``) when it would pass the end.  Transports that burst
+        override this, and decide their ``read_block`` with it."""
+        return False
+
     #: One past the last address a DATA / timestamp window read may touch.
     #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
     #: (``0xF000``) for a core behind a core manager.
@@ -531,23 +558,24 @@ class Transport(ABC):
 
     #: Set by :class:`~fcapz.analyzer.Analyzer` before a burst through a core
     #: manager that loads a burst header into the priming scan (``MGR_CAPS``
-    #: bit 4): the slot the burst must come from.  A bursting transport then
-    #: checks the priming scan (:meth:`_check_burst_header`) and keeps the
-    #: header in :attr:`last_burst_header`.  ``None``: no header expected.
-    burst_header_slot: int | None = None
+    #: bit 4): what that header must say.  A bursting transport then checks
+    #: the priming scan (:meth:`_check_burst_header`) and keeps the header in
+    #: :attr:`last_burst_header`.  ``None``: no header expected.
+    burst_expect: BurstExpectation | None = None
 
     #: The header of the last checked burst, for the epoch check after it.
     last_burst_header: BurstHeader | None = None
 
     def _check_burst_header(self, prime_scan: int, *, timestamp: bool) -> None:
-        """Check a burst's priming scan against :attr:`burst_header_slot`.
+        """Check a burst's priming scan against :attr:`burst_expect`.
 
         Raises :class:`BurstIntegrityError` when the scan is not the header of
-        a burst from that slot and window: the data that follow would belong
-        to another burst, another slot, or no burst at all.
+        the expected burst: the data that follow would belong to another
+        burst, another slot or segment, a slot held in reset, or no burst at
+        all.  ``MGR_OWNER`` is advisory: another session's token is reported.
         """
-        slot = self.burst_header_slot
-        if slot is None:
+        expect = self.burst_expect
+        if expect is None:
             return
         header = BurstHeader.parse(prime_scan)
         if header is None:
@@ -555,11 +583,35 @@ class Transport(ABC):
                 f"burst priming scan is not a burst header ({prime_scan:#x}): "
                 "the hub did not start this burst"
             )
-        if header.slot != slot or header.timestamp != timestamp:
+        if header.slot != expect.slot or header.timestamp != timestamp:
             raise BurstIntegrityError(
                 f"burst header is for slot {header.slot} "
                 f"({'timestamps' if header.timestamp else 'samples'}), expected "
-                f"slot {slot} ({'timestamps' if timestamp else 'samples'})"
+                f"slot {expect.slot} ({'timestamps' if timestamp else 'samples'})"
+            )
+        if header.start_ptr != expect.start_ptr:
+            raise BurstIntegrityError(
+                f"burst header starts at sample {header.start_ptr}, expected "
+                f"{expect.start_ptr}: the capture or its segment selection "
+                "changed before the burst started"
+            )
+        if header.sample_w != expect.sample_w:
+            raise BurstIntegrityError(
+                f"burst header is for {header.sample_w}-bit samples, slot "
+                f"{expect.slot} reports SAMPLE_W={expect.sample_w}"
+            )
+        if header.slot_epoch & 1:
+            raise BurstIntegrityError(
+                f"slot {expect.slot} is held in reset (MGR_SLOT_EPOCH "
+                f"{header.slot_epoch} is odd): its capture is not readable"
+            )
+        token = self.__dict__.get("_fcapz_owner_token")
+        if token is not None and header.owner not in (0, token):
+            _log.warning(
+                "burst from slot %d started while MGR_OWNER holds 0x%08X, not "
+                "this session's token: another host session may be using the hub",
+                expect.slot,
+                header.owner,
             )
         self.last_burst_header = header
 
@@ -1340,10 +1392,13 @@ class QuartusStpTransport(Transport):
         )
         return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
 
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        return self._burst_available
+
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available:
+        if addr == 0x0100 and self.bursts_data_window():
             return self._read_block_burst(words)
         return self.read_window_block(addr, words)
 
@@ -1393,7 +1448,7 @@ class QuartusStpTransport(Transport):
         """Read timestamp words through the Intel/Altera DATA_CHAIN burst path."""
         if words <= 0:
             return []
-        if timestamp_width > 0 and self._burst_available:
+        if timestamp_width > 0 and self.bursts_data_window(timestamp=True):
             return self._read_block_burst(
                 words,
                 timestamp=True,
@@ -2531,7 +2586,7 @@ class XilinxHwServerTransport(Transport):
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
+        if addr == 0x0100 and self.bursts_data_window():
             return self._burst_with_hint(words)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
@@ -2540,6 +2595,11 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         return self._read_block_user1(addr, words)
+
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        if timestamp:
+            return self._burst_available
+        return self._burst_available and self._burst_sample_ok()
 
     @property
     def _burst_available(self) -> bool:
@@ -2768,7 +2828,7 @@ class XilinxHwServerTransport(Transport):
         """Read timestamp words through the configured burst mode when available."""
         if words <= 0:
             return []
-        if self._burst_available and timestamp_width > 0:
+        if timestamp_width > 0 and self.bursts_data_window(timestamp=True):
             return self._burst_with_hint(
                 words,
                 timestamp=True,
