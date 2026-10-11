@@ -415,6 +415,19 @@ class Analyzer:
                     self._instance,
                 )
 
+    def pin_active_slot(self) -> None:
+        """Bind an analyzer with no selected slot to the slot the core manager
+        has active now, so another controller that moves ``MGR_ACTIVE`` on the
+        same transport (an EIO in another slot) does not move this analyzer.
+        The configuration is kept: the slot is the same.  No effect without a
+        manager or with a slot already selected."""
+        with self.transport.transaction_lock():
+            if self._instance is not None or not self._behind_manager():
+                return
+            self._select_chain()
+            self._instance = int(self.transport.read_reg_stable(_ADDR_MGR_ACTIVE))
+            self._select_instance()
+
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
 

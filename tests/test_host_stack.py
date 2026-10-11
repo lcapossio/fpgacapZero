@@ -1420,6 +1420,62 @@ class RpcSharedEioTests(unittest.TestCase):
         self.assertEqual(len(built), 2)
         self.assertIsNot(built[1], hub)
 
+    def test_analyzer_bound_on_connect_keeps_its_slot(self):
+        """connect(instance=0): an EIO in slot 1 on the same transport does not
+        move the analyzer (BUG-231)."""
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1, "instance": 0})
+        self.assertEqual(server._analyzer.instance, 0)
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+        reply = server.handle({"cmd": "probe"})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+        self.assertEqual(reply["probe"]["sample_width"], 8)
+
+    def test_unbound_analyzer_is_pinned_before_a_shared_eio(self):
+        """connect without instance reads the active slot; a shared EIO pins it
+        to that slot first, so the EIO's select does not take it over."""
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        self.assertIsNone(server._analyzer.instance)
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual(server._analyzer.instance, 0)
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+
+    def test_rebind_selects_the_slot(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        server.handle({"cmd": "connect", "chain": 1, "instance": 0})
+        server.handle({"cmd": "rebind", "chain": 1, "instance": 1})
+        self.assertEqual(server._analyzer.instance, 1)
+        server.handle({"cmd": "rebind", "chain": 1})
+        self.assertEqual(server._analyzer.instance, 1)  # same chain keeps it
+        server.handle({"cmd": "rebind", "chain": 2})
+        self.assertIsNone(server._analyzer.instance)
+
+    def test_managed_eio_on_another_target_gets_its_own_transport(self):
+        """A managed EIO on another board must not borrow the analyzer's
+        transport (BUG-238)."""
+        for other in ({"backend": "openocd"}, {"host": "10.0.0.2"}, {"port": 3122},
+                      {"tap": "xc7a35t"}):
+            with self.subTest(other=other):
+                server, hub, built = self._server()
+                server.handle({"cmd": "connect", "chain": 1})
+                server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1, **other})
+                self.assertEqual(len(built), 2)
+                self.assertFalse(server._eio_shared)
+                self.assertIsNone(server._analyzer.instance)  # not pinned
+
+    def test_managed_eio_naming_the_same_target_shares(self):
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1, "host": "127.0.0.1"})
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1,
+                       "backend": "hw_server", "port": 3121, "tap": "xc7a100t"})
+        self.assertEqual(built, [hub])
+        self.assertTrue(server._eio_shared)
+
 
 class ManagedDataChainBurstTests(unittest.TestCase):
     """A core manager bursts on its own chain, so behind a transport whose

@@ -87,6 +87,8 @@ class RpcServer:
         quartus_stp_path: str | None = None,
     ):
         self._analyzer: Analyzer | None = None
+        # Target fields of the connect that opened the analyzer's transport.
+        self._analyzer_target: Dict[str, Any] = {}
         self._eio: EioController | None = None
         # True when the EIO borrows the analyzer's transport (a core-manager
         # slot): dropping it must not close the analyzer's session.
@@ -471,6 +473,33 @@ class RpcServer:
             pass
         return result
 
+    # Request fields that pick the board a transport opens (_build_transport).
+    _TARGET_FIELDS = ("backend", "host", "port", "tap", "hardware")
+
+    @classmethod
+    def _target_fields(cls, req: Dict[str, Any]) -> Dict[str, Any]:
+        return {f: req[f] for f in cls._TARGET_FIELDS if req.get(f) is not None}
+
+    @staticmethod
+    def _resolved_target(fields: Dict[str, Any]) -> tuple:
+        """The board *fields* open, with _build_transport's defaults."""
+        backend = str(fields.get("backend", "hw_server"))
+        if backend == "usb_blaster":
+            tap = str(fields.get("tap", "auto"))
+            if tap in ("", "xc7a100t.tap"):
+                tap = "auto"
+            return (backend, fields.get("hardware"), tap)
+        port = int(fields.get("port", 6666 if backend == "openocd" else 3121))
+        tap = str(fields.get("tap", "xc7a100t.tap" if backend == "openocd" else "xc7a100t"))
+        return (backend, str(fields.get("host", "127.0.0.1")), port, tap)
+
+    def _same_target(self, req: Dict[str, Any]) -> bool:
+        """Whether *req* names the analyzer's board.  Fields it leaves out are
+        the analyzer's."""
+        base = self._analyzer_target
+        merged = {**base, **self._target_fields(req)}
+        return self._resolved_target(merged) == self._resolved_target(base)
+
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
@@ -716,9 +745,14 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
+            # A core-manager slot: the analyzer selects it before every access,
+            # so a side session in another slot cannot move it (BUG-231).
+            instance = req.get("instance")
+            instance = None if instance is None else int(instance)
             analyzer = Analyzer(
                 self._build_transport(req),
                 chain=int(requested) if requested is not None else 1,
+                instance=instance,
             )
             analyzer.connect()
             if requested is None and analyzer.probe_optional() is None:
@@ -726,11 +760,12 @@ class RpcServer:
                 # the conservative scan set (USER1/2 — bridges on 3/4 speak a
                 # different DR protocol and must not see stray shifts).
                 for chain in (2,):
-                    alt = Analyzer(analyzer.transport, chain=chain)
+                    alt = Analyzer(analyzer.transport, chain=chain, instance=instance)
                     if alt.probe_optional() is not None:
                         analyzer = alt
                         break
             self._analyzer = analyzer
+            self._analyzer_target = self._target_fields(req)
             # Echo the resolved preset/chain so a client that omitted them can
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
@@ -753,9 +788,21 @@ class RpcServer:
             if requested is None:
                 raise ValueError("rebind requires a chain")
             new_chain = int(requested)
-            if new_chain != analyzer.bscan_chain:
+            # ``instance`` names the core-manager slot on the new chain; left
+            # out, a rebind to the same chain keeps the slot and one to
+            # another chain selects none.
+            if "instance" in req:
+                instance = req["instance"]
+                new_instance = None if instance is None else int(instance)
+            elif new_chain == analyzer.bscan_chain:
+                new_instance = analyzer.instance
+            else:
+                new_instance = None
+            if new_chain != analyzer.bscan_chain or new_instance != analyzer.instance:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+                self._analyzer = Analyzer(
+                    analyzer.transport, chain=new_chain, instance=new_instance
+                )
             return self._ok(
                 chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
             )
@@ -962,8 +1009,18 @@ class RpcServer:
             instance = req.get("instance")
             # A core-manager slot shares the hub's ACTIVE register with the
             # analyzer, so it goes through the analyzer's transport: one lock
-            # and one slot cache.  A second transport would race it.
-            shared = instance is not None and self._analyzer is not None
+            # and one slot cache.  A second transport would race it.  Only for
+            # the analyzer's target: a request that names another board gets
+            # its own transport (BUG-238).
+            shared = (
+                instance is not None
+                and self._analyzer is not None
+                and self._same_target(req)
+            )
+            if shared and chain == self._analyzer.bscan_chain:
+                # The EIO's selects move MGR_ACTIVE: an analyzer that reads
+                # whichever slot is active must keep the one it reads now.
+                self._analyzer.pin_active_slot()
             eio = EioController(
                 self._analyzer.transport if shared else self._build_transport(req),
                 chain=chain,
