@@ -67,7 +67,8 @@ CASES = {
         "EIO 0 OUT_W 7 exceeds scalar EIO_OUT_W 2",
     ),
     # A slot off the burst engine's shape is read through its register
-    # window, so the window has to exist and end below 0xF000.
+    # window, so the window has to exist.  Past 0xF000 the host pages it with
+    # DATA_OFFSET.
     "nonburst_without_window": (
         ".SAMPLE_W(8), .DEPTH(64), .ELA_DEPTHS({32'd16, 32'd64}),"
         " .ELA_USER1_DATA_ENS({32'd0, 32'd1})",
@@ -75,7 +76,7 @@ CASES = {
     ),
     "nonburst_window_past_manager": (
         ".SAMPLE_W(8), .DEPTH(16384), .ELA_SAMPLE_WS({32'd8, 32'd4})",
-        "ELA 0 has no burst and its DATA window ends at 0x10100",
+        None,
     ),
     "clean_deep_burst_slots": (
         ".SAMPLE_W(8), .DEPTH(16384), .ELA_USER1_DATA_ENS({32'd0, 32'd0})",

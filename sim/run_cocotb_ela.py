@@ -103,7 +103,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
         ),
     ),
     CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32},
-                 ("timestamp_capture", "timestamp_decimation_gap")),
+                 ("timestamp_capture", "timestamp_decimation_gap",
+                  "data_offset_moves_the_window")),
     CocotbTarget("timestamp48", {"TIMESTAMP_W": 48}, ("timestamp_48_upper_word",)),
     CocotbTarget("segments4", {"NUM_SEGMENTS": 4},
                  ("segmented_capture", "segmented_windows_are_contiguous",
@@ -161,7 +162,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
     # 256 x 2048: the timestamp window base (0x10100) is past 0xFFFF.
     CocotbTarget("deep_wide_timestamp", {"SAMPLE_W": 256, "DEPTH": 2048, "TIMESTAMP_W": 32},
-                 ("deep_timestamp_base_does_not_alias_data",)),
+                 ("deep_timestamp_base_does_not_alias_data",
+                  "data_offset_reaches_deep_timestamps")),
     CocotbTarget("wide_trig", {"SAMPLE_W": 48, "DEPTH": 8, "WIDE_TRIG": 1},
                  ("wide_trigger_upper_bit",)),
     CocotbTarget(

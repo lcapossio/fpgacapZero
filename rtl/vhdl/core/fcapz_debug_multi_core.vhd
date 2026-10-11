@@ -223,9 +223,6 @@ begin
         constant ELA_PROBE_W_I         : positive := fcapz_probe_width(ELA_PROBE_MUX_W_I, ELA_NUM_CHANNELS_I, ELA_SAMPLE_W_I);
         constant ELA_PTR_W_I           : positive := fcapz_clog2(ELA_DEPTH_I);
         constant ELA_TS_W_SAFE_I       : positive := fcapz_nonzero_width(ELA_TIMESTAMP_W_I);
-        -- End of the slot's DATA + timestamp register window (fcapz_ela).
-        constant ELA_WINDOW_END_I      : natural := 16#0100# + ELA_DEPTH_I *
-            (((ELA_SAMPLE_W_I + 31) / 32) + ((ELA_TIMESTAMP_W_I + 31) / 32)) * 4;
         signal ela_burst_rd_data_i     : std_logic_vector(ELA_SAMPLE_W_I - 1 downto 0);
         signal ela_burst_rd_ts_data_i  : std_logic_vector(ELA_TS_W_SAFE_I - 1 downto 0);
         signal ela_burst_start_ptr_i   : std_logic_vector(ELA_PTR_W_I - 1 downto 0);
@@ -245,16 +242,11 @@ begin
         assert ELA_PTR_W_I <= PTR_W
             report "fcapz_debug_multi ELA DEPTH exceeds scalar DEPTH"
             severity failure;
-        -- Without burst the capture is read only through the register window,
-        -- which must exist and stay below the manager's 0xF000.
+        -- Without burst the capture is read only through the register window
+        -- (paged with DATA_OFFSET past the manager's 0xF000), which must exist.
         assert SLOT_HAS_BURST(i) = '1' or ELA_USER1_DATA_EN_I /= 0
             report "fcapz_debug_multi ELA " & integer'image(i) &
                    " has no burst and USER1_DATA_EN=0, so its capture cannot be read"
-            severity failure;
-        assert SLOT_HAS_BURST(i) = '1' or ELA_USER1_DATA_EN_I = 0 or
-               ELA_WINDOW_END_I <= 16#F000#
-            report "fcapz_debug_multi ELA " & integer'image(i) &
-                   " has no burst and its DATA window passes the manager registers at 0xF000"
             severity failure;
 
         -- MGR_CTRL's request, held on the sample clock until it runs; the

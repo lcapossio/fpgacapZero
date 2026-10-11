@@ -46,6 +46,7 @@ ADDR_TRIG_HOLDOFF = 0x00DC
 ADDR_COMPARE_CAPS = 0x00E0
 ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
+ADDR_DATA_OFFSET = 0x00F4
 ADDR_DATA_BASE = 0x0100
 
 
@@ -1060,6 +1061,61 @@ async def deep_timestamp_base_does_not_alias_data(dut):
 
 
 @cocotb.test()
+async def data_offset_moves_the_window(dut):
+    """DATA_OFFSET moves every DATA / timestamp window read by its value in
+    words: the DATA words, then the timestamp words, then 0."""
+    assert TIMESTAMP_W == 32
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 20)
+    await ela.configure_value_capture(pre=1, post=4, value=8)
+    await ela.arm()
+    await ela.drive_counter(30)
+    assert await ela.wait_done(250) & 0x4
+    data = [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(6)]
+    ts = [await ela.read(ADDR_TS_DATA_BASE + 4 * i) for i in range(6)]
+    assert [d & 0xFF for d in data] == list(range(7, 13))
+    total = DEPTH * (WORDS_PER_SAMPLE + 1)
+
+    await ela.write(ADDR_DATA_OFFSET, 2)
+    assert await ela.read(ADDR_DATA_OFFSET) == 2
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(4)] == data[2:6]
+    # The timestamp window's own addresses move too.
+    assert await ela.read(ADDR_TS_DATA_BASE) == ts[2]
+    # Into the timestamp window from the DATA window's addresses.
+    await ela.write(ADDR_DATA_OFFSET, DEPTH * WORDS_PER_SAMPLE + 1)
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(3)] == ts[1:4]
+    # Past both windows: 0, however large the offset.
+    for offset in (total, total + 7, 0xFFFF_FFFF):
+        await ela.write(ADDR_DATA_OFFSET, offset)
+        assert await ela.read(ADDR_DATA_OFFSET) == offset
+        assert await ela.read(ADDR_DATA_BASE) == 0
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(6)] == data
+
+
+@cocotb.test()
+async def data_offset_reaches_deep_timestamps(dut):
+    """256 x 2048: no 16-bit address reaches the timestamp window (0x10100);
+    DATA_OFFSET does."""
+    assert TIMESTAMP_W > 0 and ADDR_TS_DATA_BASE > 0xFFFF
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=0, post=3, value=0x33, mask=0xFF)
+    await ela.arm()
+    ela.dut.probe_in.value = 0x33
+    await ela.wait_sample(8)
+    assert await ela.wait_done() & 0x4
+    await ela.write(ADDR_DATA_OFFSET, DEPTH * WORDS_PER_SAMPLE)
+    ts = [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(4)]
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert [b - a for a, b in zip(ts, ts[1:])] == [1, 1, 1], ts
+    # A sample word read through the offset matches its window address.
+    await ela.write(ADDR_DATA_OFFSET, 2 * WORDS_PER_SAMPLE)
+    moved = await ela.read(ADDR_DATA_BASE)
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert moved == await ela.read(ADDR_DATA_BASE + 2 * WORDS_PER_SAMPLE * 4)
+
+
+@cocotb.test()
 async def wide_trigger_upper_bit(dut):
     """WIDE_TRIG: program comparator A above bit 31 through the WIDE window and
     prove the trigger fires on a high bit the 32-bit register path can't reach.
@@ -1100,7 +1156,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -1121,13 +1177,17 @@ async def config_user1_disabled(dut):
     await ela.drive_counter(20)
     assert await ela.wait_done() & 0x4
     assert await ela.read(ADDR_DATA_BASE) == 0
+    # No window, so no DATA_OFFSET either.
+    assert not await ela.read(ADDR_COMPARE_CAPS) & (1 << 20)
+    await ela.write(ADDR_DATA_OFFSET, 5)
+    assert await ela.read(ADDR_DATA_OFFSET) == 0
     FUNCTIONAL_COVERAGE.hit("user1_disabled")
 
 
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -1149,7 +1209,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000B_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 1)
