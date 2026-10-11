@@ -1021,8 +1021,17 @@ class RpcServer:
                 # The EIO's selects move MGR_ACTIVE: an analyzer that reads
                 # whichever slot is active must keep the one it reads now.
                 self._analyzer.pin_active_slot()
+            target_req = req
+            if instance is not None and self._analyzer is not None and not shared:
+                # Another board, named by the fields given; the rest are the
+                # session's, as for the comparison (BUG-243).
+                target_req = {
+                    **req,
+                    **{f: v for f, v in self._analyzer_target.items()
+                       if req.get(f) is None},
+                }
             eio = EioController(
-                self._analyzer.transport if shared else self._build_transport(req),
+                self._analyzer.transport if shared else self._build_transport(target_req),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),

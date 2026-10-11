@@ -1468,6 +1468,25 @@ class RpcSharedEioTests(unittest.TestCase):
                 self.assertFalse(server._eio_shared)
                 self.assertIsNone(server._analyzer.instance)  # not pinned
 
+    def test_managed_eio_on_another_target_keeps_the_session_fields(self):
+        """Fields the request leaves out are the session's on the separate
+        transport too, as for the comparison (BUG-243)."""
+        server, hub, _ = self._server()
+        reqs: list = []
+        build = server._build_transport
+
+        def recording_build(req):
+            reqs.append(dict(req))
+            return build(req)
+
+        server._build_transport = recording_build  # type: ignore[method-assign]
+        server.handle({"cmd": "connect", "chain": 1, "host": "10.0.0.2", "port": 3122})
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1, "tap": "xc7a35t"})
+        self.assertEqual(
+            {k: reqs[1].get(k) for k in ("host", "port", "tap")},
+            {"host": "10.0.0.2", "port": 3122, "tap": "xc7a35t"},
+        )
+
     def test_managed_eio_naming_the_same_target_shares(self):
         server, hub, built = self._server()
         server.handle({"cmd": "connect", "chain": 1, "host": "127.0.0.1"})
