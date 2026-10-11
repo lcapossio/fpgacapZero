@@ -1092,6 +1092,18 @@ async def data_offset_moves_the_window(dut):
     await ela.write(ADDR_DATA_OFFSET, 0)
     assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(6)] == data
 
+    # A host that never writes DATA_OFFSET arms or resets before reading, and
+    # either clears an offset another session left (BUG-236).
+    for ctrl in (0x2, 0x1, 0x3):
+        await ela.write(ADDR_DATA_OFFSET, 5)
+        await ela.write(ADDR_CTRL, ctrl)
+        assert await ela.read(ADDR_DATA_OFFSET) == 0, f"CTRL {ctrl:#x} kept DATA_OFFSET"
+    # Other CTRL writes leave it.
+    await ela.write(ADDR_DATA_OFFSET, 5)
+    await ela.write(ADDR_CTRL, 0)
+    assert await ela.read(ADDR_DATA_OFFSET) == 5
+    await ela.write(ADDR_DATA_OFFSET, 0)
+
 
 @cocotb.test()
 async def data_offset_reaches_deep_timestamps(dut):

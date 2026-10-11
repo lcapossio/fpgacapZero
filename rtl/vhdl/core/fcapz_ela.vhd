@@ -1180,6 +1180,12 @@ begin
                         if jtag_wdata(1) = '1' then
                             reset_toggle_jtag <= not reset_toggle_jtag;
                         end if;
+                        -- Every host arms or resets before a capture, so a
+                        -- DATA_OFFSET left by a session that died while
+                        -- paging cannot shift the next one's reads.
+                        if jtag_wdata(0) = '1' or jtag_wdata(1) = '1' then
+                            jtag_data_offset <= (others => '0');
+                        end if;
                     when ADDR_PRETRIG =>
                         jtag_pretrig_len <= jtag_wdata;
                     when ADDR_POSTTRIG =>

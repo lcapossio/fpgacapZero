@@ -946,6 +946,10 @@ module fcapz_ela #(
                         jtag_ctrl <= jtag_wdata;
                         if (jtag_wdata[0]) arm_toggle_jtag <= ~arm_toggle_jtag;
                         if (jtag_wdata[1]) reset_toggle_jtag <= ~reset_toggle_jtag;
+                        // Every host arms or resets before a capture, so a
+                        // DATA_OFFSET left by a session that died while
+                        // paging cannot shift the next one's reads.
+                        if (jtag_wdata[0] || jtag_wdata[1]) jtag_data_offset <= 32'h0;
                     end
                     ADDR_PRETRIG:    jtag_pretrig_len  <= jtag_wdata;
                     ADDR_POSTTRIG:   jtag_posttrig_len <= jtag_wdata;
