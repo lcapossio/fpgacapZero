@@ -45,6 +45,27 @@ module fcapz_core_manager_case #(
     wire burst_start;
     wire burst_timestamp;
     wire [PTR_W-1:0] burst_start_ptr;
+    wire [159:0] burst_header;
+    reg proto_rst = 1'b1;
+    reg tlr = 1'b0;
+    reg [NUM_SLOTS-1:0] slot_rst = {NUM_SLOTS{1'b0}};
+    wire [NUM_SLOTS-1:0] slot_rst_req;
+
+    // Every reset request the manager raises, per slot, and its width.
+    integer req_pulses [0:NUM_SLOTS-1];
+    integer req_wide = 0;
+    reg [NUM_SLOTS-1:0] slot_rst_req_d = {NUM_SLOTS{1'b0}};
+    integer k;
+    initial for (k = 0; k < NUM_SLOTS; k = k + 1) req_pulses[k] = 0;
+    always @(posedge clk) begin
+        slot_rst_req_d <= slot_rst_req;
+        for (k = 0; k < NUM_SLOTS; k = k + 1) begin
+            if (slot_rst_req[k] && !slot_rst_req_d[k])
+                req_pulses[k] = req_pulses[k] + 1;
+            if (slot_rst_req[k] && slot_rst_req_d[k])
+                req_wide = req_wide + 1;
+        end
+    end
 
     integer errors = 0;
     integer i;
@@ -62,10 +83,13 @@ module fcapz_core_manager_case #(
         .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH),
         .SLOT_CORE_IDS(SLOT_CORE_IDS),
-        .SLOT_HAS_BURST(SLOT_HAS_BURST)
+        .SLOT_HAS_BURST(SLOT_HAS_BURST),
+        .HEADER_EN(1)
     ) dut (
         .jtag_clk(clk),
         .jtag_rst(rst),
+        .proto_rst(proto_rst),
+        .tlr(tlr),
         .jtag_wr_en(wr_en),
         .jtag_rd_en(rd_en),
         .jtag_addr(addr),
@@ -76,6 +100,8 @@ module fcapz_core_manager_case #(
         .slot_addr(slot_addr),
         .slot_wdata(slot_wdata),
         .slot_rdata(slot_rdata),
+        .slot_rst(slot_rst),
+        .slot_rst_req(slot_rst_req),
         .burst_rd_addr(burst_rd_addr),
         .burst_rd_active(burst_rd_active),
         .slot_burst_rd_addr(slot_burst_rd_addr),
@@ -89,7 +115,8 @@ module fcapz_core_manager_case #(
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_start_ptr(burst_start_ptr)
+        .burst_start_ptr(burst_start_ptr),
+        .burst_header(burst_header)
     );
 
     task expect32(input [31:0] got, input [31:0] exp, input [255:0] msg);
@@ -184,12 +211,16 @@ module fcapz_core_manager_case #(
 
         repeat (3) @(negedge clk);
         rst = 1'b0;
+        proto_rst = 1'b0;
         repeat (1) @(negedge clk);
 
         read_reg(16'hF000, 32'h0004_434D, "manager version");
         read_reg(16'hF004, NUM_SLOTS[31:0], "manager slot count");
-        // bit2: the burst start is raised on every BURST_PTR write
-        read_reg(16'hF010, 32'h0000_0007, "manager caps");
+        // bit2 burst start per BURST_PTR write, bit3 epochs/owner, bit4
+        // header (HEADER_EN), bit5 MGR_CTRL; no TLR protocol reset
+        read_reg(16'hF010, 32'h0000_003F, "manager caps");
+        read_reg(16'hF020, 32'h0000_0001, "power-up reset release counted once");
+        read_reg(16'hF024, 32'h0000_0000, "owner clear after reset");
         read_reg(16'hF008, 32'h0000_0000, "reset active slot");
         check_active_slot(0, "0xEFFF routes to active slot 0");
         read_reg(16'hF000, 32'h0004_434D, "0xF000 stays in manager window");
@@ -238,6 +269,77 @@ module fcapz_core_manager_case #(
             @(negedge clk);
             burst_rd_active = 1'b0;
         end
+
+        // ---- epochs, owner, MGR_CTRL, Test-Logic-Reset count, header ----
+        write_reg(16'hF008, 0);
+        write_reg(16'hF014, NUM_SLOTS - 1);
+        write_reg(16'hF024, 32'hCAFE_0001);
+        read_reg(16'hF024, 32'hCAFE_0001, "owner reads back");
+        start_before = burst_start;
+        write_reg(16'hF028, 32'h1);  // hub soft reset
+        repeat (2) @(negedge clk);  // the request, then its count
+        read_reg(16'hF020, 32'h0000_0002, "soft reset counted in MGR_EPOCH");
+        read_reg(16'hF024, 32'h0000_0000, "soft reset clears the owner");
+        read_reg(16'hF014, 32'h0000_0000, "soft reset clears DESC_INDEX");
+        #1 expect_bits({7'b0, burst_start}, {7'b0, start_before},
+                       "soft reset keeps the burst start paired with the pipe");
+        for (k = 0; k < NUM_SLOTS; k = k + 1)
+            expect32(req_pulses[k], 0, "hub soft reset requests no slot reset");
+
+        write_reg(16'hF014, NUM_SLOTS - 1);
+        write_reg(16'hF028, 32'h2);  // reset the DESC_INDEX slot
+        repeat (2) @(negedge clk);  // the request, then its count
+        for (k = 0; k < NUM_SLOTS; k = k + 1)
+            expect32(req_pulses[k], (k == NUM_SLOTS - 1) ? 1 : 0,
+                     "bit 1 requests a reset of the DESC_INDEX slot only");
+        write_reg(16'hF028, 32'h4);  // reset every slot
+        repeat (2) @(negedge clk);  // the request, then its count
+        for (k = 0; k < NUM_SLOTS; k = k + 1)
+            expect32(req_pulses[k], (k == NUM_SLOTS - 1) ? 2 : 1,
+                     "bit 2 requests a reset of every slot");
+        expect32(req_wide, 0, "reset requests last one cycle");
+        write_reg(16'h0028, 32'h7);  // a slot register, not MGR_CTRL
+        repeat (2) @(negedge clk);  // the request, then its count
+        expect32(req_pulses[0], (NUM_SLOTS == 1) ? 2 : 1, "slot address 0x0028 is not MGR_CTRL");
+        read_reg(16'hF028, 32'h0000_0000, "MGR_CTRL reads 0");
+
+        // A slot's own reset is counted for that slot only.
+        @(negedge clk) slot_rst[NUM_SLOTS - 1] = 1'b1;
+        repeat (2) @(negedge clk);
+        slot_rst[NUM_SLOTS - 1] = 1'b0;
+        read_reg(16'hF02C, 32'h0000_0001, "slot reset release counted for that slot");
+        write_reg(16'hF014, 0);
+        if (NUM_SLOTS > 1)
+            read_reg(16'hF02C, 32'h0000_0000, "other slots' epochs unchanged");
+
+        // Test-Logic-Reset is counted once per entry, however long.
+        @(negedge clk) tlr = 1'b1;
+        repeat (4) @(negedge clk);
+        tlr = 1'b0;
+        read_reg(16'hF030, 32'h0000_0001, "Test-Logic-Reset counted per entry");
+
+        // The header describes the burst the BURST_PTR write just started.
+        write_reg(16'hF008, 0);
+        write_reg(16'hF024, 32'h1234_5678);
+        @(negedge clk) slot_rst[0] = 1'b1;
+        @(negedge clk) slot_rst[0] = 1'b0;
+        write_reg(16'h002C, 32'h0);
+        if (SLOT_HAS_BURST[0]) begin
+            expect32(burst_header[31:0], 32'h0000_4248, "header magic and owner slot");
+            expect32(burst_header[63:32], 32'h8, "header start pointer");
+            expect32(burst_header[95:64], 32'h0002_0000, "header epoch, timestamp select");
+            expect32(burst_header[127:96], 32'h5678_0001 + ((NUM_SLOTS == 1) ? 1 : 0),
+                     "header owner slot epoch, owner low half");
+            expect32(burst_header[159:128], 32'h0008_1234, "header SAMPLE_W, owner high half");
+        end
+
+        // The protocol reset clears only the burst start event and owner.
+        start_before = burst_start;
+        @(negedge clk) proto_rst = 1'b1;
+        @(negedge clk) proto_rst = 1'b0;
+        #1 expect_bits({7'b0, burst_start}, 8'h00, "protocol reset clears the burst start");
+        read_reg(16'hF024, 32'h1234_5678, "protocol reset keeps the owner");
+        read_reg(16'hF020, 32'h0000_0002, "protocol reset is not a hub reset");
 
         if (errors == 0) begin
             $display("fcapz_core_manager_tb slots%0d PASS", CASE_ID);

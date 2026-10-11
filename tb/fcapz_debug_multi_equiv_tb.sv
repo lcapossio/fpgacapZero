@@ -7,7 +7,10 @@
 // as before it. Both versions -- the frozen pre-split copy
 // (tb/legacy/fcapz_debug_multi_xilinx7_ref.v) and the current wrapper -- get
 // the same TAP stimulus and probes; TDO and every output must match on every
-// TCK. SHAPE picks a parameter set:
+// TCK, except where the hub changed on purpose: the reference keeps the
+// manager from before the burst header (tb/legacy), so each burst's priming
+// scan (junk there, the header here) and the MGR_CAPS read are not compared;
+// the header is checked on its own. SHAPE picks a parameter set:
 //   0 default (2 ELAs + 1 EIO)        1 heterogeneous slots + timestamps
 //   2 EIO only (NUM_ELAS=0)           3 dependent defaults (3 ELAs, EIO_EN=0)
 //   4 segments + timestamps           5 4-bit samples
@@ -51,6 +54,7 @@ module fcapz_debug_multi_equiv_tb #(
     localparam integer NUM_ELAS = (SHAPE == 2) ? 0 : N_ELA;
     localparam integer N_EIO = (SHAPE == 1 || SHAPE == 2) ? 2 : (SHAPE == 3) ? 0 : 1;
     localparam integer TS = (SHAPE == 1 || SHAPE == 4) ? 1 : 0;
+    localparam integer BURST_SAMPLE_W = (SHAPE == 1) ? 32 : (SHAPE == 5) ? 4 : 8;
 
     `include "fcapz_pipe_jtag_tasks.svh"
 
@@ -121,7 +125,8 @@ module fcapz_debug_multi_equiv_tb #(
     // ---- lockstep comparison ---------------------------------------------
     integer mismatches = 0;
     integer compared = 0;
-    always @(negedge tck) begin
+    reg compare_en = 1'b1;
+    always @(negedge tck) if (compare_en) begin
         compared = compared + 1;
         if (g_dut.u_ref.tap_tdo !== g_dut.u_new.tap_tdo ||
             g_dut.trig_ref !== g_dut.trig_new ||
@@ -152,6 +157,47 @@ module fcapz_debug_multi_equiv_tb #(
         end
     endtask
 
+    // read_burst, but the priming scan is captured from the new hub and
+    // checked as a header instead of compared.
+    reg [255:0] header;
+    task automatic equiv_read_burst(
+        input bit timestamp,
+        input integer owner_slot,
+        output reg [255:0] first,
+        output reg [255:0] second
+    );
+        integer b;
+        begin
+            write_reg(16'h002C, timestamp ? 32'h8000_0000 : 32'h0);
+            idle_tck(160);
+            compare_en = 1'b0;
+            header = 256'h0;
+            sel = 1'b1;
+            capture = 1'b1;
+            tick_tck();
+            capture = 1'b0;
+            shift = 1'b1;
+            for (b = 0; b < 256; b = b + 1) begin
+                tdi = 1'b0;
+                header[b] = g_dut.u_new.tap_tdo;
+                tick_tck();
+            end
+            shift = 1'b0;
+            update = 1'b1;
+            tick_tck();
+            update = 1'b0;
+            sel = sel_idle;
+            compare_en = 1'b1;
+            check($sformatf("burst header names slot %0d, timestamp %0d", owner_slot, timestamp),
+                  header[15:0] == 16'h4248 && header[31:16] == owner_slot &&
+                  header[64] == timestamp && header[79:65] == 15'h0 &&
+                  header[159:144] == BURST_SAMPLE_W && header[255:160] == 96'h0);
+            scan_burst(first);
+            scan_burst(second);
+            idle_tck(4);
+        end
+    endtask
+
     task automatic arm_all_elas(input integer round_no);
         integer s;
         begin
@@ -170,7 +216,9 @@ module fcapz_debug_multi_equiv_tb #(
     initial begin
         idle_tck(8);
         repeat (8) @(posedge clk_a);
-        sample_rst = 1'b0;
+        // Between edges, not on one: released on an edge of any clock it
+        // races that clock, and the two hubs can start a sample apart.
+        #0.5 sample_rst = 1'b0;
         idle_tck(16);
 
         $display("\n=== fcapz_debug_multi equivalence, SHAPE=%0d ===", SHAPE);
@@ -179,7 +227,11 @@ module fcapz_debug_multi_equiv_tb #(
         read_reg(16'hF004, rdata);
         n_slots = rdata;
         check("slot count is NUM_ELAS + NUM_EIOS", n_slots == NUM_ELAS + N_EIO);
+        // The old hub's CAPS differs, and the next scan's capture shows it again.
+        compare_en = 1'b0;
         read_reg(16'hF010, rdata);
+        read_reg(16'hF000, rdata);
+        compare_en = 1'b1;
 
         // Descriptors, then each slot's identity through ACTIVE.
         for (slot = 0; slot < n_slots; slot = slot + 1) begin
@@ -224,11 +276,11 @@ module fcapz_debug_multi_equiv_tb #(
             for (slot = 0; slot < NUM_ELAS; slot = slot + 1) begin
                 if (has_burst[slot]) begin
                     select_slot(slot);
-                    read_burst(1'b0, pkt_a, pkt_b);
+                    equiv_read_burst(1'b0, slot, pkt_a, pkt_b);
                     any_data = any_data | (|pkt_a) | (|pkt_b);
                     bursts = bursts + 1;
                     if (TS) begin
-                        read_burst(1'b1, pkt_a, pkt_b);
+                        equiv_read_burst(1'b1, slot, pkt_a, pkt_b);
                         bursts = bursts + 1;
                     end
                     // Back to back: ACTIVE right after the burst, no idle.
@@ -240,7 +292,7 @@ module fcapz_debug_multi_equiv_tb #(
             // The second ELA again, without re-selecting through a register.
             if (NUM_ELAS > 1 && has_burst[1]) begin
                 select_slot(1);
-                read_burst(1'b0, pkt_a, pkt_b);
+                equiv_read_burst(1'b0, 1, pkt_a, pkt_b);
                 bursts = bursts + 1;
             end
         end

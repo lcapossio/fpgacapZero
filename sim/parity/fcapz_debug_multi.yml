@@ -13,6 +13,7 @@
       "../../rtl/fcapz_eio.v",
       "../../rtl/fcapz_core_manager.v",
       "../../rtl/fcapz_debug_multi_core.v",
+      "../../rtl/fcapz_hub_reset.v",
       "../../rtl/jtag_pipe_iface.v",
       "../../rtl/fcapz_debug_multi.v"
     ]
@@ -32,6 +33,7 @@
       "../../rtl/vhdl/core/fcapz_core_manager.vhd",
       "../../rtl/vhdl/core/jtag_pipe_iface.vhd",
       "../../rtl/vhdl/core/fcapz_debug_multi_core.vhd",
+      "../../rtl/vhdl/core/fcapz_hub_reset.vhd",
       "../../rtl/vhdl/core/fcapz_debug_multi.vhd"
     ]
   }

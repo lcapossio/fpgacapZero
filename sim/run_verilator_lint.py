@@ -74,6 +74,7 @@ DEBUG_MULTI_CORE_SOURCES = (
     *EIO_CORE,
     RTL / "fcapz_core_manager.v",
     RTL / "fcapz_debug_multi_core.v",
+    RTL / "fcapz_hub_reset.v",
 )
 
 DEBUG_MULTI_SOURCES = (

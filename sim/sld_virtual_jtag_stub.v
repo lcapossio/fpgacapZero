@@ -18,7 +18,8 @@ module sld_virtual_jtag #(
     output reg  virtual_state_sdr = 1'b0,
     output reg  virtual_state_udr = 1'b0,
     output reg  [sld_ir_width-1:0] ir_in = {sld_ir_width{1'b0}},
-    input  wire [sld_ir_width-1:0] ir_out
+    input  wire [sld_ir_width-1:0] ir_out,
+    output reg  jtag_state_tlr = 1'b0
 );
     // Outputs stay de-asserted unless a testbench drives them.
     wire unused = tdo | ^ir_out;

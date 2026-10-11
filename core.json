@@ -51,6 +51,7 @@
     "rtl/fcapz_ela.v",
     "rtl/fcapz_core_manager.v",
     "rtl/fcapz_debug_multi_core.v",
+    "rtl/fcapz_hub_reset.v",
     "rtl/fcapz_debug_multi.v",
     "rtl/fcapz_debug_multi_xilinx7.v",
     "rtl/fcapz_debug_multi_xilinxus.v",

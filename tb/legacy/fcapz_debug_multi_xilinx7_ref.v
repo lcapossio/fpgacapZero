@@ -7,6 +7,10 @@
 // (origin/main 44d1059). Reference model for tb/fcapz_debug_multi_equiv_tb.sv;
 // not for synthesis.
 //
+// Its manager is the frozen fcapz_core_manager_pre_reset_split, so the bench
+// compares today's hub with the one before per-slot resets and the burst
+// header; the new pipe ports are tied off.
+//
 // Mixed debug wrapper: multiple ELAs plus optional EIOs behind one USER chain.
 // Slot order is ELA[0..NUM_ELAS-1], then EIO[0..NUM_EIOS-1].
 
@@ -156,7 +160,8 @@ module fcapz_debug_multi_xilinx7_ref #(
     jtag_tap_xilinx7 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+        .update(tap_update), .sel(tap_sel),
+        .tlr()
     );
 
     reset_sync u_rst_sync_ctrl (
@@ -187,10 +192,11 @@ module fcapz_debug_multi_xilinx7_ref #(
         .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_start_ptr)
+        .burst_ptr_in(burst_start_ptr),
+        .burst_header({BURST_W{1'b0}})
     );
 
-    fcapz_core_manager #(
+    fcapz_core_manager_pre_reset_split #(
         .NUM_SLOTS(NUM_SLOTS),
         .SAMPLE_W(SAMPLE_W),
         .TIMESTAMP_W(TIMESTAMP_W),

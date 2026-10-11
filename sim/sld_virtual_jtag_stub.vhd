@@ -21,7 +21,8 @@ entity sld_virtual_jtag is
         virtual_state_sdr : out std_logic;
         virtual_state_udr : out std_logic;
         ir_in             : out std_logic_vector(sld_ir_width - 1 downto 0);
-        ir_out            : in  std_logic_vector(sld_ir_width - 1 downto 0)
+        ir_out            : in  std_logic_vector(sld_ir_width - 1 downto 0);
+        jtag_state_tlr    : out std_logic := '0'
     );
 end entity sld_virtual_jtag;
 

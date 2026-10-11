@@ -23,7 +23,8 @@
     "induct_depth": 8,
     "bounded_depth": 16,
     "reset_inputs": [
-      "jtag_rst"
+      "jtag_rst",
+      "proto_rst"
     ],
     "clock_inputs": [
       "jtag_clk"
@@ -46,6 +47,15 @@
             "TIMESTAMP_W": 4,
             "DEPTH": 16,
             "SLOT_HAS_BURST": "011"
+          },
+          {
+            "NUM_SLOTS": 3,
+            "SAMPLE_W": 4,
+            "TIMESTAMP_W": 4,
+            "DEPTH": 16,
+            "SLOT_HAS_BURST": "011",
+            "HEADER_EN": 1,
+            "TLR_RESET_EN": 1
           }
         ]
       }

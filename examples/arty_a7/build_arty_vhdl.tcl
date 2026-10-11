@@ -68,6 +68,7 @@ set verilog_sources [list \
     $root/rtl/trig_compare.v \
     $root/rtl/fcapz_core_manager.v \
     $root/rtl/fcapz_debug_multi_core.v \
+    $root/rtl/fcapz_hub_reset.v \
     $root/rtl/fcapz_debug_multi.v \
     $root/rtl/fcapz_debug_multi_xilinx7.v \
     $root/rtl/fcapz_ela_xilinx7.v \

@@ -18,10 +18,12 @@ RTL = ROOT / "rtl"
 SOURCES = [
     ROOT / "tb" / "fcapz_debug_multi_equiv_tb.sv",
     ROOT / "tb" / "legacy" / "fcapz_debug_multi_xilinx7_ref.v",
+    ROOT / "tb" / "legacy" / "fcapz_core_manager_pre_reset_split.v",
     RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_debug_multi.v",
     RTL / "fcapz_debug_multi_core.v",
     RTL / "fcapz_core_manager.v",
+    RTL / "fcapz_hub_reset.v",
     RTL / "jtag_pipe_iface.v",
     RTL / "reset_sync.v",
     RTL / "fcapz_ela.v",

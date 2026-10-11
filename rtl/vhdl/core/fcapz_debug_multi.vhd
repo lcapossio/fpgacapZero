@@ -8,6 +8,7 @@
 --
 -- Registers and burst readout share the one chain (jtag_pipe_iface). The
 -- per-vendor fcapz_debug_multi_<vendor> wrappers only add the TAP instance.
+-- Resets and the burst header: see fcapz_debug_multi.v.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -38,6 +39,7 @@ entity fcapz_debug_multi is
         REL_COMPARE      : natural := 0;
         DUAL_COMPARE     : natural := 1;
         USER1_DATA_EN    : natural := 1;
+        TLR_RESET_EN     : natural := 0;
         EIO_IN_W         : positive := 1;
         EIO_OUT_W        : positive := 1;
         ELA_PORT_COUNT   : positive := fcapz_nonzero_width(NUM_ELAS);
@@ -69,6 +71,7 @@ entity fcapz_debug_multi is
         shift   : in  std_logic;
         update  : in  std_logic;
         sel     : in  std_logic;
+        tlr     : in  std_logic;
 
         ela_sample_clk  : in  std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
         ela_sample_rst  : in  std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
@@ -86,9 +89,11 @@ architecture rtl of fcapz_debug_multi is
     constant TS_W_SAFE       : positive := fcapz_nonzero_width(TIMESTAMP_W);
     constant BURST_SEG_DEPTH : positive := DEPTH / NUM_SEGMENTS;
 
-    signal debug_arst : std_logic;
-    signal jtag_rst_ctrl : std_logic;
-    signal jtag_clk, jtag_rst, jtag_wr_en, jtag_rd_en : std_logic;
+    constant HEADER_W        : positive := 160;
+
+    signal any_sample_rst : std_logic;
+    signal por_rst, proto_rst, tlr_sync : std_logic;
+    signal jtag_clk, pipe_reg_rst, jtag_wr_en, jtag_rd_en : std_logic;
     signal jtag_addr : std_logic_vector(15 downto 0);
     signal jtag_wdata, jtag_rdata : std_logic_vector(31 downto 0);
     signal burst_rd_addr : std_logic_vector(PTR_W - 1 downto 0);
@@ -97,6 +102,8 @@ architecture rtl of fcapz_debug_multi is
     signal burst_rd_ts_data : std_logic_vector(TS_W_SAFE - 1 downto 0);
     signal burst_start, burst_timestamp : std_logic;
     signal burst_start_ptr : std_logic_vector(PTR_W - 1 downto 0);
+    signal burst_header : std_logic_vector(HEADER_W - 1 downto 0);
+    signal pipe_header : std_logic_vector(BURST_W - 1 downto 0);
 begin
     -- The host shifts 256-bit burst scans (Transport.BURST_DR_BITS).
     assert BURST_W = 256
@@ -104,23 +111,30 @@ begin
                " is not 256, the host burst scan width"
         severity failure;
 
-    debug_arst <= '1' when ela_sample_rst /= (ela_sample_rst'range => '0') else '0';
+    any_sample_rst <= '1' when ela_sample_rst /= (ela_sample_rst'range => '0') else '0';
 
-    u_rst_sync_ctrl : entity work.reset_sync
-        port map (clk => tck, arst => debug_arst, srst => jtag_rst_ctrl);
+    u_hub_reset : entity work.fcapz_hub_reset
+        generic map (TLR_RESET_EN => TLR_RESET_EN)
+        port map (
+            tck => tck, any_sample_rst => any_sample_rst, tlr => tlr,
+            por_rst => por_rst, proto_rst => proto_rst, tlr_sync => tlr_sync
+        );
+
+    pipe_header <= std_logic_vector(resize(unsigned(burst_header), BURST_W));
 
     u_pipe : entity work.jtag_pipe_iface
         generic map (
             SAMPLE_W => SAMPLE_W, TIMESTAMP_W => TIMESTAMP_W,
             DEPTH => DEPTH, BURST_W => BURST_W,
-            SEG_DEPTH => BURST_SEG_DEPTH, BURST_PTR_ADDR => 16#002C#
+            SEG_DEPTH => BURST_SEG_DEPTH, BURST_PTR_ADDR => 16#002C#,
+            HEADER_EN => 1
         )
         port map (
-            arst => jtag_rst_ctrl,
+            arst => proto_rst,
             tck => tck, tdi => tdi, tdo => tdo,
             capture => capture, shift_en => shift,
             update => update, sel => sel,
-            reg_clk => jtag_clk, reg_rst => jtag_rst,
+            reg_clk => jtag_clk, reg_rst => pipe_reg_rst,
             reg_wr_en => jtag_wr_en, reg_rd_en => jtag_rd_en,
             reg_addr => jtag_addr, reg_wdata => jtag_wdata,
             reg_rdata => jtag_rdata,
@@ -130,7 +144,8 @@ begin
             timestamp_data => burst_rd_ts_data,
             burst_start => burst_start,
             burst_timestamp => burst_timestamp,
-            burst_ptr_in => burst_start_ptr
+            burst_ptr_in => burst_start_ptr,
+            burst_header => pipe_header
         );
 
     u_core : entity work.fcapz_debug_multi_core
@@ -145,6 +160,7 @@ begin
             DEFAULT_TRIG_EXT => DEFAULT_TRIG_EXT, BURST_EN => 1,
             REL_COMPARE => REL_COMPARE, DUAL_COMPARE => DUAL_COMPARE,
             USER1_DATA_EN => USER1_DATA_EN,
+            HEADER_EN => 1, TLR_RESET_EN => TLR_RESET_EN,
             EIO_IN_W => EIO_IN_W, EIO_OUT_W => EIO_OUT_W,
             ELA_PORT_COUNT => ELA_PORT_COUNT,
             ELA_SAMPLE_WS => ELA_SAMPLE_WS, ELA_DEPTHS => ELA_DEPTHS,
@@ -163,7 +179,8 @@ begin
             ela_probe_in => ela_probe_in, ela_trigger_in => ela_trigger_in,
             ela_trigger_out => ela_trigger_out, ela_armed_out => ela_armed_out,
             eio_probe_in => eio_probe_in, eio_probe_out => eio_probe_out,
-            jtag_clk => jtag_clk, jtag_rst => jtag_rst,
+            jtag_clk => jtag_clk, jtag_rst => por_rst,
+            proto_rst => proto_rst, tlr => tlr_sync,
             jtag_wr_en => jtag_wr_en, jtag_rd_en => jtag_rd_en,
             jtag_addr => jtag_addr, jtag_wdata => jtag_wdata,
             jtag_rdata => jtag_rdata,
@@ -173,6 +190,7 @@ begin
             burst_rd_ts_data => burst_rd_ts_data,
             burst_start => burst_start,
             burst_timestamp => burst_timestamp,
-            burst_start_ptr => burst_start_ptr
+            burst_start_ptr => burst_start_ptr,
+            burst_header => burst_header
         );
 end architecture rtl;

@@ -31,6 +31,8 @@ module fcapz_debug_multi_xilinx7 #(
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    // 1: the TAP's Test-Logic-Reset also resets the burst protocol.
+    parameter TLR_RESET_EN = 0,
     parameter EIO_IN_W = 1,
     parameter EIO_OUT_W = 1,
     parameter ELA_PORT_COUNT = (NUM_ELAS > 0) ? NUM_ELAS : 1,
@@ -68,12 +70,13 @@ module fcapz_debug_multi_xilinx7 #(
 );
 
     wire tap_tck, tap_tdi, tap_tdo;
-    wire tap_capture, tap_shift, tap_update, tap_sel;
+    wire tap_capture, tap_shift, tap_update, tap_sel, tap_tlr;
 
     jtag_tap_xilinx7 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+        .update(tap_update), .sel(tap_sel),
+        .tlr(tap_tlr)
     );
 
     fcapz_debug_multi #(
@@ -84,7 +87,8 @@ module fcapz_debug_multi_xilinx7 #(
         .NUM_SEGMENTS(NUM_SEGMENTS), .PROBE_MUX_W(PROBE_MUX_W),
         .STARTUP_ARM(STARTUP_ARM), .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
         .BURST_W(BURST_W), .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
-        .USER1_DATA_EN(USER1_DATA_EN), .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W),
+        .USER1_DATA_EN(USER1_DATA_EN), .TLR_RESET_EN(TLR_RESET_EN),
+        .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W),
         .ELA_PORT_COUNT(ELA_PORT_COUNT), .ELA_SAMPLE_WS(ELA_SAMPLE_WS),
         .ELA_DEPTHS(ELA_DEPTHS), .ELA_TRIG_STAGES(ELA_TRIG_STAGES),
         .ELA_STOR_QUALS(ELA_STOR_QUALS), .ELA_INPUT_PIPES(ELA_INPUT_PIPES),
@@ -100,6 +104,7 @@ module fcapz_debug_multi_xilinx7 #(
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
+        .tlr(tap_tlr),
         .ela_sample_clk(ela_sample_clk),
         .ela_sample_rst(ela_sample_rst),
         .ela_probe_in(ela_probe_in),

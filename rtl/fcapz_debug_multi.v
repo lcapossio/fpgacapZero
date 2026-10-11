@@ -10,6 +10,12 @@
 //
 // Registers and burst readout share the one chain (jtag_pipe_iface). The
 // per-vendor fcapz_debug_multi_<vendor> wrappers only add the TAP instance.
+//
+// Resets (fcapz_hub_reset): the slots' sample resets reset the hub only until
+// the first release; after that each slot resets alone.  The pipe also resets
+// on the TAP's Test-Logic-Reset when TLR_RESET_EN (tie tlr to 0 if the TAP
+// has no such output).  Each burst's first scan carries a header naming the
+// slot, pointer and epochs it belongs to.
 
 module fcapz_debug_multi #(
     parameter NUM_ELAS = 2,
@@ -32,6 +38,8 @@ module fcapz_debug_multi #(
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    // 1: the TAP's Test-Logic-Reset also resets the burst protocol.
+    parameter TLR_RESET_EN = 0,
     parameter EIO_IN_W = 1,
     parameter EIO_OUT_W = 1,
     parameter ELA_PORT_COUNT = (NUM_ELAS > 0) ? NUM_ELAS : 1,
@@ -66,6 +74,7 @@ module fcapz_debug_multi #(
     input  wire shift,
     input  wire update,
     input  wire sel,
+    input  wire tlr,
 
     input  wire [ELA_PORT_COUNT-1:0] ela_sample_clk,
     input  wire [ELA_PORT_COUNT-1:0] ela_sample_rst,
@@ -80,10 +89,10 @@ module fcapz_debug_multi #(
     localparam PTR_W = $clog2(DEPTH);
     localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
-    wire debug_arst = |ela_sample_rst;
+    localparam HEADER_W = 160;
 
-    wire jtag_rst_ctrl;
-    wire jtag_clk, jtag_rst;
+    wire por_rst, proto_rst, tlr_sync;
+    wire jtag_clk, pipe_reg_rst;
     wire jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
     wire [31:0] jtag_wdata, jtag_rdata;
@@ -95,6 +104,9 @@ module fcapz_debug_multi #(
     wire burst_start;
     wire burst_timestamp;
     wire [PTR_W-1:0] burst_start_ptr;
+    wire [HEADER_W-1:0] burst_header;
+    // Zero-extended to the scan; BURST_W is 256 (checked below).
+    wire [BURST_W-1:0] pipe_header = burst_header;
 
     // The host shifts 256-bit burst scans (Transport.BURST_DR_BITS).
     initial begin
@@ -104,10 +116,15 @@ module fcapz_debug_multi #(
         end
     end
 
-    reset_sync u_rst_sync_ctrl (
-        .clk(tck),
-        .arst(debug_arst),
-        .srst(jtag_rst_ctrl)
+    fcapz_hub_reset #(
+        .TLR_RESET_EN(TLR_RESET_EN)
+    ) u_hub_reset (
+        .tck(tck),
+        .any_sample_rst(|ela_sample_rst),
+        .tlr(tlr),
+        .por_rst(por_rst),
+        .proto_rst(proto_rst),
+        .tlr_sync(tlr_sync)
     );
 
     jtag_pipe_iface #(
@@ -116,13 +133,14 @@ module fcapz_debug_multi #(
         .DEPTH(DEPTH),
         .BURST_W(BURST_W),
         .SEG_DEPTH(BURST_SEG_DEPTH),
-        .BURST_PTR_ADDR(16'h002C)
+        .BURST_PTR_ADDR(16'h002C),
+        .HEADER_EN(1)
     ) u_pipe (
-        .arst(jtag_rst_ctrl),
+        .arst(proto_rst),
         .tck(tck), .tdi(tdi), .tdo(tdo),
         .capture(capture), .shift_en(shift),
         .update(update), .sel(sel),
-        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+        .reg_clk(jtag_clk), .reg_rst(pipe_reg_rst),
         .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
         .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
         .reg_rdata(jtag_rdata),
@@ -132,7 +150,8 @@ module fcapz_debug_multi #(
         .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_start_ptr)
+        .burst_ptr_in(burst_start_ptr),
+        .burst_header(pipe_header)
     );
 
     fcapz_debug_multi_core #(
@@ -146,6 +165,7 @@ module fcapz_debug_multi #(
         .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .BURST_EN(1),
         .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
         .USER1_DATA_EN(USER1_DATA_EN),
+        .HEADER_EN(1), .TLR_RESET_EN(TLR_RESET_EN),
         .EIO_IN_W(EIO_IN_W), .EIO_OUT_W(EIO_OUT_W),
         .ELA_PORT_COUNT(ELA_PORT_COUNT),
         .ELA_SAMPLE_WS(ELA_SAMPLE_WS), .ELA_DEPTHS(ELA_DEPTHS),
@@ -168,7 +188,9 @@ module fcapz_debug_multi #(
         .eio_probe_in(eio_probe_in),
         .eio_probe_out(eio_probe_out),
         .jtag_clk(jtag_clk),
-        .jtag_rst(jtag_rst),
+        .jtag_rst(por_rst),
+        .proto_rst(proto_rst),
+        .tlr(tlr_sync),
         .jtag_wr_en(jtag_wr_en),
         .jtag_rd_en(jtag_rd_en),
         .jtag_addr(jtag_addr),
@@ -180,7 +202,8 @@ module fcapz_debug_multi #(
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_start_ptr(burst_start_ptr)
+        .burst_start_ptr(burst_start_ptr),
+        .burst_header(burst_header)
     );
 
 endmodule

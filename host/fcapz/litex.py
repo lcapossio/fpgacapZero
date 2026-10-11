@@ -26,6 +26,7 @@ _COMMON_ELA_SOURCES = (
     "fcapz_ela.v",
     "fcapz_core_manager.v",
     "fcapz_debug_multi_core.v",
+    "fcapz_hub_reset.v",
     "fcapz_debug_multi.v",
     "fcapz_eio.v",
     "fcapz_regbus_mux.v",

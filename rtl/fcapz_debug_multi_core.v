@@ -12,6 +12,12 @@
 // tck/tdi/tdo/capture/shift/update/sel shape, or a register-only adapter
 // with BURST_EN=0. jtag_clk/jtag_rst come from the adapter, already
 // conditioned; the burst bus is read synchronously on jtag_clk.
+//
+// jtag_rst is the hub's power-up reset (fcapz_hub_reset): it resets the
+// manager and the EIOs.  Each ELA is reset in its own domain instead, by its
+// sample reset or by MGR_CTRL, with the sample side and the register side
+// together: resetting only one side of an ELA's arm/reset toggles leaves the
+// other side's copy behind, which reads as a phantom arm or reset.
 
 module fcapz_debug_multi_core #(
     parameter NUM_ELAS = 2,
@@ -36,6 +42,10 @@ module fcapz_debug_multi_core #(
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
     parameter USER1_DATA_EN = 1,
+    // The adapter loads burst_header into each burst's priming scan.
+    parameter HEADER_EN = 0,
+    // The adapter's proto_rst includes the TAP's Test-Logic-Reset.
+    parameter TLR_RESET_EN = 0,
     parameter EIO_IN_W = 1,
     parameter EIO_OUT_W = 1,
     parameter ELA_PORT_COUNT = (NUM_ELAS > 0) ? NUM_ELAS : 1,
@@ -74,6 +84,10 @@ module fcapz_debug_multi_core #(
     // Register bus from the JTAG adapter
     input  wire        jtag_clk,
     input  wire        jtag_rst,
+    // Burst protocol reset: the adapter's own reset (tie to jtag_rst without one)
+    input  wire        proto_rst,
+    // TAP in Test-Logic-Reset, synchronised to jtag_clk (0 if unknown); counted
+    input  wire        tlr,
     input  wire        jtag_wr_en,
     input  wire        jtag_rd_en,
     input  wire [15:0] jtag_addr,
@@ -87,7 +101,8 @@ module fcapz_debug_multi_core #(
     output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data,
     output wire                     burst_start,
     output wire                     burst_timestamp,
-    output wire [$clog2(DEPTH)-1:0] burst_start_ptr
+    output wire [$clog2(DEPTH)-1:0] burst_start_ptr,
+    output wire [159:0]             burst_header
 );
 
     localparam EIO_COUNT = (NUM_EIOS > 0) ? NUM_EIOS : 0;
@@ -158,6 +173,8 @@ module fcapz_debug_multi_core #(
     wire [NUM_SLOTS-1:0] slot_burst_start;
     wire [NUM_SLOTS-1:0] slot_burst_timestamp;
     wire [NUM_SLOTS*PTR_W-1:0] slot_burst_start_ptr;
+    wire [NUM_SLOTS-1:0] slot_rst;
+    wire [NUM_SLOTS-1:0] slot_rst_req;
 
     fcapz_core_manager #(
         .NUM_SLOTS(NUM_SLOTS),
@@ -165,10 +182,14 @@ module fcapz_debug_multi_core #(
         .TIMESTAMP_W(TIMESTAMP_W),
         .DEPTH(DEPTH),
         .SLOT_CORE_IDS(SLOT_CORE_IDS),
-        .SLOT_HAS_BURST(SLOT_HAS_BURST)
+        .SLOT_HAS_BURST(SLOT_HAS_BURST),
+        .HEADER_EN(HEADER_EN),
+        .TLR_RESET_EN(TLR_RESET_EN)
     ) u_manager (
         .jtag_clk(jtag_clk),
         .jtag_rst(jtag_rst),
+        .proto_rst(proto_rst),
+        .tlr(tlr),
         .jtag_wr_en(jtag_wr_en),
         .jtag_rd_en(jtag_rd_en),
         .jtag_addr(jtag_addr),
@@ -179,6 +200,8 @@ module fcapz_debug_multi_core #(
         .slot_addr(slot_addr),
         .slot_wdata(slot_wdata),
         .slot_rdata(slot_rdata),
+        .slot_rst(slot_rst),
+        .slot_rst_req(slot_rst_req),
         .burst_rd_addr(burst_rd_addr),
         .burst_rd_active(burst_rd_active),
         .slot_burst_rd_addr(slot_burst_rd_addr),
@@ -192,7 +215,8 @@ module fcapz_debug_multi_core #(
         .burst_rd_ts_data(burst_rd_ts_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_start_ptr(burst_start_ptr)
+        .burst_start_ptr(burst_start_ptr),
+        .burst_header(burst_header)
     );
 
     genvar i;
@@ -224,6 +248,9 @@ module fcapz_debug_multi_core #(
             wire [ELA_SAMPLE_W-1:0] ela_burst_rd_data;
             wire [ELA_TS_W_SAFE-1:0] ela_burst_rd_ts_data;
             wire [ELA_PTR_W-1:0] ela_burst_start_ptr;
+            wire ela_soft_rst;
+            wire ela_rst;
+            wire ela_jtag_rst;
 
             initial begin
                 if (ELA_PROBE_W > PROBE_W) begin
@@ -254,6 +281,23 @@ module fcapz_debug_multi_core #(
                 end
             end
 
+            // MGR_CTRL's one-TCK request, held on the sample clock until it
+            // runs: a stopped clock leaves the slot in reset.
+            reset_sync u_soft_rst (
+                .clk(ela_sample_clk[i]),
+                .arst(slot_rst_req[i]),
+                .srst(ela_soft_rst)
+            );
+            assign ela_rst = ela_sample_rst[i] | ela_soft_rst;
+            // The register side follows the sample side, as in a standalone
+            // ELA wrapper.
+            reset_sync u_jtag_rst (
+                .clk(jtag_clk),
+                .arst(ela_rst),
+                .srst(ela_jtag_rst)
+            );
+            assign slot_rst[i] = ela_jtag_rst;
+
             fcapz_ela #(
                 .SAMPLE_W(ELA_SAMPLE_W),
                 .DEPTH(ELA_DEPTH),
@@ -273,13 +317,13 @@ module fcapz_debug_multi_core #(
                 .USER1_DATA_EN(ELA_USER1_DATA_EN)
             ) u_ela (
                 .sample_clk(ela_sample_clk[i]),
-                .sample_rst(ela_sample_rst[i]),
+                .sample_rst(ela_rst),
                 .probe_in(ela_probe_in[i*PROBE_W +: ELA_PROBE_W]),
                 .trigger_in(ela_trigger_in[i]),
                 .trigger_out(ela_trigger_out[i]),
                 .armed_out(ela_armed_out[i]),
                 .jtag_clk(jtag_clk),
-                .jtag_rst(jtag_rst),
+                .jtag_rst(ela_jtag_rst),
                 .jtag_wr_en(slot_wr_en[i]),
                 .jtag_rd_en(slot_rd_en[i]),
                 .jtag_addr(slot_addr[i*16 +: 16]),
@@ -320,6 +364,8 @@ module fcapz_debug_multi_core #(
             localparam integer EIO_IN_W_I = eio_param32(EIO_IN_WS, i);
             localparam integer EIO_OUT_W_I = eio_param32(EIO_OUT_WS, i);
             wire [EIO_OUT_W_I-1:0] eio_probe_out_i;
+            wire eio_rst = jtag_rst | slot_rst_req[EIO_SLOT_BASE+i];
+            assign slot_rst[EIO_SLOT_BASE+i] = eio_rst;
 
             initial begin
                 if (EIO_IN_W_I > EIO_IN_W) begin
@@ -339,7 +385,7 @@ module fcapz_debug_multi_core #(
                 .probe_in(eio_probe_in[i*EIO_IN_W +: EIO_IN_W_I]),
                 .probe_out(eio_probe_out_i),
                 .jtag_clk(jtag_clk),
-                .jtag_rst(jtag_rst),
+                .jtag_rst(eio_rst),
                 .jtag_wr_en(slot_wr_en[EIO_SLOT_BASE+i]),
                 .jtag_addr(slot_addr[(EIO_SLOT_BASE+i)*16 +: 16]),
                 .jtag_wdata(slot_wdata[(EIO_SLOT_BASE+i)*32 +: 32]),

@@ -65,6 +65,7 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / "fcapz_eio.v",
     _ROOT / "rtl" / "fcapz_core_manager.v",
     _ROOT / "rtl" / "fcapz_debug_multi_core.v",
+    _ROOT / "rtl" / "fcapz_hub_reset.v",
     _ROOT / "rtl" / "fcapz_debug_multi.v",
     _ROOT / "rtl" / "fcapz_debug_multi_intel.v",
     _ROOT / "rtl" / "jtag_pipe_iface.v",

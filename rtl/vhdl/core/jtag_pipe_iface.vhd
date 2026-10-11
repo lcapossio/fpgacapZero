@@ -16,7 +16,9 @@ entity jtag_pipe_iface is
         -- Must exceed the 49-bit register frame (range checked at elaboration).
         BURST_W        : integer range 50 to integer'high := 256;
         SEG_DEPTH      : positive := 1024;
-        BURST_PTR_ADDR : natural := 16#002C#
+        BURST_PTR_ADDR : natural := 16#002C#;
+        -- The priming scan carries burst_header; see jtag_pipe_iface.v.
+        HEADER_EN      : natural := 0
     );
     port (
         arst : in  std_logic;
@@ -44,7 +46,8 @@ entity jtag_pipe_iface is
 
         burst_start     : in  std_logic;
         burst_timestamp : in  std_logic;
-        burst_ptr_in    : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0)
+        burst_ptr_in    : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_header    : in  std_logic_vector(BURST_W - 1 downto 0) := (others => '0')
     );
 end entity jtag_pipe_iface;
 
@@ -179,6 +182,9 @@ begin
                         load_cnt <= (others => '0');
                         burst_timestamp_r <= burst_timestamp;
                         loading <= '1';
+                        if HEADER_EN /= 0 then
+                            sr <= burst_header;
+                        end if;
                     elsif burst_mode = '1' then
                         sr <= staging;
                         rd_off <= next_off +

@@ -35,6 +35,7 @@ entity fcapz_debug_multi_xilinx7 is
         REL_COMPARE      : natural := 0;
         DUAL_COMPARE     : natural := 1;
         USER1_DATA_EN    : natural := 1;
+        TLR_RESET_EN     : natural := 0;
         EIO_IN_W         : positive := 1;
         EIO_OUT_W        : positive := 1;
         ELA_PORT_COUNT   : positive := fcapz_nonzero_width(NUM_ELAS);
@@ -71,14 +72,15 @@ end entity fcapz_debug_multi_xilinx7;
 
 architecture rtl of fcapz_debug_multi_xilinx7 is
     signal tap_tck, tap_tdi, tap_tdo : std_logic;
-    signal tap_capture, tap_shift, tap_update, tap_sel : std_logic;
+    signal tap_capture, tap_shift, tap_update, tap_sel, tap_tlr : std_logic;
 begin
     u_tap_ctrl : entity work.jtag_tap_xilinx7
         generic map (CHAIN => CTRL_CHAIN)
         port map (
             tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
             capture => tap_capture, shift => tap_shift,
-            update => tap_update, sel => tap_sel
+            update => tap_update, sel => tap_sel,
+            tlr => tap_tlr
         );
 
     u_multi : entity work.fcapz_debug_multi
@@ -103,6 +105,7 @@ begin
             REL_COMPARE => REL_COMPARE,
             DUAL_COMPARE => DUAL_COMPARE,
             USER1_DATA_EN => USER1_DATA_EN,
+            TLR_RESET_EN => TLR_RESET_EN,
             EIO_IN_W => EIO_IN_W,
             EIO_OUT_W => EIO_OUT_W,
             ELA_PORT_COUNT => ELA_PORT_COUNT,
@@ -129,6 +132,7 @@ begin
             tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel,
+            tlr => tap_tlr,
             ela_sample_clk => ela_sample_clk,
             ela_sample_rst => ela_sample_rst,
             ela_probe_in => ela_probe_in,

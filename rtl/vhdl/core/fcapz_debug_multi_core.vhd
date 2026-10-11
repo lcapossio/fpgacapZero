@@ -10,6 +10,9 @@
 -- tck/tdi/tdo/capture/shift/update/sel shape, or a register-only adapter
 -- with BURST_EN=0. jtag_clk/jtag_rst come from the adapter, already
 -- conditioned; the burst bus is read synchronously on jtag_clk.
+--
+-- jtag_rst is the hub's power-up reset; each ELA is reset in its own domain.
+-- See fcapz_debug_multi_core.v.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -43,6 +46,8 @@ entity fcapz_debug_multi_core is
         REL_COMPARE      : natural := 0;
         DUAL_COMPARE     : natural := 1;
         USER1_DATA_EN    : natural := 1;
+        HEADER_EN        : natural := 0;
+        TLR_RESET_EN     : natural := 0;
         EIO_IN_W         : positive := 1;
         EIO_OUT_W        : positive := 1;
         ELA_PORT_COUNT   : positive := fcapz_nonzero_width(NUM_ELAS);
@@ -78,6 +83,8 @@ entity fcapz_debug_multi_core is
         -- Register bus from the JTAG adapter
         jtag_clk        : in  std_logic;
         jtag_rst        : in  std_logic;
+        proto_rst       : in  std_logic;
+        tlr             : in  std_logic;
         jtag_wr_en      : in  std_logic;
         jtag_rd_en      : in  std_logic;
         jtag_addr       : in  std_logic_vector(15 downto 0);
@@ -91,7 +98,8 @@ entity fcapz_debug_multi_core is
         burst_rd_ts_data : out std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
         burst_start      : out std_logic;
         burst_timestamp  : out std_logic;
-        burst_start_ptr  : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0)
+        burst_start_ptr  : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_header     : out std_logic_vector(159 downto 0)
     );
 end entity fcapz_debug_multi_core;
 
@@ -152,6 +160,7 @@ architecture rtl of fcapz_debug_multi_core is
     signal slot_burst_rd_ts_data : std_logic_vector(NUM_SLOTS * TS_W_SAFE - 1 downto 0);
     signal slot_burst_start, slot_burst_timestamp : std_logic_vector(NUM_SLOTS - 1 downto 0);
     signal slot_burst_start_ptr : std_logic_vector(NUM_SLOTS * PTR_W - 1 downto 0);
+    signal slot_rst, slot_rst_req : std_logic_vector(NUM_SLOTS - 1 downto 0);
 begin
     assert ELA_PORT_COUNT >= NUM_ELAS
         report "fcapz_debug_multi ELA_PORT_COUNT must cover NUM_ELAS"
@@ -164,15 +173,19 @@ begin
             TIMESTAMP_W => TIMESTAMP_W,
             DEPTH => DEPTH,
             SLOT_CORE_IDS => SLOT_CORE_IDS,
-            SLOT_HAS_BURST => SLOT_HAS_BURST
+            SLOT_HAS_BURST => SLOT_HAS_BURST,
+            HEADER_EN => HEADER_EN,
+            TLR_RESET_EN => TLR_RESET_EN
         )
         port map (
             jtag_clk => jtag_clk, jtag_rst => jtag_rst,
+            proto_rst => proto_rst, tlr => tlr,
             jtag_wr_en => jtag_wr_en, jtag_rd_en => jtag_rd_en,
             jtag_addr => jtag_addr, jtag_wdata => jtag_wdata,
             jtag_rdata => jtag_rdata,
             slot_wr_en => slot_wr_en, slot_rd_en => slot_rd_en,
             slot_addr => slot_addr, slot_wdata => slot_wdata, slot_rdata => slot_rdata,
+            slot_rst => slot_rst, slot_rst_req => slot_rst_req,
             burst_rd_addr => burst_rd_addr,
             burst_rd_active => burst_rd_active,
             slot_burst_rd_addr => slot_burst_rd_addr,
@@ -186,7 +199,8 @@ begin
             burst_rd_ts_data => burst_rd_ts_data,
             burst_start => burst_start,
             burst_timestamp => burst_timestamp,
-            burst_start_ptr => burst_start_ptr
+            burst_start_ptr => burst_start_ptr,
+            burst_header => burst_header
         );
 
     g_elas : for i in 0 to NUM_ELAS - 1 generate
@@ -215,6 +229,9 @@ begin
         signal ela_burst_rd_data_i     : std_logic_vector(ELA_SAMPLE_W_I - 1 downto 0);
         signal ela_burst_rd_ts_data_i  : std_logic_vector(ELA_TS_W_SAFE_I - 1 downto 0);
         signal ela_burst_start_ptr_i   : std_logic_vector(ELA_PTR_W_I - 1 downto 0);
+        signal ela_soft_rst            : std_logic;
+        signal ela_rst                 : std_logic;
+        signal ela_jtag_rst            : std_logic;
     begin
         assert ELA_PROBE_W_I <= PROBE_W
             report "fcapz_debug_multi ELA probe width exceeds scalar slot width"
@@ -240,6 +257,15 @@ begin
                    " has no burst and its DATA window passes the manager registers at 0xF000"
             severity failure;
 
+        -- MGR_CTRL's request, held on the sample clock until it runs; the
+        -- register side follows the sample side.
+        u_soft_rst : entity work.reset_sync
+            port map (clk => ela_sample_clk(i), arst => slot_rst_req(i), srst => ela_soft_rst);
+        ela_rst <= ela_sample_rst(i) or ela_soft_rst;
+        u_jtag_rst : entity work.reset_sync
+            port map (clk => jtag_clk, arst => ela_rst, srst => ela_jtag_rst);
+        slot_rst(i) <= ela_jtag_rst;
+
         u_ela : entity work.fcapz_ela
             generic map (
                 SAMPLE_W => ELA_SAMPLE_W_I, DEPTH => ELA_DEPTH_I,
@@ -254,13 +280,13 @@ begin
             )
             port map (
                 sample_clk => ela_sample_clk(i),
-                sample_rst => ela_sample_rst(i),
+                sample_rst => ela_rst,
                 probe_in => ela_probe_in(i * PROBE_W + ELA_PROBE_W_I - 1 downto i * PROBE_W),
                 trigger_in => ela_trigger_in(i),
                 trigger_out => ela_trigger_out(i),
                 armed_out => ela_armed_out(i),
                 jtag_clk => jtag_clk,
-                jtag_rst => jtag_rst,
+                jtag_rst => ela_jtag_rst,
                 jtag_wr_en => slot_wr_en(i),
                 jtag_rd_en => slot_rd_en(i),
                 jtag_addr => slot_addr((i + 1) * 16 - 1 downto i * 16),
@@ -300,7 +326,11 @@ begin
             constant EIO_IN_W_I : positive := eio_param32(EIO_IN_WS, i);
             constant EIO_OUT_W_I : positive := eio_param32(EIO_OUT_WS, i);
             signal eio_probe_out_i : std_logic_vector(EIO_OUT_W_I - 1 downto 0);
+            signal eio_rst : std_logic;
         begin
+            eio_rst <= jtag_rst or slot_rst_req(slot_i);
+            slot_rst(slot_i) <= eio_rst;
+
             assert EIO_IN_W_I <= EIO_IN_W
                 report "fcapz_debug_multi EIO IN_W exceeds scalar EIO_IN_W"
                 severity failure;
@@ -313,7 +343,7 @@ begin
                 port map (
                     probe_in => eio_probe_in(i * EIO_IN_W + EIO_IN_W_I - 1 downto i * EIO_IN_W),
                     probe_out => eio_probe_out_i,
-                    jtag_clk => jtag_clk, jtag_rst => jtag_rst,
+                    jtag_clk => jtag_clk, jtag_rst => eio_rst,
                     jtag_wr_en => slot_wr_en(slot_i),
                     jtag_addr => slot_addr((slot_i + 1) * 16 - 1 downto slot_i * 16),
                     jtag_wdata => slot_wdata((slot_i + 1) * 32 - 1 downto slot_i * 32),

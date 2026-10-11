@@ -22,6 +22,7 @@ SOURCES = [
     RTL / "fcapz_debug_multi_xilinx7.v",
     RTL / "fcapz_debug_multi.v",
     RTL / "fcapz_debug_multi_core.v",
+    RTL / "fcapz_hub_reset.v",
     RTL / "fcapz_core_manager.v",
     RTL / "jtag_pipe_iface.v",
     RTL / "reset_sync.v",

@@ -36,6 +36,7 @@ set verilog_files [list \
     "${repo_path}/rtl/fcapz_eio.v" \
     "${repo_path}/rtl/fcapz_core_manager.v" \
     "${repo_path}/rtl/fcapz_debug_multi_core.v" \
+    "${repo_path}/rtl/fcapz_hub_reset.v" \
     "${repo_path}/rtl/fcapz_debug_multi.v" \
     "${repo_path}/rtl/fcapz_debug_multi_intel.v" \
     "${repo_path}/rtl/jtag_pipe_iface.v" \

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "name": "fcapz_hub_reset_parity",
+  "description": "Formal Verilog/VHDL parity for the core-manager hub resets (sticky power-up reset, Test-Logic-Reset)",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_hub_reset",
+    "sources": [
+      "../../rtl/reset_sync.v",
+      "../../rtl/fcapz_hub_reset.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_hub_reset",
+    "sources": [
+      "../../rtl/vhdl/core/reset_sync.vhd",
+      "../../rtl/vhdl/core/fcapz_hub_reset.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "any_sample_rst"
+    ],
+    "clock_inputs": [
+      "tck"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "fcapz_hub_reset",
+        "param_sets": [
+          {},
+          {
+            "TLR_RESET_EN": 1
+          }
+        ]
+      }
+    ]
+  }
+}

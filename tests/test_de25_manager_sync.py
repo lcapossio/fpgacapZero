@@ -29,6 +29,7 @@ def test_manager_build_compiles_the_intel_hub_layers() -> None:
     for layer in (
         "rtl/fcapz_core_manager.v",
         "rtl/fcapz_debug_multi_core.v",
+        "rtl/fcapz_hub_reset.v",
         "rtl/fcapz_debug_multi.v",
         "rtl/fcapz_debug_multi_intel.v",
         "rtl/jtag_tap/jtag_tap_intel.v",

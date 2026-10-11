@@ -62,11 +62,15 @@ _DEBUG_MULTI_TAP_SRC = {
 }
 
 
-def _debug_multi_target(vendor: str) -> Target:
-    """One fcapz_debug_multi_<vendor> shell driven at its TAP primitive's pins."""
+def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
+    """One fcapz_debug_multi_<vendor> shell driven at its TAP primitive's pins.
+
+    With *tlr_reset* the shell is built with TLR_RESET_EN and runs only the
+    test that depends on it.
+    """
     tap_v, tap_vhdl = _DEBUG_MULTI_TAP_SRC[vendor]
     return Target(
-        f"fcapz_debug_multi_{vendor}",
+        f"fcapz_debug_multi_{vendor}" + ("_tlr" if tlr_reset else ""),
         f"fcapz_debug_multi_{vendor}",
         (*tap_v,
          RTL / "reset_sync.v",
@@ -77,15 +81,17 @@ def _debug_multi_target(vendor: str) -> Target:
          RTL / "jtag_pipe_iface.v",
          RTL / "fcapz_core_manager.v",
          RTL / "fcapz_debug_multi_core.v",
+         RTL / "fcapz_hub_reset.v",
          RTL / "fcapz_debug_multi.v",
          RTL / f"fcapz_debug_multi_{vendor}.v"),
-        "fcapz_debug_multi_wrapper",
+        ("fcapz_debug_multi_tlr",) if tlr_reset
+        else ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets", "fcapz_debug_multi_tlr"),
         # Default slot shape (tb/cocotb/core_test.py's _DEBUG_MULTI_* constants)
         # with a nondefault chain. GHDL's top-level overrides do not
         # re-evaluate dependent generic defaults (ELA_DEPTHS from DEPTH, ...)
-        # and cannot set vector generics, so only CTRL_CHAIN, which nothing
-        # depends on, is overridden.
-        {"CTRL_CHAIN": 3},
+        # and cannot set vector generics, so only CTRL_CHAIN and TLR_RESET_EN,
+        # which nothing depends on, are overridden.
+        {"CTRL_CHAIN": 3, **({"TLR_RESET_EN": 1} if tlr_reset else {})},
         (*_VHDL_CORE_PKGS,
          *tap_vhdl,
          RTL / "vhdl" / "core" / "reset_sync.vhd",
@@ -96,6 +102,7 @@ def _debug_multi_target(vendor: str) -> Target:
          RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd",
          RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
          RTL / "vhdl" / "core" / "fcapz_debug_multi_core.vhd",
+         RTL / "vhdl" / "core" / "fcapz_hub_reset.vhd",
          RTL / "vhdl" / "core" / "fcapz_debug_multi.vhd",
          RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd"),
     )
@@ -168,7 +175,8 @@ TARGETS: tuple[Target, ...] = (
         "fcapz_core_manager",
         "fcapz_core_manager",
         (RTL / "fcapz_core_manager.v",),
-        ("fcapz_core_manager_mux", "fcapz_core_manager_burst_start_per_write"),
+        ("fcapz_core_manager_mux", "fcapz_core_manager_burst_start_per_write",
+         "fcapz_core_manager_resets"),
         {
             "NUM_SLOTS": 3,
             "SAMPLE_W": 8,
@@ -176,6 +184,8 @@ TARGETS: tuple[Target, ...] = (
             "DEPTH": 16,
             "SLOT_CORE_IDS": 0x494F_4C41_4C41,
             "SLOT_HAS_BURST": 0b011,
+            "HEADER_EN": 1,
+            "TLR_RESET_EN": 1,
         },
         (*_VHDL_CORE_PKGS,
          RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
@@ -246,6 +256,9 @@ TARGETS: tuple[Target, ...] = (
     _debug_multi_target("xilinx7"),
     _debug_multi_target("xilinxus"),
     _debug_multi_target("intel"),
+    _debug_multi_target("xilinx7", tlr_reset=True),
+    _debug_multi_target("xilinxus", tlr_reset=True),
+    _debug_multi_target("intel", tlr_reset=True),
     Target(
         "fcapz_async_fifo_equiv",
         "fcapz_async_fifo_equiv_wrap",

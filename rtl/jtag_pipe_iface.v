@@ -20,6 +20,10 @@
 // segment base pointer.  The low segment-offset bits must be zero; simulation
 // fails loudly on a misaligned pointer so bad host/wrapper plumbing cannot
 // silently read the wrong segment window.
+//
+// The first scan of a burst only primes the pipeline: its data were not loaded
+// yet.  With HEADER_EN it carries burst_header instead, sampled at that scan's
+// Capture-DR, so the host can check which burst it is about to read.
 
 module jtag_pipe_iface #(
     parameter SAMPLE_W = 8,
@@ -27,7 +31,8 @@ module jtag_pipe_iface #(
     parameter DEPTH = 1024,
     parameter BURST_W = 256,
     parameter SEG_DEPTH = DEPTH,
-    parameter BURST_PTR_ADDR = 16'h002C
+    parameter BURST_PTR_ADDR = 16'h002C,
+    parameter HEADER_EN = 0
 ) (
     input  wire        arst,
 
@@ -58,7 +63,9 @@ module jtag_pipe_iface #(
     // Control (tck domain, from ELA core via reg bus)
     input  wire                      burst_start,
     input  wire                      burst_timestamp,
-    input  wire [$clog2(DEPTH)-1:0]  burst_ptr_in
+    input  wire [$clog2(DEPTH)-1:0]  burst_ptr_in,
+    // Shifted out by the priming scan when HEADER_EN; tie to 0 otherwise.
+    input  wire [BURST_W-1:0]        burst_header
 );
 
     localparam PTR_W = $clog2(DEPTH);
@@ -181,6 +188,8 @@ module jtag_pipe_iface #(
                         load_cnt <= {LOAD_CTR_W{1'b0}};
                         burst_timestamp_r <= burst_timestamp;
                         loading <= 1'b1;
+                        if (HEADER_EN != 0)
+                            sr <= burst_header;
                     end else if (burst_mode) begin
                         sr <= staging;
                         rd_off <= next_off + words_per_scan - 1'b1;
