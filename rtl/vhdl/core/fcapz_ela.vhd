@@ -224,6 +224,8 @@ architecture rtl of fcapz_ela is
     -- RW (USER1_DATA_EN): word offset added to every DATA / timestamp window
     -- read, so a host can page through windows the 16-bit address cannot reach.
     constant ADDR_DATA_OFFSET  : natural := 16#00F4#;
+    -- RO: [15:0] capture generation (COMPARE_CAPS bit 21); see p_capture_gen.
+    constant ADDR_CAPTURE_GEN  : natural := 16#00F8#;
     constant ADDR_DATA_BASE    : natural := 16#0100#;
 
     -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
@@ -483,6 +485,9 @@ architecture rtl of fcapz_ela is
     signal datawin_is_ts_q        : std_logic := '0';
     signal datawin_chunk_q        : natural := 0;
     signal jtag_data_offset       : std_logic_vector(31 downto 0) := (others => '0');
+    -- Never reset; power-up value only (p_capture_gen).
+    signal capture_gen            : unsigned(15 downto 0) := (others => '0');
+    signal capture_gen_rst_d      : std_logic := '0';
 
     function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
         variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
@@ -1112,6 +1117,26 @@ begin
                         seq_mask_b(i) <= (others => '1');
                     end if;
                 end loop;
+            end if;
+        end if;
+    end process;
+
+    -- Capture generation: counts every CTRL write that arms or resets the
+    -- core and every release of the register-side reset: each one can start
+    -- a capture that overwrites the buffer.  A host reads it before and after
+    -- a readout, and after its own arm, to tell that the samples it read are
+    -- the capture it armed.  STARTUP_ARM arms and segment re-arms are not
+    -- counted: the first follows a counted reset, and the second fill the
+    -- segments of one capture.
+    p_capture_gen : process(jtag_clk)
+    begin
+        if rising_edge(jtag_clk) then
+            capture_gen_rst_d <= jtag_rst;
+            if (capture_gen_rst_d = '1' and jtag_rst = '0')
+                    or (jtag_wr_en = '1' and jtag_rst = '0'
+                        and to_integer(unsigned(jtag_addr)) = ADDR_CTRL
+                        and (jtag_wdata(0) = '1' or jtag_wdata(1) = '1')) then
+                capture_gen <= capture_gen + 1;
             end if;
         end if;
     end process;
@@ -2063,6 +2088,7 @@ begin
                 if USER1_DATA_EN /= 0 then
                     r(20) := '1';  -- DATA_OFFSET
                 end if;
+                r(21) := '1';  -- CAPTURE_GEN
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then
@@ -2070,6 +2096,8 @@ begin
                 end if;
             when ADDR_DATA_OFFSET =>
                 r := jtag_data_offset;
+            when ADDR_CAPTURE_GEN =>
+                r := x"0000" & std_logic_vector(capture_gen);
             when others =>
                 if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
                     seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;

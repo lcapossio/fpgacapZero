@@ -47,6 +47,7 @@ ADDR_COMPARE_CAPS = 0x00E0
 ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
 ADDR_DATA_OFFSET = 0x00F4
+ADDR_CAPTURE_GEN = 0x00F8
 ADDR_DATA_BASE = 0x0100
 
 
@@ -654,6 +655,45 @@ async def segmented_capture(dut):
 
 
 @cocotb.test()
+async def capture_gen_counts_restarts(dut):
+    """CAPTURE_GEN counts the CTRL writes that arm or reset the core and the
+    releases of the register-side reset, nothing else: not the capture, not
+    segment re-arms, not other register writes (BUG-246)."""
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 21)
+    gen = await ela.read(ADDR_CAPTURE_GEN)
+    assert gen >> 16 == 0
+    for ctrl in (0x1, 0x2, 0x3):
+        await ela.write(ADDR_CTRL, ctrl)
+        gen += 1
+        assert await ela.read(ADDR_CAPTURE_GEN) == gen, f"CTRL {ctrl:#x}"
+    await ela.write(ADDR_CTRL, 0)
+    await ela.write(ADDR_PRETRIG, 2)
+    await ela.write(ADDR_SEG_SEL, 0)
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen
+    await ela.reset_core()
+    gen += 1
+
+    # One arm, every segment of one capture: one count.
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=0, post=3, value=3, mask=0x03)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen + 1
+    gen += 1
+
+    # The register-side reset clears the registers, not the count; its
+    # release counts once.
+    dut.jtag_rst.value = 1
+    await ela.wait_jtag(3)
+    dut.jtag_rst.value = 0
+    await ela.wait_jtag(2)
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen + 1
+
+
+@cocotb.test()
 async def segment_restart_keeps_the_first_sample(dut):
     """The first sample after a segment completes can trigger the next one.
     With pretrigger 0, post 3 and a trigger on low bits == 3, every segment's
@@ -1168,7 +1208,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001A_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x003A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -1199,7 +1239,7 @@ async def config_user1_disabled(dut):
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001A_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x003A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -1221,7 +1261,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x001B_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x003B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 1)

@@ -100,6 +100,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "burst_start_register",
             "config_written_after_arm_does_not_reach_armed_capture",
             "rearm_mid_capture_restarts_cleanly",
+            "capture_gen_counts_restarts",
         ),
     ),
     CocotbTarget("timestamp32", {"DECIM_EN": 1, "TIMESTAMP_W": 32},
@@ -109,7 +110,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget("segments4", {"NUM_SEGMENTS": 4},
                  ("segmented_capture", "segmented_windows_are_contiguous",
                   "segment_restart_keeps_the_first_sample",
-                  "rearm_mid_capture_restarts_cleanly")),
+                  "rearm_mid_capture_restarts_cleanly",
+                  "capture_gen_counts_restarts")),
     CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
     *(
         CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},

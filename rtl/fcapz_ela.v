@@ -136,6 +136,8 @@ module fcapz_ela #(
     // RW (USER1_DATA_EN): word offset added to every DATA / timestamp window
     // read, so a host can page through windows the 16-bit address cannot reach.
     localparam ADDR_DATA_OFFSET = 16'h00F4;
+    // RO: [15:0] capture generation (COMPARE_CAPS bit 21); see capture_gen.
+    localparam ADDR_CAPTURE_GEN = 16'h00F8;
 
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
@@ -246,7 +248,8 @@ module fcapz_ela #(
         (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
         (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000) |  // bit18: wide comparator A
         32'h0008_0000 |  // bit19: timestamp window base decoded at full width
-        (HAS_USER1_DATA ? 32'h0010_0000 : 32'h0000_0000);  // bit20: DATA_OFFSET
+        (HAS_USER1_DATA ? 32'h0010_0000 : 32'h0000_0000) |  // bit20: DATA_OFFSET
+        32'h0020_0000;   // bit21: CAPTURE_GEN
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -618,6 +621,28 @@ module fcapz_ela #(
     reg                 datawin_is_ts_q;
     reg [31:0]          datawin_chunk_q;
     reg [31:0]          jtag_data_offset;
+
+    // ---- Capture generation -------------------------------------------------
+    // Counts every CTRL write that arms or resets the core and every release
+    // of the register-side reset: each one can start a capture that
+    // overwrites the buffer.  A host reads it before and after a readout, and
+    // after its own arm, to tell that the samples it read are the capture it
+    // armed.  Never reset; power-up value only.  STARTUP_ARM arms and segment
+    // re-arms are not counted: the first follows a counted reset, and the
+    // second fill the segments of one capture.
+    reg [15:0] capture_gen;
+    reg        capture_gen_rst_d;
+    initial begin
+        capture_gen = 16'h0;
+        capture_gen_rst_d = 1'b0;
+    end
+    always @(posedge jtag_clk) begin
+        capture_gen_rst_d <= jtag_rst;
+        if ((capture_gen_rst_d && !jtag_rst)
+                || (jtag_wr_en && !jtag_rst && jtag_addr == ADDR_CTRL
+                    && (jtag_wdata[0] || jtag_wdata[1])))
+            capture_gen <= capture_gen + 16'd1;
+    end
 
     // ---- Trigger logic (combinational) -------------------------------------
     wire arm_pulse   = arm_toggle_sync1 ^ arm_toggle_sync2;
@@ -1853,6 +1878,7 @@ module fcapz_ela #(
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
             ADDR_WIDE_SEL:    jtag_rdata_mux = HAS_WIDE_TRIG ? {24'h0, jtag_wide_sel} : 32'h0;
             ADDR_DATA_OFFSET: jtag_rdata_mux = jtag_data_offset;
+            ADDR_CAPTURE_GEN: jtag_rdata_mux = {16'h0, capture_gen};
 
             default: begin
                 if (seq_addr_hit) begin
