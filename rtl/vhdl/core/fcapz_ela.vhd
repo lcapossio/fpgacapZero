@@ -1127,17 +1127,23 @@ begin
     -- a readout, and after its own arm, to tell that the samples it read are
     -- the capture it armed.  STARTUP_ARM arms and segment re-arms are not
     -- counted: the first follows a counted reset, and the second fill the
-    -- segments of one capture.
+    -- segments of one capture.  A release and a write in the same cycle
+    -- count two.
     p_capture_gen : process(jtag_clk)
+        variable next_gen : unsigned(15 downto 0);
     begin
         if rising_edge(jtag_clk) then
             capture_gen_rst_d <= jtag_rst;
-            if (capture_gen_rst_d = '1' and jtag_rst = '0')
-                    or (jtag_wr_en = '1' and jtag_rst = '0'
-                        and to_integer(unsigned(jtag_addr)) = ADDR_CTRL
-                        and (jtag_wdata(0) = '1' or jtag_wdata(1) = '1')) then
-                capture_gen <= capture_gen + 1;
+            next_gen := capture_gen;
+            if capture_gen_rst_d = '1' and jtag_rst = '0' then
+                next_gen := next_gen + 1;
             end if;
+            if jtag_wr_en = '1' and jtag_rst = '0'
+                    and to_integer(unsigned(jtag_addr)) = ADDR_CTRL
+                    and (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                next_gen := next_gen + 1;
+            end if;
+            capture_gen <= next_gen;
         end if;
     end process;
 

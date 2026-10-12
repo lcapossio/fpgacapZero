@@ -691,6 +691,22 @@ async def capture_gen_counts_restarts(dut):
     dut.jtag_rst.value = 0
     await ela.wait_jtag(2)
     assert await ela.read(ADDR_CAPTURE_GEN) == gen + 1
+    gen += 1
+
+    # A release and an arm write in the same cycle count two: each can start
+    # a capture.
+    dut.jtag_rst.value = 1
+    await ela.wait_jtag(3)
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    dut.jtag_addr.value = ADDR_CTRL
+    dut.jtag_wdata.value = 0x1
+    dut.jtag_wr_en.value = 1
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_wr_en.value = 0
+    await ela.wait_jtag(2)
+    assert await ela.read(ADDR_CAPTURE_GEN) == (gen + 2) & 0xFFFF
+    await ela.reset_core()
 
 
 @cocotb.test()

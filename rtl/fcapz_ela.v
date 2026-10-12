@@ -629,19 +629,22 @@ module fcapz_ela #(
     // after its own arm, to tell that the samples it read are the capture it
     // armed.  Never reset; power-up value only.  STARTUP_ARM arms and segment
     // re-arms are not counted: the first follows a counted reset, and the
-    // second fill the segments of one capture.
+    // second fill the segments of one capture.  A release and a write in the
+    // same cycle count two.
     reg [15:0] capture_gen;
     reg        capture_gen_rst_d;
     initial begin
         capture_gen = 16'h0;
         capture_gen_rst_d = 1'b0;
     end
+    wire capture_gen_release = capture_gen_rst_d && !jtag_rst;
+    wire capture_gen_write   = jtag_wr_en && !jtag_rst && jtag_addr == ADDR_CTRL
+                               && (jtag_wdata[0] || jtag_wdata[1]);
     always @(posedge jtag_clk) begin
         capture_gen_rst_d <= jtag_rst;
-        if ((capture_gen_rst_d && !jtag_rst)
-                || (jtag_wr_en && !jtag_rst && jtag_addr == ADDR_CTRL
-                    && (jtag_wdata[0] || jtag_wdata[1])))
-            capture_gen <= capture_gen + 16'd1;
+        if (capture_gen_release || capture_gen_write)
+            capture_gen <= capture_gen
+                + ((capture_gen_release && capture_gen_write) ? 16'd2 : 16'd1);
     end
 
     // ---- Trigger logic (combinational) -------------------------------------

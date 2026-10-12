@@ -56,7 +56,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **ELA — `CAPTURE_GEN` identifies a capture.** A new read-only register
   (`0x00F8`, `COMPARE_CAPS` bit 21) counts every `CTRL` arm or reset write and
-  every release of the core's register-side reset, and is never reset.
+  every release of the core's register-side reset (two when both land in
+  one cycle), and is never reset.
   `SEG_START` could not tell captures apart: a re-arm by another controller
   during a readout, or between `arm()` and the readout, can leave it where it
   was while new samples overwrite the buffer. `Analyzer.arm()` now expects
