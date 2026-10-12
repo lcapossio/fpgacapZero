@@ -565,6 +565,28 @@ the manager VERSION, and writes nothing unless both answer: an
 manager is remembered as standalone and not written; a chain with
 neither is left alone and checked again next time.
 
+#### `Transport.held_manager_instance`
+
+```python
+held_manager_instance(chain: int, active_addr: int, instance: int) -> Iterator[None]
+```
+
+Select *instance* as `select_manager_instance_cached` does,
+then check, after the block, that every access in it reached that
+slot.  Call under `transaction_lock`, and access only that slot
+in the block.
+
+Another controller can select another slot at any time, and select
+this one back before the block ends: `MGR_ACTIVE` reads the same,
+but the accesses in between went elsewhere.  `MGR_SELECT_COUNT`
+(`MGR_CAPS` bit 7) counts every `MGR_ACTIVE` write, so a count
+that moved by more than this transport's own writes says one
+happened.  `MGR_ACTIVE` is read after the block too, for a hub
+reset (it moves the active slot to 0 without a select) and for hubs
+without the count.  Raises `ManagerResetError` in either
+case; the block is not checked when it raises.  Nothing is checked on
+a chain without a core manager.
+
 #### `Transport.release_manager_ownership`
 
 ```python

@@ -618,7 +618,12 @@ and should be sequenced deliberately.
 own a hub at a time.  Inside one process, share one transport: the GUI and the
 RPC server already route a managed EIO through the analyzer's transport.  Two
 processes driving the same hub at once (two CLI runs, or the GUI and a script)
-can switch the slot under each other.
+can switch the slot under each other.  The host reports that instead of
+using the wrong slot's data: every `Analyzer` operation and every access of an
+`EioController` with an `instance` checks that its slot stayed selected
+(`MGR_SELECT_COUNT` on hubs with `MGR_CAPS[7]`, then `MGR_ACTIVE`) and raises
+`ManagerResetError` when it did not.  Retry the operation; a write that raised
+may have reached the other slot.
 
 Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
 Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected

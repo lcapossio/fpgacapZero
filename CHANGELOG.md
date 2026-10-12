@@ -239,6 +239,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A managed EIO access could reach another slot unseen.** Another
+  controller (a second process on the same hub) that selected another slot
+  during an `EioController` read or write sent some of it there: a read
+  returned the other core's value, a write landed on the other core. Each
+  access of an EIO with an `instance`, `connect()` and `attach()` included,
+  now runs in `Transport.held_manager_instance()`, which compares
+  `MGR_SELECT_COUNT` less the transport's own selects across the access and
+  reads `MGR_ACTIVE` after it, and raises `ManagerResetError` (now defined in
+  `fcapz.transport`, still importable from `fcapz.analyzer`). Older hubs get
+  the `MGR_ACTIVE` check only.
+
 - **EIO discovery missed an Intel EIO.** With no chains given, `eio_discover`
   (RPC) and the desktop GUI's EIO auto-attach tried the transport's IR-table
   chains, and `usb_blaster` has none, so only instance 1 was tried and the

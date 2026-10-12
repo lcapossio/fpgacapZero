@@ -231,7 +231,9 @@ subtracts its transport's own `MGR_ACTIVE` writes; a change across
 in between, and some accesses may have gone there, even when that controller
 selected the analyzer's slot back.  Selects by other controllers between two
 operations are expected and not reported: each operation selects its slot
-again.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
+again.  `EioController` does the same for each access of a managed EIO
+(`Transport.held_manager_instance`): the select count across the access, then
+`MGR_ACTIVE` after it.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
 also compared across the readout, and every burst header in it must carry the
 same start pointer, so samples and timestamps come from one capture and one
 segment.  On an ELA with `CAPTURE_GEN` (`COMPARE_CAPS[21]`, standalone or
