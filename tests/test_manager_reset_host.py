@@ -753,7 +753,7 @@ class OtherSlotGenTransport(EpochElaTransport):
 class ReadsInsideTheSlotCheckTests(unittest.TestCase):
     """The last CAPTURE_GEN and SEG_START reads of arm() and of a readout
     come before the last slot check, so a select away just before them
-    shows (astra review of BUG-245/246)."""
+    shows (BUG-245/246 follow-up)."""
 
     def setUp(self):
         self.t = OtherSlotGenTransport()
