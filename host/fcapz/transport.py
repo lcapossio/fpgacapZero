@@ -390,6 +390,8 @@ class Transport(ABC):
         # (SAMPLE_W <= 5) burst can be dropped.  Write again: two rounds
         # outlast the longest preload.
         for _ in range(MANAGER_SELECT_ATTEMPTS):
+            writes = self.__dict__.setdefault("_fcapz_manager_select_writes", {})
+            writes[chain] = (writes.get(chain, 0) + 1) & 0xFFFF
             self.write_reg(active_addr, instance)
             if int(self.read_reg(active_addr)) == instance:
                 self.__dict__["_fcapz_manager_active_cache"] = (chain, instance)
@@ -465,6 +467,16 @@ class Transport(ABC):
             _log.warning("could not clear MGR_OWNER: %s", exc)
         finally:
             lock.release()
+
+    def manager_select_writes(self, chain: int) -> int:
+        """``MGR_ACTIVE`` writes this transport made to the core manager on
+        *chain*, modulo 2**16.  The manager counts every one, from every
+        controller, in ``MGR_SELECT_COUNT`` (``MGR_CAPS`` bit 7): the
+        difference is the other controllers' selects.  Every select of this
+        host goes through :meth:`select_manager_instance_cached`, which
+        counts them; the count survives
+        :meth:`invalidate_manager_instance_cache`."""
+        return self.__dict__.get("_fcapz_manager_select_writes", {}).get(int(chain), 0)
 
     def invalidate_manager_instance_cache(self) -> None:
         """Forget the cached core-manager active slot selection."""

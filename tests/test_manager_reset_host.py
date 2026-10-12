@@ -21,6 +21,7 @@ from fcapz.analyzer import (
 from fcapz.registers import (
     ADDR_MGR_EPOCH,
     ADDR_MGR_OWNER,
+    ADDR_MGR_SELECT_COUNT,
     ADDR_MGR_SLOT_EPOCH,
     ADDR_MGR_TLR_COUNT,
 )
@@ -253,6 +254,7 @@ class BurstEpochTests(unittest.TestCase):
 
 
 _SEG_START = 0x00C8
+_CAPTURE_GEN = 0x00F8
 
 
 class EpochElaTransport(Transport):
@@ -261,10 +263,11 @@ class EpochElaTransport(Transport):
 
     ``hooks`` maps a register address to a function run when that address is
     written (or, for the DATA window, read): tests reset the slot there.
+    With ``capture_gen`` the ELA has CAPTURE_GEN (COMPARE_CAPS bit 21).
     """
 
     def __init__(self, *, caps: int = 0x0B, slot_caps: int = 0, bursting: bool = False,
-                 slots: int = 1):
+                 slots: int = 1, capture_gen: bool = False):
         ver = ((_version_tuple()[0] & 0xFF) << 24) | ((_version_tuple()[1] & 0xFF) << 16)
         self.regs = {
             0x0000: ver | 0x4C41, 0x0008: 0x4, 0x000C: 8, 0x0010: 16,
@@ -275,7 +278,11 @@ class EpochElaTransport(Transport):
             0xF000: ver | CORE_MANAGER_CORE_ID, 0xF004: slots, 0xF008: 0,
             0xF00C: 0, 0xF010: caps, 0xF014: 0, 0xF01C: slot_caps,
             ADDR_MGR_EPOCH: 2, ADDR_MGR_SLOT_EPOCH: 2, ADDR_MGR_TLR_COUNT: 0,
+            ADDR_MGR_SELECT_COUNT: 0xFFF0,  # other controllers' selects; wraps
         }
+        if capture_gen:
+            self.regs[0x00E0] |= 1 << 21
+            self.regs[_CAPTURE_GEN] = 0xFFFE  # wraps during the tests
         self.bursting = bursting
         self.hooks: dict[int, object] = {}
         self.reads: list[int] = []
@@ -292,6 +299,17 @@ class EpochElaTransport(Transport):
 
     def reset_slot(self, edges: int = 2) -> None:
         self.manager[ADDR_MGR_SLOT_EPOCH] += edges
+
+    def foreign_select(self, slot: int, back: int | None = None) -> None:
+        """Another controller selects *slot*, then *back* if given."""
+        for value in (slot,) if back is None else (slot, back):
+            self.manager[ADDR_MGR_SELECT_COUNT] = (
+                self.manager[ADDR_MGR_SELECT_COUNT] + 1) & 0xFFFF
+            self.manager[0xF008] = value
+
+    def rearm(self) -> None:
+        """Another controller's CTRL arm."""
+        self.regs[_CAPTURE_GEN] = (self.regs[_CAPTURE_GEN] + 1) & 0xFFFF
 
     def reset_hub(self) -> None:
         """MGR_CTRL bit 0: MGR_ACTIVE back to 0, no slot reset."""
@@ -310,10 +328,15 @@ class EpochElaTransport(Transport):
         hook = self.hooks.pop(addr, None)
         if hook is not None:
             hook()
+        if addr == 0xF008:
+            self.manager[ADDR_MGR_SELECT_COUNT] = (
+                self.manager[ADDR_MGR_SELECT_COUNT] + 1) & 0xFFFF
         if addr in self.manager:
             self.manager[addr] = value
         else:
             self.regs[addr] = value
+        if addr == 0x0004 and value & 0x3 and _CAPTURE_GEN in self.regs:
+            self.rearm()
 
     def bursts_data_window(self, *, timestamp=False):
         return self.bursting
@@ -450,7 +473,7 @@ class HubResetTests(unittest.TestCase):
 
     def test_hub_reset_during_configure_raises(self):
         self.t.hooks[0x0024] = self.t.reset_hub
-        with self.assertRaisesRegex(ManagerResetError, "while it was configured"):
+        with self.assertRaisesRegex(ManagerResetError, "active slot is 0.*hub was reset"):
             self.a.configure(epoch_config())
 
 
@@ -546,3 +569,151 @@ class BurstExpectationSetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaptureGenerationTests(unittest.TestCase):
+    """CAPTURE_GEN tells the analyzer that the capture it reads is the one it
+    armed, and that no arm or reset hit it during the readout: SEG_START
+    alone does not, since a re-arm can leave it where it was (BUG-246)."""
+
+    def analyzer(self, *, managed: bool, capture_gen: bool = True, **kw) -> Analyzer:
+        self.t = EpochElaTransport(capture_gen=capture_gen, **kw)
+        a = Analyzer(self.t, manager=managed)
+        a.connect()
+        a.configure(epoch_config())
+        return a
+
+    def test_capture_passes(self):
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                a = self.analyzer(managed=managed)
+                a.arm()
+                self.assertEqual(a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+                # Read again: still the capture this analyzer armed.
+                self.assertEqual(a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+
+    def test_rearm_during_readout_raises(self):
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                a = self.analyzer(managed=managed)
+                a.arm()
+                self.t.hooks[0x0100] = self.t.rearm
+                with self.assertRaisesRegex(CaptureChangedError, "during the readout"):
+                    a.capture(timeout=0.01)
+
+    def test_rearm_since_arm_raises(self):
+        """Another controller armed again after this analyzer did: the
+        capture there is theirs, even with SEG_START unchanged."""
+        a = self.analyzer(managed=False)
+        a.arm()
+        self.t.rearm()
+        with self.assertRaisesRegex(CaptureChangedError, "since arm"):
+            a.capture(timeout=0.01)
+
+    def test_concurrent_arm_raises_at_arm(self):
+        a = self.analyzer(managed=False)
+        self.t.hooks[0x0004] = self.t.rearm
+        with self.assertRaisesRegex(CaptureChangedError, "across this arm"):
+            a.arm()
+        # Not this analyzer's capture: nothing to compare with, so a capture
+        # read now is only checked during its readout.
+        self.assertEqual(a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+
+    def test_own_reset_is_not_a_foreign_capture(self):
+        a = self.analyzer(managed=False)
+        a.arm()
+        a.reset()
+        self.assertEqual(a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+
+    def test_every_segment_of_one_capture(self):
+        a = self.analyzer(managed=False)
+        self.t.regs[0x00B8] = 2  # NUM_SEGMENTS
+        a.configure(epoch_config())
+        a.arm()
+        for seg in (0, 1):
+            self.assertEqual(a.capture_segment(seg, timeout=0.01).segment, seg)
+
+    def test_slot_reset_is_reported_as_one(self):
+        """A slot reset also moves CAPTURE_GEN; the epoch says more."""
+        a = self.analyzer(managed=True)
+        a.arm()
+
+        def reset():
+            self.t.reset_slot()
+            self.t.rearm()
+
+        self.t.hooks[0x0100] = reset
+        with self.assertRaises(ManagerResetError):
+            a.capture(timeout=0.01)
+
+    def test_core_without_capture_gen_is_not_read(self):
+        a = self.analyzer(managed=False, capture_gen=False)
+        a.arm()
+        a.capture(timeout=0.01)
+        self.assertNotIn(_CAPTURE_GEN, self.t.reads)
+
+
+class ForeignSelectTests(unittest.TestCase):
+    """Another controller's select and select back between an analyzer's own
+    accesses send some of them to another slot and leave MGR_ACTIVE as it
+    was; MGR_SELECT_COUNT (MGR_CAPS bit 7) less the transport's own selects
+    says one happened (BUG-245)."""
+
+    def setUp(self):
+        self.t = EpochElaTransport(caps=0x8B, slots=2)
+        self.a = Analyzer(self.t, instance=1)
+        self.a.connect()
+
+    def test_select_and_back_during_readout_raises(self):
+        self.a.configure(epoch_config())
+        self.a.arm()
+        self.t.hooks[0x0100] = lambda: self.t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(ManagerResetError, "during the readout"):
+            self.a.capture(timeout=0.01)
+
+    def test_select_and_back_during_configure_raises(self):
+        self.t.hooks[0x0024] = lambda: self.t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(ManagerResetError, "while it was configured"):
+            self.a.configure(epoch_config())
+
+    def test_select_and_back_during_arm_raises(self):
+        self.a.configure(epoch_config())
+        self.t.hooks[0x0004] = lambda: self.t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(ManagerResetError, "during arm"):
+            self.a.arm()
+
+    def test_select_left_elsewhere_raises(self):
+        self.a.configure(epoch_config())
+        self.a.arm()
+        self.t.hooks[0x0100] = lambda: self.t.foreign_select(0)
+        # The readout's own select (for the timestamps) moves it back; the
+        # count still differs.
+        with self.assertRaisesRegex(ManagerResetError, "during the readout"):
+            self.a.capture(timeout=0.01)
+
+    def test_selects_between_operations_pass(self):
+        """Other controllers may use the hub between this analyzer's calls:
+        each call selects its slot again."""
+        self.a.configure(epoch_config())
+        self.t.foreign_select(0)
+        self.a.arm()
+        self.t.foreign_select(0)
+        self.assertEqual(self.a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+
+    def test_analyzers_sharing_the_transport_are_not_foreign(self):
+        other = Analyzer(self.t, instance=0)
+        other.connect()
+        for a in (self.a, other, self.a):
+            a.configure(epoch_config())
+        for a in (other, self.a, other):
+            a.arm()
+            self.assertEqual(a.capture(timeout=0.01).samples, [0, 1, 2, 3])
+
+    def test_hub_without_select_count_is_not_read(self):
+        t = EpochElaTransport(caps=0x0B, slots=2)
+        a = Analyzer(t, instance=1)
+        a.connect()
+        a.configure(epoch_config())
+        a.arm()
+        a.capture(timeout=0.01)
+        self.assertNotIn(ADDR_MGR_SELECT_COUNT, t.reads)

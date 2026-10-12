@@ -15,10 +15,12 @@ from ._version import _version_tuple
 from .registers import (
     ADDR_MGR_ACTIVE,
     ADDR_MGR_EPOCH,
+    ADDR_MGR_SELECT_COUNT,
     ADDR_MGR_SLOT_EPOCH,
     ADDR_MGR_TLR_COUNT,
     MGR_CAP_BURST_HEADER,
     MGR_CAP_EPOCH_OWNER,
+    MGR_CAP_SELECT_COUNT,
     MGR_CAP_TLR_RESET,
 )
 from .transport import (
@@ -139,6 +141,10 @@ _COMPARE_CAPS_TS_BASE_FULL = 1 << 19
 # COMPARE_CAPS bit 20: DATA_OFFSET, a word offset added to every DATA /
 # timestamp window read, pages the windows past the 16-bit address space.
 _COMPARE_CAPS_DATA_OFFSET = 1 << 20
+# COMPARE_CAPS bit 21: CAPTURE_GEN counts the CTRL writes that arm or reset
+# the core and the releases of its register-side reset.
+_COMPARE_CAPS_CAPTURE_GEN = 1 << 21
+_ADDR_CAPTURE_GEN = 0x00F8
 _ADDR_DATA_OFFSET = 0x00F4
 _ADDR_DATA_BASE = 0x0100
 
@@ -319,11 +325,16 @@ class CaptureChangedError(RuntimeError):
 
 class _SlotState(NamedTuple):
     """The core-manager slot an analyzer reads, with ``MGR_SLOT_EPOCH`` of
-    that slot and ``MGR_EPOCH``."""
+    that slot, ``MGR_EPOCH`` and the other controllers' ``MGR_ACTIVE``
+    writes (``None`` without ``MGR_SELECT_COUNT``).  The last one changes
+    whenever another controller selects a slot, so it is compared only
+    across one operation, never from :meth:`Analyzer.configure` to a later
+    one."""
 
     slot: int
     slot_epoch: int
     hub_epoch: int
+    foreign_selects: int | None
 
 
 class _Readout(NamedTuple):
@@ -333,6 +344,7 @@ class _Readout(NamedTuple):
     state: _SlotState | None
     tlr_count: int | None
     start_ptr: int | None
+    capture_gen: int | None
 
 
 def _selected_transaction(method):
@@ -413,6 +425,9 @@ class Analyzer:
         self._config_state: _SlotState | None = None
         # SEG_START of the readout in progress, for its burst headers.
         self._readout_start_ptr: int | None = None
+        # CAPTURE_GEN right after this analyzer's arm; None when it did not
+        # arm the capture there is now, or the core has no CAPTURE_GEN.
+        self._armed_gen: int | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -468,6 +483,7 @@ class Analyzer:
                 # capture read with them would misread the new slot's data.
                 self._config = None
                 self._config_state = None
+                self._armed_gen = None
                 self._hw_timestamp_w = 0
                 self._hw_num_segments = 1
                 self._hw_compare_caps = 0
@@ -506,6 +522,7 @@ class Analyzer:
         next step needs a verified idle core.
         """
         self._select_instance()
+        self._armed_gen = None
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
 
     def force_idle(
@@ -575,6 +592,7 @@ class Analyzer:
         for attempt in range(max(1, max_resets)):
             with self.transport.transaction_lock():
                 self._select_instance()
+                self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
@@ -635,6 +653,7 @@ class Analyzer:
         self._select_instance()
         self._config = None
         self._config_state = None
+        self._armed_gen = None
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
         if config.pretrigger + config.posttrigger + 1 > config.depth:
@@ -776,9 +795,10 @@ class Analyzer:
         if state_after != state_before:
             raise ManagerResetError(
                 "the ELA's core manager changed while it was configured (slot, "
-                f"slot epoch, hub epoch {tuple(state_before)} before, "
-                f"{tuple(state_after)} after): a reset, or another controller's "
-                "slot select, sent some writes elsewhere"
+                "slot epoch, hub epoch, other controllers' selects "
+                f"{tuple(state_before)} before, {tuple(state_after)} after): a "
+                "reset, or another controller's slot select, sent some writes "
+                "elsewhere"
             )
         self._config_state = state_after
         self._config = config
@@ -829,11 +849,35 @@ class Analyzer:
         """Arm the core with the configuration it holds.
 
         Raises :class:`ManagerResetError` if the core's slot was reset since
-        :meth:`configure`: it would arm its build defaults.
+        :meth:`configure`: it would arm its build defaults.  On a core with
+        ``CAPTURE_GEN`` (``COMPARE_CAPS`` bit 21), raises
+        :class:`CaptureChangedError` if another controller armed or reset the
+        core at the same time; the capture read later must be this arm's.
         """
         self._select_instance()
-        self._check_configured_state("at arm")
+        state = self._check_configured_state("at arm")
+        self._armed_gen = None
+        before = self._capture_gen()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
+        if state is not None:
+            after_state = self._slot_state()
+            if after_state != state:
+                raise ManagerResetError(
+                    "the core manager changed during arm() (slot, slot epoch, hub "
+                    f"epoch, other controllers' selects {tuple(state)} before, "
+                    f"{tuple(after_state)} after): the arm may have gone to "
+                    "another slot"
+                )
+        if before is None:
+            return
+        after = self._capture_gen()
+        if after != (before + 1) & 0xFFFF:
+            raise CaptureChangedError(
+                f"CAPTURE_GEN went from {before} to {after} across this arm, not "
+                "by one: another controller armed or reset the core at the same "
+                "time"
+            )
+        self._armed_gen = after
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
         """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first.
@@ -1173,27 +1217,47 @@ class Analyzer:
             )
 
     def _slot_state(self) -> _SlotState | None:
-        """The slot this analyzer reads (its ``instance``, else the hub's
-        active slot), that slot's ``MGR_SLOT_EPOCH`` (odd while it is held in
-        reset) and ``MGR_EPOCH``; ``None`` without a core manager that has
-        epochs (``MGR_CAPS`` bit 3).  Call with this analyzer selected.
+        """The hub's active slot, that slot's ``MGR_SLOT_EPOCH`` (odd while
+        it is held in reset), ``MGR_EPOCH`` and the other controllers'
+        selects (``MGR_SELECT_COUNT`` less this transport's own); ``None``
+        without a core manager that has epochs (``MGR_CAPS`` bit 3).  Call
+        with this analyzer selected.
+
+        Raises :class:`ManagerResetError` if an analyzer with an ``instance``
+        finds another slot active: another controller selected it after this
+        analyzer did, and the accesses since went there.
 
         A hub reset resets no slot but moves ``MGR_ACTIVE`` to 0, which sends
         the reads that follow, until the next select, to slot 0: the hub
-        epoch says one happened."""
+        epoch says one happened.  Another controller's select and its select
+        back leave ``MGR_ACTIVE`` as it was: the select count says one
+        happened.  It is read before ``MGR_ACTIVE``, so an unchanged count
+        later means the slot read here stayed active in between."""
         if not self._behind_manager():
             return None
         read = self.transport.read_reg
         if self._manager_caps is None:
             self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
-        if not self._manager_caps[0] & MGR_CAP_EPOCH_OWNER:
+        caps = self._manager_caps[0]
+        if not caps & MGR_CAP_EPOCH_OWNER:
             return None
+        foreign = None
+        if caps & MGR_CAP_SELECT_COUNT:
+            own = self.transport.manager_select_writes(self._chain)
+            foreign = (int(read(ADDR_MGR_SELECT_COUNT)) - own) & 0xFFFF
         hub_epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
-        slot = self._instance
-        if slot is None:
-            slot = int(read(_ADDR_MGR_ACTIVE))
+        slot = int(read(_ADDR_MGR_ACTIVE))
+        if self._instance is not None and slot != self._instance:
+            raise ManagerResetError(
+                f"the core manager's active slot is {slot}, not this analyzer's "
+                f"slot {self._instance}: another controller selected it, or the "
+                f"hub was reset (MGR_EPOCH {hub_epoch}), after this analyzer "
+                "selected its slot"
+            )
         self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-        return _SlotState(slot, int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF, hub_epoch)
+        return _SlotState(
+            slot, int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF, hub_epoch, foreign
+        )
 
     def _tlr_count(self) -> int | None:
         """``MGR_TLR_COUNT`` on a hub whose Test-Logic-Reset resets the JTAG
@@ -1207,6 +1271,13 @@ class Analyzer:
         if not self._manager_caps[0] & MGR_CAP_TLR_RESET:
             return None
         return int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
+
+    def _capture_gen(self) -> int | None:
+        """``CAPTURE_GEN`` on a core that has it (``COMPARE_CAPS`` bit 21,
+        read by :meth:`configure`), else ``None``."""
+        if not self._hw_compare_caps & _COMPARE_CAPS_CAPTURE_GEN:
+            return None
+        return int(self.transport.read_reg_stable(_ADDR_CAPTURE_GEN)) & 0xFFFF
 
     def _check_configured_state(self, when: str) -> _SlotState | None:
         """Raise :class:`ManagerResetError` unless this analyzer still reads
@@ -1235,18 +1306,26 @@ class Analyzer:
         return now
 
     def _readout_begin(self, seg_idx: int | None = None) -> _Readout:
-        """Start of a readout: check the slot (:meth:`_check_configured_state`),
+        """Start of a readout: check the slot (:meth:`_check_configured_state`)
+        and that the capture is the one this analyzer armed (``CAPTURE_GEN``),
         select segment *seg_idx*, and record what :meth:`_readout_end`
-        compares: the slot state, ``MGR_TLR_COUNT`` and ``SEG_START``, which
-        the readout's burst headers must also carry."""
+        compares: the slot state, ``MGR_TLR_COUNT``, ``SEG_START`` (which the
+        readout's burst headers must also carry) and ``CAPTURE_GEN``."""
         state = self._check_configured_state("before the readout")
+        gen = self._capture_gen()
+        if self._armed_gen is not None and gen != self._armed_gen:
+            raise CaptureChangedError(
+                f"the core was armed or reset again since arm() (CAPTURE_GEN "
+                f"{self._armed_gen} then, {gen} now): the capture there is not "
+                "the one this analyzer armed"
+            )
         if seg_idx is not None:
             self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
         start = None
         if state is not None:
             start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
         self._readout_start_ptr = start
-        return _Readout(state, self._tlr_count(), start)
+        return _Readout(state, self._tlr_count(), start, gen)
 
     def _readout_end(self, begin: _Readout) -> None:
         """End of a readout: raise when anything recorded at its start
@@ -1261,15 +1340,28 @@ class Analyzer:
                 f"(MGR_TLR_COUNT {begin.tlr_count} before, {tlr} after), which "
                 "resets this hub's JTAG protocol"
             )
-        if begin.state is None:
-            return
+        if begin.state is not None:
+            self._check_readout_slot(begin)
+        # After the slot checks: a slot reset also moves CAPTURE_GEN, and
+        # ManagerResetError says more.
+        gen = self._capture_gen()
+        if gen != begin.capture_gen:
+            raise CaptureChangedError(
+                f"CAPTURE_GEN moved from {begin.capture_gen} to {gen} during the "
+                "readout: the core was armed or reset again, and the samples "
+                "read may mix two captures"
+            )
+
+    def _check_readout_slot(self, begin: _Readout) -> None:
+        """The slot-state and ``SEG_START`` half of :meth:`_readout_end`."""
         now = self._slot_state()
         if now != begin.state:
             raise ManagerResetError(
                 "the core manager changed during the readout (slot, slot epoch, "
-                f"hub epoch {tuple(begin.state)} before, {tuple(now)} after): a "
-                "reset, or another controller's slot select, may have mixed in "
-                "another slot's data or the build defaults"
+                f"hub epoch, other controllers' selects {tuple(begin.state)} "
+                f"before, {tuple(now)} after): a reset, or another controller's "
+                "slot select, may have mixed in another slot's data or the "
+                "build defaults"
             )
         start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
         if start != begin.start_ptr:
