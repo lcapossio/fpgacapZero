@@ -47,7 +47,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   A new read-only register (`0xF034`, `MGR_CAPS` bit 7) counts every
   `MGR_ACTIVE` write, refused ones too, and is never reset. Another
   controller that selected a slot during an analyzer's `configure()`,
-  `arm()` or readout and then selected the analyzer's slot back left nothing
+  `arm()`, `reset()` or readout and then selected the analyzer's slot back left nothing
   to see: some writes or reads went to the other slot. The transport now
   counts its own `MGR_ACTIVE` writes, and `Analyzer` compares the difference
   across each of those operations and raises `ManagerResetError`. An analyzer

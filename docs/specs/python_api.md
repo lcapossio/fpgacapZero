@@ -587,6 +587,11 @@ without the count.  Raises `ManagerResetError` in either
 case; the block is not checked when it raises.  Nothing is checked on
 a chain without a core manager.
 
+The order makes the count cover the block: count, then `MGR_ACTIVE`
+(this slot, so no select since the count took it away), the block,
+`MGR_ACTIVE` (a hub reset in the block shows, or a select back
+after it moved the count), then the count.
+
 #### `Transport.release_manager_ownership`
 
 ```python

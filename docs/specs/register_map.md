@@ -227,13 +227,15 @@ between puts the ELA back at its build defaults, so the capture is not the one
 configured, and a hub reset during a readout sends the reads after it to slot
 0.  On a hub with `MGR_CAPS[7]` it also reads `MGR_SELECT_COUNT` first and
 subtracts its transport's own `MGR_ACTIVE` writes; a change across
-`configure()`, `arm()` or a readout means another controller selected a slot
+`configure()`, `arm()`, `reset()` or a readout means another controller selected a slot
 in between, and some accesses may have gone there, even when that controller
 selected the analyzer's slot back.  Selects by other controllers between two
 operations are expected and not reported: each operation selects its slot
 again.  `EioController` does the same for each access of a managed EIO
-(`Transport.held_manager_instance`): the select count across the access, then
-`MGR_ACTIVE` after it.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
+(`Transport.held_manager_instance`): the select count, `MGR_ACTIVE`, the
+access, `MGR_ACTIVE`, the select count.  The last `CAPTURE_GEN` and
+`SEG_START` reads of `arm()` and of a readout come before its last slot check,
+so the check covers them too.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
 also compared across the readout, and every burst header in it must carry the
 same start pointer, so samples and timestamps come from one capture and one
 segment.  On an ELA with `CAPTURE_GEN` (`COMPARE_CAPS[21]`, standalone or
