@@ -500,12 +500,20 @@ class RpcServer:
         merged = {**base, **self._target_fields(req)}
         return self._resolved_target(merged) == self._resolved_target(base)
 
+    def _with_session_target(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """*req* with the target fields it leaves out taken from the session,
+        as :meth:`_same_target` reads them (BUG-243/247)."""
+        return {
+            **req,
+            **{f: v for f, v in self._analyzer_target.items() if req.get(f) is None},
+        }
+
     @staticmethod
-    def _manager_eio_slot(analyzer: Analyzer, req: Dict[str, Any]) -> tuple[int, int] | None:
-        """The (chain, slot) of the first EIO in a core-manager slot on the
-        session's transport, on ``req["chains"]`` or the transport's
-        discovery chains; ``None`` if there is none.  The session's chain is
-        selected again after."""
+    def _session_eio(analyzer: Analyzer, req: Dict[str, Any]) -> Dict[str, Any] | None:
+        """The :func:`discover_cores` entry of the first EIO on the session's
+        transport, standalone or in a core-manager slot, on ``req["chains"]``
+        or the transport's discovery chains; ``None`` if there is none.  The
+        session's chain is selected again after."""
         raw = req.get("chains")
         transport = analyzer.transport
         try:
@@ -521,8 +529,8 @@ class RpcServer:
                 pass
             transport.invalidate_manager_instance_cache()
         for entry in found:
-            if entry["type"] == "eio" and entry["instance"] is not None:
-                return int(entry["chain"]), int(entry["instance"])
+            if entry["type"] == "eio":
+                return entry
         return None
 
     def _build_transport(self, req: Dict[str, Any]):
@@ -1050,11 +1058,7 @@ class RpcServer:
             if instance is not None and self._analyzer is not None and not shared:
                 # Another board, named by the fields given; the rest are the
                 # session's, as for the comparison (BUG-243).
-                target_req = {
-                    **req,
-                    **{f: v for f, v in self._analyzer_target.items()
-                       if req.get(f) is None},
-                }
+                target_req = self._with_session_target(req)
             eio = EioController(
                 self._analyzer.transport if shared else self._build_transport(target_req),
                 chain=chain,
@@ -1083,15 +1087,22 @@ class RpcServer:
 
         if cmd == "eio_discover":
             self._drop_eio()
-            # On the session's board, an EIO in a core-manager slot is
-            # attached as eio_connect does with its instance: through the
-            # session's transport, after pinning an unbound analyzer.
-            slot = self._manager_eio_slot(analyzer, req) if self._same_target(req) else None
-            if slot is not None:
-                chain, instance = slot
-                if chain == analyzer.bscan_chain:
+            # On the session's board the EIO, standalone or in a core-manager
+            # slot, goes through the session's transport: one lock and one
+            # slot cache, and no second connection to the board.  An unbound
+            # analyzer is pinned first, as eio_connect does (BUG-247).
+            if self._same_target(req):
+                entry = self._session_eio(analyzer, req)
+                if entry is None:
+                    raise RuntimeError("no EIO core found on the target")
+                chain, base_addr = int(entry["chain"]), int(entry["base_addr"])
+                instance = entry["instance"]
+                if instance is not None and chain == analyzer.bscan_chain:
                     analyzer.pin_active_slot()
-                eio = EioController(analyzer.transport, chain=chain, instance=instance)
+                eio = EioController(
+                    analyzer.transport, chain=chain, base_addr=base_addr,
+                    instance=None if instance is None else int(instance),
+                )
                 eio.attach()
                 self._eio, self._eio_shared = eio, True
                 return self._ok(
@@ -1099,10 +1110,12 @@ class RpcServer:
                     in_w=eio.in_w,
                     out_w=eio.out_w,
                     chain=chain,
-                    base_addr=0,
+                    base_addr=base_addr,
                     instance=instance,
                 )
-            transport = self._build_transport(req)
+            # Another board: the fields the request leaves out are the
+            # session's, as for the comparison.
+            transport = self._build_transport(self._with_session_target(req))
             transport.connect()
             try:
                 chains = req.get("chains")

@@ -2047,6 +2047,56 @@ class DiscoverEioTests(unittest.TestCase):
         reply = server.handle({"cmd": "eio_discover", "backend": "usb_blaster"})
         self.assertEqual(reply["chain"], 3)
 
+    def _session_server(self, t, target):
+        """An RPC session on *t*, opened with the target fields *target*;
+        every transport the server builds after is recorded."""
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._analyzer = Analyzer(t)
+        server._analyzer_target = dict(target)
+        built: list = []
+
+        def build(req):
+            built.append(dict(req))
+            return t
+
+        server._build_transport = build  # type: ignore[method-assign]
+        return server, built
+
+    def test_rpc_eio_discover_attaches_a_standalone_eio_on_the_session(self):
+        """A bare request on a USB-Blaster session is that board: a standalone
+        EIO found there is attached through the session's transport, and no
+        hw_server transport is opened (BUG-247)."""
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={1: 1, 2: 2, 3: 3})
+        server, built = self._session_server(
+            t, {"backend": "usb_blaster", "hardware": "USB-Blaster [USB-0]"})
+        reply = server.handle({"cmd": "eio_discover"})
+        self.assertEqual((reply["chain"], reply["base_addr"]), (3, 0))
+        self.assertIsNone(reply["instance"])
+        self.assertEqual(built, [])
+        self.assertTrue(server._eio_shared)
+        self.assertIs(server._eio._t, t)  # noqa: SLF001
+
+    def test_rpc_eio_discover_on_the_session_board_reports_no_eio(self):
+        t = FakeDiscoveryTransport(eio_chain=9, eio_base=0x0, ir_table={1: 1, 2: 2})
+        server, built = self._session_server(t, {"host": "10.0.0.2"})
+        with self.assertRaisesRegex(RuntimeError, "no EIO"):
+            server.handle({"cmd": "eio_discover"})
+        self.assertEqual(built, [])
+
+    def test_rpc_eio_discover_on_another_board_keeps_the_session_fields(self):
+        """Fields the request leaves out are the session's (BUG-247)."""
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={1: 1, 2: 2, 3: 3})
+        server, built = self._session_server(t, {"host": "10.0.0.2", "port": 3122})
+        reply = server.handle({"cmd": "eio_discover", "tap": "xc7a35t"})
+        self.assertEqual(reply["chain"], 3)
+        self.assertEqual(
+            {k: built[0].get(k) for k in ("host", "port", "tap")},
+            {"host": "10.0.0.2", "port": 3122, "tap": "xc7a35t"},
+        )
+        self.assertFalse(server._eio_shared)
+
     def test_default_chains_without_an_ir_table_stop_below_the_bridges(self):
         """Intel virtual JTAG: ELA/EIO instances 1-3, never the bridges on 4/5."""
         self.assertEqual(default_eio_chains(object()), [1, 2, 3])

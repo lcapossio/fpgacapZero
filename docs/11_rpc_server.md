@@ -550,11 +550,14 @@ transport, with the session's values for the fields it leaves out.
 #### `eio_discover`
 
 Find the EIO without knowing its chain.  On the session's board (the
-request's connection fields match, as for `eio_connect`), an EIO in a
-core-manager slot is tried first and attached like `eio_connect` with its
-`instance`; the response then carries `instance`.  Otherwise the server opens
-its own connection and tries each chain in `"chains"` at base addresses
-`0x0000` and `0x8000`.
+request's connection fields match, as for `eio_connect`), the server lists the
+cores on the session's own connection and attaches the first EIO there,
+standalone or in a core-manager slot, without opening a second connection; an
+unbound analyzer is pinned to its slot first, as `eio_connect` does.  The
+response carries the EIO's `instance` (`null` when standalone).  For another
+board the server opens its own connection, taking the fields the request
+leaves out from the session, and tries each chain in `"chains"` at base
+addresses `0x0000` and `0x8000`.
 Without `"chains"` it tries every chain in the transport's IR table, or, on
 `usb_blaster` (no IR table), virtual-JTAG instances 1-3, where the Intel
 wrappers put the ELA and EIO; the bridges on 4 and 5 are left alone.
