@@ -180,6 +180,7 @@ module fcapz_core_manager_case #(
     // The manager raises the burst start event itself, once per BURST_PTR
     // write to a burst-capable slot; selecting a slot is not a start.
     reg start_before;
+    reg [31:0] select_count_before;
     task check_burst_ptr_write(input integer idx);
         begin
             start_before = burst_start;
@@ -217,8 +218,10 @@ module fcapz_core_manager_case #(
         read_reg(16'hF000, 32'h0004_434D, "manager version");
         read_reg(16'hF004, NUM_SLOTS[31:0], "manager slot count");
         // bit2 burst start per BURST_PTR write, bit3 epochs/owner, bit4
-        // header (HEADER_EN), bit5 MGR_CTRL; no TLR protocol reset
-        read_reg(16'hF010, 32'h0000_003F, "manager caps");
+        // header (HEADER_EN), bit5 MGR_CTRL, bit7 MGR_SELECT_COUNT; no TLR
+        // protocol reset
+        read_reg(16'hF010, 32'h0000_00BF, "manager caps");
+        read_reg(16'hF034, 32'h0000_0000, "no MGR_ACTIVE write yet");
         read_reg(16'hF020, 32'h0000_0002, "power-up reset counted at both edges");
         read_reg(16'hF024, 32'h0000_0000, "owner clear after reset");
         read_reg(16'hF008, 32'h0000_0000, "reset active slot");
@@ -246,6 +249,10 @@ module fcapz_core_manager_case #(
         read_reg(16'hF008, NUM_SLOTS - 1, "out-of-range active write NUM_SLOTS+1 ignored");
         write_reg(16'hF008, 32'hFFFF_FFFF);
         read_reg(16'hF008, NUM_SLOTS - 1, "out-of-range active write all ones ignored");
+        read_reg(16'hF034, 32'h0000_0006, "every MGR_ACTIVE write counted, refused ones too");
+        write_reg(16'hF014, NUM_SLOTS - 1);
+        write_reg(16'hF024, 32'h1);
+        read_reg(16'hF034, 32'h0000_0006, "other manager writes not counted");
         write_reg(16'hF014, NUM_SLOTS);
         read_reg(16'hF014, NUM_SLOTS - 1, "out-of-range descriptor write NUM_SLOTS ignored");
         write_reg(16'hF014, NUM_SLOTS + 1);
@@ -276,12 +283,19 @@ module fcapz_core_manager_case #(
         write_reg(16'hF024, 32'hCAFE_0001);
         read_reg(16'hF024, 32'hCAFE_0001, "owner reads back");
         start_before = burst_start;
+        @(negedge clk);
+        addr = 16'hF034;
+        rd_en = 1'b1;
+        #1 select_count_before = rdata;
+        @(negedge clk);
+        rd_en = 1'b0;
         write_reg(16'hF028, 32'h1);  // hub soft reset
         repeat (2) @(negedge clk);  // the request, then its count
         // Power-up reset: assert and release (2); soft reset: 2 more.
         read_reg(16'hF020, 32'h0000_0004, "soft reset counted in MGR_EPOCH");
         read_reg(16'hF024, 32'h0000_0000, "soft reset clears the owner");
         read_reg(16'hF014, 32'h0000_0000, "soft reset clears DESC_INDEX");
+        read_reg(16'hF034, select_count_before, "soft reset keeps MGR_SELECT_COUNT");
         #1 expect_bits({7'b0, burst_start}, {7'b0, start_before},
                        "soft reset keeps the burst start paired with the pipe");
         for (k = 0; k < NUM_SLOTS; k = k + 1)

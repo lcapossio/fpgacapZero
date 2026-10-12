@@ -70,7 +70,7 @@ architecture rtl of fcapz_core_manager is
     constant HEADER_MAGIC : std_logic_vector(15 downto 0) := x"4248";
 
     function manager_caps return std_logic_vector is
-        variable caps : std_logic_vector(31 downto 0) := x"0000002F";
+        variable caps : std_logic_vector(31 downto 0) := x"000000AF";
     begin
         if HEADER_EN /= 0 then
             caps(4) := '1';
@@ -94,6 +94,7 @@ architecture rtl of fcapz_core_manager is
     constant ADDR_MGR_CTRL       : std_logic_vector(15 downto 0) := x"F028";
     constant ADDR_MGR_SLOT_EPOCH : std_logic_vector(15 downto 0) := x"F02C";
     constant ADDR_MGR_TLR_COUNT  : std_logic_vector(15 downto 0) := x"F030";
+    constant ADDR_MGR_SELECT_COUNT : std_logic_vector(15 downto 0) := x"F034";
     constant ADDR_BURST_PTR      : std_logic_vector(15 downto 0) := x"002C";
 
     signal active_idx : unsigned(IDX_W - 1 downto 0) := (others => '0');
@@ -114,6 +115,8 @@ architecture rtl of fcapz_core_manager is
     signal slot_epoch     : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0) := (others => '0');
     signal tlr_d          : std_logic := '0';
     signal tlr_count      : unsigned(15 downto 0) := (others => '0');
+    -- Every MGR_ACTIVE write, accepted or not; see fcapz_core_manager.v.
+    signal select_count   : unsigned(15 downto 0) := (others => '0');
 
     signal mgr_rst   : std_logic;
     signal burst_rst : std_logic;
@@ -239,6 +242,9 @@ begin
             if tlr = '1' and tlr_d = '0' then
                 tlr_count <= tlr_count + 1;
             end if;
+            if jtag_wr_en = '1' and jtag_addr = ADDR_MGR_ACTIVE then
+                select_count <= select_count + 1;
+            end if;
         end if;
     end process;
 
@@ -342,6 +348,8 @@ begin
                 manager_rdata <= x"0000" & desc_epoch;
             when ADDR_MGR_TLR_COUNT =>
                 manager_rdata <= x"0000" & std_logic_vector(tlr_count);
+            when ADDR_MGR_SELECT_COUNT =>
+                manager_rdata <= x"0000" & std_logic_vector(select_count);
             when others =>
                 manager_rdata <= (others => '0');
         end case;

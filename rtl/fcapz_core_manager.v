@@ -18,7 +18,10 @@
 // (slot_rst_req); the epoch counters below survive every reset so the host can
 // tell that one happened.  They count both edges of a reset, so an odd epoch
 // means that reset is held now, and a reset still held when the host looked
-// changes the epoch again on release.
+// changes the epoch again on release.  MGR_SELECT_COUNT counts every
+// MGR_ACTIVE write, accepted or not, from any controller: a host that counts
+// its own writes tells from the difference that another controller selected a
+// slot, even one that selected its slot back.
 
 module fcapz_core_manager #(
     parameter NUM_SLOTS = 2,
@@ -87,8 +90,8 @@ module fcapz_core_manager #(
     // bit0 active-slot, bit1 descriptors, bit2 the manager raises the burst
     // start on every BURST_PTR write (safe across slot switches), bit3 epochs
     // and MGR_OWNER, bit4 burst header, bit5 MGR_CTRL and per-slot resets,
-    // bit6 Test-Logic-Reset resets the burst protocol
-    localparam [31:0] MANAGER_CAPS = 32'h0000_002F
+    // bit6 Test-Logic-Reset resets the burst protocol, bit7 MGR_SELECT_COUNT
+    localparam [31:0] MANAGER_CAPS = 32'h0000_00AF
         | ((HEADER_EN != 0) ? 32'h10 : 32'h0)
         | ((TLR_RESET_EN != 0) ? 32'h40 : 32'h0);
 
@@ -105,6 +108,7 @@ module fcapz_core_manager #(
     localparam ADDR_MGR_CTRL       = 16'hF028;
     localparam ADDR_MGR_SLOT_EPOCH = 16'hF02C;
     localparam ADDR_MGR_TLR_COUNT  = 16'hF030;
+    localparam ADDR_MGR_SELECT_COUNT = 16'hF034;
     localparam ADDR_BURST_PTR   = 16'h002C;
 
     reg [IDX_W-1:0] active_idx;
@@ -129,6 +133,7 @@ module fcapz_core_manager #(
     reg [NUM_SLOTS*16-1:0] slot_epoch;
     reg                 tlr_d;
     reg [15:0]          tlr_count;
+    reg [15:0]          select_count;
 
     initial begin
         mgr_rst_req = 1'b0;
@@ -139,6 +144,7 @@ module fcapz_core_manager #(
         slot_epoch = {NUM_SLOTS{16'h0}};
         tlr_d = 1'b0;
         tlr_count = 16'h0;
+        select_count = 16'h0;
     end
 
     wire mgr_rst = jtag_rst | mgr_rst_req;
@@ -219,6 +225,8 @@ module fcapz_core_manager #(
         tlr_d <= tlr;
         if (tlr && !tlr_d)
             tlr_count <= tlr_count + 16'd1;
+        if (jtag_wr_en && jtag_addr == ADDR_MGR_ACTIVE)
+            select_count <= select_count + 16'd1;
     end
 
     genvar g;
@@ -297,6 +305,7 @@ module fcapz_core_manager #(
             ADDR_MGR_OWNER:      manager_rdata = owner;
             ADDR_MGR_SLOT_EPOCH: manager_rdata = {16'h0, desc_epoch};
             ADDR_MGR_TLR_COUNT:  manager_rdata = {16'h0, tlr_count};
+            ADDR_MGR_SELECT_COUNT: manager_rdata = {16'h0, select_count};
             default:          manager_rdata = 32'h0;
         endcase
     end

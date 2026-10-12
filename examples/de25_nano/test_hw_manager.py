@@ -336,8 +336,8 @@ class TestManagerResets(unittest.TestCase):
         try:
             t.connect()
             caps, epoch, tlr, slot_epochs = regs()
-            # Bits 0-5, plus bit 6: this hub is built with TLR_RESET_EN.
-            self.assertEqual(caps, 0x7F)
+            # Bits 0-5 and 7, plus bit 6: this hub is built with TLR_RESET_EN.
+            self.assertEqual(caps, 0xFF)
             # Epochs count both reset edges: even when no reset is held.
             self.assertEqual([e & 1 for e in (epoch, *slot_epochs)], [0] * (1 + len(slot_epochs)))
             ela = Analyzer(t, chain=MANAGER_CHAIN, instance=0)

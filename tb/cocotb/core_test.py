@@ -919,8 +919,9 @@ async def fcapz_core_manager_mux(dut):
     assert await manager_read(dut, 0xF000) == 0x0004_434D
     assert await manager_read(dut, 0xF004) == 3
     # bit2: the burst start is raised on every BURST_PTR write; bits 3..6:
-    # epochs and owner, burst header, MGR_CTRL, Test-Logic-Reset resets
-    assert await manager_read(dut, 0xF010) == 0x7F
+    # epochs and owner, burst header, MGR_CTRL, Test-Logic-Reset resets;
+    # bit 7: MGR_SELECT_COUNT
+    assert await manager_read(dut, 0xF010) == 0xFF
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xEFFF) == 0
     assert int(dut.slot_rd_en.value) & 1
@@ -951,6 +952,17 @@ async def fcapz_core_manager_mux(dut):
     assert int(dut.burst_start_ptr.value) == 0xB
     await manager_write(dut, 0xF008, 7)
     assert await manager_read(dut, 0xF008) == 1
+    # MGR_SELECT_COUNT: every MGR_ACTIVE write, the refused one too, and
+    # nothing else; a hub soft reset keeps it.
+    assert await manager_read(dut, 0xF034) == 4
+    await manager_write(dut, 0xF014, 1)
+    await manager_write(dut, 0xF024, 5)
+    assert await manager_read(dut, 0xF034) == 4
+    await manager_write(dut, 0xF028, 1)
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF008) == 0
+    assert await manager_read(dut, 0xF034) == 4
 
 
 @cocotb.test()
@@ -1277,7 +1289,7 @@ _DEBUG_MULTI_SAMPLE_W = 8
 _DEBUG_MULTI_DEPTH = 1024
 _DEBUG_MULTI_BURST_W = 256
 # MGR_CAPS of the shell; bit 6 is TLR_RESET_EN.
-_DEBUG_MULTI_CAPS = 0x3F
+_DEBUG_MULTI_CAPS = 0xBF
 _MGR_CAPS_TLR_RESET = 0x40
 
 
