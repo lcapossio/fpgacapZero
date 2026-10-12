@@ -43,6 +43,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   effects, so every transport's window readers work unchanged. The hub's
   `0xF000` elaboration check is gone. Both HDLs.
 
+- **Core manager — `MGR_SELECT_COUNT` reveals another controller's select.**
+  A new read-only register (`0xF034`, `MGR_CAPS` bit 7) counts every
+  `MGR_ACTIVE` write, refused ones too, and is never reset. Another
+  controller that selected a slot during an analyzer's `configure()`,
+  `arm()` or readout and then selected the analyzer's slot back left nothing
+  to see: some writes or reads went to the other slot. The transport now
+  counts its own `MGR_ACTIVE` writes, and `Analyzer` compares the difference
+  across each of those operations and raises `ManagerResetError`. An analyzer
+  with an `instance` also reads `MGR_ACTIVE` and refuses another slot there.
+  Older hubs get the `MGR_ACTIVE` check only. Both HDLs.
+
+- **ELA — `CAPTURE_GEN` identifies a capture.** A new read-only register
+  (`0x00F8`, `COMPARE_CAPS` bit 21) counts every `CTRL` arm or reset write and
+  every release of the core's register-side reset, and is never reset.
+  `SEG_START` could not tell captures apart: a re-arm by another controller
+  during a readout, or between `arm()` and the readout, can leave it where it
+  was while new samples overwrite the buffer. `Analyzer.arm()` now expects
+  `CAPTURE_GEN` to move by exactly one, and the readout expects the value
+  `arm()` left and compares it across the readout; either raises
+  `CaptureChangedError`. Standalone ELAs too. Cores without bit 21 are read
+  as before. Both HDLs.
+
 - **Formal parity — power-up values.** The Verilog/VHDL parity proofs matched
   registers by name and assumed equal states, so they never compared
   power-up values. Each configuration now also compares the state of every

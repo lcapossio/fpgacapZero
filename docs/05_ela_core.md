@@ -549,7 +549,7 @@ Manager registers:
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
 | `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. A `BURST_PTR` write binds the burst to the active slot; a later `MGR_ACTIVE` write, even one during a burst, moves register accesses only, and the burst stays on its owner until the next `BURST_PTR` write. Writes of a slot at or past `MGR_COUNT` are ignored. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write; bit 3 epochs and `MGR_OWNER`; bit 4 burst header; bit 5 `MGR_CTRL` and per-slot resets; bit 6 Test-Logic-Reset resets the burst protocol (see the register map). |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write; bit 3 epochs and `MGR_OWNER`; bit 4 burst header; bit 5 `MGR_CTRL` and per-slot resets; bit 6 Test-Logic-Reset resets the burst protocol; bit 7 `MGR_SELECT_COUNT` (see the register map). |
 | `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor and `MGR_SLOT_EPOCH` reads, and for `MGR_CTRL` bit 1. |
 | `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
@@ -558,6 +558,7 @@ Manager registers:
 | `0xF028` | MGR_CTRL | WO | Bit 0 resets the hub, bit 1 the `MGR_DESC_INDEX` slot, bit 2 every slot. |
 | `0xF02C` | MGR_SLOT_EPOCH | RO | Both edges of the `MGR_DESC_INDEX` slot's reset (odd while held); never reset. |
 | `0xF030` | MGR_TLR_COUNT | RO | TAP Test-Logic-Reset entries; never reset. |
+| `0xF034` | MGR_SELECT_COUNT | RO | `MGR_ACTIVE` writes from any controller, refused ones too; never reset. |
 
 Each slot resets alone: an ELA's `ela_sample_rst` resets that ELA only, and no
 longer `MGR_ACTIVE`, the EIO outputs or the other ELAs.  `TLR_RESET_EN=1` on

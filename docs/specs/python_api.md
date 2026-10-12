@@ -202,7 +202,10 @@ arm() -> None
 Arm the core with the configuration it holds.
 
 Raises `ManagerResetError` if the core's slot was reset since
-`configure`: it would arm its build defaults.
+`configure`: it would arm its build defaults.  On a core with
+`CAPTURE_GEN` (`COMPARE_CAPS` bit 21), raises
+`CaptureChangedError` if another controller armed or reset the
+core at the same time; the capture read later must be this arm's.
 
 #### `Analyzer.wait_done`
 
@@ -572,6 +575,20 @@ Clear this session's owner token from the managers it claimed.
 
 A manager whose `MGR_OWNER` holds another value (another session
 took it, or the hub was reset) is left alone.
+
+#### `Transport.manager_select_writes`
+
+```python
+manager_select_writes(chain: int) -> int
+```
+
+`MGR_ACTIVE` writes this transport made to the core manager on
+*chain*, modulo 2**16.  The manager counts every one, from every
+controller, in `MGR_SELECT_COUNT` (`MGR_CAPS` bit 7): the
+difference is the other controllers' selects.  Every select of this
+host goes through `select_manager_instance_cached`, which
+counts them; the count survives
+`invalidate_manager_instance_cache`.
 
 #### `Transport.invalidate_manager_instance_cache`
 

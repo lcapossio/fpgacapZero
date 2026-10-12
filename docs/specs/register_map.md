@@ -65,10 +65,11 @@ in that bridge’s section.
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
 | `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
 | `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
-| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). Bit 21 reports `CAPTURE_GEN`. |
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
+| `0x00F8` | CAPTURE_GEN | RO | `COMPARE_CAPS` bit 21. `[15:0]` counts every `CTRL` write with bit 0 (arm) or bit 1 (reset) and every release of the core's register-side reset: each can start a capture that overwrites the buffer. Never reset (power-up 0), wraps at 16 bits. `STARTUP_ARM` arms and segment re-arms are not counted: the first follows a counted reset, and the second fill the segments of one capture. (`0x00E8` is the AXI monitor's `AXI_MON_ID`.) A host reads it after its arm and around a readout to know that the samples it read are the capture it armed. |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. |
 
 <a id="regmap-seq-cfg"></a>
@@ -173,7 +174,7 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF004` | MGR_COUNT | RO | Number of slots behind this manager. |
 | `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. Burst readback latches the active slot when `BURST_PTR` is written, then routes burst control/data through that owner instead of the live `MGR_ACTIVE` value. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode; no fixed per-slot address windows are used. |
-| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported; bit 2 = the manager raises the burst start on every `BURST_PTR` write. A manager with two or more slots and bit 2 clear predates that fix: it passes on the owner slot's own start toggle, which after a slot switch can equal the burst reader's last-seen copy, so the start is missed and the burst reads the new slot from the previous burst's pointer. On such a manager the host syncs the start first: after the `BURST_PTR` write it runs one burst scan, whose capture copies the new owner's toggle, then writes `BURST_PTR` again, a start the reader cannot miss. Bit 3 = `MGR_EPOCH`, `MGR_OWNER` and `MGR_SLOT_EPOCH` present; bit 4 = the priming scan of a burst carries the burst header (see [Burst header](#regmap-burst-header)); bit 5 = `MGR_CTRL` and `MGR_TLR_COUNT` present, and each slot resets alone; bit 6 = the TAP's Test-Logic-Reset also resets the burst protocol (`TLR_RESET_EN`). |
+| `0xF010` | MGR_CAPS | RO | Capability bits. Bit 0 = active-slot select supported; bit 1 = slot descriptor registers supported; bit 2 = the manager raises the burst start on every `BURST_PTR` write. A manager with two or more slots and bit 2 clear predates that fix: it passes on the owner slot's own start toggle, which after a slot switch can equal the burst reader's last-seen copy, so the start is missed and the burst reads the new slot from the previous burst's pointer. On such a manager the host syncs the start first: after the `BURST_PTR` write it runs one burst scan, whose capture copies the new owner's toggle, then writes `BURST_PTR` again, a start the reader cannot miss. Bit 3 = `MGR_EPOCH`, `MGR_OWNER` and `MGR_SLOT_EPOCH` present; bit 4 = the priming scan of a burst carries the burst header (see [Burst header](#regmap-burst-header)); bit 5 = `MGR_CTRL` and `MGR_TLR_COUNT` present, and each slot resets alone; bit 6 = the TAP's Test-Logic-Reset also resets the burst protocol (`TLR_RESET_EN`); bit 7 = `MGR_SELECT_COUNT` present. |
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` and `MGR_SLOT_EPOCH` reads, and the slot `MGR_CTRL` bit 1 resets. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
@@ -182,6 +183,7 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF028` | MGR_CTRL | WO | Reads 0. Write 1s to: bit 0 reset the hub (`MGR_ACTIVE`, `MGR_DESC_INDEX`, `MGR_OWNER` and the burst owner, but no slot); bit 1 reset the `MGR_DESC_INDEX` slot; bit 2 reset every slot. A slot reset is the slot's own reset: an ELA's sample and register sides together, an EIO's outputs. Present when `MGR_CAPS[5]=1`. |
 | `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts both edges of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2): odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF030` | MGR_TLR_COUNT | RO | `[15:0]` counts entries of the TAP into Test-Logic-Reset. Never reset. Present when `MGR_CAPS[5]=1`. |
+| `0xF034` | MGR_SELECT_COUNT | RO | `[15:0]` counts every `MGR_ACTIVE` write, from any controller, including writes the manager refuses. Never reset, wraps at 16 bits. Present when `MGR_CAPS[7]=1`. A host that counts its own `MGR_ACTIVE` writes learns from the difference that another controller selected a slot, even one that selected the host's slot back. |
 
 Selection sequence:
 
@@ -216,16 +218,28 @@ while a session is open, which would cancel bursts.  The epochs and
 `MGR_TLR_COUNT` are never reset, so a host compares them before and after an
 operation to learn that a reset happened in between; because an epoch counts
 both edges, it also differs when a reset was asserted and not yet released.
-The Python host reads the slot it uses (its `instance`, else `MGR_ACTIVE`),
-that slot's epoch and `MGR_EPOCH` before and after `configure()`, refuses to
+The Python host reads `MGR_ACTIVE` (an analyzer with an `instance` refuses
+another slot there), that slot's epoch and `MGR_EPOCH` before and after
+`configure()`, refuses to
 configure a slot held in reset, and checks them again at `arm()`, when a wait
 for the capture times out, and before and after the readout: a slot reset in
 between puts the ELA back at its build defaults, so the capture is not the one
 configured, and a hub reset during a readout sends the reads after it to slot
-0.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
+0.  On a hub with `MGR_CAPS[7]` it also reads `MGR_SELECT_COUNT` first and
+subtracts its transport's own `MGR_ACTIVE` writes; a change across
+`configure()`, `arm()` or a readout means another controller selected a slot
+in between, and some accesses may have gone there, even when that controller
+selected the analyzer's slot back.  Selects by other controllers between two
+operations are expected and not reported: each operation selects its slot
+again.  A failed `configure()` leaves the analyzer unconfigured.  `SEG_START` is
 also compared across the readout, and every burst header in it must carry the
 same start pointer, so samples and timestamps come from one capture and one
-segment.  On a hub with
+segment.  On an ELA with `CAPTURE_GEN` (`COMPARE_CAPS[21]`, standalone or
+behind a manager), `arm()` expects it to move by exactly one across its
+`CTRL` write, the readout expects the value `arm()` left, and the value is
+compared across the readout: a re-arm by another controller can leave
+`SEG_START` where it was while new samples overwrite the buffer.  These raise
+`CaptureChangedError`.  On a hub with
 `MGR_CAPS[6]` it also compares `MGR_TLR_COUNT` across each burst and readout,
 since a Test-Logic-Reset there cancels a burst after its header was checked.
 
