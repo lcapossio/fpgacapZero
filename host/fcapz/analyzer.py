@@ -30,6 +30,7 @@ from .transport import (
     BurstHeader,
     BurstIntegrityError,
     BurstUnavailableError,
+    ManagerResetError,
     OpenOcdTransport,
     Transport,
     check_data_window,
@@ -303,18 +304,6 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
             last = t
         return out
     return list(range(n))
-
-
-class ManagerResetError(RuntimeError):
-    """A reset on the core manager invalidated the operation.
-
-    Either the ELA's slot was reset after :meth:`Analyzer.configure`, so the
-    core went back to its build defaults and a capture armed or read since is
-    not the one configured (call ``configure()`` again), or, on a hub whose
-    Test-Logic-Reset resets the JTAG protocol (``MGR_CAPS`` bit 6), the TAP
-    passed through Test-Logic-Reset during a readout, which can drop a
-    register command.
-    """
 
 
 class CaptureChangedError(RuntimeError):

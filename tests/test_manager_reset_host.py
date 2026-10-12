@@ -18,6 +18,7 @@ from fcapz.analyzer import (
     ManagerResetError,
     TriggerConfig,
 )
+from fcapz.eio import EioController
 from fcapz.registers import (
     ADDR_MGR_EPOCH,
     ADDR_MGR_OWNER,
@@ -32,6 +33,7 @@ from fcapz.transport import (
     Transport,
     XilinxHwServerTransport,
 )
+from fcapz.transport import ManagerResetError as TransportManagerResetError
 
 
 def make_header(*, slot=1, start_ptr=0x2A, timestamp=False, mgr_epoch=4,
@@ -717,3 +719,134 @@ class ForeignSelectTests(unittest.TestCase):
         a.arm()
         a.capture(timeout=0.01)
         self.assertNotIn(ADDR_MGR_SELECT_COUNT, t.reads)
+
+
+class ManagedEioTransport(Transport):
+    """Two EIO slots behind a core manager.  MGR_SELECT_COUNT counts every
+    MGR_ACTIVE write; ``hooks`` run another controller's accesses just
+    before a slot register access."""
+
+    def __init__(self, caps: int = 0x8B) -> None:
+        self.manager = {
+            0xF000: CORE_MANAGER_CORE_ID, 0xF004: 2, 0xF008: 0, 0xF010: caps,
+            ADDR_MGR_OWNER: 0, ADDR_MGR_SELECT_COUNT: 0xFFFE,
+        }
+        self.slots = [
+            {0x0000: 0x0001_494F, 0x0004: 8, 0x0008: 8, 0x0010: 0x11, 0x0100: 0},
+            {0x0000: 0x0001_494F, 0x0004: 8, 0x0008: 8, 0x0010: 0x22, 0x0100: 0},
+        ]
+        self.hooks: dict = {}
+        self.reads: list[int] = []
+
+    def connect(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def select_chain(self, chain: int) -> None:
+        pass
+
+    def _hook(self, addr: int) -> None:
+        hook = self.hooks.pop(addr, None)
+        if hook is not None:
+            hook()
+
+    def read_reg(self, addr: int) -> int:
+        self._hook(addr)
+        self.reads.append(addr)
+        if addr >= 0xF000:
+            return self.manager.get(addr, 0)
+        return self.slots[self.manager[0xF008]].get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self._hook(addr)
+        if addr == 0xF008:
+            self.manager[ADDR_MGR_SELECT_COUNT] = (
+                self.manager[ADDR_MGR_SELECT_COUNT] + 1) & 0xFFFF
+            if value < 2:
+                self.manager[addr] = value
+        elif addr >= 0xF000:
+            self.manager[addr] = value
+        else:
+            self.slots[self.manager[0xF008]][addr] = value
+
+    def read_block(self, addr: int, words: int) -> list[int]:
+        return [self.read_reg(addr + 4 * i) for i in range(words)]
+
+    def foreign_select(self, slot: int, back: int | None = None) -> None:
+        """Another controller selects *slot*, then *back* if given."""
+        for value in (slot,) if back is None else (slot, back):
+            self.manager[ADDR_MGR_SELECT_COUNT] = (
+                self.manager[ADDR_MGR_SELECT_COUNT] + 1) & 0xFFFF
+            self.manager[0xF008] = value
+
+
+class ManagedEioSlotTests(unittest.TestCase):
+    """Another controller's select, or a hub reset, during a managed EIO's
+    access sends some of it to another slot (BUG-222)."""
+
+    def setUp(self):
+        self.t = ManagedEioTransport()
+        self.eio = EioController(self.t, chain=1, instance=1)
+        self.eio.connect()
+
+    def test_error_is_shared_with_the_analyzer(self):
+        self.assertIs(ManagerResetError, TransportManagerResetError)
+
+    def test_select_and_back_during_read_raises(self):
+        self.t.hooks[0x0010] = lambda: self.t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(
+                ManagerResetError, "2 time.*during an access to slot 1"):
+            self.eio.read_inputs()
+
+    def test_select_left_elsewhere_during_write_raises(self):
+        self.t.hooks[0x0100] = lambda: self.t.foreign_select(0)
+        with self.assertRaisesRegex(ManagerResetError, "during an access"):
+            self.eio.write_outputs(0x5A)
+        self.assertEqual(self.t.slots[0][0x0100], 0x5A)  # the write went astray
+
+    def test_hub_reset_during_read_raises_without_select_count(self):
+        t = ManagedEioTransport(caps=0x0B)
+        eio = EioController(t, chain=1, instance=1)
+        eio.connect()
+        t.hooks[0x0010] = lambda: t.manager.__setitem__(0xF008, 0)
+        with self.assertRaisesRegex(ManagerResetError, "is 0, not 1"):
+            eio.read_inputs()
+        self.assertNotIn(ADDR_MGR_SELECT_COUNT, t.reads)
+
+    def test_select_and_back_during_connect_raises(self):
+        t = ManagedEioTransport()
+        eio = EioController(t, chain=1, instance=1)
+        t.hooks[0x0004] = lambda: t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(ManagerResetError, "during an access"):
+            eio.connect()
+
+    def test_selects_between_accesses_pass(self):
+        """Each access selects its slot again, so other controllers may use
+        the hub between them."""
+        self.t.foreign_select(0)
+        self.assertEqual(self.eio.read_inputs(), 0x22)
+        self.t.foreign_select(0, back=1)
+        self.eio.write_outputs(0xA5)
+        self.assertEqual(self.t.slots[1][0x0100], 0xA5)
+        self.assertEqual(self.eio.read_outputs(), 0xA5)
+
+    def test_controllers_sharing_the_transport_are_not_foreign(self):
+        other = EioController(self.t, chain=1, instance=0)
+        other.attach()
+        for _ in range(3):
+            self.assertEqual(self.eio.read_inputs(), 0x22)
+            self.assertEqual(other.read_inputs(), 0x11)
+        self.eio.set_bit(3, 1)
+        other.set_bit(4, 1)
+        self.assertEqual(
+            (self.t.slots[1][0x0100], self.t.slots[0][0x0100]), (0x08, 0x10))
+
+    def test_direct_eio_is_not_checked(self):
+        t = ManagedEioTransport()
+        eio = EioController(t, chain=1)
+        eio.connect()
+        t.reads.clear()
+        eio.read_inputs()
+        self.assertEqual(t.reads, [0x0010])

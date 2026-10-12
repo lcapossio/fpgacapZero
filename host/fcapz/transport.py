@@ -16,8 +16,9 @@ import time
 import subprocess
 import threading
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
-from typing import IO, List, NamedTuple
+from typing import IO, Iterator, List, NamedTuple
 
 # Character whitelist for the JTAG target filter (XSDB `jtag targets -set
 # -filter {name =~ "..."}`).  This value is interpolated inside a
@@ -162,6 +163,21 @@ REG_ADDR_SPACE_END = 0x10000
 
 class DataWindowError(RuntimeError):
     """A DATA / timestamp window read would leave the addressable window."""
+
+
+class ManagerResetError(RuntimeError):
+    """The core manager moved away from the slot an operation used.
+
+    A reset invalidated it: the slot was reset after
+    :meth:`Analyzer.configure`, so the core went back to its build defaults
+    and a capture armed or read since is not the one configured (call
+    ``configure()`` again), the hub was reset, which moves ``MGR_ACTIVE`` to
+    slot 0, or, on a hub whose Test-Logic-Reset resets the JTAG protocol
+    (``MGR_CAPS`` bit 6), the TAP passed through Test-Logic-Reset during a
+    readout, which can drop a register command.  Or another controller
+    selected another slot while the operation ran, so some of its accesses
+    went to that slot.
+    """
 
 
 class BurstIntegrityError(RuntimeError):
@@ -407,6 +423,64 @@ class Transport(ABC):
             f"core manager on chain {chain} did not select slot {instance}: {detail}"
         )
 
+    @contextmanager
+    def held_manager_instance(
+        self,
+        chain: int,
+        active_addr: int,
+        instance: int,
+    ) -> Iterator[None]:
+        """Select *instance* as :meth:`select_manager_instance_cached` does,
+        then check, after the block, that every access in it reached that
+        slot.  Call under :meth:`transaction_lock`, and access only that slot
+        in the block.
+
+        Another controller can select another slot at any time, and select
+        this one back before the block ends: ``MGR_ACTIVE`` reads the same,
+        but the accesses in between went elsewhere.  ``MGR_SELECT_COUNT``
+        (``MGR_CAPS`` bit 7) counts every ``MGR_ACTIVE`` write, so a count
+        that moved by more than this transport's own writes says one
+        happened.  ``MGR_ACTIVE`` is read after the block too, for a hub
+        reset (it moves the active slot to 0 without a select) and for hubs
+        without the count.  Raises :class:`ManagerResetError` in either
+        case; the block is not checked when it raises.  Nothing is checked on
+        a chain without a core manager.
+        """
+        chain = int(chain)
+        instance = int(instance)
+        self.select_manager_instance_cached(chain, active_addr, instance)
+        if chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            yield
+            return
+        base = active_addr & 0xFF00
+        caps = self.__dict__.setdefault("_fcapz_manager_caps", {})
+        if chain not in caps:
+            caps[chain] = int(self.read_reg(base + 0x10))
+        count_addr = base + 0x34 if caps[chain] & 0x80 else None
+
+        def foreign_selects() -> int:
+            own = self.manager_select_writes(chain)
+            return (int(self.read_reg(count_addr)) - own) & 0xFFFF
+
+        before = None if count_addr is None else foreign_selects()
+        yield
+        if before is not None:
+            moved = (foreign_selects() - before) & 0xFFFF
+            if moved:
+                raise ManagerResetError(
+                    f"another controller wrote the core manager's active slot "
+                    f"on chain {chain} {moved} time(s) during an access to slot "
+                    f"{instance}: some of the access may have reached another slot"
+                )
+        active = int(self.read_reg(active_addr))
+        if active != instance:
+            raise ManagerResetError(
+                f"the core manager's active slot on chain {chain} is {active}, "
+                f"not {instance}, after an access to slot {instance}: another "
+                "controller selected it, or the hub was reset, and some of the "
+                "access went there"
+            )
+
     def _claim_manager(self, chain: int, base: int) -> None:
         """Write this session's owner token to the manager at *base* on *chain*.
 
@@ -483,6 +557,7 @@ class Transport(ABC):
         self.__dict__.pop("_fcapz_manager_active_cache", None)
         self.__dict__.pop("_fcapz_manager_standalone_chains", None)
         self.__dict__.pop("_fcapz_manager_chains", None)
+        self.__dict__.pop("_fcapz_manager_caps", None)
 
     @abstractmethod
     def connect(self) -> None:
