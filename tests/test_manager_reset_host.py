@@ -684,6 +684,12 @@ class ForeignSelectTests(unittest.TestCase):
         with self.assertRaisesRegex(ManagerResetError, "during arm"):
             self.a.arm()
 
+    def test_select_and_back_during_reset_raises(self):
+        self.a.configure(epoch_config())
+        self.t.hooks[0x0004] = lambda: self.t.foreign_select(0, back=1)
+        with self.assertRaisesRegex(ManagerResetError, "during reset"):
+            self.a.reset()
+
     def test_select_left_elsewhere_raises(self):
         self.a.configure(epoch_config())
         self.a.arm()
@@ -719,6 +725,80 @@ class ForeignSelectTests(unittest.TestCase):
         a.arm()
         a.capture(timeout=0.01)
         self.assertNotIn(ADDR_MGR_SELECT_COUNT, t.reads)
+
+
+class OtherSlotGenTransport(EpochElaTransport):
+    """Two slots with CAPTURE_GEN; while slot 0 is active, CAPTURE_GEN reads
+    ``other_gen`` once it is set.  ``on_gen_read`` runs before each
+    CAPTURE_GEN read; ``on_seg_start_read`` before each SEG_START read."""
+
+    def __init__(self):
+        super().__init__(caps=0x8B, slots=2, capture_gen=True)
+        self.other_gen = None
+        self.on_gen_read = None
+        self.on_seg_start_read = None
+
+    def read_reg(self, addr):
+        if addr == _CAPTURE_GEN and self.on_gen_read is not None:
+            self.on_gen_read()
+        if addr == _SEG_START and self.on_seg_start_read is not None:
+            self.on_seg_start_read()
+        if (addr == _CAPTURE_GEN and self.other_gen is not None
+                and self.manager[0xF008] != 1):
+            self.reads.append(addr)
+            return self.other_gen
+        return super().read_reg(addr)
+
+
+class ReadsInsideTheSlotCheckTests(unittest.TestCase):
+    """The last CAPTURE_GEN and SEG_START reads of arm() and of a readout
+    come before the last slot check, so a select away just before them
+    shows (astra review of BUG-245/246)."""
+
+    def setUp(self):
+        self.t = OtherSlotGenTransport()
+        self.a = Analyzer(self.t, instance=1)
+        self.a.connect()
+        self.a.configure(epoch_config())
+
+    def test_select_away_before_arm_gen_read_raises(self):
+        t = self.t
+
+        def foreign_arm():
+            t.rearm()  # another controller's arm, at the same time as ours
+            # Ours reads +2 after our arm; slot 0 reads the +1 arm() expects.
+            t.other_gen = t.regs[_CAPTURE_GEN]
+
+            def away():
+                t.on_gen_read = None
+                t.foreign_select(0)
+
+            t.on_gen_read = away
+
+        t.hooks[0x0004] = foreign_arm
+        with self.assertRaisesRegex(ManagerResetError, "active slot is 0"):
+            self.a.arm()
+
+    def test_select_away_before_readout_end_reads_raises(self):
+        t = self.t
+        self.a.arm()
+        armed = t.regs[_CAPTURE_GEN]
+        state = {"data": False}
+
+        def during_data():
+            t.rearm()  # another controller re-arms our slot mid-readout
+            t.other_gen = armed
+            state["data"] = True
+
+        def away():
+            if state["data"]:
+                t.on_seg_start_read = None
+                t.foreign_select(0)
+
+        t.hooks[0x0100] = during_data
+        t.on_seg_start_read = away
+        with self.assertRaises((ManagerResetError, CaptureChangedError)):
+            self.a.capture(timeout=0.01)
 
 
 class ManagedEioTransport(Transport):
@@ -802,7 +882,7 @@ class ManagedEioSlotTests(unittest.TestCase):
 
     def test_select_left_elsewhere_during_write_raises(self):
         self.t.hooks[0x0100] = lambda: self.t.foreign_select(0)
-        with self.assertRaisesRegex(ManagerResetError, "during an access"):
+        with self.assertRaisesRegex(ManagerResetError, "is 0, not 1, after an access"):
             self.eio.write_outputs(0x5A)
         self.assertEqual(self.t.slots[0][0x0100], 0x5A)  # the write went astray
 
@@ -814,6 +894,30 @@ class ManagedEioSlotTests(unittest.TestCase):
         with self.assertRaisesRegex(ManagerResetError, "is 0, not 1"):
             eio.read_inputs()
         self.assertNotIn(ADDR_MGR_SELECT_COUNT, t.reads)
+
+    def test_select_away_before_baseline_and_back_before_last_check_raises(self):
+        """Away just after the select's own read-back, so the starting count
+        includes it; back just before the last MGR_ACTIVE read."""
+        t = self.t
+        seen = {"counts": 0, "data": False, "back": False}
+        orig = t.read_reg
+
+        def read(addr):
+            if addr == ADDR_MGR_SELECT_COUNT:
+                seen["counts"] += 1
+                if seen["counts"] == 1:
+                    t.foreign_select(0)
+            if addr == 0xF008 and seen["data"] and not seen["back"]:
+                seen["back"] = True
+                t.foreign_select(1)
+            value = orig(addr)
+            if addr == 0x0010:
+                seen["data"] = True
+            return value
+
+        t.read_reg = read
+        with self.assertRaisesRegex(ManagerResetError, "at the start of an access"):
+            self.eio.read_inputs()
 
     def test_select_and_back_during_connect_raises(self):
         t = ManagedEioTransport()

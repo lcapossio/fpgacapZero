@@ -512,7 +512,17 @@ class Analyzer:
         """
         self._select_instance()
         self._armed_gen = None
+        state = self._slot_state()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+        if state is not None:
+            after = self._slot_state()
+            if after != state:
+                raise ManagerResetError(
+                    "the core manager changed during reset() (slot, slot epoch, "
+                    f"hub epoch, other controllers' selects {tuple(state)} "
+                    f"before, {tuple(after)} after): the reset may have gone to "
+                    "another slot"
+                )
 
     def force_idle(
         self,
@@ -848,6 +858,8 @@ class Analyzer:
         self._armed_gen = None
         before = self._capture_gen()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
+        # Read before the slot check, so it covers this read too.
+        after = None if before is None else self._capture_gen()
         if state is not None:
             after_state = self._slot_state()
             if after_state != state:
@@ -859,7 +871,6 @@ class Analyzer:
                 )
         if before is None:
             return
-        after = self._capture_gen()
         if after != (before + 1) & 0xFFFF:
             raise CaptureChangedError(
                 f"CAPTURE_GEN went from {before} to {after} across this arm, not "
@@ -1329,35 +1340,34 @@ class Analyzer:
                 f"(MGR_TLR_COUNT {begin.tlr_count} before, {tlr} after), which "
                 "resets this hub's JTAG protocol"
             )
-        if begin.state is not None:
-            self._check_readout_slot(begin)
-        # After the slot checks: a slot reset also moves CAPTURE_GEN, and
+        # Read SEG_START and CAPTURE_GEN before the slot check, so it covers
+        # them, and compare them after it: a slot reset also moves them, and
         # ManagerResetError says more.
+        start = None
+        if begin.state is not None:
+            start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
         gen = self._capture_gen()
+        if begin.state is not None:
+            now = self._slot_state()
+            if now != begin.state:
+                raise ManagerResetError(
+                    "the core manager changed during the readout (slot, slot "
+                    f"epoch, hub epoch, other controllers' selects "
+                    f"{tuple(begin.state)} before, {tuple(now)} after): a reset, "
+                    "or another controller's slot select, may have mixed in "
+                    "another slot's data or the build defaults"
+                )
+            if start != begin.start_ptr:
+                raise CaptureChangedError(
+                    f"SEG_START moved from {begin.start_ptr} to {start} during "
+                    "the readout: the core was re-armed, or another session "
+                    "selected another segment"
+                )
         if gen != begin.capture_gen:
             raise CaptureChangedError(
                 f"CAPTURE_GEN moved from {begin.capture_gen} to {gen} during the "
                 "readout: the core was armed or reset again, and the samples "
                 "read may mix two captures"
-            )
-
-    def _check_readout_slot(self, begin: _Readout) -> None:
-        """The slot-state and ``SEG_START`` half of :meth:`_readout_end`."""
-        now = self._slot_state()
-        if now != begin.state:
-            raise ManagerResetError(
-                "the core manager changed during the readout (slot, slot epoch, "
-                f"hub epoch, other controllers' selects {tuple(begin.state)} "
-                f"before, {tuple(now)} after): a reset, or another controller's "
-                "slot select, may have mixed in another slot's data or the "
-                "build defaults"
-            )
-        start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
-        if start != begin.start_ptr:
-            raise CaptureChangedError(
-                f"SEG_START moved from {begin.start_ptr} to {start} during the "
-                "readout: the core was re-armed, or another session selected "
-                "another segment"
             )
 
     def _read_data_block(self, total_words: int) -> list[int]:

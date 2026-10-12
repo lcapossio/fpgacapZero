@@ -445,6 +445,11 @@ class Transport(ABC):
         without the count.  Raises :class:`ManagerResetError` in either
         case; the block is not checked when it raises.  Nothing is checked on
         a chain without a core manager.
+
+        The order makes the count cover the block: count, then ``MGR_ACTIVE``
+        (this slot, so no select since the count took it away), the block,
+        ``MGR_ACTIVE`` (a hub reset in the block shows, or a select back
+        after it moved the count), then the count.
         """
         chain = int(chain)
         instance = int(instance)
@@ -463,7 +468,21 @@ class Transport(ABC):
             return (int(self.read_reg(count_addr)) - own) & 0xFFFF
 
         before = None if count_addr is None else foreign_selects()
+
+        def check_active(when: str) -> None:
+            active = int(self.read_reg(active_addr))
+            if active != instance:
+                raise ManagerResetError(
+                    f"the core manager's active slot on chain {chain} is "
+                    f"{active}, not {instance}, {when} an access to slot "
+                    f"{instance}: another controller selected it, or the hub "
+                    "was reset, and some of the access went there"
+                )
+
+        if before is not None:
+            check_active("at the start of")
         yield
+        check_active("after")
         if before is not None:
             moved = (foreign_selects() - before) & 0xFFFF
             if moved:
@@ -472,14 +491,6 @@ class Transport(ABC):
                     f"on chain {chain} {moved} time(s) during an access to slot "
                     f"{instance}: some of the access may have reached another slot"
                 )
-        active = int(self.read_reg(active_addr))
-        if active != instance:
-            raise ManagerResetError(
-                f"the core manager's active slot on chain {chain} is {active}, "
-                f"not {instance}, after an access to slot {instance}: another "
-                "controller selected it, or the hub was reset, and some of the "
-                "access went there"
-            )
 
     def _claim_manager(self, chain: int, base: int) -> None:
         """Write this session's owner token to the manager at *base* on *chain*.
