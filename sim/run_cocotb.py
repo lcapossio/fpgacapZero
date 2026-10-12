@@ -58,7 +58,8 @@ _DEBUG_MULTI_TAP_SRC = {
                  (SIM / "bscane2_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinx7.vhd",
                   RTL / "vhdl" / "jtag_tap" / "jtag_tap_xilinxus.vhd")),
     "intel": ((SIM / "sld_virtual_jtag_stub.v", RTL / "jtag_tap" / "jtag_tap_intel.v"),
-              (SIM / "sld_virtual_jtag_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_intel.vhd")),
+              (SIM / "sld_virtual_jtag_stub.vhd",
+               RTL / "vhdl" / "jtag_tap" / "jtag_tap_intel.vhd")),
 }
 
 
