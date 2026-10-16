@@ -76,13 +76,15 @@ module fcapz_ela_intel #(
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
         .capture(tap1_capture), .shift(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel)
+        .update(tap1_update), .sel(tap1_sel),
+        .tlr()
     );
 
     jtag_tap_intel #(.CHAIN(DATA_CHAIN)) u_tap_data (
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel)
+        .update(tap2_update), .sel(tap2_sel),
+        .tlr()
     );
 
     reset_sync u_rst_sync_ctrl (

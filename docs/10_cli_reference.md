@@ -84,6 +84,7 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 |---|---|
 | `probe` | Read core identity registers |
 | `ela-list` | Read core manager and probe all ELA slots |
+| `discover` | List every fcapz core on the JTAG session, chain by chain |
 | `arm` | Arm capture without configuring (advanced) |
 | `axi-mon` | Detect an AXI monitor; print its identity and probe map |
 | `configure` | Write capture configuration without arming |
@@ -166,6 +167,36 @@ Usage: `fcapz [global options] ela-list`
 No options of its own; the [global options](#global-options) apply.
 
 <!-- END GENERATED cli:ela-list -->
+
+## `discover`
+
+List every fcapz core on the JTAG session without naming a chain: ELAs, EIOs
+(including one behind the register mux at `0x8000`), a core manager and each of
+its slots, AXI monitors, and the EJTAG-AXI and EJTAG-UART bridges.  Each chain
+is first read only at `0x0000`, which the bridges see as a NOP, and is read
+further only once it answers as an ELA or EIO; see
+[chapter 5](05_ela_core.md).  A manager's active slot is left as it was.
+
+```bash
+fcapz --backend hw_server --tap xc7a100t discover
+fcapz --backend usb_blaster --tap auto discover --chains 1 2 5
+```
+
+Each entry has `type` (`ela`, `axi_mon`, `eio`, `manager`, `ejtag_uart`,
+`ejtag_axi`, or `unknown` for a manager slot of another core), `name`,
+`core_id`, `chain`, `base_addr`, `instance` (the manager slot, or `null`),
+`version_major`/`version_minor` and a type-specific `info`.
+
+<!-- BEGIN GENERATED cli:discover (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] discover [--chains N] [--no-bridges]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chains N` | — | Chains (Intel: sld_virtual_jtag instances) to scan (default: USER1-4, or instances 1-8 on Intel) |
+| `--no-bridges` | off | Do not send the EJTAG-AXI/UART identity reads to unanswered chains |
+
+<!-- END GENERATED cli:discover -->
 
 ## `arm`
 

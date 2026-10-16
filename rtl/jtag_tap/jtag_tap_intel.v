@@ -18,7 +18,9 @@ module jtag_tap_intel #(
     output wire capture,
     output wire shift,
     output wire update,
-    output wire sel
+    output wire sel,
+    // TAP in Test-Logic-Reset (level, TCK domain)
+    output wire tlr
 );
 
     wire virtual_state_cdr;
@@ -37,7 +39,8 @@ module jtag_tap_intel #(
         .virtual_state_sdr  (virtual_state_sdr),
         .virtual_state_udr  (virtual_state_udr),
         .ir_in              (),
-        .ir_out             (1'b0)
+        .ir_out             (1'b0),
+        .jtag_state_tlr     (tlr)
     );
 
     assign capture = virtual_state_cdr;

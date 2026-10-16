@@ -25,6 +25,9 @@ _COMMON_ELA_SOURCES = (
     "fcapz_version.vh",
     "fcapz_ela.v",
     "fcapz_core_manager.v",
+    "fcapz_debug_multi_core.v",
+    "fcapz_hub_reset.v",
+    "fcapz_debug_multi.v",
     "fcapz_eio.v",
     "fcapz_regbus_mux.v",
     "trig_compare.v",
@@ -44,11 +47,17 @@ _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
     "xilinxus": (
         "fcapz_ela_xilinxus.v",
         "fcapz_ela_xilinx7.v",
+        "fcapz_debug_multi_xilinxus.v",
         "fcapz_debug_multi_xilinx7.v",
+        "jtag_tap/jtag_tap_xilinxus.v",
         "jtag_tap/jtag_tap_xilinx7.v",
     ),
     "ecp5": ("fcapz_ela_ecp5.v", "jtag_tap/jtag_tap_ecp5.v"),
-    "intel": ("fcapz_ela_intel.v", "jtag_tap/jtag_tap_intel.v"),
+    "intel": (
+        "fcapz_ela_intel.v",
+        "fcapz_debug_multi_intel.v",
+        "jtag_tap/jtag_tap_intel.v",
+    ),
     "gowin": ("fcapz_ela_gowin.v", "jtag_tap/jtag_tap_gowin.v"),
     "polarfire": ("fcapz_ela_polarfire.v", "jtag_tap/jtag_tap_polarfire.v"),
 }

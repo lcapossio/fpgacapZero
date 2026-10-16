@@ -12,10 +12,14 @@ This is the repo-local Layer 0/Layer 2 slice of the translateHDL parity ladder:
   ``equiv_make`` + ``equiv_induct`` to prove sequential equivalence for each
   manifest parameter set. If induction does not close, the optional bounded
   miter distinguishes a shallow counterexample from a proof-depth limitation.
+  Induction assumes both sides start in the same state, so the state of
+  same-named registers after the manifest's reset (power-up values included)
+  is compared separately.
 
 Manifest files are JSON documents with a ``.yml`` suffix so they stay compatible
 with the translateHDL parity-manifest convention without adding PyYAML as a CI
-dependency.
+dependency.  A manifest without a ``formal`` section is checked at Layer 0
+only.  A parameter value given as a string is a vector's bits, MSB first.
 """
 
 from __future__ import annotations
@@ -45,7 +49,10 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "jtag_burst_read.yml",
     ROOT / "sim" / "parity" / "jtag_pipe_iface.yml",
     ROOT / "sim" / "parity" / "fcapz_async_fifo.yml",
+    ROOT / "sim" / "parity" / "fcapz_hub_reset.yml",
     ROOT / "sim" / "parity" / "fcapz_core_manager.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_core.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
     ROOT / "sim" / "parity" / "fcapz_axi_mon.yml",
@@ -242,6 +249,16 @@ def check_interface(manifest_path: Path, manifest: dict[str, Any]) -> bool:
     return ok
 
 
+def param_int(value: int | str) -> int:
+    """A manifest parameter as an integer; a string is a vector's bits, MSB first."""
+    return int(value, 2) if isinstance(value, str) else int(value)
+
+
+def ghdl_generic(value: int | str) -> str:
+    # GHDL takes a vector generic override only as a bit string.
+    return value if isinstance(value, str) else str(int(value))
+
+
 def ghdl_synth(
     manifest_path: Path,
     side: dict[str, Any],
@@ -258,7 +275,7 @@ def ghdl_synth(
         )
         if code != 0:
             return False
-    generics = [f"-g{name}={int(value)}" for name, value in params.items()]
+    generics = [f"-g{name}={ghdl_generic(value)}" for name, value in params.items()]
     synth_options = [str(opt) for opt in side.get("synth_options", [])]
     code, output_text = run(
         [
@@ -354,7 +371,7 @@ def yosys_read_verilog(
     joined = " ".join(source.as_posix() for source in sources)
     cmds = [f"read_verilog -sv -defer -I{RTL.as_posix()} {joined}"]
     if params:
-        sets = " ".join(f"-set {name} {int(value)}" for name, value in params.items())
+        sets = " ".join(f"-set {name} {param_int(value)}" for name, value in params.items())
         cmds.append(f"chparam {sets} {side['top']}")
     cmds.append(f"hierarchy -check -top {side['top']}")
     return cmds
@@ -390,6 +407,161 @@ def prep_side(
     ]
 
 
+_FF_TYPES = {
+    "$dff", "$dffe", "$adff", "$adffe", "$sdff", "$sdffe", "$sdffce",
+    "$aldff", "$aldffe", "$dffsr", "$dffsre",
+}
+
+
+# Init attribute name while the init check runs proc; see check_init_parity.
+_INIT_ATTR = "fcapz_init"
+
+
+def ff_init_bits(json_path: Path, top: str) -> dict[tuple[str, int], str]:
+    """``(register, bit) -> init value`` for one design: ``"0"``, ``"1"`` or
+    ``"x"``.
+
+    A flip-flop without an init powers up at 0 on the FPGAs fcapz targets, so
+    a missing init reads as ``"0"``.
+    """
+    module = json.loads(json_path.read_text(encoding="utf-8"))["modules"][top]
+    q_bits: set[int] = set()
+    for cell in module["cells"].values():
+        if cell["type"] in _FF_TYPES:
+            q_bits.update(bit for bit in cell["connections"]["Q"] if isinstance(bit, int))
+    # The init can sit on any net of the bit: GHDL puts it either on its own
+    # state register (``n123_q``) or on the signal that aliases it.
+    bit_init: dict[int, str] = {}
+    for net in module["netnames"].values():
+        init = net.get("attributes", {}).get("init")
+        if isinstance(init, str) and len(init) == len(net["bits"]):
+            for bit, value in zip(net["bits"], reversed(init)):
+                if isinstance(bit, int) and value in ("0", "1", "x"):
+                    bit_init.setdefault(bit, value)
+    bits: dict[tuple[str, int], str] = {}
+    for name, net in module["netnames"].items():
+        if net.get("hide_name"):
+            continue
+        for index, bit in enumerate(net["bits"]):
+            if bit in q_bits:
+                bits[(name, index)] = bit_init.get(bit, "0")
+    return bits
+
+
+def check_init_parity(
+    gold_read: list[str],
+    gate_read: list[str],
+    golden: dict[str, Any],
+    candidate: dict[str, Any],
+    manifest: dict[str, Any],
+    work: Path,
+    yosys: str,
+) -> str | None:
+    """Compare the state the two sides start the proofs from.
+
+    Both proofs leave power-up state unchecked: ``equiv_induct`` matches
+    registers by name and assumes their states equal, and the bounded proof
+    starts after ``reset_cycles`` of reset.  So this compares every register
+    the two sides share by name after that same reset, with every other input
+    held at 0.  A register the reset clears is equal either way; one it does
+    not clear (a counter, a synchroniser fed by a non-reset input) keeps its
+    power-up value, which the two sides must agree on.  That a reset is
+    asserted at power-up is the wrappers' contract: their ``reset_sync``
+    powers up asserted.  ``reset_sync`` itself is checked raw, with
+    ``"init_after_reset": false`` in its manifest, since its power-up value is
+    that contract.  A register left undefined after the reset is reported:
+    the check cannot compare it.  Returns a failure message, or ``None``.
+    """
+    formal = manifest.get("formal", {})
+    reset_inputs = formal.get("reset_inputs", [])
+    reset_cycles = int(formal.get("reset_cycles", 0))
+    clock_inputs = formal.get("clock_inputs", [])
+    reset_sim: list[str] = []
+    if reset_inputs and reset_cycles and formal.get("init_after_reset", True):
+        reset_sim.append(
+            "sim -zinit -w"
+            + "".join(f" -clock {clock}" for clock in clock_inputs)
+            + "".join(f" -reset {reset}" for reset in reset_inputs)
+            + f" -rstlen {reset_cycles} -n {reset_cycles}"
+        )
+    sides = {}
+    for name, read_cmds, side in (
+        ("gold", gold_read, golden),
+        ("gate", gate_read, candidate),
+    ):
+        out = work / f"init_{name}.json"
+        renames = side.get("state_renames") or {}
+        script = "\n".join(
+            [
+                "design -reset",
+                *read_cmds,
+                f"hierarchy -top {side['top']}",
+                # proc drops an init it finds on a combinationally driven
+                # signal, which is where GHDL puts the init of an async-reset
+                # flop.  Move each init to its own attribute first.
+                "proc_clean",
+                "proc_rmdead",
+                "proc_prune",
+                "proc_init",
+                f"attrmap -rename init {_INIT_ATTR}",
+                "proc",
+                "flatten",
+                # As in the proofs; sim cannot run unmapped memories.
+                "memory_map",
+                *([f"cd {side['top']}"] if renames else []),
+                *(f"rename {old} {new}" for old, new in renames.items()),
+                *(["cd"] if renames else []),
+                "opt_clean",
+                f"attrmap -rename {_INIT_ATTR} init",
+                *(
+                    [
+                        # Hold every input but the clocks and resets at 0.
+                        "delete -port "
+                        + " ".join(
+                            [f"{side['top']}/i:*"]
+                            + [
+                                f"{side['top']}/w:{port} %d"
+                                for port in (*clock_inputs, *reset_inputs)
+                            ]
+                        ),
+                        "setundef -zero -undriven",
+                        *reset_sim,
+                    ]
+                    if reset_sim
+                    else []
+                ),
+                f"write_json {out.as_posix()}",
+            ]
+        ) + "\n"
+        _, output = run([yosys, "-"], input_text=script)
+        if not out.exists():
+            return "init check could not write the netlist: " + next(
+                (line for line in output.splitlines() if "ERROR:" in line), "yosys failed"
+            )
+        sides[name] = ff_init_bits(out, side["top"])
+
+    gold, gate = sides["gold"], sides["gate"]
+    undefined = sorted(
+        f"{name}[{index}]"
+        for name, index in gold.keys() & gate.keys()
+        if "x" in (gold[(name, index)], gate[(name, index)])
+    )
+    if undefined:
+        shown = ", ".join(undefined[:8])
+        more = f" (+{len(undefined) - 8} more)" if len(undefined) > 8 else ""
+        return f"registers undefined after the reset: {shown}{more}"
+    mismatches = [
+        f"{name}[{index}] {gold[(name, index)]}/{gate[(name, index)]}"
+        for name, index in sorted(gold.keys() & gate.keys())
+        if gold[(name, index)] != gate[(name, index)]
+    ]
+    if mismatches:
+        shown = ", ".join(mismatches[:8])
+        more = f" (+{len(mismatches) - 8} more)" if len(mismatches) > 8 else ""
+        return f"power-up values differ (Verilog/VHDL): {shown}{more}"
+    return None
+
+
 def prove_config(
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -413,6 +585,11 @@ def prove_config(
         params,
     )
     gate_read = yosys_read_verilog(candidate, [vhdl_netlist], {})
+    init_error = check_init_parity(
+        gold_read, gate_read, golden, candidate, manifest, work, yosys
+    )
+    if init_error is not None:
+        return "FAIL", init_error
     script = "\n".join(
         [
             *prep_side(
@@ -524,7 +701,12 @@ def prove_config(
 def run_manifest(manifest_path: Path) -> bool:
     manifest = load_manifest(manifest_path)
     ok = check_interface(manifest_path, manifest)
-    formal = manifest["formal"]
+    formal = manifest.get("formal")
+    if formal is None:
+        # A composition of cores that each have their own proof; its
+        # behavior is covered by the shared cocotb regression.
+        print(f"[formal-parity] {manifest['name']}: interface only, no proof configured")
+        return ok
     induct_depth = int(formal.get("induct_depth", 20))
     bounded_depth = int(formal.get("bounded_depth", 0))
     yosys = find_tool("yosys", "yowasp-yosys")

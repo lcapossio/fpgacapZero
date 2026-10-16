@@ -47,6 +47,15 @@
             "BURST_W": 56,
             "SEG_DEPTH": 4,
             "BURST_PTR_ADDR": 44
+          },
+          {
+            "SAMPLE_W": 8,
+            "TIMESTAMP_W": 8,
+            "DEPTH": 8,
+            "BURST_W": 56,
+            "SEG_DEPTH": 4,
+            "BURST_PTR_ADDR": 44,
+            "HEADER_EN": 1
           }
         ]
       }

@@ -45,6 +45,18 @@ instance -> int | None
 
 Core-manager slot selected before accesses, or `None` for legacy direct mode.
 
+#### `Analyzer.pin_active_slot`
+
+```python
+pin_active_slot() -> None
+```
+
+Bind an analyzer with no selected slot to the slot the core manager
+has active now, so another controller that moves `MGR_ACTIVE` on the
+same transport (an EIO in another slot) does not move this analyzer.
+The configuration is kept: the slot is the same.  No effect without a
+manager or with a slot already selected.
+
 #### `Analyzer.select_instance`
 
 ```python
@@ -54,7 +66,8 @@ select_instance(instance: int | None) -> None
 Select a core-manager slot for subsequent analyzer operations.
 
 `None` leaves the active slot untouched and preserves legacy direct-ELA
-behavior for bitstreams without a manager.
+behavior for bitstreams without a manager.  Moving to another slot
+drops the capture configuration: call `configure` again.
 
 #### `Analyzer.connect`
 
@@ -159,7 +172,11 @@ configure(config: CaptureConfig) -> None
 Validate `config` and write it to the core; does not arm.
 
 Raises `ValueError` if the window does not fit `depth` or a field is
-out of range for the core.
+out of range for the core, and `ManagerResetError` if the
+core's core-manager slot is held in reset, or was reset (or, with no
+`instance`, the hub's active slot moved) while it was written.  A
+configure that raises leaves the analyzer unconfigured: the core may
+hold part of the new configuration.
 
 #### `Analyzer.immediate_variant`
 
@@ -184,6 +201,12 @@ arm() -> None
 
 Arm the core with the configuration it holds.
 
+Raises `ManagerResetError` if the core's slot was reset since
+`configure`: it would arm its build defaults.  On a core with
+`CAPTURE_GEN` (`COMPARE_CAPS` bit 21), raises
+`CaptureChangedError` if another controller armed or reset the
+core at the same time; the capture read later must be this arm's.
+
 #### `Analyzer.wait_done`
 
 ```python
@@ -191,6 +214,10 @@ wait_done(timeout: float = 10.0, poll_interval: float = 0.05) -> bool
 ```
 
 Poll STATUS until the capture is done; `False` if `timeout` expires first.
+
+A slot reset clears DONE, so a configured analyzer checks for one
+before it reports the timeout, and raises `ManagerResetError`
+instead.
 
 #### `Analyzer.status`
 
@@ -214,7 +241,11 @@ capture(timeout: float = 10.0) -> CaptureResult
 Wait for the armed capture to finish and read it back.
 
 Call `configure` and `arm` first.  Raises `TimeoutError` if the core
-is not done within `timeout` seconds.
+is not done within `timeout` seconds.  Behind a core manager with
+epochs, raises `ManagerResetError` if the slot was reset (or,
+with no `instance`, the hub's active slot moved) since
+`configure` or during the readout, and
+`CaptureChangedError` if the capture changed under it.
 
 #### `Analyzer.wait_all_segments_done`
 
@@ -231,6 +262,8 @@ capture_segment(seg_idx: int, timeout: float = 10.0) -> CaptureResult
 ```
 
 Read back data from a specific segment after all segments are done.
+
+Raises like `capture`.
 
 #### `Analyzer.export_json`
 
@@ -326,6 +359,12 @@ Like `probe` but returns `None` if this chain has no fcapz ELA.
 Use this when the host should stay connected for subsidiary BSCAN cores
 (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
 not present the `'LA'` core id.  JTAG/transport errors still propagate.
+
+Unlike `probe`, this can switch a core manager's slot.  When the
+analyzer has no slot of its own (`instance` is `None`) and the chain
+is a manager whose active slot is not an ELA, for instance an EIO left
+selected, it selects the manager's first ELA slot and keeps it, so
+`instance` is set afterwards.
 
 #### `Analyzer.probe`
 
@@ -507,12 +546,76 @@ higher-level register sequences so one controller cannot switch
 select_manager_instance_cached(chain: int, active_addr: int, instance: int) -> None
 ```
 
-Write a core-manager active slot only when the transport changed.
+Make *instance* the core manager's active slot on *chain*.
 
-The active manager slot is a sticky hardware register.  Host controllers
-sharing one transport use this cache under `transaction_lock` to
-avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-agree on which slot was last selected.
+The active slot is a sticky hardware register that something else can
+move: a hub reset (power-up, `MGR_CTRL` bit 0, or any ELA sample
+reset on bitstreams before per-slot resets) returns it to slot 0, and
+another host session can select its own slot.  So the slot is always read back
+before it is trusted, and written only when it differs.  Call under
+`transaction_lock`.
+
+Raises `ValueError` for a negative slot and `RuntimeError` when a
+core manager answers on *chain* but does not take the slot (out of
+range, or still refusing after `MANAGER_SELECT_ATTEMPTS`
+writes).  The first time it meets a chain it reads `0x0000` and then
+the manager VERSION, and writes nothing unless both answer: an
+`MGR_ACTIVE` write is the reset command of an EJTAG-AXI bridge (see
+`register_pipe_identity`).  A chain with an fcapz core but no
+manager is remembered as standalone and not written; a chain with
+neither is left alone and checked again next time.
+
+#### `Transport.held_manager_instance`
+
+```python
+held_manager_instance(chain: int, active_addr: int, instance: int) -> Iterator[None]
+```
+
+Select *instance* as `select_manager_instance_cached` does,
+then check, after the block, that every access in it reached that
+slot.  Call under `transaction_lock`, and access only that slot
+in the block.
+
+Another controller can select another slot at any time, and select
+this one back before the block ends: `MGR_ACTIVE` reads the same,
+but the accesses in between went elsewhere.  `MGR_SELECT_COUNT`
+(`MGR_CAPS` bit 7) counts every `MGR_ACTIVE` write, so a count
+that moved by more than this transport's own writes says one
+happened.  `MGR_ACTIVE` is read after the block too, for a hub
+reset (it moves the active slot to 0 without a select) and for hubs
+without the count.  Raises `ManagerResetError` in either
+case; the block is not checked when it raises.  Nothing is checked on
+a chain without a core manager.
+
+The order makes the count cover the block: count, then `MGR_ACTIVE`
+(this slot, so no select since the count took it away), the block,
+`MGR_ACTIVE` (a hub reset in the block shows, or a select back
+after it moved the count), then the count.
+
+#### `Transport.release_manager_ownership`
+
+```python
+release_manager_ownership() -> None
+```
+
+Clear this session's owner token from the managers it claimed.
+
+A manager whose `MGR_OWNER` holds another value (another session
+took it, or the hub was reset) is left alone.
+
+#### `Transport.manager_select_writes`
+
+```python
+manager_select_writes(chain: int) -> int
+```
+
+`MGR_ACTIVE` writes this transport made to the core manager on
+*chain*, modulo 2**16.  The manager counts every one, from every
+controller, in `MGR_SELECT_COUNT` (`MGR_CAPS` bit 7): the
+difference is the other controllers' selects.  Every select of this
+host goes through `select_manager_instance_cached`, which
+counts them; the count survives
+`invalidate_manager_instance_cache`.
 
 #### `Transport.invalidate_manager_instance_cache`
 
@@ -599,6 +702,19 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `Transport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `Transport.select_chain`
 
 ```python
@@ -616,6 +732,16 @@ Subclasses that support multi-chain access must override this.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `Transport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `Transport.raw_dr_scan`
 
@@ -735,6 +861,16 @@ select_chain(chain: int) -> None
 ```
 
 Select BSCANE2 USER chain for subsequent register accesses.
+
+#### `OpenOcdTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `OpenOcdTransport.raw_dr_scan`
 
@@ -896,6 +1032,16 @@ select_chain(chain: int) -> None
 
 Select BSCANE2 USER chain for subsequent register accesses.
 
+#### `XilinxHwServerTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
+
 #### `XilinxHwServerTransport.raw_dr_scan`
 
 ```python
@@ -969,13 +1115,45 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `XilinxHwServerTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
+#### `XilinxHwServerTransport.burst_on_data_chain`
+
+```python
+@property
+burst_on_data_chain -> bool
+```
+
+A two-chain session (`single_chain_burst=False`) bursts on USER2,
+which a core manager never answers.
+
 #### `XilinxHwServerTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via the burst DR.
+
+With *on_control_chain* the scans stay on the control chain even on a
+two-chain session: a core manager answers bursts only there.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample, the flat layout `Analyzer.capture()` reassembles.  This is the
@@ -995,6 +1173,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = False,
 ) -> List[int]
 ```
 
@@ -1070,6 +1250,7 @@ CLOSE_TERM_SEC = 2.0
 CLOSE_KILL_SEC = 2.0
 CLOSE_JOIN_SEC = 1.0
 CLOSE_CONTEND_SEC = 0.5
+DISCOVERY_INSTANCES = (1, 2, 3, 4, 5, 6, 7, 8)
 ```
 
 #### `QuartusStpTransport.connect`
@@ -1121,6 +1302,16 @@ Subclasses that support multi-chain access must override this.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `QuartusStpTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `QuartusStpTransport.raw_dr_scan`
 
@@ -1182,6 +1373,19 @@ Read a 32-bit register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
 
+#### `QuartusStpTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `QuartusStpTransport.read_block`
 
 ```python
@@ -1215,10 +1419,19 @@ Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
 #### `QuartusStpTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = True,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via single-chain burst on the active chain.
+
+*on_control_chain* is accepted for the shared signature; this reader
+always bursts on the active chain.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample — the exact flat layout `Analyzer.capture()` reassembles.
@@ -1245,6 +1458,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = True,
 ) -> List[int]
 ```
 
@@ -1649,6 +1864,32 @@ AxiMonitorError
 Subclass of `RuntimeError`.
 
 Raised when an AXI monitor is required but absent or unsupported.
+
+## `fcapz.discovery`
+
+### `discover_cores`
+
+```python
+discover_cores(
+    transport: Transport,
+    *,
+    chains: Optional[Iterable[int]] = None,
+    bridges: bool = True,
+) -> List[Dict[str, Any]]
+```
+
+List every fcapz core reachable on an open *transport*.
+
+*chains* defaults to `fcapz.transport.Transport.discovery_chains`.
+Each entry is `{type, name, core_id, chain, base_addr, instance,
+version_major, version_minor, info}`, where `type` is `"ela"`,
+`"axi_mon"`, `"eio"`, `"manager"`, `"ejtag_uart"`,
+`"ejtag_axi"` or `"unknown"` (a manager slot of another core type),
+and `instance` is the manager slot or `None`.  A manager's active slot
+is left as it was found.  Set *bridges* to `False` to skip the bridge
+identity reads on chains no register core answered.  Chains the transport
+cannot select, such as a missing `sld_virtual_jtag` instance, are
+skipped; connection errors propagate.  Chain 1 is selected on return.
 
 ## `fcapz.eio`
 

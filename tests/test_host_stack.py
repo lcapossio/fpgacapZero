@@ -22,7 +22,7 @@ from fcapz.analyzer import (
     TriggerConfig,
     expected_ela_version_reg,
 )
-from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
+from fcapz.eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from fcapz.transport import (
     BurstIntegrityError,
     BurstUnavailableError,
@@ -929,6 +929,9 @@ class AnalyzerTests(unittest.TestCase):
         """32-bit timestamp capture uses the transport-level timestamp burst path."""
 
         class TimestampBurstTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -961,6 +964,9 @@ class AnalyzerTests(unittest.TestCase):
         multi-slot manager also run with the start sync."""
 
         class OldManagerTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -996,6 +1002,9 @@ class AnalyzerTests(unittest.TestCase):
         replaced by a window re-read."""
 
         class TimestampBurstTransport(FakeTransport):
+            def bursts_data_window(self, *, timestamp=False):
+                return True
+
             def __init__(self):
                 super().__init__()
                 self.regs[0x001C] = 3       # CAPTURE_LEN
@@ -1105,6 +1114,462 @@ class AnalyzerTests(unittest.TestCase):
         self.assertFalse(analyzer.probe()["has_wide_trigger"])
         transport.regs[0x00E0] = 0x1C3 | (1 << 18)
         self.assertTrue(analyzer.probe()["has_wide_trigger"])
+
+
+class DataChainBurstTransport(FakeTransport):
+    """A USB-Blaster-like transport: ``read_block`` and ``read_timestamp_block``
+    burst on a separate data chain, ``read_sample_block`` and
+    ``read_timestamp_block_single_chain`` on the active chain."""
+
+    burst_on_data_chain = True
+
+    def bursts_data_window(self, *, timestamp=False):
+        return True
+
+    def __init__(self, *, sample_w: int, managed: bool, slot_caps: int = 1,
+                 timestamp_w: int = 0, capture_len: int = 3):
+        super().__init__()
+        self.regs[0x000C] = sample_w
+        self.regs[0x001C] = capture_len
+        self.regs[0x00C4] = timestamp_w
+        if managed:
+            self._manager_regs[0xF004] = 3
+            self._manager_regs[0xF010] = 0x7
+            self._manager_regs[0xF014] = 0
+            self._manager_regs[0xF01C] = slot_caps
+        else:
+            del self._manager_regs[0xF000]
+        self.calls: list[tuple] = []
+        self.on_control_chain: list[bool] = []
+        self.sample_burst_unavailable = False
+
+    def read_block(self, addr, words):
+        self.calls.append(("read_block", addr, words))
+        return [0x10 + i for i in range(words)]
+
+    def read_window_block(self, addr, words):
+        self.calls.append(("window", addr, words))
+        return [0x20 + i for i in range(words)]
+
+    def read_timestamp_block(self, addr, words, timestamp_width):
+        self.calls.append(("ts_data_chain", addr, words, timestamp_width))
+        return [100 + i for i in range(words)]
+
+    def read_sample_block(self, base_addr, n_samples, sample_width, *, on_control_chain=False):
+        if self.sample_burst_unavailable:
+            raise BurstUnavailableError("burst readout is off")
+        self.calls.append(("sample_burst", base_addr, n_samples, sample_width))
+        self.on_control_chain.append(on_control_chain)
+        words_per = (sample_width + 31) // 32
+        return [s if w == 0 else 0 for s in range(n_samples) for w in range(words_per)]
+
+    def read_timestamp_block_single_chain(self, base_addr, n_timestamps, timestamp_width,
+                                          *, on_control_chain=False):
+        self.calls.append(("ts_burst", base_addr, n_timestamps, timestamp_width))
+        self.on_control_chain.append(on_control_chain)
+        return [200 + i for i in range(n_timestamps)]
+
+
+class ManagerSelectConfirmTests(unittest.TestCase):
+    """A manager drops an ACTIVE write while its burst engine still loads,
+    which happens right after a narrow burst; the host reads the slot back."""
+
+    class _DroppingTransport(FakeTransport):
+        def __init__(self, drops: int):
+            super().__init__()
+            self.drops = drops
+            self.active_writes: list[int] = []
+
+        def write_reg(self, addr, value):
+            if addr == 0xF008:
+                self.active_writes.append(int(value))
+                if self.drops:
+                    self.drops -= 1
+                    return
+            super().write_reg(addr, value)
+
+    def test_dropped_switch_is_written_again(self):
+        t = self._DroppingTransport(drops=2)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [1, 1, 1])
+        self.assertEqual(t.read_reg(0xF008), 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)  # cached now
+        self.assertEqual(len(t.active_writes), 3)
+
+    def test_switch_that_lands_is_written_once(self):
+        t = self._DroppingTransport(drops=0)
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(t.active_writes, [2])
+
+    def test_design_without_a_manager_is_cached_and_never_written(self):
+        # A slot selected on a standalone core: 0x0000 answers "LA" but
+        # 0xF000 is not a manager, so the chain is remembered as standalone
+        # before any ACTIVE write.
+        t = self._DroppingTransport(drops=99)
+        t._manager_regs[0xF000] = 0x1234
+        reads: list[int] = []
+        orig_read = t.read_reg
+        t.read_reg = lambda addr: (reads.append(addr), orig_read(addr))[1]
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [])
+        self.assertEqual(reads, [0x0000, 0xF000])
+
+    def test_chain_without_a_register_core_is_never_written(self):
+        # A bridge chain: 0x0000 does not answer "LA" or "IO".  Only that
+        # read is sent -- 0xF000 is a burst command on the EJTAG-AXI bridge
+        # and an ACTIVE write its reset -- and the chain is checked again on
+        # the next call, since a hub held in reset reads 0 too.
+        t = self._DroppingTransport(drops=0)
+        t.regs[0x0000] = 0
+        reads: list[int] = []
+        orig_read = t.read_reg
+        t.read_reg = lambda addr: (reads.append(addr), orig_read(addr))[1]
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [])
+        self.assertEqual(reads, [0x0000, 0x0000])
+
+    def test_manager_that_never_takes_the_slot_raises(self):
+        t = self._DroppingTransport(drops=99)
+        t._manager_regs[0xF004] = 4
+        with self.assertRaisesRegex(RuntimeError, "did not select slot 1"):
+            t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.active_writes, [1, 1, 1])
+        # Nothing was cached: the next call tries again.
+        t.drops = 0
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        self.assertEqual(t.read_reg(0xF008), 1)
+
+    def test_slot_past_the_count_raises(self):
+        class _RangeChecked(FakeTransport):
+            def write_reg(self, addr, value):
+                if addr == 0xF008 and int(value) >= self._manager_regs[0xF004]:
+                    return  # the manager rejects an out-of-range slot
+                super().write_reg(addr, value)
+
+        t = _RangeChecked()
+        t._manager_regs[0xF004] = 3
+        with self.assertRaisesRegex(RuntimeError, "it has 3 slot"):
+            t.select_manager_instance_cached(1, 0xF008, 99)
+        self.assertEqual(t.read_reg(0xF008), 0)
+
+    def test_negative_slot_raises(self):
+        t = self._DroppingTransport(drops=0)
+        with self.assertRaises(ValueError):
+            t.select_manager_instance_cached(1, 0xF008, -1)
+        self.assertEqual(t.active_writes, [])
+
+    def test_slot_moved_behind_the_cache_is_selected_again(self):
+        # An ELA sample reset (or another session) moves ACTIVE after the
+        # host selected slot 2: the next select reads it back and rewrites.
+        t = self._DroppingTransport(drops=0)
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        t._manager_regs[0xF008] = 0
+        t.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(t.active_writes, [2, 2])
+        self.assertEqual(t.read_reg(0xF008), 2)
+
+
+class _SlottedManagerTransport(FakeTransport):
+    """Manager with descriptors over per-slot register banks."""
+
+    def __init__(self, cores: list[int], *, desc_sticks: bool = True):
+        super().__init__()
+        self._manager_regs.update({0xF004: len(cores), 0xF010: 0x3, 0xF014: 0})
+        self._cores = cores
+        self._desc_sticks = desc_sticks
+        self._slots = [
+            dict(self.regs) if c == ELA_CORE_ID else {0x0000: c} for c in cores
+        ]
+
+    def read_reg(self, addr: int) -> int:
+        idx = self._manager_regs[0xF014]
+        if addr == 0xF018:
+            return self._cores[idx] if idx < len(self._cores) else 0
+        if addr == 0xF01C:
+            return 0
+        if addr in self._manager_regs:
+            return self._manager_regs[addr]
+        return self._slots[self._active_ela].get(addr, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        if addr == 0xF014 and not self._desc_sticks:
+            return
+        if addr == 0xF008:
+            self._active_ela = int(value)
+            self._manager_regs[addr] = int(value)
+            return
+        if addr in self._manager_regs:
+            self._manager_regs[addr] = int(value)
+            return
+        self._slots[self._active_ela][addr] = value
+
+    def read_regs_pipelined_user1(self, addrs: list[int]) -> list[int]:
+        return [self.read_reg(a) for a in addrs]
+
+
+class ManagerSlotStrictnessTests(unittest.TestCase):
+    def test_slot_info_rejects_a_slot_past_the_count(self):
+        manager = ElaManager(_SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID]))
+        with self.assertRaises(ValueError):
+            manager.slot_info(2)
+        with self.assertRaises(ValueError):
+            manager.slot_info(-1)
+
+    def test_slot_info_raises_when_the_descriptor_index_does_not_take(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID], desc_sticks=False)
+        manager = ElaManager(t)
+        self.assertEqual(manager.slot_info(0)["core_id"], ELA_CORE_ID)
+        with self.assertRaises(RuntimeError):
+            manager.slot_info(1)
+
+    def test_slot_info_without_descriptors_reports_zeros(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID])
+        t._manager_regs[0xF010] = 0x1
+        info = ElaManager(t).slot_info(1)
+        self.assertEqual((info["core_id"], info["capabilities"]), (0, 0))
+        self.assertEqual(t._manager_regs[0xF014], 0)  # index untouched
+
+    def test_probe_all_raises_when_a_described_ela_does_not_answer(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID, EIO_CORE_ID])
+        t._slots[1] = {}  # slot 1 claims to be an ELA but reads as zeros
+        with self.assertRaises(RuntimeError):
+            ElaManager(t).probe_all()
+
+    def test_probe_all_skips_slots_described_as_other_cores(self):
+        t = _SlottedManagerTransport([EIO_CORE_ID, ELA_CORE_ID])
+        infos = ElaManager(t).probe_all()
+        self.assertEqual([i["instance"] for i in infos], [1])
+
+    def test_probe_all_without_descriptors_skips_slots_that_do_not_probe(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID])
+        t._manager_regs[0xF010] = 0x1
+        infos = ElaManager(t).probe_all()
+        self.assertEqual([i["instance"] for i in infos], [0])
+
+    def test_switching_slots_drops_the_old_slot_configuration(self):
+        t = _SlottedManagerTransport([ELA_CORE_ID, ELA_CORE_ID])
+        t._slots[1][0x00C4] = 32  # TIMESTAMP_W on slot 1 only
+        analyzer = Analyzer(t, instance=0)
+        analyzer.connect()
+        analyzer.configure(AnalyzerTests._make_cfg(self))
+        analyzer.select_instance(0)  # same slot: configuration kept
+        self.assertIsNotNone(analyzer._config)
+        analyzer.select_instance(1)
+        self.assertIsNone(analyzer._config)
+        self.assertEqual(analyzer._hw_timestamp_w, 0)
+        analyzer.configure(AnalyzerTests._make_cfg(self))
+        self.assertEqual(analyzer._hw_timestamp_w, 32)
+
+    def test_manager_with_more_than_256_deep_slots_is_detected(self):
+        # A 256-bit x 2048 slot's DATA window would reach 0xF000 on a
+        # standalone core, so the whole manager block is checked.
+        t = _SlottedManagerTransport([ELA_CORE_ID] * 300)
+        t._slots[0].update({0x000C: 256, 0x0010: 2048})
+        analyzer = Analyzer(t)
+        self.assertTrue(analyzer._behind_manager())
+        self.assertEqual(ElaManager(t).probe()["num_slots"], 300)
+
+
+class RpcSharedEioTests(unittest.TestCase):
+    """An EIO on a core-manager slot must share the analyzer's transport:
+    two transports would each cache ACTIVE and race the hub (BUG-222)."""
+
+    def _server(self):
+        from fcapz.rpc import RpcServer
+
+        hub = _SlottedManagerTransport([ELA_CORE_ID, EIO_CORE_ID])
+        hub._slots[1] = {0x0000: _expected_eio_version_reg(), 0x0004: 8, 0x0008: 8}
+        hub.closed = 0
+
+        def close():
+            hub.closed += 1
+
+        hub.close = close
+        built: list = []
+
+        def build(req):
+            if not built:
+                built.append(hub)
+                return hub
+            other = FakeVioTransport()
+            built.append(other)
+            return other
+
+        server = RpcServer()
+        server._build_transport = build  # type: ignore[method-assign]
+        return server, hub, built
+
+    def test_managed_eio_uses_the_analyzer_transport(self):
+        server, hub, built = self._server()
+        self.assertTrue(server.handle({"cmd": "connect", "chain": 1})["ok"])
+        reply = server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual((reply["in_w"], reply["out_w"]), (8, 8))
+        self.assertEqual(built, [hub])
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+        server.handle({"cmd": "eio_close"})
+        self.assertEqual(hub.closed, 0)  # the analyzer's session stays open
+        server.handle({"cmd": "close"})
+        self.assertEqual(hub.closed, 1)
+
+    def test_unmanaged_eio_gets_its_own_transport(self):
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        server.handle({"cmd": "eio_connect", "chain": 3})
+        self.assertEqual(len(built), 2)
+        self.assertIsNot(built[1], hub)
+
+    def test_analyzer_bound_on_connect_keeps_its_slot(self):
+        """connect(instance=0): an EIO in slot 1 on the same transport does not
+        move the analyzer (BUG-231)."""
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1, "instance": 0})
+        self.assertEqual(server._analyzer.instance, 0)
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+        reply = server.handle({"cmd": "probe"})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+        self.assertEqual(reply["probe"]["sample_width"], 8)
+
+    def test_unbound_analyzer_is_pinned_before_a_shared_eio(self):
+        """connect without instance reads the active slot; a shared EIO pins it
+        to that slot first, so the EIO's select does not take it over."""
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        self.assertIsNone(server._analyzer.instance)
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
+        self.assertEqual(server._analyzer.instance, 0)
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+
+    def test_rebind_selects_the_slot(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        server.handle({"cmd": "connect", "chain": 1, "instance": 0})
+        server.handle({"cmd": "rebind", "chain": 1, "instance": 1})
+        self.assertEqual(server._analyzer.instance, 1)
+        server.handle({"cmd": "rebind", "chain": 1})
+        self.assertEqual(server._analyzer.instance, 1)  # same chain keeps it
+        server.handle({"cmd": "rebind", "chain": 2})
+        self.assertIsNone(server._analyzer.instance)
+
+    def test_managed_eio_on_another_target_gets_its_own_transport(self):
+        """A managed EIO on another board must not borrow the analyzer's
+        transport (BUG-238)."""
+        for other in ({"backend": "openocd"}, {"host": "10.0.0.2"}, {"port": 3122},
+                      {"tap": "xc7a35t"}):
+            with self.subTest(other=other):
+                server, hub, built = self._server()
+                server.handle({"cmd": "connect", "chain": 1})
+                server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1, **other})
+                self.assertEqual(len(built), 2)
+                self.assertFalse(server._eio_shared)
+                self.assertIsNone(server._analyzer.instance)  # not pinned
+
+    def test_managed_eio_on_another_target_keeps_the_session_fields(self):
+        """Fields the request leaves out are the session's on the separate
+        transport too, as for the comparison (BUG-243)."""
+        server, hub, _ = self._server()
+        reqs: list = []
+        build = server._build_transport
+
+        def recording_build(req):
+            reqs.append(dict(req))
+            return build(req)
+
+        server._build_transport = recording_build  # type: ignore[method-assign]
+        server.handle({"cmd": "connect", "chain": 1, "host": "10.0.0.2", "port": 3122})
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1, "tap": "xc7a35t"})
+        self.assertEqual(
+            {k: reqs[1].get(k) for k in ("host", "port", "tap")},
+            {"host": "10.0.0.2", "port": 3122, "tap": "xc7a35t"},
+        )
+
+    def test_eio_discover_attaches_a_manager_slot_on_the_session(self):
+        """A managed EIO is found in its slot and shares the session's
+        transport (BUG-219 on the manager build)."""
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        reply = server.handle({"cmd": "eio_discover", "chains": [1]})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+        self.assertEqual(built, [hub])
+        self.assertTrue(server._eio_shared)
+        self.assertEqual(server._analyzer.instance, 0)  # pinned to its slot
+
+    def test_managed_eio_naming_the_same_target_shares(self):
+        server, hub, built = self._server()
+        server.handle({"cmd": "connect", "chain": 1, "host": "127.0.0.1"})
+        server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1,
+                       "backend": "hw_server", "port": 3121, "tap": "xc7a100t"})
+        self.assertEqual(built, [hub])
+        self.assertTrue(server._eio_shared)
+
+
+class ManagedDataChainBurstTests(unittest.TestCase):
+    """A core manager bursts on its own chain, so behind a transport whose
+    two-chain burst targets a separate data chain a managed slot reads through
+    the single-chain burst at every sample width."""
+
+    def _capture(self, transport, sample_w):
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(CaptureConfig(
+            pretrigger=1, posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=7, mask=0xFF),
+            sample_width=sample_w, depth=1024,
+        ))
+        return analyzer.capture(timeout=0.01)
+
+    def test_managed_slot_bursts_on_its_own_chain_at_every_width(self):
+        for sample_w in (8, 24, 32, 64):
+            with self.subTest(sample_w=sample_w):
+                t = DataChainBurstTransport(sample_w=sample_w, managed=True)
+                result = self._capture(t, sample_w)
+                self.assertEqual(t.calls, [("sample_burst", 0x0100, 3, sample_w)])
+                self.assertEqual(result.samples, [0, 1, 2])
+
+    def test_managed_timestamps_burst_on_its_own_chain(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True, timestamp_w=32)
+        result = self._capture(t, 8)
+        self.assertEqual(
+            [c[0] for c in t.calls], ["sample_burst", "ts_burst"]
+        )
+        self.assertEqual(result.timestamps, [200, 201, 202])
+        self.assertEqual(t.on_control_chain, [True, True])
+
+    def test_unmanaged_wide_core_keeps_the_transport_routing(self):
+        t = DataChainBurstTransport(sample_w=64, managed=False, timestamp_w=32)
+        self._capture(t, 64)
+        self.assertEqual(t.on_control_chain, [False, False])
+
+    def test_unavailable_managed_burst_reads_the_window_not_the_data_chain(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True)
+        t.sample_burst_unavailable = True
+        result = self._capture(t, 8)
+        self.assertEqual(t.calls, [("window", 0x0100, 3)])
+        self.assertEqual(result.samples, [0x20, 0x21, 0x22])
+
+    def test_managed_slot_without_burst_reads_the_window(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True, slot_caps=0)
+        self._capture(t, 8)
+        self.assertNotIn("sample_burst", [c[0] for c in t.calls])
+        self.assertNotIn("read_block", [c[0] for c in t.calls])
+
+    def test_standalone_ela_keeps_the_data_chain_burst(self):
+        t = DataChainBurstTransport(sample_w=8, managed=False, timestamp_w=32)
+        result = self._capture(t, 8)
+        self.assertEqual(
+            [c[0] for c in t.calls], ["read_block", "ts_data_chain"]
+        )
+        self.assertEqual(result.samples, [0x10, 0x11, 0x12])
+
+    def test_same_chain_transport_keeps_read_block_for_a_managed_slot(self):
+        t = DataChainBurstTransport(sample_w=8, managed=True)
+        t.burst_on_data_chain = False  # hw_server single-chain burst
+        self._capture(t, 8)
+        self.assertEqual(t.calls, [("read_block", 0x0100, 3)])
 
 
 class SequencerTests(unittest.TestCase):
@@ -1562,6 +2027,82 @@ class DiscoverEioTests(unittest.TestCase):
         t = FakeDiscoveryTransport(eio_chain=9, eio_base=0x0, ir_table={1: 1, 2: 2})
         self.assertIsNone(discover_eio(t, chains=(1, 2)))
 
+    def test_default_chains_follow_the_ir_table(self):
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={4: 4, 1: 1, 3: 3})
+        self.assertEqual(default_eio_chains(t), [1, 3, 4])
+
+    def test_rpc_eio_discover_without_an_ir_table_scans_the_instances(self):
+        """The DE25 shape: Quartus virtual JTAG has no IR table and the EIO is
+        instance 3 (BUG-219)."""
+        from fcapz.rpc import RpcServer
+
+        class VirtualJtag(FakeDiscoveryTransport):
+            def select_chain(self, chain):
+                self._active_chain = chain
+
+        t = VirtualJtag(eio_chain=3, eio_base=0x0, ir_table={})
+        server = RpcServer()
+        server._analyzer = Analyzer(FakeTransport())  # an ELA session is open
+        server._build_transport = lambda req: t  # type: ignore[method-assign]
+        reply = server.handle({"cmd": "eio_discover", "backend": "usb_blaster"})
+        self.assertEqual(reply["chain"], 3)
+
+    def _session_server(self, t, target):
+        """An RPC session on *t*, opened with the target fields *target*;
+        every transport the server builds after is recorded."""
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._analyzer = Analyzer(t)
+        server._analyzer_target = dict(target)
+        built: list = []
+
+        def build(req):
+            built.append(dict(req))
+            return t
+
+        server._build_transport = build  # type: ignore[method-assign]
+        return server, built
+
+    def test_rpc_eio_discover_attaches_a_standalone_eio_on_the_session(self):
+        """A bare request on a USB-Blaster session is that board: a standalone
+        EIO found there is attached through the session's transport, and no
+        hw_server transport is opened (BUG-247)."""
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={1: 1, 2: 2, 3: 3})
+        server, built = self._session_server(
+            t, {"backend": "usb_blaster", "hardware": "USB-Blaster [USB-0]"})
+        reply = server.handle({"cmd": "eio_discover"})
+        self.assertEqual((reply["chain"], reply["base_addr"]), (3, 0))
+        self.assertIsNone(reply["instance"])
+        self.assertEqual(built, [])
+        self.assertTrue(server._eio_shared)
+        self.assertIs(server._eio._t, t)  # noqa: SLF001
+
+    def test_rpc_eio_discover_on_the_session_board_reports_no_eio(self):
+        t = FakeDiscoveryTransport(eio_chain=9, eio_base=0x0, ir_table={1: 1, 2: 2})
+        server, built = self._session_server(t, {"host": "10.0.0.2"})
+        with self.assertRaisesRegex(RuntimeError, "no EIO"):
+            server.handle({"cmd": "eio_discover"})
+        self.assertEqual(built, [])
+
+    def test_rpc_eio_discover_on_another_board_keeps_the_session_fields(self):
+        """Fields the request leaves out are the session's (BUG-247)."""
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={1: 1, 2: 2, 3: 3})
+        server, built = self._session_server(t, {"host": "10.0.0.2", "port": 3122})
+        reply = server.handle({"cmd": "eio_discover", "tap": "xc7a35t"})
+        self.assertEqual(reply["chain"], 3)
+        self.assertEqual(
+            {k: built[0].get(k) for k in ("host", "port", "tap")},
+            {"host": "10.0.0.2", "port": 3122, "tap": "xc7a35t"},
+        )
+        self.assertFalse(server._eio_shared)
+
+    def test_default_chains_without_an_ir_table_stop_below_the_bridges(self):
+        """Intel virtual JTAG: ELA/EIO instances 1-3, never the bridges on 4/5."""
+        self.assertEqual(default_eio_chains(object()), [1, 2, 3])
+        t = FakeDiscoveryTransport(eio_chain=3, eio_base=0x0, ir_table={})
+        self.assertEqual(default_eio_chains(t), [1, 2, 3])
+
 
 class EioControllerTests(unittest.TestCase):
     def _make_eio(self, probe_in: int = 0xAB) -> EioController:
@@ -1698,6 +2239,7 @@ class EioControllerTests(unittest.TestCase):
             orig_write(addr, value)
 
         t.write_reg = traced_write  # type: ignore[method-assign]
+        t.regs[0xF000] = 0x434D  # manager VERSION ("CM")
         eio = EioController(t, chain=1, instance=2)
 
         eio.connect()

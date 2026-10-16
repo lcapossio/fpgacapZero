@@ -184,6 +184,12 @@ core answers there, scans chain 2 and binds to the first core found (chains
 not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
 session, e.g. to reach an AXI monitor directly.
 
+`"instance"` binds the session to a core-manager slot: the analyzer selects
+it before every access, so an EIO in another slot of the same hub cannot move
+it.  Without it the session reads whichever slot the hub has active; a later
+`eio_connect` with an `instance` on the same chain then binds it to the slot
+active at that moment.
+
 #### `discover_boards`
 
 Find fpgacapZero-compatible boards across running OpenOCD instances (OpenOCD
@@ -241,6 +247,10 @@ are left untouched.
 ```json
 {"cmd": "rebind", "chain": 2}
 ```
+
+`"instance"` selects a core-manager slot (`null` for none).  Left out, a
+rebind to the same chain keeps the session's slot and one to another chain
+selects none.
 
 Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
 — `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
@@ -360,12 +370,14 @@ Response:
 
 Enumerate the fcapz cores present on the connected target. Always reports the
 connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
-USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
-clients can list everything and offer a switch. Each entry has `type`, `name`,
+USER chains (1, 2 and 5) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. When the connected chain is a
+core manager, the manager (`type` `manager`) and its other slots are listed
+too, each with its slot in `instance`. Each entry has `type`, `name`,
 `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
-type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
-monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
-`axi_mon`).
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
+manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
+sample_width}` for `axi_mon`).
 
 ```json
 {"cmd": "list_cores"}
@@ -384,6 +396,23 @@ Response:
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
+```
+
+#### `discover`
+
+List every fcapz core on the session, chain by chain, as
+`fcapz.discovery.discover_cores()` does: register cores (ELA, EIO, AXI
+monitor, a core manager and each of its slots) and the EJTAG-AXI and
+EJTAG-UART bridges.  Each chain is read only at `0x0000` until it answers as
+an ELA or EIO, which the bridges see as a NOP.  Optional `chains` narrows the
+sweep (default USER1-4, or `sld_virtual_jtag` instances 1-8);
+`"bridges": false` skips the bridge identity reads.  Entries have the
+`list_cores` fields plus `instance` (manager slot or `null`); bridge `type`s
+are `ejtag_axi` and `ejtag_uart`.  The session's chain is selected again
+afterwards and a manager's active slot is left as it was.
+
+```json
+{"cmd": "discover", "chains": [1, 4]}
 ```
 
 #### `configure`
@@ -510,6 +539,34 @@ unbounded timeouts could starve all clients.
 ```
 
 Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+
+With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
+session's transport, so the two keep one lock and one cache of the hub's
+active slot, provided the request names the same board: connection fields it
+leaves out are the session's, and any it names (`backend`, `host`, `port`,
+`tap`, `hardware`) must match.  A request for another board opens its own
+transport, with the session's values for the fields it leaves out.
+
+#### `eio_discover`
+
+Find the EIO without knowing its chain.  On the session's board (the
+request's connection fields match, as for `eio_connect`), the server lists the
+cores on the session's own connection and attaches the first EIO there,
+standalone or in a core-manager slot, without opening a second connection; an
+unbound analyzer is pinned to its slot first, as `eio_connect` does.  The
+response carries the EIO's `instance` (`null` when standalone).  For another
+board the server opens its own connection, taking the fields the request
+leaves out from the session, and tries each chain in `"chains"` at base
+addresses `0x0000` and `0x8000`.
+Without `"chains"` it tries every chain in the transport's IR table, or, on
+`usb_blaster` (no IR table), virtual-JTAG instances 1-3, where the Intel
+wrappers put the ELA and EIO; the bridges on 4 and 5 are left alone.
+
+```json
+{"cmd": "eio_discover", "backend": "usb_blaster", "hardware": "DE25-Nano [USB-1]"}
+```
+
+Response: as `eio_connect`, plus `"discovered": true` and the `base_addr` found.
 
 #### `eio_close`
 

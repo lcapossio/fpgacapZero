@@ -416,6 +416,26 @@ class QuartusStpTransportTests(unittest.TestCase):
             packed |= (value & mask) << (idx * element_width)
         return f"{packed:0256b}"
 
+    def test_quartus_burst_unpacks_widths_that_do_not_divide_the_scan(self):
+        for width in (9, 24, 26, 27, 31):
+            with self.subTest(width=width):
+                per_scan = 256 // width
+                values = [((1 << width) - 1) ^ i for i in range(2 * per_scan)]
+                prime = self._quartus_burst_token([0] * per_scan, width)
+                tokens = [prime] + [
+                    self._quartus_burst_token(values[i:i + per_scan], width)
+                    for i in range(0, len(values), per_scan)
+                ]
+
+                class FakeQuartus(QuartusStpTransport):
+                    def read_reg(self, addr, w=width):
+                        return w if addr == 0x000C else 0
+
+                    def _send(self, script, out=" ".join(tokens)):
+                        return out
+
+                self.assertEqual(FakeQuartus()._read_block_burst(len(values)), values)
+
     def test_find_quartus_stp_explicit_passthrough(self):
         self.assertEqual(find_quartus_stp("/x/quartus_stp"), "/x/quartus_stp")
 
@@ -504,6 +524,26 @@ class QuartusStpTransportTests(unittest.TestCase):
         # One 256-bit DR scan per sample plus one prime scan; one 49-bit BURST_PTR write.
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
         self.assertEqual(t.last_script.count("-length 49"), 1)
+
+    def test_read_sample_block_single_chain_packs_narrow_samples_at_their_width(self):
+        # A managed 24-bit ELA: ten samples per 256-bit scan at 24-bit offsets
+        # (jtag_pipe_iface), so twelve samples take two scans after the prime.
+        samples = [0xA00000 + i for i in range(12)]
+        scans = [0, 0]
+        for i, s in enumerate(samples):
+            scans[i // 10] |= s << (24 * (i % 10))
+        payload = " ".join(["0" * 256] + [f"{v:0256b}" for v in scans])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(1)  # the manager's instance
+        self.assertEqual(t.read_sample_block(0x0100, len(samples), 24), samples)
+        self.assertNotIn("-instance_index 2", t.last_script)
+        self.assertEqual(t.last_script.count("-length 256"), 3)
 
     def test_read_sample_block_single_chain_short_reply_is_an_integrity_error(self):
         # Prime scan plus one sample scan, but two samples requested.
@@ -807,7 +847,7 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return f"{stale} {fresh0} {fresh1}"
 
         t = FakeQuartus()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         self.assertEqual(t._read_block_burst(33), list(range(33)))
         self.assertEqual(len(scripts), 1)  # one pass, no repeat
         self.assertEqual(scripts[0].count("-length 256"), 3)
@@ -883,7 +923,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         if single_chain:
             t.read_sample_block(0x0100, n, 256)
         else:
-            t._cached_sps = 32
+            t._burst_sample_width = lambda: 8
             t._read_block_burst(n)
         self.assertEqual(len(scripts), 1)
         return scripts[0]
@@ -1856,10 +1896,36 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                 bits[base + bit_idx] = "1" if (value >> bit_idx) & 1 else "0"
         return "".join(bits)
 
+    def test_burst_unpacks_widths_that_do_not_divide_the_scan(self):
+        """jtag_burst_read packs 256 // SAMPLE_W samples at a stride of
+        exactly SAMPLE_W; the leftover high bits are not part of a sample."""
+        for width in (9, 24, 26, 27, 31):
+            with self.subTest(width=width):
+                t = XilinxHwServerTransport()
+                t.read_reg_stable = lambda addr, w=width: w if addr == 0x000C else 0
+                per_scan = 256 // width
+                values = [((1 << width) - 1) ^ i for i in range(2 * per_scan)]
+                tokens = " ".join(
+                    self._burst_token(values[i:i + per_scan], width)
+                    for i in range(0, len(values), per_scan)
+                )
+                self.assertEqual(t._parse_burst_bits(tokens, len(values)), values)
+
+    def test_burst_width_follows_the_selected_slot(self):
+        """The width is read for every burst: a slot switch between two
+        bursts must not unpack the second with the first slot's width."""
+        t = XilinxHwServerTransport()
+        width = {"w": 8}
+        t.read_reg_stable = lambda addr: width["w"] if addr == 0x000C else 0
+        self.assertEqual(t._parse_burst_bits(self._burst_token([0x5A] * 32), 1), [0x5A])
+        width["w"] = 24
+        token = self._burst_token([0xABCDEF] * 10, 24)
+        self.assertEqual(t._parse_burst_bits(token, 10), [0xABCDEF] * 10)
+
     def test_parse_burst_bits_can_skip_priming_scan(self):
         """Burst parsing discards the priming scan when requested."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
@@ -1870,7 +1936,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_read_block_burst_primes_user2_before_returned_scans(self):
         """Burst reads discard the first USER2 scan while staging fills."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh0 = self._burst_token(list(range(32)))
@@ -1887,11 +1953,43 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
+    def test_two_chain_session_reports_bursts_on_a_data_chain(self):
+        self.assertTrue(XilinxHwServerTransport(single_chain_burst=False).burst_on_data_chain)
+        self.assertFalse(XilinxHwServerTransport().burst_on_data_chain)
+
+    def test_two_chain_session_bursts_a_managed_slot_on_its_own_chain(self):
+        """A core manager on USER3 answers bursts only on USER3, so a
+        two-chain session must not move the scans to USER2."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t.select_chain(3)
+        t._burst_sample_width = lambda: 8
+        sent: list[str] = []
+        stale = self._burst_token([0] * 4, 64)
+        fresh = self._burst_token([0x1234_5678_9ABC_DEF0, 1, 2, 3], 64)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+        user2 = t._irshift_tcl("_bq", chain=2)
+        user3 = t._irshift_tcl("_bq", chain=3)
+
+        words = t.read_sample_block(0x0100, 4, 64, on_control_chain=True)
+
+        self.assertEqual(words[:2], [0x9ABC_DEF0, 0x1234_5678])
+        self.assertNotIn(user2, sent[0])
+        self.assertEqual(sent[0].count(user3), 3)  # BURST_PTR + 2 scans
+
+        sent.clear()
+        t.read_sample_block(0x0100, 4, 64)
+        self.assertIn(user2, sent[0])  # an unmanaged two-chain core: USER2
+
     def test_single_chain_burst_uses_active_chain_for_wide_scans(self):
         """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()
         t.select_chain(2)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -1912,7 +2010,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -2035,7 +2133,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         """A narrow-core burst that comes back a scan short is a readout
         defect: it is raised, not hidden behind a DATA-window re-read."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -2059,7 +2157,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_burst_with_extra_scans_is_refused(self):
         """More scans than were queued means the output is not this burst."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         tok = self._burst_token(list(range(32)))
         t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
         with self.assertRaises(BurstIntegrityError):

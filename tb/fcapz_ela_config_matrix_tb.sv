@@ -420,8 +420,8 @@ module fcapz_ela_config_matrix_tb;
         read_min(ADDR_FEATURES, rdata);
         check("minimal features report no optional gates", rdata == 32'h0001_0101);
         read_min(ADDR_COMPARE_CAPS, rdata);
-        check("minimal compare caps are A-only EQ/NEQ/edges/changed",
-              rdata == 32'h000A_01C3);
+        check("minimal compare caps are A-only EQ/NEQ/edges/changed, DATA_OFFSET",
+              rdata == 32'h003A_01C3);
         read_min(ADDR_SQ_MODE, rdata);
         check("disabled SQ_MODE ignores writes", rdata == 32'h0);
         read_min(ADDR_SQ_VALUE, rdata);
@@ -477,11 +477,13 @@ module fcapz_ela_config_matrix_tb;
         check("USER1_DATA_EN=0 capture length is valid", cap_len == 32'd4);
         read_nouser1(ADDR_DATA_BASE, rdata);
         check("USER1_DATA_EN=0 DATA window reads zero", rdata == 32'h0);
+        read_nouser1(ADDR_COMPARE_CAPS, rdata);
+        check("USER1_DATA_EN=0 compare caps have no DATA_OFFSET", rdata[20] == 1'b0);
 
         $display("\n=== Config 3: REL_COMPARE=1, INPUT_PIPE=1, DUAL_COMPARE=0 ===");
         read_rel(ADDR_COMPARE_CAPS, rdata);
         check("relational compare caps include LT/GT/LE/GE and A-only",
-              rdata == 32'h000A_01FF);
+              rdata == 32'h003A_01FF);
         write_rel(ADDR_SEQ_BASE + 16'd12, 32'hDEAD_BEEF);
         write_rel(ADDR_SEQ_BASE + 16'd16, 32'h1234_5678);
         read_rel(ADDR_SEQ_BASE + 16'd12, rdata);
@@ -508,7 +510,7 @@ module fcapz_ela_config_matrix_tb;
               ((rdata & 32'h10) != 0) && (((rdata >> 16) & 8'hFF) == 8'd4));
         read_combo(ADDR_COMPARE_CAPS, rdata);
         check("combo compare caps include relational and dual comparator",
-              rdata == 32'h000B_01FF);
+              rdata == 32'h003B_01FF);
 
         probe_combo = 8'h00;
         write_combo(ADDR_CTRL, 32'h2);

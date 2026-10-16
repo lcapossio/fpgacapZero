@@ -35,7 +35,9 @@ ADDR_SQ_VALUE = 0x0034
 ADDR_SQ_MASK = 0x0038
 ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
+ADDR_COMPARE_CAPS = 0x00E0
 ADDR_AXI_MON_ID = 0x00E8
+ADDR_CAPTURE_GEN = 0x00F8
 ADDR_AXI_GEOM = 0x00EC
 ADDR_DATA_BASE = 0x0100
 
@@ -232,6 +234,14 @@ async def identity_and_geometry(dut):
     assert ((geom >> 8) & 0xFF) == 32                       # DATA_W
     assert ((geom >> 16) & 0xF) == 0                        # ID_W: AXI4-Lite has no ID
     assert ((geom >> 20) & 0x1F) == 5                       # 5 channels: AW/W/B/AR/R
+
+    # The embedded ELA's CAPTURE_GEN (COMPARE_CAPS bit 21) sits clear of the
+    # AM registers and counts this core's arms (BUG-246).
+    assert (await d.read(ADDR_COMPARE_CAPS)) & (1 << 21)
+    gen = await d.read(ADDR_CAPTURE_GEN)
+    await d.arm()
+    assert await d.read(ADDR_CAPTURE_GEN) == (gen + 1) & 0xFFFF
+    assert await d.read(ADDR_AXI_MON_ID) == amid
 
 
 @cocotb.test()

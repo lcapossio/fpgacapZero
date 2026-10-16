@@ -15,7 +15,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -55,6 +55,8 @@ def _enter_successful_connect_mocks(ex: ExitStack, gui_path: Path) -> MagicMock:
     ex.enter_context(patch("fcapz.gui.app_window.save_gui_settings"))
 
     mock_transport = MagicMock(name="transport")
+    # USER1 answers as an ELA ("LA"), so the worker may read the manager block.
+    mock_transport.read_reg.return_value = 0x0004_4C41
     ex.enter_context(
         patch(
             "fcapz.gui.worker.transport_from_connection",
@@ -407,6 +409,52 @@ def test_jtag_hierarchy_shows_managed_slots(qtbot: Any, tmp_path: Path) -> None:
         assert "USER1" in rows
         assert any("slot 2" in r and "EIO" in r for r in rows)
         assert any("slot 0" in r and "Selectable ELA capture" in r for r in rows)
+
+
+@pytest.mark.gui
+def test_connect_selects_the_first_ela_slot(qtbot: Any, tmp_path: Path) -> None:
+    """A hub whose slot 0 is an EIO: the capture analyzer takes slot 1."""
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        mock_an = _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+        eio = ex.enter_context(patch("fcapz.gui.app_window.EioController")).return_value
+        eio.in_w = eio.out_w = 8
+        eio.version_major, eio.version_minor = 0, 4
+        eio.bscan_chain, eio.instance = 1, 0
+        eio.read_outputs.return_value = 0
+
+        class FakeManager:
+            def __init__(self, _transport: object) -> None:
+                pass
+
+            def probe(self) -> dict[str, int]:
+                return {
+                    "version_major": 0,
+                    "version_minor": 4,
+                    "core_id": 0x434D,
+                    "num_slots": 2,
+                    "active": 0,
+                    "window_stride": 0,
+                    "capabilities": 3,
+                }
+
+            def slot_info(self, instance: int) -> dict[str, int]:
+                return {
+                    "instance": instance,
+                    "core_id": [0x494F, 0x4C41][instance],
+                    "capabilities": [0, 1][instance],
+                }
+
+        ex.enter_context(patch("fcapz.gui.worker.ElaManager", FakeManager))
+
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        qtbot.mouseClick(_button_with_text(w, "Connect"), Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: w._analyzer is not None, timeout=5000)
+
+        mock_an.select_instance.assert_any_call(1)
+        assert call(0) not in mock_an.select_instance.call_args_list
 
 
 @pytest.mark.gui

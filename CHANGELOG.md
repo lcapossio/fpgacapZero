@@ -9,6 +9,105 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Core manager — resets a host can see, and a checked burst header.** New
+  manager registers: `MGR_EPOCH` and `MGR_SLOT_EPOCH` count both edges of the
+  hub and per-slot resets (odd while a reset is held), `MGR_TLR_COUNT` counts
+  TAP Test-Logic-Reset entries (all never reset), `MGR_OWNER` holds an
+  advisory owner token, and `MGR_CTRL` resets the hub, one slot or every slot.
+  The priming scan of a burst now carries a header (magic, slot, start
+  pointer, window, both epochs, owner, sample width) instead of a stale word.
+  The host checks the header against what it read before the burst (the
+  advisory owner only against another session's token), re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
+  `MGR_TLR_COUNT`) after it, and raises `BurstIntegrityError` when the burst
+  is not the one it asked for or a reset hit it. `Analyzer` holds its slot,
+  the slot epoch and the hub epoch from `configure()` through the readout and
+  raises `ManagerResetError` when the slot was reset, the hub was reset during
+  a readout, or (with no `instance`) the active slot moved; a wait that times
+  out after a slot reset says so. A failed `configure()` leaves the analyzer
+  unconfigured. `CaptureChangedError` reports a capture whose `SEG_START`
+  moved during its readout. The host writes its owner token when it first
+  selects a slot, warns about another token, and clears it on close. The hub
+  shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
+  the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
+  TAP through Test-Logic-Reset between scans. `MGR_CAPS` bits 3-6 report each feature. Both HDLs,
+  all three vendor shells.
+
+- **ELA — `DATA_OFFSET` pages the DATA window.** The DATA and timestamp
+  windows are register addresses, so they ended at `0xFFFF`, or at `0xF000`
+  behind a core manager: a deep core without burst readout could not be read
+  in full, and the hub refused to build one. The new `DATA_OFFSET` register
+  (`0x00F4`, `COMPARE_CAPS` bit 20) adds a word offset to every window read,
+  and the host pages reads past the limit through it. Arming or resetting the
+  ELA sets it back to 0, so an offset a host left behind cannot shift the
+  next capture. Reads keep no side
+  effects, so every transport's window readers work unchanged. The hub's
+  `0xF000` elaboration check is gone. Both HDLs.
+
+- **Core manager — `MGR_SELECT_COUNT` reveals another controller's select.**
+  A new read-only register (`0xF034`, `MGR_CAPS` bit 7) counts every
+  `MGR_ACTIVE` write, refused ones too, and is never reset. Another
+  controller that selected a slot during an analyzer's `configure()`,
+  `arm()`, `reset()` or readout and then selected the analyzer's slot back left nothing
+  to see: some writes or reads went to the other slot. The transport now
+  counts its own `MGR_ACTIVE` writes, and `Analyzer` compares the difference
+  across each of those operations and raises `ManagerResetError`. An analyzer
+  with an `instance` also reads `MGR_ACTIVE` and refuses another slot there.
+  Older hubs get the `MGR_ACTIVE` check only. Both HDLs.
+
+- **ELA — `CAPTURE_GEN` identifies a capture.** A new read-only register
+  (`0x00F8`, `COMPARE_CAPS` bit 21) counts every `CTRL` arm or reset write and
+  every release of the core's register-side reset (two when both land in
+  one cycle), and is never reset.
+  `SEG_START` could not tell captures apart: a re-arm by another controller
+  during a readout, or between `arm()` and the readout, can leave it where it
+  was while new samples overwrite the buffer. `Analyzer.arm()` now expects
+  `CAPTURE_GEN` to move by exactly one, and the readout expects the value
+  `arm()` left and compares it across the readout; either raises
+  `CaptureChangedError`. Standalone ELAs too. Cores without bit 21 are read
+  as before. Both HDLs.
+
+- **Formal parity — power-up values.** The Verilog/VHDL parity proofs matched
+  registers by name and assumed equal states, so they never compared
+  power-up values. Each configuration now also compares the state of every
+  register after the reset the proofs assume, which covers the registers the
+  reset does not clear (counters, synchronisers). GHDL keeps the power-up
+  value of an async-reset flop on an alias that yosys `proc` drops, so the
+  check keeps it under its own attribute first. `reset_sync` is compared
+  without a reset, since its power-up value is its contract.
+
+- **Host — core discovery.** `fcapz discover`, the RPC `discover` command and
+  `fcapz.discovery.discover_cores()` list every fcapz core without being told
+  a chain: ELAs, EIOs, AXI monitors, a core manager and each of its slots, and
+  the EJTAG-AXI and EJTAG-UART bridges. A chain is read only at `0x0000`, a
+  NOP on both bridges, until it answers as an ELA or EIO. A new bench,
+  `fcapz_bridge_discovery`, shifts those scans into both bridges and checks
+  that nothing moves. `list_cores` now lists the manager and its slots.
+
+- **Core manager on every vendor.** The multi-core hub is now three layers:
+  `fcapz_debug_multi_core` (manager and ELA/EIO slots, no JTAG),
+  `fcapz_debug_multi` (TAP signals, reset sync and the JTAG pipe) and a thin
+  vendor shell that only adds the TAP primitive. New shells
+  `fcapz_debug_multi_xilinxus` (UltraScale `BSCANE2`) and
+  `fcapz_debug_multi_intel` (`sld_virtual_jtag`, `CTRL_CHAIN` is the instance
+  index) join `fcapz_debug_multi_xilinx7`, which keeps its parameters, ports
+  and behaviour. Each has a VHDL twin. cocotb drives all three shells at their
+  TAP primitives in both HDLs, static and formal parity cover the new layers,
+  and an old-vs-new simulation of the Xilinx-7 wrapper matched. The layers are
+  in every Arty build, the LiteX source lists and `core.json`.
+
+- **DE25-Nano — core-manager variant.** `de25_nano_manager_top` puts two ELAs
+  and two EIOs behind one `fcapz_debug_multi_intel` hub on instance 1, with
+  EJTAG-AXI on instance 4 (`python examples/de25_nano/build.py --variant
+  manager`). `test_hw_manager.py` covers slot enumeration, captures with
+  timestamps across many burst packets, slot switches after a burst, both EIO
+  slots and the bridge.
+
+- **Host — managed bursts on USB-Blaster.** The Quartus transport reads ELA
+  bursts from a separate data instance, but a managed hub bursts on its own
+  instance. The analyzer now sends a managed slot's burst and timestamp reads
+  through the hub's instance (`Transport.burst_on_data_chain` marks
+  transports that need this) instead of the data instance.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -57,6 +156,33 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   public API's undocumented classes and methods have docstrings.
 
 ### Changed
+
+- **Host — an EIO left active no longer hides a hub's ELAs.**
+  `Analyzer.probe_optional()` on a core manager whose active slot is not an
+  ELA selects the first ELA slot (when the analyzer has no slot of its own),
+  so the RPC connect and the GUI find the hub. `probe()` still reads only the
+  active slot. The GUI connects to the first slot the descriptors call an ELA
+  instead of slot 0.
+
+- **Formal parity — vector parameters.** `sim/run_formal_hdl_parity.py`
+  accepts bit-string parameters (such as a per-slot burst mask), and a
+  manifest without a `formal` section is checked for interface parity only.
+
+- **Core manager — slots the host cannot read fail elaboration.** A slot off
+  the burst engine's shape is read only through its register window, so a
+  design now fails elaboration when such a slot sets `USER1_DATA_EN=0`.
+  `BURST_W` other than 256 is rejected too. These designs built before but
+  could not be read back. Both HDLs.
+
+- **Host — manager slot selection fails loudly.** Selecting a slot past
+  `MGR_COUNT`, a negative slot, or one the manager does not take now raises
+  instead of leaving the previous slot selected. `slot_info()` checks the
+  range and confirms `MGR_DESC_INDEX`; `probe_all()` uses the descriptors to
+  skip non-ELA slots and reports an ELA slot that does not answer. Moving an
+  `Analyzer` to another slot with `select_instance()` drops its capture
+  configuration, so call `configure()` again. A manager with more than 256
+  slots is detected.
+  The manager proof now also runs with a mixed burst mask.
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -112,6 +238,116 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--variant microblaze` (needs a MicroBlaze licence and `mb-gcc`).
 
 ### Fixed
+
+- **A managed EIO access could reach another slot unseen.** Another
+  controller (a second process on the same hub) that selected another slot
+  during an `EioController` read or write sent some of it there: a read
+  returned the other core's value, a write landed on the other core. Each
+  access of an EIO with an `instance`, `connect()` and `attach()` included,
+  now runs in `Transport.held_manager_instance()`, which compares
+  `MGR_SELECT_COUNT` less the transport's own selects across the access and
+  reads `MGR_ACTIVE` after it, and raises `ManagerResetError` (now defined in
+  `fcapz.transport`, still importable from `fcapz.analyzer`). Older hubs get
+  the `MGR_ACTIVE` check only.
+
+- **EIO discovery missed an Intel EIO.** With no chains given, `eio_discover`
+  (RPC) and the desktop GUI's EIO auto-attach tried the transport's IR-table
+  chains, and `usb_blaster` has none, so only instance 1 was tried and the
+  DE25-Nano EIO on instance 3 was never found. They now try instances 1-3.
+  On the session's board, RPC `eio_discover` attaches the EIO it finds there,
+  standalone or in a core-manager slot, through the session's transport
+  instead of opening a second connection to the board. A request for another
+  board takes the connection fields it leaves out from the session, so a bare
+  request on a `usb_blaster` session no longer opens a local `hw_server`.
+
+- **JTAG pipe — a register command after a burst could read stale data.** In
+  burst mode, the Capture-DR of every scan starts a preload of the next burst
+  word, which runs for `256 / SAMPLE_W + 1` TCK cycles (257 for 1-bit
+  samples), longer than a 49-bit register scan. A register command that
+  followed went out while the preload still held the ELA's DATA window, and
+  read 0. Every register command now ends the preload its own Capture-DR
+  started. Both HDLs.
+
+- **Host — a burst-wired slot behind a transport that does not burst.**
+  OpenOCD, and hw_server for some sample widths, read `read_block(0x0100)`
+  through the register window. The analyzer handed them the whole capture
+  anyway, so a deep one overran the window instead of being paged. Transports
+  now say whether they burst (`Transport.bursts_data_window()`), and the
+  analyzer pages whenever they do not.
+
+- **RPC — the analyzer ignored `connect(instance=...)`.** The session read
+  whichever slot was active, so an EIO in another slot of the same hub took it
+  over. `connect` and `rebind` now bind the slot, and a managed `eio_connect`
+  pins an unbound session to the slot it reads. A managed `eio_connect` also
+  shares the session's transport only when it names the same board.
+
+- **Core manager — one ELA's reset could phantom-arm another.** Any ELA's
+  `ela_sample_rst` reset the whole hub's JTAG side: `MGR_ACTIVE`, every EIO
+  output, and the register side of every ELA. Another ELA's arm and reset
+  commands cross to its sample clock as toggles, and only their JTAG halves
+  were reset, so an ELA armed an odd number of times saw a phantom arm and
+  re-armed over a capture the host had not read. Each ELA now resets its
+  sample and register sides together from its own reset, and the hub resets
+  only at power-up or from `MGR_CTRL` bit 0. A cocotb test reproduces the
+  phantom arm on the old wiring on all three shells. Both HDLs.
+
+- **`reset_sync` (Verilog) powered up released.** The VHDL synchroniser powers
+  up asserted; the Verilog one had no power-up value, so it came up 0 and a
+  design whose reset input was never asserted was never reset. It now powers
+  up asserted too. Found by the new formal power-up check.
+
+- **Host — slot selection could reset an EJTAG-AXI bridge.** Selecting a
+  manager slot wrote `MGR_ACTIVE` (`0xF008`) before checking that the chain
+  held a manager; on an EJTAG-AXI bridge that frame is `CMD_RESET`. The host
+  now writes only after `0x0000` answers as an ELA or EIO and `0xF000` as a
+  manager. Likewise `discover_eio()` read `0x8000`, an AXI read command on the
+  bridge, on chains it had not identified. Neither path met a bridge on the
+  default chains.
+
+- **Core manager — a slot switch right after a burst could be dropped.** After
+  a burst the JTAG pipe refills its burst buffer on the next scan, and the
+  manager ignores an `MGR_ACTIVE` write while that refill runs. With narrow
+  samples (1-5 bits) the refill outlasted the scan, so the next analyzer kept
+  talking to the previous slot. The host now reads `MGR_ACTIVE` back after each
+  switch and writes it again, up to three times. The manager now takes that
+  write once a burst owner is bound (see the next entry), so on a new bitstream
+  the first write lands; the host loop stays for older bitstreams.
+
+- **Core manager — a slot switch could move a pending burst.** Each time the
+  burst engine started loading, the manager rebound the burst to the active
+  slot, so an `MGR_ACTIVE` write between the `BURST_PTR` write and the burst
+  read the new slot's memory from the old slot's pointer. The `BURST_PTR` write
+  now binds the owner until the next one; a burst with no `BURST_PTR` write
+  since reset still binds the active slot once. The host's sequence never hit
+  this, but custom plumbing on `fcapz_core_manager` could. Both HDLs.
+
+- **Host — bursts of 24-, 26-, 27- or 31-bit samples unpacked wrong.** Both
+  the hw_server and USB-Blaster transports unpacked a burst at
+  `256 // (256 // SAMPLE_W)` bits per sample, wider than the packing whenever
+  `SAMPLE_W` does not divide 256, so each sample picked up bits of the next
+  one. They now unpack at `SAMPLE_W`, read for every burst, so a
+  slot switch cannot leave the previous slot's width behind.
+
+- **Host — two-chain Xilinx sessions sent managed bursts to USER2.** With
+  `single_chain_burst=False` (`--two-chain-burst`) every burst went to USER2,
+  which a core manager does not answer. Managed slots now burst on the hub's
+  own chain, as on the USB-Blaster.
+
+- **RPC — a managed EIO raced the analyzer.** `eio_connect` with a manager
+  slot opened a second transport, whose cached active slot went stale when the
+  analyzer switched slots. It now shares the analyzer's transport, and
+  `eio_close` leaves that session open.
+
+- **Core manager — VHDL defaults and EIO-only builds.** The VHDL
+  `fcapz_debug_multi_xilinx7` defaulted `NUM_EIOS` to 1 and `ELA_PORT_COUNT`
+  to 2 instead of following `EIO_EN` and `NUM_ELAS` like the Verilog, and
+  rejected `NUM_ELAS=0`. Both HDLs now agree, and an EIO-only hub elaborates.
+
+- **Core manager — sized parameter overrides and width warnings.** The
+  replicated per-slot defaults now widen each scalar to 32 bits before
+  replicating it. A sized override such as `.SAMPLE_W(8'd8)` used to pack as
+  8-bit fields, so with two or more ELA slots the per-slot widths and depths
+  were wrong and elaboration failed. This also clears Verilator `WIDTHCONCAT`.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

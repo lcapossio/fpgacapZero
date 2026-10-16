@@ -25,10 +25,11 @@ on the ``EioController`` instance as ``version_major`` /
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 
 from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
-from .transport import Transport
+from .transport import Transport, register_pipe_identity
 
 # ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
 # a valid bitstream.  Same encoding scheme as the ELA core's "LA" magic.
@@ -88,14 +89,26 @@ class EioController:
             if self._chain != 1:
                 raise
 
-    def _select_instance(self) -> None:
-        self._select_chain()
-        if self._instance is not None:
-            self._t.select_manager_instance_cached(
-                self._chain,
-                _ADDR_MGR_ACTIVE,
-                self._instance,
-            )
+    @contextmanager
+    def _access(self) -> Iterator[None]:
+        """Hold the transport and this EIO's slot for one access.
+
+        Behind a core manager, raises :class:`~fcapz.transport.ManagerResetError`
+        after the block if another controller's select, or a hub reset, sent
+        some of it to another slot (see
+        :meth:`Transport.held_manager_instance`): a read may have returned
+        another core's value, and a write may have reached another core or
+        been lost.
+        """
+        with self._t.transaction_lock():
+            self._select_chain()
+            if self._instance is None:
+                yield
+                return
+            with self._t.held_manager_instance(
+                self._chain, _ADDR_MGR_ACTIVE, self._instance
+            ):
+                yield
 
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
@@ -114,20 +127,7 @@ class EioController:
             self._select_chain()
             self._t.connect()
             self._t.invalidate_manager_instance_cache()
-            self._select_instance()
-            version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
-            core_id = version & 0xFFFF
-            if core_id != EIO_CORE_ID:
-                raise RuntimeError(
-                    f"EIO core identity check failed at VERSION[15:0]: "
-                    f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
-                    f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
-                )
-            self.version_major = (version >> 24) & 0xFF
-            self.version_minor = (version >> 16) & 0xFF
-            self.core_id = core_id
-            self.in_w  = self._t.read_reg(self._abs(_ADDR_IN_W))
-            self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
+            self._read_identity()
 
     def attach(self) -> None:
         """Use an already-connected transport (e.g. shared with the ELA analyzer).
@@ -137,26 +137,34 @@ class EioController:
         or :meth:`Transport.close`.
         """
         with self._t.transaction_lock():
-            self._select_instance()
             try:
-                version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
-                core_id = version & 0xFFFF
-                if core_id != EIO_CORE_ID:
-                    raise RuntimeError(
-                        f"EIO core identity check failed at VERSION[15:0]: "
-                        f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
-                        f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
-                    )
-                self.version_major = (version >> 24) & 0xFF
-                self.version_minor = (version >> 16) & 0xFF
-                self.core_id = core_id
-                self.in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
-                self.out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
+                self._read_identity()
             finally:
                 try:
                     self._t.select_chain(1)
                 except NotImplementedError:
                     pass
+
+    def _read_identity(self) -> None:
+        """Check VERSION and read the probe widths, as one access."""
+        with self._access():
+            version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
+            core_id = version & 0xFFFF
+            if core_id != EIO_CORE_ID:
+                raise RuntimeError(
+                    f"EIO core identity check failed at VERSION[15:0]: "
+                    f"expected 0x{EIO_CORE_ID:04X} ('IO'), got 0x{core_id:04X}. "
+                    f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
+                )
+            version_major = (version >> 24) & 0xFF
+            version_minor = (version >> 16) & 0xFF
+            in_w = self._t.read_reg(self._abs(_ADDR_IN_W))
+            out_w = self._t.read_reg(self._abs(_ADDR_OUT_W))
+        self.version_major = version_major
+        self.version_minor = version_minor
+        self.core_id = core_id
+        self.in_w = in_w
+        self.out_w = out_w
 
     def _abs(self, offset: int) -> int:
         """Prepend ``base_addr`` so the on-chip regbus mux routes to EIO."""
@@ -169,8 +177,7 @@ class EioController:
     # ------------------------------------------------------------------
     def read_inputs(self) -> int:
         """Return current probe_in value as a single integer (LSB = bit 0)."""
-        with self._t.transaction_lock():
-            self._select_instance()
+        with self._access():
             words = (self.in_w + 31) // 32
             value = 0
             for i in range(words):
@@ -181,8 +188,7 @@ class EioController:
 
     def write_outputs(self, value: int) -> None:
         """Write probe_out as a single integer (LSB = bit 0)."""
-        with self._t.transaction_lock():
-            self._select_instance()
+        with self._access():
             mask = (1 << self.out_w) - 1
             value = value & mask
             words = (self.out_w + 31) // 32
@@ -202,8 +208,7 @@ class EioController:
             Current output register value as an unsigned integer, zero-padded
             to OUT_W bits (bits above OUT_W are masked off).
         """
-        with self._t.transaction_lock():
-            self._select_instance()
+        with self._access():
             words = (self.out_w + 31) // 32
             value = 0
             for i in range(words):
@@ -259,6 +264,19 @@ class EioController:
         return f"EioController(in_w={self.in_w}, out_w={self.out_w})"
 
 
+# Transports without an IR table address Intel virtual-JTAG instances. The
+# fcapz Intel wrappers put the ELA/EIO on 1-3 and the EJTAG bridges on 4
+# (AXI) and 5 (UART), whose different DR protocol must not see stray scans.
+_INSTANCE_SCAN = (1, 2, 3)
+
+
+def default_eio_chains(transport: Transport) -> list[int]:
+    """The chains to probe for an EIO when the caller names none: the
+    transport's IR-table chains, else the Intel wrappers' ELA/EIO instances."""
+    table = getattr(transport, "ir_table", None)
+    return sorted(table) if table else list(_INSTANCE_SCAN)
+
+
 def discover_eio(
     transport: Transport,
     *,
@@ -273,9 +291,12 @@ def discover_eio(
     chain 1), then every ``chains`` x ``bases`` combination, attaching the
     first location whose identity register reads the EIO magic (``0x494F``).
 
-    ``EioController.attach`` only reads and restores chain 1, so probing a
-    wrong location is harmless — non-matches (wrong chain, ELA magic,
-    unprogrammed FPGA) raise and are skipped.  Returns the attached
+    ``EioController.attach`` only reads and restores chain 1, and
+    non-matches (wrong chain, ELA magic, unprogrammed FPGA) raise and are
+    skipped.  A base other than ``0x0000`` is read only on a chain whose
+    ``0x0000`` answered as an fcapz register core: on an EJTAG-AXI bridge a
+    read of ``0x8000`` is an AXI read command (see
+    :func:`~fcapz.transport.register_pipe_identity`).  Returns the attached
     controller, or ``None`` if no EIO core responds anywhere.
     """
     candidates: list[dict[str, int]] = []
@@ -285,11 +306,28 @@ def discover_eio(
         {"chain": int(c), "base_addr": int(b)} for c in chains for b in bases
     )
     seen: set[tuple] = set()
+    register_chains: dict[int, bool] = {}
     for kw in candidates:
         key = tuple(sorted(kw.items()))
         if key in seen:
             continue
         seen.add(key)
+        chain = kw["chain"]
+        if kw.get("base_addr", 0) != 0:
+            if chain not in register_chains:
+                try:
+                    register_chains[chain] = (
+                        register_pipe_identity(transport, chain) is not None
+                    )
+                except (OSError, RuntimeError, ValueError, NotImplementedError):
+                    register_chains[chain] = False
+                finally:
+                    try:
+                        transport.select_chain(1)
+                    except (NotImplementedError, ValueError):
+                        pass
+            if not register_chains[chain]:
+                continue
         eio = EioController(transport, **kw)
         try:
             eio.attach()
