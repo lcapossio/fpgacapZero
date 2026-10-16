@@ -16,8 +16,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   advisory owner token, and `MGR_CTRL` resets the hub, one slot or every slot.
   The priming scan of a burst now carries a header (magic, slot, start
   pointer, window, both epochs, owner, sample width) instead of a stale word.
-  The host checks every field against what it read before the burst,
-  re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
+  The host checks the header against what it read before the burst (the
+  advisory owner only against another session's token), re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
   `MGR_TLR_COUNT`) after it, and raises `BurstIntegrityError` when the burst
   is not the one it asked for or a reset hit it. `Analyzer` holds its slot,
   the slot epoch and the hub epoch from `configure()` through the readout and
@@ -170,10 +170,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Core manager — slots the host cannot read fail elaboration.** A slot off
   the burst engine's shape is read only through its register window, so a
-  design now fails elaboration when such a slot sets `USER1_DATA_EN=0`, or when
-  its DATA and timestamp window runs past the manager registers at `0xF000`
-  (about 15k words). `BURST_W` other than 256 is rejected too. These designs
-  built before but could not be read back. Both HDLs.
+  design now fails elaboration when such a slot sets `USER1_DATA_EN=0`.
+  `BURST_W` other than 256 is rejected too. These designs built before but
+  could not be read back. Both HDLs.
 
 - **Host — manager slot selection fails loudly.** Selecting a slot past
   `MGR_COUNT`, a negative slot, or one the manager does not take now raises
