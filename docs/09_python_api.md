@@ -236,6 +236,8 @@ cfg = CaptureConfig(
     startup_arm     = False,       # leave the core armed after RESET
     trigger_holdoff = 0,           # ignore triggers for N cycles after arm/re-arm
     trigger_delay   = 0,           # new in v0.3.0
+    rle             = False,       # run-length capture (RLE_W cores, v0.5.0)
+    post_clocks     = 0,           # with rle: end the window N clocks after the trigger
 )
 a.configure(cfg)
 ```
@@ -267,6 +269,12 @@ method (writes `BURST_PTR[31]=1` to switch burst readout to the timestamp
 BRAM).  If the method is absent, `Analyzer` falls back
 to `read_block()` over USER1, which is correct but slower.
 `XilinxHwServerTransport` always implements the fast path.
+
+With `rle=True`, run counts are read the same way, through
+`transport.read_run_length_block()` (`BURST_PTR[31:30]=2'b11`) or, without a
+burst path, the USER1 timestamp window with `RLE_CTRL[1]` set. They land in
+`result.run_lengths`. See
+[Run-length capture](05_ela_core.md#run-length-capture).
 
 ```python
 a.arm()
@@ -376,7 +384,16 @@ class CaptureConfig:
     startup_arm:      bool = False  # RESET leaves the core armed
     trigger_holdoff:  int = 0       # 0..65535 cycles after arm/re-arm
     trigger_delay:    int = 0       # 0..65535 sample-clock cycles
+    rle:              bool = False  # run-length capture; needs RLE_W > 0
+    post_clocks:      int = 0       # with rle: post-trigger clock limit (0 = off)
 ```
+
+`configure()` raises `ValueError` if `rle=True` on a core that reports
+`RLE_W=0`, or together with decimation or storage qualification. On an
+`RLE_W` core it always writes the enable, so `rle=False` turns it off.
+It raises if `post_clocks` is negative or set without `rle=True`. It writes
+`RLE_POST_CLKS` on every `RLE_W` core (0 when `rle` is off), clamped to the
+register width; a larger limit could never be reached.
 
 ### `TriggerConfig`
 
@@ -457,7 +474,13 @@ class CaptureResult:
     overflow:   bool                  # True if STATUS.overflow was set
     timestamps: list[int]             # parallel list of timestamps (empty if TIMESTAMP_W=0)
     segment:    int = 0               # which segment (for segmented captures)
+    run_lengths: list[int]            # clocks per entry (empty unless rle=True)
 ```
+
+With `rle=True`, each entry of `samples` held for `run_lengths[i]` clocks,
+and `pretrigger`/`posttrigger` count entries. `entry_start_clocks(result)`
+gives each entry's start clock, and `expand_run_lengths(result)` returns one
+sample per clock (it raises if that exceeds `max_samples`, default 16M).
 
 The trigger sample is at `samples[config.pretrigger]` (0-indexed).
 Pre-trigger samples are at indices `0..pretrigger-1`, post-trigger

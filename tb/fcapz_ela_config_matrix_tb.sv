@@ -523,6 +523,9 @@ module fcapz_ela_config_matrix_tb;
         write_combo(ADDR_SEQ_BASE + 16'd12, 32'd0);
         write_combo(ADDR_SEQ_BASE + 16'd16, 32'hFF);
         write_combo(ADDR_CTRL, 32'h1);
+        // The counter below is timed for an ARM that landed two sample
+        // clocks sooner, before the settings snapshot gained its stage.
+        repeat (2) @(posedge sample_clk);
         wait_done_combo(status);
         read_combo(ADDR_CAPTURE_LEN, cap_len);
         check("combo capture remains active until all segments complete", status[2] == 1'b0);

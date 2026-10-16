@@ -1140,6 +1140,25 @@ class QuartusStpTransport(Transport):
             )
         return self.read_block(addr, words)
 
+    def read_run_length_block(self, n_entries: int, lane_width: int) -> List[int]:
+        """Read one run count per captured entry through the DATA_CHAIN burst.
+
+        Counts travel on the timestamp lane, ``lane_width`` bits per element
+        (the core's timestamp width, or its RLE_W without timestamps).  Raises
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, so the caller can read the window instead.
+        """
+        if n_entries <= 0:
+            return []
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        return self._read_block_burst(
+            n_entries,
+            timestamp=True,
+            element_width=lane_width,
+            run_lengths=True,
+        )
+
     @property
     def _burst_available(self) -> bool:
         """Declared by the ``burst`` constructor argument, never probed."""
@@ -1160,6 +1179,7 @@ class QuartusStpTransport(Transport):
         *,
         timestamp: bool = False,
         element_width: int | None = None,
+        run_lengths: bool = False,
     ) -> List[int]:
         if timestamp:
             if element_width is None:
@@ -1175,6 +1195,7 @@ class QuartusStpTransport(Transport):
             (1 << 48)
             | (self.ADDR_BURST_PTR << 32)
             | (0x80000000 if timestamp else 0)
+            | (0x40000000 if timestamp and run_lengths else 0)  # run counts
         )
 
         def write_ptr() -> list[str]:
@@ -2299,8 +2320,12 @@ class XilinxHwServerTransport(Transport):
         *,
         timestamp: bool = False,
         element_width: int | None = None,
+        run_lengths: bool = False,
     ) -> List[int]:
         """Read *words* samples via the 256-bit burst DR.
+
+        ``timestamp`` reads the timestamp lane instead; with ``run_lengths``
+        too it carries the run counts of a run-length capture.
 
         The BURST_PTR write, the staging-fill idle and every 256-bit DR scan
         are ONE ``jtag sequence``, run once.  Nothing else can reach the chain
@@ -2330,7 +2355,8 @@ class XilinxHwServerTransport(Transport):
         burst_frame = self._pad_dr(
             self._frame_bits(
                 addr=self.ADDR_BURST_PTR,
-                data=(0x80000000 if timestamp else 0),
+                data=(0x80000000 if timestamp else 0)
+                | (0x40000000 if timestamp and run_lengths else 0),
                 write=True,
             )
         )
@@ -2467,6 +2493,28 @@ class XilinxHwServerTransport(Transport):
         if len(values) != n_timestamps:
             raise BurstIntegrityError(
                 f"timestamp burst returned {len(values)} values, expected {n_timestamps}"
+            )
+        return values
+
+    def read_run_length_block(self, n_entries: int, lane_width: int) -> List[int]:
+        """Read one run count per captured entry via the burst DR.
+
+        Counts travel on the timestamp lane, ``lane_width`` bits per element
+        (the core's timestamp width, or its RLE_W without timestamps).  Raises
+        :class:`BurstUnavailableError`, before any scan, when burst readout is
+        off, and :class:`BurstIntegrityError` when a burst ran but returned the
+        wrong number of counts.
+        """
+        if n_entries <= 0:
+            return []
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        values = self._burst_with_hint(
+            n_entries, timestamp=True, element_width=lane_width, run_lengths=True
+        )
+        if len(values) != n_entries:
+            raise BurstIntegrityError(
+                f"run-length burst returned {len(values)} values, expected {n_entries}"
             )
         return values
 

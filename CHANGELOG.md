@@ -9,6 +9,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Run-length capture (`RLE_W`).** A new ELA parameter (0 or 1..16, default 0)
+  adds a run-count RAM so one buffer entry holds a sample and how many sample
+  clocks it repeated, up to `2^RLE_W`. Idle or slow signals then cover far more
+  time in the same `DEPTH`. Turned on per capture with `CaptureConfig.rle`,
+  `fcapz capture --rle`, the RPC `rle` field, or a checkbox in the GUI and web
+  interface. Results gain `run_lengths`; VCD, the previews and the web viewer
+  place entries at their start clocks, and `expand_run_lengths()` restores one
+  sample per clock; a VCD ends where the last run does. Pre/post-trigger
+  windows count entries. Counts read back on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
+  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). An optional
+  post-trigger clock limit (`RLE_POST_CLKS`, 0x0090; `CaptureConfig.post_clocks`,
+  `--post-clocks`, RPC `post_clocks`, GUI and web fields) also ends the window
+  N sample clocks after the trigger, so a quiet signal cannot hold it open.
+  Both HDLs and all standalone ELA wrappers; `RLE_W=0` builds and behaves
+  exactly as before. Not combinable with decimation or storage qualification. The DE25-Nano
+  reference design builds with `RLE_W=16` and a second ELA channel that holds
+  each value for 8 clocks, and is hardware-validated with it.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -123,6 +141,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — a setting written just before ARM could miss that capture.** The
+  settings crossed into the sample clock through two synchronizer flops, but
+  the arm pulse came off the first flop of its own, one clock ahead. With a
+  sample clock slower than the JTAG writes, a setting and the ARM (or
+  `STARTUP_ARM` and a soft reset) landing on the same sample clock edge gave
+  that capture the old setting. The `CTRL` write that arms or soft-resets now
+  snapshots the settings in the JTAG domain, and the sample domain copies that
+  snapshot one clock before the pulse that uses it, so a capture takes exactly
+  the settings written before its ARM and none written after. The snapshot
+  replaces the first synchronizer stage, so the cost is four flip-flops, with
+  no new timing constraints. ARM and soft reset reach the capture two sample
+  clocks later than before. Older bitstreams keep the race; `force_idle()`
+  still covers it for `STARTUP_ARM`.
 - **ELA — storage qualification stored the wrong samples.** The core took
   `SQ_MODE` as the raw compare mode with 0 meaning off, so EQ could not be
   selected, and the host wrote 1 for "store when match" (NEQ on the core) and 2

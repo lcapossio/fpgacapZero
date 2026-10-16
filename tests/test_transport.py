@@ -831,6 +831,24 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
         self.assertEqual(scripts[0].count("-length 256"), 2)
 
+    def test_quartus_run_length_burst_selects_the_count_stream(self):
+        """Run counts burst on the timestamp lane with BURST_PTR[31:30] = 0b11."""
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 16, element_width=16)
+        fresh = self._quartus_burst_token(list(range(16)), element_width=16)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_run_length_block(16, 16), list(range(16)))
+        count_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0xC0000000
+        self.assertIn(t._int_to_shift_string(count_frame, t.DR_BITS), scripts[0])
+        with self.assertRaises(BurstUnavailableError):
+            FakeQuartus(burst=False).read_run_length_block(16, 16)
+
     def test_quartus_failed_burst_is_raised_not_read_around(self):
         scripts: list[str] = []
 
@@ -2228,6 +2246,27 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
         self.assertEqual(vals, list(range(8)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
+
+    def test_run_length_burst_selects_the_count_stream(self):
+        """Run counts burst on the timestamp lane with BURST_PTR[31:30] = 0b11."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32, sample_w=8)
+        first = self._burst_token(list(range(32)), sample_w=8)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            return f"{stale} {first}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_run_length_block(32, 8), list(range(32)))
+        count_frame = t._pad_dr(
+            t._frame_bits(addr=t.ADDR_BURST_PTR, data=0xC0000000, write=True)
+        )
+        self.assertIn(count_frame, sent[0])
+        with self.assertRaises(BurstIntegrityError):
+            t.read_run_length_block(33, 8)
 
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads clock idle TCKs before every captured word."""

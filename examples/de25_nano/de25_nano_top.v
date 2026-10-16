@@ -204,6 +204,10 @@ module de25_nano_top (
         .CTRL_CHAIN(1),
         .DATA_CHAIN(2),
         .INPUT_PIPE(1),
+        // Channel 1 holds each value for 8 clocks so the hardware tests
+        // see real runs with run-length capture (RLE_W).
+        .NUM_CHANNELS(2),
+        .RLE_W(16),
         .DECIM_EN(1),
         .EXT_TRIG_EN(1),
         .STOR_QUAL(1),
@@ -214,7 +218,7 @@ module de25_nano_top (
     ) u_ela (
         .sample_clk(CLOCK1_50),
         .sample_rst(por_rst),
-        .probe_in(counter),
+        .probe_in({counter & 8'hF8, counter}),
         .trigger_in(trigger_in_w),
         .trigger_out(ela_trigger_out),
         .armed_out(ela_armed)

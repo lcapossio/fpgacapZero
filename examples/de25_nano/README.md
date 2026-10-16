@@ -62,6 +62,9 @@ is the same shared subsystem the Arty A7 VexRiscv variant uses.
 - `LEDR[7:0]` are active-low and driven from EIO outputs, with `LEDR[0]`
   also showing a heartbeat.
 - EIO output bits 4-6 feed the ELA external-trigger test hooks.
+- ELA channel 0 is the free-running counter. Channel 1 is the same counter
+  with its low 3 bits cleared, so each value holds for 8 clocks; the
+  run-length capture test (`RLE_W=16`) uses it.
 - EIO input bits 15:8 count the clocks the ELA `trigger_out` was high
   (saturating at 255); EIO output bit 7 clears the count. The hardware tests
   use it to check that `trigger_out` is one clock per trigger.

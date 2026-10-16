@@ -409,11 +409,18 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
   "stor_qual_value": 0,
   "stor_qual_mask": 0,
   "trigger_delay": 0,
+  "rle": false,
   "probes": [
     {"name": "counter", "width": 8, "lsb": 0}
   ]
 }
 ```
+
+`rle` (bool, default `false`) turns on run-length capture on cores that
+report `rle_width > 0` in `probe`. Capture replies then carry a
+`run_lengths` list beside `samples`. `post_clocks` (int, default 0) also
+ends the post-trigger window that many sample clocks after the trigger; it
+needs `rle`.
 
 `probes` can also be a string in the CLI `name:width:lsb,...` form.
 Use `probe_file` with a `.prob` sidecar path to load the same information

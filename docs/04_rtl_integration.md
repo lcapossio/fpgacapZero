@@ -294,7 +294,8 @@ module fcapz_ela_xilinx7 #(
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
     parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,     // 0=disable slow USER1 DATA window readback
-    parameter WIDE_TRIG    = 0       // 1=comparator A programmable across full SAMPLE_W
+    parameter WIDE_TRIG    = 0,      // 1=comparator A programmable across full SAMPLE_W
+    parameter RLE_W        = 0       // 0=off, 1..16=run-length capture count width
 ) ( ... );
 ```
 
@@ -309,6 +310,7 @@ module fcapz_ela_xilinx7 #(
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
 | `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into the burst read engine so it knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
+| `RLE_W` | int | 0, 1..16 | Run-length capture: a parallel count RAM (`DEPTH x RLE_W`) lets one buffer entry hold a sample and how many clocks it repeated, up to `2^RLE_W`. `0` (default) builds none of it. With timestamps, `RLE_W` must not exceed `TIMESTAMP_W`; the counts share the timestamp burst lane. The post-trigger clock limit adds about 5 x `min(32, clog2(DEPTH+1) + RLE_W)` flip-flops, plus 3 x `NUM_SEGMENTS` x `clog2(DEPTH+1)` with segments. See [Run-length capture](05_ela_core.md#run-length-capture). |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |

@@ -9,6 +9,8 @@ from .analyzer import (
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
+    entry_start_clocks,
+    expand_run_lengths,
 )
 from .axi_monitor import AxiGeometry, AxiMonitor, AxiMonitorError
 from .eio import EioController
@@ -48,6 +50,8 @@ __all__ = [
     "ProbeSpec",
     "SequencerStage",
     "TriggerConfig",
+    "entry_start_clocks",
+    "expand_run_lengths",
     "Transport",
     "OpenOcdTransport",
     "XilinxHwServerTransport",

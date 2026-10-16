@@ -122,17 +122,18 @@ cannot be changed from the host. `configure` instead clears the
 subsequent resets.
 
 A startup-armed core re-loads its auto-arm flag from that register on
-every soft reset, so a single reset can race the configuration
+every soft reset. Current cores take the register with the reset write,
+but on older ones a single reset can race the configuration
 clock-domain crossing and come back still armed. `force_idle` polls
 STATUS after the reset and, if the core re-armed, resets again -- by which
 point the runtime STARTUP_ARM register cleared by `configure` has
 crossed into the sample domain -- up to `max_resets` times.
 
 Timing assumption: a STATUS read round-trips over JTAG far slower than
-the core's reset-to-re-arm latency (a couple of sample clocks), so the
+the core's reset-to-re-arm latency (a few sample clocks), so the
 first post-reset STATUS read reliably observes the settled state. This
 holds for any practical sample clock; only a sample clock so slow that a
-full JTAG access spans fewer than ~2 sample cycles could read a
+full JTAG access spans fewer than ~5 sample cycles could read a
 transient idle before a pending re-arm propagates.
 
 Note this is intentionally lossy: it discards any in-flight or
@@ -254,7 +255,8 @@ Write `result` to `out_path` as JSON.
 export_csv_text(result: CaptureResult) -> str
 ```
 
-Return `result` as CSV text: `index,value` (plus `timestamp` if present).
+Return `result` as CSV text: `index,value`, plus `timestamp` and
+`run_length` columns when the capture has them.
 
 #### `Analyzer.write_csv`
 
@@ -381,6 +383,8 @@ Everything `Analyzer.configure` writes to the ELA before a capture.
 | `startup_arm` | `bool` | `False` | runtime STARTUP_ARM register (0xD8): if True a soft reset re-arms the core. Distinct from the compile-time STARTUP_ARM RTL parameter, which sets the power-up (boot-armed) value. |
 | `trigger_holdoff` | `int` | `0` | sample-clock cycles to ignore triggers after arm/re-arm |
 | `trigger_delay` | `int` | `0` | post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event, compensating for upstream pipeline latency |
+| `rle` | `bool` | `False` | run-length capture (cores built with RLE_W): each stored entry is a sample plus how many sample clocks it held. Pre/post-trigger lengths then count entries, not clocks. |
+| `post_clocks` | `int` | `0` | run-length only: also end the post-trigger window this many sample clocks after the trigger, if posttrigger entries have not ended it first (0 = no clock limit) |
 
 ### `CaptureResult`
 
@@ -397,7 +401,8 @@ One capture read back by `Analyzer.capture`, with the config that made it.
 | `samples` | `List[int]` | `list()` |  |
 | `overflow` | `bool` | `False` |  |
 | `timestamps` | `List[int]` | `list()` |  |
-| `segment` | `int` | `0` | which segment this result is from |
+| `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry is cut where the capture ends: on the clock it starts (length 1) when posttrigger entries end it, or on the post_clocks stop clock. The signal may have held longer. |
+| `run_lengths` | `List[int]` | `list()` |  |
 
 ### `ProbeSpec`
 
@@ -458,6 +463,27 @@ Comparator trigger: `mode` is `value_match`, `edge_detect` or `both`.
 | `mode` | `str` | required |  |
 | `value` | `int` | required |  |
 | `mask` | `int` | required |  |
+
+### `entry_start_clocks`
+
+```python
+entry_start_clocks(result: CaptureResult) -> list[int]
+```
+
+Sample clock, from the first entry, at which each entry starts.
+
+`0 .. n-1` when the capture is not run-length.
+
+### `expand_run_lengths`
+
+```python
+expand_run_lengths(result: CaptureResult, max_samples: int = 16777216) -> list[int]
+```
+
+One sample per sample clock: each entry repeated for its run length.
+
+Returns `result.samples` unchanged when the capture is not run-length.
+Raises `ValueError` when the expansion would exceed `max_samples`.
 
 ## `fcapz.transport`
 
@@ -1007,6 +1033,20 @@ so it must not be read through the window.  Raises
 `BurstIntegrityError` when a burst ran but returned the wrong
 number of timestamps.
 
+#### `XilinxHwServerTransport.read_run_length_block`
+
+```python
+read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+```
+
+Read one run count per captured entry via the burst DR.
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, and `BurstIntegrityError` when a burst ran but returned the
+wrong number of counts.
+
 #### `XilinxHwServerTransport.read_timestamp_block`
 
 ```python
@@ -1211,6 +1251,19 @@ read_timestamp_block(addr: int, words: int, timestamp_width: int) -> List[int]
 ```
 
 Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
+
+#### `QuartusStpTransport.read_run_length_block`
+
+```python
+read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+```
+
+Read one run count per captured entry through the DATA_CHAIN burst.
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, so the caller can read the window instead.
 
 #### `QuartusStpTransport.read_sample_block`
 

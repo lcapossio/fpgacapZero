@@ -22,7 +22,8 @@ entity fcapz_ela_gowin is
         EIO_OUT_W      : positive := 1;
         REL_COMPARE    : natural := 0;
         DUAL_COMPARE   : natural := 1;
-        USER1_DATA_EN  : natural := 1
+        USER1_DATA_EN  : natural := 1;
+        RLE_W          : natural := 0   -- 0 = no run-length capture, 1..16 = run-count width
     );
     port (
         clk           : in  std_logic;
@@ -41,7 +42,9 @@ end entity fcapz_ela_gowin;
 
 architecture rtl of fcapz_ela_gowin is
     constant PTR_W     : positive := fcapz_clog2(DEPTH);
-    constant TS_W_SAFE : positive := fcapz_nonzero_width(TIMESTAMP_W);
+    -- Aux lane: timestamps, or run counts on a core without timestamps.
+    constant AUX_W      : natural := fcapz_ela_aux_w(TIMESTAMP_W, RLE_W);
+    constant AUX_W_SAFE : positive := fcapz_nonzero_width(AUX_W);
     constant CHAIN_IDX : natural := CHAIN - 1;
 
     signal tap_tdi       : std_logic;
@@ -59,7 +62,7 @@ architecture rtl of fcapz_ela_gowin is
 
     signal burst_rd_addr_dummy : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
     signal burst_rd_data_unused : std_logic_vector(SAMPLE_W - 1 downto 0);
-    signal burst_rd_ts_data_unused : std_logic_vector(TS_W_SAFE - 1 downto 0);
+    signal burst_rd_ts_data_unused : std_logic_vector(AUX_W_SAFE - 1 downto 0);
     signal burst_start_unused, burst_timestamp_unused : std_logic;
     signal burst_start_ptr_unused : std_logic_vector(PTR_W - 1 downto 0);
 begin
@@ -135,7 +138,7 @@ begin
                 TRIG_STAGES => TRIG_STAGES, STOR_QUAL => STOR_QUAL,
                 INPUT_PIPE => INPUT_PIPE, NUM_CHANNELS => NUM_CHANNELS,
                 TIMESTAMP_W => TIMESTAMP_W, REL_COMPARE => REL_COMPARE,
-                DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN
+                DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN, RLE_W => RLE_W
             )
             port map (
                 sample_clk => sample_clk, sample_rst => sample_rst,
@@ -174,7 +177,7 @@ begin
                 TRIG_STAGES => TRIG_STAGES, STOR_QUAL => STOR_QUAL,
                 INPUT_PIPE => INPUT_PIPE, NUM_CHANNELS => NUM_CHANNELS,
                 TIMESTAMP_W => TIMESTAMP_W, REL_COMPARE => REL_COMPARE,
-                DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN
+                DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN, RLE_W => RLE_W
             )
             port map (
                 sample_clk => sample_clk, sample_rst => sample_rst,

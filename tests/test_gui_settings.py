@@ -263,6 +263,7 @@ class TestTriggerHistoryEntry(unittest.TestCase):
         self.assertNotIn("startup_arm", d)
         self.assertEqual(d["trigger_holdoff"], 9)
         self.assertEqual(d["trigger_delay"], 3)
+        self.assertIs(d["rle"], False)
         self.assertEqual(d["trigger_sequence"], [])
         self.assertNotIn("trigger_value_radix", d)
         d16 = trigger_history_entry_from_config(cfg, trigger_value_radix=16)

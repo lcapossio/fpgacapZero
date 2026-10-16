@@ -32,7 +32,8 @@ entity fcapz_ela_xilinxus is
         EIO_OUT_W        : positive := 1;
         REL_COMPARE      : natural := 0;
         DUAL_COMPARE     : natural := 1;
-        USER1_DATA_EN    : natural := 1
+        USER1_DATA_EN    : natural := 1;
+        RLE_W            : natural := 0   -- 0 = no run-length capture, 1..16 = run-count width
     );
     port (
         sample_clk    : in  std_logic;
@@ -73,7 +74,8 @@ begin
             EIO_OUT_W => EIO_OUT_W,
             REL_COMPARE => REL_COMPARE,
             DUAL_COMPARE => DUAL_COMPARE,
-            USER1_DATA_EN => USER1_DATA_EN
+            USER1_DATA_EN => USER1_DATA_EN,
+            RLE_W => RLE_W
         )
         port map (
             sample_clk => sample_clk,

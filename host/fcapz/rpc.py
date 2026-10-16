@@ -550,6 +550,12 @@ class RpcServer:
         return delay
 
     @staticmethod
+    def _validated_post_clocks(clocks: int) -> int:
+        if clocks < 0:
+            raise ValueError(f"post_clocks must be >= 0, got {clocks}")
+        return clocks
+
+    @staticmethod
     def _validated_trigger_holdoff(delay: int) -> int:
         if not (0 <= delay <= 0xFFFF):
             raise ValueError(f"trigger_holdoff must be 0..65535, got {delay}")
@@ -623,6 +629,8 @@ class RpcServer:
                 int(req.get("trigger_holdoff", 0))
             ),
             trigger_delay=cls._validated_trigger_delay(int(req.get("trigger_delay", 0))),
+            rle=cls._validated_bool(req.get("rle", False), field="rle"),
+            post_clocks=cls._validated_post_clocks(int(req.get("post_clocks", 0))),
         )
 
     @staticmethod

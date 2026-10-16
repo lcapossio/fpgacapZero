@@ -45,6 +45,9 @@ configuration uses zero overhead for unused features):
   cycle, extending the time window without growing the buffer.
 - **Per-sample timestamp counter** (32 or 48 bit) — exported into VCD
   for cycle-accurate timing even with decimation enabled.
+- **Run-length capture** (new in v0.5.0) — store a repeated sample once
+  with how many clocks it held, so idle or slow signals cover far more
+  time in the same buffer.
 - **Segmented memory** — auto-rearm after each segment fills, so a
   single capture run can record 4, 8, or 16 separate trigger events.
 - **Runtime probe mux** — observe a wide bus and runtime-select which

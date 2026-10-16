@@ -73,7 +73,9 @@ sample array, and timestamps if present.
 ```
 
 `samples` is always present.  `timestamps` is present **only** if
-the bitstream was built with `TIMESTAMP_W > 0`.
+the bitstream was built with `TIMESTAMP_W > 0`.  `run_lengths` (same
+`{"index", "value"}` form, clocks per entry) is present only for a
+[run-length capture](05_ela_core.md#run-length-capture).
 
 ### When to use it
 
@@ -131,6 +133,9 @@ index,value,timestamp
 ...
 ```
 
+A run-length capture adds a `run_length` column (clocks per entry) after
+`timestamp`, or after `value` without timestamps.
+
 ### When to use it
 
 - **Spreadsheets**: import directly into Excel, LibreOffice, or
@@ -160,7 +165,8 @@ VCD with:
 - A `$var wire` declaration for the timestamp counter if
   `TIMESTAMP_W > 0`
 - Per-cycle value-change records using the actual cycle number
-  (or sample index, when no timestamps are present)
+  (or sample index, when no timestamps are present). A run-length
+  capture places each entry at its start clock.
 
 For segmented captures, `Analyzer.export_vcd_text_segments(results)` emits all
 segments in **one** VCD: the same signals and `logic` scope, segments

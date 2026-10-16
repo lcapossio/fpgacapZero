@@ -31,6 +31,11 @@ module fcapz_ela_bug_probe_tb;
         repeat (n) @(posedge sample_clk);
     endtask
 
+    // The stimulus after each ARM was timed for an ARM that reached the
+    // capture two sample clocks sooner, before the settings snapshot gained
+    // its sample-domain stage.  Waiting them out keeps every scenario aligned.
+    localparam int ARM_STAGE_CLKS = 2;
+
     // ---------------------------------------------------------------------
     // Regression 1: exactly-full capture must not write one extra sample
     // and overwrite the oldest entry after wrap.
@@ -347,6 +352,7 @@ module fcapz_ela_bug_probe_tb;
         write_full(16'h0024, 32'd4);
         write_full(16'h0028, 32'hFF);
         write_full(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_full = '0;
         repeat (20) begin
             @(posedge sample_clk);
@@ -371,6 +377,7 @@ module fcapz_ela_bug_probe_tb;
         write_dec(16'h0024, 32'd19);   // deliberately between store ticks
         write_dec(16'h0028, 32'hFF);
         write_dec(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_dec = '0;
         repeat (50) begin
             @(posedge sample_clk);
@@ -393,6 +400,7 @@ module fcapz_ela_bug_probe_tb;
         write_dec(16'h0028, 32'hFF);
         probe_dec = '0;
         write_dec(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         repeat (290) begin
             @(posedge sample_clk);
             probe_dec <= probe_dec + 1'b1;
@@ -415,6 +423,7 @@ module fcapz_ela_bug_probe_tb;
         write_seq(16'h0044, 32'd5);
         write_seq(16'h0048, 32'hFF);
         write_seq(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_seq = 8'd0;
         wait_sample(4);
         @(posedge sample_clk); probe_seq <= 8'd5;
@@ -431,6 +440,7 @@ module fcapz_ela_bug_probe_tb;
         write_ts(16'h0028, 32'hFF);
         dut_ts.g_ts.ts_counter = 48'h0001_0000_0100;
         write_ts(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_ts = '0;
         repeat (10) begin
             @(posedge sample_clk);
@@ -451,6 +461,7 @@ module fcapz_ela_bug_probe_tb;
         probe_w48 = 48'h1111_2222_3333;
         wait_sample(2);
         write_w48(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         wait_sample(40);
         read_w48(16'h0100, word0);
         read_w48(16'h0104, word1);
@@ -467,6 +478,7 @@ module fcapz_ela_bug_probe_tb;
         write_segtrig(16'h00B4, 32'd2);   // EXT_TRIG = AND
         write_segtrig(16'h00DC, 32'd4);   // TRIG_HOLDOFF = 4
         write_segtrig(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_segtrig = '0;
         ext_trig_segtrig = 1'b0;
         begin
@@ -507,6 +519,7 @@ module fcapz_ela_bug_probe_tb;
         write_segtrig(16'h00B4, 32'd2);
         write_segtrig(16'h00DC, 32'd4);
         write_segtrig(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         probe_segtrig = '0;
         ext_trig_segtrig = 1'b0;
         begin
@@ -550,6 +563,7 @@ module fcapz_ela_bug_probe_tb;
             probe_roll <= probe_roll + 1'b1;
         end
         write_roll(16'h0004, 32'h1);    // ARM after history is already full
+        wait_sample(ARM_STAGE_CLKS);
         begin
             integer pulse_delay;
             integer pulse_width;
@@ -610,6 +624,7 @@ module fcapz_ela_bug_probe_tb;
         // trigger can commit, and the window it then returns must be one
         // contiguous run with nothing from before this arm.
         write_roll(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         begin
             integer pulse_delay2;
             integer pulse_width2;
@@ -681,6 +696,7 @@ module fcapz_ela_bug_probe_tb;
         probe_segtrig = '0;
         ext_trig_segtrig = 1'b0;
         write_segtrig(16'h0004, 32'h1);
+        wait_sample(ARM_STAGE_CLKS);
         repeat (1120) begin
             @(posedge sample_clk);
             probe_segtrig <= probe_segtrig + 1'b1;

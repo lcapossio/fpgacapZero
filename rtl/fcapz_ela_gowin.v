@@ -42,7 +42,8 @@ module fcapz_ela_gowin #(
     parameter EIO_OUT_W    = 1,
     parameter REL_COMPARE  = 0,
     parameter DUAL_COMPARE = 1,
-    parameter USER1_DATA_EN = 1
+    parameter USER1_DATA_EN = 1,
+    parameter RLE_W = 0  // 0=no run-length capture, 1..16=run-count width
 ) (
     input  wire                             clk,
         // NOTE: this clock must be
@@ -99,7 +100,9 @@ module fcapz_ela_gowin #(
     wire [PTR_W-1:0] burst_rd_addr_dummy = {PTR_W{1'b0}};
     wire burst_rd_active_dummy = 1'b0;
     wire [SAMPLE_W-1:0] burst_rd_data_unused;
-    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data_unused;
+    // Aux lane: timestamps, or run counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    wire [((AUX_W > 0) ? AUX_W : 1)-1:0] burst_rd_ts_data_unused;
     wire burst_start_unused;
     wire burst_timestamp_unused;
     wire [PTR_W-1:0] burst_start_ptr_unused;
@@ -182,7 +185,7 @@ module fcapz_ela_gowin #(
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
-                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in), .trigger_in(1'b0),
@@ -217,7 +220,7 @@ module fcapz_ela_gowin #(
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
-                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in), .trigger_in(1'b0),

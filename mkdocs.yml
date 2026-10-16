@@ -130,3 +130,4 @@ nav:
       - Python API reference: specs/python_api.md
       - Waveform schema: specs/waveform_schema.md
       - AXI monitor (design plan): specs/axi_monitor.md
+      - Run-length capture (design plan): specs/rle_capture.md

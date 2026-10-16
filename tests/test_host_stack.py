@@ -20,7 +20,10 @@ from fcapz.analyzer import (
     ElaManager,
     SequencerStage,
     TriggerConfig,
+    entry_start_clocks,
+    expand_run_lengths,
     expected_ela_version_reg,
+    vcd_simulation_times,
 )
 from fcapz.eio import EIO_CORE_ID, EioController, discover_eio
 from fcapz.transport import (
@@ -1149,6 +1152,222 @@ class StorageQualModeTests(unittest.TestCase):
     def test_out_of_range_mode_is_rejected(self):
         with self.assertRaises(ValueError):
             self._configure(0x3_01FF | (1 << 22), 3)
+
+
+class RunLengthTransport(FakeTransport):
+    """An ELA built with RLE_W: run counts on the timestamp DATA window
+    (read while RLE_CTRL[1] is set) and, optionally, a run-length burst."""
+
+    DEPTH = 1024
+
+    def __init__(self, *, rle_w=8, timestamp_w=0, counts=(2, 0, 5, 0), burst=False):
+        super().__init__()
+        self.regs[0x00CC] = rle_w
+        self.regs[0x00C4] = timestamp_w
+        self.regs[0x00E0] = 0x3_01FF | (1 << 19) | (1 << 22)
+        self.regs[0x001C] = len(counts)  # CAPTURE_LEN
+        self.counts = list(counts)
+        self.ctrl_writes: list[int] = []
+        self.burst_calls: list[tuple[int, int]] = []
+        if burst:
+            self.read_run_length_block = self._run_length_burst
+
+    def _run_length_burst(self, n_entries, lane_width):
+        self.burst_calls.append((n_entries, lane_width))
+        return self.counts[:n_entries]
+
+    def write_reg(self, addr, value):
+        if addr == 0x00A8:
+            self.ctrl_writes.append(value)
+        super().write_reg(addr, value)
+
+    def read_block(self, addr, words):
+        if addr == 0x0100:
+            return self.data[:words]
+        lane_w = self.regs[0x00C4] or self.regs[0x00CC]
+        if addr == 0x0100 + self.DEPTH * 4 and self.regs.get(0x00A8, 0) & 2:
+            out: list[int] = []
+            for count in self.counts:
+                out += [count] + [0] * ((lane_w + 31) // 32 - 1)
+            return out[:words]
+        return [0] * words
+
+
+class RunLengthTests(unittest.TestCase):
+    """Run-length capture: configure checks, count readout, exports."""
+
+    def _cfg(self, **kw) -> CaptureConfig:
+        return replace(AnalyzerTests()._make_cfg(), **kw)
+
+    def _capture(self, transport, **kw):
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, **kw))
+        analyzer.arm()
+        return analyzer, analyzer.capture(timeout=0.01)
+
+    def test_configure_writes_enable_on_rle_cores_only(self):
+        transport = RunLengthTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True))
+        analyzer.configure(self._cfg())
+        self.assertEqual(transport.ctrl_writes, [1, 0])
+
+        plain = RunLengthTransport(rle_w=0)
+        analyzer = Analyzer(plain)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        self.assertEqual(plain.ctrl_writes, [])
+
+    def test_rejected_configs_write_nothing(self):
+        cases = (
+            (RunLengthTransport(rle_w=0), {}, "RLE_W=0"),
+            (RunLengthTransport(), {"decimation": 3}, "decimation"),
+            (RunLengthTransport(), {"stor_qual_mode": 2}, "storage qualification"),
+        )
+        for transport, kw, msg in cases:
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            before = dict(transport.regs)
+            with self.assertRaisesRegex(ValueError, msg):
+                analyzer.configure(self._cfg(rle=True, **kw))
+            self.assertEqual(transport.regs, before)
+
+    def test_post_clocks_is_written_and_clamped_to_the_register(self):
+        transport = RunLengthTransport(rle_w=8)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=20))
+        self.assertEqual(transport.regs[0x0090], 20)
+        # DEPTH 1024: LEN_W 11, + RLE_W 8 = 19 bits.
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(transport.regs[0x0090], (1 << 19) - 1)
+        # A plain capture clears a limit left by an earlier one.
+        analyzer.configure(self._cfg())
+        self.assertEqual(transport.regs[0x0090], 0)
+
+        wide = RunLengthTransport(rle_w=16)
+        analyzer = Analyzer(wide)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(wide.regs[0x0090], (1 << 27) - 1)
+
+        plain = RunLengthTransport(rle_w=0)
+        analyzer = Analyzer(plain)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        self.assertNotIn(0x0090, plain.regs)
+
+    def test_post_clocks_needs_rle(self):
+        for kw, msg in (({"post_clocks": 5}, "needs run-length"),
+                        ({"rle": True, "post_clocks": -1}, ">= 0")):
+            transport = RunLengthTransport()
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            before = dict(transport.regs)
+            with self.assertRaisesRegex(ValueError, msg):
+                analyzer.configure(self._cfg(**kw))
+            self.assertEqual(transport.regs, before)
+
+    def test_window_readout_sets_and_restores_the_count_select(self):
+        transport = RunLengthTransport()
+        _, result = self._capture(transport)
+        self.assertEqual(result.samples, [1, 2, 3, 4])
+        self.assertEqual(result.run_lengths, [3, 1, 6, 1])
+        # enable on configure, then counts on the window and back.
+        self.assertEqual(transport.ctrl_writes, [1, 3, 1])
+
+    def test_window_counts_are_masked_and_take_the_low_lane_word(self):
+        transport = RunLengthTransport(rle_w=2, timestamp_w=48, counts=(7, 1, 0, 2))
+        _, result = self._capture(transport)
+        self.assertEqual(result.run_lengths, [4, 2, 1, 3])
+
+    def test_burst_reads_the_lane_width_and_masks_to_rle_w(self):
+        transport = RunLengthTransport(timestamp_w=32, counts=(0x1FF, 0, 1, 0), burst=True)
+        _, result = self._capture(transport)
+        self.assertEqual(transport.burst_calls, [(4, 32)])  # the timestamp lane
+        self.assertEqual(result.run_lengths, [0x100, 1, 2, 1])
+        self.assertEqual(transport.ctrl_writes, [1])  # no window read
+
+        transport = RunLengthTransport(rle_w=12, burst=True)
+        self._capture(transport)
+        self.assertEqual(transport.burst_calls, [(4, 12)])  # the counts' own lane
+
+    def test_unavailable_burst_falls_back_to_the_window(self):
+        transport = RunLengthTransport(burst=True)
+
+        def unavailable(n_entries, lane_width):
+            raise BurstUnavailableError("burst readout is off")
+
+        transport.read_run_length_block = unavailable
+        _, result = self._capture(transport)
+        self.assertEqual(result.run_lengths, [3, 1, 6, 1])
+
+    def test_plain_capture_on_an_rle_core_has_no_run_lengths(self):
+        transport = RunLengthTransport(burst=True)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(result.run_lengths, [])
+        self.assertEqual(transport.burst_calls, [])
+
+    def test_entries_place_at_their_start_clock(self):
+        result = CaptureResult(
+            config=self._cfg(rle=True), samples=[1, 2, 3], run_lengths=[3, 1, 2]
+        )
+        self.assertEqual(entry_start_clocks(result), [0, 3, 4])
+        self.assertEqual(vcd_simulation_times(result), [0, 3, 4])
+        self.assertEqual(expand_run_lengths(result), [1, 1, 1, 2, 3, 3])
+        with self.assertRaises(ValueError):
+            expand_run_lengths(result, max_samples=5)
+        plain = CaptureResult(config=self._cfg(), samples=[5, 6])
+        self.assertEqual(vcd_simulation_times(plain), [0, 1])
+        self.assertEqual(expand_run_lengths(plain), [5, 6])
+
+    def test_vcd_keeps_the_last_run_length(self):
+        analyzer = Analyzer(RunLengthTransport())
+        cfg = self._cfg(rle=True)
+        one = CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10])
+        self.assertTrue(analyzer.export_vcd_text(one).endswith("#2\nb00000010 s\n#12\n"))
+        segments = [
+            CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10], segment=0),
+            CaptureResult(config=cfg, samples=[3], run_lengths=[5], segment=1),
+        ]
+        text = analyzer.export_vcd_text_segments(segments)
+        # Segment 1 starts where segment 0's last run ends, and the dump ends
+        # where segment 1's run does.
+        self.assertIn("#12\nb1 t\n", text)
+        self.assertTrue(text.endswith("#17\n"))
+
+    def test_exports_carry_the_run_lengths(self):
+        analyzer = Analyzer(RunLengthTransport())
+        result = CaptureResult(
+            config=self._cfg(rle=True), samples=[1, 2], run_lengths=[4, 1]
+        )
+        self.assertEqual(
+            analyzer.export_csv_text(result), "index,value,run_length\n0,1,4\n1,2,1\n"
+        )
+        self.assertEqual(
+            analyzer.export_json(result)["run_lengths"],
+            [{"index": 0, "value": 4}, {"index": 1, "value": 1}],
+        )
+        self.assertIn("#4\n", analyzer.export_vcd_text(result))
+        result.timestamps = [10, 14]
+        self.assertEqual(
+            analyzer.export_csv_text(result),
+            "index,value,timestamp,run_length\n0,1,10,4\n1,2,14,1\n",
+        )
+
+    def test_probe_reports_the_run_count_width(self):
+        analyzer = Analyzer(RunLengthTransport(rle_w=16))
+        analyzer.connect()
+        self.assertEqual(analyzer.probe()["rle_width"], 16)
+        analyzer = Analyzer(RunLengthTransport(rle_w=0))
+        analyzer.connect()
+        self.assertEqual(analyzer.probe()["rle_width"], 0)
 
 
 class SequencerTests(unittest.TestCase):

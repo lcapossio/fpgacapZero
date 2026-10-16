@@ -14,6 +14,10 @@ package fcapz_util_pkg is
     -- optional 8-bit transaction-events word (DECODE_EN). Mirrors the Verilog
     -- SAMPLE_W localparam so the VHDL port widths stay in lockstep.
     function fcapz_axi_mon_sample_w(addr_w : positive; data_w : positive; decode_en : natural) return positive;
+    -- Width of the ELA aux lane (burst_rd_ts_data and the timestamp DATA
+    -- window): timestamps, or run counts on a core without timestamps.
+    -- Mirrors AUX_W in rtl/fcapz_ela.v.
+    function fcapz_ela_aux_w(timestamp_w : natural; rle_w : natural) return natural;
 end package fcapz_util_pkg;
 
 library ieee;
@@ -69,5 +73,13 @@ package body fcapz_util_pkg is
         -- AW(addr_w+5) + W(data_w + data_w/8 + 2) + B(4) + AR(addr_w+5) + R(data_w+4)
         --   = 2*addr_w + 2*data_w + data_w/8 + 20, plus the optional events word.
         return 2 * addr_w + 2 * data_w + data_w / 8 + 20 + events_w;
+    end function;
+
+    function fcapz_ela_aux_w(timestamp_w : natural; rle_w : natural) return natural is
+    begin
+        if timestamp_w > 0 then
+            return timestamp_w;
+        end if;
+        return rle_w;
     end function;
 end package body fcapz_util_pkg;

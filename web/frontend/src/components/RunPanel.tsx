@@ -157,6 +157,12 @@ export function RunPanel({
       ext_trigger_mode: Number(ela.extTriggerMode),
       sequence,
       segments: ela.segmented,
+      // Only an RLE core accepts it; the server rejects rle=true otherwise.
+      rle: ela.rle && Number(identity.rle_width) > 0,
+      post_clocks:
+        ela.rle && Number(identity.rle_width) > 0
+          ? Math.max(0, Math.floor(Number(ela.postClocks)) || 0)
+          : 0,
       probes: parseProbesText(ela.probesText),
       sample_width: identity.sample_width,
       depth: identity.depth,
