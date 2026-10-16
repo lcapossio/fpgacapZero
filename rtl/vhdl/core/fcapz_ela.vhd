@@ -409,6 +409,7 @@ architecture rtl of fcapz_ela is
     signal arm_sel_change    : std_logic := '0';
     signal sel_flush_start   : std_logic := '0';
     signal arm_sq_bubble     : std_logic := '0';
+    signal sq_mode_on        : std_logic := '0';
     signal arm_voids_history : std_logic := '0';
     signal sel_flush_active  : std_logic := '0';
     signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
@@ -673,8 +674,12 @@ begin
     -- Arming clears the registered storage-qualification hit, so with the
     -- registered compare and qualification on, the sample right after the
     -- arm is not stored and the rolling history gets a hole.
-    arm_sq_bubble <= '1' when PROBE_PIPE > 0 and STOR_QUAL /= 0 and
-                              sq_mode_sync2(3 downto 0) /= x"0" else '0';
+    -- SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
+    -- (EQ..CHANGED).  Other values turn it off too.
+    sq_mode_on <= '1' when STOR_QUAL /= 0 and
+                           unsigned(sq_mode_sync2(3 downto 0)) /= 0 and
+                           unsigned(sq_mode_sync2(3 downto 0)) <= 9 else '0';
+    arm_sq_bubble <= '1' when PROBE_PIPE > 0 and sq_mode_on = '1' else '0';
     -- Arms after which the rolling pre-arm history cannot be trusted.
     arm_voids_history <= arm_sel_change or arm_sq_bubble;
 
@@ -1066,8 +1071,12 @@ begin
                     ext_trig_mode <= (others => '0');
                 end if;
                 if STOR_QUAL /= 0 then
-                    sq_enable <= bool_to_sl(sq_mode_sync2(3 downto 0) /= x"0");
-                    sq_cmp_mode <= sq_mode_sync2(3 downto 0);
+                    sq_enable <= sq_mode_on;
+                    if sq_mode_on = '1' then
+                        sq_cmp_mode <= std_logic_vector(unsigned(sq_mode_sync2(3 downto 0)) - 1);
+                    else
+                        sq_cmp_mode <= (others => '0');
+                    end if;
                     sq_value <= expand32(sq_value_sync2);
                     sq_mask <= expand32(sq_mask_sync2);
                 else
@@ -2030,6 +2039,7 @@ begin
                     r(18) := '1';  -- full-width comparator A programmable
                 end if;
                 r(19) := '1';  -- timestamp window base decoded at full width
+                r(22) := '1';  -- SQ_MODE is compare mode + 1
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then

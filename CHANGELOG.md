@@ -123,6 +123,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — storage qualification stored the wrong samples.** The core took
+  `SQ_MODE` as the raw compare mode with 0 meaning off, so EQ could not be
+  selected, and the host wrote 1 for "store when match" (NEQ on the core) and 2
+  for "store when no match" (LT). The host also skipped the write for mode 0, so
+  a qualifier from an earlier capture stayed on. `SQ_MODE` now holds the compare
+  mode plus one (1 = EQ, 2 = NEQ, ... 9 = CHANGED; 0 and 10..15 = off), shown by
+  new `COMPARE_CAPS` bit 22, and the host always writes it. On older cores the
+  host maps mode 2 to NEQ and rejects mode 1. Code that writes `SQ_MODE`
+  directly must add 1 to the compare mode. `AxiMonitor.beat_storage_qual()` now
+  returns mode 2. Both HDLs. The DE25-Nano ELA now builds with `STOR_QUAL=1`,
+  and its hardware tests cover modes 0, 1 and 2.
+
 - **ELA — the sequencer loop index had two drivers before optimization.** One
   module-level `integer si` was the loop index of two clocked blocks, so right
   after `proc` yosys `check` reported 32 conflicting drivers, and recent

@@ -239,7 +239,8 @@ module fcapz_ela #(
         COMPARE_MODE_CAPS | 32'h0002_0000 |
         (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
         (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000) |  // bit18: wide comparator A
-        32'h0008_0000;  // bit19: timestamp window base decoded at full width
+        32'h0008_0000 |  // bit19: timestamp window base decoded at full width
+        32'h0040_0000;   // bit22: SQ_MODE is compare mode + 1
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -296,7 +297,7 @@ module fcapz_ela #(
     reg reset_toggle_jtag;
 
     // Storage qualification JTAG registers
-    reg [31:0] jtag_sq_mode;   // [3:0]=cmp_mode
+    reg [31:0] jtag_sq_mode;   // [3:0]=compare mode + 1, 0=off
     reg [31:0] jtag_sq_value;
     reg [31:0] jtag_sq_mask;
     wire [SAMPLE_W-1:0] jtag_sq_value_w;
@@ -369,6 +370,9 @@ module fcapz_ela #(
     reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
     reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
     reg [3:0]          sq_mode_sync1, sq_mode_sync2;
+    // SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
+    // (EQ..CHANGED).  Other values turn it off too.
+    wire sq_mode_on = HAS_STOR_QUAL && (sq_mode_sync2 != 4'd0) && (sq_mode_sync2 <= 4'd9);
     reg [SAMPLE_W-1:0] sq_value_sync1, sq_value_sync2;
     reg [SAMPLE_W-1:0] sq_mask_sync1, sq_mask_sync2;
     reg [31:0]         seq_cfg_sync1     [0:TRIG_STAGES-1];
@@ -638,7 +642,7 @@ module fcapz_ela #(
     // Arming clears the registered storage-qualification hit, so with
     // COMPARE_PIPE and qualification on, the sample right after the arm is
     // not stored and the rolling history gets a hole.
-    wire arm_sq_bubble = (COMPARE_PIPE != 0) && HAS_STOR_QUAL && (sq_mode_sync2 != 0);
+    wire arm_sq_bubble = (COMPARE_PIPE != 0) && sq_mode_on;
     // Arms after which the rolling pre-arm history cannot be trusted.
     wire arm_voids_history = arm_sel_change || arm_sq_bubble;
     reg                   sel_flush_active;
@@ -1274,8 +1278,8 @@ module fcapz_ela #(
             // Probe mux select (clamped when enabled)
             probe_sel        <= probe_sel_next;
             // Storage qualification
-            sq_enable        <= HAS_STOR_QUAL && (sq_mode_sync2 != 0);
-            sq_cmp_mode      <= HAS_STOR_QUAL ? sq_mode_sync2 : 4'h0;
+            sq_enable        <= sq_mode_on;
+            sq_cmp_mode      <= sq_mode_on ? sq_mode_sync2 - 4'd1 : 4'h0;
             sq_value         <= HAS_STOR_QUAL ? sq_value_sync2 : {SAMPLE_W{1'b0}};
             sq_mask          <= HAS_STOR_QUAL ? sq_mask_sync2 : {SAMPLE_W{1'b0}};
             // Phase 1: decimation

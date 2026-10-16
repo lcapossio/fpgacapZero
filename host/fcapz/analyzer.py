@@ -124,6 +124,9 @@ _COMPARE_CAPS_WIDE_TRIG = 1 << 18
 # COMPARE_CAPS bit 19: the timestamp window base is decoded at full width.
 # Cores without it decode a base past 0x10000 at its low 16 bits.
 _COMPARE_CAPS_TS_BASE_FULL = 1 << 19
+# COMPARE_CAPS bit 22: SQ_MODE holds the compare mode plus one (1 = EQ,
+# 2 = NEQ).  Cores without it take the raw compare mode, so EQ (0) means off.
+_COMPARE_CAPS_SQ_MODE_PLUS1 = 1 << 22
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -182,6 +185,20 @@ def _validate_compare_mode(caps: int, mode: int, context: str) -> None:
             f"{context} compare mode {mode} is not available in this bitstream "
             f"(COMPARE_CAPS=0x{caps:03X}); rebuild with REL_COMPARE=1 for modes 2-5"
         )
+
+
+def _sq_mode_register(caps: int, mode: int) -> int:
+    """SQ_MODE register value for ``stor_qual_mode`` 0 (off), 1 (match), 2 (no match)."""
+    if mode not in (0, 1, 2):
+        raise ValueError(f"stor_qual_mode must be 0, 1, or 2, got {mode}")
+    if mode == 0 or caps & _COMPARE_CAPS_SQ_MODE_PLUS1:
+        return mode
+    if mode == 2:
+        return 1  # NEQ in the raw encoding
+    raise ValueError(
+        "store-when-match (stor_qual_mode=1) needs COMPARE_CAPS bit 22; "
+        "this bitstream's storage qualifier cannot select EQ. Rebuild the core."
+    )
 
 
 def _dual_compare_available(caps: int) -> bool:
@@ -569,6 +586,7 @@ class Analyzer:
         raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
         self._hw_compare_caps = raw_compare_caps
         hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
+        sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
 
@@ -626,10 +644,11 @@ class Analyzer:
         self.transport.write_reg(_ADDR_STARTUP_ARM, int(bool(config.startup_arm)))
         self.transport.write_reg(_ADDR_TRIG_HOLDOFF, config.trigger_holdoff)
         self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
-        if config.stor_qual_mode:
-            self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
-            self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
-            self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask)
+        # Always written, so mode 0 turns off a qualifier left by an earlier
+        # capture.
+        self.transport.write_reg(_ADDR_SQ_MODE, sq_mode)
+        self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask & 0xFFFF_FFFF)
 
         if config.sequence is not None:
             if hw_trig_stages == 0:

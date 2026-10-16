@@ -232,6 +232,7 @@ module de25_nano_vex_top (
         .INPUT_PIPE(1),
         .DECIM_EN(1),
         .EXT_TRIG_EN(1),
+        .STOR_QUAL(1),
         .TIMESTAMP_W(32),
         .NUM_SEGMENTS(4),
         .STARTUP_ARM(1),

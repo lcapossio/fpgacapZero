@@ -149,7 +149,8 @@ python examples/de25_nano/run_hw_tests.py \
 
 The pytest suite mirrors the Arty A7 hardware regression coverage where the
 DE25-Nano design has equivalent Intel/Altera plumbing: ELA identity/registers,
-captures, trigger delay, decimation, timestamps, segmented capture, EIO
+captures, trigger delay, decimation, storage qualification, timestamps,
+segmented capture, EIO
 read/write, and EJTAG-AXI read/write/burst/error paths.
 
 ## Soak Test

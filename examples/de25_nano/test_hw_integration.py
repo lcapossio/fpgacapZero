@@ -568,6 +568,61 @@ class TestDecimation(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestStorageQualification(unittest.TestCase):
+    """ELA storage qualifier on the counter: store odd or even samples only."""
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+
+        self.a = Analyzer(_make_transport(), chain=ELA_CHAIN)
+        self.a.connect()
+        if not self.a.probe()["has_storage_qualification"]:
+            self.a.close()
+            self.skipTest("this bitstream has no STOR_QUAL")
+
+    def tearDown(self):
+        self.a.close()
+
+    def _capture(self, sq_mode: int, trigger: int) -> list[int]:
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=SAMPLE_CLOCK_HZ,
+            pretrigger=2,
+            posttrigger=4,
+            trigger=TriggerConfig(mode="value_match", value=trigger, mask=0xFF),
+            stor_qual_mode=sq_mode,
+            stor_qual_value=1,
+            stor_qual_mask=1,
+        )
+        self.a.configure(cfg)
+        self.a.arm()
+        samples = [s & 0xFF for s in self.a.capture(timeout=5.0).samples]
+        self.assertIn(trigger, samples)
+        return samples
+
+    def _gaps(self, samples: list[int]) -> list[int]:
+        return [(samples[i] - samples[i - 1]) & 0xFF for i in range(1, len(samples))]
+
+    def test_store_when_match_keeps_odd_samples(self):
+        samples = self._capture(1, 0x41)
+        self.assertTrue(all(s & 1 for s in samples), samples)
+        self.assertTrue(all(g == 2 for g in self._gaps(samples)), samples)
+
+    def test_store_when_no_match_keeps_even_samples(self):
+        samples = self._capture(2, 0x40)
+        self.assertFalse(any(s & 1 for s in samples), samples)
+        self.assertTrue(all(g == 2 for g in self._gaps(samples)), samples)
+
+    def test_mode_zero_turns_off_an_earlier_qualifier(self):
+        self._capture(2, 0x40)
+        samples = self._capture(0, 0x40)
+        self.assertTrue(all(g == 1 for g in self._gaps(samples)), samples)
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestTimestamps(unittest.TestCase):
     """ELA timestamps: verify monotonic timestamp capture."""
 

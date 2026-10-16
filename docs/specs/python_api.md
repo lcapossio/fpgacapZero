@@ -1572,8 +1572,8 @@ in the low byte, so a NEQ-vs-zero storage qualifier over their mask
 stores a sample **only on cycles where at least one channel handshakes**
 — compressing the capture to transaction beats.
 
-Returns the ELA storage-qualifier tuple: mode `1` (NEQ, i.e. store
-when the masked bits are non-zero), value `0`, mask = the OR of the
+Returns the ELA storage-qualifier tuple: mode `2` (store on no
+match, i.e. when the masked bits are non-zero), value `0`, mask = the OR of the
 handshake-event bits.  Requires a DECODE_EN=1 build (the handshake bits
 do not exist otherwise).
 

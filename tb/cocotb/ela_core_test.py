@@ -795,7 +795,7 @@ async def rearm_mid_capture_restarts_cleanly(dut):
             if STOR_QUAL:
                 # Qualifier that keeps every counter sample (bit 0 always
                 # changes), so any hole in the window is the core's.
-                await ela.write(ADDR_SQ_MODE, 8)
+                await ela.write(ADDR_SQ_MODE, 9)  # CHANGED
                 await ela.write(ADDR_SQ_VALUE, 0)
                 await ela.write(ADDR_SQ_MASK, 0x01)
             await ela.arm()
@@ -823,7 +823,7 @@ async def soft_reset_drops_idle_prefill_credit(dut):
     counter = cocotb.start_soon(free_running_counter(dut))
     pre = 96
     await ela.configure_value_capture(pre=pre, post=0, value=0, mask=0)
-    await ela.write(ADDR_SQ_MODE, 8)  # CHANGED on bit 0: keeps every sample
+    await ela.write(ADDR_SQ_MODE, 9)  # CHANGED on bit 0: keeps every sample
     await ela.write(ADDR_SQ_MASK, 0x01)
     await ela.arm()  # latch pre and the qualifier
     await ela.reset_core()  # idle prefill, pre_count still below pre
@@ -1100,7 +1100,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -1127,7 +1127,7 @@ async def config_user1_disabled(dut):
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000A_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -1149,10 +1149,10 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x000B_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
-    await ela.write(ADDR_SQ_MODE, 1)
+    await ela.write(ADDR_SQ_MODE, 2)  # NEQ
     await ela.write(ADDR_SQ_VALUE, 0)
     await ela.write(ADDR_SQ_MASK, 1)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1306)
@@ -1588,7 +1588,7 @@ async def trigger_marks_the_matched_sample(dut):
     if STOR_QUAL:
         # Store odd samples only (NEQ against bit 0 clear).
         await ela.reset_core()
-        await ela.write(ADDR_SQ_MODE, 1)
+        await ela.write(ADDR_SQ_MODE, 2)  # NEQ
         await ela.write(ADDR_SQ_VALUE, 0)
         await ela.write(ADDR_SQ_MASK, 1)
         window = await _counter_window(ela, pre=3, post=3, value=0x41)

@@ -1107,6 +1107,50 @@ class AnalyzerTests(unittest.TestCase):
         self.assertTrue(analyzer.probe()["has_wide_trigger"])
 
 
+class StorageQualModeTests(unittest.TestCase):
+    """stor_qual_mode 1 (match) and 2 (no match) map onto SQ_MODE by core."""
+
+    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+        transport = FakeTransport()
+        transport.regs[0x00E0] = caps
+        transport.regs[0x0030] = old_sq_mode
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(replace(
+            AnalyzerTests()._make_cfg(),
+            stor_qual_mode=mode, stor_qual_value=0x42, stor_qual_mask=0xFF,
+        ))
+        return transport
+
+    def test_plus_one_core_takes_eq_and_neq(self):
+        caps = 0x3_01FF | (1 << 22)
+        self.assertEqual(self._configure(caps, 1).regs[0x0030], 1)  # EQ
+        self.assertEqual(self._configure(caps, 2).regs[0x0030], 2)  # NEQ
+        regs = self._configure(caps, 1).regs
+        self.assertEqual((regs[0x0034], regs[0x0038]), (0x42, 0xFF))
+
+    def test_older_core_maps_no_match_to_raw_neq(self):
+        for caps in (0x3_01FF, 0):  # 0 = core older than COMPARE_CAPS
+            self.assertEqual(self._configure(caps, 2).regs[0x0030], 1)
+
+    def test_older_core_rejects_match_before_writing(self):
+        transport = FakeTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        before = dict(transport.regs)
+        with self.assertRaisesRegex(ValueError, "bit 22"):
+            analyzer.configure(replace(AnalyzerTests()._make_cfg(), stor_qual_mode=1))
+        self.assertEqual(transport.regs, before)
+
+    def test_mode_zero_turns_off_an_earlier_qualifier(self):
+        regs = self._configure(0x3_01FF | (1 << 22), 0, old_sq_mode=2).regs
+        self.assertEqual(regs[0x0030], 0)
+
+    def test_out_of_range_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._configure(0x3_01FF | (1 << 22), 3)
+
+
 class SequencerTests(unittest.TestCase):
     """Tests for trigger sequencer register writes via configure()."""
 

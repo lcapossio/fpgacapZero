@@ -131,7 +131,7 @@ remain low-32 for now.
 
 A passive tap samples **every** `ACLK`, so a mostly-idle bus fills the buffer
 with idle repeats. On a `DECODE_EN` build, `event_capture_config(...,
-store_on_beats=True)` enables the ELA storage qualifier (NEQ-vs-zero over the
+store_on_beats=True)` enables the ELA storage qualifier (no-match-vs-zero over the
 handshake bits) so only cycles where a channel handshakes are stored — the buffer
 holds transaction beats around the trigger instead of idle.
 

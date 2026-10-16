@@ -246,8 +246,8 @@ class AxiMonitor:
         stores a sample **only on cycles where at least one channel handshakes**
         — compressing the capture to transaction beats.
 
-        Returns the ELA storage-qualifier tuple: mode ``1`` (NEQ, i.e. store
-        when the masked bits are non-zero), value ``0``, mask = the OR of the
+        Returns the ELA storage-qualifier tuple: mode ``2`` (store on no
+        match, i.e. when the masked bits are non-zero), value ``0``, mask = the OR of the
         handshake-event bits.  Requires a DECODE_EN=1 build (the handshake bits
         do not exist otherwise).
         """
@@ -259,7 +259,7 @@ class AxiMonitor:
         mask = 0
         for name in HANDSHAKE_EVENTS:
             mask |= 1 << EVENT_BITS[name]
-        return (1, 0, mask)  # NEQ vs 0 over the handshake bits
+        return (2, 0, mask)  # no match vs 0 over the handshake bits
 
     def event_capture_config(
         self,

@@ -278,6 +278,11 @@ Modes:
 | 1 | Store when `(probe & mask) == (value & mask)` |
 | 2 | Store when `(probe & mask) != (value & mask)` |
 
+The `SQ_MODE` register holds the compare mode plus one, so it can
+also select the relational and edge modes (see the register map).
+Cores older than `COMPARE_CAPS` bit 22 take the raw compare mode:
+on them the host maps mode 2 to NEQ and rejects mode 1.
+
 Cost: +21 LUTs in the RTL when `STOR_QUAL=1` is built in.  Free
 when `STOR_QUAL=0`.
 
