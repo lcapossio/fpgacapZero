@@ -22,6 +22,7 @@ import json
 import secrets
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import urlsplit
 
 from fastapi import (
     Depends,
@@ -95,6 +96,85 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
     return None
 
 
+def _serial_allowed(client_host: Optional[str], token: Optional[str]) -> bool:
+    """May this client reach serial ports?  Loopback, or any on a token server.
+
+    Enumerating is harmless on its own -- ``list_serial_ports`` never opens a
+    port -- but it hands a caller the exact device names, and a serial
+    ``connect`` then opens one, which asserts DTR/RTS.  On a development machine
+    that reaches far beyond the board under test: JTAG probes, vendor
+    programmers and USB-serial bridges all appear as serial ports, and opening
+    one resets an RP2040/RP2350 or disturbs a programming session.
+
+    A server bound beyond loopback with no ``--token`` has no authentication at
+    all, so that would be an unauthenticated hardware-denial primitive.  Remote
+    use stays available -- it just has to be authenticated.  Loopback clients
+    are unaffected either way.
+
+    The answer is passed to :meth:`RpcGateway.call`, which enforces it under
+    the session lock: a request that names no backend (``capture``,
+    ``close``) still reaches the serial port when the open session is serial,
+    and only the gateway knows what the open session is.
+    """
+    return token is not None or _is_loopback(client_host)
+
+
+def _origin_ok(
+    origin: Optional[str],
+    host_header: Optional[str],
+    client_host: Optional[str],
+    allowed_origins: Iterable[str],
+    ws_scheme: str = "ws",
+) -> bool:
+    """Cross-site WebSocket gate.
+
+    CORS does not cover WebSockets: any page a browser has open can connect to
+    ``ws://127.0.0.1:7373/api/ws``, and its ``Host`` header is the real one,
+    so the rebinding check passes.  On a token-less loopback server that page
+    would get the whole API.  Browsers always send ``Origin`` on a WebSocket
+    handshake, so require it to be this server, a configured CORS origin, or
+    -- for the Vite dev proxy, which rewrites ``Host`` but not ``Origin`` -- a
+    loopback page reaching us from loopback.  No ``Origin`` at all is a
+    non-browser client (a script), which the token governs as before.
+    """
+    if origin is None:
+        return True
+    if origin in allowed_origins:
+        return True
+    parsed = urlsplit(origin)
+    if not parsed.hostname:  # "null": a sandboxed frame or a file:// page
+        return False
+    if _same_origin(parsed, host_header, ws_scheme):
+        return True
+    return _is_loopback(parsed.hostname) and _is_loopback(client_host)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _same_origin(origin, host_header: Optional[str], ws_scheme: str) -> bool:
+    """Is the page at *origin* (a ``urlsplit`` result) this server?
+
+    Scheme, host and effective port must all match.  Comparing ``host:port``
+    alone would let a plain-HTTP page reach a ``wss://`` server on the same
+    name, since both default their port away.
+    """
+    page_scheme = {"ws": "http", "wss": "https"}.get(ws_scheme, ws_scheme)
+    if not host_header or origin.scheme.lower() != page_scheme:
+        return False
+    server = urlsplit("//" + host_header.strip())
+    try:
+        origin_port = origin.port or _DEFAULT_PORTS.get(page_scheme)
+        server_port = server.port or _DEFAULT_PORTS.get(page_scheme)
+    except ValueError:  # a malformed port
+        return False
+    return (
+        origin.hostname is not None
+        and origin.hostname == server.hostname
+        and origin_port == server_port
+    )
+
+
 def _host_name(host_header: Optional[str]) -> Optional[str]:
     """Hostname part of a ``Host`` header, stripping the port and IPv6 brackets."""
     if not host_header:
@@ -147,6 +227,7 @@ def create_app(
                 quartus_stp_path=quartus_stp_path,
             )
         )
+    cors_origins = tuple(cors_origins)
     app = FastAPI(title="fpgacapZero web", version="1")
     app.state.gateway = gateway
     # Capture fcapz backend logs into a ring buffer for the web Log tab, so
@@ -198,14 +279,27 @@ def create_app(
                 "error": "Host not allowed (possible DNS rebinding).",
                 "type": "PermissionError",
             }
-        blocked = _openocd_guard(req, request.client.host if request.client else None)
+        client_host = request.client.host if request.client else None
+        blocked = _openocd_guard(req, client_host)
         if blocked is not None:
             return blocked
-        return await run_in_threadpool(gateway.call, req)
+        return await run_in_threadpool(
+            gateway.call, req, serial_allowed=_serial_allowed(client_host, token)
+        )
 
     @app.websocket("/api/ws")
     async def ws(websocket: WebSocket):
+        client_host = websocket.client.host if websocket.client else None
         if not _host_header_ok(websocket.headers.get("host"), bind_host):
+            await websocket.close(code=1008)
+            return
+        if not _origin_ok(
+            websocket.headers.get("origin"),
+            websocket.headers.get("host"),
+            client_host,
+            cors_origins,
+            websocket.url.scheme,
+        ):
             await websocket.close(code=1008)
             return
         if token is not None and not _token_ok(websocket.query_params.get("token"), token):
@@ -233,13 +327,15 @@ def create_app(
                         }
                     )
                     continue
-                blocked = _openocd_guard(
-                    req, websocket.client.host if websocket.client else None
-                )
+                blocked = _openocd_guard(req, client_host)
                 if blocked is not None:
                     await websocket.send_json(blocked)
                     continue
-                resp = await run_in_threadpool(gateway.call, req)
+                resp = await run_in_threadpool(
+                    gateway.call,
+                    req,
+                    serial_allowed=_serial_allowed(client_host, token),
+                )
                 await websocket.send_json(resp)
         except WebSocketDisconnect:
             return

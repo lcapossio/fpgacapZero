@@ -807,10 +807,50 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return f"{stale} {fresh0} {fresh1}"
 
         t = FakeQuartus()
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         self.assertEqual(t._read_block_burst(33), list(range(33)))
         self.assertEqual(len(scripts), 1)  # one pass, no repeat
         self.assertEqual(scripts[0].count("-length 256"), 3)
+
+    def _quartus_reading(self, sample_widths: list[int], scans: list[str]):
+        """A FakeQuartus whose SAMPLE_W reads return *sample_widths* in turn
+        and whose burst scripts return *scans*."""
+        widths = iter(sample_widths)
+
+        class FakeQuartus(QuartusStpTransport):
+            def read_reg(self, addr):
+                assert addr == 0x000C
+                return next(widths)
+
+            def _send(self, script):
+                return " ".join(scans)
+
+        return FakeQuartus()
+
+    def test_quartus_burst_stride_is_the_sample_width(self):
+        """24-bit samples sit at bits 0, 24, 48 ...; deriving the stride as
+        256 // (256 // 24) = 25 decodes every sample after the first wrong."""
+        values = [(0xA5A5A5 + i * 0x010203) & 0xFFFFFF for i in range(10)]
+        fresh = self._quartus_burst_token(values, element_width=24)
+        t = self._quartus_reading([24], ["0" * 256, fresh])
+        self.assertEqual(t.read_block(0x0100, 10), values)
+
+    def test_quartus_sample_width_is_read_for_every_burst(self):
+        """A cached width would unpack the next core or slot at the old one."""
+        narrow = self._quartus_burst_token([1, 2, 3, 4], element_width=8)
+        t = self._quartus_reading([8, 16], ["0" * 256, narrow])
+        self.assertEqual(t.read_block(0x0100, 4), [1, 2, 3, 4])
+        wide = self._quartus_burst_token([0x1001, 0x2002], element_width=16)
+        t._send = lambda script: " ".join(["0" * 256, wide])  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 2), [0x1001, 0x2002])
+
+    def test_quartus_read_block_reads_a_wide_core_through_the_window(self):
+        """read_block returns 32-bit words; a burst returns whole samples."""
+        t = self._quartus_reading([64], [])
+        t._read_block_burst = MagicMock()  # type: ignore[method-assign]
+        t.read_window_block = MagicMock(return_value=[1, 2, 3, 4])  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 4), [1, 2, 3, 4])
+        t._read_block_burst.assert_not_called()
 
     def test_quartus_timestamp_burst_primes_and_selects_timestamp_stream(self):
         scripts: list[str] = []
@@ -840,6 +880,7 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return f"{1:049b} {2:049b}"
 
         t = FakeQuartus()
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         t._read_block_burst = MagicMock(side_effect=RuntimeError("DATA_CHAIN missing"))  # type: ignore[method-assign]
         with self.assertRaisesRegex(RuntimeError, "DATA_CHAIN missing"):
             t.read_block(0x0100, 2)
@@ -883,7 +924,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         if single_chain:
             t.read_sample_block(0x0100, n, 256)
         else:
-            t._cached_sps = 32
+            t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
             t._read_block_burst(n)
         self.assertEqual(len(scripts), 1)
         return scripts[0]
@@ -1859,18 +1900,20 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_parse_burst_bits_can_skip_priming_scan(self):
         """Burst parsing discards the priming scan when requested."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
-        vals = t._parse_burst_bits(f"{stale} {fresh}", 13, skip_scans=1)
+        vals = t._parse_burst_bits(
+            f"{stale} {fresh}", 13, skip_scans=1, element_width=8
+        )
 
         self.assertEqual(vals, list(range(13)))
 
     def test_read_block_burst_primes_user2_before_returned_scans(self):
         """Burst reads discard the first USER2 scan while staging fills."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh0 = self._burst_token(list(range(32)))
@@ -1891,7 +1934,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()
         t.select_chain(2)
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -1912,7 +1955,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -1935,7 +1978,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         for single_chain, hint in ((True, "--two-chain-burst"), (False, "BURST_EN=0")):
             with self.subTest(single_chain=single_chain):
                 t = XilinxHwServerTransport(single_chain_burst=single_chain)
-                t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+                t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
                 t._read_block_burst = MagicMock(side_effect=RuntimeError("USER2 unavailable"))  # type: ignore[method-assign]
                 t._read_block_user1 = MagicMock(return_value=[1, 2, 3])  # type: ignore[method-assign]
                 for call in (
@@ -1954,7 +1997,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
     def test_typed_burst_errors_pass_through_unchanged(self):
         t = XilinxHwServerTransport()
-        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         for error in (BurstIntegrityError("short"), DataWindowError("past the end")):
             with self.subTest(error=type(error).__name__):
                 t._read_block_burst = MagicMock(side_effect=error)  # type: ignore[method-assign]
@@ -2035,8 +2078,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         """A narrow-core burst that comes back a scan short is a readout
         defect: it is raised, not hidden behind a DATA-window re-read."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
-        t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
         # 33 samples need 2 scans + 1 prime; only 2 tokens come back.
@@ -2059,7 +2101,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_burst_with_extra_scans_is_refused(self):
         """More scans than were queued means the output is not this burst."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = MagicMock(return_value=8)  # type: ignore[method-assign]
         tok = self._burst_token(list(range(32)))
         t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
         with self.assertRaises(BurstIntegrityError):
@@ -2119,8 +2161,32 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t._read_block_user1 = MagicMock(return_value=[0])
 
         self.assertEqual(t.read_block(0x0100, 2), [9, 9])
-        t._read_block_burst.assert_called_once_with(2)
+        t._read_block_burst.assert_called_once_with(2, element_width=8)
         t._read_block_user1.assert_not_called()
+
+    def test_burst_stride_is_the_sample_width(self):
+        """24-bit samples sit at bits 0, 24, 48 ...; deriving the stride as
+        256 // (256 // 24) = 25 decodes every sample after the first wrong."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(return_value=24)
+        values = [(0xA5A5A5 + i * 0x010203) & 0xFFFFFF for i in range(10)]
+        stale = self._burst_token([0xEE] * 10, sample_w=24)
+        fresh = self._burst_token(values, sample_w=24)
+        t._send = MagicMock(return_value=f"{stale} {fresh}")  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 10), values)
+
+    def test_sample_width_is_read_for_every_burst(self):
+        """A cached width would unpack the next core or slot at the old one."""
+        t = XilinxHwServerTransport()
+        t.read_reg_stable = MagicMock(side_effect=[8, 16])
+        stale = self._burst_token([0xEE] * 4)
+        t._send = MagicMock(  # type: ignore[method-assign]
+            return_value=f"{stale} {self._burst_token([1, 2, 3, 4])}"
+        )
+        self.assertEqual(t.read_block(0x0100, 4), [1, 2, 3, 4])
+        wide = self._burst_token([0x1001, 0x2002], sample_w=16)
+        t._send = MagicMock(return_value=f"{stale} {wide}")  # type: ignore[method-assign]
+        self.assertEqual(t.read_block(0x0100, 2), [0x1001, 0x2002])
 
     def test_burst_read_tcl_targets_active_chain(self):
         """The pipelined DATA reader must shift IR on the ACTIVE chain, not a
@@ -2150,12 +2216,12 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         # 8 words fit one _BLOCK_CHUNK -> a single pipelined _send, not 8+.
         self.assertEqual(len(sent), 1)
 
-    def test_burst_sample_gate_raises_when_width_unreadable(self):
+    def test_burst_sample_width_raises_when_unreadable(self):
         """An unreadable SAMPLE_W is a link fault, not a reason to guess."""
         t = XilinxHwServerTransport()
         t.read_reg_stable = MagicMock(side_effect=RuntimeError("not connected"))
         with self.assertRaisesRegex(RuntimeError, "not connected"):
-            t._burst_sample_ok()
+            t._burst_sample_width()
 
     def test_without_burst_reads_the_window(self):
         """burst=False declares a build with no burst path: read the window."""

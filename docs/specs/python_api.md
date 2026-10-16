@@ -488,6 +488,19 @@ All methods should raise:
 * `OSError` / `TimeoutError` — for network or process-level errors
   during `connect`.
 
+#### `Transport.link_info`
+
+```python
+link_info() -> dict | None
+```
+
+Facts about the link itself, or `None` when there are none.
+
+Distinct from the core identity a `probe` returns: this describes what
+the host is talking *through*, which for a byte-stream bridge is a real
+negotiated thing (protocol version, chain count, DR width) rather than a
+constant of the wire.
+
 #### `Transport.transaction_lock`
 
 ```python
@@ -694,6 +707,7 @@ DEFAULT_IR_TABLE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX7 = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX_ULTRASCALE = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
+IR_TABLE_EFINIX = {1: 8, 2: 9}
 IR_TABLE_XILINX_ZYNQUS = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_US = {1: 36, 2: 37, 3: 38, 4: 39}
 USER1_IR = 2

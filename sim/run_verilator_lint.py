@@ -194,6 +194,48 @@ TARGETS = (
         sources=EJTAG_UART_CORE,
     ),
     LintTarget(
+        name="fcapz_tap_bridge",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+    ),
+    # Both ends of MAX_DR_BITS: the byte shift of a one-byte buffer, and a
+    # 65,536-bit buffer whose bit-shift counter is wider than scan_width.
+    LintTarget(
+        name="fcapz_tap_bridge_dr8",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+        extra_flags=("-GMAX_DR_BITS=8",),
+    ),
+    LintTarget(
+        name="fcapz_tap_bridge_dr65535",
+        top="fcapz_tap_bridge",
+        sources=(RTL / "fcapz_tap_bridge.v",),
+        # A 64 Ki-bit buffer is the point of this target, so its 64 Ki-bit
+        # replications are intended (WIDTHCONCAT flags any over 8 Ki; the
+        # --replication-limit option is newer than the CI Verilator), and the
+        # width check against MAX_DR_BITS is constant-true at the 16-bit maximum.
+        extra_flags=(
+            "-GMAX_DR_BITS=65535",
+            "-Wno-WIDTHCONCAT",
+            "-Wno-CMPCONST",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_uart_tap",
+        top="fcapz_uart_tap",
+        sources=(RTL / "fcapz_tap_bridge.v", RTL / "fcapz_uart_tap.v"),
+    ),
+    LintTarget(
+        name="fcapz_ela_uart",
+        top="fcapz_ela_uart",
+        sources=(
+            *ELA_WRAPPER_SOURCES,
+            RTL / "fcapz_tap_bridge.v",
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_ela_uart.v",
+        ),
+    ),
+    LintTarget(
         name="jtag_tap_xilinx7",
         top="jtag_tap_xilinx7",
         sources=(SIM / "bscane2_stub.v", RTL / "jtag_tap" / "jtag_tap_xilinx7.v"),
@@ -225,6 +267,13 @@ TARGETS = (
             SIM / "sld_virtual_jtag_stub.v",
             RTL / "jtag_tap" / "jtag_tap_intel.v",
         ),
+    ),
+    LintTarget(
+        # Efinix JTAG User TAP is an Interface Designer block (top-level ports),
+        # not an RTL primitive, so the adapter needs no simulation stub.
+        name="jtag_tap_efinix",
+        top="jtag_tap_efinix",
+        sources=(RTL / "jtag_tap" / "jtag_tap_efinix.v",),
     ),
     LintTarget(
         name="fcapz_ela_xilinx7",
@@ -437,6 +486,17 @@ TARGETS = (
             *EJTAG_UART_WRAPPER_SOURCES,
             RTL / "jtag_tap" / "jtag_tap_intel.v",
             RTL / "fcapz_ejtaguart_intel.v",
+        ),
+    ),
+    LintTarget(
+        # No vendor stub: the JTAG User TAP signals are exposed as wrapper
+        # ports (wired to Efinity Interface Designer blocks at the top level).
+        name="fcapz_ela_efinix",
+        top="fcapz_ela_efinix",
+        sources=(
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_efinix.v",
+            RTL / "fcapz_ela_efinix.v",
         ),
     ),
     # Generated SpinalHDL output (axiZero crossbar): we do not control its

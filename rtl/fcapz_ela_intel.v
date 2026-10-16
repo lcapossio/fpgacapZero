@@ -37,7 +37,10 @@ module fcapz_ela_intel #(
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
-    input  wire [SAMPLE_W*NUM_CHANNELS-1:0] probe_in,
+    // With PROBE_MUX_W set the core takes the whole mux input, not one
+    // SAMPLE_W*NUM_CHANNELS slice: a narrower port here would tie every slice
+    // above the first to zero.
+    input  wire [(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] probe_in,
     input  wire                          trigger_in,
     output wire                          trigger_out,
     output wire                          armed_out

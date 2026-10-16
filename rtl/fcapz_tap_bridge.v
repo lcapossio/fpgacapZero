@@ -1,0 +1,728 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+`timescale 1ns/1ps
+
+// Byte-stream to virtual JTAG TAP bridge (transport- and vendor-agnostic).
+//
+// Presents the standard fpgacapZero TAP interface (tck, tdi, tdo, capture,
+// shift, update, sel) to the existing core plumbing -- jtag_reg_iface,
+// jtag_burst_read, fcapz_ela, fcapz_eio -- but sources the DR scans from a
+// stream of bytes rather than a hard JTAG TAP block.
+//
+// This module owns the protocol only.  It has no idea how the bytes arrive,
+// so any physical layer can carry it: see fcapz_uart_tap.v for a UART PHY.
+// An SPI, USB-FIFO or FTDI-style PHY drops in the same way -- implement the
+// byte interface below and instantiate this.
+//
+// Why this exists
+// ---------------
+// Small and cheap FPGA boards frequently expose no user JTAG to the fabric at
+// all: the pins are bonded out nowhere, the vendor TAP is unavailable, or the
+// only host link is a serial port on a companion MCU.  Because this module
+// reproduces the TAP contract exactly, none of the core RTL changes -- the
+// vendor TAP wrapper is simply swapped for this one, and the host talks the
+// same register protocol it always did.
+//
+// Byte interface
+// --------------
+//   rx_data/rx_valid   one received byte, rx_valid high for a single clk
+//   tx_data/tx_start   one byte to send, tx_start pulsed for a single clk
+//   tx_busy            PHY cannot accept a byte yet
+//
+// Wire protocol (host -> fabric), little-endian:
+//   SOF   0x5A
+//   CMD   1 byte
+//   ...   command-specific payload
+//
+//   CMD_SCAN (0x01): chain[7:0], width[15:0], then ceil(width/8) payload
+//                    bytes shifted in LSB-first (byte 0 = DR bits [7:0]).
+//                    Reply carries the same number of captured TDO bytes.
+//   CMD_IDLE (0x02): cycles[15:0] -- run tck with sel deasserted, the
+//                    equivalent of OpenOCD's "runtest N".  Lets a read settle
+//                    between the address scan and the data scan.
+//   CMD_INFO (0x03): no payload.  Reply is the identity block below.
+//   CMD_BREAD(0x04): chain[7:0], width[15:0], count[15:0], no payload.
+//                    Runs `count` back-to-back scans that shift in zeros and
+//                    returns their captured TDO words concatenated, one after
+//                    another, under a single reply header.  Semantically it is
+//                    `count` CMD_SCANs with an all-zero payload -- same TAP
+//                    sequence, same trailing clocks -- but it removes the
+//                    per-scan round trip, which dominates a burst readback
+//                    over USB CDC, and the all-zero request payload with it.
+//                    Protocol version 2 and later.
+//   CMD_RST  (0x0F): no payload.  Returns all chains to an idle TAP state.
+//
+// Replies are framed the same way with SOF 0xA5:
+//   SOF 0xA5, STATUS, payload...
+// STATUS is 0x00 on success, or one of the STAT_* codes below.  Between
+// commands the parser hunts for SOF, so leading junk -- the handover noise a
+// configuration-pin bridge leaves behind, say -- is skipped.
+//
+// Resynchronisation.  There is no length or checksum, so a command that loses
+// a byte would otherwise leave the parser waiting for a field the host never
+// sends, and parse the next command into it.  RX_TIMEOUT bounds that: if a
+// command stalls mid-parse for RX_TIMEOUT clocks, the parser drops it and goes
+// back to hunting for SOF.  It does so silently -- the host has already given
+// up on that command, and a late reply would be read as the header of its
+// next one.  Every state the timeout covers comes before the scan starts (sel
+// is low, tck has not moved), so a dropped command has no effect on the TAP.
+//
+// Parameters
+//   NUM_CHAINS  - number of user chains exposed via sel[]
+//   MAX_DR_BITS - largest DR width accepted (256 covers the burst chain)
+//   PROTO_EXTRA - reported in the identity block; a PHY may use it to tell
+//                 the host something about itself (0 when unused)
+//   RX_TIMEOUT  - clk cycles a partly received command may wait for its next
+//                 byte before it is dropped; 0 waits forever.  Set it well
+//                 above the longest gap the PHY can leave inside one command.
+
+module fcapz_tap_bridge #(
+    parameter NUM_CHAINS  = 4,
+    parameter MAX_DR_BITS = 256,
+    parameter PROTO_EXTRA = 0,
+    parameter RX_TIMEOUT  = 0
+) (
+    input  wire                   clk,
+    input  wire                   arst,
+
+    // Byte stream from/to the physical layer
+    input  wire [7:0]             rx_data,
+    input  wire                   rx_valid,
+    output reg  [7:0]             tx_data,
+    output reg                    tx_start,
+    input  wire                   tx_busy,
+
+    // fpgacapZero TAP interface -- shared strobes, per-chain select.
+    // Mirrors real JTAG: one TAP, the IR selects which chain is active.
+    output wire                   tck,
+    output wire                   tdi,
+    input  wire [NUM_CHAINS-1:0]  tdo,
+    output wire                   capture,
+    output wire                   shift,
+    output wire                   update,
+    output wire [NUM_CHAINS-1:0]  sel
+);
+
+    // ------------------------------------------------------------------
+    //  Protocol constants
+    // ------------------------------------------------------------------
+    localparam [7:0] SOF_CMD   = 8'h5A;
+    localparam [7:0] SOF_RSP   = 8'hA5;
+
+    localparam [7:0] CMD_SCAN  = 8'h01;
+    localparam [7:0] CMD_IDLE  = 8'h02;
+    localparam [7:0] CMD_INFO  = 8'h03;
+    localparam [7:0] CMD_BREAD = 8'h04;
+    localparam [7:0] CMD_RST   = 8'h0F;
+
+    localparam [7:0] STAT_OK        = 8'h00;
+    localparam [7:0] STAT_BAD_FRAME = 8'h01;
+    localparam [7:0] STAT_BAD_CHAIN = 8'h02;
+    localparam [7:0] STAT_BAD_WIDTH = 8'h03;
+
+    // Identity block returned by CMD_INFO, so the host can probe the bridge
+    // before it probes the core behind it:
+    //   byte 0..3 : magic "FCZU"  (0x46 0x43 0x5A 0x55)
+    //   byte 4    : protocol version
+    //   byte 5    : NUM_CHAINS
+    //   byte 6..7 : MAX_DR_BITS, little-endian
+    //   byte 8    : PROTO_EXTRA (PHY-defined, 0 when unused)
+    // 2 added CMD_BREAD.  A version-1 host still works against a version-2
+    // bridge: every earlier command is unchanged.
+    localparam [7:0] PROTO_VERSION = 8'h02;
+    localparam INFO_BYTES = 9;
+
+    localparam MAX_DR_BYTES = (MAX_DR_BITS + 7) / 8;
+    // The buffer is rounded up to whole bytes so that the byte-indexed
+    // payload write can never run off the end of the vector, whatever
+    // MAX_DR_BITS is; the rotation maths below uses BUF_W throughout.
+    localparam BUF_W        = MAX_DR_BYTES * 8;
+    // Byte counters only ever address a payload or the identity block, so
+    // size them for that.  A 16-bit counter plus compare was the critical
+    // path on a Trion T8 once the wide shifters were gone.
+    localparam CNT_MAX      = (MAX_DR_BYTES > INFO_BYTES) ? MAX_DR_BYTES
+                                                          : INFO_BYTES;
+    localparam CNT_W        = $clog2(CNT_MAX + 1);
+    // S_ALIGN counts bits, not bytes.
+    localparam SHF_W        = $clog2(BUF_W + 1);
+
+    // synthesis translate_off
+    initial begin
+        if (NUM_CHAINS < 1)
+            $error("NUM_CHAINS must be >= 1");
+        if (MAX_DR_BITS < 8)
+            $error("MAX_DR_BITS must be >= 8");
+        // scan_width and the identity block both carry the width in 16 bits.
+        if (MAX_DR_BITS > 65535)
+            $error("MAX_DR_BITS must be <= 65535");
+        if (RX_TIMEOUT < 0)
+            $error("RX_TIMEOUT must be >= 0");
+    end
+    // synthesis translate_on
+
+    // ------------------------------------------------------------------
+    //  Scan buffer
+    //
+    //  One buffer serves both directions: the host's payload is written in
+    //  byte by byte as it arrives, the captured TDO replaces it bit by bit
+    //  during the scan, and the result is streamed straight back out.  That
+    //  keeps a 256-bit burst scan down to a single register bank.
+    // ------------------------------------------------------------------
+    reg [BUF_W-1:0]            scan_buf;
+
+    // scan_buf is written from ten places in the FSM below, but only ever in
+    // three shapes: clear, shift right one byte, shift right one bit.  Written
+    // inline, each of those is a distinct next-state function and the tool
+    // builds a wide mux in front of all BUF_W bits -- on a Trion T8 that was
+    // the largest single LUT consumer left in this module.  Decoding the shape
+    // once, here, collapses it to one 3:1 mux per bit plus a shared fill.
+    reg                        sb_clear;
+    reg                        sb_sh8;    // shift right by one byte
+    reg                        sb_sh1;    // shift right by one bit
+    reg [7:0]                  sb_fill8;  // byte shifted in at the top
+    reg                        sb_fill1;  // bit shifted in at the top
+    reg [15:0]                 scan_width;
+    // ceil(scan_width/8), registered once the width is known.  Recomputing
+    // it inside the payload loop put an add, a shift and a 16-bit compare
+    // on the enable of every counter bit, which was the critical path on a
+    // Trion T8 once the barrel shifters were gone.
+    reg [CNT_W-1:0]            scan_bytes;
+    reg [15:0]                 scan_bits_left;
+    reg [CNT_W-1:0]            byte_count;   // payload bytes in/out
+    reg [CNT_W-1:0]            byte_index;
+    // Counts the filler shifts that replace the two variable-width shifts
+    // this module used to do (see S_SCAN_PAD and S_ALIGN).
+    reg [SHF_W-1:0]            shift_left;
+    reg [7:0]                  chain_sel;
+    reg [15:0]                 idle_cycles;
+    reg [7:0]                  status;
+
+    // Combinational, deliberately: S_SCAN_PAY both latches this into
+    // status and branches on it, and with a one-byte payload both happen
+    // on the same cycle.  Reading the register there would see the stale
+    // STAT_OK, run a zero-selected scan, and emit BAD_CHAIN followed by a
+    // payload byte the host never drains -- desyncing the link.  A UART
+    // PHY leaves enough slack to hide that; a PHY that delivers bytes
+    // back to back does not.
+    wire chain_bad = (chain_sel == 8'd0) || (chain_sel > NUM_CHAINS[7:0]);
+
+    // ceil(width/8) of the width completing in S_SCAN_W1.  17 bits so the +7
+    // cannot wrap; only the low CNT_W bits are kept, which is exact for every
+    // width S_SCAN_W1 accepts (<= MAX_DR_BITS) and don't-care for the rest,
+    // since those are rejected on the same cycle.
+    wire [15:0] rx_width       = {rx_data, scan_width[7:0]};
+    wire [16:0] rx_width_plus7 = {1'b0, rx_width} + 17'd7;
+    wire [13:0] rx_width_bytes = rx_width_plus7[16:3];
+    // scan_width widened to the bit-shift counter.  SHF_W reaches 17 when
+    // MAX_DR_BITS rounds up to a 65,536-bit buffer, one more than the 16-bit
+    // width carries.
+    wire [16:0] scan_width_x   = {1'b0, scan_width};
+
+    // ------------------------------------------------------------------
+    //  TAP drive
+    //
+    //  tck is generated as a two-phase toggle: the FSM presents tdi and the
+    //  strobes while tck is low, then raises tck so the core samples on its
+    //  rising edge.  tdo is combinational out of jtag_reg_iface (tdo = sr[0]),
+    //  so it is sampled in the low phase, before the edge that shifts it.
+    // ------------------------------------------------------------------
+    reg tck_r, tdi_r, cap_r, shf_r, upd_r;
+    reg [NUM_CHAINS-1:0] sel_r;
+
+    assign tck     = tck_r;
+    assign tdi     = tdi_r;
+    assign capture = cap_r;
+    assign shift   = shf_r;
+    assign update  = upd_r;
+    assign sel     = sel_r;
+
+    // TDO of the currently selected chain.
+    reg tdo_mux;
+    integer ci;
+    always @(*) begin
+        tdo_mux = 1'b0;
+        for (ci = 0; ci < NUM_CHAINS; ci = ci + 1)
+            if (sel_r[ci]) tdo_mux = tdo[ci];
+    end
+
+    // ------------------------------------------------------------------
+    //  Command FSM
+    // ------------------------------------------------------------------
+    localparam [4:0] S_SOF        = 5'd0;
+    localparam [4:0] S_CMD        = 5'd1;
+    localparam [4:0] S_SCAN_CHAIN = 5'd2;
+    localparam [4:0] S_SCAN_W0    = 5'd3;
+    localparam [4:0] S_SCAN_W1    = 5'd4;
+    localparam [4:0] S_SCAN_PAY   = 5'd5;
+    localparam [4:0] S_CAP_LO     = 5'd6;
+    localparam [4:0] S_CAP_HI     = 5'd7;
+    localparam [4:0] S_SHF_LO     = 5'd8;
+    localparam [4:0] S_SHF_HI     = 5'd9;
+    localparam [4:0] S_UPD_LO     = 5'd10;
+    localparam [4:0] S_UPD_HI     = 5'd11;
+    localparam [4:0] S_IDLE_C0    = 5'd12;
+    localparam [4:0] S_IDLE_C1    = 5'd13;
+    localparam [4:0] S_IDLE_RUN_L = 5'd14;
+    localparam [4:0] S_IDLE_RUN_H = 5'd15;
+    localparam [4:0] S_RSP_SOF    = 5'd16;
+    localparam [4:0] S_RSP_STAT   = 5'd17;
+    localparam [4:0] S_RSP_PAY    = 5'd18;
+    localparam [4:0] S_RSP_WAIT   = 5'd19;
+    localparam [4:0] S_BR_C0      = 5'd20;
+    localparam [4:0] S_BR_C1      = 5'd21;
+    localparam [4:0] S_BR_NEXT    = 5'd22;
+    localparam [4:0] S_SCAN_PAD   = 5'd23;
+    localparam [4:0] S_ALIGN      = 5'd24;
+
+    reg [4:0] state;
+
+    // ------------------------------------------------------------------
+    //  Receive timeout (see "Resynchronisation" above)
+    //
+    //  Covers exactly the states that wait on the host for part of a
+    //  command.  S_SOF is not one of them -- an idle link is not a stall --
+    //  and neither is anything from the scan onwards.
+    // ------------------------------------------------------------------
+    localparam HAS_RX_TIMEOUT = (RX_TIMEOUT > 0);
+    localparam RX_TO_W        = HAS_RX_TIMEOUT ? $clog2(RX_TIMEOUT + 1) : 1;
+
+    wire in_cmd_parse = (state == S_CMD)        || (state == S_SCAN_CHAIN) ||
+                        (state == S_SCAN_W0)    || (state == S_SCAN_W1)    ||
+                        (state == S_SCAN_PAY)   || (state == S_BR_C0)      ||
+                        (state == S_BR_C1)      || (state == S_IDLE_C0)    ||
+                        (state == S_IDLE_C1);
+
+    reg  [RX_TO_W-1:0] rx_gap;
+    // A byte that lands on the deadline still counts: it is the command
+    // completing, not the stall the timeout is for.
+    wire rx_timeout = HAS_RX_TIMEOUT && in_cmd_parse && !rx_valid &&
+                      (rx_gap == RX_TIMEOUT[RX_TO_W-1:0]);
+
+    always @(posedge clk or posedge arst) begin
+        if (arst)                         rx_gap <= {RX_TO_W{1'b0}};
+        else if (!HAS_RX_TIMEOUT || !in_cmd_parse || rx_valid || rx_timeout)
+                                          rx_gap <= {RX_TO_W{1'b0}};
+        else                              rx_gap <= rx_gap + 1'b1;
+    end
+
+    reg [4:0] rsp_next;      // state to enter once the reply has drained
+    reg [4:0] idle_next;     // state to enter once the tck idle run finishes
+    reg       rsp_is_info;
+
+    // CMD_BREAD: `scans_left` counts the scans still owed, and br_hdr_sent
+    // records that the single reply header has already gone out, so the
+    // second and later scans stream straight into S_RSP_PAY.
+    reg        br_active;
+    reg        br_hdr_sent;
+    reg [15:0] scans_left;
+
+    // INFO payload, indexed byte-wise during the reply.
+    reg [7:0] info_byte;
+    always @(*) begin
+        case (byte_index[3:0])
+            4'd0: info_byte = 8'h46;               // 'F'
+            4'd1: info_byte = 8'h43;               // 'C'
+            4'd2: info_byte = 8'h5A;               // 'Z'
+            4'd3: info_byte = 8'h55;               // 'U'
+            4'd4: info_byte = PROTO_VERSION;
+            4'd5: info_byte = NUM_CHAINS[7:0];
+            4'd6: info_byte = MAX_DR_BITS[7:0];
+            4'd7: info_byte = MAX_DR_BITS[15:8];
+            default: info_byte = PROTO_EXTRA[7:0];
+        endcase
+    end
+
+    // Which shape is scan_buf written in this cycle?  One arm per FSM state
+    // that touches it; every other state holds.
+    always @(*) begin
+        sb_clear = 1'b0;
+        sb_sh8   = 1'b0;
+        sb_sh1   = 1'b0;
+        sb_fill8 = 8'h00;
+        sb_fill1 = 1'b0;
+        case (state)
+            S_CMD:      sb_clear = rx_valid && (rx_data == CMD_RST);
+            S_SCAN_W1:  sb_clear = rx_valid;
+            S_BR_C1:    sb_clear = rx_valid;
+            S_BR_NEXT:  sb_clear = 1'b1;
+            S_SCAN_PAY: begin
+                sb_sh8   = rx_valid;
+                sb_fill8 = rx_data;
+            end
+            S_SCAN_PAD: sb_sh8 = (shift_left != {SHF_W{1'b0}});
+            S_RSP_PAY:  sb_sh8 = (!tx_busy && !tx_start && !rsp_is_info);
+            S_SHF_HI:   begin
+                sb_sh1   = 1'b1;
+                sb_fill1 = tdo_mux;
+            end
+            S_ALIGN:    sb_sh1 = (shift_left != {SHF_W{1'b0}});
+            default: ;
+        endcase
+    end
+
+    // Shift through the concatenation rather than slicing scan_buf[BUF_W-1:8]:
+    // with MAX_DR_BITS = 8 that slice is [7:8], reversed and out of range.
+    wire [BUF_W+7:0] sb_cat8 = {sb_fill8, scan_buf};
+    wire [BUF_W:0]   sb_cat1 = {sb_fill1, scan_buf};
+
+    always @(posedge clk or posedge arst) begin
+        if (arst)          scan_buf <= {BUF_W{1'b0}};
+        else if (sb_clear) scan_buf <= {BUF_W{1'b0}};
+        else if (sb_sh8)   scan_buf <= sb_cat8[BUF_W+7:8];
+        else if (sb_sh1)   scan_buf <= sb_cat1[BUF_W:1];
+    end
+
+    always @(posedge clk or posedge arst) begin
+        if (arst) begin
+            state          <= S_SOF;
+            tck_r          <= 1'b0;
+            tdi_r          <= 1'b0;
+            cap_r          <= 1'b0;
+            shf_r          <= 1'b0;
+            upd_r          <= 1'b0;
+            sel_r          <= {NUM_CHAINS{1'b0}};
+            scan_width     <= 16'd0;
+            scan_bytes     <= {CNT_W{1'b0}};
+            scan_bits_left <= 16'd0;
+            byte_count     <= {CNT_W{1'b0}};
+            byte_index     <= {CNT_W{1'b0}};
+            shift_left     <= {SHF_W{1'b0}};
+            chain_sel      <= 8'd0;
+            idle_cycles    <= 16'd0;
+            status         <= STAT_OK;
+            tx_start       <= 1'b0;
+            tx_data        <= 8'h0;
+            rsp_next       <= S_SOF;
+            idle_next      <= S_RSP_SOF;
+            rsp_is_info    <= 1'b0;
+            br_active      <= 1'b0;
+            br_hdr_sent    <= 1'b0;
+            scans_left     <= 16'd0;
+        end else begin
+            tx_start <= 1'b0;
+
+            case (state)
+            // ---- command parse -------------------------------------------
+            S_SOF: begin
+                sel_r     <= {NUM_CHAINS{1'b0}};
+                br_active <= 1'b0;
+                if (rx_valid && rx_data == SOF_CMD) state <= S_CMD;
+            end
+
+            S_CMD: begin
+                if (rx_valid) begin
+                    status      <= STAT_OK;
+                    byte_index <= {CNT_W{1'b0}};
+                    rsp_is_info <= 1'b0;
+                    br_hdr_sent <= 1'b0;
+                    case (rx_data)
+                    CMD_SCAN: state <= S_SCAN_CHAIN;
+                    CMD_BREAD: begin
+                        // Shares the chain/width parse with CMD_SCAN; the
+                        // branch back out is in S_SCAN_W1.
+                        br_active <= 1'b1;
+                        state     <= S_SCAN_CHAIN;
+                    end
+                    CMD_IDLE: state <= S_IDLE_C0;
+                    CMD_INFO: begin
+                        rsp_is_info <= 1'b1;
+                        byte_count  <= INFO_BYTES[CNT_W-1:0];
+                        state       <= S_RSP_SOF;
+                    end
+                    CMD_RST: begin
+                        byte_count <= {CNT_W{1'b0}};
+                        state      <= S_RSP_SOF;
+                    end
+                    default: begin
+                        // Unknown opcode: report it rather than silently
+                        // consuming an unknown-length payload.
+                        status     <= STAT_BAD_FRAME;
+                        byte_count <= {CNT_W{1'b0}};
+                        state      <= S_RSP_SOF;
+                    end
+                    endcase
+                end
+            end
+
+            S_SCAN_CHAIN: begin
+                if (rx_valid) begin
+                    chain_sel <= rx_data;
+                    state     <= S_SCAN_W0;
+                end
+            end
+
+            S_SCAN_W0: begin
+                if (rx_valid) begin
+                    scan_width[7:0] <= rx_data;
+                    state           <= S_SCAN_W1;
+                end
+            end
+
+            S_SCAN_W1: begin
+                if (rx_valid) begin
+                    scan_width[15:8] <= rx_data;
+                    scan_bytes       <= rx_width_bytes[CNT_W-1:0];
+                    byte_index <= {CNT_W{1'b0}};
+                    // Validate the width *before* the payload phase.  A bad
+                    // width makes the payload length itself untrustworthy, so
+                    // there is no safe number of bytes to drain -- reply at
+                    // once and let the SOF hunt resynchronise.  (A zero-byte
+                    // payload would otherwise park S_SCAN_PAY forever waiting
+                    // on a byte the host never sends.)
+                    if (rx_width == 16'd0 || rx_width > MAX_DR_BITS[15:0]) begin
+                        status     <= STAT_BAD_WIDTH;
+                        byte_count <= {CNT_W{1'b0}};
+                        state      <= S_RSP_SOF;
+                    end else begin
+                        state <= br_active ? S_BR_C0 : S_SCAN_PAY;
+                    end
+                end
+            end
+
+            S_SCAN_PAY: begin
+                // The width is known good here, so the payload length is
+                // trustworthy: drain it before replying, or the next command
+                // would be parsed out of this one's leftover bytes.  A bad
+                // chain is latched now and reported after the drain.
+                if (chain_bad)
+                    status <= STAT_BAD_CHAIN;
+
+                if (rx_valid) begin
+                    // Shift each byte in at the top.  Byte 0 therefore ends up
+                    // at bits [7:0] once MAX_DR_BYTES byte-slots have gone
+                    // past, which S_SCAN_PAD finishes off.
+                    //
+                    // The obvious alternative -- writing each byte straight to
+                    // its final offset with a variable part-select -- costs a
+                    // MAX_DR_BYTES-way byte-wide demux in front of every bit
+                    // of the buffer.  On a Trion T8 that alone measured in the
+                    // thousands of LUT4s.  A shift register and a handful of
+                    // filler cycles are free by comparison.
+                    byte_index <= byte_index + 1'b1;
+                    if (byte_index + 1'b1 >= scan_bytes) begin
+                        byte_count     <= scan_bytes;
+                        byte_index <= {CNT_W{1'b0}};
+                        scan_bits_left <= scan_width;
+                        shift_left     <= {(MAX_DR_BYTES[SHF_W-1:0] - {{(SHF_W-CNT_W){1'b0}}, scan_bytes})};
+                        if (chain_bad || status != STAT_OK) begin
+                            byte_count <= {CNT_W{1'b0}};
+                            state      <= S_RSP_SOF;
+                        end else begin
+                            state <= S_SCAN_PAD;
+                        end
+                    end
+                end
+            end
+
+            S_SCAN_PAD: begin
+                // Push the payload down to bit 0, one byte-slot per cycle.
+                // At most MAX_DR_BYTES-1 cycles, against tens of microseconds
+                // spent receiving the payload itself.
+                if (shift_left == {SHF_W{1'b0}}) begin
+                    sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                    state <= S_CAP_LO;
+                end else begin
+                    shift_left <= shift_left - 1'b1;
+                end
+            end
+
+            // ---- burst read: count, then back-to-back scans --------------
+            S_BR_C0: begin
+                if (rx_valid) begin
+                    scans_left[7:0] <= rx_data;
+                    state           <= S_BR_C1;
+                end
+            end
+
+            S_BR_C1: begin
+                if (rx_valid) begin
+                    scans_left[15:8] <= rx_data;
+                    byte_count       <= scan_bytes;
+                    byte_index <= {CNT_W{1'b0}};
+                    scan_bits_left   <= scan_width;
+                    // The chain is checked here rather than after a payload
+                    // drain: CMD_BREAD has no payload, so there is nothing to
+                    // drain and nothing untrustworthy about the length.
+                    if (chain_bad) begin
+                        status     <= STAT_BAD_CHAIN;
+                        byte_count <= {CNT_W{1'b0}};
+                        state      <= S_RSP_SOF;
+                    end else if ({rx_data, scans_left[7:0]} == 16'd0) begin
+                        // Zero scans is well defined: an empty reply.
+                        byte_count <= {CNT_W{1'b0}};
+                        state      <= S_RSP_SOF;
+                    end else begin
+                        sel_r <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                        state <= S_CAP_LO;
+                    end
+                end
+            end
+
+            S_BR_NEXT: begin
+                // One scan's worth of payload has drained; set up the next.
+                scans_left     <= scans_left - 1'b1;
+                scan_bits_left <= scan_width;
+                byte_index <= {CNT_W{1'b0}};
+                sel_r          <= {{(NUM_CHAINS-1){1'b0}}, 1'b1} << (chain_sel - 8'd1);
+                state          <= S_CAP_LO;
+            end
+
+            // ---- DR scan: capture, shift x width, update -----------------
+            S_CAP_LO: begin
+                // scan_buf is already bit-0-aligned (see S_SCAN_PAY), so the
+                // shift path can start straight away.
+                cap_r    <= 1'b1;
+                tck_r    <= 1'b0;
+                state    <= S_CAP_HI;
+            end
+
+            S_CAP_HI: begin
+                tck_r <= 1'b1;
+                state <= S_SHF_LO;
+            end
+
+            S_SHF_LO: begin
+                cap_r <= 1'b0;
+                tck_r <= 1'b0;
+                if (scan_bits_left == 16'd0) begin
+                    shf_r <= 1'b0;
+                    upd_r <= 1'b1;
+                    state <= S_UPD_HI;
+                end else begin
+                    shf_r <= 1'b1;
+                    tdi_r <= scan_buf[0];
+                    state <= S_SHF_HI;
+                end
+            end
+
+            S_SHF_HI: begin
+                tck_r <= 1'b1;
+                // Rotate the captured bit into the top: after `scan_width`
+                // shifts the buffer holds the TDO word, LSB-first.
+                scan_bits_left <= scan_bits_left - 1'b1;
+                state          <= S_SHF_LO;
+            end
+
+            S_UPD_HI: begin
+                tck_r <= 1'b1;
+                state <= S_UPD_LO;
+            end
+
+            S_UPD_LO: begin
+                tck_r <= 1'b0;
+                upd_r <= 1'b0;
+                sel_r <= {NUM_CHAINS{1'b0}};
+                // The TDO word sits in the high bits after `scan_width`
+                // rotations; S_ALIGN brings it back down so byte 0 is DR bits
+                // [7:0].
+                byte_index <= {CNT_W{1'b0}};
+                shift_left <= BUF_W[SHF_W-1:0] - scan_width_x[SHF_W-1:0];
+                state      <= S_ALIGN;
+            end
+
+            S_ALIGN: begin
+                // Keep rotating, one bit per cycle, until the captured word is
+                // bit-0 aligned.  Doing it in one step -- `scan_buf >> (BUF_W -
+                // scan_width)` -- reads better but infers a full BUF_W-wide
+                // barrel shifter: on a Trion T8 that was the single largest
+                // block in the design and set the critical path.  A scan is
+                // hundreds of cycles long already; at most BUF_W more is noise.
+                if (shift_left == {SHF_W{1'b0}}) begin
+                    // Trailing clocks.  jtag_reg_iface registers reg_wr_en/rd_en
+                    // *on* the update edge, so the register bus needs at least
+                    // one further tck edge to latch the access -- a hard TAP
+                    // gets that for free from free-running TCK, but this FSM
+                    // would otherwise stop the clock the instant update
+                    // deasserts and strand the write until the next scan.
+                    // Four gives margin.
+                    idle_cycles <= 16'd4;
+                    // Scans after the first in a CMD_BREAD stream have already
+                    // had their reply header sent, so they resume mid-reply.
+                    idle_next   <= (br_active && br_hdr_sent) ? S_RSP_PAY
+                                                              : S_RSP_SOF;
+                    state       <= S_IDLE_RUN_L;
+                end else begin
+                    shift_left <= shift_left - 1'b1;
+                end
+            end
+
+            // ---- idle / runtest ------------------------------------------
+            S_IDLE_C0: begin
+                if (rx_valid) begin
+                    idle_cycles[7:0] <= rx_data;
+                    state            <= S_IDLE_C1;
+                end
+            end
+
+            S_IDLE_C1: begin
+                if (rx_valid) begin
+                    idle_cycles[15:8] <= rx_data;
+                    byte_count <= {CNT_W{1'b0}};
+                    idle_next         <= S_RSP_SOF;
+                    state             <= S_IDLE_RUN_L;
+                end
+            end
+
+            S_IDLE_RUN_L: begin
+                tck_r <= 1'b0;
+                if (idle_cycles == 16'd0) state <= idle_next;
+                else                      state <= S_IDLE_RUN_H;
+            end
+
+            S_IDLE_RUN_H: begin
+                tck_r       <= 1'b1;
+                idle_cycles <= idle_cycles - 1'b1;
+                state       <= S_IDLE_RUN_L;
+            end
+
+            // ---- reply ---------------------------------------------------
+            S_RSP_SOF: begin
+                if (!tx_busy && !tx_start) begin
+                    tx_data  <= SOF_RSP;
+                    tx_start <= 1'b1;
+                    state    <= S_RSP_STAT;
+                end
+            end
+
+            S_RSP_STAT: begin
+                if (!tx_busy && !tx_start) begin
+                    tx_data     <= status;
+                    tx_start    <= 1'b1;
+                    br_hdr_sent <= 1'b1;
+                    rsp_next    <= (byte_count == {CNT_W{1'b0}}) ? S_SOF : S_RSP_PAY;
+                    state    <= S_RSP_WAIT;
+                end
+            end
+
+            S_RSP_WAIT: begin
+                if (!tx_busy && !tx_start) state <= rsp_next;
+            end
+
+            S_RSP_PAY: begin
+                if (!tx_busy && !tx_start) begin
+                    tx_data  <= rsp_is_info ? info_byte : scan_buf[7:0];
+                    tx_start <= 1'b1;
+                    byte_index <= byte_index + 1'b1;
+                    if (byte_index + 1'b1 < byte_count)
+                        rsp_next <= S_RSP_PAY;
+                    else if (br_active && scans_left > 16'd1)
+                        rsp_next <= S_BR_NEXT;
+                    else
+                        rsp_next <= S_SOF;
+                    state      <= S_RSP_WAIT;
+                end
+            end
+
+            default: state <= S_SOF;
+            endcase
+
+            // Drop a stalled command.  Nothing else needs undoing: every
+            // command clears the scan buffer and status on its way in, and
+            // S_SOF clears sel and br_active.
+            if (rx_timeout)
+                state <= S_SOF;
+        end
+    end
+
+endmodule

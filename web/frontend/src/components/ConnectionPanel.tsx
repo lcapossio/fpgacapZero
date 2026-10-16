@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { RpcCancelled, getToken, rpc, setToken } from "../api";
-import type { Board, ConnectionParams, Core, Identity, ProbeSpec } from "../api";
+import type {
+  Board,
+  ConnectionParams,
+  Core,
+  Identity,
+  LinkInfo,
+  ProbeSpec,
+  SerialPort,
+} from "../api";
 import { probesToText } from "../axiMon";
 import type { AxiMonInfo } from "../axiMon";
 import { defaultElaForDepth, useSession } from "../session";
 import type { ElaConfig } from "../session";
 
-const BACKENDS = ["openocd", "hw_server", "usb_blaster"];
+const BACKENDS = ["openocd", "hw_server", "usb_blaster", "serial"];
 const DEFAULT_PORT: Record<string, string> = { openocd: "6666", hw_server: "3121" };
 const CONNECT_TIMEOUT = 6000;
 // Discovery probes every tap on a small sweep of TCL ports, so give it more
@@ -36,6 +44,9 @@ const VENDOR_NAMES: Record<string, string> = {
   ultrascale: "AMD/Xilinx UltraScale+",
   intel: "Intel/Altera",
   altera: "Intel/Altera",
+  efinix: "Efinix (Trion/Titanium)",
+  trion: "Efinix Trion",
+  titanium: "Efinix Titanium",
 };
 
 function vendorName(ir: string): string {
@@ -58,6 +69,14 @@ export function ConnectionPanel({
   // blank auto-selects the sole attached cable. The quartus_stp path lives on
   // the server (auto-detected, or its --quartus-stp flag), never in the browser.
   const [hardware, setHardware] = useState("");
+  // serial only: the byte-stream TAP bridge (rtl/fcapz_uart_tap.v) reaches the
+  // fabric over a serial port, not a JTAG probe, so it takes a port name and a
+  // baud rate in place of host/port/tap.
+  const [serialPort, setSerialPort] = useState("");
+  const [baud, setBaud] = useState("1000000");
+  // Ports the server can see. Enumeration only — nothing is opened, so this
+  // never resets a board or disturbs an unrelated probe.
+  const [serialPorts, setSerialPorts] = useState<SerialPort[]>([]);
   const [token, setTok] = useState(getToken());
   const [needsToken, setNeedsToken] = useState(false);
   const [manualTap, setManualTap] = useState("");
@@ -82,6 +101,7 @@ export function ConnectionPanel({
     tap: string;
     ir_table: string;
     device?: string;
+    link?: LinkInfo;
   } | null>(null);
   const { ela, setEla, setAxiMon, setEjtagAxi, setCores, conn, chainSwitch, setSwitching } =
     useSession();
@@ -181,10 +201,28 @@ export function ConnectionPanel({
     setEjtagAxi(null);
   }
 
+  /** Ask the server which serial ports exist, and preselect one if we can. */
+  async function refreshSerialPorts() {
+    try {
+      const r = await rpc("list_serial_ports", {}, CONNECT_TIMEOUT);
+      const found = (r.ports as SerialPort[]) ?? [];
+      setSerialPorts(found);
+      // Only fill a blank box, so a refresh never overwrites a chosen port.
+      // Functional update: a scan can take a moment, and `serialPort` captured
+      // when it started may be stale by the time it returns -- typing into the
+      // box during a slow scan must not be clobbered.
+      if (found.length === 1) setSerialPort((cur) => (cur.trim() ? cur : found[0].device));
+    } catch {
+      // Enumeration is a convenience; the port can always be typed instead.
+      setSerialPorts([]);
+    }
+  }
+
   function changeBackend(b: string) {
     setBackend(b);
     setPort(DEFAULT_PORT[b] ?? port); // keep port in sync with the backend
     resetScan(); // drop a stale picker from the previous backend
+    if (b === "serial") void refreshSerialPorts();
   }
 
   function handleError(e: unknown) {
@@ -207,6 +245,10 @@ export function ConnectionPanel({
     // USB-Blaster ignores host/port; it optionally takes a Quartus cable name.
     const reqParams: Record<string, unknown> = { backend, host, port: Number(port), tap };
     if (backend === "usb_blaster" && hardware.trim()) reqParams.hardware = hardware.trim();
+    if (backend === "serial") {
+      reqParams.serial_port = serialPort.trim();
+      reqParams.baudrate = Number(baud);
+    }
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
     const c = await rpc("connect", reqParams, t, sig());
@@ -226,6 +268,7 @@ export function ConnectionPanel({
       tap,
       ir_table: params.ir_table,
       device: typeof c.device === "string" && c.device ? c.device : undefined,
+      link: (c.link as LinkInfo | null) ?? undefined,
     });
     const id = r.probe as Identity;
     onConnected(params, id);
@@ -318,7 +361,9 @@ export function ConnectionPanel({
     setToken(token);
     beginCancellable();
     try {
-      if (manualTap.trim()) {
+      // The tap box is hidden on serial, so a value left over from another
+      // backend must not hijack the connect.
+      if (manualTap.trim() && backend !== "serial") {
         await connectTo(manualTap.trim());
         return;
       }
@@ -357,6 +402,17 @@ export function ConnectionPanel({
           setPickedIdx(0);
           setStatus(`${found.length} compatible boards found — pick one`);
         }
+        return;
+      }
+      if (backend === "serial") {
+        // Nothing to scan: there is no JTAG chain and no TCP endpoint. The
+        // bridge checks its own identity inside connect(), so a wrong port
+        // reports that rather than returning garbage.
+        if (!serialPort.trim()) {
+          setError("enter the serial port the board is on (e.g. COM5 or /dev/ttyACM0).");
+          return;
+        }
+        await connectTo(serialPort.trim());
         return;
       }
       if (backend === "usb_blaster") {
@@ -545,13 +601,34 @@ export function ConnectionPanel({
         {error && <p className="err">{error}</p>}
         {connTarget && (
           <p className="muted">
-            {connTarget.device && (
+            {/* Serial has no tap, no IR preset and no host:port — those fields
+                still hold whatever the previous JTAG backend left behind, so
+                printing the generic line would claim a TCP target we are not
+                connected to. */}
+            {connTarget.backend === "serial" ? (
               <>
-                <b>{connTarget.device}</b> ·{" "}
+                <b>{connTarget.link?.channel ?? serialPort}</b>
+                {" @ "}
+                {(connTarget.link?.baudrate ?? Number(baud)).toLocaleString()} baud
+                {connTarget.link && (
+                  <>
+                    {" · bridge v"}
+                    {connTarget.link.proto_version} · {connTarget.link.num_chains} chains ·{" "}
+                    {connTarget.link.max_dr_bits}-bit max DR
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                {connTarget.device && (
+                  <>
+                    <b>{connTarget.device}</b> ·{" "}
+                  </>
+                )}
+                {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
+                {connTarget.backend} {connTarget.host}:{connTarget.port}
               </>
             )}
-            {connTarget.tap} · {vendorName(connTarget.ir_table)} ·{" "}
-            {connTarget.backend} {connTarget.host}:{connTarget.port}
           </p>
         )}
         <p className="muted">
@@ -641,7 +718,7 @@ export function ConnectionPanel({
             ))}
           </select>
         </label>
-        {backend !== "usb_blaster" && (
+        {backend !== "usb_blaster" && backend !== "serial" && (
           <>
             <label>
               Host
@@ -650,6 +727,56 @@ export function ConnectionPanel({
             <label>
               Port
               <input value={port} onChange={(e) => setPort(e.target.value)} />
+            </label>
+          </>
+        )}
+        {backend === "serial" && (
+          <>
+            {/* A datalist, not a <select>: the enumerated ports are
+                suggestions, not the whole world -- a port can appear after the
+                scan, or be a path we never enumerate. A <select> would also
+                render blank whenever the chosen port is missing from the list
+                while still holding that value underneath, so Connect could use
+                a port the user cannot see. Here the value is always visible. */}
+            <label>
+              Serial port
+              <input
+                list="fcapz-serial-ports"
+                value={serialPort}
+                onChange={(e) => setSerialPort(e.target.value)}
+                placeholder="COM5, or /dev/ttyACM0"
+              />
+              <datalist id="fcapz-serial-ports">
+                {serialPorts.map((p) => (
+                  // Keep the device name as the value and the description as
+                  // the label: several FTDI/CP2108 channels share a
+                  // description, so hiding the device name makes them
+                  // indistinguishable.
+                  <option key={p.device} value={p.device}>
+                    {p.description || p.hwid}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+            <div className="field">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void refreshSerialPorts()}
+                disabled={busy}
+              >
+                Rescan ports
+              </button>
+            </div>
+            <label>
+              Baud
+              <input
+                type="number"
+                min={300}
+                step={1}
+                value={baud}
+                onChange={(e) => setBaud(e.target.value)}
+              />
             </label>
           </>
         )}
@@ -663,14 +790,16 @@ export function ConnectionPanel({
             />
           </label>
         )}
-        <label>
-          {backend === "usb_blaster" ? "Device (optional)" : "Tap (optional)"}
-          <input
-            value={manualTap}
-            onChange={(e) => setManualTap(e.target.value)}
-            placeholder="auto-detected if blank"
-          />
-        </label>
+        {backend !== "serial" && (
+          <label>
+            {backend === "usb_blaster" ? "Device (optional)" : "Tap (optional)"}
+            <input
+              value={manualTap}
+              onChange={(e) => setManualTap(e.target.value)}
+              placeholder="auto-detected if blank"
+            />
+          </label>
+        )}
         {needsToken && (
           <label>
             API token

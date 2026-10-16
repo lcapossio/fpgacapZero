@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import math
 import os
 import queue
 import re
@@ -41,6 +42,7 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
+_tap_log = logging.getLogger("fcapz.transport.tap_bridge")
 # xsdb marks the selected target with ``*``, after its number in ``jtag
 # targets`` (``2* xc7a100t``) and before it in ``targets`` (``* 2  ...``).
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\*?\s+(.+?)\s*$")
@@ -136,6 +138,80 @@ def list_xilinx_hw_server_targets(
     return targets
 
 
+# Generous bounds rather than a list of "standard" rates: the bridge's divider
+# is set in RTL and unusual rates (a 32 MHz clock divided to an exact value) are
+# normal here.  This only rejects input that cannot be a baud rate at all --
+# blank fields arriving as 0, JavaScript's non-finite numbers, fractions that
+# int() would silently truncate.
+BAUD_MIN = 300
+BAUD_MAX = 20_000_000
+BAUD_DEFAULT = 1_000_000
+
+
+def validate_baudrate(value) -> int:
+    """Validate a requested serial baud rate, or raise ``ValueError``.
+
+    Shared by every front end (RPC, CLI, GUI) so one bad rate is rejected the
+    same way and with the same message wherever it is typed.  ``None`` and the
+    empty string mean "unspecified", which is the default rate -- a cleared
+    field must not become 0 baud.
+    """
+    if value is None or value == "":
+        return BAUD_DEFAULT
+    if isinstance(value, bool):
+        raise ValueError(f"baudrate must be an integer, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        # Also catches NaN/Infinity, which is_integer() reports as False.
+        raise ValueError(f"baudrate must be a whole number, got {value!r}")
+    try:
+        baud = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"baudrate must be an integer, got {value!r}") from None
+    if not BAUD_MIN <= baud <= BAUD_MAX:
+        raise ValueError(f"baudrate {baud} out of range ({BAUD_MIN}..{BAUD_MAX})")
+    return baud
+
+
+def list_serial_ports() -> list[dict[str, str]]:
+    """Enumerate the machine's serial ports, without opening any of them.
+
+    Deliberately identification-only.  The obvious next step -- open each port
+    and see which one answers the bridge's identity probe -- is not safe here:
+    opening a port asserts DTR/RTS, which resets an RP2040/RP2350 board, and a
+    developer machine typically also has FTDI JTAG cables and vendor debug
+    probes enumerated as serial ports.  Auto-probing would reset or disturb
+    hardware the user never pointed us at.  So this lists what exists and the
+    user picks; a wrong choice is caught by the bridge's identity check inside
+    :meth:`TapBridgeTransport.connect`.
+
+    Returns one dict per port with ``device`` (what to connect to),
+    ``description`` and ``hwid``.  Returns ``[]`` when pyserial is missing,
+    rather than raising -- the caller is usually populating a UI list.
+    """
+    try:
+        from serial.tools import list_ports  # type: ignore
+    except ImportError:  # pragma: no cover - depends on env
+        return []
+    out: list[dict[str, str]] = []
+    for p in list_ports.comports():
+        out.append(
+            {
+                "device": str(p.device),
+                "description": str(p.description or ""),
+                "hwid": str(p.hwid or ""),
+            }
+        )
+    # Natural order, so COM4 comes before COM10 and ttyACM2 before ttyACM10 --
+    # a plain string sort interleaves them and makes the picker hard to read.
+    out.sort(
+        key=lambda d: [
+            int(part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", d["device"])
+        ]
+    )
+    return out
+
+
 def list_openocd_taps(
     *,
     host: str = "127.0.0.1",
@@ -219,6 +295,23 @@ class Transport(ABC):
     * ``OSError`` / ``TimeoutError`` — for network or process-level errors
       during :meth:`connect`.
     """
+
+    #: What kind of link this is, for clients that must label a session or
+    #: decide whether IR-table semantics apply at all.  ``"jtag"`` transports
+    #: reach the fabric through a real TAP and take an IR table; a
+    #: ``"bytestream"`` transport addresses chains directly by index and has no
+    #: IR, so an IR-table preset is not merely unused there -- it is meaningless.
+    transport_kind: str = "jtag"
+
+    def link_info(self) -> dict | None:
+        """Facts about the link itself, or ``None`` when there are none.
+
+        Distinct from the core identity a ``probe`` returns: this describes what
+        the host is talking *through*, which for a byte-stream bridge is a real
+        negotiated thing (protocol version, chain count, DR width) rather than a
+        constant of the wire.
+        """
+        return None
 
     def transaction_lock(self) -> threading.RLock:
         """Return the shared host-side lock for multi-register transactions.
@@ -414,6 +507,12 @@ class OpenOcdTransport(Transport):
     # instantiate one GW_JTAG primitive each, so combining cores should use the
     # wrapper's address-muxed EIO_EN path unless the design shares the primitive.
     IR_TABLE_GOWIN: dict[int, int] = {1: 0x42, 2: 0x43}
+    # Efinix Trion / Titanium JTAG User TAP opcodes.  fcapz uses USER1 for the
+    # control chain and USER2 for burst data (matching rtl/fcapz_ela_efinix.v).
+    # Both match the post-configuration BSDL Efinity 2025.1 writes for the
+    # T20F256 (4-bit IR) and Ti60F225 (5-bit IR).  The IR length comes from the
+    # OpenOCD tap definition (-irlen 4 for Trion, 5 for Titanium), not from here.
+    IR_TABLE_EFINIX: dict[int, int] = {1: 0x08, 2: 0x09}
     # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this
@@ -559,6 +658,778 @@ class OpenOcdTransport(Transport):
     def read_block(self, addr: int, words: int) -> List[int]:
         check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
+
+
+class TapBridgeTransport(Transport):
+    """Register access over an ``fcapz_tap_bridge`` virtual JTAG TAP.
+
+    The RTL front-end (``rtl/fcapz_tap_bridge.v``) reproduces the fpgacapZero
+    TAP contract from a stream of bytes, so every core behind it -- ELA, EIO,
+    the burst readout chain -- is bit-identical to the JTAG case.  Only the way
+    DR scans reach the fabric differs.
+
+    This class owns the *protocol* and knows nothing about how bytes travel.
+    Subclasses supply the byte channel by implementing :meth:`_open`,
+    :meth:`_close`, :meth:`_write_bytes` and :meth:`_read_bytes`; the wire
+    format, identity probe and register semantics are shared.  See
+    :class:`SerialTapTransport` for a UART channel.  An SPI, USB-FIFO or TCP
+    channel subclasses this the same way and pairs with the matching RTL PHY.
+
+    Use it for any board whose fabric has no usable JTAG -- nothing here is
+    board- or vendor-specific.
+
+    Chain numbers are the RTL front-end's ``sel[]`` index (1-based), so unlike
+    the JTAG transports there is no IR table: the chain travels in the command.
+
+    Protocol recap (49-bit DR, LSB-first) -- identical to every other
+    transport, since the register interface behind the TAP is unchanged:
+        bits[31:0]  = wdata / rdata
+        bits[47:32] = addr[15:0]
+        bits[48]    = rnw (1=write, 0=read)
+    """
+
+    MAGIC = b"FCZU"
+    SOF_CMD = 0x5A
+    SOF_RSP = 0xA5
+
+    CMD_SCAN = 0x01
+    CMD_IDLE = 0x02
+    CMD_INFO = 0x03
+    CMD_BREAD = 0x04      # protocol 2 and later
+    CMD_RST = 0x0F
+
+    INFO_BYTES = 9
+    SUPPORTED_PROTO = (1, 2)
+    # First protocol version that understands CMD_BREAD.
+    PROTO_BATCHED_SCANS = 2
+
+    _STATUS_TEXT = {
+        0x00: "ok",
+        0x01: "bad frame / unknown command",
+        0x02: "chain out of range",
+        0x03: "DR width out of range",
+    }
+
+    # Cycles of `runtest` between a read's address scan and its data scan,
+    # matching OpenOcdTransport.READ_IDLE_CYCLES so read timing is consistent
+    # across transports.
+    READ_IDLE_CYCLES = 8
+
+    # Burst readback.  These are properties of the fpgacapZero core behind the
+    # bridge, not of the bridge, so they match every other transport.
+    ADDR_SAMPLE_W = 0x000C
+    ADDR_BURST_PTR = 0x002C
+    ADDR_DATA_BASE = 0x0100
+
+    # Enough tck for the BURST_PTR update to cross into the burst reader and
+    # for the first wide staging word to fill before the next CAPTURE samples
+    # it.  The raw memory-fill latency is ~33 tck; the rest is margin, and on
+    # this link it costs one four-byte command either way.
+    BURST_PREFILL_IDLE_CYCLES = 160
+
+    # After a transaction goes wrong -- no reply, a short one, bad framing --
+    # wait until the link has been silent this long, discarding whatever
+    # arrives, before the next command.  That lets a late reply drain instead
+    # of being read as the next command's header, and outlasts the bridge's
+    # own receive timeout (RX_TIMEOUT_US in rtl/fcapz_uart_tap.v, 10 ms by
+    # default), so a command the bridge was still waiting on has been dropped
+    # by the time the next one starts.  Keep it above that timeout.
+    RESYNC_QUIET_S = 0.05
+    # Give up draining after this many quiet periods that were not quiet: a
+    # link that never stops talking is not one a resync can fix.
+    RESYNC_MAX_ROUNDS = 40
+
+    def __init__(
+        self,
+        *,
+        chain: int = 1,
+        burst: bool = True,
+        burst_data_chain: int = 2,
+        burst_dr_bits: int | None = None,
+    ) -> None:
+        self._active_chain = int(chain)
+        self._open_channel = False
+        self.num_chains: int | None = None
+        self.max_dr_bits: int | None = None
+        self.proto_version: int | None = None
+        self.proto_extra: int | None = None
+        # burst_dr_bits defaults to the bridge's MAX_DR_BITS: fcapz_ela_uart
+        # ties the two together (MAX_DR_BITS(BURST_W)), because the widest DR
+        # the bridge must carry *is* the burst chain's.  A wrapper that sizes
+        # them apart passes the burst width explicitly.
+        self.burst_data_chain = int(burst_data_chain)
+        self._burst_dr_bits_override = (
+            None if burst_dr_bits is None else int(burst_dr_bits)
+        )
+        self._has_burst = bool(burst)
+        # Set when a failed transaction could not be drained: the next reply
+        # might be the tail of the old one, so nothing more is sent until the
+        # channel is reopened.
+        self._out_of_step = False
+
+    transport_kind = "bytestream"
+
+    def link_info(self) -> dict | None:
+        """The bridge's own identity, as reported by ``CMD_INFO``.
+
+        ``None`` before connect(), when nothing has been negotiated yet.
+        """
+        if self.proto_version is None:
+            return None
+        return {
+            "kind": self.transport_kind,
+            "channel": self._channel_name(),
+            "proto_version": self.proto_version,
+            "num_chains": self.num_chains,
+            "max_dr_bits": self.max_dr_bits,
+        }
+
+    @property
+    def unprobeable_chains(self) -> tuple[int, ...]:
+        """Chains a generic core sweep must leave alone.
+
+        The burst chain is not a register interface: it is the streaming DR of
+        ``jtag_burst_read``, and a scan on it advances that core's staging
+        registers and read pointer.  A real burst start reinitialises them, so
+        a stray probe does not corrupt a capture -- but it is still the wrong
+        protocol on that chain, and burst data that happens to contain an ELA
+        or EIO magic word would be reported as a core that is not there.
+
+        Transports without this attribute are plain JTAG links where every
+        chain is a register interface, so callers default to ``()``.
+        """
+        return (self.burst_data_chain,) if self._has_burst else ()
+
+    # -- byte channel: subclass responsibility ------------------------------
+    def _open(self) -> None:
+        """Open the byte channel.  Raise ``RuntimeError`` if unavailable."""
+        raise NotImplementedError
+
+    def _close(self) -> None:
+        """Close the byte channel.  Must be idempotent."""
+        raise NotImplementedError
+
+    def _write_bytes(self, data: bytes) -> None:
+        """Send every byte of *data*."""
+        raise NotImplementedError
+
+    def _read_bytes(self, count: int) -> bytes:
+        """Read up to *count* bytes, returning fewer only on timeout."""
+        raise NotImplementedError
+
+    def _discard_input(self) -> int:
+        """Drop whatever has already arrived without blocking; return how many
+        bytes that was.  A channel that cannot tell returns 0, which makes
+        :meth:`_resync` a single quiet wait."""
+        return 0
+
+    def _wire_time_s(self, nbytes: int) -> float:
+        """Seconds *nbytes* take to cross the channel, at its line rate.
+
+        Sizes the drain after a failed reply (see :meth:`_resync`).  A channel
+        that does not know its rate returns 0, and gets only the fixed
+        allowance.
+        """
+        return 0.0
+
+    def _channel_name(self) -> str:
+        """Short identifier for error messages (a port name, say)."""
+        return type(self).__name__
+
+    # -- lifecycle ----------------------------------------------------------
+    def connect(self) -> None:
+        self._open()
+        self._open_channel = True
+        self._out_of_step = False
+        try:
+            self._identify()
+        except BaseException:
+            # The handshake is where a wrong port shows up (a bootloader, a
+            # console, a JTAG probe's virtual COM port).  Release the channel
+            # instead of leaving an exclusive OS handle owned by an object the
+            # caller is about to drop -- on Windows that handle blocks the next
+            # attempt, and on a probe it is hardware we should not be holding.
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._open_channel:
+            try:
+                self._close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            self._open_channel = False
+
+    def _require_open(self) -> None:
+        if not self._open_channel:
+            raise RuntimeError(
+                f"{type(self).__name__}: not connected (call connect())"
+            )
+
+    # -- framing ------------------------------------------------------------
+    def _identify(self) -> None:
+        """Probe the bridge itself before probing the core behind it.
+
+        A mismatched magic almost always means the channel is not the bridge at
+        all (a bootloader, a console, another board), which is worth saying
+        plainly rather than letting register reads return garbage.
+        """
+        payload = self._txn(bytes([self.SOF_CMD, self.CMD_INFO]), self.INFO_BYTES)
+        if payload[:4] != self.MAGIC:
+            raise RuntimeError(
+                f"no fcapz TAP bridge on {self._channel_name()}: expected magic "
+                f"{self.MAGIC!r}, got {payload[:4]!r}"
+            )
+        self.proto_version = payload[4]
+        self.num_chains = payload[5]
+        self.max_dr_bits = int.from_bytes(payload[6:8], "little")
+        self.proto_extra = payload[8]
+        if self.proto_version not in self.SUPPORTED_PROTO:
+            raise RuntimeError(
+                f"unsupported fcapz TAP bridge protocol version "
+                f"{self.proto_version} on {self._channel_name()} "
+                f"(host supports {sorted(self.SUPPORTED_PROTO)})"
+            )
+
+    def _txn(self, command: bytes, resp_bytes: int) -> bytes:
+        """Send one command and return its reply payload.
+
+        Raises ``RuntimeError`` on a bridge-reported error status or a short
+        read, and ``ConnectionError`` if the channel fails mid-transaction or
+        an earlier failure left it out of step.
+        """
+        self._require_open()
+        if self._out_of_step:
+            raise ConnectionError(
+                f"link to {self._channel_name()} is out of step: a failed "
+                f"transaction kept talking past the resync, so a reply could "
+                f"belong to the wrong command. Reconnect to recover."
+            )
+        try:
+            self._write_bytes(command)
+            header = self._read_bytes(2)
+        except OSError as exc:
+            raise ConnectionError(
+                f"link to {self._channel_name()} failed mid-transaction: {exc}"
+            ) from exc
+
+        if len(header) < 2:
+            self._resync(2 + resp_bytes - len(header))
+            raise RuntimeError(
+                f"fcapz TAP bridge on {self._channel_name()} did not reply "
+                f"(got {len(header)} of 2 header bytes)"
+            )
+        if header[0] != self.SOF_RSP:
+            self._resync(2 + resp_bytes)
+            raise RuntimeError(
+                f"fcapz TAP bridge on {self._channel_name()}: bad reply framing "
+                f"(expected SOF 0x{self.SOF_RSP:02X}, got 0x{header[0]:02X})"
+            )
+        # A bridge-reported error is a complete, well-framed reply: the link
+        # is still in step, so there is nothing to resynchronise.
+        status = header[1]
+        if status != 0:
+            text = self._STATUS_TEXT.get(status, "unknown error")
+            raise RuntimeError(
+                f"fcapz TAP bridge on {self._channel_name()} rejected the "
+                f"command: {text} (status 0x{status:02X})"
+            )
+
+        if resp_bytes == 0:
+            return b""
+        payload = self._read_bytes(resp_bytes)
+        if len(payload) < resp_bytes:
+            self._resync(resp_bytes - len(payload))
+            raise RuntimeError(
+                f"fcapz TAP bridge on {self._channel_name()}: short reply "
+                f"({len(payload)} of {resp_bytes} bytes)"
+            )
+        return payload
+
+    def _resync(self, outstanding: int = 0) -> None:
+        """Bring the link back into step after a failed transaction.
+
+        Waits for :attr:`RESYNC_QUIET_S` of silence, dropping anything that
+        arrives meanwhile.  *outstanding* is how many reply bytes may still be
+        on the way; their wire time is added to the drain budget, so a long
+        reply on a slow link is drained rather than mistaken for a link that
+        never goes quiet.  If it still does not go quiet, the transport is
+        marked out of step and refuses further commands.  A channel error here
+        is left for the next transaction to report.
+        """
+        rounds = self.RESYNC_MAX_ROUNDS
+        if self.RESYNC_QUIET_S > 0:
+            rounds += math.ceil(
+                self._wire_time_s(max(0, outstanding)) / self.RESYNC_QUIET_S
+            )
+        try:
+            for _ in range(rounds):
+                time.sleep(self.RESYNC_QUIET_S)
+                if self._discard_input() == 0:
+                    return
+        except OSError:
+            return
+        self._out_of_step = True
+        _tap_log.warning(
+            "%s did not go quiet after a failed transaction; refusing further "
+            "commands until it is reconnected",
+            self._channel_name(),
+        )
+
+    # -- Transport API ------------------------------------------------------
+    def select_chain(self, chain: int) -> None:
+        """Select the RTL front-end ``sel[]`` index for later accesses."""
+        chain = int(chain)
+        if chain < 1 or (self.num_chains is not None and chain > self.num_chains):
+            raise ValueError(
+                f"chain {chain} out of range 1..{self.num_chains or '?'}"
+            )
+        self._active_chain = chain
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        """Shift *width* bits through the selected chain, return captured TDO."""
+        width = int(width)
+        if width < 1:
+            raise ValueError(f"DR width must be >= 1, got {width}")
+        if self.max_dr_bits is not None and width > self.max_dr_bits:
+            raise ValueError(
+                f"DR width {width} exceeds the bridge's MAX_DR_BITS "
+                f"({self.max_dr_bits})"
+            )
+        target = self._active_chain if chain is None else int(chain)
+        nbytes = (width + 7) // 8
+        cmd = (
+            bytes([self.SOF_CMD, self.CMD_SCAN, target & 0xFF])
+            + int(width).to_bytes(2, "little")
+            + (int(bits) & ((1 << width) - 1)).to_bytes(nbytes, "little")
+        )
+        payload = self._txn(cmd, nbytes)
+        captured = int.from_bytes(payload, "little")
+        return captured & ((1 << width) - 1)
+
+    def batched_dr_scans(
+        self, count: int, width: int, *, chain: int | None = None
+    ) -> List[int]:
+        """Run *count* zero-payload scans in one command; return the TDO words.
+
+        Identical in effect to calling :meth:`raw_dr_scan` *count* times with
+        zero data -- same TAP sequence, same trailing clocks -- but one command
+        and one reply instead of ``count`` of each.  That matters more than the
+        byte count: on a USB CDC link every transaction costs a round trip of
+        its own, and a burst readback is dozens of them.
+
+        Requires bridge protocol >= 2; callers check
+        :attr:`_supports_batched_scans` first.
+        """
+        count = int(count)
+        width = int(width)
+        if count < 1:
+            return []
+        if width < 1:
+            raise ValueError(f"DR width must be >= 1, got {width}")
+        if self.max_dr_bits is not None and width > self.max_dr_bits:
+            raise ValueError(
+                f"DR width {width} exceeds the bridge's MAX_DR_BITS "
+                f"({self.max_dr_bits})"
+            )
+        if count > 0xFFFF:
+            raise ValueError(f"scan count {count} exceeds the 16-bit field")
+
+        target = self._active_chain if chain is None else int(chain)
+        nbytes = (width + 7) // 8
+        cmd = (
+            bytes([self.SOF_CMD, self.CMD_BREAD, target & 0xFF])
+            + width.to_bytes(2, "little")
+            + count.to_bytes(2, "little")
+        )
+        payload = self._txn(cmd, nbytes * count)
+        mask = (1 << width) - 1
+        return [
+            int.from_bytes(payload[i * nbytes:(i + 1) * nbytes], "little") & mask
+            for i in range(count)
+        ]
+
+    @property
+    def _supports_batched_scans(self) -> bool:
+        return (
+            self.proto_version is not None
+            and self.proto_version >= self.PROTO_BATCHED_SCANS
+        )
+
+    def _runtest(self, cycles: int) -> None:
+        cmd = bytes([self.SOF_CMD, self.CMD_IDLE]) + int(cycles).to_bytes(2, "little")
+        self._txn(cmd, 0)
+
+    def write_reg(self, addr: int, value: int) -> None:
+        frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+        self.raw_dr_scan(frame, 49)
+
+    def read_reg(self, addr: int) -> int:
+        # Same two-scan shape as the JTAG transports: the first scan presents
+        # the address, the second shifts out what CAPTURE latched.
+        read_frame = (addr & 0xFFFF) << 32
+        self.raw_dr_scan(read_frame, 49)
+        self._runtest(self.READ_IDLE_CYCLES)
+        shifted_out = self.raw_dr_scan(read_frame, 49)
+        return shifted_out & 0xFFFFFFFF
+
+    def read_block(self, addr: int, words: int) -> List[int]:
+        """Read *words* 32-bit words at *addr*, bursting the DATA window.
+
+        Words, not samples: a sample wider than 32 bits comes back as
+        ``ceil(SAMPLE_W / 32)`` words, low word first -- the layout
+        ``Analyzer.capture()`` reassembles.  A burst that runs and fails
+        raises; it is never read around through the register window, same as
+        the JTAG transports.  The window is not a safe second try: a core
+        built with ``USER1_DATA_EN=0`` answers it with zeros, which would turn
+        a link error into a capture of zeros.  Only a burst that cannot run
+        at all (:class:`BurstUnavailableError`, raised before any scan) falls
+        through to the window.
+        """
+        if words <= 0:
+            return []
+        if addr == self.ADDR_DATA_BASE and self._burst_available:
+            sample_w = self._core_sample_width()
+            words_per = (sample_w + 31) // 32
+            try:
+                samples = self._read_block_burst(
+                    -(-words // words_per), element_width=sample_w
+                )
+            except BurstUnavailableError:
+                return self.read_window_block(addr, words)
+            return _split_words(samples, words_per)[:words]
+        return self.read_window_block(addr, words)
+
+    def read_window_block(self, addr: int, words: int) -> List[int]:
+        """Per-word reads through the control-chain register window."""
+        if words <= 0:
+            return []
+        check_data_window(addr, words, self.data_window_end)
+        return [self.read_reg(addr + i * 4) for i in range(words)]
+
+    def read_sample_block(
+        self, base_addr: int, n_samples: int, sample_width: int
+    ) -> List[int]:
+        """Read *n_samples* whole samples through the burst chain.
+
+        Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
+        sample, the flat layout ``Analyzer.capture()`` reassembles for a core
+        wider than 32 bits.  Raises :class:`BurstUnavailableError`, before any
+        scan, when the burst cannot carry the request, so the caller can read
+        the window instead; a burst that runs and fails raises anything else.
+        """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        if base_addr != self.ADDR_DATA_BASE:
+            raise BurstUnavailableError(
+                f"burst reads start at the DATA base, not 0x{base_addr:04X}"
+            )
+        samples = self._read_block_burst(n_samples, element_width=sample_width)
+        return _split_words(samples, (sample_width + 31) // 32)
+
+    @property
+    def timestamp_burst_max_width(self) -> int:
+        """Widest timestamp :meth:`read_timestamp_block` can return whole.
+
+        The burst engine packs whole timestamps into one DR, so anything up to
+        the burst width works; the JTAG transports stop at one 32-bit word.
+        ``Analyzer`` checks this before reading wide timestamps through the
+        window instead.
+        """
+        return self._burst_dr_bits if self._burst_available else 0
+
+    def read_timestamp_block(
+        self, addr: int, words: int, timestamp_width: int
+    ) -> List[int]:
+        """Read *words* whole timestamps, through the burst chain when usable.
+
+        One value per timestamp, at any width up to the burst DR.  As with
+        :meth:`read_block`, a burst that fails raises rather than falling back
+        to the window.
+        """
+        if words <= 0:
+            return []
+        if self._burst_available and timestamp_width > 0:
+            try:
+                return self._read_block_burst(
+                    words, timestamp=True, element_width=timestamp_width
+                )
+            except BurstUnavailableError:
+                pass
+        return self.read_window_block(addr, words)
+
+    def read_timestamp_block_single_chain(
+        self, base_addr: int, n_timestamps: int, timestamp_width: int
+    ) -> List[int]:
+        """Timestamps for a core wider than 32 bits.
+
+        ``Analyzer`` calls this for wide cores because on JTAG those are
+        single-chain and the two-chain burst cannot reach them.  Every core
+        behind this bridge has its own burst chain, at any width, so it is the
+        same burst as :meth:`read_timestamp_block`.
+        """
+        if not self._burst_available:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        return self._read_block_burst(
+            n_timestamps, timestamp=True, element_width=timestamp_width
+        )
+
+    # -- burst readback -----------------------------------------------------
+    #
+    # The ELA's burst chain (rtl/jtag_burst_read.v; chain 2 in
+    # rtl/fcapz_ela_uart.v) hands back a whole DR full of samples per scan,
+    # instead of one 32-bit word per *two* 49-bit scans.  On a byte-stream link
+    # that is the difference between ~48 bytes per sample and ~1.05, so a 1024
+    # x 8-bit capture goes from ~49 kB to ~1.07 kB on the wire.
+    #
+    # Batched into one CMD_BREAD (protocol 2) the reply is one packed DR per
+    # scan with a single header, so the per-sample cost is essentially the
+    # sample itself and barely depends on the scan width -- a wider DR is in
+    # fact marginally worse, because the priming scan that gets discarded grows
+    # with it.  That is why the UART wrapper defaults BURST_W to 64 and not to
+    # the 256 the hard-TAP wrappers use.
+    #
+    # The sequence is the same one the JTAG transports run -- the fabric is
+    # identical, only the way scans arrive differs.  Unlike hw_server and
+    # quartus_stp there is no read-until-stable retry: those guard against a
+    # stale first transaction from the probe stack, which has no analogue here
+    # (the bridge acknowledges every scan and holds no pipeline of its own).
+
+    @property
+    def _burst_dr_bits(self) -> int:
+        if self._burst_dr_bits_override is not None:
+            return self._burst_dr_bits_override
+        if self.max_dr_bits is None:
+            raise RuntimeError("burst width unknown: connect() first")
+        return self.max_dr_bits
+
+    @property
+    def _burst_available(self) -> bool:
+        """True when a burst chain is reachable and wide enough to pay off."""
+        if not self._has_burst:
+            return False
+        if self.num_chains is None or self.num_chains < self.burst_data_chain:
+            return False
+        return self._burst_dr_bits >= 32
+
+    def _core_sample_width(self) -> int:
+        """The selected core's hardware SAMPLE_W.
+
+        Read on every burst rather than cached: it sets the unpacking stride,
+        and a stale value after the selected core changes would decode every
+        sample at the wrong offset with nothing to show for it.
+        """
+        sample_w = int(self.read_reg(self.ADDR_SAMPLE_W))
+        if sample_w < 1:
+            raise BurstUnavailableError(
+                f"core reports SAMPLE_W={sample_w}; cannot unpack a burst"
+            )
+        return sample_w
+
+    def _read_block_burst(
+        self,
+        count: int,
+        *,
+        element_width: int,
+        timestamp: bool = False,
+    ) -> List[int]:
+        """Burst *count* whole elements (samples, or timestamps) of
+        *element_width* bits each.
+
+        ``jtag_burst_read`` packs ``BURST_W // element_width`` elements per
+        scan, element *i* at bits ``[i * element_width +: element_width]``,
+        so the stride is the element width itself -- not ``BURST_W`` divided
+        by the number that fit, which differs whenever the width does not
+        divide the DR.
+        """
+        if count <= 0:
+            return []
+        dr_bits = self._burst_dr_bits
+        if not 1 <= element_width <= dr_bits:
+            raise BurstUnavailableError(
+                f"{element_width}-bit elements do not fit the {dr_bits}-bit "
+                f"burst DR"
+            )
+        per_scan = dr_bits // element_width
+        n_scans = (count + per_scan - 1) // per_scan
+        mask = (1 << element_width) - 1
+
+        # 1. Arm the burst reader on the control chain.  Bit 31 asks for
+        #    timestamps rather than samples.
+        burst_frame = (
+            (1 << 48)
+            | (self.ADDR_BURST_PTR << 32)
+            | (0x80000000 if timestamp else 0)
+        )
+
+        def write_ptr() -> None:
+            self.raw_dr_scan(burst_frame, 49, chain=self._active_chain)
+            # 2. Let the update cross into the reader and the first staging
+            #    word fill before the next CAPTURE samples it.
+            self._runtest(self.BURST_PREFILL_IDLE_CYCLES)
+
+        write_ptr()
+        if self.burst_start_sync:
+            # See Transport.burst_start_sync: one burst scan, whose capture
+            # brings the engine's copy of the start toggle level with the new
+            # owner's, then a second BURST_PTR write the engine cannot miss.
+            self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
+            write_ptr()
+
+        # 3. One priming scan (staging is not loaded yet, so its CAPTURE is
+        #    meaningless), then the real ones.  A version-2 bridge takes all of
+        #    them as a single command, which is what removes the per-scan round
+        #    trip; older ones are driven one scan at a time.
+        if self._supports_batched_scans:
+            scans = self.batched_dr_scans(
+                n_scans + 1, dr_bits, chain=self.burst_data_chain
+            )
+        else:
+            scans = [
+                self.raw_dr_scan(0, dr_bits, chain=self.burst_data_chain)
+                for _ in range(n_scans + 1)
+            ]
+
+        values: list[int] = []
+        for scan_value in scans[1:]:
+            for idx in range(per_scan):
+                if len(values) >= count:
+                    break
+                values.append((scan_value >> (idx * element_width)) & mask)
+
+        if len(values) != count:
+            raise BurstIntegrityError(
+                f"TAP bridge burst returned {len(values)} values, expected {count}"
+            )
+        return values
+
+
+def _split_words(values: List[int], words_per: int) -> List[int]:
+    """Flatten each value into *words_per* 32-bit words, low word first."""
+    if words_per == 1:
+        return list(values)
+    return [
+        (value >> (32 * k)) & 0xFFFFFFFF
+        for value in values
+        for k in range(words_per)
+    ]
+
+
+class SerialTapTransport(TapBridgeTransport):
+    """:class:`TapBridgeTransport` over a serial port (pyserial).
+
+    Pairs with ``rtl/fcapz_uart_tap.v``.  The port can be a USB-serial cable
+    wired straight to two fabric pins, or a CDC port on a companion MCU that
+    bridges through to the fabric -- the transport does not care which.
+    """
+
+    # How long the link may stay silent before a reply is given up on (see
+    # _read_bytes); a long reply that keeps arriving is never cut short.  The
+    # bridge answers as fast as the link drains, so a short allowance is
+    # plenty and keeps a dead link from stalling a capture.
+    DEFAULT_TIMEOUT = 2.0
+    # 8N1: a start bit, eight data bits and a stop bit per byte.
+    BITS_PER_BYTE = 10
+
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = 1_000_000,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        chain: int = 1,
+        burst: bool = True,
+        burst_data_chain: int = 2,
+        burst_dr_bits: int | None = None,
+    ) -> None:
+        super().__init__(
+            chain=chain,
+            burst=burst,
+            burst_data_chain=burst_data_chain,
+            burst_dr_bits=burst_dr_bits,
+        )
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.timeout = float(timeout)
+        self._ser = None
+
+    def _channel_name(self) -> str:
+        return repr(self.port)
+
+    def link_info(self) -> dict | None:
+        info = super().link_info()
+        if info is not None:
+            # The bare port name and the rate actually in use -- _channel_name
+            # is quoted for error messages, which is not what a UI wants.
+            info["channel"] = self.port
+            info["baudrate"] = self.baudrate
+        return info
+
+    def _open(self) -> None:
+        try:
+            import serial  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise RuntimeError(
+                "SerialTapTransport needs pyserial. "
+                "Install it with: pip install 'fpgacapzero[serial]'"
+            ) from exc
+
+        try:
+            self._ser = serial.Serial(
+                self.port, self.baudrate, timeout=self.timeout
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"cannot open serial port {self.port!r} at {self.baudrate} baud: {exc}"
+            ) from exc
+
+        # Drop anything the previous session (or a bitstream loader) left in
+        # the buffers, so the first INFO reply is not read out of stale bytes.
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+        except Exception:  # pragma: no cover - not all backends implement it
+            pass
+
+    def _close(self) -> None:
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            finally:
+                self._ser = None
+
+    def _write_bytes(self, data: bytes) -> None:
+        self._ser.write(data)
+        self._ser.flush()
+
+    def _read_bytes(self, count: int) -> bytes:
+        """Read *count* bytes, for as long as they keep arriving.
+
+        pyserial's timeout bounds a whole read, so on its own it caps every
+        reply at ``timeout`` however long: a 4 kB burst at 9,600 baud needs
+        over four seconds just on the wire.  Nor can a deadline be sized for
+        it here -- the bridge streams a burst reply scan by scan, and how long
+        each scan takes depends on the fabric clock, which the host does not
+        know.  So ``timeout`` is how long the link may be *silent*: each read
+        returns what arrived within it, reading continues while anything did,
+        and a read that brings nothing ends the reply.
+        """
+        data = bytearray()
+        while len(data) < count:
+            chunk = self._ser.read(count - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return bytes(data)
+
+    def _discard_input(self) -> int:
+        pending = self._ser.in_waiting
+        if pending:
+            self._ser.read(pending)
+        return pending
+
+    def _wire_time_s(self, nbytes: int) -> float:
+        return nbytes * self.BITS_PER_BYTE / self.baudrate
 
 
 def find_quartus_stp(explicit: str | None = None) -> str | None:
@@ -1083,7 +1954,12 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         if addr == 0x0100 and self._burst_available:
-            return self._read_block_burst(words)
+            # Words, not samples: the burst returns one value per sample, so
+            # it stands in for the window only when a sample is one word.  A
+            # wider core reads with read_sample_block().
+            sample_w = self._burst_sample_width()
+            if sample_w <= 32:
+                return self._read_block_burst(words, element_width=sample_w)
         return self.read_window_block(addr, words)
 
     def read_window_block(self, addr: int, words: int) -> List[int]:
@@ -1145,14 +2021,17 @@ class QuartusStpTransport(Transport):
         """Declared by the ``burst`` constructor argument, never probed."""
         return self.burst
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def _burst_sample_width(self) -> int:
+        """The selected core's ``SAMPLE_W``, which is the burst stride.
+
+        Sample *i* sits at bit ``i * SAMPLE_W`` of each scan, so the width
+        itself is the stride -- ``256 // (256 // SAMPLE_W)`` is not, for any
+        width that does not divide 256.  Read fresh for every burst, never
+        cached, so a session that changes core or manager slot decodes the
+        one it has selected now.
+        """
+        sw = int(self.read_reg(0x000C))  # ADDR_SAMPLE_W
+        return sw if sw >= 1 else 8
 
     def _read_block_burst(
         self,
@@ -1161,13 +2040,9 @@ class QuartusStpTransport(Transport):
         timestamp: bool = False,
         element_width: int | None = None,
     ) -> List[int]:
-        if timestamp:
-            if element_width is None:
-                element_width = 32
-            per_scan = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            per_scan = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // per_scan
+        if element_width is None:
+            element_width = 32 if timestamp else self._burst_sample_width()
+        per_scan = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + per_scan - 1) // per_scan
         prime_scans = 1
         ctrl_chain = self._active_chain
@@ -2251,8 +3126,10 @@ class XilinxHwServerTransport(Transport):
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
-            return self._burst_with_hint(words)
+        if addr == 0x0100 and self._burst_available:
+            sample_w = self._burst_sample_width()
+            if sample_w <= 32:
+                return self._burst_with_hint(words, element_width=sample_w)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
 
@@ -2272,26 +3149,20 @@ class XilinxHwServerTransport(Transport):
         """
         return self.burst
 
-    def _burst_sample_ok(self) -> bool:
-        """True when the selected core's ``SAMPLE_W`` fits the burst DR model.
+    def _burst_sample_width(self) -> int:
+        """The selected core's ``SAMPLE_W``, which is the burst stride.
 
-        The burst engine returns whole samples; ``capture()`` only treats them
-        as such for ``SAMPLE_W <= 32`` (one 32-bit word per sample). Read fresh
-        (not cached) so a session that hops between an 8-bit ELA and a 160-bit
-        AXI monitor always gates on the *currently selected* core.
+        ``jtag_burst_read`` packs sample *i* at bit ``i * SAMPLE_W``, so the
+        width itself is the stride; ``256 // (256 // SAMPLE_W)`` is not, for
+        any width that does not divide 256 (24 gives 25).  Read fresh for every
+        burst: a session that hops between an 8-bit ELA and a 160-bit AXI
+        monitor, or between core-manager slots, must decode the core it has
+        selected *now*.  ``read_block`` bursts only ``SAMPLE_W <= 32`` (one
+        32-bit word per sample); a wider core reads with
+        :meth:`read_sample_block`.
         """
         sw = int(self.read_reg_stable(0x000C))  # ADDR_SAMPLE_W
-        return sw < 1 or sw <= 32
-
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+        return sw if sw >= 1 else 8
 
     def _read_block_burst(
         self,
@@ -2313,13 +3184,9 @@ class XilinxHwServerTransport(Transport):
         line, so the sequence object is built over several xsdb sends and only
         the last one runs it.
         """
-        if timestamp and element_width is None:
-            element_width = 32
-        if element_width is not None:
-            sps = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            sps = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // sps
+        if element_width is None:
+            element_width = 32 if timestamp else self._burst_sample_width()
+        sps = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + sps - 1) // sps
         prime_scans = 1
 
@@ -2511,22 +3378,18 @@ class XilinxHwServerTransport(Transport):
         total_words: int,
         *,
         skip_scans: int = 0,
-        element_width: int | None = None,
+        element_width: int,
         expected_scans: int | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
-        samples (SAMPLE_W bits each, LSB first).
+        *element_width*-bit values, LSB first, at a stride of that width.
 
         With *expected_scans*, any other number of scan tokens raises
         :class:`BurstIntegrityError` rather than returning a short or
         misaligned burst.
         """
-        if element_width is None:
-            sps = self._burst_samples_per_scan
-            sw = self.BURST_DR_BITS // sps  # bits per sample
-        else:
-            sw = element_width
-            sps = max(1, self.BURST_DR_BITS // sw)
+        sw = element_width
+        sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         burst_offset = self._dr_data_offset()

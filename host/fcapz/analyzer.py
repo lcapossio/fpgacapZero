@@ -795,11 +795,22 @@ class Analyzer:
             raw = self.transport.read_block(ts_base, ts_word_count)
             return _join_timestamp_words(raw, ts_words_per, mask)
 
+        # read_timestamp_block returns whole timestamps.  The JTAG transports
+        # burst only one-word ones; a transport that packs wider ones whole
+        # (the byte-stream TAP bridge) says how wide through
+        # timestamp_burst_max_width.
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        if ts_words_per == 1 and callable(timestamp_burst) and has_burst:
+        burst_max_w = getattr(self.transport, "timestamp_burst_max_width", 32)
+        if not isinstance(burst_max_w, int):
+            burst_max_w = 32
+        if (
+            callable(timestamp_burst)
+            and has_burst
+            and self._hw_timestamp_w <= burst_max_w
+        ):
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
-        else:
-            raw = self.transport.read_block(ts_base, ts_word_count)
+            return [v & mask for v in raw]
+        raw = self.transport.read_block(ts_base, ts_word_count)
         return _join_timestamp_words(raw, ts_words_per, mask)
 
     def _behind_manager(self) -> bool:
@@ -1435,6 +1446,7 @@ _DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
     "xilinx7": None,
     "ultrascale": OpenOcdTransport.IR_TABLE_US,
     "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
+    "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
 }
 
 
