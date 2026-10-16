@@ -117,7 +117,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `uart_rxd` on CCK/F3, `uart_txd` on CDI0/F2. On a real board the FPGA
   configures, the bridge identity and ELA registers read back, and a
   1024-sample capture returns a clean ramp over the burst chain in ~16 ms.
-- **Forgix board example (Efinix Trion T8F49 + RP2354).** The board exposes no
+  The board exposes no
   JTAG to the fabric at all — the T8 is configured over a write-only passive
   SPI link and its JTAG pins are bonded out nowhere — and the T8F49 package has
   no JTAG User TAP blocks, so `fcapz_ela_efinix` cannot be used on it.
