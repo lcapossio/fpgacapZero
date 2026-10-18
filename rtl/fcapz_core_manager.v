@@ -158,7 +158,6 @@ module fcapz_core_manager #(
                         && SLOT_HAS_BURST[active_idx];
     wire ctrl_wr = jtag_wr_en && jtag_addr == ADDR_MGR_CTRL;
 
-    integer i;
     always @(posedge jtag_clk or posedge mgr_rst) begin
         if (mgr_rst) begin
             active_idx <= {IDX_W{1'b0}};
@@ -209,7 +208,8 @@ module fcapz_core_manager #(
     end
 
     // One-cycle reset requests; the epochs count both edges of each reset.
-    always @(posedge jtag_clk) begin
+    always @(posedge jtag_clk) begin : reset_events
+        integer i;  // block-local: a shared one gets a driver per block
         mgr_rst_req <= ctrl_wr && jtag_wdata[0];
         for (i = 0; i < NUM_SLOTS; i = i + 1)
             slot_rst_req_r[i] <= ctrl_wr
@@ -251,7 +251,8 @@ module fcapz_core_manager #(
     reg [PTR_W-1:0] active_burst_start_ptr;
     reg [15:0] burst_slot_epoch;
 
-    always @(*) begin
+    always @(*) begin : active_mux
+        integer i;
         active_rdata = 32'h0;
         active_burst_data = {SAMPLE_W{1'b0}};
         active_burst_ts_data = {TS_W_SAFE{1'b0}};
@@ -277,7 +278,8 @@ module fcapz_core_manager #(
     reg [15:0] desc_core_id;
     reg desc_has_burst;
     reg [15:0] desc_epoch;
-    always @(*) begin
+    always @(*) begin : desc_mux
+        integer i;
         desc_core_id = 16'h0000;
         desc_has_burst = 1'b0;
         desc_epoch = 16'h0;
