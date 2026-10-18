@@ -129,6 +129,11 @@ multi-stage state machine where each stage has **two comparators
 (A and B)** with a selectable compare mode each, and a combine rule
 between A and B.
 
+On such a core the hardware triggers only from the sequencer. A capture
+configured with a plain `trigger` and no sequence still works: the host
+programs it as a single final stage 0 (`value_match` as EQ, `edge_detect`
+as CHANGED, `both` as EQ on A OR CHANGED on B, which needs `DUAL_COMPARE`).
+
 The sequencer is the most powerful trigger feature in fcapz.  It
 lets you say things like:
 

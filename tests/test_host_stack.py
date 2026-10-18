@@ -2236,6 +2236,46 @@ class SequencerBoundsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, field):
                     analyzer.configure(cfg)
 
+    def _seq_writes(self, trig_stages: int, trigger: TriggerConfig) -> dict:
+        """Configure a plain trigger; returns the SEQ-window writes by address."""
+        transport = self._make_transport_with_stages(trig_stages)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        writes = {}
+        real = transport.write_reg
+
+        def record(addr, value):
+            if 0x0040 <= addr < 0x0040 + 4 * 20:
+                writes[addr] = value
+            real(addr, value)
+
+        transport.write_reg = record
+        analyzer.configure(CaptureConfig(
+            pretrigger=0, posttrigger=1, trigger=trigger, sample_width=8, depth=1024,
+        ))
+        return writes
+
+    def test_plain_trigger_on_a_multi_stage_core_programs_one_final_stage(self):
+        # TRIG_STAGES > 1 cores trigger only from the sequencer; left alone,
+        # it runs whatever sequence the core last held.
+        cases = (
+            ("value_match", 0x00001000, 0),   # A EQ
+            ("edge_detect", 0x00001008, 0),   # A CHANGED
+            ("both", 0x00001380, 0x5A),       # A EQ | B CHANGED, combine OR
+        )
+        for mode, cfg_word, value_b in cases:
+            with self.subTest(mode=mode):
+                writes = self._seq_writes(4, TriggerConfig(mode=mode, value=0x5A, mask=0xF0))
+                self.assertEqual(writes[0x0040], cfg_word | (1 << 16))
+                self.assertEqual((writes[0x0044], writes[0x0048]), (0x5A, 0xF0))
+                self.assertEqual(writes[0x004C], value_b)
+
+    def test_plain_trigger_on_a_single_stage_core_leaves_the_sequencer(self):
+        self.assertEqual(
+            self._seq_writes(1, TriggerConfig(mode="value_match", value=1, mask=0xFF)),
+            {},
+        )
+
     def test_sequence_absent_hw_stages_zero_raises(self):
         transport = self._make_transport_with_stages(0)
         analyzer = Analyzer(transport)

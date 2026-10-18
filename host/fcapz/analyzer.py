@@ -242,6 +242,32 @@ def _dual_compare_available(caps: int) -> bool:
     return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
 
 
+def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
+    """The one final sequencer stage equivalent to a plain *trigger*.
+
+    A core built with TRIG_STAGES > 1 triggers only from its sequencer;
+    TRIG_MODE/VALUE/MASK feed the single-stage path those builds bypass.
+    """
+    if (trigger.value >> 32) or (trigger.mask >> 32):
+        raise ValueError(
+            "trigger value/mask exceed 32 bits; a multi-stage sequencer stage "
+            "compares only the low 32 bits"
+        )
+    value, mask = trigger.value & 0xFFFF_FFFF, trigger.mask & 0xFFFF_FFFF
+    eq, changed = 0, 8
+    if trigger.mode == "value_match":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              is_final=True)
+    if trigger.mode == "edge_detect":
+        return SequencerStage(cmp_mode_a=changed, value_a=value, mask_a=mask,
+                              is_final=True)
+    if trigger.mode == "both":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              cmp_mode_b=changed, value_b=value, mask_b=mask,
+                              combine=3, is_final=True)
+    raise ValueError("invalid trigger mode")
+
+
 def _validate_dual_compare(caps: int, stage: SequencerStage, context: str) -> None:
     if stage.combine != 0 and not _dual_compare_available(caps):
         raise ValueError(
@@ -719,19 +745,26 @@ class Analyzer:
                     f"pre+post+1 exceeds segment depth {seg_depth}"
                 )
 
-        if config.sequence is not None:
+        sequence = config.sequence
+        if sequence is None and hw_trig_stages > 1:
+            # A multi-stage core ignores TRIG_MODE/VALUE/MASK, so a plain
+            # trigger left in them would arm whatever sequence the core last
+            # held (after reset, one that never fires).  Program it as stage 0.
+            sequence = [_simple_trigger_stage(config.trigger)]
+
+        if sequence is not None:
             # All of it before any write: a sequence refused halfway would
             # leave the core holding settings this Analyzer does not know.
             if hw_trig_stages == 0:
                 raise ValueError(
                     "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
                 )
-            if len(config.sequence) > hw_trig_stages:
+            if len(sequence) > hw_trig_stages:
                 raise ValueError(
-                    f"sequence has {len(config.sequence)} stages but hw supports "
+                    f"sequence has {len(sequence)} stages but hw supports "
                     f"only {hw_trig_stages}"
                 )
-            for idx, stage in enumerate(config.sequence):
+            for idx, stage in enumerate(sequence):
                 _validate_stage_fields(stage, f"stage {idx}")
                 _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
                 _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
@@ -802,8 +835,8 @@ class Analyzer:
                 min(config.post_clocks, post_clk_max) if config.rle else 0,
             )
 
-        if config.sequence is not None:
-            for idx, stage in enumerate(config.sequence):
+        if sequence is not None:
+            for idx, stage in enumerate(sequence):
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
