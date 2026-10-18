@@ -3110,6 +3110,42 @@ class XilinxHwServerTransport(Transport):
         sink.put(None)
 
 
+def hw_server_chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
+    """Return the :class:`XilinxHwServerTransport` kwargs for *fpga_name*'s family.
+
+    Meant to be ``**``-unpacked alongside the usual host/port/bitfile
+    arguments; the CLI, the GUI and the RPC server all build their hw_server
+    transports through it.  An empty dict means "use transport defaults"
+    (7-series single-device 6-bit IR, no bypass padding).
+
+    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
+    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
+    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
+    itself, so the host shifts plain fcapz frames.  The PL still sees one
+    extra shift clock per DR scan, which the RTL tolerates.  Raw hex IR
+    opcodes on that two-TAP chain do not select USER2-4.
+
+    Versal parts (xcvm/xcvc/xcvp/xcve/xcvh) don't use BSCANE2 and aren't
+    supported by fcapz; they fall through to defaults and fail loudly at
+    the identity check rather than silently pretending to work.
+    """
+    name_lc = fpga_name.lower()
+    # Standalone UltraScale / UltraScale+ (Kintex, Virtex, Artix US+):
+    # 6-bit IR, different USER opcodes from 7-series.  Checked before the
+    # xck* / xczu* branch below because ``xcku040`` starts with ``xck``.
+    if name_lc.startswith(("xcku", "xcvu", "xcau")):
+        return {
+            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+            "ir_length": 6,
+        }
+    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*): register-IR
+    # mode handles the PL TAP + ARM DAP routing and padding.
+    if name_lc.startswith(("xck", "xczu")):
+        return {"use_register_ir": True}
+    # 7-series (xc7a / xc7k / xc7v / xc7s / xc7z) and anything else.
+    return {}
+
+
 class VendorStubTransport(Transport):
     """Placeholder adapter for future non-Xilinx backends."""
 

@@ -31,6 +31,7 @@ from .transport import (
     QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
+    hw_server_chain_shape_kwargs,
     list_openocd_taps,
     list_xilinx_hw_server_targets,
 )
@@ -525,14 +526,23 @@ class RpcServer:
                 ir_table=ir,
             )
         if backend == "hw_server":
+            fpga_name = str(req.get("tap", "xc7a100t"))
+            # The part family sets the chain shape exactly as the CLI and GUI
+            # do: register-IR mode on Zynq US+ MPSoC (xck*/xczu*), 6-bit IR on
+            # standalone UltraScale.  The resolved ir_table (explicit, or
+            # inferred from the same tap) supplies the opcodes; register-IR
+            # mode names USER chains directly and does not use them.
+            shape = hw_server_chain_shape_kwargs(fpga_name)
+            shape.pop("ir_table", None)
             return XilinxHwServerTransport(
                 host=host,
                 port=int(req.get("port", 3121)),
-                fpga_name=req.get("tap", "xc7a100t"),
+                fpga_name=fpga_name,
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
                 burst=bool(req.get("burst", True)),
                 ir_table=ir,
+                **shape,
             )
         if backend == "usb_blaster":
             tap = str(req.get("tap", "auto"))
