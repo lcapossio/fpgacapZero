@@ -459,5 +459,77 @@ class EjtagUartTests(unittest.TestCase):
         self.assertEqual(len(scan_log), 5)
 
 
+class PhantomUartTransport(FakeUartTransport):
+    """Clocks a foreign Update-DR before every separate transport call.
+
+    Models hw_server on Zynq UltraScale+ MPSoC, whose own JTAG accesses
+    update the core's chain between host scans and so clear a pending pop
+    or config result.  A batch runs uninterrupted.
+    """
+
+    def _phantom_update(self) -> None:
+        self._prev_rx_valid = False
+        self._prev_config_valid = False
+
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
+        self._phantom_update()
+        return super().raw_dr_scan(bits, width, chain=chain)
+
+    def raw_dr_scan_batch(
+        self, scans: list[tuple[int, int]], *, chain: int | None = None
+    ) -> list[int]:
+        self._phantom_update()
+        return [
+            FakeUartTransport.raw_dr_scan(self, bits, width, chain=chain)
+            for bits, width in scans
+        ]
+
+
+class EjtagUartForeignUpdateTests(unittest.TestCase):
+    """A result is read in the same batch as the scan that produced it."""
+
+    def _make_ctrl(self) -> tuple[EjtagUartController, PhantomUartTransport]:
+        t = PhantomUartTransport()
+        ctrl = EjtagUartController(t, chain=4)
+        ctrl.connect()
+        return ctrl, t
+
+    def test_fake_loses_a_pop_split_across_calls(self):
+        ctrl, t = self._make_ctrl()
+        t.rx_buf.extend(b"Z")
+        ctrl._scan(cmd=CMD_RX_POP)
+        status, _, _ = ctrl._scan(cmd=CMD_NOP)
+        self.assertFalse(status & 0x10)
+        self.assertEqual(t.rx_buf, b"")
+
+    def test_connect_reads_identity(self):
+        ctrl, _ = self._make_ctrl()
+        self.assertEqual(ctrl.attach()["version"], _VERSION)
+
+    def test_recv_count(self):
+        ctrl, t = self._make_ctrl()
+        payload = bytes(range(200))
+        t.rx_buf.extend(payload)
+        self.assertEqual(ctrl.recv(count=len(payload), timeout=0.05), payload)
+
+    def test_recv_all_available(self):
+        ctrl, t = self._make_ctrl()
+        payload = bytes(range(32, 127)) * 2
+        t.rx_buf.extend(payload)
+        self.assertEqual(ctrl.recv(timeout=0.05), payload)
+
+    def test_recv_count_leaves_the_rest(self):
+        ctrl, t = self._make_ctrl()
+        t.rx_buf.extend(b"abcdef")
+        self.assertEqual(ctrl.recv(count=4, timeout=0.05), b"abcd")
+        self.assertEqual(t.rx_buf, b"ef")
+
+    def test_recv_line(self):
+        ctrl, t = self._make_ctrl()
+        t.rx_buf.extend(b"KV260\nnext")
+        self.assertEqual(ctrl.recv_line(timeout=0.05), "KV260\n")
+        self.assertEqual(t.rx_buf, b"next")
+
+
 if __name__ == "__main__":
     unittest.main()

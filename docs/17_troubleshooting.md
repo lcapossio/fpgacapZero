@@ -188,12 +188,13 @@ and the burst doesn't cross a 4 KB boundary.
 
 ### Loopback test drops bytes at 115200 baud
 
-**Cause**: **BUG-002** — known issue.  Internal loopback at high
-baud rates drops bytes due to a CDC settling window.  Documented
-in [chapter 08](08_ejtag_uart_bridge.md).
+**Cause**: **BUG-002**, fixed on the host.  An older host read each
+pop result in a separate JTAG operation, and a JTAG update it did not
+issue could discard the byte in between.  No framing error or
+overflow is reported for these losses.  See
+[chapter 08](08_ejtag_uart_bridge.md).
 
-**Workaround**: drop to 9600 baud for loopback verification, or
-use external loopback (TX→RX wire) which is unaffected.
+**Fix**: update the host package; no bitstream change is needed.
 
 ## Capture / runtime
 
