@@ -12,13 +12,13 @@ Uses a 32-bit pipelined DR — each scan shifts in a command + tx_byte and
 shifts out status + rx_byte + tx_free.
 
 A ``RX_POP`` or ``CMD_CONFIG`` result appears in the *next* scan's capture,
-and the core clears it on every Update-DR of its chain.  JTAG traffic the host
-does not issue can clock such an update between two separate scans: on Zynq
-UltraScale+ MPSoC, hw_server's background accesses do so many times a second.
-So every scan that returns a result runs in one batch
+and the core clears it on every Update-DR of its chain.  Updates the host does
+not issue can land between two separate scans: on a Zynq UltraScale+ MPSoC
+under hw_server they arrive many times a second.  So every scan that returns
+a result runs in one batch with the scan that reads it
 (:meth:`~fcapz.transport.Transport.raw_dr_scan_batch`, a single uninterrupted
-``jtag sequence`` on hw_server) with the scan that reads it, and each batch
-ends in a NOP that drains the last result.
+``jtag sequence`` on hw_server), and each batch ends in a NOP that drains the
+last result.
 
 DR format (32 bits, LSB first):
   Shift-in:  [7:0]=tx_byte, [27:8]=reserved, [31:28]=cmd
