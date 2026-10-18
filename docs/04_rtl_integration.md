@@ -29,7 +29,8 @@ features they expose.
 |---|---|---|
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
 | AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
-| AMD/Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
+| AMD/Xilinx Zynq UltraScale+ MPSoC | `_xilinxus` | ✅ Kria KV260 (`xck26`) over hw_server `-register` mode |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `_xilinxus` | ❌ same shim, not yet HW-validated on a standalone part |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
@@ -51,9 +52,17 @@ includes the ELA configuration matrix for small/scalable builds:
 Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
 Arty A7 hardware test validates the AMD/Xilinx 7-series reference bitstream and
-the BRS-100 smoke/stress path validates the Gowin wrapper. ECP5, Intel,
-PolarFire, and UltraScale wrappers should be treated as RTL-implemented and
-lint-clean until a board-level smoke test is added for that family.
+the BRS-100 smoke/stress path validates the Gowin wrapper. The DE25-Nano
+test validates the Intel wrapper. The Kria KV260 test
+([`examples/kv260`](../examples/kv260/)) validates Zynq UltraScale+ MPSoC: the
+`_xilinxus` JTAG-UART and AXI bridge, and the `_xilinx7` multi-core manager
+(4-stage sequencer, storage qualification, relational compares) and AXI
+monitor, all on `xck26` over hw_server's `-register` mode. One known limit
+is marked `expectedFailure` there: an AXI bridge burst read longer than
+`FIFO_DEPTH - 1` beats fails. ECP5, PolarFire, and
+standalone Kintex / Virtex UltraScale(+) wrappers should be treated as
+RTL-implemented and lint-clean until a board-level smoke test is added for
+that family.
 
 > [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
@@ -375,8 +384,8 @@ Two cases to use this mode:
    IR mode.**  Through xsdb, raw hex IR opcodes reach only USER1 on
    these parts (USER2..USER4 alias to USER1 or put the TAP in BYPASS).
    The hw_server transport's named-register mode
-   (`use_register_ir=True`, which `fcapz --tap xck…` / `--tap xczu…`
-   selects automatically) reaches all four USER chains, so a standalone
+   (`use_register_ir=True`, which a tap named `xck…` / `xczu…`
+   selects automatically in the CLI, GUI, RPC server and MCP server) reaches all four USER chains, so a standalone
    `fcapz_eio_xilinxus` works there — see [chapter 14 "Zynq UltraScale+
    MPSoC — how the JTAG chain works with xsdb"](14_transports.md#zynq-ultrascale-mpsoc--how-the-jtag-chain-works-with-xsdb).
    Only when you drive the PL TAP without that mode, set `EIO_EN=1` on

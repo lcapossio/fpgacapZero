@@ -383,10 +383,11 @@ then shifts plain 49-bit / 256-bit frames.  The raw-opcode path
 reach the PL BSCANE2 through xsdb on MPSoC (see below), and which end of
 the scan the DAP bit sits on is not established (next section).
 
-CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
-`use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
-auto-selects `IR_TABLE_XILINX_ULTRASCALE`.
-See `host/fcapz/cli.py::_chain_shape_kwargs`.
+CLI, GUI, RPC (web UI) and MCP users don't have to pick manually: a tap
+named `xck26` (or any `xck*` / `xczu*`) selects `use_register_ir=True`,
+and `xcku040` (any `xcku*` / `xcvu*` / `xcau*`) selects
+`IR_TABLE_XILINX_ULTRASCALE` with a 6-bit IR.  All of them use
+`fcapz.transport.hw_server_chain_shape_kwargs`.
 
 ### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
@@ -452,8 +453,9 @@ the PL still sees it as one extra shift clock on every DR scan (a
 49-bit command is 50 TCKs in Shift-DR).  The pipe interface therefore
 decodes a command from the last 49 bits of any scan that is at least
 49 and fewer than `BURST_W` shifts long, instead of requiring exactly
-49 (see the changelog).  Single-chain and multi-core
-wrappers have not yet been re-verified on MPSoC hardware.
+49 (see the changelog).  The single-chain multi-core manager on USER1,
+with the AXI monitor, JTAG-UART and AXI bridge on USER2-4, has since been
+verified on a KV260 ([`examples/kv260`](../examples/kv260/)).
 
 #### Register access sequence
 
