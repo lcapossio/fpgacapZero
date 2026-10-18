@@ -369,6 +369,47 @@ class ManagerDetectionTests(unittest.TestCase):
         self.assertNotIn(0xF000, t.reads)
 
 
+class RpcManagerSlotTests(unittest.TestCase):
+    """An RPC session on a manager chain is bound to slot 0, not to whichever
+    slot an earlier session left selected."""
+
+    class _EioSelectedTransport(FakeTransport):
+        # Four slots; slots 2-3 are EIOs, and slot 2 is selected at start.
+        def __init__(self):
+            super().__init__()
+            self._manager_regs[0xF004] = 4
+            self._active_ela = 2
+            self._manager_regs[0xF008] = 2
+
+        def read_reg(self, addr):
+            if addr == 0x0000 and self._active_chain == 1 and self._active_ela >= 2:
+                return 0x494F  # EIO core id
+            return super().read_reg(addr)
+
+    def _server(self):
+        from fcapz.rpc import RpcServer
+
+        transport = self._EioSelectedTransport()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        return server, transport
+
+    def test_connect_binds_slot_0_instead_of_the_selected_eio(self):
+        server, transport = self._server()
+        r = server.handle({"cmd": "connect", "backend": "hw_server"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["chain"], 1)
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_a_moved_slot_is_reselected_before_the_next_access(self):
+        server, transport = self._server()
+        server.handle({"cmd": "connect", "backend": "hw_server"})
+        transport.write_reg(0xF008, 3)  # an EIO side session moves the manager
+        transport.invalidate_manager_instance_cache()
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(transport._active_ela, 0)
+
+
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(

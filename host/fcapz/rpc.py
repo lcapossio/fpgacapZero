@@ -432,6 +432,19 @@ class RpcServer:
         return dict(table) if table is not None else None
 
     @staticmethod
+    def _pin_manager_slot(analyzer: Analyzer) -> None:
+        """Bind the session to slot 0 when *analyzer*'s chain has a core manager.
+
+        Without a slot the analyzer uses whichever slot the manager last
+        selected, and an EIO side session on that chain moves it: connect then
+        saw no ELA on USER1 and autodetected another chain, and a later
+        capture could address an EIO.  Slot 0 is the first ELA in the
+        multi-core wrappers; a pinned slot is re-selected before every access.
+        """
+        if analyzer._behind_manager():  # noqa: SLF001 - detection lives there
+            analyzer.select_instance(0)
+
+    @staticmethod
     def _resolved_ir_name(req: Dict[str, Any]) -> str:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
@@ -829,6 +842,7 @@ class RpcServer:
             )
             try:
                 analyzer.connect()
+                self._pin_manager_slot(analyzer)
             except Exception:
                 # Don't leak the transport's child process / socket on a failed
                 # connect (hw_server down, wrong tap, program failure, ...).
@@ -843,6 +857,7 @@ class RpcServer:
                 # different DR protocol and must not see stray shifts).
                 for chain in (2,):
                     alt = Analyzer(analyzer.transport, chain=chain)
+                    self._pin_manager_slot(alt)
                     if alt.probe_optional() is not None:
                         analyzer = alt
                         break
@@ -872,6 +887,7 @@ class RpcServer:
             if new_chain != analyzer.bscan_chain:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
                 self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+                self._pin_manager_slot(self._analyzer)
             return self._ok(
                 chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
             )
