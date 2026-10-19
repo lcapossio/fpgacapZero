@@ -2433,6 +2433,8 @@ class XilinxHwServerTransport(Transport):
         # is what makes it end immediately.  Never touches stdin: a _send
         # blocked writing a large command to an xsdb that stopped reading
         # holds the pipe's buffer lock, and an "exit" write would wait on it.
+        # Leaves _proc for the owner: its _send fails on the dead pipe and
+        # its close() reaps the process.
         self._poisoned = True
         proc = self._proc
         if proc is not None:

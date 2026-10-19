@@ -1654,6 +1654,9 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertTrue(done.wait(2.0), "cancel() blocked on stdin")
         proc.kill.assert_called_once()
         proc.stdin.write.assert_not_called()
+        # The owner's thread may be mid-_send or about to close(): the
+        # process stays for it to fail on and reap.
+        self.assertIs(t._proc, proc)
 
     def test_close_when_not_connected_is_safe(self):
         """close() is idempotent when called before connect()."""
