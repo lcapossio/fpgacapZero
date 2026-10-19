@@ -273,6 +273,15 @@ architecture rtl of fcapz_ela is
     type seq_next_array_t is array (natural range <>) of std_logic_vector(SEQ_STATE_W - 1 downto 0);
     type seq_flag_array_t is array (natural range <>) of std_logic;
 
+    -- seq_count_reached in rtl/fcapz_ela.v.  17-bit compare: seq_counter
+    -- saturates at x"FFFF", and a 16-bit x"FFFF" + 1 would wrap to 0 and miss
+    -- the hit (BUG-255).  A target of 0 bypasses the count.
+    function seq_count_reached(counter : unsigned(15 downto 0);
+                               target  : unsigned(15 downto 0)) return boolean is
+    begin
+        return target = 0 or resize(counter, 17) + 1 >= resize(target, 17);
+    end function;
+
     signal jtag_ctrl         : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_pretrig_len  : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_posttrig_len : std_logic_vector(31 downto 0) := (others => '0');
@@ -1048,7 +1057,7 @@ begin
                 when others => seq_stage_hit := hit_a;
             end case;
             if seq_stage_hit = '1' and seq_is_final(seq_state) = '1' then
-                if seq_count_target(seq_state) = 0 or seq_counter + 1 >= seq_count_target(seq_state) then
+                if seq_count_reached(seq_counter, seq_count_target(seq_state)) then
                     hit_internal := '1';
                 end if;
             end if;
@@ -2100,10 +2109,12 @@ begin
                         -- above; reaching here with the count met means the
                         -- external-trigger combine held it back.
                         if seq_is_final(seq_state) = '0' and
-                           (seq_count_target(seq_state) = 0 or seq_counter + 1 >= seq_count_target(seq_state)) then
+                           seq_count_reached(seq_counter, seq_count_target(seq_state)) then
                             seq_state <= to_integer(unsigned(seq_next_state(seq_state)));
                             seq_counter <= (others => '0');
-                        else
+                        elsif seq_counter /= x"FFFF" then
+                            -- Saturate, as rtl/fcapz_ela.v: held-back hits
+                            -- keep counting and must not wrap to 0 (BUG-255).
                             seq_counter <= seq_counter + 1;
                         end if;
                         trig_delay_count <= (others => '0');

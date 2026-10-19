@@ -833,8 +833,11 @@ module fcapz_ela #(
         end
     end
 
+    // 17-bit compare: seq_counter saturates at 16'hFFFF (see its update), and
+    // 16-bit 16'hFFFF + 1 would wrap to 0 and miss the hit (BUG-255).
     wire seq_count_reached = (seq_count_target[seq_state] == 16'h0) ||
-                             ((seq_counter + 16'h1) >= seq_count_target[seq_state]);
+                             (({1'b0, seq_counter} + 17'h1) >=
+                              {1'b0, seq_count_target[seq_state]});
     wire pretrigger_ready = pre_count >= pretrig_len;
     wire trigger_holdoff_done = !trig_holdoff_active;
 
@@ -1868,7 +1871,10 @@ module fcapz_ela #(
                         seq_counter <= 16'h0;
                     end else if (pretrigger_ready && TRIG_STAGES > 1 && seq_stage_hit) begin
                         trig_delay_count <= 16'h0;
-                        seq_counter <= seq_counter + 1'b1;
+                        // Saturate: hits held back by the external-trigger
+                        // combine keep counting and must not wrap to 0.
+                        if (seq_counter != 16'hFFFF)
+                            seq_counter <= seq_counter + 1'b1;
                     end else begin
                         trig_delay_count <= 16'h0;
                     end

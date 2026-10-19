@@ -252,9 +252,10 @@ def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
     TRIG_MODE/VALUE/MASK feed the single-stage path those builds bypass.
 
     ``count_target=0`` skips the count check.  The default of 1 means the
-    same except when the 16-bit match counter wraps: matches the external
-    trigger gate holds back still count, and at 0xFFFF a target of 1 reads
-    as not reached for one sample.
+    same on current RTL, whose hit counter saturates; bitstreams from fcapz
+    0.4.9 and earlier wrap the 16-bit counter, so after 65535 matches the
+    external trigger gate held back, a target of 1 read as not reached for
+    one sample.
     """
     if (trigger.value >> 32) or (trigger.mask >> 32):
         raise ValueError(

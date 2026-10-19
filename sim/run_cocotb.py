@@ -141,6 +141,14 @@ TARGETS: tuple[Target, ...] = (
         _VHDL_ELA_SRC,
     ),
     Target(
+        "ela_seq_count_saturates",
+        "fcapz_ela",
+        (RTL / "reset_sync.v", RTL / "fcapz_ela.v", RTL / "dpram.v", RTL / "trig_compare.v"),
+        "fcapz_ela_seq_count_saturates",
+        {"SAMPLE_W": 8, "DEPTH": 16, "TRIG_STAGES": 2, "EXT_TRIG_EN": 1},
+        _VHDL_ELA_SRC,
+    ),
+    Target(
         "fcapz_ela_xilinx7_single_chain",
         "fcapz_ela_xilinx7",
         (
