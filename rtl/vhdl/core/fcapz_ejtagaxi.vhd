@@ -195,7 +195,7 @@ architecture rtl of fcapz_ejtagaxi is
     signal respq_rst_tck : std_logic := '0';
     signal respq_rst_axi : std_logic := '0';
 
-    signal fifo_wr_en_i : std_logic := '0';
+    signal fifo_wr_en_i : std_logic;
     signal fifo_full : std_logic;
     signal fifo_rd_en_i : std_logic := '0';
     signal fifo_rdata : std_logic_vector(DATA_W - 1 downto 0);
@@ -204,7 +204,6 @@ architecture rtl of fcapz_ejtagaxi is
     signal fifo_rd_count8 : std_logic_vector(7 downto 0);
     signal fifo_rst_tck : std_logic := '0';
     signal fifo_rst_axi : std_logic := '0';
-    signal fifo_wr_data_i : std_logic_vector(DATA_W - 1 downto 0) := (others => '0');
 
     signal axi_state : axi_state_t := ST_IDLE;
     signal timeout_cnt : unsigned(31 downto 0) := (others => '0');
@@ -282,7 +281,13 @@ begin
     m_axi_arburst <= m_axi_arburst_i;
     m_axi_arvalid <= m_axi_arvalid_i;
     m_axi_arprot <= "000";
-    m_axi_rready <= m_axi_rready_i;
+    -- Burst fill: ready is the FIFO's own not-full, and the write is the
+    -- handshake itself, so every accepted beat is written exactly once.  A
+    -- registered ready stayed high in the cycle the FIFO filled and dropped
+    -- that beat; a registered write lagged the full flag by a cycle.
+    m_axi_rready <= not fifo_full when axi_state = ST_BURST_R_FILL else m_axi_rready_i;
+    fifo_wr_en_i <= '1' when axi_state = ST_BURST_R_FILL and m_axi_rvalid = '1'
+                             and fifo_full = '0' else '0';
 
     debug_tck <= (others => '0');
     debug_tck_edge <= (others => '0');
@@ -354,7 +359,7 @@ begin
             wr_clk => axi_clk,
             wr_rst => axi_rst or fifo_rst_axi,
             wr_en => fifo_wr_en_i,
-            wr_data => fifo_wr_data_i,
+            wr_data => m_axi_rdata,
             wr_full => fifo_full,
             wr_rst_busy => open,
             rd_clk => tck,
@@ -620,8 +625,6 @@ begin
             m_axi_rready_i <= '0';
             cmdq_rd_en_i <= '0';
             respq_wr_en_i <= '0';
-            fifo_wr_en_i <= '0';
-            fifo_wr_data_i <= (others => '0');
             cmdq_rst_axi <= '0';
             respq_rst_axi <= '0';
             fifo_rst_axi <= '0';
@@ -632,7 +635,6 @@ begin
         elsif rising_edge(axi_clk) then
             cmdq_rd_en_i <= '0';
             respq_wr_en_i <= '0';
-            fifo_wr_en_i <= '0';
             cmdq_rst_axi <= '0';
             respq_rst_axi <= '0';
             fifo_rst_axi <= '0';
@@ -860,7 +862,6 @@ begin
                     when ST_BURST_AR =>
                         if m_axi_arready = '1' then
                             m_axi_arvalid_i <= '0';
-                            m_axi_rready_i <= '1';
                             axi_state <= ST_BURST_R_FILL;
                             timeout_cnt <= (others => '0');
                         elsif timeout_cnt >= to_unsigned(TIMEOUT - 1, timeout_cnt'length) then
@@ -870,15 +871,12 @@ begin
                         end if;
 
                     when ST_BURST_R_FILL =>
-                        m_axi_rready_i <= not fifo_full;
+                        -- m_axi_rready and fifo_wr_en_i are concurrent here.
                         if m_axi_rvalid = '1' and fifo_full = '0' then
-                            fifo_wr_data_i <= m_axi_rdata;
-                            fifo_wr_en_i <= '1';
                             timeout_cnt <= (others => '0');
                             if m_axi_rlast = '1' then
                                 resp_rdata <= m_axi_rdata;
                                 resp_code <= m_axi_rresp;
-                                m_axi_rready_i <= '0';
                                 axi_state <= ST_DONE;
                             end if;
                         elsif m_axi_rvalid = '0' then

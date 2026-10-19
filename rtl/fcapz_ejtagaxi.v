@@ -84,7 +84,7 @@ module fcapz_ejtagaxi #(
     input  wire [1:0]            m_axi_rresp,
     input  wire                   m_axi_rvalid,
     input  wire                   m_axi_rlast,
-    output reg                    m_axi_rready,
+    output wire                   m_axi_rready,
 
     // Optional debug buses for on-chip logic analysis
     output wire [255:0]          debug_tck,
@@ -246,6 +246,7 @@ module fcapz_ejtagaxi #(
 
     // -- AXI FSM state --------------------------------------------------------
     reg [3:0]  axi_state;
+    reg        rready_q;   // R-channel ready for single reads
     reg [11:0] timeout_cnt;
     reg [7:0]  beat_count;
     reg        reset_req_sync1_axi;
@@ -1115,7 +1116,7 @@ module fcapz_ejtagaxi #(
         m_axi_arsize        = 3'b010;
         m_axi_arburst       = 2'b01;
         m_axi_arvalid       = 1'b0;
-        m_axi_rready        = 1'b0;
+        rready_q            = 1'b0;
         cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
         respq_rst_axi       = 1'b0;
@@ -1166,7 +1167,7 @@ module fcapz_ejtagaxi #(
             m_axi_arsize      <= 3'b010;
             m_axi_arburst     <= 2'b01;
             m_axi_arvalid     <= 1'b0;
-            m_axi_rready      <= 1'b0;
+            rready_q          <= 1'b0;
             cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
             respq_rst_axi     <= 1'b0;
@@ -1233,7 +1234,7 @@ module fcapz_ejtagaxi #(
                 m_axi_wlast            <= 1'b0;
                 m_axi_bready           <= 1'b0;
                 m_axi_arvalid          <= 1'b0;
-                m_axi_rready           <= 1'b0;
+                rready_q               <= 1'b0;
                 cmdq_rst_axi           <= 1'b1;
                 respq_rst_axi          <= 1'b1;
                 fifo_rst_axi           <= 1'b1;
@@ -1250,7 +1251,7 @@ module fcapz_ejtagaxi #(
                     m_axi_wlast   <= 1'b0;
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
-                    m_axi_rready  <= 1'b0;
+                    rready_q      <= 1'b0;
                     timeout_cnt   <= 12'd0;
                     beat_count    <= 8'd0;
 
@@ -1369,7 +1370,7 @@ module fcapz_ejtagaxi #(
                 ST_AR: begin
                     if (m_axi_arready) begin
                         m_axi_arvalid <= 1'b0;
-                        m_axi_rready  <= 1'b1;
+                        rready_q      <= 1'b1;
                         axi_state     <= ST_WAIT_R;
                         timeout_cnt   <= 12'd0;
                     end else begin
@@ -1384,7 +1385,7 @@ module fcapz_ejtagaxi #(
                     if (m_axi_rvalid) begin
                         resp_rdata   <= m_axi_rdata;
                         resp_code    <= m_axi_rresp;
-                        m_axi_rready <= 1'b0;
+                        rready_q     <= 1'b0;
                         axi_state    <= ST_DONE;
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
@@ -1479,7 +1480,6 @@ module fcapz_ejtagaxi #(
                 ST_BURST_AR: begin
                     if (m_axi_arready) begin
                         m_axi_arvalid <= 1'b0;
-                        m_axi_rready  <= 1'b1;
                         axi_state     <= ST_BURST_R_FILL;
                         timeout_cnt   <= 12'd0;
                     end else begin
@@ -1491,16 +1491,13 @@ module fcapz_ejtagaxi #(
 
                 // ---- Burst read: fill FIFO from R-channel ----
                 ST_BURST_R_FILL: begin
-                    // Flow control: deassert rready when FIFO is full
-                    m_axi_rready <= !fifo_full;
-
+                    // m_axi_rready is !fifo_full here (assigned below), so
+                    // a beat is accepted exactly when fifo_wr_en writes it.
                     if (m_axi_rvalid && !fifo_full) begin
-                        // fifo_wr_en is combinational (assigned below)
                         timeout_cnt    <= 12'd0;
                         if (m_axi_rlast) begin
                             resp_code    <= m_axi_rresp;
                             resp_rdata   <= m_axi_rdata;
-                            m_axi_rready <= 1'b0;
                             axi_state    <= ST_DONE;
                         end
                     end else if (!m_axi_rvalid) begin
@@ -1517,7 +1514,7 @@ module fcapz_ejtagaxi #(
                     m_axi_wlast   <= 1'b0;
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
-                    m_axi_rready  <= 1'b0;
+                    rready_q      <= 1'b0;
                     if (respq_wr_ready && !respq_full) begin
                         axi_state     <= ST_IDLE;
                     end
@@ -1530,7 +1527,7 @@ module fcapz_ejtagaxi #(
                     m_axi_wlast   <= 1'b0;
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
-                    m_axi_rready  <= 1'b0;
+                    rready_q      <= 1'b0;
                     resp_code     <= 2'b10; // SLVERR
                     resp_rdata    <= {DATA_W{1'b0}};
                     if (respq_wr_ready && !respq_full) begin
@@ -1549,6 +1546,11 @@ module fcapz_ejtagaxi #(
     // FIFO write enable: burst read data from AXI R-channel
     assign fifo_wr_en = (axi_state == ST_BURST_R_FILL) &&
                         m_axi_rvalid && !fifo_full;
+
+    // Burst fill: ready is the FIFO's own !full, not a registered copy.  A
+    // registered copy stayed high in the cycle the FIFO filled, so the slave
+    // handed over a beat that fifo_wr_en did not write.
+    assign m_axi_rready = (axi_state == ST_BURST_R_FILL) ? !fifo_full : rready_q;
 
     assign debug_axi = DEBUG_EN ? {
         cmdq_rd_data,

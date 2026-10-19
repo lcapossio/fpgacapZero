@@ -457,15 +457,13 @@ class TestEjtagAxi(_Hw):
         self.bridge.burst_write(0x0, data)
         self.assertEqual(self.bridge.read_block(0x0, 16), data)
 
-    @unittest.expectedFailure
     def test_burst_read_full_fifo_depth(self):
-        """Known limitation: a FIFO_DEPTH-beat burst read fails with SLVERR.
+        """A FIFO_DEPTH-beat burst read.
 
-        The bridge drives ``m_axi_rready <= !fifo_full`` from a register, so
-        the beat the slave hands over in the cycle the burst FIFO fills is
-        not written.  The XPM async FIFO reports full after FIFO_DEPTH - 1
-        writes, so a 16-beat read loses its last beat and times out; 15
-        beats pass.  Remove the decorator when the RTL is fixed.
+        The XPM async FIFO reports full after FIFO_DEPTH - 1 writes, so the
+        last beat waits for the host to pop one.  A registered ``rready``
+        used to accept that beat in the cycle the FIFO filled and drop it:
+        16 beats failed with SLVERR while 15 passed.
         """
         data = [0x3000_0000 + i for i in range(16)]
         self.bridge.write_block(0x0, data)

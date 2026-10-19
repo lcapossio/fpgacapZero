@@ -74,10 +74,3 @@ MPSoC chain shape, and `--program` loads the PL through the PS TAP:
 ```bash
 fcapz --backend hw_server --tap xck26 --program examples/kv260/kv260_top.bit probe
 ```
-
-## Known limits
-
-One test is marked `expectedFailure` and reports as such: an AXI bridge
-burst read of `FIFO_DEPTH` beats (16 here) fails with SLVERR, because the
-beat delivered in the cycle the burst FIFO fills is dropped. Bursts of up
-to 15 beats pass.

@@ -57,9 +57,7 @@ test validates the Intel wrapper. The Kria KV260 test
 ([`examples/kv260`](../examples/kv260/)) validates Zynq UltraScale+ MPSoC: the
 `_xilinxus` JTAG-UART and AXI bridge, and the `_xilinx7` multi-core manager
 (4-stage sequencer, storage qualification, relational compares) and AXI
-monitor, all on `xck26` over hw_server's `-register` mode. One known limit
-is marked `expectedFailure` there: an AXI bridge burst read longer than
-`FIFO_DEPTH - 1` beats fails. ECP5, PolarFire, and
+monitor, all on `xck26` over hw_server's `-register` mode. ECP5, PolarFire, and
 standalone Kintex / Virtex UltraScale(+) wrappers should be treated as
 RTL-implemented and lint-clean until a board-level smoke test is added for
 that family.

@@ -295,12 +295,19 @@ if count > self._fifo_depth:
     )
 ```
 
-This catches the overflow at the host API boundary.  Without it,
-an oversized burst would either deadlock (FIFO full → AXI side
-asserts `rready=0` → AXI slave stalls indefinitely if it can't
-back-pressure) or silently drop beats.  With the host check you
-get a clear error message that points at the fix (rebuild with a
-bigger `FIFO_DEPTH`).
+This catches an oversized burst at the host API boundary, with a
+clear error message that points at the fix (rebuild with a bigger
+`FIFO_DEPTH`).
+
+On the AXI side a burst read is flow-controlled exactly: while the
+bridge fills the FIFO, `rready` is the FIFO's own not-full, and a beat
+is written in the same cycle it is accepted.  A full FIFO holds the
+slave off until the host pops a beat, and no beat is dropped or
+written twice.  The AMD/Xilinx XPM FIFO reports full one entry early
+(`FIFO_DEPTH - 1`), so the last beat of a full-depth burst simply
+waits for the host's first pop.  (Before this was fixed, a registered
+`rready` accepted a beat in the cycle the FIFO filled and dropped it,
+so a 16-beat read on a 16-deep XPM FIFO failed with SLVERR.)
 
 The host learns the bitstream's FIFO_DEPTH from the FEATURES
 register at `0x002C`:
