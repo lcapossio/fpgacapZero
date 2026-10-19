@@ -167,6 +167,13 @@ FPGACAP_SKIP_HW=1 pytest examples/arty_a7/test_hw_integration.py -v
 Set `FPGACAP_SKIP_HW=1` in CI or when no board is available; the suite will
 skip gracefully.
 
+The Kria KV260 (Zynq UltraScale+ MPSoC) suite runs the same way over its
+on-board USB-JTAG. It programs the board once, through RPC `connect`:
+
+```bash
+pytest examples/kv260/test_hw_integration.py -v
+```
+
 ### GUI + hardware (opt-in)
 
 `tests/test_gui_hw_capture.py` exercises **fcapz-gui** (`MainWindow`) against

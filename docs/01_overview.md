@@ -179,8 +179,10 @@ The host stack supports three JTAG transports out of the box:
 - **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
   default).  Programs the FPGA, talks to BSCANE2, hardware-validated
-  on Arty A7-100T, no extra software to install if you already have
-  Vivado.
+  on Arty A7-100T and on the Kria KV260 (Zynq UltraScale+ MPSoC), no
+  extra software to install if you already have Vivado.  On MPSoC parts
+  the chain mode is picked from the tap name (see
+  [chapter 14](14_transports.md)).
 - **OpenOCD** — cross-platform, works with any OpenOCD-supported JTAG
   adapter (FTDI, WCH CH347, CMSIS-DAP, J-Link, …) on any board.  Slower
   than hw_server but vendor-neutral.  Talks to OpenOCD's TCL listener

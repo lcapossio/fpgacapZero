@@ -17,7 +17,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   AXI bridge on USER4. `pl_clk0` comes from the PS through a minimal block
   design. The pytest suite programs the board through RPC `connect` and
   exercises each core over hw_server's `-register` mode, plus the RPC
-  connect paths the web UI and MCP server use.
+  connect paths the web UI and MCP server use. `python
+  examples/kv260/build.py` builds it.
 
 - **MCP — multi-stage trigger sequences.** The capture `config` takes
   `trigger_sequence`, one typed object per sequencer stage (compare modes
@@ -362,6 +363,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   documented, while single-stage cores keep their RTL behaviour; on a
   multi-stage core built without `DUAL_COMPARE` it is refused. Every board
   validated before was built with `TRIG_STAGES=1`.
+- **EJTAG-AXI — a burst read that fills the FIFO no longer loses a beat.**
+  While filling the burst FIFO the bridge drove `rready` from a register
+  holding last cycle's not-full, so in the cycle the FIFO filled the slave
+  handed over a beat that was never written. The XPM FIFO reports full at
+  `FIFO_DEPTH - 1`, so a 16-beat read on a 16-deep bridge failed with SLVERR
+  while 15 passed (seen on a KV260). `rready` is now the FIFO's own not-full
+  during the fill, so a beat is accepted exactly when it is written; a full
+  FIFO holds the slave off until the host pops. The VHDL core also wrote
+  the FIFO a cycle after accepting the beat, against a full flag that lagged
+  by that cycle; its write is now combinational too. Both HDLs; needs a
+  bitstream rebuild. A cocotb test drives a 24-beat burst through the
+  16-deep FIFO in both HDLs.
 - **EJTAG-UART — no more dropped bytes (BUG-002).** An `RX_POP` or
   `CMD_CONFIG` result appears in the next scan's capture, and the core
   clears it on every Update-DR of its chain. The host read it in a separate

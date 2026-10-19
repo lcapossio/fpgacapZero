@@ -557,6 +557,29 @@ a.connect()
 print(a.probe())
 ```
 
+### Example: Zynq UltraScale+ MPSoC (Kria KV260)
+
+```python
+from fcapz import XilinxHwServerTransport, Analyzer
+from fcapz.transport import hw_server_chain_shape_kwargs
+
+t = XilinxHwServerTransport(
+    port=3121,
+    fpga_name="xck26",
+    bitfile="examples/kv260/kv260_top.bit",                 # loaded through the PS TAP
+    **hw_server_chain_shape_kwargs("xck26"),                # → use_register_ir=True
+)
+a = Analyzer(t)
+a.connect()
+print(a.probe())
+```
+
+The CLI, GUI, RPC server (web UI) and MCP server make the same choice
+from the tap name, so `fcapz --backend hw_server --tap xck26 ...` needs
+nothing else.  [`examples/kv260`](../examples/kv260/) is a reference
+design with a core on every USER chain, and its hardware test exercises
+them all.
+
 The desktop GUI ([chapter 12](12_gui.md)) has an "IR table" dropdown
 in the Connection panel that selects between the two presets, so
 GUI users never have to remember the codes.
