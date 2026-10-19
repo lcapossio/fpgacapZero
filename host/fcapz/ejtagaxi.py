@@ -343,27 +343,30 @@ class EjtagAxiController:
 
         Restores JTAG chain 1 (ELA) before returning so a shared
         session can continue using USER1 register access. Also primes the
-        bridge before any subsequent command traffic.
+        bridge before any subsequent command traffic.  Holds the transport's
+        transaction lock: switching its chain must not land between another
+        controller's register accesses.
         """
-        self._transport.select_chain(self._chain)
-        try:
-            decoded = self._scan_batch(
-                [
-                    (CMD_CONFIG, 0x0000, 0, 0),
-                    (CMD_CONFIG, 0x0004, 0, 0),
-                    (CMD_CONFIG, 0x002C, 0, 0),
-                    (CMD_NOP, 0, 0, 0),
-                ]
-            )
-            _, _, identity_or_version, _ = decoded[1]
-            _, _, legacy_version, _ = decoded[2]
-            _, _, features, _ = decoded[3]
-            info = self._decode_config(identity_or_version, legacy_version, features)
-            self._fifo_depth = int(info["fifo_depth"])
-            self._prime_cdc()
-            return info
-        finally:
-            self._transport.select_chain(1)
+        with self._transport.transaction_lock():
+            self._transport.select_chain(self._chain)
+            try:
+                decoded = self._scan_batch(
+                    [
+                        (CMD_CONFIG, 0x0000, 0, 0),
+                        (CMD_CONFIG, 0x0004, 0, 0),
+                        (CMD_CONFIG, 0x002C, 0, 0),
+                        (CMD_NOP, 0, 0, 0),
+                    ]
+                )
+                _, _, identity_or_version, _ = decoded[1]
+                _, _, legacy_version, _ = decoded[2]
+                _, _, features, _ = decoded[3]
+                info = self._decode_config(identity_or_version, legacy_version, features)
+                self._fifo_depth = int(info["fifo_depth"])
+                self._prime_cdc()
+                return info
+            finally:
+                self._transport.select_chain(1)
 
     def axi_write(self, addr: int, data: int, wstrb: int = 0xF) -> int:
         """Single AXI write. 2 scans. Returns resp code."""

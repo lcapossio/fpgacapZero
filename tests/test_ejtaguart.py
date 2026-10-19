@@ -206,6 +206,29 @@ class EjtagUartTests(unittest.TestCase):
         ctrl.connect()
         return ctrl, t
 
+    def test_close_closes_the_transport_when_a_reset_scan_fails(self):
+        ctrl, t = self._make_ctrl()
+        closed: list[bool] = []
+        t.close = lambda: closed.append(True)
+
+        def failing_scan(*args, **kwargs):
+            raise OSError("JTAG error")
+
+        ctrl._scan = failing_scan
+        with self.assertRaises(OSError):
+            ctrl.close()
+        self.assertEqual(closed, [True])
+
+    def test_attach_switches_chain_under_the_transaction_lock(self):
+        class _LockChecked(FakeUartTransport):
+            def select_chain(self, chain):
+                if not self.transaction_lock()._is_owned():
+                    raise AssertionError("chain switched without the transaction lock")
+                super().select_chain(chain)
+
+        t = _LockChecked()
+        EjtagUartController(t, chain=4).attach()
+
     def test_probe_identity(self):
         t = FakeUartTransport()
         ctrl = EjtagUartController(t, chain=4)
