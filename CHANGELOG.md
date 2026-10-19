@@ -428,6 +428,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
   connect in progress holds, so a hung Quartus open can be aborted.
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **GUI — EIO panel chain switches hold the transport lock.** Polling,
+  output writes and attach switched the shared JTAG chain without the lock,
+  so a poll during a capture could send the capture's next access down the
+  EIO's chain, then froze the window until the capture ended. A poll tick
+  now skips while a capture holds the transport; a write waits up to a
+  second, then reports that a capture is running.
 - **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
   transport's transaction lock**, so it cannot land between another
   controller's register accesses on a shared transport. The GUI refuses

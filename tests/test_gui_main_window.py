@@ -479,3 +479,46 @@ def test_attach_is_refused_while_a_capture_runs(qtbot: Any, tmp_path: Path) -> N
         discover.assert_not_called()
         axi_cls.return_value.attach.assert_not_called()
         uart_cls.return_value.attach.assert_not_called()
+
+
+@pytest.mark.gui
+def test_eio_poll_skips_a_tick_while_a_capture_holds_the_transport(qtbot: Any) -> None:
+    """The capture worker holds the transport lock for its whole wait; a poll
+    tick on the Qt thread must skip, not freeze the window or stop polling."""
+    import threading
+
+    from fcapz.gui.eio_panel import EioPanel
+
+    panel = EioPanel()
+    qtbot.addWidget(panel)
+    transport = MagicMock(name="transport")
+    lock = threading.RLock()
+    transport.transaction_lock.return_value = lock
+    eio = MagicMock(name="eio")
+    panel._transport = transport
+    panel._eio = eio
+    panel._poll_enable.setChecked(True)
+    panel._poll_timer.start()
+    taken = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with lock:
+            taken.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert taken.wait(5)
+    try:
+        with patch("fcapz.gui.eio_panel.QMessageBox.warning") as warning:
+            panel._poll_tick()
+    finally:
+        release.set()
+        holder.join(5)
+    eio.read_inputs.assert_not_called()
+    transport.select_chain.assert_not_called()
+    warning.assert_not_called()
+    assert panel._poll_timer.isActive()
+    assert panel._poll_enable.isChecked()
+    panel._poll_timer.stop()
