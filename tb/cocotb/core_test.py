@@ -11,7 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, FallingEdge, ReadOnly, Timer
+from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
 
 try:
@@ -994,6 +994,67 @@ async def fcapz_ela_channel_mux(dut):
     await jtag_write(dut, 0x00A0, 0)
     assert await jtag_read(dut, 0x00A0) == 0
     assert (await capture_channel(7)) & 0xFF == 0xAA
+
+
+@cocotb.test()
+async def fcapz_ela_seq_count_saturates(dut):
+    """BUG-255: hits the external-trigger AND holds back keep counting.
+
+    A 16-bit counter wrapped after 65535 of them, so a stage whose count was
+    long met read as not reached again until it re-counted to its target.
+    With a target of 0x8000 and ~1000 hits past the wrap, the old RTL ignored
+    the external trigger for ~31000 more cycles; the counter now saturates.
+    """
+    cocotb.start_soon(Clock(dut.sample_clk, 10, unit="ns").start())
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
+    dut.sample_rst.value = 1
+    dut.jtag_rst.value = 1
+    dut.probe_in.value = 0x55
+    dut.trigger_in.value = 0
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
+    dut.burst_rd_addr.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.sample_clk)
+    dut.sample_rst.value = 0
+    for _ in range(2):
+        await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.jtag_clk)
+
+    target = 0x8000
+    # Stage 0: final, comparator A EQ 0x55 on every bit, count target 0x8000.
+    await jtag_write(dut, 0x0040, (target << 16) | (1 << 12))
+    await jtag_write(dut, 0x0044, 0x55)
+    await jtag_write(dut, 0x0048, 0xFF)
+    await jtag_write(dut, 0x00B4, 2)          # external trigger: AND
+    await jtag_write(dut, 0x0014, 0)          # no pretrigger history
+    await jtag_write(dut, 0x0018, 2)
+    await arm_ela(dut)
+
+    # Every sample matches, so the stage counts every cycle while the
+    # external trigger holds the hit back: run ~1000 hits past the wrap.
+    await ClockCycles(dut.sample_clk, 0x10000 + 1000)
+    assert not (await jtag_read(dut, 0x0008)) & 0x2, "triggered without trigger_in"
+
+    dut.trigger_in.value = 1
+    for _ in range(200):
+        await RisingEdge(dut.sample_clk)
+        if int(dut.trigger_out.value):
+            break
+    else:
+        raise AssertionError(
+            "count target long met, but trigger_in did not trigger: "
+            "the stage hit counter wrapped"
+        )
+    for _ in range(100):
+        await RisingEdge(dut.sample_clk)
+    assert (await jtag_read(dut, 0x0008)) & 0x2, "STATUS.triggered not set"
 
 
 @cocotb.test()

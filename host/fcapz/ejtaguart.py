@@ -171,36 +171,41 @@ class EjtagUartController:
         """Like :meth:`connect` but assume the transport is already open.
 
         Restores JTAG chain 1 before returning. Does not close the transport on
-        failure.
+        failure.  Holds the transport's transaction lock: switching its chain
+        must not land between another controller's register accesses.
         """
-        self._transport.select_chain(self._chain)
-        try:
-            identity_or_version = self._config_read_u32(0x00)
-            uid = identity_or_version & 0xFFFF
-            if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
-                self._scan(cmd=self.CMD_NOP)
-                self._scan(cmd=self.CMD_NOP)
+        with self._transport.transaction_lock():
+            self._transport.select_chain(self._chain)
+            try:
                 identity_or_version = self._config_read_u32(0x00)
-            legacy_version = (
-                self._config_read_u32(0x04)
-                if identity_or_version == _LEGACY_UART_ID
-                else None
-            )
-            return self._decode_identity(identity_or_version, legacy_version)
-        finally:
-            self._transport.select_chain(1)
+                uid = identity_or_version & 0xFFFF
+                if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
+                    self._scan(cmd=self.CMD_NOP)
+                    self._scan(cmd=self.CMD_NOP)
+                    identity_or_version = self._config_read_u32(0x00)
+                legacy_version = (
+                    self._config_read_u32(0x04)
+                    if identity_or_version == _LEGACY_UART_ID
+                    else None
+                )
+                return self._decode_identity(identity_or_version, legacy_version)
+            finally:
+                self._transport.select_chain(1)
 
     def close(self) -> None:
         """Reset bridge, drain to ensure reset completes, close transport.
 
         The FIFO reset counter runs on TCK, so we must send follow-up
         scans to clock it down.  4 NOP scans guarantees the 4-cycle
-        fifo_rst hold period has elapsed.
+        fifo_rst hold period has elapsed.  The transport is closed even if a
+        reset scan fails.
         """
-        self._scan(cmd=self.CMD_RESET)
-        for _ in range(4):
-            self._scan(cmd=self.CMD_NOP)
-        self._transport.close()
+        try:
+            self._scan(cmd=self.CMD_RESET)
+            for _ in range(4):
+                self._scan(cmd=self.CMD_NOP)
+        finally:
+            self._transport.close()
 
     def send(self, data: bytes, timeout: float = 30.0) -> None:
         """Send bytes to UART TX. Blocks until all accepted or timeout.

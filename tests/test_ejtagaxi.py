@@ -319,6 +319,16 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl.connect()
         return ctrl, t
 
+    def test_attach_switches_chain_under_the_transaction_lock(self):
+        class _LockChecked(FakeBridgeTransport):
+            def select_chain(self, chain):
+                if not self.transaction_lock()._is_owned():
+                    raise AssertionError("chain switched without the transaction lock")
+                super().select_chain(chain)
+
+        t = _LockChecked()
+        EjtagAxiController(t, chain=4).attach()
+
     def test_connect_reads_bridge_id(self):
         ctrl, t = self._make_ctrl()
         # connect() already called by _make_ctrl — call again to check return

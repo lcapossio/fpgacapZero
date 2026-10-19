@@ -408,6 +408,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   re-select their analyzer's slot. CLI ELA commands without `--ela-instance`
   bind the first ELA slot too, instead of following the slot the last tool
   left selected (after `eio-write`, the EIO).
+- **ELA — a sequencer stage could drop a met count after 65535 hits.** A
+  stage's hit counter kept counting hits that an external trigger in AND
+  mode held back, and being 16 bits it wrapped: the count read as not met
+  again until the stage re-counted to its target, so the external trigger
+  was ignored for up to `count_target` samples. The counter now saturates
+  and the compare is 17 bits wide. Both HDLs; needs a bitstream rebuild. A
+  cocotb test drives 66536 held-back hits through a stage with target
+  0x8000 in both HDLs.
+- **RPC — cancel reaches a connection that is still opening, and failed
+  session swaps no longer leak.** `cancel_active` saw only installed
+  sessions, so a `connect`, `eio_connect`, `eio_discover`, `axi_connect`
+  or `uart_connect` hung in its handshake could not be aborted. A failed
+  `eio_discover` handshake left its transport open, and a failed
+  `eio_connect` replacement left the closed old controller installed.
+  Discovery probes (`scan_targets`, `discover_boards`, `openocd_discover`)
+  can be cancelled too: the `xsdb` child is killed and OpenOCD probe
+  sockets are closed.
+  On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
+  connect in progress holds, so a hung Quartus open can be aborted.
+- **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
+  transport's transaction lock**, so it cannot land between another
+  controller's register accesses on a shared transport. The GUI refuses
+  Attach (EIO, AXI, UART) while a capture runs, since the capture holds that
+  lock for its whole wait and attaching would freeze the window.
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already

@@ -16,7 +16,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 
-from typing import IO, List
+from typing import IO, Any, Callable, List
 
 # Character whitelist for the JTAG target filter (XSDB `jtag targets -set
 # -filter {name =~ "..."}`).  This value is interpolated inside a
@@ -93,14 +93,32 @@ def parse_xsdb_jtag_targets(output: str) -> list[str]:
     return names
 
 
+class _ProcessCancel:
+    """Cancel handle for a helper child process: ``cancel()`` kills it."""
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self._proc = proc
+
+    def cancel(self) -> None:
+        try:
+            self._proc.kill()
+        except OSError:
+            pass
+
+
 def list_xilinx_hw_server_targets(
     *,
     host: str = "127.0.0.1",
     port: int = 3121,
     xsdb_path: str | None = None,
     timeout_sec: float = 10.0,
+    register: Callable[[Any], None] | None = None,
 ) -> list[str]:
-    """Return JTAG target names reported by ``hw_server`` via XSDB."""
+    """Return JTAG target names reported by ``hw_server`` via XSDB.
+
+    *register*, if given, receives a handle whose ``cancel()`` kills the
+    XSDB child, so a caller on another thread can abort the scan.
+    """
     xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
     if not xsdb:
         raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
@@ -114,16 +132,23 @@ def list_xilinx_hw_server_targets(
         raw = env.get(key, "")
         if not raw or not os.path.isdir(raw) or not os.access(raw, os.W_OK):
             env[key] = os.getcwd()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [xsdb],
-        input=script,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
-        timeout=float(timeout_sec),
-        check=False,
         env=env,
     )
-    output = f"{proc.stdout}\n{proc.stderr}"
+    if register is not None:
+        register(_ProcessCancel(proc))
+    try:
+        stdout, stderr = proc.communicate(script, timeout=float(timeout_sec))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    output = f"{stdout}\n{stderr}"
     if proc.returncode != 0:
         raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
     targets = parse_xsdb_jtag_targets(output)
@@ -141,13 +166,18 @@ def list_openocd_taps(
     host: str = "127.0.0.1",
     port: int = 6666,
     timeout_sec: float = 5.0,
+    register: Callable[[Any], None] | None = None,
 ) -> list[str]:
     """Return JTAG tap names from a running OpenOCD instance (``jtag names``).
 
     Requires OpenOCD to already be listening on its TCL RPC port (default
     6666).  Used by the GUI's "Scan" button for the OpenOCD backend.
+    *register*, if given, receives the transport before it connects, so a
+    caller on another thread can ``cancel()`` it.
     """
     t = OpenOcdTransport(host=host, port=port, connect_timeout_sec=timeout_sec)
+    if register is not None:
+        register(t)
     t.connect()
     try:
         return t.list_taps()
@@ -723,6 +753,10 @@ class QuartusStpTransport(Transport):
         # whose request timed out).  Lock order is always _life_lock, then
         # _stp_io_lock; nothing takes them the other way round.
         self._life_lock = threading.RLock()
+        # Set by cancel(), cleared when a session is torn down.  A cancel that
+        # lands before connect() has published its session has no process to
+        # kill; connect() checks this right after publishing.
+        self._cancel_requested = False
         self.burst = bool(burst)
         # The actual device quartus_stp opened (family/part + IDCODE), filled in
         # by connect(). None until connected. Surfaced so the UI can name the
@@ -750,7 +784,10 @@ class QuartusStpTransport(Transport):
             if self._session is not None:
                 # Replacing a live session would leave its process running,
                 # still holding the cable, with nothing left to close it.
+                # A cancel already aimed at this connect must survive that.
+                pending = self._cancel_requested
                 self._close_locked()
+                self._cancel_requested = pending
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE,
@@ -779,6 +816,8 @@ class QuartusStpTransport(Transport):
             # thread (a GUI cancel) has a process to kill while it runs.
             self._session = session
             try:
+                if self._cancel_requested:
+                    raise RuntimeError("quartus_stp connect was cancelled")
                 if proc.poll() is not None:
                     self._raise_process_exited(session)
                 opened_device = self._send(
@@ -801,6 +840,20 @@ class QuartusStpTransport(Transport):
         finally:
             self._life_lock.release()
 
+    def cancel(self) -> None:
+        """Abort an in-flight request or connect from another thread.
+
+        Kills ``quartus_stp`` without taking any lock: a connect() holds
+        ``_life_lock`` through its open handshake, and a cancel must never
+        wait on a lock the call it aborts holds.  The owner reconciles with
+        :meth:`close`.
+        """
+        self._cancel_requested = True
+        session = self._session
+        if session is not None:
+            session.dead = True
+            self._kill_quietly(session.proc)
+
     def close_fast(self) -> None:
         """Kill ``quartus_stp`` without the graceful teardown, for Ctrl+C.
 
@@ -816,6 +869,7 @@ class QuartusStpTransport(Transport):
             self._kill_quietly(session.proc)
         self._acquire_life_lock_killing()
         try:
+            self._cancel_requested = False
             session = self._session
             if session is None:
                 return
@@ -847,7 +901,10 @@ class QuartusStpTransport(Transport):
         also covers waiting for the I/O lock; the rest of it goes to waiting
         for the process to exit.  Terminate and kill follow and need no lock,
         so a stalled request elsewhere cannot keep this from returning.
+
+        Also clears a pending cancel: the session it was aimed at is gone.
         """
+        self._cancel_requested = False
         session = self._session
         if session is None:
             return

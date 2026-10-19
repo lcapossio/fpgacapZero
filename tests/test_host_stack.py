@@ -644,6 +644,159 @@ class RpcManagerSlotTests(unittest.TestCase):
         self.assertEqual(board.active, 0)
 
 
+class RpcLifecycleTests(unittest.TestCase):
+    """Transports a command is still opening, and failed session swaps."""
+
+    class _BlockingConnect(FakeTransport):
+        """connect() blocks until cancel() is called, as a hung handshake."""
+
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.released = threading.Event()
+            self.cancelled = False
+
+        def connect(self):
+            self.entered.set()
+            if not self.released.wait(5.0):
+                raise AssertionError("cancel never reached the opening transport")
+            raise OSError("connection cancelled")
+
+        def cancel(self):
+            self.cancelled = True
+            self.released.set()
+
+    @staticmethod
+    def _connected_server():
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._build_transport = lambda req: FakeTransport()
+        assert server.handle({"cmd": "connect", "backend": "hw_server"})["ok"]
+        return server
+
+    def test_cancel_reaches_a_transport_that_is_still_connecting(self):
+        for cmd in ("connect", "eio_connect", "eio_discover"):
+            with self.subTest(cmd=cmd):
+                transport = self._BlockingConnect()
+                server = self._connected_server()
+                server._build_transport = lambda req, t=transport: t
+                result: list = []
+
+                def run():
+                    try:
+                        result.append(server.handle({"cmd": cmd, "backend": "hw_server"}))
+                    except Exception as exc:  # noqa: BLE001 - the cancelled call fails
+                        result.append(exc)
+
+                worker = threading.Thread(target=run)
+                worker.start()
+                self.assertTrue(transport.entered.wait(5.0))
+                server.cancel_active()
+                worker.join(5.0)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(transport.cancelled)
+                self.assertNotIn(transport, server._live_transports())
+
+    def test_a_concurrent_command_keeps_another_commands_opening_transport(self):
+        # The web gateway runs openocd_status/scan_targets outside its session
+        # lock; one finishing must not unregister a connect still in progress.
+        from fcapz.rpc import RpcServer
+
+        transport = self._BlockingConnect()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        worker = threading.Thread(
+            target=lambda: self._swallow(server.handle, {"cmd": "connect", "backend": "hw_server"})
+        )
+        worker.start()
+        self.assertTrue(transport.entered.wait(5.0))
+        self._swallow(server.handle, {"cmd": "openocd_status"})
+        self.assertIn(transport, server._live_transports())
+        server.cancel_active()
+        worker.join(5.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(transport.cancelled)
+
+    def test_cancel_reaches_discovery_probes(self):
+        # scan_targets and discover_boards open their own OpenOCD transports
+        # inside library helpers; cancel must reach those too.
+        from unittest.mock import patch
+
+        from fcapz import transport as tr
+        from fcapz.rpc import RpcServer
+
+        for req in ({"cmd": "scan_targets", "backend": "openocd"},
+                    {"cmd": "discover_boards", "port": 6666}):
+            with self.subTest(cmd=req["cmd"]):
+                entered, released = threading.Event(), threading.Event()
+
+                def blocking_connect(_self):
+                    entered.set()
+                    if not released.wait(5.0):
+                        raise AssertionError("cancel never reached the probe")
+                    raise OSError("cancelled")
+
+                with patch.object(tr.OpenOcdTransport, "connect", blocking_connect), \
+                        patch.object(tr.OpenOcdTransport, "cancel",
+                                     lambda _self: released.set()):
+                    server = RpcServer()
+                    worker = threading.Thread(target=lambda: self._swallow(server.handle, req))
+                    worker.start()
+                    self.assertTrue(entered.wait(5.0))
+                    server.cancel_active()
+                    worker.join(5.0)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(released.is_set())
+                self.assertEqual(server._live_transports(), [])
+
+    def test_cancel_takes_no_lock_a_command_holds(self):
+        server = self._connected_server()
+        done = threading.Event()
+        with server._opening_lock:  # a command registering a transport
+            threading.Thread(target=lambda: (server.cancel_active(), done.set())).start()
+            self.assertTrue(done.wait(2.0), "cancel_active waited for the command's lock")
+
+    @staticmethod
+    def _swallow(fn, *args):
+        try:
+            return fn(*args)
+        except Exception:  # noqa: BLE001 - the outcome is asserted separately
+            return None
+
+    def test_eio_discover_closes_a_transport_whose_connect_fails(self):
+        class _FailingConnect(FakeTransport):
+            closed = False
+
+            def connect(self):
+                raise OSError("handshake failed")
+
+            def close(self):
+                type(self).closed = True
+
+        server = self._connected_server()
+        server._build_transport = lambda req: _FailingConnect()
+        with self.assertRaises(OSError):
+            server.handle({"cmd": "eio_discover", "backend": "hw_server"})
+        self.assertTrue(_FailingConnect.closed)
+
+    def test_a_failed_eio_replacement_leaves_no_eio_session(self):
+        server = self._connected_server()
+        server._build_transport = lambda req: FakeVioTransport()
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 3})
+        self.assertTrue(r["ok"], r)
+        self.assertIsNotNone(server._eio)
+
+        class _NoEio(FakeTransport):
+            def read_reg(self, addr):
+                return 0  # no EIO identity anywhere
+
+        server._build_transport = lambda req: _NoEio()
+        with self.assertRaises(RuntimeError):
+            server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 3})
+        self.assertIsNone(server._eio)
+
+
 class AnalyzerTests(unittest.TestCase):
     def _make_cfg(self) -> CaptureConfig:
         return CaptureConfig(

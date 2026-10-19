@@ -184,7 +184,11 @@ Each stage also has an **occurrence count** — wait until the combined
 condition has been true `count_target` times before advancing — and
 a `next_state` field that says which stage to jump to when the
 condition fires.  The final stage that fires the trigger sets
-`is_final = 1`.
+`is_final = 1`.  A `count_target` of 0 skips the count.  The stage's
+hit counter is 16 bits and saturates at 65535: hits that an external
+trigger in AND mode holds back keep counting, and the count stays met
+until the stage fires.  (Bitstreams from fcapz 0.4.9 and earlier wrap the
+counter instead, which can drop a met count after 65535 hits.)
 
 ### Configuring the sequencer from the host
 
