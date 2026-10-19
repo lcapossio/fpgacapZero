@@ -602,6 +602,20 @@ class TestRpcPath(unittest.TestCase):
         self.assertIn("value", r)
         self._ok({"cmd": "eio_write", "value": 0})
 
+    def test_slotless_eio_sessions_bind_their_managed_slot(self):
+        # Discovery while the EIO slot is active, and a connect without
+        # instance, must both come back bound to EIO slot 2: an unbound
+        # controller followed the ELA session's slot and wrote into the ELA.
+        self._ok(_rpc_req("eio_connect", chain=1, instance=2))
+        r = self._ok(_rpc_req("eio_discover", chains=[1]))
+        self.assertEqual((r["chain"], r["instance"]), (1, 2))
+        self._ok({"cmd": "probe"})
+        self._ok({"cmd": "eio_write", "value": 0})
+        r = self._ok(_rpc_req("eio_connect", chain=1))
+        self.assertEqual(r["instance"], 2)
+        self._ok({"cmd": "probe"})
+        self.assertIn("value", self._ok({"cmd": "eio_read"}))
+
     def test_axi_side_session(self):
         self._ok(_rpc_req("axi_connect", chain=4))
         self._ok({"cmd": "axi_write", "addr": "0x1C", "data": "0x0BADCAFE"})
