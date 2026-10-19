@@ -438,6 +438,36 @@ class EjtagUartTests(unittest.TestCase):
 
         self.assertEqual(data, b"AB")
 
+    def test_recv_idle_timeout_holds_on_a_slow_transport(self):
+        """With 10 ms per scan, recv gives up about one idle timeout after
+        the FIFO runs empty instead of finishing a long blind batch, and a
+        byte arriving later is left for the next call."""
+        from unittest.mock import patch
+
+        ctrl, t = self._make_ctrl()
+        t.rx_buf = bytearray(b"A")
+        clock = [0.0]
+        orig_scan = t.raw_dr_scan
+
+        def slow_scan(bits, width, *, chain=None):
+            clock[0] += 0.010
+            if clock[0] >= 0.5 and b"B" not in t.rx_buf:
+                t.rx_buf.extend(b"B")
+            return orig_scan(bits, width, chain=chain)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        t.raw_dr_scan = slow_scan
+        with patch("fcapz.ejtaguart.time.monotonic", lambda: clock[0]), \
+             patch("fcapz.ejtaguart.time.sleep", sleep):
+            data = ctrl.recv(count=64, timeout=0.1)
+            self.assertEqual(data, b"A")
+            self.assertLess(clock[0], 0.2)
+            self.assertEqual(t.rx_buf, b"")  # B has not arrived yet
+            clock[0] = 0.5
+            self.assertEqual(ctrl.recv(count=1, timeout=0.1), b"B")
+
     def test_close_drains_reset(self):
         """close() sends RESET + 4 NOP drain scans (5 scans total)."""
         scan_log: list[int] = []

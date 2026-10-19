@@ -2209,9 +2209,12 @@ Timeout is an idle timeout: the deadline resets each time a
 byte is successfully received.  A slow-but-steady stream will
 not time out mid-message.
 
-Pops run back to back in batches of up to `RX_BATCH`, each
-scan reading the result of the previous pop, so a byte costs
-about one scan.  A batch never pops more than *count* bytes.
+Pops run back to back in batches, each scan reading the result
+of the previous pop, so a byte costs about one scan.  A batch
+starts at one pop and doubles (up to `RX_BATCH`) only while
+every pop returns a byte; once the FIFO runs empty it polls
+one pop at a time, so the deadline is checked between polls.
+A batch never pops more than *count* bytes.
 
 #### `EjtagUartController.recv_line`
 

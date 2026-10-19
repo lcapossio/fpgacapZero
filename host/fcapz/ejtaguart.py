@@ -245,14 +245,18 @@ class EjtagUartController:
         byte is successfully received.  A slow-but-steady stream will
         not time out mid-message.
 
-        Pops run back to back in batches of up to ``RX_BATCH``, each
-        scan reading the result of the previous pop, so a byte costs
-        about one scan.  A batch never pops more than *count* bytes.
+        Pops run back to back in batches, each scan reading the result
+        of the previous pop, so a byte costs about one scan.  A batch
+        starts at one pop and doubles (up to ``RX_BATCH``) only while
+        every pop returns a byte; once the FIFO runs empty it polls
+        one pop at a time, so the deadline is checked between polls.
+        A batch never pops more than *count* bytes.
         """
         result = bytearray()
         deadline = time.monotonic() + timeout
+        batch = 1
         while True:
-            want = self.RX_BATCH
+            want = batch
             if count > 0:
                 want = min(want, count - len(result))
             got = 0
@@ -271,7 +275,10 @@ class EjtagUartController:
             if drained:
                 if count == 0 or time.monotonic() >= deadline:
                     return bytes(result)
+                batch = 1
                 time.sleep(0.001)
+            else:
+                batch = min(batch * 2, self.RX_BATCH)
 
     def recv_line(self, timeout: float = 1.0) -> str:
         """Receive until newline or timeout (idle timeout).
