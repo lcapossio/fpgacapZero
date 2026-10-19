@@ -2040,7 +2040,9 @@ Like `connect` but assume the transport is already open.
 
 Restores JTAG chain 1 (ELA) before returning so a shared
 session can continue using USER1 register access. Also primes the
-bridge before any subsequent command traffic.
+bridge before any subsequent command traffic.  Holds the transport's
+transaction lock: switching its chain must not land between another
+controller's register accesses.
 
 #### `EjtagAxiController.axi_write`
 
@@ -2192,7 +2194,8 @@ attach() -> dict
 Like `connect` but assume the transport is already open.
 
 Restores JTAG chain 1 before returning. Does not close the transport on
-failure.
+failure.  Holds the transport's transaction lock: switching its chain
+must not land between another controller's register accesses.
 
 #### `EjtagUartController.close`
 
@@ -2204,7 +2207,8 @@ Reset bridge, drain to ensure reset completes, close transport.
 
 The FIFO reset counter runs on TCK, so we must send follow-up
 scans to clock it down.  4 NOP scans guarantees the 4-cycle
-fifo_rst hold period has elapsed.
+fifo_rst hold period has elapsed.  The transport is closed even if a
+reset scan fails.
 
 #### `EjtagUartController.send`
 
