@@ -404,10 +404,69 @@ class RpcManagerSlotTests(unittest.TestCase):
     def test_a_moved_slot_is_reselected_before_the_next_access(self):
         server, transport = self._server()
         server.handle({"cmd": "connect", "backend": "hw_server"})
-        transport.write_reg(0xF008, 3)  # an EIO side session moves the manager
-        transport.invalidate_manager_instance_cache()
+        # Another session moves the manager behind this transport's cache.
+        transport._manager_regs[0xF008] = 3
+        transport._active_ela = 3
         self.assertTrue(server.handle({"cmd": "probe"})["ok"])
         self.assertEqual(transport._active_ela, 0)
+
+    class _Board:
+        """One manager, reached through several transports (one per session)."""
+
+        def __init__(self):
+            self.manager_regs = dict(
+                RpcManagerSlotTests._EioSelectedTransport()._manager_regs)
+            self.active = 2
+            self.writes: list[tuple[int, int]] = []  # (active slot, addr)
+
+    def _session_transport(self, board):
+        outer = self
+
+        class _SessionTransport(outer._EioSelectedTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs = board.manager_regs
+
+            @property
+            def _active_ela(self):
+                return board.active
+
+            @_active_ela.setter
+            def _active_ela(self, value):
+                board.active = int(value)
+
+            def write_reg(self, addr, value):
+                if addr not in self._manager_regs and self._active_chain == 1:
+                    board.writes.append((board.active, addr))
+                super().write_reg(addr, value)
+
+        return _SessionTransport()
+
+    def test_separate_sessions_never_trust_a_stale_slot(self):
+        # The ELA and EIO sessions each hold their own transport, and each
+        # caches the slot it last wrote.  Every command must re-select its
+        # own slot: a cached one may have been moved by the other session.
+        from fcapz.rpc import RpcServer
+
+        board = self._Board()
+        server = RpcServer()
+        server._build_transport = lambda req: self._session_transport(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server",
+                           "chain": 1, "instance": 2})
+        self.assertTrue(r["ok"], r)
+
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0, "probe read the EIO slot")
+
+        board.writes.clear()
+        self.assertTrue(server.handle({"cmd": "eio_write", "value": 0x5A})["ok"])
+        self.assertTrue(board.writes)
+        self.assertEqual({slot for slot, _ in board.writes}, {2},
+                         "EIO write landed outside its slot")
+
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0)
 
 
 class AnalyzerTests(unittest.TestCase):

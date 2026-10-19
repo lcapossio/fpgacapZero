@@ -829,6 +829,15 @@ class RpcServer:
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
 
+        # Each session holds its own transport, and each transport caches the
+        # core-manager slot it last wrote.  Another session (or a transient
+        # probe) can move MGR_ACTIVE between commands, so that cache can lie:
+        # forget it, and this command's first access re-selects its own slot.
+        for transport in self._live_transports():
+            invalidate = getattr(transport, "invalidate_manager_instance_cache", None)
+            if callable(invalidate):
+                invalidate()
+
         if cmd == "connect":
             # Reconnecting must start from a clean slate: release any prior
             # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
