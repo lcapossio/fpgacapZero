@@ -26,7 +26,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   out after a slot reset says so. A failed `configure()` leaves the analyzer
   unconfigured. `CaptureChangedError` reports a capture whose `SEG_START`
   moved during its readout. The host writes its owner token when it first
-  selects a slot, warns about another token, and clears it on close. The hub
+  selects a slot, warns about another token, and clears it on close; a
+  reconnect or a new bitstream drops the claim and identifies the managers
+  again. The hub
   shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
   the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
   TAP through Test-Logic-Reset between scans. `MGR_CAPS` bits 3-6 report each feature. Both HDLs,

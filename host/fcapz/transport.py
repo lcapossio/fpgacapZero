@@ -869,6 +869,14 @@ class Transport(ABC):
         self.__dict__.pop("_fcapz_manager_caps", None)
         self.__dict__.pop("_fcapz_checked_slots", None)
 
+    def _forget_hub_state(self) -> None:
+        """:meth:`forget_manager_chains`, and the managers this session
+        claimed, unreleased: a new connection or a new bitstream may put
+        anything on those chains, and an ``MGR_OWNER`` read or write there
+        would be a command to whatever core is there now."""
+        self.forget_manager_chains()
+        self.__dict__.pop("_fcapz_owned_managers", None)
+
     @abstractmethod
     def connect(self) -> None:
         """Open the transport connection.
@@ -1160,6 +1168,7 @@ class OpenOcdTransport(Transport):
         self._sock_lock = threading.Lock()
 
     def connect(self) -> None:
+        self._forget_hub_state()
         self._sock = socket.create_connection(
             (self.host, self.port),
             timeout=self._connect_timeout_sec,
@@ -1451,6 +1460,7 @@ class QuartusStpTransport(Transport):
         return None if session is None else session.proc
 
     def connect(self) -> None:
+        self._forget_hub_state()
         argv = self._quartus_stp_argv
         if argv is None:
             quartus_stp = find_quartus_stp(self._quartus_stp_path)
@@ -2643,6 +2653,7 @@ class XilinxHwServerTransport(Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        self._forget_hub_state()
         timing = connect_timing_logs_enabled()
         marks: list[tuple[str, float]] = [("start", time.monotonic())]
 
@@ -2949,8 +2960,9 @@ class XilinxHwServerTransport(Transport):
             timeout_sec=max(self.read_timeout_sec, self.PROGRAM_TIMEOUT_SEC),
         )
         self._send(f"after {int(self.post_program_delay_ms)}")
-        # A new bitstream: which chains hold a manager is no longer known.
-        self.forget_manager_chains()
+        # A new bitstream: which chains hold a manager, and what this
+        # session claimed, are no longer known.
+        self._forget_hub_state()
 
     def close(self) -> None:
         if self._proc and self._proc.stdin:

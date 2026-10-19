@@ -781,6 +781,59 @@ class InterimContractTests(unittest.TestCase):
         a.arm()
         self.assertTrue(a.wait_done(timeout=1.0))
 
+    def test_a_reconnect_identifies_again(self):
+        """Another bitstream may sit behind a new connection: a slot verified
+        before it must be identified again, not prefixed with an MGR_ACTIVE
+        write (an EJTAG-AXI bridge's reset)."""
+        from unittest.mock import patch
+
+        t, fake = _hw_server()
+        fake.interfere = False
+        fake.caps = 0xF  # MGR_OWNER: the slot's manager gets claimed
+        _warm(t, 1)
+        self.assertTrue(t.__dict__.get("_fcapz_owned_managers"))
+        with patch("shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError):
+                t.connect()  # xsdb missing: forgets before it fails
+        self.assertFalse(t.__dict__.get("_fcapz_owned_managers"))
+        self.assertFalse(t.slot_routing_isolated(1, 1))
+        sent = self._spy(t, fake)
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            pass
+        self.assertTrue(sent)  # identified again
+
+    def test_every_backend_connect_forgets_the_hub(self):
+        from unittest.mock import patch
+
+        from fcapz.transport import OpenOcdTransport, QuartusStpTransport
+
+        for t, ctx in (
+            (OpenOcdTransport(),
+             patch("socket.create_connection", side_effect=OSError("refused"))),
+            (QuartusStpTransport(quartus_stp_path="missing_quartus_stp"),
+             patch("fcapz.transport.find_quartus_stp", return_value=None)),
+        ):
+            with self.subTest(backend=type(t).__name__):
+                _identified(t, 1)
+                t.__dict__["_fcapz_owned_managers"] = {(1, 0xF000)}
+                with ctx, self.assertRaises((OSError, RuntimeError)):
+                    t.connect()
+                self.assertFalse(t.__dict__.get("_fcapz_manager_chains"))
+                self.assertFalse(t.__dict__.get("_fcapz_checked_slots"))
+                self.assertFalse(t.__dict__.get("_fcapz_owned_managers"))
+
+    def test_program_drops_the_claimed_managers(self):
+        """After a new bitstream, 0xF024 on a once-claimed chain may be any
+        core's register: close() must not read or clear it there."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        fake.caps = 0xF
+        _warm(t, 1)
+        t.program("C:/tmp/design.bit")
+        sent = self._spy(t, fake)
+        t.release_manager_ownership()
+        self.assertEqual(sent, [])
+
     def test_openocd_cancel_releases_no_ownership(self):
         """A cancel runs on another thread: an MGR_OWNER release would put
         scans from it in the middle of the aborted operation."""
