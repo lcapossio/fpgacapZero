@@ -2497,9 +2497,23 @@ class XilinxHwServerTransport(Transport):
                 f"-bits {burst_total} {burst_zeros}",
                 *write_ptr,
             ]
+        tail: list[str] = []
+        if self.single_chain_burst:
+            # Leave the pipe idle.  Until a command scan ends burst mode, every
+            # capture on the chain starts another staging fill, and the core
+            # manager ignores an MGR_ACTIVE write while one runs.  On a narrow
+            # lane (1-4 bits) a fill outlasts the next 49-bit select scan, so
+            # without this a slot switch right after the burst was dropped and
+            # the next access reached the previous slot.  The VERSION read is
+            # not captured, so the output is unchanged.
+            neutral = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
+            tail = [
+                f"{ir1_cmd}; $_bq drshift -state DRUPDATE -bits {user_total} {neutral}",
+                f"$_bq state IDLE {self.BURST_DRAIN_IDLE_CYCLES}",
+            ]
         # The first wide scan primes/fills staging and is discarded.
         tcls = self._burst_sequence_sends(
-            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans, tail
         )
 
         # Every send is checked: a failure while the sequence is being built
@@ -2522,18 +2536,24 @@ class XilinxHwServerTransport(Transport):
     _BURST_SCANS_PER_SEQUENCE = 256
 
     def _burst_sequence_sends(
-        self, head: list[str], ir_cmd: str, total_bits: int, zeros: str, n_scans: int
+        self,
+        head: list[str],
+        ir_cmd: str,
+        total_bits: int,
+        zeros: str,
+        n_scans: int,
+        tail: list[str] | None = None,
     ) -> list[str]:
-        """TCL sends that build ONE ``_bq`` sequence -- *head* plus *n_scans*
-        burst DR scans, at most ``_BURST_SCANS_PER_SEQUENCE`` per send -- and
-        run it in the last send, printing every captured scan."""
+        """TCL sends that build ONE ``_bq`` sequence -- *head*, *n_scans*
+        burst DR scans (at most ``_BURST_SCANS_PER_SEQUENCE`` per send), then
+        *tail* -- and run it in the last send, printing every captured scan."""
         scan = f"{ir_cmd}; $_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
         sends: list[list[str]] = []
         for start in range(0, n_scans, self._BURST_SCANS_PER_SEQUENCE):
             count = min(self._BURST_SCANS_PER_SEQUENCE, n_scans - start)
             sends.append([scan] * count)
         sends[0] = head + sends[0]
-        sends[-1] = sends[-1] + ["puts [$_bq run -bits]; $_bq delete"]
+        sends[-1] = sends[-1] + list(tail or ()) + ["puts [$_bq run -bits]; $_bq delete"]
         return ["; ".join(s) for s in sends]
 
     def read_sample_block(
@@ -2848,6 +2868,10 @@ class XilinxHwServerTransport(Transport):
     # READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
     BURST_PREFILL_IDLE_CYCLES = 160
+    # Idle TCKs after the command scan that ends a single-chain burst: one
+    # full staging fill (256 / lane-width words, 256 for a 1-bit lane) plus
+    # margin.  See _read_block_burst.
+    BURST_DRAIN_IDLE_CYCLES = 258
 
     def _ir_hex(self, value: int) -> str:
         """Format an IR opcode as the right-width hex string for ``-hex N``."""

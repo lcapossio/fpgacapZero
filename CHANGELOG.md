@@ -428,6 +428,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
   connect in progress holds, so a hung Quartus open can be aborted.
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **hw_server — a slot switch after a single-chain burst is no longer
+  dropped.** The core manager ignores an `MGR_ACTIVE` write while the burst
+  pipe fills its staging register, and on a 1-, 2- or 4-bit lane the fill
+  that the next scan's capture starts outlasts a select scan. The select was
+  dropped silently, and the next accesses (an EIO poll, say) reached the
+  ELA slot. A single-chain burst now ends with an uncaptured `VERSION` read
+  and 258 idle TCKs inside the same sequence. New RTL testbench
+  `fcapz_core_manager_select_after_burst`.
 - **GUI — EIO panel chain switches hold the transport lock.** Polling,
   output writes and attach switched the shared JTAG chain without the lock,
   so a poll during a capture could send the capture's next access down the

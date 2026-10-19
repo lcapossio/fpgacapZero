@@ -199,6 +199,14 @@ mixed manager returns idle/zero burst controls.
   active slot as the burst owner. Later `MGR_ACTIVE` writes do not redirect an
   in-flight burst; address, data, timestamp, and burst-active control stay
   routed to the captured owner until another burst owner is selected or reset.
+- The manager ignores an `MGR_ACTIVE` write while the burst pipe is filling
+  its staging register. On a single-chain build every capture in burst mode
+  starts a fill of `256 / SAMPLE_W` TCKs, including the capture of the next
+  command scan, so a select written straight after a burst is dropped on a
+  lane of 4 bits or fewer. End a burst with a command scan (which ends burst
+  mode), then idle at least `256 / SAMPLE_W + 2` TCKs before selecting.
+  `XilinxHwServerTransport` ends every single-chain burst with an uncaptured
+  `VERSION` read and 258 idle TCKs.
 - Legacy two-chain AMD/Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
