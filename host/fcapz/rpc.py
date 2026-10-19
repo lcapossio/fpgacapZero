@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import traceback
 from typing import Any, Dict
 
@@ -111,6 +112,11 @@ class RpcServer:
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
+        # Transports the running command built but has not yet installed in a
+        # session field (they are still connecting or probing).  cancel_active
+        # runs on another thread and must reach them too.
+        self._opening: list[Transport] = []
+        self._opening_lock = threading.Lock()
         # Optional server-managed OpenOCD (None = the openocd_* commands are
         # disabled and report so). Configured only by the web server launch.
         self._openocd_launcher = openocd_launcher
@@ -134,15 +140,25 @@ class RpcServer:
     # child process -- not the wrapper around it.
     _TRANSPORT_ATTRS = ("transport", "_t", "_transport")
 
+    def _new_transport(self, req: Dict[str, Any]) -> Transport:
+        """Build a transport and register it for cancellation until the
+        command that built it returns."""
+        transport = self._build_transport(req)
+        with self._opening_lock:
+            self._opening.append(transport)
+        return transport
+
     def _live_transports(self) -> list[Transport]:
         """Every transport this session currently holds, deduplicated.
 
-        Several controllers can share one transport (an EIO session opened on
-        the analyzer's), and cancelling the same one twice is pointless at
-        best.
+        Includes the ones the running command is still opening.  Several
+        controllers can share one transport (an EIO session opened on the
+        analyzer's), and cancelling the same one twice is pointless at best.
         """
         found: list[Transport] = []
         seen: set[int] = set()
+        with self._opening_lock:
+            opening = list(self._opening)
         for holder in (
             self._analyzer,
             self._eio,
@@ -150,6 +166,7 @@ class RpcServer:
             self._axi_transport,
             self._uart,
             self._uart_transport,
+            *opening,
         ):
             if holder is None:
                 continue
@@ -830,6 +847,15 @@ class RpcServer:
         return payload
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return self._handle(req)
+        finally:
+            # Built transports are installed in a session field or closed by
+            # now; either way cancel no longer needs this list to find them.
+            with self._opening_lock:
+                self._opening.clear()
+
+    def _handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
 
         # Each session holds its own transport, and each transport caches the
@@ -847,7 +873,7 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
-            transport = self._build_transport(req)
+            transport = self._new_transport(req)
             analyzer = Analyzer(
                 transport,
                 chain=int(requested) if requested is not None else 1,
@@ -1082,11 +1108,17 @@ class RpcServer:
 
         if cmd == "eio_connect":
             if self._eio is not None:
-                self._eio.close()
+                # Drop it before building the replacement: a failed connect
+                # must not leave this closed controller installed.
+                try:
+                    self._eio.close()
+                except Exception:
+                    pass
+                self._eio = None
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            transport = self._build_transport(req)
+            transport = self._new_transport(req)
             eio = EioController(
                 transport,
                 chain=chain,
@@ -1114,11 +1146,14 @@ class RpcServer:
 
         if cmd == "eio_discover":
             if self._eio is not None:
-                self._eio.close()
+                try:
+                    self._eio.close()
+                except Exception:
+                    pass
                 self._eio = None
-            transport = self._build_transport(req)
-            transport.connect()
+            transport = self._new_transport(req)
             try:
+                transport.connect()
                 chains = req.get("chains")
                 chains = (
                     [int(c) for c in chains]
@@ -1180,7 +1215,7 @@ class RpcServer:
                     pass
                 self._axi_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._build_transport(req)
+            transport = self._new_transport(req)
             ctrl = EjtagAxiController(transport, chain=chain)
             try:
                 info = ctrl.connect()  # opens transport + probes bridge
@@ -1262,7 +1297,7 @@ class RpcServer:
                     pass
                 self._uart_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._build_transport(req)
+            transport = self._new_transport(req)
             ctrl = EjtagUartController(transport, chain=chain)
             try:
                 info = ctrl.connect()
