@@ -16,7 +16,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 
-from typing import IO, List
+from typing import IO, Any, Callable, List
 
 # Character whitelist for the JTAG target filter (XSDB `jtag targets -set
 # -filter {name =~ "..."}`).  This value is interpolated inside a
@@ -93,14 +93,32 @@ def parse_xsdb_jtag_targets(output: str) -> list[str]:
     return names
 
 
+class _ProcessCancel:
+    """Cancel handle for a helper child process: ``cancel()`` kills it."""
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self._proc = proc
+
+    def cancel(self) -> None:
+        try:
+            self._proc.kill()
+        except OSError:
+            pass
+
+
 def list_xilinx_hw_server_targets(
     *,
     host: str = "127.0.0.1",
     port: int = 3121,
     xsdb_path: str | None = None,
     timeout_sec: float = 10.0,
+    register: Callable[[Any], None] | None = None,
 ) -> list[str]:
-    """Return JTAG target names reported by ``hw_server`` via XSDB."""
+    """Return JTAG target names reported by ``hw_server`` via XSDB.
+
+    *register*, if given, receives a handle whose ``cancel()`` kills the
+    XSDB child, so a caller on another thread can abort the scan.
+    """
     xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
     if not xsdb:
         raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
@@ -114,16 +132,23 @@ def list_xilinx_hw_server_targets(
         raw = env.get(key, "")
         if not raw or not os.path.isdir(raw) or not os.access(raw, os.W_OK):
             env[key] = os.getcwd()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [xsdb],
-        input=script,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
-        timeout=float(timeout_sec),
-        check=False,
         env=env,
     )
-    output = f"{proc.stdout}\n{proc.stderr}"
+    if register is not None:
+        register(_ProcessCancel(proc))
+    try:
+        stdout, stderr = proc.communicate(script, timeout=float(timeout_sec))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    output = f"{stdout}\n{stderr}"
     if proc.returncode != 0:
         raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
     targets = parse_xsdb_jtag_targets(output)
@@ -141,13 +166,18 @@ def list_openocd_taps(
     host: str = "127.0.0.1",
     port: int = 6666,
     timeout_sec: float = 5.0,
+    register: Callable[[Any], None] | None = None,
 ) -> list[str]:
     """Return JTAG tap names from a running OpenOCD instance (``jtag names``).
 
     Requires OpenOCD to already be listening on its TCL RPC port (default
     6666).  Used by the GUI's "Scan" button for the OpenOCD backend.
+    *register*, if given, receives the transport before it connects, so a
+    caller on another thread can ``cancel()`` it.
     """
     t = OpenOcdTransport(host=host, port=port, connect_timeout_sec=timeout_sec)
+    if register is not None:
+        register(t)
     t.connect()
     try:
         return t.list_taps()

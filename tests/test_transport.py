@@ -115,44 +115,63 @@ class XsdbTargetParserTests(unittest.TestCase):
         """
         self.assertEqual(parse_xsdb_jtag_targets(raw), ["xck26"])
 
-    @patch("shutil.which", return_value="xsdb")
-    @patch("subprocess.run")
-    def test_list_jtag_targets_uses_minimal_scan_script(
-        self,
-        run_mock: MagicMock,
-        _which_mock: MagicMock,
-    ) -> None:
+    @staticmethod
+    def _xsdb_proc(stdout: str) -> MagicMock:
         proc = MagicMock()
         proc.returncode = 0
-        proc.stdout = "  1  jsn-JTAG-HS3-210299\n* 2  xck26\n"
-        proc.stderr = ""
-        run_mock.return_value = proc
+        proc.communicate.return_value = (stdout, "")
+        return proc
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_uses_minimal_scan_script(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = self._xsdb_proc("  1  jsn-JTAG-HS3-210299\n* 2  xck26\n")
+        popen_mock.return_value = proc
 
         self.assertEqual(
             list_xilinx_hw_server_targets(host="localhost", port=3121),
             ["jsn-JTAG-HS3-210299", "xck26"],
         )
 
-        script = run_mock.call_args.kwargs["input"]
+        script = proc.communicate.call_args.args[0]
         self.assertIn("connect -url tcp:localhost:3121", script)
         self.assertIn("puts [jtag targets]", script)
         self.assertNotIn("configparams", script)
 
     @patch("shutil.which", return_value="xsdb")
-    @patch("subprocess.run")
+    @patch("subprocess.Popen")
     def test_list_jtag_targets_rejects_autolaunch_without_target_output(
         self,
-        run_mock: MagicMock,
+        popen_mock: MagicMock,
         _which_mock: MagicMock,
     ) -> None:
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.stdout = "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
-        proc.stderr = ""
-        run_mock.return_value = proc
+        popen_mock.return_value = self._xsdb_proc(
+            "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
+        )
 
         with self.assertRaisesRegex(RuntimeError, "launched hw_server"):
             list_xilinx_hw_server_targets(host="localhost", port=3121)
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_registers_a_handle_that_kills_xsdb(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = self._xsdb_proc("* 1  xck26\n")
+        popen_mock.return_value = proc
+        handles: list = []
+
+        list_xilinx_hw_server_targets(host="localhost", port=3121, register=handles.append)
+
+        self.assertEqual(len(handles), 1)
+        handles[0].cancel()
+        proc.kill.assert_called_once()
 
 # ---------------------------------------------------------------------------
 # Transport ABC contract

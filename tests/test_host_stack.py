@@ -718,6 +718,38 @@ class RpcLifecycleTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertTrue(transport.cancelled)
 
+    def test_cancel_reaches_discovery_probes(self):
+        # scan_targets and discover_boards open their own OpenOCD transports
+        # inside library helpers; cancel must reach those too.
+        from unittest.mock import patch
+
+        from fcapz import transport as tr
+        from fcapz.rpc import RpcServer
+
+        for req in ({"cmd": "scan_targets", "backend": "openocd"},
+                    {"cmd": "discover_boards", "port": 6666}):
+            with self.subTest(cmd=req["cmd"]):
+                entered, released = threading.Event(), threading.Event()
+
+                def blocking_connect(_self):
+                    entered.set()
+                    if not released.wait(5.0):
+                        raise AssertionError("cancel never reached the probe")
+                    raise OSError("cancelled")
+
+                with patch.object(tr.OpenOcdTransport, "connect", blocking_connect), \
+                        patch.object(tr.OpenOcdTransport, "cancel",
+                                     lambda _self: released.set()):
+                    server = RpcServer()
+                    worker = threading.Thread(target=lambda: self._swallow(server.handle, req))
+                    worker.start()
+                    self.assertTrue(entered.wait(5.0))
+                    server.cancel_active()
+                    worker.join(5.0)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(released.is_set())
+                self.assertEqual(server._live_transports(), [])
+
     def test_cancel_takes_no_lock_a_command_holds(self):
         server = self._connected_server()
         done = threading.Event()

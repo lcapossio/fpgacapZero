@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
@@ -1771,7 +1771,13 @@ def _board_label(tap: str, port: int, identity: Dict) -> str:
 
 
 def _probe_openocd_board(
-    *, host: str, port: int, tap: str, chain: int, timeout_sec: float
+    *,
+    host: str,
+    port: int,
+    tap: str,
+    chain: int,
+    timeout_sec: float,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> Optional[Dict]:
     """Probe one OpenOCD tap for an fcapz ELA, trying each IR-table preset.
 
@@ -1786,6 +1792,8 @@ def _probe_openocd_board(
     transport = OpenOcdTransport(
         host=host, port=port, tap=tap, connect_timeout_sec=timeout_sec
     )
+    if register is not None:
+        register(transport)
     try:
         transport.connect()
     except OSError:
@@ -1830,6 +1838,7 @@ def discover_boards(
     chain: int = 1,
     timeout_sec: float = 5.0,
     budget_sec: Optional[float] = None,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> List[Dict]:
     """Find fpgacapZero-compatible boards across running OpenOCD instances.
 
@@ -1852,6 +1861,8 @@ def discover_boards(
     Without it a multi-port sweep against filtered ports can take
     ``len(ports) * timeout_sec`` and outlive the caller's own deadline (the web
     client aborts its request, but that cannot cancel this work server-side).
+    *register*, if given, receives each transport before it connects, so a
+    caller on another thread can ``cancel()`` the sweep.
     """
     deadline = None if budget_sec is None else time.monotonic() + float(budget_sec)
 
@@ -1867,7 +1878,9 @@ def discover_boards(
         if step <= 0:
             break  # budget spent — return what we have
         try:
-            taps = list_openocd_taps(host=host, port=port, timeout_sec=step)
+            taps = list_openocd_taps(
+                host=host, port=port, timeout_sec=step, register=register
+            )
         except OSError:
             continue  # nothing listening on this port — skip, don't fail
         for tap in taps:
@@ -1875,7 +1888,8 @@ def discover_boards(
             if step <= 0:
                 break
             entry = _probe_openocd_board(
-                host=host, port=port, tap=tap, chain=chain, timeout_sec=step
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=step,
+                register=register,
             )
             if entry is not None:
                 boards.append(entry)

@@ -119,7 +119,7 @@ class RpcServer:
         # _opening_lock, and readers just read the attribute.  Each handle()
         # call removes only the transports it opened (_invocation.opened): the
         # web gateway runs some commands concurrently with a blocked one.
-        self._opening: tuple[Transport, ...] = ()
+        self._opening: tuple[Any, ...] = ()
         self._opening_lock = threading.Lock()
         self._invocation = threading.local()
         # Optional server-managed OpenOCD (None = the openocd_* commands are
@@ -149,12 +149,18 @@ class RpcServer:
         """Build a transport and register it for cancellation until the
         command that built it returns."""
         transport = self._build_transport(req)
+        self._register_opening(transport)
+        return transport
+
+    def _register_opening(self, handle: Any) -> None:
+        """Make *handle* (anything with ``cancel()``: a transport, or a
+        discovery helper's child process) reachable by :meth:`cancel_active`
+        until the command that opened it returns."""
         with self._opening_lock:
-            self._opening = (*self._opening, transport)
+            self._opening = (*self._opening, handle)
         opened = getattr(self._invocation, "opened", None)
         if opened is not None:
-            opened.append(transport)
-        return transport
+            opened.append(handle)
 
     def _live_transports(self) -> list[Transport]:
         """Every transport this session currently holds, deduplicated.
@@ -957,6 +963,7 @@ class RpcServer:
                     host=host,
                     port=int(req.get("port", 6666)),
                     timeout_sec=_wait_sec(req, "timeout", 5.0),
+                    register=self._register_opening,
                 )
                 return self._ok(backend="openocd", targets=taps)
             if backend == "hw_server":
@@ -964,6 +971,7 @@ class RpcServer:
                     host=host,
                     port=int(req.get("port", 3121)),
                     timeout_sec=_wait_sec(req, "timeout", 10.0),
+                    register=self._register_opening,
                 )
                 return self._ok(backend="hw_server", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
@@ -985,6 +993,7 @@ class RpcServer:
                 ports=ports,
                 timeout_sec=_wait_sec(req, "timeout", 5.0),
                 budget_sec=None if req.get("budget") is None else _wait_sec(req, "budget", 0.0),
+                register=self._register_opening,
             )
             return self._ok(backend="openocd", boards=boards)
 
@@ -1008,6 +1017,7 @@ class RpcServer:
                 chain=int(req.get("chain", 1)),
                 wait_sec=_wait_sec(req, "wait", 10.0),
                 timeout_sec=_wait_sec(req, "timeout", 5.0),
+                register=self._register_opening,
             )
             return self._ok(backend="openocd", boards=boards)
 
