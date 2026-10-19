@@ -407,6 +407,17 @@ class SlotScopeTests(unittest.TestCase):
         self.assertEqual(t._active_chain, 1)
         self.assertIn(select, sent[0])
 
+    def test_a_scope_without_chain_gives_back_the_chain_that_was_active(self):
+        """Entered on chain 2 without chain=, the scope's body runs on chain 2,
+        not on its selection's chain, and a nested scope must give 2 back."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        t.select_chain(2)
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            with t.slot_scope(None, chain=3):
+                pass
+            self.assertEqual(t._active_chain, 2)
+
     def test_nested_probe_on_another_chain_restores_the_chain(self):
         """A probe on chain 2 inside a chain-1 slot scope must leave the
         enclosing scope's next access on chain 1, with its select."""

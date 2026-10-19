@@ -334,13 +334,13 @@ class Transport(ABC):
                 self._scope_select_chain(chain)
             local.selection = selection
             # The chain this body runs on, for a nested scope to give back.
-            # A scope without chain= runs on its selection's chain.
+            # A scope without chain= runs on whatever chain is active.
             if chain is not None:
                 local.chain = chain
-            elif selection is not None:
-                local.chain = selection.chain
-            else:
+            elif previous_chain is not None:
                 local.chain = previous_chain
+            else:
+                local.chain = self._current_chain()
             failed = False
             try:
                 if selection is not None and not self.atomic_slot_select:
@@ -376,6 +376,10 @@ class Transport(ABC):
                     self.invalidate_manager_instance_cache()
                     if not failed or not isinstance(exc, Exception):
                         raise
+
+    def _current_chain(self) -> int | None:
+        """The chain register accesses go to now, or ``None`` if untracked."""
+        return getattr(self, "_active_chain", None)
 
     def _scope_select_chain(self, chain: int) -> None:
         try:
@@ -2442,7 +2446,6 @@ class XilinxHwServerTransport(Transport):
                 proc.kill()
             except OSError:
                 pass
-            self._proc = None
         self._stdout_lines.put(None)
 
     # -- chain selection -----------------------------------------------------
