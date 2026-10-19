@@ -1335,33 +1335,36 @@ class OpenOcdTransport(Transport):
         self, write_addr: int, value: int, addrs: List[int]
     ) -> List[int]:
         """The write and the reads run as one command line."""
-        if not addrs:
-            self.write_reg(write_addr, value)
-            return []
-        frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
-        cmds = [
-            *self._slot_select_cmds([write_addr, *addrs]),
-            self._scan_tcl(frame),
-            f"runtest {self.READ_IDLE_CYCLES}",
-        ]
-        for i, addr in enumerate(addrs):
-            read_frame = (addr & 0xFFFF) << 32
-            cmds += [
-                self._scan_tcl(read_frame),
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+            cmds = [
+                *self._slot_select_cmds([write_addr, *addrs]),
+                self._scan_tcl(frame),
                 f"runtest {self.READ_IDLE_CYCLES}",
-                f"set __fcapz_read_{i} [{self._scan_tcl(read_frame)}]",
             ]
-        cmds.append("list " + " ".join(f"$__fcapz_read_{i}" for i in range(len(addrs))))
-        tokens = self._run_line(cmds).split()
-        if len(tokens) != len(addrs):
-            raise RuntimeError(
-                f"OpenOCD returned {len(tokens)} values for {len(addrs)} reads: "
-                f"{' '.join(tokens)!r}"
-            )
-        return [
-            self._parse_drscan_result(token, command="drscan", width=49) & 0xFFFFFFFF
-            for token in tokens
-        ]
+            for i, addr in enumerate(addrs):
+                read_frame = (addr & 0xFFFF) << 32
+                cmds += [
+                    self._scan_tcl(read_frame),
+                    f"runtest {self.READ_IDLE_CYCLES}",
+                    f"set __fcapz_read_{i} [{self._scan_tcl(read_frame)}]",
+                ]
+            cmds.append("list " + " ".join(f"$__fcapz_read_{i}" for i in range(len(addrs))))
+            tokens = self._run_line(cmds).split()
+            if len(tokens) != len(addrs):
+                raise RuntimeError(
+                    f"OpenOCD returned {len(tokens)} values for {len(addrs)} reads: "
+                    f"{' '.join(tokens)!r}"
+                )
+            return [
+                self._parse_drscan_result(token, command="drscan", width=49) & 0xFFFFFFFF
+                for token in tokens
+            ]
 
     def read_block(self, addr: int, words: int) -> List[int]:
         check_data_window(addr, words, self.data_window_end)
@@ -1959,17 +1962,20 @@ class QuartusStpTransport(Transport):
         self, write_addr: int, value: int, addrs: List[int]
     ) -> List[int]:
         """The write and the reads run in one locked script."""
-        if not addrs:
-            self.write_reg(write_addr, value)
-            return []
-        instance = self._active_chain
-        frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
-        head = [
-            self._virtual_ir_tcl(instance),
-            self._dr_shift_tcl(instance, frame, self.DR_BITS, "__fcapz_write_discard"),
-            f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
-        ]
-        return self._locked_reads(addrs, head=head, select_addrs=[write_addr])
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            instance = self._active_chain
+            frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+            head = [
+                self._virtual_ir_tcl(instance),
+                self._dr_shift_tcl(instance, frame, self.DR_BITS, "__fcapz_write_discard"),
+                f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
+            ]
+            return self._locked_reads(addrs, head=head, select_addrs=[write_addr])
 
     def _locked_reads(
         self, addrs: List[int], *, head: list[str], select_addrs: List[int] = ()
@@ -3820,17 +3826,20 @@ class XilinxHwServerTransport(Transport):
         self, write_addr: int, value: int, addrs: List[int]
     ) -> List[int]:
         """The write and the reads run as one ``jtag sequence``."""
-        if not addrs:
-            self.write_reg(write_addr, value)
-            return []
-        n = self._user_dr_bits(self.DR_BITS)
-        frame = self._pad_dr(self._frame_bits(addr=write_addr, data=value, write=True))
-        head = [
-            *self._slot_select_tcl("_pq", [write_addr, *addrs]),
-            f"{self._irshift_tcl('_pq')}; $_pq drshift -state DRUPDATE -bits {n} {frame}",
-            f"$_pq state IDLE {self._write_idle_cycles}",
-        ]
-        return self._pipelined_reads(addrs, head)
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            n = self._user_dr_bits(self.DR_BITS)
+            frame = self._pad_dr(self._frame_bits(addr=write_addr, data=value, write=True))
+            head = [
+                *self._slot_select_tcl("_pq", [write_addr, *addrs]),
+                f"{self._irshift_tcl('_pq')}; $_pq drshift -state DRUPDATE -bits {n} {frame}",
+                f"$_pq state IDLE {self._write_idle_cycles}",
+            ]
+            return self._pipelined_reads(addrs, head)
 
     def _pipelined_reads(self, addrs: List[int], head: List[str]) -> List[int]:
         """Pipelined reads of *addrs* in one sequence, after the scans in *head*."""

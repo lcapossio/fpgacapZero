@@ -1086,6 +1086,24 @@ class _AtomicBackendContract:
         ela1.select_instance(1)
         self.assertEqual(t.read_reg(0x0014), 22)
 
+    def test_read_regs_after_write_waits_for_another_threads_transaction(self):
+        """The unit reads the active chain and slot once: another thread's
+        scope must not switch them while it is being built."""
+        t, fake = self.make()
+        fake.interfere = False
+        done = threading.Event()
+
+        def call():
+            t.read_regs_after_write(_DESC_INDEX, 2, [_DESC_CORE])
+            done.set()
+
+        with t.transaction_lock():
+            worker = threading.Thread(target=call)
+            worker.start()
+            self.assertFalse(done.wait(0.2))
+        worker.join(5)
+        self.assertTrue(done.is_set())
+
     def test_isolated_controllers_are_not_alarmed_by_foreign_selects(self):
         from fcapz.analyzer import CaptureConfig, TriggerConfig
 
