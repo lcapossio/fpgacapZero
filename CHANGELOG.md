@@ -428,6 +428,32 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
   connect in progress holds, so a hung Quartus open can be aborted.
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **hw_server — every core-manager access selects its own slot in the same
+  JTAG sequence.** The host cached the `MGR_ACTIVE` it last wrote, so a
+  second program on the same cable (a GUI next to a CLI, two MCP clients)
+  moving the slot sent this one's next accesses to another core: EIO writes
+  into an ELA, a capture read from the wrong slot. Now each sequence that
+  reaches a slot starts with an uncaptured `MGR_ACTIVE` write: register
+  accesses, block-read chunks, pipelined reads, and bursts (once, before
+  `BURST_PTR`). Slot enumeration and descriptor reads (`MGR_DESC_INDEX`) are
+  single sequences too. New `Transport.slot_scope` / `SlotSelection` /
+  `atomic_slot_select` / `read_regs_after_write`. OpenOCD and Quartus still
+  select once per operation (a second program can move the slot between
+  operations); they follow. Cost on a KV260: see the PR.
+- **hw_server — a slot switch after a single-chain burst is no longer
+  dropped.** The core manager ignores an `MGR_ACTIVE` write while the burst
+  pipe fills its staging register, and on a 1-, 2- or 4-bit lane the fill
+  that the next scan's capture starts outlasts a select scan. The select was
+  dropped silently, and the next accesses (an EIO poll, say) reached the
+  ELA slot. A single-chain burst now ends with an uncaptured `VERSION` read
+  and 258 idle TCKs inside the same sequence. New RTL testbench
+  `fcapz_core_manager_select_after_burst`.
+- **GUI — EIO panel chain switches hold the transport lock.** Polling,
+  output writes and attach switched the shared JTAG chain without the lock,
+  so a poll during a capture could send the capture's next access down the
+  EIO's chain, then froze the window until the capture ended. A poll tick
+  now skips while a capture holds the transport; a write waits up to a
+  second, then reports that a capture is running.
 - **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
   transport's transaction lock**, so it cannot land between another
   controller's register accesses on a shared transport. The GUI refuses

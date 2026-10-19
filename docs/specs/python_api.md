@@ -554,6 +554,60 @@ selecting different core-manager slots.  This lock serializes those
 higher-level register sequences so one controller cannot switch
 `MGR_ACTIVE` between another controller's read/modify/write halves.
 
+#### `Transport.current_slot_selection`
+
+```python
+current_slot_selection() -> SlotSelection | None
+```
+
+The calling thread's innermost `slot_scope` selection, or `None`.
+
+#### `Transport.slot_scope`
+
+```python
+slot_scope(
+    selection: SlotSelection | None,
+    *,
+    chain: int | None = None,
+) -> Iterator[None]
+```
+
+Run the body's register accesses on *chain* against *selection*'s slot.
+
+Holds `transaction_lock` throughout.  The selection belongs to
+the calling thread and lasts only for the body.  `None` means the
+body carries no selection -- probes and manager-wide reads, which
+must not inherit an enclosing slot.  *chain*, if given, is selected
+for the body.
+
+On exit, also after an exception, a nested scope gives back the chain
+that was active when it was entered and then the enclosing slot, so a
+nested probe on another chain or slot cannot leave the enclosing
+controller's next access misrouted.  A
+top-level scope leaves its chain selected, as controllers always have.
+
+A backend with `atomic_slot_select` writes `MGR_ACTIVE` at the
+head of every backend operation in the scope that reaches a slot (an
+access to the manager's own block, `0xF000`-`0xF0FF`, does not),
+so a second process on the same cable cannot redirect the access.
+Other backends select once on entry through
+`select_manager_instance_cached`, which another process can
+still undo between operations.
+
+#### `Transport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+Write *value* to *write_addr*, then read each of *addrs*.
+
+For a selector register and the registers it selects, such as
+`MGR_DESC_INDEX` and the slot descriptor.  A backend with
+`atomic_slot_select` does it all in one backend operation, so
+no other client can move the selector in between; this default is
+separate accesses.
+
 #### `Transport.select_manager_instance_cached`
 
 ```python
@@ -562,10 +616,11 @@ select_manager_instance_cached(chain: int, active_addr: int, instance: int) -> N
 
 Write a core-manager active slot only when the transport changed.
 
-The active manager slot is a sticky hardware register.  Host controllers
-sharing one transport use this cache under `transaction_lock` to
-avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-agree on which slot was last selected.
+The active manager slot is a sticky hardware register.  On a backend
+without `atomic_slot_select`, `slot_scope` selects through
+this cache under `transaction_lock`, avoiding redundant JTAG
+writes while Analyzer/EIO/CoreManager agree on which slot was last
+selected.  Another process can move the slot behind the cache.
 
 #### `Transport.invalidate_manager_instance_cache`
 
@@ -673,7 +728,11 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
@@ -921,6 +980,7 @@ _BLOCK_CHUNK = 512
 _BURST_SCANS_PER_SEQUENCE = 256
 WRITE_IDLE_CYCLES_REGISTER = 100
 BURST_PREFILL_IDLE_CYCLES = 160
+BURST_DRAIN_IDLE_CYCLES = 258
 ```
 
 #### `XilinxHwServerTransport.connect`
@@ -1120,6 +1180,14 @@ Uses the same USER1 pipelined capture pattern as `_burst_read_tcl`
 (IR+DR per step; capture carries the previous address's data).  A final
 `read_reg` to VERSION flushes the JTAG pipeline for later accesses.
 
+#### `XilinxHwServerTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one `jtag sequence`.
+
 ### `QuartusStpTransport`
 
 ```python
@@ -1223,7 +1291,11 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.

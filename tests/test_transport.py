@@ -1631,6 +1631,33 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertTrue(outcome, "the call should have failed, not returned")
         self.assertIsInstance(outcome[0], (ConnectionError, RuntimeError))
 
+    def test_cancel_does_not_write_to_a_stalled_stdin(self):
+        """A _send stuck writing to an xsdb that stopped reading holds the
+        pipe; cancel() must kill the process without writing to it."""
+        proc = MagicMock()
+        stdin_lock = threading.Lock()
+        stdin_lock.acquire()  # the stalled writer holds it
+        self.addCleanup(stdin_lock.release)
+
+        def write(_data):
+            with stdin_lock:
+                pass
+
+        proc.stdin.write.side_effect = write
+        t = XilinxHwServerTransport()
+        t._proc = proc
+        done = threading.Event()
+        canceller = threading.Thread(
+            target=lambda: (t.cancel(), done.set()), daemon=True
+        )
+        canceller.start()
+        self.assertTrue(done.wait(2.0), "cancel() blocked on stdin")
+        proc.kill.assert_called_once()
+        proc.stdin.write.assert_not_called()
+        # The owner's thread may be mid-_send or about to close(): the
+        # process stays for it to fail on and reap.
+        self.assertIs(t._proc, proc)
+
     def test_close_when_not_connected_is_safe(self):
         """close() is idempotent when called before connect()."""
         t = XilinxHwServerTransport()
@@ -2368,7 +2395,12 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                     body = "; ".join(sent)
                     self.assertEqual(body.count("[jtag sequence]"), 1)
                     self.assertEqual(body.count("-capture"), n + 1)
-                    self.assertEqual(body.count("-bits 49"), 2 if sync else 1)
+                    # A single-chain burst ends with one uncaptured command
+                    # scan (see test_single_chain_burst_ends_with_a_drain).
+                    self.assertEqual(
+                        body.count("-bits 49"),
+                        (2 if sync else 1) + (1 if single_chain else 0),
+                    )
                     self.assertEqual(
                         body.count("-bits 256"), n + 1 + (1 if sync else 0)
                     )
@@ -2378,6 +2410,36 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                         self.assertLess(ptr[0], first_burst)
                         self.assertLess(first_burst, ptr[1])
                         self.assertLess(ptr[1], body.index("-capture"))
+
+    def test_single_chain_burst_ends_with_a_drain(self):
+        """A single-chain burst leaves the pipe out of burst mode with its
+        staging fill drained: otherwise the core manager ignores an
+        MGR_ACTIVE write that follows on a narrow (1-4 bit) lane.  The drain
+        is one uncaptured VERSION read and the drain idle, after the last
+        burst scan, in the same sequence; the parse is unchanged."""
+        for single_chain in (True, False):
+            with self.subTest(single_chain=single_chain):
+                t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                n = 2
+                tokens = [self._burst_token([0xEE], 256)] + [
+                    self._burst_token([s], 256) for s in range(n)
+                ]
+                sent: list[str] = []
+                t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                words = t.read_sample_block(0x0100, n, 256)
+                self.assertEqual(words[::8], list(range(n)))
+                body = "; ".join(sent)
+                drain = f"state IDLE {t.BURST_DRAIN_IDLE_CYCLES}"
+                if not single_chain:
+                    self.assertNotIn(drain, body)
+                    continue
+                neutral = t._pad_dr(t._frame_bits(addr=0x0000, data=0, write=False))
+                last_burst = body.rindex("-bits 256")
+                read = body.index(f"-bits 49 {neutral}")
+                self.assertLess(last_burst, read)
+                self.assertLess(read, body.index(drain))
+                self.assertLess(body.index(drain), body.index("run -bits"))
+                self.assertNotIn("-capture -bits 49", body)
 
     def test_timestamp_burst_primes_before_returned_scan(self):
         """Timestamp burst reads also discard the first fill scan."""

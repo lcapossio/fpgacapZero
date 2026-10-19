@@ -41,6 +41,31 @@ path for timestamp data.
   returned and a second `BURST_PTR` write (see `MGR_CAPS` in
   [`register_map.md`](register_map.md)).
 
+### Core-manager slot selection
+
+- `slot_scope(selection)` — context manager.  Every register access in the
+  body reaches `selection`'s slot (`SlotSelection(chain, active_addr,
+  slot)`), or carries no selection when it is `None`.  It holds
+  `transaction_lock()` for the body; the selection belongs to the calling
+  thread and is restored on exit.  `Analyzer`, `EioController` and
+  `CoreManager` enter it for every operation.
+- `atomic_slot_select: bool` (class attribute) — `True` when the backend
+  writes `MGR_ACTIVE` at the head of each backend operation in the scope
+  that reaches a slot, in the same uninterrupted transaction as the access.
+  Then a second process on the same cable cannot redirect an access by
+  moving `MGR_ACTIVE`.  Accesses to the manager's own block
+  (`0xF000`-`0xF0FF`) are never prefixed.  Otherwise the scope selects once
+  on entry with `select_manager_instance_cached`, which another process can
+  undo between operations.  `XilinxHwServerTransport` is atomic; OpenOCD and
+  Quartus are not yet.
+- `read_regs_after_write(write_addr, value, addrs)` — a selector write and
+  the reads it selects (`MGR_DESC_INDEX` and the slot descriptor), as one
+  backend operation on an atomic backend.
+
+Read-modify-write sequences (EIO `set_bit`, ELA configure then arm) are
+still several operations: per-operation selection keeps each one on its
+slot, but two processes driving the same slot can still interleave.
+
 ## Implementations
 
 ### `XilinxHwServerTransport` (primary, hardware-validated)
@@ -60,6 +85,11 @@ path for timestamp data.
 - Falls back to control-chain single-sequence pipelined reads for non-DATA addresses.
 - All operations within a read use a single `jtag sequence` object to prevent
   stale-read bugs from inter-sequence timing gaps.
+- Inside a `slot_scope`, each sequence that reaches a slot starts with an
+  uncaptured `MGR_ACTIVE` write and the register-write idle (20 TCKs, 100 in
+  `-register` mode): one per register access, per block-read chunk and its
+  flush, per pipelined read, and once before `BURST_PTR` in a burst, never
+  between burst scans.  The captured output is unchanged.
 - Automatic FPGA programming via `bitfile=` constructor parameter.
 - Default port: 3121.
 

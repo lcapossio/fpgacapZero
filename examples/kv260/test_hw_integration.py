@@ -418,6 +418,41 @@ class TestEio(_Hw):
             self.assertEqual(eio.read_outputs(), value)
         eio.write_outputs(0)
 
+    def test_accesses_survive_another_client_moving_the_slot(self):
+        """A second hw_server client (another program on the cable) moves
+        MGR_ACTIVE before every operation; EIO writes still land in the EIO
+        and an ELA capture still reads the ELA."""
+        from fcapz.analyzer import CaptureConfig, CoreManager, TriggerConfig
+
+        other = _make_transport()
+        other.connect()
+        try:
+            intruder = CoreManager(other)
+            eio = self._eio(2)
+            ela = self._ela(0)
+            for value in (0xA5, 0x5A):
+                intruder.select_raw(0)
+                eio.write_outputs(value)
+                intruder.select_raw(1)
+                self.assertEqual(eio.read_outputs(), value)
+            intruder.select_raw(2)
+            ela.configure(CaptureConfig(
+                pretrigger=8, posttrigger=55, sample_width=8, depth=1024,
+                trigger=TriggerConfig(mode="value_match", value=0x40, mask=0xFF),
+            ))
+            intruder.select_raw(3)
+            ela.arm()
+            intruder.select_raw(2)
+            r = ela.capture(timeout=5.0)
+            samples = [s & 0xFF for s in r.samples]
+            self.assertEqual(len(samples), 64)
+            self.assertEqual(set(_steps(samples)), {1}, samples)
+            intruder.select_raw(0)
+            eio.write_outputs(0)
+            self.assertEqual(eio.read_outputs(), 0)
+        finally:
+            other.close()
+
     def test_eio_reads_slow_counter(self):
         eio = self._eio(2)
         seen = set()

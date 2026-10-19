@@ -623,8 +623,11 @@ ela1 = Analyzer(transport, instance=1)
 
 Multiple `Analyzer` objects can share one transport session; each analyzer
 re-selects its configured manager slot before probe, configure, arm, status
-polling, and readback. Do not run captures from two Python threads against
-the same transport at the same time. The transport serializes low-level I/O,
+polling, and readback. On `hw_server` the select travels in the same JTAG
+sequence as every access, so another program on the same cable moving
+`MGR_ACTIVE` cannot redirect it; OpenOCD and Quartus select once per
+operation, which another program can still undo in between. Do not run
+captures from two Python threads against the same transport at the same time. The transport serializes low-level I/O,
 but capture workflows still share FPGA JTAG bandwidth and should be sequenced
 deliberately.
 

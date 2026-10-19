@@ -15,6 +15,9 @@ import time
 import subprocess
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 from typing import IO, Any, Callable, List
 
@@ -229,6 +232,26 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
         )
 
 
+# The core manager's own registers.  The manager answers these itself, for
+# every active slot, so an access to them never needs a slot selected.
+_MGR_BLOCK_START = 0xF000
+_MGR_BLOCK_END = 0xF100
+
+
+def _in_manager_block(addr: int) -> bool:
+    return _MGR_BLOCK_START <= (int(addr) & 0xFFFF) < _MGR_BLOCK_END
+
+
+@dataclass(frozen=True)
+class SlotSelection:
+    """The core-manager slot an access must reach: *slot* written to the
+    ``MGR_ACTIVE`` register at *active_addr* on *chain*."""
+
+    chain: int
+    active_addr: int
+    slot: int
+
+
 class Transport(ABC):
     """Abstract base class for all fpgacapZero JTAG transports.
 
@@ -260,9 +283,138 @@ class Transport(ABC):
         """
         lock = self.__dict__.get("_fcapz_transaction_lock")
         if lock is None:
-            lock = threading.RLock()
-            self.__dict__["_fcapz_transaction_lock"] = lock
+            lock = self.__dict__.setdefault("_fcapz_transaction_lock", threading.RLock())
         return lock
+
+    #: True when the backend writes the selected slot inside the same backend
+    #: operation as each access in a :meth:`slot_scope`, so no other client of
+    #: the cable can move ``MGR_ACTIVE`` in between.
+    atomic_slot_select: bool = False
+
+    def _slot_local(self) -> threading.local:
+        local = self.__dict__.get("_fcapz_slot_local")
+        if local is None:
+            local = self.__dict__.setdefault("_fcapz_slot_local", threading.local())
+        return local
+
+    def current_slot_selection(self) -> SlotSelection | None:
+        """The calling thread's innermost :meth:`slot_scope` selection, or ``None``."""
+        return getattr(self._slot_local(), "selection", None)
+
+    @contextmanager
+    def slot_scope(
+        self, selection: SlotSelection | None, *, chain: int | None = None
+    ) -> Iterator[None]:
+        """Run the body's register accesses on *chain* against *selection*'s slot.
+
+        Holds :meth:`transaction_lock` throughout.  The selection belongs to
+        the calling thread and lasts only for the body.  ``None`` means the
+        body carries no selection -- probes and manager-wide reads, which
+        must not inherit an enclosing slot.  *chain*, if given, is selected
+        for the body.
+
+        On exit, also after an exception, a nested scope gives back the chain
+        that was active when it was entered and then the enclosing slot, so a
+        nested probe on another chain or slot cannot leave the enclosing
+        controller's next access misrouted.  A
+        top-level scope leaves its chain selected, as controllers always have.
+
+        A backend with :attr:`atomic_slot_select` writes ``MGR_ACTIVE`` at the
+        head of every backend operation in the scope that reaches a slot (an
+        access to the manager's own block, ``0xF000``-``0xF0FF``, does not),
+        so a second process on the same cable cannot redirect the access.
+        Other backends select once on entry through
+        :meth:`select_manager_instance_cached`, which another process can
+        still undo between operations.
+        """
+        with self.transaction_lock():
+            local = self._slot_local()
+            previous = getattr(local, "selection", None)
+            previous_chain = getattr(local, "chain", None)
+            depth = getattr(local, "depth", 0)
+            # The chain active on entry, which a nested scope gives back: read
+            # from the transport, since code inside the enclosing body (a GUI
+            # subsidiary chain) may have switched it without a scope.  A
+            # backend that does not track it falls back to the enclosing
+            # scope's record.
+            entry_chain = self._current_chain()
+            if entry_chain is None:
+                entry_chain = previous_chain
+            if chain is not None:
+                self._scope_select_chain(chain)
+            local.selection = selection
+            local.chain = chain if chain is not None else entry_chain
+            local.depth = depth + 1
+            failed = False
+            try:
+                if selection is not None and not self.atomic_slot_select:
+                    self.select_manager_instance_cached(
+                        selection.chain, selection.active_addr, selection.slot
+                    )
+                yield
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                local.selection = previous
+                local.chain = previous_chain
+                local.depth = depth
+                try:
+                    # Compare with the chain now, not this scope's own: the
+                    # body may have switched chains without a scope.  An
+                    # untracked backend only knows what this scope selected.
+                    exit_chain = self._current_chain()
+                    if exit_chain is None:
+                        exit_chain = chain
+                    if (
+                        depth > 0
+                        and entry_chain is not None
+                        and exit_chain is not None
+                        and exit_chain != entry_chain
+                    ):
+                        self._scope_select_chain(entry_chain)
+                    if (
+                        previous is not None
+                        and previous != selection
+                        and not self.atomic_slot_select
+                    ):
+                        self.select_manager_instance_cached(
+                            previous.chain, previous.active_addr, previous.slot
+                        )
+                except BaseException as exc:
+                    # The hardware slot is unknown now: make the next scope
+                    # select for real.  The body's own error wins over a
+                    # failed restore, but not over an interrupt.
+                    self.invalidate_manager_instance_cache()
+                    if not failed or not isinstance(exc, Exception):
+                        raise
+
+    def _current_chain(self) -> int | None:
+        """The chain register accesses go to now, or ``None`` if untracked."""
+        return getattr(self, "_active_chain", None)
+
+    def _scope_select_chain(self, chain: int) -> None:
+        try:
+            self.select_chain(chain)
+        except NotImplementedError:
+            # A single-chain transport: chain 1 is the only one there is.
+            if chain != 1:
+                raise
+
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """Write *value* to *write_addr*, then read each of *addrs*.
+
+        For a selector register and the registers it selects, such as
+        ``MGR_DESC_INDEX`` and the slot descriptor.  A backend with
+        :attr:`atomic_slot_select` does it all in one backend operation, so
+        no other client can move the selector in between; this default is
+        separate accesses.
+        """
+        with self.transaction_lock():
+            self.write_reg(write_addr, value)
+            return [int(self.read_reg(addr)) for addr in addrs]
 
     def select_manager_instance_cached(
         self,
@@ -272,15 +424,29 @@ class Transport(ABC):
     ) -> None:
         """Write a core-manager active slot only when the transport changed.
 
-        The active manager slot is a sticky hardware register.  Host controllers
-        sharing one transport use this cache under :meth:`transaction_lock` to
-        avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-        agree on which slot was last selected.
+        The active manager slot is a sticky hardware register.  On a backend
+        without :attr:`atomic_slot_select`, :meth:`slot_scope` selects through
+        this cache under :meth:`transaction_lock`, avoiding redundant JTAG
+        writes while Analyzer/EIO/CoreManager agree on which slot was last
+        selected.  Another process can move the slot behind the cache.
         """
         key = (int(chain), int(instance))
         if self.__dict__.get("_fcapz_manager_active_cache") == key:
             return
-        self.write_reg(active_addr, int(instance))
+        # A write that fails may still have reached the hardware: until it
+        # succeeds the slot is unknown, not the previously cached one.
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
+        current = self._current_chain()
+        if current is None or current == int(chain):
+            self.write_reg(active_addr, int(instance))
+        else:
+            # The manager lives on *chain*; another chain's 0xF008 is some
+            # other core's register.
+            self._scope_select_chain(int(chain))
+            try:
+                self.write_reg(active_addr, int(instance))
+            finally:
+                self._scope_select_chain(current)
         self.__dict__["_fcapz_manager_active_cache"] = key
 
     def invalidate_manager_instance_cache(self) -> None:
@@ -374,7 +540,11 @@ class Transport(ABC):
         may be the vendor instance identifier, such as Intel's
         ``sld_virtual_jtag`` ``instance_index``.
 
-        Subclasses that support multi-chain access must override this.
+        Subclasses that support multi-chain access must override this, and
+        keep the selected chain in ``_active_chain`` (or override
+        ``_current_chain``): :meth:`slot_scope` reads it to give an enclosing
+        scope back its chain and to write a slot select on the manager's own
+        chain.
         Raises ``ValueError`` if *chain* is invalid for that transport.
         Raises ``NotImplementedError`` on transports that only support a
         single fixed chain.
@@ -2290,9 +2460,19 @@ class XilinxHwServerTransport(Transport):
     def cancel(self) -> None:
         # Called from another thread while a _send may be waiting. Killing
         # the process is what makes that wait end early; the sentinel below
-        # (pushed by close_fast) is what makes it end immediately.
+        # is what makes it end immediately.  Never touches stdin: a _send
+        # blocked writing a large command to an xsdb that stopped reading
+        # holds the pipe's buffer lock, and an "exit" write would wait on it.
+        # Leaves _proc for the owner: its _send fails on the dead pipe and
+        # its close() reaps the process.
         self._poisoned = True
-        self.close_fast()
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        self._stdout_lines.put(None)
 
     # -- chain selection -----------------------------------------------------
 
@@ -2350,13 +2530,13 @@ class XilinxHwServerTransport(Transport):
 
     def read_reg(self, addr: int) -> int:
         frame = self._frame_bits(addr=addr, data=0, write=False)
-        tcl = self._read_reg_tcl(frame)
+        tcl = self._read_reg_tcl(frame, addr=addr)
         raw = self._send(tcl)
         return self._parse_bits_u32(raw)
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = self._frame_bits(addr=addr, data=value, write=True)
-        tcl = self._write_reg_tcl(frame)
+        tcl = self._write_reg_tcl(frame, addr=addr)
         self._send(tcl)
 
     _BLOCK_CHUNK = 512  # max reads per single jtag sequence
@@ -2485,7 +2665,13 @@ class XilinxHwServerTransport(Transport):
             f"$_bq drshift -state DRUPDATE -bits {user_total} {burst_frame}",
             f"$_bq state IDLE {write_idle}",
         ]
-        head = ["set _bq [jtag sequence]", *write_ptr]
+        # Select the slot before BURST_PTR, which makes it the burst owner;
+        # never between burst scans, where any command scan ends burst mode.
+        head = [
+            "set _bq [jtag sequence]",
+            *self._slot_select_tcl("_bq", [self.ADDR_BURST_PTR]),
+            *write_ptr,
+        ]
         if self.burst_start_sync:
             # See Transport.burst_start_sync: one burst scan whose capture
             # matches the engine's copy to the new owner's start toggle, then
@@ -2497,9 +2683,23 @@ class XilinxHwServerTransport(Transport):
                 f"-bits {burst_total} {burst_zeros}",
                 *write_ptr,
             ]
+        tail: list[str] = []
+        if self.single_chain_burst:
+            # Leave the pipe idle.  Until a command scan ends burst mode, every
+            # capture on the chain starts another staging fill, and the core
+            # manager ignores an MGR_ACTIVE write while one runs.  On a narrow
+            # lane (1-4 bits) a fill outlasts the next 49-bit select scan, so
+            # without this a slot switch right after the burst was dropped and
+            # the next access reached the previous slot.  The VERSION read is
+            # not captured, so the output is unchanged.
+            neutral = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
+            tail = [
+                f"{ir1_cmd}; $_bq drshift -state DRUPDATE -bits {user_total} {neutral}",
+                f"$_bq state IDLE {self.BURST_DRAIN_IDLE_CYCLES}",
+            ]
         # The first wide scan primes/fills staging and is discarded.
         tcls = self._burst_sequence_sends(
-            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans
+            head, ir_burst_cmd, burst_total, burst_zeros, n_scans + prime_scans, tail
         )
 
         # Every send is checked: a failure while the sequence is being built
@@ -2522,18 +2722,24 @@ class XilinxHwServerTransport(Transport):
     _BURST_SCANS_PER_SEQUENCE = 256
 
     def _burst_sequence_sends(
-        self, head: list[str], ir_cmd: str, total_bits: int, zeros: str, n_scans: int
+        self,
+        head: list[str],
+        ir_cmd: str,
+        total_bits: int,
+        zeros: str,
+        n_scans: int,
+        tail: list[str] | None = None,
     ) -> list[str]:
-        """TCL sends that build ONE ``_bq`` sequence -- *head* plus *n_scans*
-        burst DR scans, at most ``_BURST_SCANS_PER_SEQUENCE`` per send -- and
-        run it in the last send, printing every captured scan."""
+        """TCL sends that build ONE ``_bq`` sequence -- *head*, *n_scans*
+        burst DR scans (at most ``_BURST_SCANS_PER_SEQUENCE`` per send), then
+        *tail* -- and run it in the last send, printing every captured scan."""
         scan = f"{ir_cmd}; $_bq drshift -state DRUPDATE -capture -bits {total_bits} {zeros}"
         sends: list[list[str]] = []
         for start in range(0, n_scans, self._BURST_SCANS_PER_SEQUENCE):
             count = min(self._BURST_SCANS_PER_SEQUENCE, n_scans - start)
             sends.append([scan] * count)
         sends[0] = head + sends[0]
-        sends[-1] = sends[-1] + ["puts [$_bq run -bits]; $_bq delete"]
+        sends[-1] = sends[-1] + list(tail or ()) + ["puts [$_bq run -bits]; $_bq delete"]
         return ["; ".join(s) for s in sends]
 
     def read_sample_block(
@@ -2770,6 +2976,9 @@ class XilinxHwServerTransport(Transport):
 
         parts: list[str] = [
             "set _q [jtag sequence]",
+            *self._slot_select_tcl(
+                "_q", [base_addr + (offset + i) * 4 for i in range(count)]
+            ),
             # Scan 0: set first address, no capture
             f"{ir_cmd}; "
             f"$_q drshift -state DRUPDATE -bits {n} {frames[0]}",
@@ -2807,6 +3016,26 @@ class XilinxHwServerTransport(Transport):
         (IR+DR per step; capture carries the previous address's data).  A final
         :meth:`read_reg` to VERSION flushes the JTAG pipeline for later accesses.
         """
+        return self._pipelined_reads(addrs, self._slot_select_tcl("_pq", addrs))
+
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """The write and the reads run as one ``jtag sequence``."""
+        if not addrs:
+            self.write_reg(write_addr, value)
+            return []
+        n = self._user_dr_bits(self.DR_BITS)
+        frame = self._pad_dr(self._frame_bits(addr=write_addr, data=value, write=True))
+        head = [
+            *self._slot_select_tcl("_pq", [write_addr, *addrs]),
+            f"{self._irshift_tcl('_pq')}; $_pq drshift -state DRUPDATE -bits {n} {frame}",
+            f"$_pq state IDLE {self._write_idle_cycles}",
+        ]
+        return self._pipelined_reads(addrs, head)
+
+    def _pipelined_reads(self, addrs: List[int], head: List[str]) -> List[int]:
+        """Pipelined reads of *addrs* in one sequence, after the scans in *head*."""
         if not addrs:
             return []
         n = self._user_dr_bits(self.DR_BITS)
@@ -2819,6 +3048,7 @@ class XilinxHwServerTransport(Transport):
         count = len(frames)
         parts: list[str] = [
             "set _pq [jtag sequence]",
+            *head,
             f"{ir_cmd}; "
             f"$_pq drshift -state DRUPDATE -bits {n} {frames[0]}",
             f"$_pq state IDLE {idle}",
@@ -2848,6 +3078,51 @@ class XilinxHwServerTransport(Transport):
     # READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
     BURST_PREFILL_IDLE_CYCLES = 160
+    # Idle TCKs after the command scan that ends a single-chain burst: one
+    # full staging fill (256 / lane-width words, 256 for a 1-bit lane) plus
+    # margin.  See _read_block_burst.
+    BURST_DRAIN_IDLE_CYCLES = 258
+
+    @property
+    def _write_idle_cycles(self) -> int:
+        """Idle TCKs after a register write's UPDATE-DR (see _write_reg_tcl)."""
+        if self.use_register_ir:
+            return self.WRITE_IDLE_CYCLES_REGISTER
+        return self.READ_IDLE_CYCLES
+
+    # The selection is written in the same sequence as the access, and
+    # hw_server runs a sequence as one uninterrupted unit.
+    atomic_slot_select = True
+
+    def _slot_select_tcl(self, seq_var: str, addrs: List[int]) -> List[str]:
+        """Scans that write the calling thread's slot selection (see
+        :meth:`Transport.slot_scope`), for the head of a ``jtag sequence``
+        whose accesses reach *addrs*.
+
+        Nothing when no slot is selected, when the access is on another
+        chain, or when every address is in the manager's own block: the
+        manager answers those for any slot, and a select ahead of a read of
+        ``MGR_ACTIVE`` would overwrite what the read is after.  The write
+        scan is not captured, so the sequence's output is unchanged; its
+        idle matches :meth:`write_reg`'s.
+        """
+        sel = self.current_slot_selection()
+        if sel is None or sel.chain != self._active_chain:
+            return []
+        if addrs and all(_in_manager_block(a) for a in addrs):
+            return []
+        # This sequence moves MGR_ACTIVE behind the cache, and may fail
+        # after doing so: a later cached select must write for real.
+        self.invalidate_manager_instance_cache()
+        n = self._user_dr_bits(self.DR_BITS)
+        frame = self._pad_dr(
+            self._frame_bits(addr=sel.active_addr, data=sel.slot, write=True)
+        )
+        return [
+            f"{self._irshift_tcl(seq_var, chain=sel.chain)}; "
+            f"${seq_var} drshift -state DRUPDATE -bits {n} {frame}",
+            f"${seq_var} state IDLE {self._write_idle_cycles}",
+        ]
 
     def _ir_hex(self, value: int) -> str:
         """Format an IR opcode as the right-width hex string for ``-hex N``."""
@@ -2905,7 +3180,9 @@ class XilinxHwServerTransport(Transport):
 
     # -- TCL generation ------------------------------------------------------
 
-    def _read_reg_tcl(self, frame: str, var_suffix: str = "") -> str:
+    def _read_reg_tcl(
+        self, frame: str, var_suffix: str = "", *, addr: int | None = None
+    ) -> str:
         """Return TCL that performs one register read and returns the bit string.
 
         One jtag sequence: IR, command DR ending in an explicit UPDATE-DR,
@@ -2919,9 +3196,11 @@ class XilinxHwServerTransport(Transport):
         idle = self.READ_IDLE_CYCLES
         padded = self._pad_dr(frame)
         ir_cmd = self._irshift_tcl(v)
+        select = self._slot_select_tcl(v, [] if addr is None else [addr])
         return (
             f"set {v} [jtag sequence]; "
-            f"{ir_cmd}; "
+            + "".join(f"{part}; " for part in select)
+            + f"{ir_cmd}; "
             f"${v} drshift -state DRUPDATE -bits {n} {padded}; "
             f"${v} state IDLE {idle}; "
             f"{ir_cmd}; "
@@ -2929,7 +3208,7 @@ class XilinxHwServerTransport(Transport):
             f"puts [${v} run -bits]; ${v} delete"
         )
 
-    def _write_reg_tcl(self, frame: str) -> str:
+    def _write_reg_tcl(self, frame: str, *, addr: int | None = None) -> str:
         n = self._user_dr_bits(self.DR_BITS)
         padded = self._pad_dr(frame)
         ir_cmd = self._irshift_tcl("_w")
@@ -2941,9 +3220,11 @@ class XilinxHwServerTransport(Transport):
             idle = self.WRITE_IDLE_CYCLES_REGISTER
         else:
             idle = self.READ_IDLE_CYCLES
+        select = self._slot_select_tcl("_w", [] if addr is None else [addr])
         return (
-            f"set _w [jtag sequence]; "
-            f"{ir_cmd}; "
+            "set _w [jtag sequence]; "
+            + "".join(f"{part}; " for part in select)
+            + f"{ir_cmd}; "
             f"$_w drshift -state DRUPDATE -bits {n} {padded}; "
             f"$_w state IDLE {idle}; "
             f"$_w run; $_w delete"
