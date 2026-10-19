@@ -56,6 +56,33 @@ Select a core-manager slot for subsequent analyzer operations.
 `None` leaves the active slot untouched and preserves legacy direct-ELA
 behavior for bitstreams without a manager.
 
+#### `Analyzer.speaks_register_protocol`
+
+```python
+speaks_register_protocol(base_addr: int = 0) -> bool
+```
+
+Whether VERSION at *base_addr* answers with an ELA or EIO identity.
+
+Gate any manager probe on this.  A `0xF000` read puts a
+manager-address frame into whatever DR the chain has, and on an
+EJTAG-AXI chain that frame decodes as burst write data; a VERSION read
+is the frame every identity check already sends first.  Behind a
+manager address 0 reaches the active slot, an ELA or an EIO.
+
+#### `Analyzer.bind_manager_slot`
+
+```python
+bind_manager_slot() -> None
+```
+
+Bind a slot-less analyzer to its manager's first ELA slot.
+
+Without a slot every access reaches whichever slot the manager has
+active, which another session or tool may have moved to an EIO.  An
+analyzer that already has a slot, or a chain without a manager, is
+left as it is.  Slot 0 is used if no slot reads as an ELA.
+
 #### `Analyzer.connect`
 
 ```python

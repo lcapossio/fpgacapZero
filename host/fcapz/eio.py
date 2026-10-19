@@ -97,6 +97,34 @@ class EioController:
                 self._instance,
             )
 
+    def _resolve_instance(self) -> None:
+        """Bind a slot-less controller to its manager's first EIO slot.
+
+        Without a slot every access reaches whichever slot the manager has
+        active, which another session or tool may have moved to an ELA: EIO
+        writes would then land in the ELA.  A chain without a manager keeps
+        the direct, slot-less access.
+        """
+        if self._instance is not None:
+            return
+        from .analyzer import Analyzer, CoreManager  # analyzer imports nothing from here
+
+        probe = Analyzer(self._t, chain=self._chain)
+        if (
+            not probe.speaks_register_protocol(self._base_addr)
+            or not probe._behind_manager()  # noqa: SLF001 - detection lives there
+        ):
+            return
+        if self._base_addr:
+            raise RuntimeError(
+                f"chain {self._chain} has a core manager: select the EIO by "
+                f"instance, not base_addr 0x{self._base_addr:04X}"
+            )
+        slot = CoreManager(self._t, chain=self._chain).first_slot(EIO_CORE_ID)
+        if slot is None:
+            raise RuntimeError(f"the core manager on chain {self._chain} has no EIO slot")
+        self._instance = slot
+
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
 
@@ -114,6 +142,7 @@ class EioController:
             self._select_chain()
             self._t.connect()
             self._t.invalidate_manager_instance_cache()
+            self._resolve_instance()
             self._select_instance()
             version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
             core_id = version & 0xFFFF
@@ -137,8 +166,9 @@ class EioController:
         or :meth:`Transport.close`.
         """
         with self._t.transaction_lock():
-            self._select_instance()
             try:
+                self._resolve_instance()
+                self._select_instance()
                 version = int(self._t.read_reg(self._abs(_ADDR_VERSION)))
                 core_id = version & 0xFFFF
                 if core_id != EIO_CORE_ID:
@@ -272,6 +302,8 @@ def discover_eio(
     sits behind.  This tries, in order: core-manager slots (``instances`` on
     chain 1), then every ``chains`` x ``bases`` combination, attaching the
     first location whose identity register reads the EIO magic (``0x494F``).
+    A chain with a core manager binds to its first EIO slot, so the returned
+    controller always carries its slot (:attr:`EioController.instance`).
 
     ``EioController.attach`` only reads and restores chain 1, so probing a
     wrong location is harmless — non-matches (wrong chain, ELA magic,

@@ -16,6 +16,7 @@ from fcapz.analyzer import (
     CaptureConfig,
     CaptureResult,
     CORE_MANAGER_CORE_ID,
+    CoreManager,
     ELA_CORE_ID,
     ElaManager,
     SequencerStage,
@@ -441,6 +442,180 @@ class RpcManagerSlotTests(unittest.TestCase):
                 super().write_reg(addr, value)
 
         return _SessionTransport()
+
+    def _board_server(self, board):
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._build_transport = lambda req: self._session_transport(board)
+        return server
+
+    def _assert_eio_writes_land_in(self, server, board, slot):
+        # The ELA session moves the manager first, as a capture would.
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0)
+        board.writes.clear()
+        self.assertTrue(server.handle({"cmd": "eio_write", "value": 0x5A})["ok"])
+        self.assertTrue(board.writes)
+        self.assertEqual({s for s, _ in board.writes}, {slot},
+                         "EIO write landed outside its slot")
+
+    def test_discovered_eio_is_bound_to_its_slot(self):
+        # Discovery found the EIO through whichever slot was active, and the
+        # controller it returned had no slot: once the ELA session moved the
+        # manager back, EIO writes reached the ELA.
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server",
+                           "chain": 1, "instance": 2})
+        self.assertTrue(r["ok"], r)
+        r = server.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [1]})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["instance"], 2)
+        self._assert_eio_writes_land_in(server, board, 2)
+
+    def test_discovery_finds_an_eio_slot_that_is_not_active(self):
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        self.assertEqual(board.active, 0)  # the ELA slot, not an EIO
+        r = server.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [1]})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["chain"], r["instance"]), (1, 2))
+
+    def test_eio_connect_without_instance_binds_the_first_eio_slot(self):
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 1})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["instance"], 2)
+        self._assert_eio_writes_land_in(server, board, 2)
+
+    def test_eio_base_addr_is_refused_behind_a_manager(self):
+        transport = self._EioSelectedTransport()
+        eio = EioController(transport, chain=1, base_addr=0x8000)
+        # Refused, either as a manager chain or because nothing answers there.
+        with self.assertRaises(RuntimeError):
+            eio.attach()
+        self.assertIsNone(eio.instance)
+        self.assertIsNone(discover_eio(transport, chains=[1], bases=[0x8000]))
+
+    def test_a_transient_analyzer_binds_the_first_ela_slot(self):
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        analyzer = Analyzer(transport, chain=1)
+        self.assertIsNone(analyzer.probe_optional())
+        analyzer.bind_manager_slot()
+        self.assertEqual(analyzer._instance, 0)
+        self.assertIsNotNone(analyzer.probe_optional())
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_no_manager_probe_on_a_chain_without_a_register_core(self):
+        # USER4's EJTAG-AXI bridge decodes a 0xF000 read frame as burst write
+        # data; only the address-0 VERSION frame (a bridge NOP) may reach it.
+        class _BridgeChainTransport(self._EioSelectedTransport):
+            def __init__(self):
+                super().__init__()
+                self.chain4_reads: list[int] = []
+
+            def read_reg(self, addr):
+                if self._active_chain == 4:
+                    self.chain4_reads.append(addr)
+                    return 0
+                return super().read_reg(addr)
+
+        transport = _BridgeChainTransport()
+        with self.assertRaises(RuntimeError):
+            EioController(transport, chain=4).attach()
+        analyzer = Analyzer(transport, chain=4)
+        analyzer.bind_manager_slot()
+        self.assertIsNone(analyzer._instance)
+        self.assertTrue(transport.chain4_reads)
+        self.assertEqual(set(transport.chain4_reads), {0x0000})
+
+    def test_a_failed_slot_restore_leaves_no_cached_slot(self):
+        class _RestoreFails(self._EioSelectedTransport):
+            def write_reg(self, addr, value):
+                if addr == 0xF008 and getattr(self, "fail_restore", False) \
+                        and int(value) == 2 and self._active_ela == 3:
+                    raise OSError("JTAG error during restore")
+                super().write_reg(addr, value)
+
+        transport = _RestoreFails()
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        transport.fail_restore = True
+        with self.assertRaises(OSError):
+            CoreManager(transport, chain=1).slot_core_ids()
+        transport.fail_restore = False
+        # The manager is left on slot 3; the next slot-2 access must re-select.
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(transport._active_ela, 2)
+
+    def test_a_garbage_slot_count_is_refused(self):
+        transport = self._EioSelectedTransport()
+        transport._manager_regs[0xF004] = 0xFFFFFFFF
+        writes: list[int] = []
+        orig = transport.write_reg
+        transport.write_reg = lambda a, v: (writes.append(a), orig(a, v))
+        with self.assertRaisesRegex(RuntimeError, "slots"):
+            CoreManager(transport, chain=1).slot_core_ids()
+        self.assertNotIn(0xF008, writes)
+
+    def test_cli_eio_probe_reports_the_bound_slot(self):
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)  # the ELA slot is active
+        out = io.StringIO()
+        with patch.object(cli, "_make_transport", return_value=transport), \
+                patch("sys.argv", ["fcapz", "eio-probe", "--chain", "1"]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(_json.loads(out.getvalue())["instance"], 2)
+
+    def test_cli_ela_commands_after_eio_write_reach_the_ela(self):
+        # eio-write binds EIO slot 2 and leaves the manager there; the next
+        # ELA command without --ela-instance must not follow it into the EIO.
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)
+
+        def run(*argv):
+            out = io.StringIO()
+            with patch.object(cli, "_make_transport", return_value=transport), \
+                    patch("sys.argv", ["fcapz", *argv]), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+            return out.getvalue()
+
+        run("eio-write", "--chain", "1", "0x5A")
+        self.assertEqual(transport._active_ela, 2)
+        ident = _json.loads(run("probe"))
+        self.assertEqual(ident["core_id"], ELA_CORE_ID)
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_axi_monitor_reads_reselect_the_analyzer_slot(self):
+        from fcapz.axi_monitor import AxiMonitor
+
+        transport = self._EioSelectedTransport()
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.bind_manager_slot()
+        transport.write_reg(0xF008, 2)  # another session selects the EIO
+        transport.invalidate_manager_instance_cache()
+        AxiMonitor(analyzer).identity()
+        self.assertEqual(transport._active_ela, 0)
 
     def test_separate_sessions_never_trust_a_stale_slot(self):
         # The ELA and EIO sessions each hold their own transport, and each
@@ -2060,7 +2235,8 @@ class EioControllerTests(unittest.TestCase):
             return orig_read(addr)
         t.read_reg = traced_read  # type: ignore[method-assign]
         eio.connect()
-        for addr in seen_reads:
+        # 0xF000 is the core-manager identity check, not an EIO register.
+        for addr in (a for a in seen_reads if a != 0xF000):
             self.assertFalse(addr & 0x8000, f"unexpected bit 15 on 0x{addr:04X}")
 
     def test_attach_restores_default_chain(self):

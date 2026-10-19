@@ -79,15 +79,12 @@ class AxiMonitor:
         self._an = analyzer
 
     def _read(self, addr: int) -> int:
-        # Select the monitor's BSCAN chain first -- another core (e.g. the AXI
-        # bridge on a different USER chain) may have left the transport selected
-        # elsewhere.
+        # Select the monitor's BSCAN chain and manager slot first -- another
+        # core (e.g. the AXI bridge on a different USER chain, or an EIO in
+        # another slot) may have left the transport selected elsewhere.
         t = self._an.transport
         with t.transaction_lock():
-            try:
-                t.select_chain(self._an.bscan_chain)
-            except NotImplementedError:
-                pass
+            self._an._select_instance()  # noqa: SLF001 - the analyzer owns its slot
             return t.read_reg(addr)
 
     # ---- detection / geometry ------------------------------------------
