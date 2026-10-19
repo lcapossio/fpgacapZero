@@ -428,6 +428,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
   connect in progress holds, so a hung Quartus open can be aborted.
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **hw_server — every core-manager access selects its own slot in the same
+  JTAG sequence.** The host cached the `MGR_ACTIVE` it last wrote, so a
+  second program on the same cable (a GUI next to a CLI, two MCP clients)
+  moving the slot sent this one's next accesses to another core: EIO writes
+  into an ELA, a capture read from the wrong slot. Now each sequence that
+  reaches a slot starts with an uncaptured `MGR_ACTIVE` write: register
+  accesses, block-read chunks, pipelined reads, and bursts (once, before
+  `BURST_PTR`). Slot enumeration and descriptor reads (`MGR_DESC_INDEX`) are
+  single sequences too. New `Transport.slot_scope` / `SlotSelection` /
+  `atomic_slot_select` / `read_regs_after_write`. OpenOCD and Quartus still
+  select once per operation (a second program can move the slot between
+  operations); they follow. Cost on a KV260: see the PR.
 - **hw_server — a slot switch after a single-chain burst is no longer
   dropped.** The core manager ignores an `MGR_ACTIVE` write while the burst
   pipe fills its staging register, and on a 1-, 2- or 4-bit lane the fill

@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from ._version import _version_tuple
 from .registers import ADDR_MGR_ACTIVE
 from .transport import (
+    SlotSelection,
     REG_ADDR_SPACE_END,
     BurstUnavailableError,
     OpenOcdTransport,
@@ -433,8 +436,7 @@ def _last_entry_clocks(result: CaptureResult) -> int:
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             return method(self, *args, **kwargs)
 
     return wrapper
@@ -502,15 +504,23 @@ class Analyzer:
             if self._chain != 1:
                 raise
 
-    def _select_instance(self) -> None:
+    def _slot_selection(self) -> SlotSelection | None:
+        if self._instance is None:
+            return None
+        return SlotSelection(self._chain, _ADDR_MGR_ACTIVE, self._instance)
+
+    @contextmanager
+    def _selected(self) -> Iterator[None]:
+        """Hold the transport, on this core's chain, with every access in the
+        body reaching this core's slot (see :meth:`Transport.slot_scope`).
+
+        A slot-less analyzer runs with no selection, never with the slot of
+        a controller that called it.
+        """
         with self.transport.transaction_lock():
             self._select_chain()
-            if self._instance is not None:
-                self.transport.select_manager_instance_cached(
-                    self._chain,
-                    _ADDR_MGR_ACTIVE,
-                    self._instance,
-                )
+            with self.transport.slot_scope(self._slot_selection()):
+                yield
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -523,7 +533,8 @@ class Analyzer:
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            with self._selected():
+                pass
 
     def speaks_register_protocol(self, base_addr: int = 0) -> bool:
         """Whether VERSION at *base_addr* answers with an ELA or EIO identity.
@@ -534,8 +545,7 @@ class Analyzer:
         is the frame every identity check already sends first.  Behind a
         manager address 0 reaches the active slot, an ELA or an EIO.
         """
-        with self.transport.transaction_lock():
-            self._select_chain()
+        with self._selected():
             core_id = int(self.transport.read_reg(base_addr | _ADDR_VERSION)) & 0xFFFF
         return core_id in (_ELA_CORE_ID, _EIO_CORE_ID)
 
@@ -566,7 +576,8 @@ class Analyzer:
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            with self._selected():
+                pass
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -585,7 +596,6 @@ class Analyzer:
         (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
         next step needs a verified idle core.
         """
-        self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
 
     def force_idle(
@@ -654,15 +664,13 @@ class Analyzer:
         last_status = -1
         attempt = 0
         for attempt in range(max(1, max_resets)):
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
             attempt_deadline = time.monotonic() + _FORCE_IDLE_SETTLE_S
             while True:
-                with self.transport.transaction_lock():
-                    self._select_instance()
+                with self._selected():
                     last_status = read_status(_ADDR_STATUS)
                 if (last_status & _STATUS_BUSY) == 0:
                     return
@@ -709,7 +717,6 @@ class Analyzer:
         Raises `ValueError` if the window does not fit ``depth`` or a field is
         out of range for the core.
         """
-        self._select_instance()
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
         if config.pretrigger + config.posttrigger + 1 > config.depth:
@@ -898,7 +905,6 @@ class Analyzer:
         External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
         cannot block an immediate run.
         """
-        self._select_instance()
         _read = self.transport.read_reg_stable
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
@@ -931,7 +937,6 @@ class Analyzer:
     @_selected_transaction
     def arm(self) -> None:
         """Arm the core with the configuration it holds."""
-        self._select_instance()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
@@ -939,8 +944,7 @@ class Analyzer:
         deadline = time.monotonic() + timeout
         read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
@@ -956,8 +960,7 @@ class Analyzer:
         "reading back" instead of blanketing both under one blocking capture.
         """
         read_status = self.transport.read_reg_stable
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             s = int(read_status(_ADDR_STATUS))
         return {
             "armed": bool(s & _STATUS_ARMED),
@@ -990,7 +993,6 @@ class Analyzer:
     @_selected_transaction
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
-        self._select_instance()
         if self._hw_timestamp_w == 0:
             return []
         self._set_data_window_end()
@@ -1044,7 +1046,6 @@ class Analyzer:
         transport has one, else the timestamp DATA window with
         ``RLE_CTRL[1]`` set.
         """
-        self._select_instance()
         if not (self._config is not None and self._config.rle and self._hw_rle_w):
             return []
         if total <= 0:
@@ -1098,8 +1099,7 @@ class Analyzer:
         if self._manager_override is not None:
             return self._manager_override
         if self._manager_found is None:
-            with self.transport.transaction_lock():
-                self._select_chain()
+            with self._selected():
                 read = self.transport.read_reg_stable
                 version = int(read(_ADDR_MGR_VERSION))
                 if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
@@ -1179,11 +1179,10 @@ class Analyzer:
         active slot is read from ``MGR_ACTIVE`` on every call: another
         controller, or :meth:`CoreManager.select_raw`, may have moved it.
         """
-        with self.transport.transaction_lock():
+        with self._selected():
             self.transport.burst_start_sync = False
             if not self._behind_manager():
                 return True
-            self._select_chain()
             read = self.transport.read_reg
             if self._manager_caps is None:
                 self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
@@ -1200,9 +1199,12 @@ class Analyzer:
                 slot = int(read(_ADDR_MGR_ACTIVE))
             caps = self._manager_slot_caps.get(slot)
             if caps is None:
-                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-                caps = int(read(_ADDR_MGR_DESC_CAPS))
-                self._manager_slot_caps[slot] = caps
+                # One backend operation: another client moving DESC_INDEX in
+                # between would hand this slot another slot's capabilities.
+                (caps,) = self.transport.read_regs_after_write(
+                    _ADDR_MGR_DESC_INDEX, slot, [_ADDR_MGR_DESC_CAPS]
+                )
+                self._manager_slot_caps[slot] = int(caps)
             return bool(caps & 0x1)
 
     @_selected_transaction
@@ -1262,8 +1264,7 @@ class Analyzer:
         if not self.wait_done(timeout):
             raise CaptureNotReady("capture did not complete within timeout")
 
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             read_reg = self.transport.read_reg_stable
             status = read_reg(_ADDR_STATUS)
             fallback_total = self._config.pretrigger + self._config.posttrigger + 1
@@ -1307,7 +1308,6 @@ class Analyzer:
     @_selected_transaction
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
         """Read back data from a specific segment after all segments are done."""
-        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
 
@@ -1605,7 +1605,6 @@ class Analyzer:
         self,
     ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         """Read ELA identity / feature registers on this analyzer's chain."""
-        self._select_instance()
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -1914,10 +1913,18 @@ class CoreManager:
             if self._chain != 1:
                 raise
 
-    def probe(self) -> Dict:
-        """Read manager identity and slot count."""
+    @contextmanager
+    def _unselected(self) -> Iterator[None]:
+        """Hold the transport on the manager's chain with no slot selected:
+        the manager's own registers answer for any slot."""
         with self.transport.transaction_lock():
             self._select_chain()
+            with self.transport.slot_scope(None):
+                yield
+
+    def probe(self) -> Dict:
+        """Read manager identity and slot count."""
+        with self._unselected():
             read = self.transport.read_reg_stable
             version = int(read(_ADDR_MGR_VERSION))
             core_id = version & 0xFFFF
@@ -1941,24 +1948,30 @@ class CoreManager:
 
     def slot_info(self, instance: int) -> Dict:
         """Return descriptor info for one slot when the manager supports it."""
-        with self.transport.transaction_lock():
-            self._select_chain()
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+        with self._unselected():
+            # One backend operation, so another client cannot move
+            # DESC_INDEX between the write and the reads.
+            core, caps = self.transport.read_regs_after_write(
+                _ADDR_MGR_DESC_INDEX,
+                int(instance),
+                [_ADDR_MGR_DESC_CORE, _ADDR_MGR_DESC_CAPS],
+            )
             return {
                 "instance": int(instance),
-                "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-                "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+                "core_id": int(core) & 0xFFFF,
+                "capabilities": int(caps),
             }
 
     def slot_core_ids(self) -> list[int]:
         """Core ID (``VERSION[15:0]``) of every slot, read from the slot itself.
 
         Selects each slot in turn and restores the active slot afterwards, so
-        the result does not depend on optional descriptors.  The transport's
-        slot cache is dropped: the next pinned access re-selects its own slot.
+        the result does not depend on optional descriptors.  Each VERSION read
+        carries its own slot (see :meth:`Transport.slot_scope`).  The
+        transport's slot cache is dropped: the next pinned access re-selects
+        its own slot.
         """
-        with self.transport.transaction_lock():
-            self._select_chain()
+        with self._unselected():
             read = self.transport.read_reg_stable
             count = int(read(_ADDR_MGR_COUNT))
             original = int(read(_ADDR_MGR_ACTIVE))
@@ -1973,8 +1986,9 @@ class CoreManager:
             self.transport.invalidate_manager_instance_cache()
             try:
                 for slot in range(count):
-                    self.transport.write_reg(_ADDR_MGR_ACTIVE, slot)
-                    ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
+                    selection = SlotSelection(self._chain, _ADDR_MGR_ACTIVE, slot)
+                    with self.transport.slot_scope(selection):
+                        ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
             finally:
                 try:
                     self.transport.write_reg(_ADDR_MGR_ACTIVE, original)
@@ -1990,8 +2004,9 @@ class CoreManager:
         return None
 
     def select_raw(self, instance: int) -> None:
-        with self.transport.transaction_lock():
-            self._select_chain()
+        """Write *instance* to ``MGR_ACTIVE`` now, whatever was cached."""
+        with self._unselected():
+            self.transport.invalidate_manager_instance_cache()
             self.transport.select_manager_instance_cached(
                 self._chain,
                 _ADDR_MGR_ACTIVE,

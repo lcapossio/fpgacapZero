@@ -82,10 +82,8 @@ class AxiMonitor:
         # Select the monitor's BSCAN chain and manager slot first -- another
         # core (e.g. the AXI bridge on a different USER chain, or an EIO in
         # another slot) may have left the transport selected elsewhere.
-        t = self._an.transport
-        with t.transaction_lock():
-            self._an._select_instance()  # noqa: SLF001 - the analyzer owns its slot
-            return t.read_reg(addr)
+        with self._an._selected():  # noqa: SLF001 - the analyzer owns its slot
+            return self._an.transport.read_reg(addr)
 
     # ---- detection / geometry ------------------------------------------
     def identity(self) -> int | None:
