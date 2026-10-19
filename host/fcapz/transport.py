@@ -333,7 +333,14 @@ class Transport(ABC):
             if chain is not None:
                 self._scope_select_chain(chain)
             local.selection = selection
-            local.chain = previous_chain if chain is None else chain
+            # The chain this body runs on, for a nested scope to give back.
+            # A scope without chain= runs on its selection's chain.
+            if chain is not None:
+                local.chain = chain
+            elif selection is not None:
+                local.chain = selection.chain
+            else:
+                local.chain = previous_chain
             failed = False
             try:
                 if selection is not None and not self.atomic_slot_select:
@@ -362,11 +369,12 @@ class Transport(ABC):
                         self.select_manager_instance_cached(
                             previous.chain, previous.active_addr, previous.slot
                         )
-                except Exception:
+                except BaseException as exc:
                     # The hardware slot is unknown now: make the next scope
-                    # select for real.  The body's own error, if any, wins.
+                    # select for real.  The body's own error wins over a
+                    # failed restore, but not over an interrupt.
                     self.invalidate_manager_instance_cache()
-                    if not failed:
+                    if not failed or not isinstance(exc, Exception):
                         raise
 
     def _scope_select_chain(self, chain: int) -> None:
@@ -409,6 +417,9 @@ class Transport(ABC):
         key = (int(chain), int(instance))
         if self.__dict__.get("_fcapz_manager_active_cache") == key:
             return
+        # A write that fails may still have reached the hardware: until it
+        # succeeds the slot is unknown, not the previously cached one.
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
         self.write_reg(active_addr, int(instance))
         self.__dict__["_fcapz_manager_active_cache"] = key
 

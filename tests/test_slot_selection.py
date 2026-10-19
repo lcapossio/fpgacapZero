@@ -353,6 +353,60 @@ class SlotScopeTests(unittest.TestCase):
                     raise KeyError("body")
         self.assertNotIn("_fcapz_manager_active_cache", t.__dict__)
 
+    def test_a_failed_selector_write_does_not_leave_a_stale_cache(self):
+        """The inner select reaches the hardware, then reports an error: the
+        enclosing slot must still be written back."""
+        t = _FallbackTransport()
+        real_write = t.write_reg
+
+        def write_reg(addr, value):
+            real_write(addr, value)
+            if value == 2:
+                raise OSError("no response")
+
+        t.write_reg = write_reg  # type: ignore[method-assign]
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            with self.assertRaises(OSError):
+                with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+                    pass
+            self.assertEqual(t.writes[-1], (_MGR_ACTIVE, 1))
+
+    def test_an_interrupted_restore_drops_the_cache_and_propagates(self):
+        t = _FallbackTransport()
+        real_write = t.write_reg
+        interrupt = {"on": False}
+
+        def write_reg(addr, value):
+            real_write(addr, value)
+            if interrupt["on"]:
+                raise KeyboardInterrupt
+
+        t.write_reg = write_reg  # type: ignore[method-assign]
+        for body_error in (None, ValueError):
+            interrupt["on"] = False
+            with self.subTest(body_error=body_error):
+                with self.assertRaises(KeyboardInterrupt):
+                    with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+                        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+                            interrupt["on"] = True
+                            if body_error:
+                                raise body_error
+                self.assertNotIn("_fcapz_manager_active_cache", t.__dict__)
+
+    def test_nested_probe_restores_a_scope_entered_without_chain(self):
+        t, fake = _hw_server()
+        fake.interfere = False
+        sent: list[str] = []
+        send = fake.send
+        t._send = lambda tcl, check=False, **kw: (sent.append(tcl), send(tcl))[1]  # type: ignore[method-assign]
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            Analyzer(t, chain=2).speaks_register_protocol()
+            sent.clear()
+            t.write_reg(0x0004, 1)
+        select = t._pad_dr(t._frame_bits(addr=_MGR_ACTIVE, data=1, write=True))
+        self.assertEqual(t._active_chain, 1)
+        self.assertIn(select, sent[0])
+
     def test_nested_probe_on_another_chain_restores_the_chain(self):
         """A probe on chain 2 inside a chain-1 slot scope must leave the
         enclosing scope's next access on chain 1, with its select."""
