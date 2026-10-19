@@ -2419,9 +2419,18 @@ class XilinxHwServerTransport(Transport):
     def cancel(self) -> None:
         # Called from another thread while a _send may be waiting. Killing
         # the process is what makes that wait end early; the sentinel below
-        # (pushed by close_fast) is what makes it end immediately.
+        # is what makes it end immediately.  Never touches stdin: a _send
+        # blocked writing a large command to an xsdb that stopped reading
+        # holds the pipe's buffer lock, and an "exit" write would wait on it.
         self._poisoned = True
-        self.close_fast()
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            self._proc = None
+        self._stdout_lines.put(None)
 
     # -- chain selection -----------------------------------------------------
 

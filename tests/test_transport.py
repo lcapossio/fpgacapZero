@@ -1631,6 +1631,30 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertTrue(outcome, "the call should have failed, not returned")
         self.assertIsInstance(outcome[0], (ConnectionError, RuntimeError))
 
+    def test_cancel_does_not_write_to_a_stalled_stdin(self):
+        """A _send stuck writing to an xsdb that stopped reading holds the
+        pipe; cancel() must kill the process without writing to it."""
+        proc = MagicMock()
+        stdin_lock = threading.Lock()
+        stdin_lock.acquire()  # the stalled writer holds it
+        self.addCleanup(stdin_lock.release)
+
+        def write(_data):
+            with stdin_lock:
+                pass
+
+        proc.stdin.write.side_effect = write
+        t = XilinxHwServerTransport()
+        t._proc = proc
+        done = threading.Event()
+        canceller = threading.Thread(
+            target=lambda: (t.cancel(), done.set()), daemon=True
+        )
+        canceller.start()
+        self.assertTrue(done.wait(2.0), "cancel() blocked on stdin")
+        proc.kill.assert_called_once()
+        proc.stdin.write.assert_not_called()
+
     def test_close_when_not_connected_is_safe(self):
         """close() is idempotent when called before connect()."""
         t = XilinxHwServerTransport()
