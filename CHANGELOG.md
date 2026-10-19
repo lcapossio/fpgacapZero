@@ -425,7 +425,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
 - **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
   transport's transaction lock**, so it cannot land between another
-  controller's register accesses on a shared transport.
+  controller's register accesses on a shared transport. The GUI refuses
+  Attach (EIO, AXI, UART) while a capture runs, since the capture holds that
+  lock for its whole wait and attaching would freeze the window.
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already
