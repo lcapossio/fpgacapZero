@@ -295,6 +295,22 @@ class _FallbackTransport(Transport):
         return [0] * words
 
 
+class _ChainedFallbackTransport(_FallbackTransport):
+    """A fallback backend that tracks its chain, like OpenOCD and Quartus."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active_chain = 1
+        self.chained_writes: list[tuple[int, int, int]] = []
+
+    def select_chain(self, chain: int) -> None:
+        self._active_chain = chain
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self.chained_writes.append((self._active_chain, addr, value))
+        super().write_reg(addr, value)
+
+
 class SlotScopeTests(unittest.TestCase):
     def test_scope_is_restored_on_exit_and_on_exception(self):
         t = _FallbackTransport()
@@ -431,6 +447,30 @@ class SlotScopeTests(unittest.TestCase):
                     pass
                 self.assertEqual(t._active_chain, 2)
             self.assertEqual(t._active_chain, 2)
+
+    def test_a_scope_gives_back_a_chain_its_own_body_switched(self):
+        t, fake = _hw_server()
+        fake.interfere = False
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1), chain=1):
+            with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 0), chain=1):
+                t.select_chain(2)
+                with t.slot_scope(None, chain=3):
+                    pass
+                self.assertEqual(t._active_chain, 2)
+            self.assertEqual(t._active_chain, 1)
+
+    def test_a_slot_is_restored_on_its_own_chain(self):
+        """Fallback backends: restoring the enclosing slot from another chain
+        writes MGR_ACTIVE on the manager's chain, then comes back."""
+        t = _ChainedFallbackTransport()
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1), chain=1):
+            t.select_chain(2)
+            with t.slot_scope(SlotSelection(2, _MGR_ACTIVE, 0), chain=2):
+                pass
+            self.assertEqual(t._active_chain, 2)
+        self.assertEqual(
+            t.chained_writes, [(1, _MGR_ACTIVE, 1), (2, _MGR_ACTIVE, 0), (1, _MGR_ACTIVE, 1)]
+        )
 
     def test_nested_probe_on_another_chain_restores_the_chain(self):
         """A probe on chain 2 inside a chain-1 slot scope must leave the

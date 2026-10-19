@@ -360,11 +360,17 @@ class Transport(ABC):
                 local.chain = previous_chain
                 local.depth = depth
                 try:
+                    # Compare with the chain now, not this scope's own: the
+                    # body may have switched chains without a scope.  An
+                    # untracked backend only knows what this scope selected.
+                    exit_chain = self._current_chain()
+                    if exit_chain is None:
+                        exit_chain = chain
                     if (
-                        chain is not None
-                        and depth > 0
+                        depth > 0
                         and entry_chain is not None
-                        and entry_chain != chain
+                        and exit_chain is not None
+                        and exit_chain != entry_chain
                     ):
                         self._scope_select_chain(entry_chain)
                     if (
@@ -430,7 +436,17 @@ class Transport(ABC):
         # A write that fails may still have reached the hardware: until it
         # succeeds the slot is unknown, not the previously cached one.
         self.__dict__.pop("_fcapz_manager_active_cache", None)
-        self.write_reg(active_addr, int(instance))
+        current = self._current_chain()
+        if current is None or current == int(chain):
+            self.write_reg(active_addr, int(instance))
+        else:
+            # The manager lives on *chain*; another chain's 0xF008 is some
+            # other core's register.
+            self._scope_select_chain(int(chain))
+            try:
+                self.write_reg(active_addr, int(instance))
+            finally:
+                self._scope_select_chain(current)
         self.__dict__["_fcapz_manager_active_cache"] = key
 
     def invalidate_manager_instance_cache(self) -> None:
