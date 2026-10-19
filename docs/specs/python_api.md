@@ -56,6 +56,19 @@ Select a core-manager slot for subsequent analyzer operations.
 `None` leaves the active slot untouched and preserves legacy direct-ELA
 behavior for bitstreams without a manager.
 
+#### `Analyzer.bind_manager_slot`
+
+```python
+bind_manager_slot() -> None
+```
+
+Bind a slot-less analyzer to its manager's first ELA slot.
+
+Without a slot every access reaches whichever slot the manager has
+active, which another session or tool may have moved to an EIO.  An
+analyzer that already has a slot, or a chain without a manager, is
+left as it is.  Slot 0 is used if no slot reads as an ELA.
+
 #### `Analyzer.connect`
 
 ```python

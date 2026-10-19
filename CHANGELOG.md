@@ -397,6 +397,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `rebind`) talked to the EIO. RPC now selects slot 0 explicitly, and
   before every command it drops each session's cached slot, so an analyzer
   or EIO session never trusts a slot another session has since changed.
+- **EIO and ELA — a session without a slot binds one behind a manager.** An
+  EIO opened without `instance` (CLI `eio-*`, RPC `eio_connect`, and every
+  `eio_discover`) used whichever slot was active, so once an ELA session
+  moved the manager its writes reached the ELA. It now binds the manager's
+  first EIO slot, and RPC reports it as `instance`. Discovery finds an EIO
+  slot that is not active, and refuses `base_addr` behind a manager. The
+  analyzers RPC opens for a moment to list cores, find the AXI monitor or
+  discover boards bind the first ELA slot, and AXI monitor register reads
+  re-select their analyzer's slot.
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already

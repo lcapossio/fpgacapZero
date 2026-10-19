@@ -521,6 +521,20 @@ class Analyzer:
             self._manager_found = None
             self._select_instance()
 
+    def bind_manager_slot(self) -> None:
+        """Bind a slot-less analyzer to its manager's first ELA slot.
+
+        Without a slot every access reaches whichever slot the manager has
+        active, which another session or tool may have moved to an EIO.  An
+        analyzer that already has a slot, or a chain without a manager, is
+        left as it is.  Slot 0 is used if no slot reads as an ELA.
+        """
+        with self.transport.transaction_lock():
+            if self._instance is not None or not self._behind_manager():
+                return
+            slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
+            self.select_instance(0 if slot is None else slot)
+
     def connect(self) -> None:
         """Connect the transport and select this analyzer's chain and slot."""
         with self.transport.transaction_lock():
@@ -1763,7 +1777,9 @@ def _probe_openocd_board(
             )
             transport.invalidate_manager_instance_cache()
             try:
-                identity = Analyzer(transport, chain=chain).probe_optional()
+                candidate = Analyzer(transport, chain=chain)
+                candidate.bind_manager_slot()
+                identity = candidate.probe_optional()
             except (OSError, RuntimeError, KeyError, ValueError):
                 identity = None
             if identity:
@@ -1896,6 +1912,35 @@ class CoreManager:
                 "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
                 "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
             }
+
+    def slot_core_ids(self) -> list[int]:
+        """Core ID (``VERSION[15:0]``) of every slot, read from the slot itself.
+
+        Selects each slot in turn and restores the active slot afterwards, so
+        the result does not depend on optional descriptors.  The transport's
+        slot cache is dropped: the next pinned access re-selects its own slot.
+        """
+        with self.transport.transaction_lock():
+            self._select_chain()
+            read = self.transport.read_reg_stable
+            count = int(read(_ADDR_MGR_COUNT))
+            original = int(read(_ADDR_MGR_ACTIVE))
+            ids: list[int] = []
+            try:
+                for slot in range(count):
+                    self.transport.write_reg(_ADDR_MGR_ACTIVE, slot)
+                    ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
+            finally:
+                self.transport.write_reg(_ADDR_MGR_ACTIVE, original)
+                self.transport.invalidate_manager_instance_cache()
+            return ids
+
+    def first_slot(self, core_id: int) -> int | None:
+        """Lowest slot holding *core_id*, or ``None`` if no slot does."""
+        for slot, cid in enumerate(self.slot_core_ids()):
+            if cid == core_id:
+                return slot
+        return None
 
     def select_raw(self, instance: int) -> None:
         with self.transport.transaction_lock():

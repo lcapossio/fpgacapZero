@@ -264,6 +264,7 @@ class RpcServer:
                 "core_id": eio.core_id,
                 "chain": eio.bscan_chain,
                 "base_addr": eio._base_addr,  # noqa: SLF001 - report discovered offset
+                "instance": eio.instance,
                 "version_major": eio.version_major,
                 "version_minor": eio.version_minor,
                 "info": {"in_w": eio.in_w, "out_w": eio.out_w},
@@ -283,6 +284,7 @@ class RpcServer:
                 continue
             try:
                 other = Analyzer(analyzer.transport, chain=chain)
+                other.bind_manager_slot()
                 ident = other.probe_optional()
             except Exception:
                 ident = None
@@ -433,16 +435,15 @@ class RpcServer:
 
     @staticmethod
     def _pin_manager_slot(analyzer: Analyzer) -> None:
-        """Bind the session to slot 0 when *analyzer*'s chain has a core manager.
+        """Bind the session to the first ELA slot when its chain has a manager.
 
         Without a slot the analyzer uses whichever slot the manager last
         selected, and an EIO side session on that chain moves it: connect then
         saw no ELA on USER1 and autodetected another chain, and a later
-        capture could address an EIO.  Slot 0 is the first ELA in the
-        multi-core wrappers; a pinned slot is re-selected before every access.
+        capture could address an EIO.  A pinned slot is re-selected before
+        every access.
         """
-        if analyzer._behind_manager():  # noqa: SLF001 - detection lives there
-            analyzer.select_instance(0)
+        analyzer.bind_manager_slot()
 
     @staticmethod
     def _resolved_ir_name(req: Dict[str, Any]) -> str:
@@ -510,7 +511,9 @@ class RpcServer:
             if chain == analyzer.bscan_chain:
                 continue
             try:
-                alt = AxiMonitor(Analyzer(analyzer.transport, chain=chain))
+                alt_analyzer = Analyzer(analyzer.transport, chain=chain)
+                alt_analyzer.bind_manager_slot()
+                alt = AxiMonitor(alt_analyzer)
                 alt_geo = alt.geometry() if alt.present else None
             except Exception:
                 alt_geo = None
@@ -1106,6 +1109,7 @@ class RpcServer:
                 out_w=eio.out_w,
                 chain=chain,
                 base_addr=base_addr,
+                instance=eio.instance,
             )
 
         if cmd == "eio_discover":
@@ -1131,6 +1135,7 @@ class RpcServer:
                     out_w=eio.out_w,
                     chain=eio.bscan_chain,
                     base_addr=eio._base_addr,  # noqa: SLF001 - report discovered offset
+                    instance=eio.instance,
                 )
             except Exception:
                 try:
