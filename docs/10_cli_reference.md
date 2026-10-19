@@ -42,7 +42,7 @@ subcommand follows:
 | `--two-chain-burst` | off | hw_server only: use legacy ELA builds with 256-bit burst reads on USER2 |
 | `--no-burst` | off | hw_server/usb_blaster: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
-| `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: current/legacy slot) |
+| `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
 | `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
 
 <!-- END GENERATED cli:global -->

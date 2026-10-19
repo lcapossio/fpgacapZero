@@ -579,6 +579,33 @@ class RpcManagerSlotTests(unittest.TestCase):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(_json.loads(out.getvalue())["instance"], 2)
 
+    def test_cli_ela_commands_after_eio_write_reach_the_ela(self):
+        # eio-write binds EIO slot 2 and leaves the manager there; the next
+        # ELA command without --ela-instance must not follow it into the EIO.
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)
+
+        def run(*argv):
+            out = io.StringIO()
+            with patch.object(cli, "_make_transport", return_value=transport), \
+                    patch("sys.argv", ["fcapz", *argv]), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+            return out.getvalue()
+
+        run("eio-write", "--chain", "1", "0x5A")
+        self.assertEqual(transport._active_ela, 2)
+        ident = _json.loads(run("probe"))
+        self.assertEqual(ident["core_id"], ELA_CORE_ID)
+        self.assertEqual(transport._active_ela, 0)
+
     def test_axi_monitor_reads_reselect_the_analyzer_slot(self):
         from fcapz.axi_monitor import AxiMonitor
 

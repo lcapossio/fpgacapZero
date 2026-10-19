@@ -297,7 +297,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="Core-manager ELA slot on the selected chain (default: current/legacy slot)",
+        help="Core-manager ELA slot on the selected chain "
+        "(default: the first ELA slot behind a core manager)",
     )
     p.add_argument(
         "--program",
@@ -1004,6 +1005,9 @@ def main() -> int:
 
     try:
         analyzer.connect()
+        # Without --ela-instance, bind the first ELA slot behind a manager: the
+        # active slot is whatever the last tool left, e.g. an EIO after eio-write.
+        analyzer.bind_manager_slot()
         if args.cmd == "ela-list":
             manager = ElaManager(transport, chain=args.chain)
             print(json.dumps(manager.probe_all(), indent=2))

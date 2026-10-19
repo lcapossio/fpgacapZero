@@ -405,7 +405,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   slot that is not active, and refuses `base_addr` behind a manager. The
   analyzers RPC opens for a moment to list cores, find the AXI monitor or
   discover boards bind the first ELA slot, and AXI monitor register reads
-  re-select their analyzer's slot.
+  re-select their analyzer's slot. CLI ELA commands without `--ela-instance`
+  bind the first ELA slot too, instead of following the slot the last tool
+  left selected (after `eio-write`, the EIO).
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already
