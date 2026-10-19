@@ -529,5 +529,94 @@ class SlotScopeTests(unittest.TestCase):
         self.assertFalse(any(select in s for s in sent))
 
 
+
+class _Boom(Exception):
+    pass
+
+
+class NestingSweepTests(unittest.TestCase):
+    """Every three-deep nesting of slot scopes, with and without chain=, a
+    chain switch made without a scope inside each body, and an exception
+    from the innermost body.  After each nested scope exits, the enclosing
+    body must be back on the chain it was on, and on a fallback backend its
+    slot must be selected on its own chain, with a cache that never claims
+    a slot the hardware does not have."""
+
+    SELECTIONS = (None, 1, 2)  # no selection, or a slot on chain 1 / 2
+    CHAINS = (None, 1, 2)
+    SWITCHES = (None, 2)
+
+    def _levels(self):
+        one = [
+            (sel, ch, sw)
+            for sel in self.SELECTIONS
+            for ch in self.CHAINS
+            for sw in self.SWITCHES
+        ]
+        return [(a, b, c) for a in one for b in one for c in one]
+
+    def _sweep(self, make):
+        for levels in self._levels():
+            for raise_inner in (False, True):
+                t, hw = make()
+                self._run(t, hw, levels, raise_inner)
+
+    def _run(self, t, hw, levels, raise_inner):
+        fallback = not t.atomic_slot_select
+
+        def body(i):
+            sel_chain, ch, switch = levels[i]
+            sel = (
+                None
+                if sel_chain is None
+                else SlotSelection(sel_chain, _MGR_ACTIVE, i + 1)
+            )
+            with t.slot_scope(sel, chain=ch):
+                if switch is not None:
+                    t.select_chain(switch)
+                if i == len(levels) - 1:
+                    if raise_inner:
+                        raise _Boom
+                    return
+                before = t._active_chain
+                try:
+                    body(i + 1)
+                except _Boom:
+                    pass
+                where = f"levels={levels} raise={raise_inner} at depth {i}"
+                self.assertEqual(t._active_chain, before, where)
+                if fallback and sel is not None:
+                    self.assertEqual(hw.get(sel.chain), sel.slot, where)
+                cached = t.__dict__.get("_fcapz_manager_active_cache")
+                if fallback and cached is not None:
+                    self.assertEqual(hw.get(cached[0]), cached[1], where)
+
+        body(0)
+
+    def test_fallback_backend_with_a_tracked_chain(self):
+        def make():
+            t = _ChainedFallbackTransport()
+            hw: dict[int, int] = {}
+            real = t.write_reg
+
+            def write_reg(addr, value):
+                real(addr, value)
+                if addr == _MGR_ACTIVE:
+                    hw[t._active_chain] = value
+
+            t.write_reg = write_reg  # type: ignore[method-assign]
+            return t, hw
+
+        self._sweep(make)
+
+    def test_hw_server(self):
+        def make():
+            t, fake = _hw_server()
+            fake.interfere = False
+            return t, {}
+
+        self._sweep(make)
+
+
 if __name__ == "__main__":
     unittest.main()
