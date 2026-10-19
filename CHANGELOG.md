@@ -361,8 +361,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `edge_detect` as CHANGED, and `both` as EQ on comparator A OR CHANGED on
   comparator B. `both` therefore means value-or-edge on these cores, as
   documented, while single-stage cores keep their RTL behaviour; on a
-  multi-stage core built without `DUAL_COMPARE` it is refused. Every board
-  validated before was built with `TRIG_STAGES=1`.
+  multi-stage core built without `DUAL_COMPARE` it is refused. The stage
+  has no hit count (`count_target` 0), so a hit is never lost to the
+  16-bit stage counter wrapping. Every board validated before was built
+  with `TRIG_STAGES=1`.
 - **EJTAG-AXI — a burst read that fills the FIFO no longer loses a beat.**
   While filling the burst FIFO the bridge drove `rready` from a register
   holding last cycle's not-full, so in the cycle the FIFO filled the slave
@@ -383,13 +385,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   KV260 that lost bytes in 9 of 15 32-byte loopback messages, and every byte
   with 50 ms between pop and readout. `recv`, `recv_line` and the identity
   read now run each pop and its readout in one batch (one `jtag sequence`
-  on hw_server) ending in a NOP drain. Host-only; no bitstream change.
+  on hw_server) ending in a NOP drain. `recv` starts with one pop per batch
+  and doubles up to 64 while data keeps coming, so on transports that scan
+  one at a time it still honours its idle timeout. Host-only; no bitstream
+  change.
   The earlier explanation, an RX synchroniser missing stop bits on a
   zero-delay wire, is withdrawn.
 - **RPC — `connect` binds manager slot 0.** Behind a multi-core manager an
   analyzer with no instance used whichever slot was last selected, so after
   an EIO session on slot 2 a later ELA `connect` (and the chain autodetect
-  and `rebind`) talked to the EIO. RPC now selects slot 0 explicitly.
+  and `rebind`) talked to the EIO. RPC now selects slot 0 explicitly, and
+  before every command it drops each session's cached slot, so an analyzer
+  or EIO session never trusts a slot another session has since changed.
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already
