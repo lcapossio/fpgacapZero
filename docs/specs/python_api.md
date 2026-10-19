@@ -1185,6 +1185,19 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `QuartusStpTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Abort an in-flight request or connect from another thread.
+
+Kills `quartus_stp` without taking any lock: a connect() holds
+`_life_lock` through its open handshake, and a cancel must never
+wait on a lock the call it aborts holds.  The owner reconciles with
+`close`.
+
 #### `QuartusStpTransport.close_fast`
 
 ```python

@@ -1265,6 +1265,38 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIsNotNone(proc.poll(), "the cancelled quartus_stp is still running")
         self.assertIsNone(t._proc)
 
+    def test_quartus_cancel_takes_no_lock(self):
+        """cancel_active runs on another thread from the call it aborts and
+        must not wait on a lock that call holds; connect() holds _life_lock
+        through its open handshake."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=5.0)
+        session = _install_session(t, proc)
+        t._life_lock.acquire()
+        try:
+            canceller = threading.Thread(target=t.cancel, daemon=True)
+            canceller.start()
+            canceller.join(timeout=2)
+            self.assertFalse(canceller.is_alive(), "cancel() waited on _life_lock")
+        finally:
+            t._life_lock.release()
+        proc.kill.assert_called()
+        self.assertTrue(session.dead)
+
+    def test_quartus_cancel_before_the_session_is_published_aborts_connect(self):
+        """A cancel landing before connect() has started quartus_stp has no
+        process to kill; connect() must still refuse to finish the open."""
+        t = self._fake_quartus()
+        t.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            t.connect()
+        self.assertIsNone(t._proc)
+        t.close()
+        t.connect()  # close() reconciles; the transport is usable again
+        self.addCleanup(t.close)
+        self.assertIsNotNone(t._proc)
+
     def test_quartus_concurrent_closes_both_return_and_reap(self):
         """A second close() arriving while the first is still tearing down
         waits its turn or kills the session; either way both return and the

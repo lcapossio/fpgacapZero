@@ -422,6 +422,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   or `uart_connect` hung in its handshake could not be aborted. A failed
   `eio_discover` handshake left its transport open, and a failed
   `eio_connect` replacement left the closed old controller installed.
+  Discovery probes (`scan_targets`, `discover_boards`, `openocd_discover`)
+  can be cancelled too: the `xsdb` child is killed and OpenOCD probe
+  sockets are closed.
+  On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
+  connect in progress holds, so a hung Quartus open can be aborted.
 - **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
 - **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
   transport's transaction lock**, so it cannot land between another

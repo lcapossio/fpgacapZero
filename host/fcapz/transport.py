@@ -753,6 +753,10 @@ class QuartusStpTransport(Transport):
         # whose request timed out).  Lock order is always _life_lock, then
         # _stp_io_lock; nothing takes them the other way round.
         self._life_lock = threading.RLock()
+        # Set by cancel(), cleared once close() has torn the session down.  A
+        # cancel that lands before connect() has published its session has no
+        # process to kill; connect() checks this right after publishing.
+        self._cancel_requested = False
         self.burst = bool(burst)
         # The actual device quartus_stp opened (family/part + IDCODE), filled in
         # by connect(). None until connected. Surfaced so the UI can name the
@@ -809,6 +813,8 @@ class QuartusStpTransport(Transport):
             # thread (a GUI cancel) has a process to kill while it runs.
             self._session = session
             try:
+                if self._cancel_requested:
+                    raise RuntimeError("quartus_stp connect was cancelled")
                 if proc.poll() is not None:
                     self._raise_process_exited(session)
                 opened_device = self._send(
@@ -828,8 +834,23 @@ class QuartusStpTransport(Transport):
         self._acquire_life_lock_killing()
         try:
             self._close_locked()
+            self._cancel_requested = False
         finally:
             self._life_lock.release()
+
+    def cancel(self) -> None:
+        """Abort an in-flight request or connect from another thread.
+
+        Kills ``quartus_stp`` without taking any lock: a connect() holds
+        ``_life_lock`` through its open handshake, and a cancel must never
+        wait on a lock the call it aborts holds.  The owner reconciles with
+        :meth:`close`.
+        """
+        self._cancel_requested = True
+        session = self._session
+        if session is not None:
+            session.dead = True
+            self._kill_quietly(session.proc)
 
     def close_fast(self) -> None:
         """Kill ``quartus_stp`` without the graceful teardown, for Ctrl+C.
@@ -846,6 +867,7 @@ class QuartusStpTransport(Transport):
             self._kill_quietly(session.proc)
         self._acquire_life_lock_killing()
         try:
+            self._cancel_requested = False
             session = self._session
             if session is None:
                 return
