@@ -753,9 +753,9 @@ class QuartusStpTransport(Transport):
         # whose request timed out).  Lock order is always _life_lock, then
         # _stp_io_lock; nothing takes them the other way round.
         self._life_lock = threading.RLock()
-        # Set by cancel(), cleared once close() has torn the session down.  A
-        # cancel that lands before connect() has published its session has no
-        # process to kill; connect() checks this right after publishing.
+        # Set by cancel(), cleared when a session is torn down.  A cancel that
+        # lands before connect() has published its session has no process to
+        # kill; connect() checks this right after publishing.
         self._cancel_requested = False
         self.burst = bool(burst)
         # The actual device quartus_stp opened (family/part + IDCODE), filled in
@@ -784,7 +784,10 @@ class QuartusStpTransport(Transport):
             if self._session is not None:
                 # Replacing a live session would leave its process running,
                 # still holding the cable, with nothing left to close it.
+                # A cancel already aimed at this connect must survive that.
+                pending = self._cancel_requested
                 self._close_locked()
+                self._cancel_requested = pending
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE,
@@ -834,7 +837,6 @@ class QuartusStpTransport(Transport):
         self._acquire_life_lock_killing()
         try:
             self._close_locked()
-            self._cancel_requested = False
         finally:
             self._life_lock.release()
 
@@ -899,7 +901,10 @@ class QuartusStpTransport(Transport):
         also covers waiting for the I/O lock; the rest of it goes to waiting
         for the process to exit.  Terminate and kill follow and need no lock,
         so a stalled request elsewhere cannot keep this from returning.
+
+        Also clears a pending cancel: the session it was aimed at is gone.
         """
+        self._cancel_requested = False
         session = self._session
         if session is None:
             return

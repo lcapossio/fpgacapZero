@@ -1292,8 +1292,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cancelled"):
             t.connect()
         self.assertIsNone(t._proc)
-        t.close()
-        t.connect()  # close() reconciles; the transport is usable again
+        t.connect()  # the refused connect consumed the cancel
         self.addCleanup(t.close)
         self.assertIsNotNone(t._proc)
 
