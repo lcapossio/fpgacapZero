@@ -247,6 +247,11 @@ def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
 
     A core built with TRIG_STAGES > 1 triggers only from its sequencer;
     TRIG_MODE/VALUE/MASK feed the single-stage path those builds bypass.
+
+    ``count_target=0`` skips the count check.  The default of 1 means the
+    same except when the 16-bit match counter wraps: matches the external
+    trigger gate holds back still count, and at 0xFFFF a target of 1 reads
+    as not reached for one sample.
     """
     if (trigger.value >> 32) or (trigger.mask >> 32):
         raise ValueError(
@@ -257,14 +262,14 @@ def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
     eq, changed = 0, 8
     if trigger.mode == "value_match":
         return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
-                              is_final=True)
+                              is_final=True, count_target=0)
     if trigger.mode == "edge_detect":
         return SequencerStage(cmp_mode_a=changed, value_a=value, mask_a=mask,
-                              is_final=True)
+                              is_final=True, count_target=0)
     if trigger.mode == "both":
         return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
                               cmp_mode_b=changed, value_b=value, mask_b=mask,
-                              combine=3, is_final=True)
+                              combine=3, is_final=True, count_target=0)
     raise ValueError("invalid trigger mode")
 
 

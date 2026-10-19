@@ -2366,7 +2366,9 @@ class SequencerBoundsTests(unittest.TestCase):
         for mode, cfg_word, value_b in cases:
             with self.subTest(mode=mode):
                 writes = self._seq_writes(4, TriggerConfig(mode=mode, value=0x5A, mask=0xF0))
-                self.assertEqual(writes[0x0040], cfg_word | (1 << 16))
+                # count_target 0 (cfg[31:16]): no count check, so the 16-bit
+                # match counter wrapping cannot hide a match.
+                self.assertEqual(writes[0x0040], cfg_word)
                 self.assertEqual((writes[0x0044], writes[0x0048]), (0x5A, 0xF0))
                 self.assertEqual(writes[0x004C], value_b)
 
