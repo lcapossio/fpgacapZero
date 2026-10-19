@@ -497,3 +497,76 @@ def test_ela_core_selector_selects_managed_instance(qtbot: Any, tmp_path: Path) 
 
         mock_an.select_instance.assert_any_call(1)
         assert w._capture.selected_ela_instance() == 1
+
+
+@pytest.mark.gui
+def test_attach_is_refused_while_a_capture_runs(qtbot: Any, tmp_path: Path) -> None:
+    """The capture worker holds the transport lock for its whole wait, and
+    attach takes it on the Qt thread: attaching then would freeze the window
+    (Stop included) until the capture ends."""
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        _enter_successful_connect_mocks(ex, gui_path)
+        ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.critical"))
+        info = ex.enter_context(patch("fcapz.gui.app_window.QMessageBox.information"))
+        axi_cls = ex.enter_context(patch("fcapz.gui.app_window.EjtagAxiController"))
+        uart_cls = ex.enter_context(patch("fcapz.gui.app_window.EjtagUartController"))
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        discover = ex.enter_context(patch.object(w, "_discover_eio"))
+        w._analyzer = MagicMock(name="analyzer")
+        w._cap_thread = MagicMock(name="capture thread")
+        try:
+            w._on_eio_attach()
+            w._on_axi_attach()
+            w._on_uart_attach()
+        finally:
+            w._cap_thread = None
+            w._analyzer = None
+        assert info.call_count == 3
+        discover.assert_not_called()
+        axi_cls.return_value.attach.assert_not_called()
+        uart_cls.return_value.attach.assert_not_called()
+
+
+@pytest.mark.gui
+def test_eio_poll_skips_a_tick_while_a_capture_holds_the_transport(qtbot: Any) -> None:
+    """The capture worker holds the transport lock for its whole wait; a poll
+    tick on the Qt thread must skip, not freeze the window or stop polling."""
+    import threading
+
+    from fcapz.gui.eio_panel import EioPanel
+
+    panel = EioPanel()
+    qtbot.addWidget(panel)
+    transport = MagicMock(name="transport")
+    lock = threading.RLock()
+    transport.transaction_lock.return_value = lock
+    eio = MagicMock(name="eio")
+    panel._transport = transport
+    panel._eio = eio
+    panel._poll_enable.setChecked(True)
+    panel._poll_timer.start()
+    taken = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with lock:
+            taken.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert taken.wait(5)
+    try:
+        with patch("fcapz.gui.eio_panel.QMessageBox.warning") as warning:
+            panel._poll_tick()
+    finally:
+        release.set()
+        holder.join(5)
+    eio.read_inputs.assert_not_called()
+    transport.select_chain.assert_not_called()
+    warning.assert_not_called()
+    assert panel._poll_timer.isActive()
+    assert panel._poll_enable.isChecked()
+    panel._poll_timer.stop()

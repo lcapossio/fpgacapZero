@@ -98,6 +98,10 @@ on `arty_a7_top` (xc7a100t, 2025.2). JTAG `tck_bscan` is constrained at 10 MHz
 - `sample_clk` is the capture clock.
 - JTAG clock (TCK) is independent; control/config paths cross through the
   core's synchronizer and toggle-handshake CDCs.
+- The ELA settings cross as bundled data: the CTRL write that arms or
+  soft-resets snapshots them in the TCK domain, and the synchronized toggle
+  copies the snapshot (stable since that write) into the sample domain one
+  clock before the arm / reset pulse latches it.
 - Sample buffer uses true dual-port RAM (port A = sample_clk, port B = TCK).
 - DATA-window readback is decoded in the JTAG domain and reads RAM port B.
   The sample domain exports completed-capture metadata through an acked

@@ -105,7 +105,7 @@ class FakeLauncher:
 
 
 def _patch_discover(monkeypatch, launcher):
-    def fake_discover(*, host, ports, chain, timeout_sec):
+    def fake_discover(*, host, ports, chain, timeout_sec, register=None):
         out = []
         for p in ports:
             out.extend(launcher.boards_by_port.get(p, []))

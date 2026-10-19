@@ -138,6 +138,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual: bool = True
         self._hw_probe_mux_w: int = 0
         self._hw_num_segments: int = 1
+        self._hw_rle_w: int = 0
         self._hw_compare_caps: int = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy: bool = False
         self._did_apply_first_connect_prepost_defaults: bool = False
@@ -261,6 +262,21 @@ class CapturePanel(QGroupBox):
         self._trig_delay.setRange(0, 65535)
         self._trig_delay.setValue(0)
 
+        self._rle = QCheckBox("Store runs of a repeated sample once")
+        self._rle.setObjectName("fcapz_capture_rle")
+        self._post_clocks = QSpinBox()
+        self._post_clocks.setObjectName("fcapz_capture_post_clocks")
+        self._post_clocks.setRange(0, 2_147_483_647)
+        self._post_clocks.setValue(0)
+        self._post_clocks.setSpecialValueText("off")
+        self._post_clocks.setToolTip(
+            "Run-length capture: also end the post-trigger window this many "
+            "sample clocks after the trigger, if the post-trigger entries have "
+            "not ended it first. 0 = off.",
+        )
+        self._rle.toggled.connect(self._sync_post_clocks_enabled)
+        self._sync_post_clocks_enabled()
+
         self._probes = QLineEdit()
         self._probes.setPlaceholderText("name:width:lsb,... (optional)")
         self._btn_load_probes = QPushButton("Load .prob")
@@ -355,6 +371,8 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Storage qual mask", self._stor_mask)
         form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
+        form_adv.addRow("Run-length capture", self._rle)
+        form_adv.addRow("Post-trigger clock limit", self._post_clocks)
         form_adv.addRow("Probes", row_probes)
         self._adv_section = CollapsibleSection(
             "Advanced (decimation, mux, ext trig, storage qual, probes, …)",
@@ -412,6 +430,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = True
         self._hw_probe_mux_w = 0
         self._hw_num_segments = 1
+        self._hw_rle_w = 0
         self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
         self._ui_busy = False
         self.set_managed_ela_slots([], current=0)
@@ -508,6 +527,9 @@ class CapturePanel(QGroupBox):
             self._stor_mode.setToolTip("")
             self._stor_val.setToolTip("")
             self._stor_mask.setToolTip("")
+            self._rle.setEnabled(True)
+            self._rle.setToolTip("")
+            self._sync_post_clocks_enabled()
             with QSignalBlocker(self._probe_sel):
                 self._probe_sel.setMaximum(1023)
             self._probe_sel.setEnabled(True)
@@ -554,6 +576,20 @@ class CapturePanel(QGroupBox):
             self._stor_mode.setToolTip(tip)
             self._stor_val.setToolTip(tip)
             self._stor_mask.setToolTip(tip)
+
+        if self._hw_rle_w:
+            self._rle.setEnabled(True)
+            self._rle.setToolTip(
+                "Each stored entry is a sample and how many sample clocks it held "
+                f"(up to {1 << self._hw_rle_w}). Pre/post-trigger lengths count "
+                "entries. Not with decimation or storage qualification.",
+            )
+        else:
+            with QSignalBlocker(self._rle):
+                self._rle.setChecked(False)
+            self._rle.setEnabled(False)
+            self._rle.setToolTip("This ELA build has no run-length capture (RLE_W=0).")
+        self._sync_post_clocks_enabled()
 
         sw = max(1, int(self._hw_sample_w))
         pmw = int(self._hw_probe_mux_w)
@@ -647,6 +683,7 @@ class CapturePanel(QGroupBox):
             ("stor_qual_mode", self._stor_mode, 0),
             ("trigger_holdoff", self._trig_holdoff, 0),
             ("trigger_delay", self._trig_delay, 0),
+            ("post_clocks", self._post_clocks, 0),
         ):
             if key in entry:
                 try:
@@ -672,6 +709,8 @@ class CapturePanel(QGroupBox):
                 self._stor_mask.setText(str(entry["stor_qual_mask"]))
         if "probes" in entry and entry["probes"] is not None:
             self._probes.setText(str(entry["probes"]))
+        if "rle" in entry:
+            self._rle.setChecked(bool(entry["rle"]) and self._rle.isEnabled())
         if "trigger_sequence" in entry:
             self._apply_trigger_sequence_entry(entry["trigger_sequence"])
         self._refresh_pre_post_validity()
@@ -908,6 +947,7 @@ class CapturePanel(QGroupBox):
             self._hw_has_storage_qual = True
             self._hw_probe_mux_w = 0
             self._hw_num_segments = 1
+            self._hw_rle_w = 0
             self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
             self.set_managed_ela_slots([], current=0)
             self._btn_stop.setEnabled(False)
@@ -934,6 +974,7 @@ class CapturePanel(QGroupBox):
         self._hw_has_storage_qual = bool(info.get("has_storage_qualification", True))
         self._hw_probe_mux_w = int(info.get("probe_mux_w", 0))
         self._hw_num_segments = max(1, int(info.get("num_segments", 1)))
+        self._hw_rle_w = int(info.get("rle_width", 0))
         self._hw_compare_caps = int(info.get("compare_caps", _COMPARE_CAPS_LEGACY_FULL)) or (
             _COMPARE_CAPS_LEGACY_FULL
         )
@@ -1030,6 +1071,14 @@ class CapturePanel(QGroupBox):
             raise ValueError(
                 "Storage qualification is not in this bitstream (FEATURES bit 4); set mode to 0.",
             )
+        rle = self._rle.isChecked()
+        if rle and not self._hw_rle_w:
+            raise ValueError("Run-length capture is not in this bitstream (RLE_W=0).")
+        if rle and (int(self._decim.value()) != 0 or stor_m != 0):
+            raise ValueError(
+                "Run-length capture cannot be combined with decimation or storage "
+                "qualification; set both to 0.",
+            )
         sequence: list[SequencerStage] | None = None
         if self._seq_enable.isChecked():
             if self._hw_trig_stages <= 0:
@@ -1081,7 +1130,13 @@ class CapturePanel(QGroupBox):
             startup_arm=False,
             trigger_holdoff=int(self._trig_holdoff.value()),
             trigger_delay=int(self._trig_delay.value()),
+            rle=rle,
+            post_clocks=int(self._post_clocks.value()) if rle else 0,
         )
+
+    def _sync_post_clocks_enabled(self, *_args: object) -> None:
+        """The clock limit applies to run-length captures only."""
+        self._post_clocks.setEnabled(self._rle.isEnabled() and self._rle.isChecked())
 
     def wire_collapsible_persistence(self, callback: Callable[[], None]) -> None:
         self._adv_section.expandedChanged.connect(lambda _e: callback())

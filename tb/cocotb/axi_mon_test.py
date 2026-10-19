@@ -390,7 +390,7 @@ async def beat_storage_qualifier(dut):
     if not DECODE:
         return  # handshake event bits only exist on a DECODE_EN build
     d = await setup(dut)
-    await d.write(ADDR_SQ_MODE, 1)        # NEQ (store when masked bits != 0)
+    await d.write(ADDR_SQ_MODE, 2)        # NEQ (store when masked bits != 0)
     await d.write(ADDR_SQ_VALUE, 0)
     await d.write(ADDR_SQ_MASK, 0x1F)     # aw_hs..r_hs
     await d.write(ADDR_PRETRIG, 0)

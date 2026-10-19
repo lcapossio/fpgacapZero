@@ -107,6 +107,15 @@ TESTBENCHES = {
             RTL / "jtag_burst_read.v",
         ],
     ),
+    "fcapz_core_manager_select_after_burst": (
+        TB / "fcapz_core_manager_select_after_burst_tb.sv",
+        [
+            RTL / "fcapz_core_manager.v",
+            TB / "legacy" / "fcapz_core_manager_pre_burst_start.v",
+            RTL / "jtag_pipe_iface.v",
+            TB / "legacy" / "jtag_pipe_iface_pre_cmd_preload_end.v",
+        ],
+    ),
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
@@ -146,6 +155,7 @@ DEFAULT_TESTBENCHES = [
     "fcapz_eio",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",
+    "fcapz_core_manager_select_after_burst",
     "chan_mux",
     "fcapz_axi_interconnect",
     "fcapz_bridge_discovery",

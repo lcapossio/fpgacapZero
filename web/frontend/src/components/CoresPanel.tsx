@@ -22,6 +22,7 @@ function elaFeatures(id: Identity): string[] {
   if (id.has_timestamp)
     f.push(`timestamps${id.timestamp_width ? ` (${id.timestamp_width}-bit)` : ""}`);
   if (id.has_dual_compare) f.push("dual compare");
+  if (id.rle_width) f.push(`run-length capture (${id.rle_width}-bit)`);
   return f;
 }
 

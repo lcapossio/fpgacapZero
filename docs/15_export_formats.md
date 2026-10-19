@@ -48,6 +48,7 @@ sample array, and timestamps if present.
   "posttrigger": 16,
   "channel": 0,
   "decimation": 0,
+  "stor_qual_mode": 0,
   "ext_trigger_mode": 0,
   "trigger": {
     "mode": "value_match",
@@ -73,7 +74,15 @@ sample array, and timestamps if present.
 ```
 
 `samples` is always present.  `timestamps` is present **only** if
-the bitstream was built with `TIMESTAMP_W > 0`.
+the bitstream was built with `TIMESTAMP_W > 0`.  `run_lengths` (same
+`{"index", "value"}` form, clocks per entry) is present only for a
+[run-length capture](05_ela_core.md#run-length-capture).  `probes` is present
+only when the capture had a probe map, and lists `{name, width, lsb}` per lane.
+
+`decimation` and `stor_qual_mode` record how the capture was sampled, which
+is what tells a later reader whether consecutive samples are consecutive
+cycles.  They are not decoration: the AXI decoder refuses a capture that
+stored only some cycles rather than reading gaps as bus behaviour.
 
 ### When to use it
 
@@ -131,6 +140,9 @@ index,value,timestamp
 ...
 ```
 
+A run-length capture adds a `run_length` column (clocks per entry) after
+`timestamp`, or after `value` without timestamps.
+
 ### When to use it
 
 - **Spreadsheets**: import directly into Excel, LibreOffice, or
@@ -160,7 +172,8 @@ VCD with:
 - A `$var wire` declaration for the timestamp counter if
   `TIMESTAMP_W > 0`
 - Per-cycle value-change records using the actual cycle number
-  (or sample index, when no timestamps are present)
+  (or sample index, when no timestamps are present). A run-length
+  capture places each entry at its start clock.
 
 For segmented captures, `Analyzer.export_vcd_text_segments(results)` emits all
 segments in **one** VCD: the same signals and `logic` scope, segments

@@ -180,7 +180,7 @@ def test_event_capture_config_triggers_on_event():
 def test_beat_storage_qual_masks_handshakes():
     mode, value, mask = _mon_decode().beat_storage_qual()
     # NEQ (mode 1) vs 0 over aw_hs|w_hs|b_hs|ar_hs|r_hs = bits 0..4 = 0x1F.
-    assert (mode, value, mask) == (1, 0, 0x1F)
+    assert (mode, value, mask) == (2, 0, 0x1F)
 
 
 def test_beat_storage_qual_requires_decode():
@@ -190,7 +190,7 @@ def test_beat_storage_qual_requires_decode():
 
 def test_event_capture_config_store_on_beats():
     cfg = _mon_decode().event_capture_config("aw_hs", store_on_beats=True)
-    assert cfg.stor_qual_mode == 1
+    assert cfg.stor_qual_mode == 2
     assert cfg.stor_qual_value == 0
     assert cfg.stor_qual_mask == 0x1F
     # default (no beat filtering) leaves storage qualification disabled

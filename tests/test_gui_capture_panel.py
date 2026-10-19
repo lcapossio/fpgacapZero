@@ -244,6 +244,79 @@ class TestCapturePanelApplyHistory(unittest.TestCase):
         self.assertEqual(cfg.sequence[0].count_target, 5)
         self.assertTrue(cfg.sequence[0].is_final)
 
+    def test_rle_checkbox_follows_rle_width(self) -> None:
+        p = CapturePanel()
+        rle = p.findChild(QCheckBox, "fcapz_capture_rle")
+        self.assertIsNotNone(rle)
+        p.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        self.assertFalse(rle.isEnabled())
+        self.assertIn("RLE_W=0", rle.toolTip())
+        self.assertFalse(p.build_capture_config().rle)
+        p.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "rle_width": 16},
+        )
+        self.assertTrue(rle.isEnabled())
+        rle.setChecked(True)
+        self.assertTrue(p.build_capture_config().rle)
+        # A rebuild without RLE clears the box.
+        p.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        self.assertFalse(rle.isChecked())
+        self.assertFalse(p.build_capture_config().rle)
+
+    def test_rle_rejects_decimation_and_storage_qualification(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "rle_width": 8},
+        )
+        p.findChild(QCheckBox, "fcapz_capture_rle").setChecked(True)
+        decim = p.findChild(QSpinBox, "fcapz_capture_decim")
+        decim.setValue(2)
+        with self.assertRaisesRegex(ValueError, "decimation"):
+            p.build_capture_config()
+        decim.setValue(0)
+        p.findChild(QSpinBox, "fcapz_capture_stor_mode").setValue(1)
+        with self.assertRaisesRegex(ValueError, "storage"):
+            p.build_capture_config()
+
+    def test_post_clock_limit_follows_the_rle_box(self) -> None:
+        p = CapturePanel()
+        spin = p.findChild(QSpinBox, "fcapz_capture_post_clocks")
+        rle = p.findChild(QCheckBox, "fcapz_capture_rle")
+        p.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "rle_width": 8},
+        )
+        self.assertFalse(spin.isEnabled())
+        spin.setValue(40)
+        self.assertEqual(p.build_capture_config().post_clocks, 0)
+        rle.setChecked(True)
+        self.assertTrue(spin.isEnabled())
+        self.assertEqual(p.build_capture_config().post_clocks, 40)
+        p.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        self.assertFalse(spin.isEnabled())
+        self.assertEqual(p.build_capture_config().post_clocks, 0)
+
+    def test_apply_trigger_history_restores_post_clocks(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "rle_width": 8},
+        )
+        p.apply_trigger_history_entry({"rle": True, "post_clocks": 77})
+        self.assertEqual(p.build_capture_config().post_clocks, 77)
+
+    def test_apply_trigger_history_restores_rle(self) -> None:
+        p = CapturePanel()
+        p.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "rle_width": 8},
+        )
+        p.apply_trigger_history_entry({"rle": True})
+        self.assertTrue(p.build_capture_config().rle)
+        p.apply_trigger_history_entry({"rle": False})
+        self.assertFalse(p.build_capture_config().rle)
+        # An RLE history entry does not turn RLE on for a core without it.
+        p.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        p.apply_trigger_history_entry({"rle": True})
+        self.assertFalse(p.build_capture_config().rle)
+
 
 if __name__ == "__main__":
     unittest.main()

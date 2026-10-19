@@ -287,8 +287,7 @@ class TestManagedCapture(unittest.TestCase):
             a.force_idle()
             a.arm()
             a.capture(timeout=5.0)
-            with t.transaction_lock():
-                a._select_instance()
+            with a._selected():
 
                 def window(offset, first, n):
                     t.write_reg(ADDR_DATA_OFFSET, offset)

@@ -568,6 +568,61 @@ class TestDecimation(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestStorageQualification(unittest.TestCase):
+    """ELA storage qualifier on the counter: store odd or even samples only."""
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+
+        self.a = Analyzer(_make_transport(), chain=ELA_CHAIN)
+        self.a.connect()
+        if not self.a.probe()["has_storage_qualification"]:
+            self.a.close()
+            self.skipTest("this bitstream has no STOR_QUAL")
+
+    def tearDown(self):
+        self.a.close()
+
+    def _capture(self, sq_mode: int, trigger: int) -> list[int]:
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=SAMPLE_CLOCK_HZ,
+            pretrigger=2,
+            posttrigger=4,
+            trigger=TriggerConfig(mode="value_match", value=trigger, mask=0xFF),
+            stor_qual_mode=sq_mode,
+            stor_qual_value=1,
+            stor_qual_mask=1,
+        )
+        self.a.configure(cfg)
+        self.a.arm()
+        samples = [s & 0xFF for s in self.a.capture(timeout=5.0).samples]
+        self.assertIn(trigger, samples)
+        return samples
+
+    def _gaps(self, samples: list[int]) -> list[int]:
+        return [(samples[i] - samples[i - 1]) & 0xFF for i in range(1, len(samples))]
+
+    def test_store_when_match_keeps_odd_samples(self):
+        samples = self._capture(1, 0x41)
+        self.assertTrue(all(s & 1 for s in samples), samples)
+        self.assertTrue(all(g == 2 for g in self._gaps(samples)), samples)
+
+    def test_store_when_no_match_keeps_even_samples(self):
+        samples = self._capture(2, 0x40)
+        self.assertFalse(any(s & 1 for s in samples), samples)
+        self.assertTrue(all(g == 2 for g in self._gaps(samples)), samples)
+
+    def test_mode_zero_turns_off_an_earlier_qualifier(self):
+        self._capture(2, 0x40)
+        samples = self._capture(0, 0x40)
+        self.assertTrue(all(g == 1 for g in self._gaps(samples)), samples)
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestTimestamps(unittest.TestCase):
     """ELA timestamps: verify monotonic timestamp capture."""
 
@@ -602,6 +657,183 @@ class TestTimestamps(unittest.TestCase):
         self.assertEqual(len(result.timestamps), len(result.samples))
         for i in range(1, len(result.timestamps)):
             self.assertGreater(result.timestamps[i], result.timestamps[i - 1])
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestRunLengthCapture(unittest.TestCase):
+    """ELA run-length capture (RLE_W=16) on channel 1, which holds each value
+    of the counter (low 3 bits cleared) for 8 clocks.
+
+    The slow-channel captures trigger on a value change, so the trigger is
+    always the first clock of a run.  A value match could also fire later in
+    the run (on the first clock the pre-trigger window is full), and the
+    trigger then opens a new entry mid-run."""
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+
+        self.a = Analyzer(_make_transport(), chain=ELA_CHAIN)
+        self.a.connect()
+
+    def tearDown(self):
+        self.a.close()
+
+    def _config(self, channel=1, rle=True, trigger=None, **kw):
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        kw.setdefault("pretrigger", 4)
+        kw.setdefault("posttrigger", 8)
+        return CaptureConfig(
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=SAMPLE_CLOCK_HZ,
+            trigger=trigger or TriggerConfig(mode="edge_detect", value=0, mask=0xF8),
+            channel=channel,
+            rle=rle,
+            **kw,
+        )
+
+    def _capture(self, cfg):
+        self.a.configure(cfg)
+        self.a.arm()
+        return self.a.capture(timeout=5.0)
+
+    def _check_runs(self, result, pretrigger, step, run, trigger_value=None):
+        samples = [s & 0xFF for s in result.samples]
+        lengths = result.run_lengths
+        self.assertEqual(len(lengths), len(samples))
+        if trigger_value is not None:
+            self.assertEqual(samples[pretrigger], trigger_value, samples)
+        for i in range(1, len(samples)):
+            self.assertEqual((samples[i] - samples[i - 1]) & 0xFF, step, samples)
+        # The oldest entry may have opened mid-run; the last one is open-ended.
+        self.assertTrue(1 <= lengths[0] <= run, lengths)
+        self.assertEqual(lengths[1:-1], [run] * (len(lengths) - 2), lengths)
+        self.assertEqual(lengths[-1], 1, lengths)
+        # Each count matches the timestamp gap to the next entry.
+        ts = result.timestamps
+        self.assertEqual(len(ts), len(samples))
+        for i in range(len(ts) - 1):
+            self.assertEqual(ts[i + 1] - ts[i], lengths[i], (ts, lengths))
+
+    def test_rle_width_reported(self):
+        info = self.a.probe()
+        self.assertEqual(info.get("rle_width", 0), 16)
+        self.assertEqual(info.get("num_channels", 1), 2)
+
+    def test_runs_on_slow_channel(self):
+        result = self._capture(self._config())
+        self.assertEqual(len(result.samples), 13)
+        self._check_runs(result, 4, step=8, run=8)
+
+    def test_runs_through_the_data_window(self):
+        from fcapz.transport import BurstUnavailableError
+
+        def no_burst(*_args, **_kw):
+            raise BurstUnavailableError("forced by test")
+
+        self.a.transport.read_run_length_block = no_burst
+        result = self._capture(self._config())
+        self._check_runs(result, 4, step=8, run=8)
+        # The window is handed back to timestamps after the read.
+        self.assertEqual(self.a.transport.read_reg(0x00A8), 1)
+
+    def test_fast_counter_gives_single_clock_runs(self):
+        from fcapz.analyzer import TriggerConfig
+
+        trig = TriggerConfig(mode="value_match", value=0x40, mask=0xFF)
+        result = self._capture(self._config(channel=0, trigger=trig))
+        self._check_runs(result, 4, step=1, run=1, trigger_value=0x40)
+
+    def test_rle_off_on_an_rle_core_stores_every_clock(self):
+        self._capture(self._config())
+        result = self._capture(self._config(rle=False, pretrigger=8, posttrigger=8))
+        self.assertEqual(result.run_lengths, [])
+        samples = [s & 0xFF for s in result.samples]
+        v = samples[8]
+        expect = [(v - 8) & 0xFF] * 8 + [v] * 8 + [(v + 8) & 0xFF]
+        self.assertEqual(samples, expect, samples)
+        self.assertEqual(self.a.transport.read_reg(0x00A8), 0)
+
+    def test_expand_restores_one_sample_per_clock(self):
+        from fcapz import expand_run_lengths
+
+        result = self._capture(self._config())
+        clocks = expand_run_lengths(result)
+        self.assertEqual(len(clocks), sum(result.run_lengths))
+        start = result.samples[0] & 0xFF
+        lead = result.run_lengths[0]
+        expect = [start] * lead
+        for k in range(len(clocks) - lead):
+            expect.append((start + 8 * (1 + k // 8)) & 0xFF)
+        self.assertEqual([c & 0xFF for c in clocks], expect)
+
+    def test_rle_refuses_decimation(self):
+        with self.assertRaisesRegex(ValueError, "decimation"):
+            self.a.configure(self._config(decimation=3))
+
+    def test_segments_start_new_entries(self):
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        cfg = CaptureConfig(
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=SAMPLE_CLOCK_HZ,
+            pretrigger=2,
+            posttrigger=3,
+            trigger=TriggerConfig(mode="edge_detect", value=0, mask=0xF8),
+            channel=1,
+            rle=True,
+        )
+        self.a.configure(cfg)
+        self.a.arm()
+        self.assertTrue(self.a.wait_all_segments_done(timeout=10.0))
+        for seg in range(4):
+            result = self.a.capture_segment(seg, timeout=5.0)
+            self.assertEqual(len(result.samples), 6)
+            self._check_runs(result, 2, step=8, run=8)
+
+    def _check_window(self, result, pretrigger, post_lengths):
+        """Entries step by 8 and each pre-trigger run is whole (but the
+        oldest); the window from the trigger has ``post_lengths``."""
+        samples = [s & 0xFF for s in result.samples]
+        lengths = result.run_lengths
+        self.assertEqual(len(samples), pretrigger + len(post_lengths), (samples, lengths))
+        for i in range(1, len(samples)):
+            self.assertEqual((samples[i] - samples[i - 1]) & 0xFF, 8, samples)
+        self.assertTrue(1 <= lengths[0] <= 8, lengths)
+        self.assertEqual(lengths[1:pretrigger], [8] * (pretrigger - 1), lengths)
+        self.assertEqual(lengths[pretrigger:], post_lengths, lengths)
+        ts = result.timestamps
+        for i in range(len(ts) - 1):
+            self.assertEqual(ts[i + 1] - ts[i], lengths[i], (ts, lengths))
+
+    def _capture_all_segments(self, cfg):
+        self.a.configure(cfg)
+        self.a.arm()
+        self.assertTrue(self.a.wait_all_segments_done(timeout=10.0))
+        return [self.a.capture_segment(seg, timeout=5.0) for seg in range(4)]
+
+    def test_clock_limit_ends_the_window(self):
+        # The trigger is clock 0 and the first clock of a run, so clocks
+        # 0..20 are two whole runs and 5 clocks of a third, long before 100
+        # post-trigger entries.  Each segment reports its own length.
+        cfg = self._config(pretrigger=4, posttrigger=100, post_clocks=20)
+        for result in self._capture_all_segments(cfg):
+            self._check_window(result, 4, [8, 8, 5])
+        self.assertEqual(self.a.transport.read_reg(0x0090), 20)
+
+    def test_entry_limit_wins_over_a_later_clock_limit(self):
+        cfg = self._config(pretrigger=4, posttrigger=2, post_clocks=200)
+        for result in self._capture_all_segments(cfg):
+            self._check_window(result, 4, [8, 8, 1])
+
+    def test_clock_limit_needs_rle(self):
+        with self.assertRaisesRegex(ValueError, "needs run-length"):
+            self.a.configure(self._config(rle=False, post_clocks=20))
+        # A plain capture clears the limit.
+        self._capture(self._config(rle=False))
+        self.assertEqual(self.a.transport.read_reg(0x0090), 0)
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")

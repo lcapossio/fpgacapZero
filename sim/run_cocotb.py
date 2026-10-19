@@ -211,6 +211,14 @@ TARGETS: tuple[Target, ...] = (
         _VHDL_ELA_SRC,
     ),
     Target(
+        "ela_seq_count_saturates",
+        "fcapz_ela",
+        (RTL / "reset_sync.v", RTL / "fcapz_ela.v", RTL / "dpram.v", RTL / "trig_compare.v"),
+        "fcapz_ela_seq_count_saturates",
+        {"SAMPLE_W": 8, "DEPTH": 16, "TRIG_STAGES": 2, "EXT_TRIG_EN": 1},
+        _VHDL_ELA_SRC,
+    ),
+    Target(
         "fcapz_ela_xilinx7_single_chain",
         "fcapz_ela_xilinx7",
         (
@@ -289,6 +297,22 @@ TARGETS: tuple[Target, ...] = (
             RTL / "fcapz_ejtagaxi.v",
         ),
         "fcapz_ejtagaxi_protocol",
+        {"FIFO_DEPTH": 16},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
+        "fcapz_ejtagaxi_burst_fill",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_burst_fill",
         {"FIFO_DEPTH": 16},
         (
             RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",

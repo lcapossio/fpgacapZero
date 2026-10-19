@@ -76,6 +76,7 @@ CORES = (
             "REL_COMPARE",
             "DUAL_COMPARE",
             "USER1_DATA_EN",
+            "RLE_W",
         ),
         constants=(
             "ADDR_VERSION",
@@ -111,6 +112,8 @@ CORES = (
             "ADDR_STARTUP_ARM",
             "ADDR_TRIG_HOLDOFF",
             "ADDR_COMPARE_CAPS",
+            "ADDR_RLE_CTRL",
+            "ADDR_RLE_W",
             "ADDR_DATA_BASE",
         ),
     ),

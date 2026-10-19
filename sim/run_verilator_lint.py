@@ -163,6 +163,21 @@ TARGETS = (
         top="fcapz_ela",
         sources=ELA_CORE,
     ),
+    # Run-length capture: counts on their own lane, and on the timestamp
+    # lane with the input pipe and segments.
+    LintTarget(
+        name="fcapz_ela_rle",
+        top="fcapz_ela",
+        sources=ELA_CORE,
+        extra_flags=("-GRLE_W=8",),
+    ),
+    LintTarget(
+        name="fcapz_ela_rle_ts",
+        top="fcapz_ela",
+        sources=ELA_CORE,
+        extra_flags=("-GRLE_W=16", "-GTIMESTAMP_W=32", "-GINPUT_PIPE=1",
+                     "-GNUM_SEGMENTS=4", "-GSAMPLE_W=40"),
+    ),
     LintTarget(
         name="fcapz_eio",
         top="fcapz_eio",
@@ -249,6 +264,18 @@ TARGETS = (
             RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
             RTL / "fcapz_ela_xilinx7.v",
         ),
+    ),
+    # Run counts on the single-chain burst lane of a core without timestamps.
+    LintTarget(
+        name="fcapz_ela_xilinx7_rle",
+        top="fcapz_ela_xilinx7",
+        sources=(
+            SIM / "bscane2_stub.v",
+            *ELA_WRAPPER_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_xilinx7.v",
+            RTL / "fcapz_ela_xilinx7.v",
+        ),
+        extra_flags=("-GRLE_W=8",),
     ),
     LintTarget(
         name="fcapz_debug_multi_core",
@@ -460,6 +487,20 @@ TARGETS = (
             RTL / "jtag_tap" / "jtag_tap_intel.v",
             RTL / "fcapz_ela_intel.v",
         ),
+    ),
+    # Run counts beside timestamps on the USER2 burst reader.
+    LintTarget(
+        name="fcapz_ela_intel_rle",
+        top="fcapz_ela_intel",
+        sources=(
+            SIM / "sld_virtual_jtag_stub.v",
+            *ELA_CORE,
+            RTL / "jtag_reg_iface.v",
+            RTL / "jtag_burst_read.v",
+            RTL / "jtag_tap" / "jtag_tap_intel.v",
+            RTL / "fcapz_ela_intel.v",
+        ),
+        extra_flags=("-GRLE_W=12", "-GTIMESTAMP_W=32"),
     ),
     LintTarget(
         name="fcapz_eio_intel",

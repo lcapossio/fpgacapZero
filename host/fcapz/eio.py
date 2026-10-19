@@ -29,7 +29,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 from .registers import ADDR_MGR_ACTIVE as _ADDR_MGR_ACTIVE
-from .transport import Transport, register_pipe_identity
+from .transport import SlotSelection, Transport, register_pipe_identity
 
 # ASCII "IO" packed into VERSION[15:0]; constant per-core, never zero on
 # a valid bitstream.  Same encoding scheme as the ELA core's "LA" magic.
@@ -90,18 +90,26 @@ class EioController:
                 raise
 
     @contextmanager
-    def _access(self) -> Iterator[None]:
-        """Hold the transport and this EIO's slot for one access.
+    def _selected(self) -> Iterator[None]:
+        """Hold the transport, on the EIO's chain, with every access in the
+        body reaching the EIO's slot (see :meth:`Transport.slot_scope`)."""
+        selection = None
+        if self._instance is not None:
+            selection = SlotSelection(self._chain, _ADDR_MGR_ACTIVE, self._instance)
+        with self._t.slot_scope(selection, chain=self._chain):
+            yield
 
-        Behind a core manager, raises :class:`~fcapz.transport.ManagerResetError`
-        after the block if another controller's select, or a hub reset, sent
-        some of it to another slot (see
-        :meth:`Transport.held_manager_instance`): a read may have returned
-        another core's value, and a write may have reached another core or
-        been lost.
+    @contextmanager
+    def _access(self) -> Iterator[None]:
+        """:meth:`_selected`, checked: behind a core manager, raises
+        :class:`~fcapz.transport.ManagerResetError` after the block if another
+        controller's select, or a hub reset, sent some of it to another slot
+        (see :meth:`Transport.held_manager_instance`): a read may have
+        returned another core's value, and a write may have reached another
+        core or been lost.  Nothing to check where the transport routes every
+        access to the slot itself (:meth:`Transport.slot_routing_isolated`).
         """
-        with self._t.transaction_lock():
-            self._select_chain()
+        with self._selected():
             if self._instance is None:
                 yield
                 return
@@ -109,6 +117,34 @@ class EioController:
                 self._chain, _ADDR_MGR_ACTIVE, self._instance
             ):
                 yield
+
+    def _resolve_instance(self) -> None:
+        """Bind a slot-less controller to its manager's first EIO slot.
+
+        Without a slot every access reaches whichever slot the manager has
+        active, which another session or tool may have moved to an ELA: EIO
+        writes would then land in the ELA.  A chain without a manager keeps
+        the direct, slot-less access.
+        """
+        if self._instance is not None:
+            return
+        from .analyzer import Analyzer, CoreManager  # analyzer imports nothing from here
+
+        probe = Analyzer(self._t, chain=self._chain)
+        if (
+            not probe.speaks_register_protocol(self._base_addr)
+            or not probe._behind_manager()  # noqa: SLF001 - detection lives there
+        ):
+            return
+        if self._base_addr:
+            raise RuntimeError(
+                f"chain {self._chain} has a core manager: select the EIO by "
+                f"instance, not base_addr 0x{self._base_addr:04X}"
+            )
+        slot = CoreManager(self._t, chain=self._chain).first_slot(EIO_CORE_ID)
+        if slot is None:
+            raise RuntimeError(f"the core manager on chain {self._chain} has no EIO slot")
+        self._instance = slot
 
     def connect(self) -> None:
         """Connect transport, verify EIO core identity, read parameters.
@@ -126,7 +162,8 @@ class EioController:
         with self._t.transaction_lock():
             self._select_chain()
             self._t.connect()
-            self._t.invalidate_manager_instance_cache()
+            self._t.forget_manager_chains()
+            self._resolve_instance()
             self._read_identity()
 
     def attach(self) -> None:
@@ -138,6 +175,7 @@ class EioController:
         """
         with self._t.transaction_lock():
             try:
+                self._resolve_instance()
                 self._read_identity()
             finally:
                 try:
@@ -290,6 +328,8 @@ def discover_eio(
     sits behind.  This tries, in order: core-manager slots (``instances`` on
     chain 1), then every ``chains`` x ``bases`` combination, attaching the
     first location whose identity register reads the EIO magic (``0x494F``).
+    A chain with a core manager binds to its first EIO slot, so the returned
+    controller always carries its slot (:attr:`EioController.instance`).
 
     ``EioController.attach`` only reads and restores chain 1, and
     non-matches (wrong chain, ELA magic, unprogrammed FPGA) raise and are

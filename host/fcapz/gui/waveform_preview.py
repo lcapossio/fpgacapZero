@@ -68,9 +68,12 @@ def _x_axis_and_label(result: CaptureResult) -> tuple[list[float], str]:
     cfg = result.config
     n = len(result.samples)
     hz = max(1.0, float(cfg.sample_clock_hz))
-    if result.timestamps and len(result.timestamps) == n:
+    if (result.timestamps and len(result.timestamps) == n) or (
+        n and len(result.run_lengths) == n
+    ):
         # Match VCD: times are zero-based per capture so continuous updates do not
         # pan the preview to a wildly different absolute counter range each shot.
+        # A run-length capture places each entry at its start clock.
         scale_s = 1.0 / hz
         return [float(t) * scale_s for t in vcd_simulation_times(result)], "Time (s)"
     return [float(i) for i in range(n)], "Sample index"

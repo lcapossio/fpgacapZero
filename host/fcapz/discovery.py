@@ -188,7 +188,9 @@ def discover_cores(
         chains = transport.discovery_chains()
     found: List[Dict[str, Any]] = []
     unanswered: List[int] = []
-    with transport.transaction_lock():
+    # Unselected: a caller's slot must not prefix the probes of other chains'
+    # cores, and a fallback backend gets the caller's slot back after.
+    with transport.slot_scope(None):
         try:
             for chain in dict.fromkeys(int(c) for c in chains):
                 try:

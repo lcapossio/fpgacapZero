@@ -948,7 +948,10 @@ class ManagedEioSlotTests(unittest.TestCase):
             (self.t.slots[1][0x0100], self.t.slots[0][0x0100]), (0x08, 0x10))
 
     def test_direct_eio_is_not_checked(self):
+        # A chain without a manager: a slot-less EIO behind one binds itself
+        # to the first EIO slot.
         t = ManagedEioTransport()
+        t.manager[0xF000] = 0
         eio = EioController(t, chain=1)
         eio.connect()
         t.reads.clear()

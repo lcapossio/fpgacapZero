@@ -48,12 +48,12 @@ in that bridge’s section.
 | `0x0010` | DEPTH | RO | Total capture depth in samples. |
 | `0x0014` | PRETRIG_LEN | RW | Pre-trigger sample count. |
 | `0x0018` | POSTTRIG_LEN | RW | Post-trigger sample count. |
-| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. |
+| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. On a segmented `RLE_W` core, for a capture with a clock limit (`RLE_POST_CLKS`), it is the length of the segment `SEG_SEL` selects (0 until that segment completes), because the limit can end segments at different lengths. |
 | `0x0020` | TRIG_MODE | RW | Trigger mode; see [TRIG_MODE](#regmap-trig-mode). |
 | `0x0024` | TRIG_VALUE | RW | Trigger comparator value. |
 | `0x0028` | TRIG_MASK | RW | Trigger comparator mask. |
-| `0x002C` | BURST_PTR | WO | Write to initiate burst read from `start_ptr` via USER2. `bit[31]` selects source BRAM: `0` = sample data, `1` = timestamp data. Host timestamp burst readback sets `bit[31]=1`. |
-| `0x0030` | SQ_MODE | RW | Storage qualification mode: 0=off, 1=value, 2=edge, 3=both. Active only when `STOR_QUAL=1`. |
+| `0x002C` | BURST_PTR | WO | Write to initiate burst read from `start_ptr` via USER2. `bit[31]` selects source BRAM: `0` = sample data, `1` = timestamp data. Host timestamp burst readback sets `bit[31]=1`. On an `RLE_W` core, `bit[31:30]=2'b11` reads run counts on the timestamp lane. |
+| `0x0030` | SQ_MODE | RW | Storage qualification mode, bits [3:0]. 0 = off; 1..9 select compare mode 0..8 (1 = EQ, 2 = NEQ, ... 9 = CHANGED); 10..15 = off. Active only when `STOR_QUAL=1`. Cores without `COMPARE_CAPS` bit 22 take the raw compare mode instead (1 = NEQ), so EQ is out of reach on them. |
 | `0x0034` | SQ_VALUE | RW | Storage qualification match value. |
 | `0x0038` | SQ_MASK | RW | Storage qualification match mask. |
 | `0x003C` | FEATURES | RO | Feature flags: `[3:0]` = `TRIG_STAGES`, `[4]` = `STOR_QUAL`, other bits report optional build features. |
@@ -62,10 +62,13 @@ in that bridge’s section.
 | `0x0040 + N*20 + 8` | SEQ_STAGE_N_MASK_A | RW | Sequencer stage N comparator A mask. |
 | `0x0040 + N*20 + 12` | SEQ_STAGE_N_VALUE_B | RW | Sequencer stage N comparator B match value. |
 | `0x0040 + N*20 + 16` | SEQ_STAGE_N_MASK_B | RW | Sequencer stage N comparator B mask. |
+| `0x0090` | RLE_POST_CLKS | RW | `RLE_W` cores only. Post-trigger clock limit for run-length captures: the post-trigger window also ends this many sample clocks after the trigger commit (clock 0), if `POSTTRIG_LEN` entries have not ended it first. `CAPTURE_LEN` then reports the entries stored. 0 = no limit (reset value). `min(32, clog2(DEPTH+1) + RLE_W)` bits wide; taken on arm; ignored while run-length capture is off. |
+| `0x00A8` | RLE_CTRL | RW | `RLE_W` cores only. Bit 0 = run-length capture enable, taken on arm (resets to 0). Bit 1 = the timestamp DATA window returns run counts instead of timestamps; arm and soft reset clear it. The core ignores bit 0 while decimation or storage qualification is on. See [Run-length capture](../05_ela_core.md#run-length-capture). |
+| `0x00CC` | RLE_W | RO | Run-count width (`RLE_W` parameter). 0 = no run-length capture; this is also the capability bit. |
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
 | `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
 | `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
-| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). Bit 21 reports `CAPTURE_GEN`. |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). Bit 21 reports `CAPTURE_GEN`. Bit 22 is always set: `SQ_MODE` holds the compare mode plus one. |
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
@@ -118,6 +121,10 @@ B-combine sequencer configurations.
 - [0] `arm` (write 1 to arm)
 - [1] `reset` (write 1 to reset)
 - [31:2] reserved
+
+A write with `arm` or `reset` set snapshots the capture settings for that
+capture (and, for `reset`, `STARTUP_ARM` for the re-arm). Settings written
+after it apply from the next arm or reset.
 
 <a id="regmap-status"></a>
 ### STATUS
@@ -252,12 +259,22 @@ since a Test-Logic-Reset there cancels a burst after its header was checked.
 <a id="regmap-burst-user2"></a>
 ## Burst Readout (256-bit DR)
 - Write to `BURST_PTR` (0x002C) via the active ELA control chain to start a burst from `start_ptr`.
-  - `data[30:0]` — ignored (start pointer is latched from the capture state machine).
+  - `data[29:0]` — ignored (start pointer is latched from the capture state machine).
   - `data[31]` — BRAM select: `0` = sample BRAM, `1` = timestamp BRAM.
+  - `data[30]` — with `data[31]=1` on an `RLE_W` core, reads the run-count RAM
+    instead of timestamps. Ignored otherwise.
 - In managed multi-core designs, this `BURST_PTR` write captures the current
   active slot as the burst owner. Later `MGR_ACTIVE` writes do not redirect an
   in-flight burst; address, data, timestamp, and burst-active control stay
   routed to the captured owner until another burst owner is selected or reset.
+- The manager ignores an `MGR_ACTIVE` write while the burst pipe is filling
+  its staging register. On a single-chain build every capture in burst mode
+  starts a fill of `256 / SAMPLE_W` TCKs, including the capture of the next
+  command scan, so a select written straight after a burst is dropped on a
+  lane of 4 bits or fewer. End a burst with a command scan (which ends burst
+  mode), then idle at least `256 / SAMPLE_W + 2` TCKs before selecting.
+  `XilinxHwServerTransport` ends every single-chain burst with an uncaptured
+  `VERSION` read and 258 idle TCKs.
 - Legacy two-chain AMD/Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
@@ -266,6 +283,10 @@ since a Test-Logic-Reset there cancels a burst after its header was checked.
 - **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
   packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
   via this path and discards the priming scan.
+- **Run-count mode** (`bit[31:30]=2'b11`, `RLE_W` cores): same packing as timestamp
+  mode. The lane is `TIMESTAMP_W` bits wide, or `RLE_W` bits on a core without
+  timestamps; each count sits in the low `RLE_W` bits. The host uses
+  `read_run_length_block()`.
 - Read pointer auto-increments; staging buffer is pre-filled during the SHIFT phase.
 
 <a id="regmap-burst-header"></a>

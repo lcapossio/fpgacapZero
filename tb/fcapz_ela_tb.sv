@@ -902,6 +902,9 @@ module fcapz_ela_tb;
         jtag_write_pmux(16'h0024, 32'hAA); // TRIG_VALUE = 0xAA
         jtag_write_pmux(16'h0028, 32'hFF); // TRIG_MASK
         jtag_write_pmux(16'h0004, 32'h1); // ARM
+        // The stimulus below was timed for an ARM that landed two sample
+        // clocks sooner, before the settings snapshot gained its stage.
+        repeat (2) @(posedge sample_clk);
 
         // Drive probe_in_pmux: slice0=incrementing, slice1=0x11, slice2=0x22, slice3=0x33
         probe_in_pmux = 32'h33_22_11_00;
@@ -933,6 +936,9 @@ module fcapz_ela_tb;
         jtag_write_pmux(16'h0024, 32'hFF); // TRIG_VALUE = 0xFF in slice 2
         jtag_write_pmux(16'h0028, 32'hFF); // TRIG_MASK
         jtag_write_pmux(16'h0004, 32'h1); // ARM
+        // The stimulus below was timed for an ARM that landed two sample
+        // clocks sooner, before the settings snapshot gained its stage.
+        repeat (2) @(posedge sample_clk);
 
         probe_in_pmux = 32'h33_00_11_AA;  // slice2 = 0x00 (no trigger yet)
         repeat (3) @(posedge sample_clk);

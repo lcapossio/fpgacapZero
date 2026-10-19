@@ -16,11 +16,15 @@ from fcapz.analyzer import (
     CaptureConfig,
     CaptureResult,
     CORE_MANAGER_CORE_ID,
+    CoreManager,
     ELA_CORE_ID,
     ElaManager,
     SequencerStage,
     TriggerConfig,
+    entry_start_clocks,
+    expand_run_lengths,
     expected_ela_version_reg,
+    vcd_simulation_times,
 )
 from fcapz.eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from fcapz.transport import (
@@ -364,6 +368,448 @@ class ManagerDetectionTests(unittest.TestCase):
         t = self._transport(depth=1024, manager_block=False)
         self.assertTrue(Analyzer(t, manager=True)._behind_manager())
         self.assertNotIn(0xF000, t.reads)
+
+
+class RpcManagerSlotTests(unittest.TestCase):
+    """An RPC session on a manager chain is bound to slot 0, not to whichever
+    slot an earlier session left selected."""
+
+    class _EioSelectedTransport(FakeTransport):
+        # Four slots; slots 2-3 are EIOs, and slot 2 is selected at start.
+        def __init__(self):
+            super().__init__()
+            self._manager_regs[0xF004] = 4
+            self._active_ela = 2
+            self._manager_regs[0xF008] = 2
+
+        def read_reg(self, addr):
+            if addr == 0x0000 and self._active_chain == 1 and self._active_ela >= 2:
+                return 0x494F  # EIO core id
+            return super().read_reg(addr)
+
+    def _server(self):
+        from fcapz.rpc import RpcServer
+
+        transport = self._EioSelectedTransport()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        return server, transport
+
+    def test_connect_binds_slot_0_instead_of_the_selected_eio(self):
+        server, transport = self._server()
+        r = server.handle({"cmd": "connect", "backend": "hw_server"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["chain"], 1)
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_a_moved_slot_is_reselected_before_the_next_access(self):
+        server, transport = self._server()
+        server.handle({"cmd": "connect", "backend": "hw_server"})
+        # Another session moves the manager behind this transport's cache.
+        transport._manager_regs[0xF008] = 3
+        transport._active_ela = 3
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(transport._active_ela, 0)
+
+    class _Board:
+        """One manager, reached through several transports (one per session)."""
+
+        def __init__(self):
+            self.manager_regs = dict(
+                RpcManagerSlotTests._EioSelectedTransport()._manager_regs)
+            self.active = 2
+            self.writes: list[tuple[int, int]] = []  # (active slot, addr)
+
+    def _session_transport(self, board):
+        outer = self
+
+        class _SessionTransport(outer._EioSelectedTransport):
+            def __init__(self):
+                super().__init__()
+                self._manager_regs = board.manager_regs
+
+            @property
+            def _active_ela(self):
+                return board.active
+
+            @_active_ela.setter
+            def _active_ela(self, value):
+                board.active = int(value)
+
+            def write_reg(self, addr, value):
+                if addr not in self._manager_regs and self._active_chain == 1:
+                    board.writes.append((board.active, addr))
+                super().write_reg(addr, value)
+
+        return _SessionTransport()
+
+    def _board_server(self, board):
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._build_transport = lambda req: self._session_transport(board)
+        return server
+
+    def _assert_eio_writes_land_in(self, server, board, slot):
+        # The ELA session moves the manager first, as a capture would.
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0)
+        board.writes.clear()
+        self.assertTrue(server.handle({"cmd": "eio_write", "value": 0x5A})["ok"])
+        self.assertTrue(board.writes)
+        self.assertEqual({s for s, _ in board.writes}, {slot},
+                         "EIO write landed outside its slot")
+
+    def test_discovered_eio_is_bound_to_its_slot(self):
+        # Discovery found the EIO through whichever slot was active, and the
+        # controller it returned had no slot: once the ELA session moved the
+        # manager back, EIO writes reached the ELA.
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server",
+                           "chain": 1, "instance": 2})
+        self.assertTrue(r["ok"], r)
+        r = server.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [1]})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["instance"], 2)
+        self._assert_eio_writes_land_in(server, board, 2)
+
+    def test_discovery_finds_an_eio_slot_that_is_not_active(self):
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        self.assertEqual(board.active, 0)  # the ELA slot, not an EIO
+        r = server.handle({"cmd": "eio_discover", "backend": "hw_server", "chains": [1]})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["chain"], r["instance"]), (1, 2))
+
+    def test_eio_connect_without_instance_binds_the_first_eio_slot(self):
+        board = self._Board()
+        server = self._board_server(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 1})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["instance"], 2)
+        self._assert_eio_writes_land_in(server, board, 2)
+
+    def test_eio_base_addr_is_refused_behind_a_manager(self):
+        transport = self._EioSelectedTransport()
+        eio = EioController(transport, chain=1, base_addr=0x8000)
+        # Refused, either as a manager chain or because nothing answers there.
+        with self.assertRaises(RuntimeError):
+            eio.attach()
+        self.assertIsNone(eio.instance)
+        self.assertIsNone(discover_eio(transport, chains=[1], bases=[0x8000]))
+
+    def test_a_transient_analyzer_binds_the_first_ela_slot(self):
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.bind_manager_slot()
+        self.assertEqual(analyzer._instance, 0)
+        self.assertIsNotNone(analyzer.probe_optional())
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_probe_optional_binds_the_first_ela_slot_itself(self):
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        analyzer = Analyzer(transport, chain=1)
+        self.assertIsNotNone(analyzer.probe_optional())
+        self.assertEqual(analyzer._instance, 0)
+        analyzer.bind_manager_slot()  # already bound: kept
+        self.assertEqual(analyzer._instance, 0)
+
+    def test_no_manager_probe_on_a_chain_without_a_register_core(self):
+        # USER4's EJTAG-AXI bridge decodes a 0xF000 read frame as burst write
+        # data; only the address-0 VERSION frame (a bridge NOP) may reach it.
+        class _BridgeChainTransport(self._EioSelectedTransport):
+            def __init__(self):
+                super().__init__()
+                self.chain4_reads: list[int] = []
+
+            def read_reg(self, addr):
+                if self._active_chain == 4:
+                    self.chain4_reads.append(addr)
+                    return 0
+                return super().read_reg(addr)
+
+        transport = _BridgeChainTransport()
+        with self.assertRaises(RuntimeError):
+            EioController(transport, chain=4).attach()
+        analyzer = Analyzer(transport, chain=4)
+        analyzer.bind_manager_slot()
+        self.assertIsNone(analyzer._instance)
+        self.assertTrue(transport.chain4_reads)
+        self.assertEqual(set(transport.chain4_reads), {0x0000})
+
+    def test_a_failed_slot_restore_leaves_no_cached_slot(self):
+        class _RestoreFails(self._EioSelectedTransport):
+            def write_reg(self, addr, value):
+                if addr == 0xF008 and getattr(self, "fail_restore", False) \
+                        and int(value) == 2 and self._active_ela == 3:
+                    raise OSError("JTAG error during restore")
+                super().write_reg(addr, value)
+
+        transport = _RestoreFails()
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        transport.fail_restore = True
+        with self.assertRaises(OSError):
+            CoreManager(transport, chain=1).slot_core_ids()
+        transport.fail_restore = False
+        # The manager is left on slot 3; the next slot-2 access must re-select.
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(transport._active_ela, 2)
+
+    def test_a_garbage_slot_count_is_refused(self):
+        transport = self._EioSelectedTransport()
+        transport._manager_regs[0xF004] = 0xFFFFFFFF
+        writes: list[int] = []
+        orig = transport.write_reg
+        transport.write_reg = lambda a, v: (writes.append(a), orig(a, v))
+        with self.assertRaisesRegex(RuntimeError, "slots"):
+            CoreManager(transport, chain=1).slot_core_ids()
+        self.assertNotIn(0xF008, writes)
+
+    def test_cli_eio_probe_reports_the_bound_slot(self):
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)  # the ELA slot is active
+        out = io.StringIO()
+        with patch.object(cli, "_make_transport", return_value=transport), \
+                patch("sys.argv", ["fcapz", "eio-probe", "--chain", "1"]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(_json.loads(out.getvalue())["instance"], 2)
+
+    def test_cli_ela_commands_after_eio_write_reach_the_ela(self):
+        # eio-write binds EIO slot 2 and leaves the manager there; the next
+        # ELA command without --ela-instance must not follow it into the EIO.
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)
+
+        def run(*argv):
+            out = io.StringIO()
+            with patch.object(cli, "_make_transport", return_value=transport), \
+                    patch("sys.argv", ["fcapz", *argv]), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+            return out.getvalue()
+
+        run("eio-write", "--chain", "1", "0x5A")
+        self.assertEqual(transport._active_ela, 2)
+        ident = _json.loads(run("probe"))
+        self.assertEqual(ident["core_id"], ELA_CORE_ID)
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_axi_monitor_reads_reselect_the_analyzer_slot(self):
+        from fcapz.axi_monitor import AxiMonitor
+
+        transport = self._EioSelectedTransport()
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.bind_manager_slot()
+        transport.write_reg(0xF008, 2)  # another session selects the EIO
+        transport.invalidate_manager_instance_cache()
+        AxiMonitor(analyzer).identity()
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_separate_sessions_never_trust_a_stale_slot(self):
+        # The ELA and EIO sessions each hold their own transport, and each
+        # caches the slot it last wrote.  Every command must re-select its
+        # own slot: a cached one may have been moved by the other session.
+        from fcapz.rpc import RpcServer
+
+        board = self._Board()
+        server = RpcServer()
+        server._build_transport = lambda req: self._session_transport(board)
+        self.assertTrue(server.handle({"cmd": "connect", "backend": "hw_server"})["ok"])
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server",
+                           "chain": 1, "instance": 2})
+        self.assertTrue(r["ok"], r)
+
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0, "probe read the EIO slot")
+
+        board.writes.clear()
+        self.assertTrue(server.handle({"cmd": "eio_write", "value": 0x5A})["ok"])
+        self.assertTrue(board.writes)
+        self.assertEqual({slot for slot, _ in board.writes}, {2},
+                         "EIO write landed outside its slot")
+
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(board.active, 0)
+
+
+class RpcLifecycleTests(unittest.TestCase):
+    """Transports a command is still opening, and failed session swaps."""
+
+    class _BlockingConnect(FakeTransport):
+        """connect() blocks until cancel() is called, as a hung handshake."""
+
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.released = threading.Event()
+            self.cancelled = False
+
+        def connect(self):
+            self.entered.set()
+            if not self.released.wait(5.0):
+                raise AssertionError("cancel never reached the opening transport")
+            raise OSError("connection cancelled")
+
+        def cancel(self):
+            self.cancelled = True
+            self.released.set()
+
+    @staticmethod
+    def _connected_server():
+        from fcapz.rpc import RpcServer
+
+        server = RpcServer()
+        server._build_transport = lambda req: FakeTransport()
+        assert server.handle({"cmd": "connect", "backend": "hw_server"})["ok"]
+        return server
+
+    def test_cancel_reaches_a_transport_that_is_still_connecting(self):
+        for cmd in ("connect", "eio_connect", "eio_discover"):
+            with self.subTest(cmd=cmd):
+                transport = self._BlockingConnect()
+                server = self._connected_server()
+                server._build_transport = lambda req, t=transport: t
+                result: list = []
+                # eio_discover on the session's board uses the session's
+                # transport; on another board it opens its own.
+                extra = {"host": "10.0.0.2"} if cmd == "eio_discover" else {}
+
+                def run():
+                    try:
+                        result.append(
+                            server.handle({"cmd": cmd, "backend": "hw_server", **extra})
+                        )
+                    except Exception as exc:  # noqa: BLE001 - the cancelled call fails
+                        result.append(exc)
+
+                worker = threading.Thread(target=run)
+                worker.start()
+                self.assertTrue(transport.entered.wait(5.0))
+                server.cancel_active()
+                worker.join(5.0)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(transport.cancelled)
+                self.assertNotIn(transport, server._live_transports())
+
+    def test_a_concurrent_command_keeps_another_commands_opening_transport(self):
+        # The web gateway runs openocd_status/scan_targets outside its session
+        # lock; one finishing must not unregister a connect still in progress.
+        from fcapz.rpc import RpcServer
+
+        transport = self._BlockingConnect()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        worker = threading.Thread(
+            target=lambda: self._swallow(server.handle, {"cmd": "connect", "backend": "hw_server"})
+        )
+        worker.start()
+        self.assertTrue(transport.entered.wait(5.0))
+        self._swallow(server.handle, {"cmd": "openocd_status"})
+        self.assertIn(transport, server._live_transports())
+        server.cancel_active()
+        worker.join(5.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(transport.cancelled)
+
+    def test_cancel_reaches_discovery_probes(self):
+        # scan_targets and discover_boards open their own OpenOCD transports
+        # inside library helpers; cancel must reach those too.
+        from unittest.mock import patch
+
+        from fcapz import transport as tr
+        from fcapz.rpc import RpcServer
+
+        for req in ({"cmd": "scan_targets", "backend": "openocd"},
+                    {"cmd": "discover_boards", "port": 6666}):
+            with self.subTest(cmd=req["cmd"]):
+                entered, released = threading.Event(), threading.Event()
+
+                def blocking_connect(_self):
+                    entered.set()
+                    if not released.wait(5.0):
+                        raise AssertionError("cancel never reached the probe")
+                    raise OSError("cancelled")
+
+                with patch.object(tr.OpenOcdTransport, "connect", blocking_connect), \
+                        patch.object(tr.OpenOcdTransport, "cancel",
+                                     lambda _self: released.set()):
+                    server = RpcServer()
+                    worker = threading.Thread(target=lambda: self._swallow(server.handle, req))
+                    worker.start()
+                    self.assertTrue(entered.wait(5.0))
+                    server.cancel_active()
+                    worker.join(5.0)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(released.is_set())
+                self.assertEqual(server._live_transports(), [])
+
+    def test_cancel_takes_no_lock_a_command_holds(self):
+        server = self._connected_server()
+        done = threading.Event()
+        with server._opening_lock:  # a command registering a transport
+            threading.Thread(target=lambda: (server.cancel_active(), done.set())).start()
+            self.assertTrue(done.wait(2.0), "cancel_active waited for the command's lock")
+
+    @staticmethod
+    def _swallow(fn, *args):
+        try:
+            return fn(*args)
+        except Exception:  # noqa: BLE001 - the outcome is asserted separately
+            return None
+
+    def test_eio_discover_closes_a_transport_whose_connect_fails(self):
+        class _FailingConnect(FakeTransport):
+            closed = False
+
+            def connect(self):
+                raise OSError("handshake failed")
+
+            def close(self):
+                type(self).closed = True
+
+        server = self._connected_server()
+        server._build_transport = lambda req: _FailingConnect()
+        with self.assertRaises(OSError):
+            # Another board: the session's own transport is not reused.
+            server.handle(
+                {"cmd": "eio_discover", "backend": "hw_server", "host": "10.0.0.2"}
+            )
+        self.assertTrue(_FailingConnect.closed)
+
+    def test_a_failed_eio_replacement_leaves_no_eio_session(self):
+        server = self._connected_server()
+        server._build_transport = lambda req: FakeVioTransport()
+        r = server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 3})
+        self.assertTrue(r["ok"], r)
+        self.assertIsNotNone(server._eio)
+
+        class _NoEio(FakeTransport):
+            def read_reg(self, addr):
+                return 0  # no EIO identity anywhere
+
+        server._build_transport = lambda req: _NoEio()
+        with self.assertRaises(RuntimeError):
+            server.handle({"cmd": "eio_connect", "backend": "hw_server", "chain": 3})
+        self.assertIsNone(server._eio)
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -1434,11 +1880,15 @@ class RpcSharedEioTests(unittest.TestCase):
         self.assertEqual(reply["probe"]["sample_width"], 8)
 
     def test_unbound_analyzer_is_pinned_before_a_shared_eio(self):
-        """connect without instance reads the active slot; a shared EIO pins it
-        to that slot first, so the EIO's select does not take it over."""
+        """connect without instance binds the first ELA slot; an analyzer
+        still unbound when a shared EIO connects is pinned to the active slot
+        first, so the EIO's select does not take it over."""
         server, hub, _ = self._server()
         server.handle({"cmd": "connect", "chain": 1})
-        self.assertIsNone(server._analyzer.instance)
+        self.assertEqual(server._analyzer.instance, 0)
+        # Rebuild the unbound state connect no longer leaves (an analyzer made
+        # outside it, say), so the pin itself is still covered.
+        server._analyzer._instance = None
         server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1})
         self.assertEqual(server._analyzer.instance, 0)
         self.assertTrue(server.handle({"cmd": "probe"})["ok"])
@@ -1453,7 +1903,8 @@ class RpcSharedEioTests(unittest.TestCase):
         server.handle({"cmd": "rebind", "chain": 1})
         self.assertEqual(server._analyzer.instance, 1)  # same chain keeps it
         server.handle({"cmd": "rebind", "chain": 2})
-        self.assertIsNone(server._analyzer.instance)
+        # The fake answers on every chain: chain 2's first ELA slot.
+        self.assertEqual(server._analyzer.instance, 0)
 
     def test_managed_eio_on_another_target_gets_its_own_transport(self):
         """A managed EIO on another board must not borrow the analyzer's
@@ -1466,7 +1917,7 @@ class RpcSharedEioTests(unittest.TestCase):
                 server.handle({"cmd": "eio_connect", "chain": 1, "instance": 1, **other})
                 self.assertEqual(len(built), 2)
                 self.assertFalse(server._eio_shared)
-                self.assertIsNone(server._analyzer.instance)  # not pinned
+                self.assertEqual(hub._manager_regs[0xF008], 0)  # hub untouched
 
     def test_managed_eio_on_another_target_keeps_the_session_fields(self):
         """Fields the request leaves out are the session's on the separate
@@ -1570,6 +2021,289 @@ class ManagedDataChainBurstTests(unittest.TestCase):
         t.burst_on_data_chain = False  # hw_server single-chain burst
         self._capture(t, 8)
         self.assertEqual(t.calls, [("read_block", 0x0100, 3)])
+
+
+class StorageQualModeTests(unittest.TestCase):
+    """stor_qual_mode 1 (match) and 2 (no match) map onto SQ_MODE by core."""
+
+    @staticmethod
+    def _sq_core() -> FakeTransport:
+        """A core built with STOR_QUAL (FEATURES[4])."""
+        transport = FakeTransport()
+        transport.regs[0x003C] = int(transport.regs[0x003C]) | (1 << 4)
+        return transport
+
+    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+        transport = self._sq_core()
+        transport.regs[0x00E0] = caps
+        transport.regs[0x0030] = old_sq_mode
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(replace(
+            AnalyzerTests()._make_cfg(),
+            stor_qual_mode=mode, stor_qual_value=0x42, stor_qual_mask=0xFF,
+        ))
+        return transport
+
+    def test_plus_one_core_takes_eq_and_neq(self):
+        caps = 0x3_01FF | (1 << 22)
+        self.assertEqual(self._configure(caps, 1).regs[0x0030], 1)  # EQ
+        self.assertEqual(self._configure(caps, 2).regs[0x0030], 2)  # NEQ
+        regs = self._configure(caps, 1).regs
+        self.assertEqual((regs[0x0034], regs[0x0038]), (0x42, 0xFF))
+
+    def test_older_core_maps_no_match_to_raw_neq(self):
+        for caps in (0x3_01FF, 0):  # 0 = core older than COMPARE_CAPS
+            self.assertEqual(self._configure(caps, 2).regs[0x0030], 1)
+
+    def test_a_core_without_the_qualifier_refuses_before_writing(self):
+        # SQ_MODE is not decoded there: the capture would store every sample
+        # while the caller believes it was filtered.
+        for mode in (1, 2):
+            with self.subTest(mode=mode):
+                transport = FakeTransport()
+                transport.regs[0x00E0] = 0x3_01FF | (1 << 22)
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                before = dict(transport.regs)
+                with self.assertRaisesRegex(ValueError, "STOR_QUAL=0"):
+                    analyzer.configure(
+                        replace(AnalyzerTests()._make_cfg(), stor_qual_mode=mode)
+                    )
+                self.assertEqual(transport.regs, before)
+
+    def test_older_core_rejects_match_before_writing(self):
+        transport = self._sq_core()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        before = dict(transport.regs)
+        with self.assertRaisesRegex(ValueError, "bit 22"):
+            analyzer.configure(replace(AnalyzerTests()._make_cfg(), stor_qual_mode=1))
+        self.assertEqual(transport.regs, before)
+
+    def test_mode_zero_turns_off_an_earlier_qualifier(self):
+        regs = self._configure(0x3_01FF | (1 << 22), 0, old_sq_mode=2).regs
+        self.assertEqual(regs[0x0030], 0)
+
+    def test_out_of_range_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._configure(0x3_01FF | (1 << 22), 3)
+
+
+class RunLengthTransport(FakeTransport):
+    """An ELA built with RLE_W: run counts on the timestamp DATA window
+    (read while RLE_CTRL[1] is set) and, optionally, a run-length burst."""
+
+    DEPTH = 1024
+
+    def __init__(self, *, rle_w=8, timestamp_w=0, counts=(2, 0, 5, 0), burst=False):
+        super().__init__()
+        self.regs[0x00CC] = rle_w
+        self.regs[0x00C4] = timestamp_w
+        self.regs[0x00E0] = 0x3_01FF | (1 << 19) | (1 << 22)
+        self.regs[0x001C] = len(counts)  # CAPTURE_LEN
+        self.counts = list(counts)
+        self.ctrl_writes: list[int] = []
+        self.burst_calls: list[tuple[int, int]] = []
+        if burst:
+            self.read_run_length_block = self._run_length_burst
+
+    def _run_length_burst(self, n_entries, lane_width):
+        self.burst_calls.append((n_entries, lane_width))
+        return self.counts[:n_entries]
+
+    def write_reg(self, addr, value):
+        if addr == 0x00A8:
+            self.ctrl_writes.append(value)
+        super().write_reg(addr, value)
+
+    def read_block(self, addr, words):
+        if addr == 0x0100:
+            return self.data[:words]
+        lane_w = self.regs[0x00C4] or self.regs[0x00CC]
+        if addr == 0x0100 + self.DEPTH * 4 and self.regs.get(0x00A8, 0) & 2:
+            out: list[int] = []
+            for count in self.counts:
+                out += [count] + [0] * ((lane_w + 31) // 32 - 1)
+            return out[:words]
+        return [0] * words
+
+
+class RunLengthTests(unittest.TestCase):
+    """Run-length capture: configure checks, count readout, exports."""
+
+    def _cfg(self, **kw) -> CaptureConfig:
+        return replace(AnalyzerTests()._make_cfg(), **kw)
+
+    def _capture(self, transport, **kw):
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, **kw))
+        analyzer.arm()
+        return analyzer, analyzer.capture(timeout=0.01)
+
+    def test_configure_writes_enable_on_rle_cores_only(self):
+        transport = RunLengthTransport()
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True))
+        analyzer.configure(self._cfg())
+        self.assertEqual(transport.ctrl_writes, [1, 0])
+
+        plain = RunLengthTransport(rle_w=0)
+        analyzer = Analyzer(plain)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        self.assertEqual(plain.ctrl_writes, [])
+
+    def test_rejected_configs_write_nothing(self):
+        cases = (
+            (RunLengthTransport(rle_w=0), {}, "RLE_W=0"),
+            (RunLengthTransport(), {"decimation": 3}, "decimation"),
+            (RunLengthTransport(), {"stor_qual_mode": 2}, "storage qualification"),
+        )
+        for transport, kw, msg in cases:
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            before = dict(transport.regs)
+            with self.assertRaisesRegex(ValueError, msg):
+                analyzer.configure(self._cfg(rle=True, **kw))
+            self.assertEqual(transport.regs, before)
+
+    def test_post_clocks_is_written_and_clamped_to_the_register(self):
+        transport = RunLengthTransport(rle_w=8)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=20))
+        self.assertEqual(transport.regs[0x0090], 20)
+        # DEPTH 1024: LEN_W 11, + RLE_W 8 = 19 bits.
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(transport.regs[0x0090], (1 << 19) - 1)
+        # A plain capture clears a limit left by an earlier one.
+        analyzer.configure(self._cfg())
+        self.assertEqual(transport.regs[0x0090], 0)
+
+        wide = RunLengthTransport(rle_w=16)
+        analyzer = Analyzer(wide)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(wide.regs[0x0090], (1 << 27) - 1)
+
+        plain = RunLengthTransport(rle_w=0)
+        analyzer = Analyzer(plain)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        self.assertNotIn(0x0090, plain.regs)
+
+    def test_post_clocks_needs_rle(self):
+        for kw, msg in (({"post_clocks": 5}, "needs run-length"),
+                        ({"rle": True, "post_clocks": -1}, ">= 0")):
+            transport = RunLengthTransport()
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            before = dict(transport.regs)
+            with self.assertRaisesRegex(ValueError, msg):
+                analyzer.configure(self._cfg(**kw))
+            self.assertEqual(transport.regs, before)
+
+    def test_window_readout_sets_and_restores_the_count_select(self):
+        transport = RunLengthTransport()
+        _, result = self._capture(transport)
+        self.assertEqual(result.samples, [1, 2, 3, 4])
+        self.assertEqual(result.run_lengths, [3, 1, 6, 1])
+        # enable on configure, then counts on the window and back.
+        self.assertEqual(transport.ctrl_writes, [1, 3, 1])
+
+    def test_window_counts_are_masked_and_take_the_low_lane_word(self):
+        transport = RunLengthTransport(rle_w=2, timestamp_w=48, counts=(7, 1, 0, 2))
+        _, result = self._capture(transport)
+        self.assertEqual(result.run_lengths, [4, 2, 1, 3])
+
+    def test_burst_reads_the_lane_width_and_masks_to_rle_w(self):
+        transport = RunLengthTransport(timestamp_w=32, counts=(0x1FF, 0, 1, 0), burst=True)
+        _, result = self._capture(transport)
+        self.assertEqual(transport.burst_calls, [(4, 32)])  # the timestamp lane
+        self.assertEqual(result.run_lengths, [0x100, 1, 2, 1])
+        self.assertEqual(transport.ctrl_writes, [1])  # no window read
+
+        transport = RunLengthTransport(rle_w=12, burst=True)
+        self._capture(transport)
+        self.assertEqual(transport.burst_calls, [(4, 12)])  # the counts' own lane
+
+    def test_unavailable_burst_falls_back_to_the_window(self):
+        transport = RunLengthTransport(burst=True)
+
+        def unavailable(n_entries, lane_width):
+            raise BurstUnavailableError("burst readout is off")
+
+        transport.read_run_length_block = unavailable
+        _, result = self._capture(transport)
+        self.assertEqual(result.run_lengths, [3, 1, 6, 1])
+
+    def test_plain_capture_on_an_rle_core_has_no_run_lengths(self):
+        transport = RunLengthTransport(burst=True)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        analyzer.arm()
+        result = analyzer.capture(timeout=0.01)
+        self.assertEqual(result.run_lengths, [])
+        self.assertEqual(transport.burst_calls, [])
+
+    def test_entries_place_at_their_start_clock(self):
+        result = CaptureResult(
+            config=self._cfg(rle=True), samples=[1, 2, 3], run_lengths=[3, 1, 2]
+        )
+        self.assertEqual(entry_start_clocks(result), [0, 3, 4])
+        self.assertEqual(vcd_simulation_times(result), [0, 3, 4])
+        self.assertEqual(expand_run_lengths(result), [1, 1, 1, 2, 3, 3])
+        with self.assertRaises(ValueError):
+            expand_run_lengths(result, max_samples=5)
+        plain = CaptureResult(config=self._cfg(), samples=[5, 6])
+        self.assertEqual(vcd_simulation_times(plain), [0, 1])
+        self.assertEqual(expand_run_lengths(plain), [5, 6])
+
+    def test_vcd_keeps_the_last_run_length(self):
+        analyzer = Analyzer(RunLengthTransport())
+        cfg = self._cfg(rle=True)
+        one = CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10])
+        self.assertTrue(analyzer.export_vcd_text(one).endswith("#2\nb00000010 s\n#12\n"))
+        segments = [
+            CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10], segment=0),
+            CaptureResult(config=cfg, samples=[3], run_lengths=[5], segment=1),
+        ]
+        text = analyzer.export_vcd_text_segments(segments)
+        # Segment 1 starts where segment 0's last run ends, and the dump ends
+        # where segment 1's run does.
+        self.assertIn("#12\nb1 t\n", text)
+        self.assertTrue(text.endswith("#17\n"))
+
+    def test_exports_carry_the_run_lengths(self):
+        analyzer = Analyzer(RunLengthTransport())
+        result = CaptureResult(
+            config=self._cfg(rle=True), samples=[1, 2], run_lengths=[4, 1]
+        )
+        self.assertEqual(
+            analyzer.export_csv_text(result), "index,value,run_length\n0,1,4\n1,2,1\n"
+        )
+        self.assertEqual(
+            analyzer.export_json(result)["run_lengths"],
+            [{"index": 0, "value": 4}, {"index": 1, "value": 1}],
+        )
+        self.assertIn("#4\n", analyzer.export_vcd_text(result))
+        result.timestamps = [10, 14]
+        self.assertEqual(
+            analyzer.export_csv_text(result),
+            "index,value,timestamp,run_length\n0,1,10,4\n1,2,14,1\n",
+        )
+
+    def test_probe_reports_the_run_count_width(self):
+        analyzer = Analyzer(RunLengthTransport(rle_w=16))
+        analyzer.connect()
+        self.assertEqual(analyzer.probe()["rle_width"], 16)
+        analyzer = Analyzer(RunLengthTransport(rle_w=0))
+        analyzer.connect()
+        self.assertEqual(analyzer.probe()["rle_width"], 0)
 
 
 class SequencerTests(unittest.TestCase):
@@ -2215,7 +2949,8 @@ class EioControllerTests(unittest.TestCase):
             return orig_read(addr)
         t.read_reg = traced_read  # type: ignore[method-assign]
         eio.connect()
-        for addr in seen_reads:
+        # 0xF000 is the core-manager identity check, not an EIO register.
+        for addr in (a for a in seen_reads if a != 0xF000):
             self.assertFalse(addr & 0x8000, f"unexpected bit 15 on 0x{addr:04X}")
 
     def test_attach_restores_default_chain(self):
@@ -2431,6 +3166,108 @@ class SequencerBoundsTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             analyzer.configure(cfg)
+
+    def _refused_writes(self, transport: FakeTransport, cfg: CaptureConfig) -> list:
+        """Configure, expecting a refusal; returns the registers it wrote."""
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        writes = []
+        real = transport.write_reg
+        transport.write_reg = lambda addr, value: (writes.append(addr), real(addr, value))
+        with self.assertRaises(ValueError):
+            analyzer.configure(cfg)
+        return writes
+
+    def test_a_refused_sequence_writes_nothing(self):
+        # A refusal halfway would leave the core holding a configuration the
+        # Analyzer does not know, and the next arm would run it.
+        for name, sequence in (
+            ("too many stages", [SequencerStage()] * 3),
+            ("bad last stage", [SequencerStage(), SequencerStage(count_target=1 << 16)]),
+        ):
+            with self.subTest(name):
+                cfg = CaptureConfig(
+                    pretrigger=0,
+                    posttrigger=1,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=sequence,
+                )
+                writes = self._refused_writes(self._make_transport_with_stages(2), cfg)
+                self.assertEqual(writes, [])
+
+    def test_a_refused_wide_trigger_writes_nothing(self):
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=1 << 32, mask=(1 << 33) - 1),
+            sample_width=8,
+            depth=1024,
+        )
+        self.assertEqual(self._refused_writes(FakeTransport(), cfg), [])
+
+    def test_stage_fields_wider_than_seq_cfg_are_refused(self):
+        # pack_cfg would mask them: a count_target of 65536 programs 0,
+        # which the sequencer takes as already reached.
+        for field, value in (("count_target", 1 << 16), ("count_target", -1),
+                             ("next_state", 4), ("combine", 4)):
+            with self.subTest(field=field, value=value):
+                transport = self._make_transport_with_stages(2)
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                cfg = CaptureConfig(
+                    pretrigger=0,
+                    posttrigger=1,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=[SequencerStage(**{field: value})],
+                )
+                with self.assertRaisesRegex(ValueError, field):
+                    analyzer.configure(cfg)
+
+    def _seq_writes(self, trig_stages: int, trigger: TriggerConfig) -> dict:
+        """Configure a plain trigger; returns the SEQ-window writes by address."""
+        transport = self._make_transport_with_stages(trig_stages)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        writes = {}
+        real = transport.write_reg
+
+        def record(addr, value):
+            if 0x0040 <= addr < 0x0040 + 4 * 20:
+                writes[addr] = value
+            real(addr, value)
+
+        transport.write_reg = record
+        analyzer.configure(CaptureConfig(
+            pretrigger=0, posttrigger=1, trigger=trigger, sample_width=8, depth=1024,
+        ))
+        return writes
+
+    def test_plain_trigger_on_a_multi_stage_core_programs_one_final_stage(self):
+        # TRIG_STAGES > 1 cores trigger only from the sequencer; left alone,
+        # it runs whatever sequence the core last held.
+        cases = (
+            ("value_match", 0x00001000, 0),   # A EQ
+            ("edge_detect", 0x00001008, 0),   # A CHANGED
+            ("both", 0x00001380, 0x5A),       # A EQ | B CHANGED, combine OR
+        )
+        for mode, cfg_word, value_b in cases:
+            with self.subTest(mode=mode):
+                writes = self._seq_writes(4, TriggerConfig(mode=mode, value=0x5A, mask=0xF0))
+                # count_target 0 (cfg[31:16]): no count check, so the 16-bit
+                # match counter wrapping cannot hide a match.
+                self.assertEqual(writes[0x0040], cfg_word)
+                self.assertEqual((writes[0x0044], writes[0x0048]), (0x5A, 0xF0))
+                self.assertEqual(writes[0x004C], value_b)
+
+    def test_plain_trigger_on_a_single_stage_core_leaves_the_sequencer(self):
+        self.assertEqual(
+            self._seq_writes(1, TriggerConfig(mode="value_match", value=1, mask=0xFF)),
+            {},
+        )
 
     def test_sequence_absent_hw_stages_zero_raises(self):
         transport = self._make_transport_with_stages(0)

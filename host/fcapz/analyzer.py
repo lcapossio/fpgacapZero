@@ -6,10 +6,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 from ._version import _version_tuple
 from .registers import (
@@ -24,6 +26,7 @@ from .registers import (
     MGR_CAP_TLR_RESET,
 )
 from .transport import (
+    SlotSelection,
     REG_ADDR_SPACE_END,
     REGISTER_PIPE_CORE_IDS,
     BurstExpectation,
@@ -39,6 +42,19 @@ from .transport import (
 
 _log = logging.getLogger(__name__)
 
+
+class CaptureNotReady(TimeoutError):
+    """The armed capture has not completed yet.
+
+    A ``TimeoutError`` subclass so every existing ``except TimeoutError``
+    still catches it, but a distinct type because it is the one timeout that
+    is *expected*: the trigger simply has not fired, the core is still armed,
+    and the right response is to wait longer. A timeout from the transport
+    while reading status or sample data means something else entirely -- the
+    link may be wedged -- and must not be mistaken for it.
+    """
+
+
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
 # identity magic.  Hosts must reject any bitstream that does not present
@@ -47,6 +63,7 @@ ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
 CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
 _CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
+_EIO_CORE_ID = 0x494F  # fcapz.eio.EIO_CORE_ID ("IO"); eio imports this module
 
 
 def expected_ela_version_reg() -> int:
@@ -87,6 +104,7 @@ _ADDR_SEG_SEL = 0x00C0
 _ADDR_SEG_START = 0x00C8
 _ADDR_TIMESTAMP_W = 0x00C4
 _ADDR_FEATURES = 0x003C
+_FEATURE_STOR_QUAL = 1 << 4  # FEATURES[4]: built with STOR_QUAL
 _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
@@ -107,9 +125,21 @@ _ADDR_MGR_DESC_CAPS = 0xF01C
 # slot's pointer; on those the transport syncs the start first
 # (Transport.burst_start_sync).
 _MGR_CAP_BURST_START = 0x4
+# Most slots a core manager can report: MGR_COUNT is 16 bits wide, and
+# NUM_SLOTS has no smaller bound.  Anything above is garbage.
+_MGR_MAX_SLOTS = 0xFFFF
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
+# Run-length capture (RLE_W cores).  RLE_W reads 0 on cores without it.
+_ADDR_RLE_CTRL = 0x00A8
+_ADDR_RLE_W = 0x00CC
+# Post-trigger clock limit, RLE only (0 = none).  min(32, LEN_W + RLE_W) bits.
+_ADDR_RLE_POST_CLKS = 0x0090
+_RLE_CTRL_ENABLE = 1 << 0         # taken on arm
+_RLE_CTRL_WINDOW_COUNTS = 1 << 1  # timestamp DATA window returns run counts
+# BURST_PTR[31:30] = 0b11 bursts run counts on the timestamp lane.
+_RLE_MAX_W = 16
 
 _COMPARE_CAPS_LEGACY_FULL = 0x1FF
 _COMPARE_CAPS_LIGHTWEIGHT = 0x1C3
@@ -127,6 +157,7 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
     _ADDR_NUM_SEGMENTS,
     _ADDR_PROBE_MUX_W,
     _ADDR_COMPARE_CAPS,
+    _ADDR_RLE_W,
 )
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
@@ -147,6 +178,9 @@ _COMPARE_CAPS_DATA_OFFSET = 1 << 20
 _COMPARE_CAPS_CAPTURE_GEN = 1 << 21
 _ADDR_CAPTURE_GEN = 0x00F8
 _ADDR_DATA_OFFSET = 0x00F4
+# COMPARE_CAPS bit 22: SQ_MODE holds the compare mode plus one (1 = EQ,
+# 2 = NEQ).  Cores without it take the raw compare mode, so EQ (0) means off.
+_COMPARE_CAPS_SQ_MODE_PLUS1 = 1 << 22
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -194,6 +228,18 @@ class SequencerStage:
         return cfg
 
 
+def _validate_stage_fields(stage: SequencerStage, label: str) -> None:
+    """Refuse a field SEQ_CFG would truncate rather than program it changed.
+
+    `pack_cfg` masks each field to its width, so a count_target of 65536
+    would program 0, which the sequencer reads as already reached.
+    """
+    for name, top in (("combine", 3), ("next_state", 3), ("count_target", 0xFFFF)):
+        value = getattr(stage, name)
+        if not 0 <= value <= top:
+            raise ValueError(f"{label} {name} must be 0..{top}, got {value}")
+
+
 def _compare_mode_available(caps: int, mode: int) -> bool:
     """Return True when a 4-bit compare mode is implemented by the bitstream."""
     return 0 <= mode <= 8 and bool(caps & (1 << mode))
@@ -207,9 +253,55 @@ def _validate_compare_mode(caps: int, mode: int, context: str) -> None:
         )
 
 
+def _sq_mode_register(caps: int, mode: int) -> int:
+    """SQ_MODE register value for ``stor_qual_mode`` 0 (off), 1 (match), 2 (no match)."""
+    if mode not in (0, 1, 2):
+        raise ValueError(f"stor_qual_mode must be 0, 1, or 2, got {mode}")
+    if mode == 0 or caps & _COMPARE_CAPS_SQ_MODE_PLUS1:
+        return mode
+    if mode == 2:
+        return 1  # NEQ in the raw encoding
+    raise ValueError(
+        "store-when-match (stor_qual_mode=1) needs COMPARE_CAPS bit 22; "
+        "this bitstream's storage qualifier cannot select EQ. Rebuild the core."
+    )
+
+
 def _dual_compare_available(caps: int) -> bool:
     """Legacy bitstreams omitted this flag but always had comparator B."""
     return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
+
+
+def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
+    """The one final sequencer stage equivalent to a plain *trigger*.
+
+    A core built with TRIG_STAGES > 1 triggers only from its sequencer;
+    TRIG_MODE/VALUE/MASK feed the single-stage path those builds bypass.
+
+    ``count_target=0`` skips the count check.  The default of 1 means the
+    same on current RTL, whose hit counter saturates; bitstreams from fcapz
+    0.4.9 and earlier wrap the 16-bit counter, so after 65535 matches the
+    external trigger gate held back, a target of 1 read as not reached for
+    one sample.
+    """
+    if (trigger.value >> 32) or (trigger.mask >> 32):
+        raise ValueError(
+            "trigger value/mask exceed 32 bits; a multi-stage sequencer stage "
+            "compares only the low 32 bits"
+        )
+    value, mask = trigger.value & 0xFFFF_FFFF, trigger.mask & 0xFFFF_FFFF
+    eq, changed = 0, 8
+    if trigger.mode == "value_match":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              is_final=True, count_target=0)
+    if trigger.mode == "edge_detect":
+        return SequencerStage(cmp_mode_a=changed, value_a=value, mask_a=mask,
+                              is_final=True, count_target=0)
+    if trigger.mode == "both":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              cmp_mode_b=changed, value_b=value, mask_b=mask,
+                              combine=3, is_final=True, count_target=0)
+    raise ValueError("invalid trigger mode")
 
 
 def _validate_dual_compare(caps: int, stage: SequencerStage, context: str) -> None:
@@ -264,6 +356,14 @@ class CaptureConfig:
                                # (0..65535) — shifts the committed trigger
                                # sample N cycles after the trigger event,
                                # compensating for upstream pipeline latency
+    rle: bool = False          # run-length capture (cores built with RLE_W):
+                               # each stored entry is a sample plus how many
+                               # sample clocks it held.  Pre/post-trigger
+                               # lengths then count entries, not clocks.
+    post_clocks: int = 0       # run-length only: also end the post-trigger
+                               # window this many sample clocks after the
+                               # trigger, if posttrigger entries have not
+                               # ended it first (0 = no clock limit)
 
 
 @dataclass
@@ -274,13 +374,55 @@ class CaptureResult:
     overflow: bool = False
     timestamps: List[int] = field(default_factory=list)
     segment: int = 0  # which segment this result is from
+    # Run-length capture: sample clocks each entry in ``samples`` held (empty
+    # when the capture was not run-length).  The last entry is cut where the
+    # capture ends: on the clock it starts (length 1) when posttrigger
+    # entries end it, or on the post_clocks stop clock.  The signal may have
+    # held longer.
+    run_lengths: List[int] = field(default_factory=list)
+
+
+def entry_start_clocks(result: CaptureResult) -> list[int]:
+    """Sample clock, from the first entry, at which each entry starts.
+
+    ``0 .. n-1`` when the capture is not run-length.
+    """
+    n = len(result.samples)
+    if len(result.run_lengths) != n:
+        return list(range(n))
+    out: list[int] = []
+    clock = 0
+    for length in result.run_lengths:
+        out.append(clock)
+        clock += int(length)
+    return out
+
+
+def expand_run_lengths(result: CaptureResult, max_samples: int = 1 << 24) -> list[int]:
+    """One sample per sample clock: each entry repeated for its run length.
+
+    Returns ``result.samples`` unchanged when the capture is not run-length.
+    Raises `ValueError` when the expansion would exceed ``max_samples``.
+    """
+    if len(result.run_lengths) != len(result.samples):
+        return list(result.samples)
+    total = sum(int(n) for n in result.run_lengths)
+    if total > max_samples:
+        raise ValueError(
+            f"expanding the run lengths gives {total} samples, over max_samples={max_samples}"
+        )
+    out: list[int] = []
+    for value, length in zip(result.samples, result.run_lengths):
+        out.extend([value] * int(length))
+    return out
 
 
 def vcd_simulation_times(result: CaptureResult) -> list[int]:
     """Per-sample times for VCD ``#`` lines (``len(result.samples)`` entries).
 
     Without hardware timestamps this is ``0 .. n-1`` (one time unit per stored
-    sample, matching the historical behaviour).
+    sample, matching the historical behaviour), or for a run-length capture
+    each entry's start clock (:func:`entry_start_clocks`).
 
     With timestamps, values are **shifted by the first sample** so each dump
     starts at 0 while preserving relative spacing. Raw counters often jump
@@ -303,7 +445,16 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
             out.append(t)
             last = t
         return out
-    return list(range(n))
+    return entry_start_clocks(result)
+
+
+def _last_entry_clocks(result: CaptureResult) -> int:
+    """Clocks the last entry stands for: its run length on a run-length
+    capture, else one."""
+    runs = result.run_lengths
+    if runs and len(runs) == len(result.samples):
+        return int(runs[-1])
+    return 1
 
 
 class CaptureChangedError(RuntimeError):
@@ -339,8 +490,7 @@ class _Readout(NamedTuple):
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             return method(self, *args, **kwargs)
 
     return wrapper
@@ -403,6 +553,7 @@ class Analyzer:
         self._manager_override = None if manager is None else bool(manager)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
+        self._hw_rle_w: int = 0
         self._hw_num_segments: int = 1
         self._hw_compare_caps: int = 0
         # (MGR_CAPS, MGR_COUNT), read once per session.
@@ -435,15 +586,21 @@ class Analyzer:
             if self._chain != 1:
                 raise
 
-    def _select_instance(self) -> None:
-        with self.transport.transaction_lock():
-            self._select_chain()
-            if self._instance is not None:
-                self.transport.select_manager_instance_cached(
-                    self._chain,
-                    _ADDR_MGR_ACTIVE,
-                    self._instance,
-                )
+    def _slot_selection(self) -> SlotSelection | None:
+        if self._instance is None:
+            return None
+        return SlotSelection(self._chain, _ADDR_MGR_ACTIVE, self._instance)
+
+    @contextmanager
+    def _selected(self) -> Iterator[None]:
+        """Hold the transport, on this core's chain, with every access in the
+        body reaching this core's slot (see :meth:`Transport.slot_scope`).
+
+        A slot-less analyzer runs with no selection, never with the slot of
+        a controller that called it.
+        """
+        with self.transport.slot_scope(self._slot_selection(), chain=self._chain):
+            yield
 
     def pin_active_slot(self) -> None:
         """Bind an analyzer with no selected slot to the slot the core manager
@@ -454,9 +611,10 @@ class Analyzer:
         with self.transport.transaction_lock():
             if self._instance is not None or not self._behind_manager():
                 return
-            self._select_chain()
-            self._instance = int(self.transport.read_reg_stable(_ADDR_MGR_ACTIVE))
-            self._select_instance()
+            with self.transport.slot_scope(None, chain=self._chain):
+                self._instance = int(self.transport.read_reg_stable(_ADDR_MGR_ACTIVE))
+            with self._selected():
+                pass
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -480,18 +638,51 @@ class Analyzer:
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            with self._selected():
+                pass
+
+    def speaks_register_protocol(self, base_addr: int = 0) -> bool:
+        """Whether VERSION at *base_addr* answers with an ELA or EIO identity.
+
+        Gate any manager probe on this.  A ``0xF000`` read puts a
+        manager-address frame into whatever DR the chain has, and on an
+        EJTAG-AXI chain that frame decodes as burst write data; a VERSION read
+        is the frame every identity check already sends first.  Behind a
+        manager address 0 reaches the active slot, an ELA or an EIO.
+        """
+        with self._selected():
+            core_id = int(self.transport.read_reg(base_addr | _ADDR_VERSION)) & 0xFFFF
+        return core_id in (_ELA_CORE_ID, _EIO_CORE_ID)
+
+    def bind_manager_slot(self) -> None:
+        """Bind a slot-less analyzer to its manager's first ELA slot.
+
+        Without a slot every access reaches whichever slot the manager has
+        active, which another session or tool may have moved to an EIO.  An
+        analyzer that already has a slot, or a chain without a manager, is
+        left as it is.  Slot 0 is used if no slot reads as an ELA.
+        """
+        with self.transport.transaction_lock():
+            if (
+                self._instance is not None
+                or not self.speaks_register_protocol()
+                or not self._behind_manager()
+            ):
+                return
+            slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
+            self.select_instance(0 if slot is None else slot)
 
     def connect(self) -> None:
         """Connect the transport and select this analyzer's chain and slot."""
         with self.transport.transaction_lock():
             self._select_chain()
             self.transport.connect()
-            self.transport.invalidate_manager_instance_cache()
+            self.transport.forget_manager_chains()
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            with self._selected():
+                pass
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -510,7 +701,6 @@ class Analyzer:
         (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
         next step needs a verified idle core.
         """
-        self._select_instance()
         self._armed_gen = None
         state = self._slot_state()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
@@ -556,17 +746,18 @@ class Analyzer:
         subsequent resets.
 
         A startup-armed core re-loads its auto-arm flag from that register on
-        every soft reset, so a single reset can race the configuration
+        every soft reset. Current cores take the register with the reset write,
+        but on older ones a single reset can race the configuration
         clock-domain crossing and come back still armed. ``force_idle`` polls
         STATUS after the reset and, if the core re-armed, resets again -- by which
         point the runtime STARTUP_ARM register cleared by :meth:`configure` has
         crossed into the sample domain -- up to ``max_resets`` times.
 
         Timing assumption: a STATUS read round-trips over JTAG far slower than
-        the core's reset-to-re-arm latency (a couple of sample clocks), so the
+        the core's reset-to-re-arm latency (a few sample clocks), so the
         first post-reset STATUS read reliably observes the settled state. This
         holds for any practical sample clock; only a sample clock so slow that a
-        full JTAG access spans fewer than ~2 sample cycles could read a
+        full JTAG access spans fewer than ~5 sample cycles could read a
         transient idle before a pending re-arm propagates.
 
         Note this is intentionally lossy: it discards any in-flight or
@@ -589,16 +780,14 @@ class Analyzer:
         last_status = -1
         attempt = 0
         for attempt in range(max(1, max_resets)):
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
             attempt_deadline = time.monotonic() + _FORCE_IDLE_SETTLE_S
             while True:
-                with self.transport.transaction_lock():
-                    self._select_instance()
+                with self._selected():
                     last_status = read_status(_ADDR_STATUS)
                 if (last_status & _STATUS_BUSY) == 0:
                     return
@@ -649,7 +838,6 @@ class Analyzer:
         configure that raises leaves the analyzer unconfigured: the core may
         hold part of the new configuration.
         """
-        self._select_instance()
         self._config = None
         self._config_state = None
         self._armed_gen = None
@@ -667,6 +855,10 @@ class Analyzer:
             raise ValueError(
                 f"trigger_holdoff must be 0..65535, got {config.trigger_holdoff}"
             )
+        if config.post_clocks < 0:
+            raise ValueError(f"post_clocks must be >= 0, got {config.post_clocks}")
+        if config.post_clocks and not config.rle:
+            raise ValueError("post_clocks needs run-length capture (rle=True)")
 
         self._validate_probes(config.probes, config.sample_width)
 
@@ -704,8 +896,29 @@ class Analyzer:
         raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
         self._hw_compare_caps = raw_compare_caps
         hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
+        # Without the qualifier SQ_MODE is not decoded, and the capture would
+        # store every sample while the caller believes it was filtered.
+        if config.stor_qual_mode and not hw_features & _FEATURE_STOR_QUAL:
+            raise ValueError(
+                "storage qualification not present in this bitstream (STOR_QUAL=0)"
+            )
+        sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
+        hw_rle_w = int(_read(_ADDR_RLE_W))
+        self._hw_rle_w = hw_rle_w if 0 < hw_rle_w <= _RLE_MAX_W else 0
+        if config.rle:
+            # Checked before any write, like the SQ mode above.
+            if not self._hw_rle_w:
+                raise ValueError(
+                    "run-length capture not present in this bitstream (RLE_W=0)"
+                )
+            if config.decimation:
+                raise ValueError("run-length capture cannot be combined with decimation")
+            if config.stor_qual_mode:
+                raise ValueError(
+                    "run-length capture cannot be combined with storage qualification"
+                )
 
         # Segment depth check
         if self._hw_num_segments > 1:
@@ -715,6 +928,31 @@ class Analyzer:
                     f"pre+post+1 exceeds segment depth {seg_depth}"
                 )
 
+        sequence = config.sequence
+        if sequence is None and hw_trig_stages > 1:
+            # A multi-stage core ignores TRIG_MODE/VALUE/MASK, so a plain
+            # trigger left in them would arm whatever sequence the core last
+            # held (after reset, one that never fires).  Program it as stage 0.
+            sequence = [_simple_trigger_stage(config.trigger)]
+
+        if sequence is not None:
+            # All of it before any write: a sequence refused halfway would
+            # leave the core holding settings this Analyzer does not know.
+            if hw_trig_stages == 0:
+                raise ValueError(
+                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
+                )
+            if len(sequence) > hw_trig_stages:
+                raise ValueError(
+                    f"sequence has {len(sequence)} stages but hw supports "
+                    f"only {hw_trig_stages}"
+                )
+            for idx, stage in enumerate(sequence):
+                _validate_stage_fields(stage, f"stage {idx}")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
+                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+
         mode_bits = 0
         if config.trigger.mode in ("value_match", "both"):
             mode_bits |= _TRIG_VALUE_MATCH
@@ -722,6 +960,13 @@ class Analyzer:
             mode_bits |= _TRIG_EDGE_DETECT
         if mode_bits == 0:
             raise ValueError("invalid trigger mode")
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
 
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
@@ -736,13 +981,6 @@ class Analyzer:
         # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
         # always-true) trigger leaves the upper mask bits set, so the trigger is
         # not actually always-true and never fires (the capture never completes).
-        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
-        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
-            raise ValueError(
-                "trigger value/mask exceed 32 bits but this core lacks "
-                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
-                "comparator A are programmable"
-            )
         if wide:
             words = (config.sample_width + 31) // 32
             for k in range(1, words):
@@ -764,25 +1002,27 @@ class Analyzer:
         if raw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
             # A paged read puts it back to 0, but not one cut short.
             self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
-        if config.stor_qual_mode:
-            self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
-            self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
-            self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask)
+        # Always written, so mode 0 turns off a qualifier left by an earlier
+        # capture.
+        self.transport.write_reg(_ADDR_SQ_MODE, sq_mode)
+        self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask & 0xFFFF_FFFF)
+        if self._hw_rle_w:
+            # Always written on RLE cores, so rle=False turns off a run-length
+            # capture left by an earlier configure().
+            self.transport.write_reg(
+                _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE if config.rle else 0
+            )
+            # Clamped to the register: a larger limit would never be reached
+            # (a window of DEPTH entries spans fewer clocks).
+            post_clk_max = (1 << min(32, hw_depth.bit_length() + self._hw_rle_w)) - 1
+            self.transport.write_reg(
+                _ADDR_RLE_POST_CLKS,
+                min(config.post_clocks, post_clk_max) if config.rle else 0,
+            )
 
-        if config.sequence is not None:
-            if hw_trig_stages == 0:
-                raise ValueError(
-                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
-                )
-            if len(config.sequence) > hw_trig_stages:
-                raise ValueError(
-                    f"sequence has {len(config.sequence)} stages but hw supports "
-                    f"only {hw_trig_stages}"
-                )
-            for idx, stage in enumerate(config.sequence):
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
-                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+        if sequence is not None:
+            for idx, stage in enumerate(sequence):
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
@@ -813,7 +1053,6 @@ class Analyzer:
         External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
         cannot block an immediate run.
         """
-        self._select_instance()
         _read = self.transport.read_reg_stable
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
@@ -853,7 +1092,6 @@ class Analyzer:
         :class:`CaptureChangedError` if another controller armed or reset the
         core at the same time; the capture read later must be this arm's.
         """
-        self._select_instance()
         state = self._check_configured_state("at arm")
         self._armed_gen = None
         before = self._capture_gen()
@@ -889,15 +1127,13 @@ class Analyzer:
         deadline = time.monotonic() + timeout
         read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
         if self._config_state is not None:
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 self._check_configured_state("while waiting for the capture")
         return False
 
@@ -910,8 +1146,7 @@ class Analyzer:
         "reading back" instead of blanketing both under one blocking capture.
         """
         read_status = self.transport.read_reg_stable
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             s = int(read_status(_ADDR_STATUS))
         return {
             "armed": bool(s & _STATUS_ARMED),
@@ -945,7 +1180,6 @@ class Analyzer:
     @_burst_epoch_checked
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
-        self._select_instance()
         if self._hw_timestamp_w == 0:
             return []
         self._set_data_window_end()
@@ -1044,6 +1278,54 @@ class Analyzer:
             and self._behind_manager()
         )
 
+    @_selected_transaction
+    @_burst_epoch_checked
+    def _read_run_lengths(self, total: int) -> list[int]:
+        """Read the run length (sample clocks) of each captured entry.
+
+        Empty unless the configured capture is run-length.  Counts travel on
+        the timestamp lane: a burst with ``BURST_PTR[31:30] = 0b11`` when the
+        transport has one, else the timestamp DATA window with
+        ``RLE_CTRL[1]`` set.
+        """
+        if not (self._config is not None and self._config.rle and self._hw_rle_w):
+            return []
+        if total <= 0:
+            return []
+        # The lane is as wide as the timestamps, or the counts without them.
+        lane_w = self._hw_timestamp_w or self._hw_rle_w
+        mask = (1 << self._hw_rle_w) - 1
+
+        burst = getattr(self.transport, "read_run_length_block", None)
+        has_burst = self._selected_slot_has_burst()
+        # A two-chain run-length burst never reaches a managed slot (see
+        # _managed_burst_off_chain): read the window instead.
+        if callable(burst) and has_burst and not self._managed_burst_off_chain(has_burst):
+            try:
+                raw = burst(total, lane_w)
+            except BurstUnavailableError as exc:
+                _log.info("run-length burst unavailable (%s); reading the window", exc)
+            else:
+                return [(v & mask) + 1 for v in raw]
+
+        self._set_data_window_end()
+        words_per_sample = (self._config.sample_width + 31) // 32
+        base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
+        words_per = (lane_w + 31) // 32
+        # Bit 0 is kept: it is taken on arm, and a re-arm without configure()
+        # (continuous capture) must still capture run-length.
+        self.transport.write_reg(
+            _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE | _RLE_CTRL_WINDOW_COUNTS
+        )
+        try:
+            raw = self._read_window(
+                base, total * words_per, self.transport.read_block,
+                self.transport.read_window_block,
+            )
+        finally:
+            self.transport.write_reg(_ADDR_RLE_CTRL, _RLE_CTRL_ENABLE)
+        return [c + 1 for c in _join_timestamp_words(raw, words_per, mask)]
+
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
 
@@ -1065,8 +1347,7 @@ class Analyzer:
         if self._manager_override is not None:
             return self._manager_override
         if self._manager_found is None:
-            with self.transport.transaction_lock():
-                self._select_chain()
+            with self._selected():
                 read = self.transport.read_reg_stable
                 version = int(read(_ADDR_MGR_VERSION))
                 if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
@@ -1075,7 +1356,7 @@ class Analyzer:
                     found = True
                 else:
                     found = self._manager_block_matches(read) and self._desc_index_writable(
-                        read, self.transport.write_reg
+                        read, self.transport.write_reg, self.transport.read_regs_after_write
                     )
             self._manager_found = found
         return self._manager_found
@@ -1086,8 +1367,9 @@ class Analyzer:
         inside its DATA + timestamp windows (``DEPTH`` bounds the capture)."""
         sample_w = max(1, int(read(_ADDR_SAMPLE_W)))
         depth = int(read(_ADDR_DEPTH))
-        ts_w = int(read(_ADDR_TIMESTAMP_W))
-        words_per_sample = (sample_w + 31) // 32 + (ts_w + 31) // 32
+        # The aux window holds timestamps, or run counts on a core without them.
+        aux_w = int(read(_ADDR_TIMESTAMP_W)) or int(read(_ADDR_RLE_W))
+        words_per_sample = (sample_w + 31) // 32 + (aux_w + 31) // 32
         return addr < _ADDR_DATA_BASE + depth * words_per_sample * 4
 
     @staticmethod
@@ -1099,10 +1381,11 @@ class Analyzer:
         active = int(read(_ADDR_MGR_ACTIVE))
         stride = int(read(_ADDR_MGR_STRIDE))
         caps = int(read(_ADDR_MGR_CAPS))
-        return 1 <= count <= 0xFFFF and active < count and stride == 0 and bool(caps & 0x1)
+        return (1 <= count <= _MGR_MAX_SLOTS and active < count and stride == 0
+                and bool(caps & 0x1))
 
     @staticmethod
-    def _desc_index_writable(read, write) -> bool:
+    def _desc_index_writable(read, write, write_then_read) -> bool:
         """Whether ``MGR_DESC_INDEX`` latches a write of another valid slot.
 
         A manager with descriptors (``MGR_CAPS`` bit 1) latches any index
@@ -1110,6 +1393,11 @@ class Analyzer:
         up, so the word it returns there stays put.  The original index is
         restored, even when a read fails.  Without descriptors, or with one
         slot and so no other valid index, the register match alone decides.
+
+        The probe write and its readback are one backend operation
+        (``write_then_read``, :meth:`Transport.read_regs_after_write`), so
+        another client moving ``MGR_DESC_INDEX`` in between cannot make a
+        manager read as a standalone core.
 
         A failed read or write propagates, so nothing is cached for the
         session and the next call decides afresh.
@@ -1123,9 +1411,11 @@ class Analyzer:
             if original >= count:
                 return False
             probe = (original + 1) % count
-            write(_ADDR_MGR_DESC_INDEX, probe)
             try:
-                return int(read(_ADDR_MGR_DESC_INDEX)) == probe
+                (latched,) = write_then_read(
+                    _ADDR_MGR_DESC_INDEX, probe, [_ADDR_MGR_DESC_INDEX]
+                )
+                return int(latched) == probe
             finally:
                 write(_ADDR_MGR_DESC_INDEX, original)
 
@@ -1144,12 +1434,11 @@ class Analyzer:
         active slot is read from ``MGR_ACTIVE`` on every call: another
         controller, or :meth:`CoreManager.select_raw`, may have moved it.
         """
-        with self.transport.transaction_lock():
+        with self._selected():
             self.transport.burst_start_sync = False
             self.transport.burst_expect = None
             if not self._behind_manager():
                 return True
-            self._select_chain()
             read = self.transport.read_reg
             if self._manager_caps is None:
                 self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
@@ -1181,9 +1470,12 @@ class Analyzer:
                 )
             caps = self._manager_slot_caps.get(slot)
             if caps is None:
-                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-                caps = int(read(_ADDR_MGR_DESC_CAPS))
-                self._manager_slot_caps[slot] = caps
+                # One backend operation: another client moving DESC_INDEX in
+                # between would hand this slot another slot's capabilities.
+                (caps,) = self.transport.read_regs_after_write(
+                    _ADDR_MGR_DESC_INDEX, slot, [_ADDR_MGR_DESC_CAPS]
+                )
+                self._manager_slot_caps[slot] = int(caps)
             return bool(caps & 0x1)
 
     def _check_burst_epochs(
@@ -1207,8 +1499,12 @@ class Analyzer:
                     f"before, {tlr} after), which cancels a burst on this hub"
                 )
         epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
-        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, header.slot)
-        slot_epoch = int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF
+        # One backend operation: another client moving DESC_INDEX in between
+        # would hand this burst another slot's epoch.
+        (slot_epoch,) = self.transport.read_regs_after_write(
+            _ADDR_MGR_DESC_INDEX, header.slot, [ADDR_MGR_SLOT_EPOCH]
+        )
+        slot_epoch = int(slot_epoch) & 0xFFFF
         if (epoch, slot_epoch) != (header.mgr_epoch, header.slot_epoch):
             raise BurstIntegrityError(
                 f"slot {header.slot} or its core manager was reset during the "
@@ -1232,7 +1528,14 @@ class Analyzer:
         epoch says one happened.  Another controller's select and its select
         back leave ``MGR_ACTIVE`` as it was: the select count says one
         happened.  It is read before ``MGR_ACTIVE``, so an unchanged count
-        later means the slot read here stayed active in between."""
+        later means the slot read here stayed active in between.
+
+        Where the transport proves every access reaches this analyzer's slot
+        whatever other controllers select
+        (:meth:`Transport.slot_routing_isolated`), neither ``MGR_ACTIVE`` nor
+        the select count is evidence of a misrouted access, and neither is
+        checked: the slot is the analyzer's own, and the select count
+        ``None``."""
         if not self._behind_manager():
             return None
         read = self.transport.read_reg
@@ -1241,6 +1544,13 @@ class Analyzer:
         caps = self._manager_caps[0]
         if not caps & MGR_CAP_EPOCH_OWNER:
             return None
+        if self._instance is not None and self.transport.slot_routing_isolated(
+            self._chain, self._instance
+        ):
+            hub_epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
+            return _SlotState(
+                self._instance, self._slot_epoch(self._instance), hub_epoch, None
+            )
         foreign = None
         if caps & MGR_CAP_SELECT_COUNT:
             own = self.transport.manager_select_writes(self._chain)
@@ -1254,10 +1564,16 @@ class Analyzer:
                 f"hub was reset (MGR_EPOCH {hub_epoch}), after this analyzer "
                 "selected its slot"
             )
-        self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-        return _SlotState(
-            slot, int(read(ADDR_MGR_SLOT_EPOCH)) & 0xFFFF, hub_epoch, foreign
+        return _SlotState(slot, self._slot_epoch(slot), hub_epoch, foreign)
+
+    def _slot_epoch(self, slot: int) -> int:
+        """``MGR_SLOT_EPOCH`` of *slot*, selected through ``MGR_DESC_INDEX``
+        in the same backend operation as the read, so another client moving
+        ``DESC_INDEX`` in between cannot hand back another slot's epoch."""
+        (epoch,) = self.transport.read_regs_after_write(
+            _ADDR_MGR_DESC_INDEX, slot, [ADDR_MGR_SLOT_EPOCH]
         )
+        return int(epoch) & 0xFFFF
 
     def _tlr_count(self) -> int | None:
         """``MGR_TLR_COUNT`` on a hub whose Test-Logic-Reset resets the JTAG
@@ -1447,10 +1763,9 @@ class Analyzer:
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
-            raise TimeoutError("capture did not complete within timeout")
+            raise CaptureNotReady("capture did not complete within timeout")
 
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             return self._read_capture(None)
 
     def wait_all_segments_done(
@@ -1464,7 +1779,6 @@ class Analyzer:
         """Read back data from a specific segment after all segments are done.
 
         Raises like :meth:`capture`."""
-        self._select_instance()
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
         return self._read_capture(seg_idx)
@@ -1499,6 +1813,7 @@ class Analyzer:
                 samples.append(val & mask)
 
         timestamps = self._read_timestamps(total)
+        run_lengths = self._read_run_lengths(total)
         self._readout_end(readout)
 
         return CaptureResult(
@@ -1507,6 +1822,7 @@ class Analyzer:
             overflow=bool(status & _STATUS_OVERFLOW),
             timestamps=timestamps,
             segment=0 if seg_idx is None else seg_idx,
+            run_lengths=run_lengths,
         )
 
     def export_json(self, result: CaptureResult) -> Dict:
@@ -1521,6 +1837,10 @@ class Analyzer:
             "posttrigger": cfg.posttrigger,
             "channel": cfg.channel,
             "decimation": cfg.decimation,
+            # Recorded so an offline reader knows whether the samples are
+            # consecutive cycles. AXI reassembly, for one, is only sound when
+            # they are (see axi_decode.decode_axi).
+            "stor_qual_mode": cfg.stor_qual_mode,
             "ext_trigger_mode": cfg.ext_trigger_mode,
             "trigger": {
                 "mode": cfg.trigger.mode,
@@ -1531,9 +1851,22 @@ class Analyzer:
             "segment": result.segment,
             "samples": [{"index": i, "value": v} for i, v in enumerate(result.samples)],
         }
+        if cfg.probes:
+            # The field map, so a reader does not have to guess it back from
+            # the flattened width -- several geometries share one width.
+            d["probes"] = [
+                {"name": pr.name, "width": pr.width, "lsb": pr.lsb}
+                for pr in cfg.probes
+            ]
         if result.timestamps:
             d["timestamps"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)
+            ]
+        if result.run_lengths:
+            # Sample clocks per entry; the last one is cut where the capture
+            # ended (see CaptureResult.run_lengths).
+            d["run_lengths"] = [
+                {"index": i, "value": v} for i, v in enumerate(result.run_lengths)
             ]
         return d
 
@@ -1544,15 +1877,21 @@ class Analyzer:
         )
 
     def export_csv_text(self, result: CaptureResult) -> str:
-        """Return ``result`` as CSV text: ``index,value`` (plus ``timestamp`` if present)."""
+        """Return ``result`` as CSV text: ``index,value``, plus ``timestamp`` and
+        ``run_length`` columns when the capture has them."""
+        n = len(result.samples)
+        columns: list[tuple[str, list[int]]] = []
         if result.timestamps:
-            lines = ["index,value,timestamp"]
-            for i, (v, t) in enumerate(zip(result.samples, result.timestamps)):
-                lines.append(f"{i},{v},{t}")
-        else:
-            lines = ["index,value"]
-            for i, v in enumerate(result.samples):
-                lines.append(f"{i},{v}")
+            columns.append(("timestamp", result.timestamps))
+        if len(result.run_lengths) == n and n:
+            columns.append(("run_length", result.run_lengths))
+        if result.timestamps:
+            # Rows stop at the shorter of samples and timestamps, as before.
+            n = min(n, len(result.timestamps))
+        lines = [",".join(["index", "value", *(name for name, _ in columns)])]
+        for i in range(n):
+            row = [str(i), str(result.samples[i]), *(str(col[i]) for _, col in columns)]
+            lines.append(",".join(row))
         return "\n".join(lines) + "\n"
 
     def write_csv(self, result: CaptureResult, out_path: str) -> None:
@@ -1626,6 +1965,9 @@ class Analyzer:
             if ts_var_id and i < len(result.timestamps):
                 ts_bits = format(result.timestamps[i], f"0{ts_w}b")
                 lines.append(f"b{ts_bits} {ts_var_id}")
+        if sim_times and _last_entry_clocks(result) > 1:
+            # Close the dump where the last run ends, so its length survives.
+            lines.append(f"#{sim_times[-1] + _last_entry_clocks(result)}")
         return "\n".join(lines) + "\n"
 
     def write_vcd(self, result: CaptureResult, out_path: str) -> None:
@@ -1695,7 +2037,10 @@ class Analyzer:
                     val = (sample >> lsb) & ((1 << width) - 1)
                     lines.append(f"b{val:0{width}b} {var_id}")
             if sim_times:
-                offset += sim_times[-1] + 1
+                # The next segment starts where this one's last entry ends.
+                offset += sim_times[-1] + _last_entry_clocks(result)
+        if results[-1].samples and _last_entry_clocks(results[-1]) > 1:
+            lines.append(f"#{offset}")
         return "\n".join(lines) + "\n"
 
     def capture_continuous(
@@ -1733,9 +2078,8 @@ class Analyzer:
     @_selected_transaction
     def _read_ela_probe_registers_raw(
         self,
-    ) -> tuple[int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         """Read ELA identity / feature registers on this analyzer's chain."""
-        self._select_instance()
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -1748,6 +2092,7 @@ class Analyzer:
             num_segments = max(1, int(vals[6]))
             probe_mux_w = int(vals[7])
             compare_caps = int(vals[8])
+            rle_w = int(vals[9])
         else:
             _vread = self.transport.read_reg_stable
             version = int(_vread(_ADDR_VERSION))
@@ -1759,6 +2104,9 @@ class Analyzer:
             num_segments = max(1, int(_vread(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(_vread(_ADDR_PROBE_MUX_W))
             compare_caps = int(_vread(_ADDR_COMPARE_CAPS))
+            rle_w = int(_vread(_ADDR_RLE_W))
+        if not 0 <= rle_w <= _RLE_MAX_W:
+            rle_w = 0
         if compare_caps == 0:
             compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
@@ -1771,6 +2119,7 @@ class Analyzer:
             num_segments,
             probe_mux_w,
             compare_caps,
+            rle_w,
         )
 
     @staticmethod
@@ -1784,6 +2133,7 @@ class Analyzer:
         num_segments: int,
         probe_mux_w: int,
         compare_caps: int,
+        rle_w: int = 0,
     ) -> Dict:
         core_id = version & 0xFFFF
         return {
@@ -1794,7 +2144,7 @@ class Analyzer:
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
             "trig_stages": int(features & 0xF),
-            "has_storage_qualification": bool(features & (1 << 4)),
+            "has_storage_qualification": bool(features & _FEATURE_STOR_QUAL),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),
@@ -1808,6 +2158,8 @@ class Analyzer:
             # their full sample width, not just comparator A's low 32 bits, via
             # the wide-comparator window that configure() programs.
             "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
+            # Run-count width of a run-length capture core (0 = not built).
+            "rle_width": rle_w,
         }
 
     def probe_optional(self) -> Optional[Dict]:
@@ -1869,7 +2221,7 @@ class Analyzer:
         trigger sequencer depth, 0 if absent), `has_storage_qualification`
         (FEATURES[4]), and the rest of the feature flags.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew = (
             self._read_ela_probe_registers_raw()
         )
         core_id = version & 0xFFFF
@@ -1879,7 +2231,9 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        return self._probe_dict_from_raw(
+            version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew
+        )
 
 
 def _infer_ir_table_name(tap: str) -> str:
@@ -1914,7 +2268,13 @@ def _board_label(tap: str, port: int, identity: Dict) -> str:
 
 
 def _probe_openocd_board(
-    *, host: str, port: int, tap: str, chain: int, timeout_sec: float
+    *,
+    host: str,
+    port: int,
+    tap: str,
+    chain: int,
+    timeout_sec: float,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> Optional[Dict]:
     """Probe one OpenOCD tap for an fcapz ELA, trying each IR-table preset.
 
@@ -1929,6 +2289,8 @@ def _probe_openocd_board(
     transport = OpenOcdTransport(
         host=host, port=port, tap=tap, connect_timeout_sec=timeout_sec
     )
+    if register is not None:
+        register(transport)
     try:
         transport.connect()
     except OSError:
@@ -1941,9 +2303,11 @@ def _probe_openocd_board(
                 if table is not None
                 else dict(OpenOcdTransport.DEFAULT_IR_TABLE)
             )
-            transport.invalidate_manager_instance_cache()
+            transport.forget_manager_chains()
             try:
-                identity = Analyzer(transport, chain=chain).probe_optional()
+                candidate = Analyzer(transport, chain=chain)
+                candidate.bind_manager_slot()
+                identity = candidate.probe_optional()
             except (OSError, RuntimeError, KeyError, ValueError):
                 identity = None
             if identity:
@@ -1971,6 +2335,7 @@ def discover_boards(
     chain: int = 1,
     timeout_sec: float = 5.0,
     budget_sec: Optional[float] = None,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> List[Dict]:
     """Find fpgacapZero-compatible boards across running OpenOCD instances.
 
@@ -1993,6 +2358,8 @@ def discover_boards(
     Without it a multi-port sweep against filtered ports can take
     ``len(ports) * timeout_sec`` and outlive the caller's own deadline (the web
     client aborts its request, but that cannot cancel this work server-side).
+    *register*, if given, receives each transport before it connects, so a
+    caller on another thread can ``cancel()`` the sweep.
     """
     deadline = None if budget_sec is None else time.monotonic() + float(budget_sec)
 
@@ -2008,7 +2375,9 @@ def discover_boards(
         if step <= 0:
             break  # budget spent — return what we have
         try:
-            taps = list_openocd_taps(host=host, port=port, timeout_sec=step)
+            taps = list_openocd_taps(
+                host=host, port=port, timeout_sec=step, register=register
+            )
         except OSError:
             continue  # nothing listening on this port — skip, don't fail
         for tap in taps:
@@ -2016,7 +2385,8 @@ def discover_boards(
             if step <= 0:
                 break
             entry = _probe_openocd_board(
-                host=host, port=port, tap=tap, chain=chain, timeout_sec=step
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=step,
+                register=register,
             )
             if entry is not None:
                 boards.append(entry)
@@ -2041,10 +2411,16 @@ class CoreManager:
             if self._chain != 1:
                 raise
 
+    @contextmanager
+    def _unselected(self) -> Iterator[None]:
+        """Hold the transport on the manager's chain with no slot selected:
+        the manager's own registers answer for any slot."""
+        with self.transport.slot_scope(None, chain=self._chain):
+            yield
+
     def probe(self) -> Dict:
         """Read manager identity and slot count."""
-        with self.transport.transaction_lock():
-            self._select_chain()
+        with self._unselected():
             read = self.transport.read_reg_stable
             version = int(read(_ADDR_MGR_VERSION))
             core_id = version & 0xFFFF
@@ -2066,29 +2442,6 @@ class CoreManager:
             }
             return info
 
-    def slot_core_ids(self) -> List[int]:
-        """Return the core ID (``VERSION[15:0]``) of every slot, in order.
-
-        Read from the descriptors when the manager has them (``MGR_CAPS``
-        bit 1).  Without them, each slot is selected in turn and its VERSION
-        read, and the slot that was active is selected again.  Raises
-        ``RuntimeError`` if no manager answers on this chain.
-        """
-        with self.transport.transaction_lock():
-            info = self.probe()
-            count = int(info["num_slots"])
-            if info["capabilities"] & 0x2:
-                return [int(self.slot_info(i)["core_id"]) for i in range(count)]
-            select = self.transport.select_manager_instance_cached
-            core_ids: List[int] = []
-            try:
-                for idx in range(count):
-                    select(self._chain, _ADDR_MGR_ACTIVE, idx)
-                    core_ids.append(int(self.transport.read_reg(_ADDR_VERSION)) & 0xFFFF)
-            finally:
-                select(self._chain, _ADDR_MGR_ACTIVE, int(info["active"]))
-            return core_ids
-
     def slot_info(self, instance: int) -> Dict:
         """Return descriptor info for one slot.
 
@@ -2098,8 +2451,7 @@ class CoreManager:
         and capabilities 0.
         """
         instance = int(instance)
-        with self.transport.transaction_lock():
-            self._select_chain()
+        with self._unselected():
             read = self.transport.read_reg
             count = int(read(_ADDR_MGR_COUNT))
             if not 0 <= instance < count:
@@ -2109,22 +2461,76 @@ class CoreManager:
                 )
             if not int(read(_ADDR_MGR_CAPS)) & 0x2:
                 return {"instance": instance, "core_id": 0, "capabilities": 0}
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, instance)
-            selected = int(read(_ADDR_MGR_DESC_INDEX))
-            if selected != instance:
+            # One backend operation, so another client cannot move
+            # DESC_INDEX between the write and the reads.
+            selected, core, caps = self.transport.read_regs_after_write(
+                _ADDR_MGR_DESC_INDEX,
+                instance,
+                [_ADDR_MGR_DESC_INDEX, _ADDR_MGR_DESC_CORE, _ADDR_MGR_DESC_CAPS],
+            )
+            if int(selected) != instance:
                 raise RuntimeError(
                     f"core manager on chain {self._chain} did not select "
-                    f"descriptor {instance} (DESC_INDEX reads {selected})"
+                    f"descriptor {instance} (DESC_INDEX reads {int(selected)})"
                 )
             return {
                 "instance": instance,
-                "core_id": int(read(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-                "capabilities": int(read(_ADDR_MGR_DESC_CAPS)),
+                "core_id": int(core) & 0xFFFF,
+                "capabilities": int(caps),
             }
 
+    def slot_core_ids(self) -> list[int]:
+        """Core ID (``VERSION[15:0]``) of every slot, in order.
+
+        Read from the descriptors when the manager has them (``MGR_CAPS``
+        bit 1).  Without them each slot is selected in turn, its VERSION read,
+        and the slot that was active is selected again.  Raises
+        ``RuntimeError`` if no manager answers on this chain.  Each VERSION read
+        carries its own slot (see :meth:`Transport.slot_scope`).  The
+        transport's slot cache is dropped: the next pinned access re-selects
+        its own slot.
+        """
+        with self._unselected():
+            info = self.probe()
+            if info["capabilities"] & 0x2:
+                return [int(self.slot_info(i)["core_id"]) for i in range(info["num_slots"])]
+            read = self.transport.read_reg_stable
+            count = int(read(_ADDR_MGR_COUNT))
+            original = int(read(_ADDR_MGR_ACTIVE))
+            if not (1 <= count <= _MGR_MAX_SLOTS and original < count):
+                raise RuntimeError(
+                    f"core manager on chain {self._chain} reports {count} slots "
+                    f"with slot {original} active; refusing to walk them"
+                )
+            ids: list[int] = []
+            # Drop the cache before the first raw select: if a select or the
+            # restore fails, no controller may trust a slot it cached earlier.
+            self.transport.invalidate_manager_instance_cache()
+            try:
+                for slot in range(count):
+                    selection = SlotSelection(self._chain, _ADDR_MGR_ACTIVE, slot)
+                    with self.transport.slot_scope(selection):
+                        ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
+            finally:
+                # A counted, verified select (MGR_SELECT_COUNT tells this
+                # host's selects from other controllers').
+                self.transport.invalidate_manager_instance_cache()
+                self.transport.select_manager_instance_cached(
+                    self._chain, _ADDR_MGR_ACTIVE, original
+                )
+            return ids
+
+    def first_slot(self, core_id: int) -> int | None:
+        """Lowest slot holding *core_id*, or ``None`` if no slot does."""
+        for slot, cid in enumerate(self.slot_core_ids()):
+            if cid == core_id:
+                return slot
+        return None
+
     def select_raw(self, instance: int) -> None:
-        with self.transport.transaction_lock():
-            self._select_chain()
+        """Write *instance* to ``MGR_ACTIVE`` now, whatever was cached."""
+        with self._unselected():
+            self.transport.invalidate_manager_instance_cache()
             self.transport.select_manager_instance_cached(
                 self._chain,
                 _ADDR_MGR_ACTIVE,

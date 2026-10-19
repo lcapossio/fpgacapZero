@@ -58,7 +58,8 @@ module fcapz_ela_xilinx7 #(
     parameter EIO_OUT_W   = 1,
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
-    parameter USER1_DATA_EN = 1
+    parameter USER1_DATA_EN = 1,
+    parameter RLE_W = 0  // 0=no run-length capture, 1..16=run-count width
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -94,7 +95,9 @@ module fcapz_ela_xilinx7 #(
     wire [PTR_W-1:0]    burst_rd_addr;
     wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
-    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
+    // Aux lane: timestamps, or run counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    wire [((AUX_W > 0) ? AUX_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
@@ -119,7 +122,7 @@ module fcapz_ela_xilinx7 #(
     generate
         if (SINGLE_CHAIN_BURST != 0) begin : g_pipe_iface
             jtag_pipe_iface #(
-                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(AUX_W),
                 .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH),
                 .BURST_PTR_ADDR(16'h002C)
             ) u_pipe (
@@ -180,7 +183,7 @@ module fcapz_ela_xilinx7 #(
                 .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
                 .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
                 .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
-                .USER1_DATA_EN(USER1_DATA_EN)
+                .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -213,7 +216,7 @@ module fcapz_ela_xilinx7 #(
                 .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
                 .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT),
                 .REL_COMPARE(REL_COMPARE), .DUAL_COMPARE(DUAL_COMPARE),
-                .USER1_DATA_EN(USER1_DATA_EN)
+                .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -250,7 +253,7 @@ module fcapz_ela_xilinx7 #(
             );
 
             jtag_burst_read #(
-                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(AUX_W),
                 .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
             ) u_burst (
                 .arst(jtag_rst_data),

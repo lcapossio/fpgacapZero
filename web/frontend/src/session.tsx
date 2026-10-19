@@ -2,12 +2,16 @@ import { createContext, useContext, useMemo, useRef, useState } from "react";
 import type { MutableRefObject, ReactNode } from "react";
 import type { ConnectionParams, Core, Identity } from "./api";
 import type { AxiMonInfo } from "./axiMon";
+import type { AxiDecode } from "./axiTxn";
 
 /** The latest ELA capture, shared from the Run panel to the Viewer panels. */
 export interface CaptureState {
   vcd: string;
   csv?: string;
   json?: unknown;
+  /** AXI4-Lite transactions decoded from this capture, when its probe map
+   *  was an AXI monitor's. Undefined for every other core. */
+  axi?: AxiDecode;
   sampleCount?: number | string;
   /** VCD time of the trigger sample (the pretrigger-th stored sample), read
    *  from the VCD itself so it's correct for timestamped and plain captures
@@ -43,6 +47,11 @@ export interface ElaConfig {
   useSequencer: boolean;
   sequenceJson: string;
   segmented: boolean;
+  /** Run-length capture: store a repeated sample once with its clock count. */
+  rle: boolean;
+  /** Run-length only: end the post-trigger window this many clocks after the
+   *  trigger, if the post-trigger entries have not ended it (0 = off). */
+  postClocks: string;
   probesText: string;
 }
 
@@ -60,6 +69,8 @@ export const DEFAULT_ELA: ElaConfig = {
   useSequencer: false,
   sequenceJson: "",
   segmented: false,
+  rle: false,
+  postClocks: "0",
   probesText: "",
 };
 
