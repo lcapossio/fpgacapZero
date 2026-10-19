@@ -96,10 +96,8 @@ class EioController:
         selection = None
         if self._instance is not None:
             selection = SlotSelection(self._chain, _ADDR_MGR_ACTIVE, self._instance)
-        with self._t.transaction_lock():
-            self._select_chain()
-            with self._t.slot_scope(selection):
-                yield
+        with self._t.slot_scope(selection, chain=self._chain):
+            yield
 
     def _resolve_instance(self) -> None:
         """Bind a slot-less controller to its manager's first EIO slot.

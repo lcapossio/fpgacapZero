@@ -302,14 +302,21 @@ class Transport(ABC):
         return getattr(self._slot_local(), "selection", None)
 
     @contextmanager
-    def slot_scope(self, selection: SlotSelection | None) -> Iterator[None]:
-        """Run the body's register accesses against *selection*'s slot.
+    def slot_scope(
+        self, selection: SlotSelection | None, *, chain: int | None = None
+    ) -> Iterator[None]:
+        """Run the body's register accesses on *chain* against *selection*'s slot.
 
         Holds :meth:`transaction_lock` throughout.  The selection belongs to
-        the calling thread and lasts only for the body: on exit the enclosing
-        scope's selection, or none, is back, also after an exception.
-        ``None`` means the body carries no selection -- probes and
-        manager-wide reads, which must not inherit an enclosing slot.
+        the calling thread and lasts only for the body.  ``None`` means the
+        body carries no selection -- probes and manager-wide reads, which
+        must not inherit an enclosing slot.  *chain*, if given, is selected
+        for the body.
+
+        On exit, also after an exception, the enclosing scope gets back its
+        chain and then its slot, so a nested probe on another chain or slot
+        cannot leave the enclosing controller's next access misrouted.  A
+        top-level scope leaves its chain selected, as controllers always have.
 
         A backend with :attr:`atomic_slot_select` writes ``MGR_ACTIVE`` at the
         head of every backend operation in the scope that reaches a slot (an
@@ -322,28 +329,53 @@ class Transport(ABC):
         with self.transaction_lock():
             local = self._slot_local()
             previous = getattr(local, "selection", None)
+            previous_chain = getattr(local, "chain", None)
+            if chain is not None:
+                self._scope_select_chain(chain)
             local.selection = selection
-            completed = False
+            local.chain = previous_chain if chain is None else chain
+            failed = False
             try:
                 if selection is not None and not self.atomic_slot_select:
                     self.select_manager_instance_cached(
                         selection.chain, selection.active_addr, selection.slot
                     )
                 yield
-                completed = True
+            except BaseException:
+                failed = True
+                raise
             finally:
                 local.selection = previous
-            # Back in an enclosing scope on another slot: put its slot back
-            # for the accesses it still makes.
-            if (
-                completed
-                and previous is not None
-                and previous != selection
-                and not self.atomic_slot_select
-            ):
-                self.select_manager_instance_cached(
-                    previous.chain, previous.active_addr, previous.slot
-                )
+                local.chain = previous_chain
+                try:
+                    if (
+                        chain is not None
+                        and previous_chain is not None
+                        and previous_chain != chain
+                    ):
+                        self._scope_select_chain(previous_chain)
+                    if (
+                        previous is not None
+                        and previous != selection
+                        and not self.atomic_slot_select
+                    ):
+                        self.select_manager_instance_cached(
+                            previous.chain, previous.active_addr, previous.slot
+                        )
+                except Exception:
+                    # The hardware slot is unknown now: make the next scope
+                    # select for real.  The body's own error, if any, wins.
+                    self.invalidate_manager_instance_cache()
+                    if not failed:
+                        raise
+
+    def _scope_select_chain(self, chain: int) -> None:
+        try:
+            self.select_chain(chain)
+        except NotImplementedError:
+            # A single-chain transport: chain 1 is the only one there is.
+            if chain != 1:
+                raise
 
     def read_regs_after_write(
         self, write_addr: int, value: int, addrs: List[int]
@@ -2893,7 +2925,9 @@ class XilinxHwServerTransport(Transport):
 
         parts: list[str] = [
             "set _q [jtag sequence]",
-            *self._slot_select_tcl("_q", [base_addr]),
+            *self._slot_select_tcl(
+                "_q", [base_addr + (offset + i) * 4 for i in range(count)]
+            ),
             # Scan 0: set first address, no capture
             f"{ir_cmd}; "
             f"$_q drshift -state DRUPDATE -bits {n} {frames[0]}",

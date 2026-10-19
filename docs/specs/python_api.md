@@ -565,16 +565,25 @@ The calling thread's innermost `slot_scope` selection, or `None`.
 #### `Transport.slot_scope`
 
 ```python
-slot_scope(selection: SlotSelection | None) -> Iterator[None]
+slot_scope(
+    selection: SlotSelection | None,
+    *,
+    chain: int | None = None,
+) -> Iterator[None]
 ```
 
-Run the body's register accesses against *selection*'s slot.
+Run the body's register accesses on *chain* against *selection*'s slot.
 
 Holds `transaction_lock` throughout.  The selection belongs to
-the calling thread and lasts only for the body: on exit the enclosing
-scope's selection, or none, is back, also after an exception.
-`None` means the body carries no selection -- probes and
-manager-wide reads, which must not inherit an enclosing slot.
+the calling thread and lasts only for the body.  `None` means the
+body carries no selection -- probes and manager-wide reads, which
+must not inherit an enclosing slot.  *chain*, if given, is selected
+for the body.
+
+On exit, also after an exception, the enclosing scope gets back its
+chain and then its slot, so a nested probe on another chain or slot
+cannot leave the enclosing controller's next access misrouted.  A
+top-level scope leaves its chain selected, as controllers always have.
 
 A backend with `atomic_slot_select` writes `MGR_ACTIVE` at the
 head of every backend operation in the scope that reaches a slot (an

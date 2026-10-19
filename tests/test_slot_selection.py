@@ -224,6 +224,30 @@ class HwServerAtomicSelectionTests(unittest.TestCase):
         self.assertEqual(len(sent), 4)
         self.assertEqual([s.count(select) for s in sent], [1, 1, 1, 1])
 
+    def test_block_read_running_out_of_the_manager_block_is_selected(self):
+        """A block that starts in the manager block but reaches past it is
+        selected: only a sequence that stays inside the block is not."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        sent: list[str] = []
+        send = fake.send
+        t._send = lambda tcl, check=False, **kw: (sent.append(tcl), send(tcl))[1]  # type: ignore[method-assign]
+        t.data_window_end = 0x10000
+        select = t._pad_dr(t._frame_bits(addr=_MGR_ACTIVE, data=1, write=True))
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            t.read_window_block(0xF0FC, 2)
+            t.read_window_block(0xF000, 2)
+        self.assertIn(select, sent[0])
+        self.assertNotIn(select, sent[2])
+
+    def test_deep_manager_detection_survives_another_client(self):
+        """The DESC_INDEX latch probe (for a manager whose 0xF000 could alias
+        a deep standalone core) writes and reads back in one sequence."""
+        t, fake = _hw_server()
+        fake.slots[0].update({0x000C: 32, 0x0010: 32768})  # SAMPLE_W, DEPTH
+        a = Analyzer(t, instance=0)
+        self.assertTrue(a._behind_manager())
+
     def test_burst_selects_once_before_the_pointer_write(self):
         for single_chain in (True, False):
             for sync in (False, True):
@@ -294,6 +318,58 @@ class SlotScopeTests(unittest.TestCase):
             with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
                 pass  # cached: no write
         self.assertEqual(t.writes, [(_MGR_ACTIVE, 1), (_MGR_ACTIVE, 2), (_MGR_ACTIVE, 1)])
+
+    def test_exception_in_a_nested_scope_still_restores_the_outer_slot(self):
+        """Fallback backends: a nested scope that raises must put the
+        enclosing scope's slot back on the hardware."""
+        t = _FallbackTransport()
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+            with self.assertRaises(ValueError):
+                with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+                    raise ValueError
+            self.assertEqual(t.writes[-1], (_MGR_ACTIVE, 1))
+
+    def test_failed_restore_drops_the_cache_and_keeps_the_body_error(self):
+        t = _FallbackTransport()
+        fail = {"on": False}
+        real_write = t.write_reg
+
+        def write_reg(addr, value):
+            if fail["on"]:
+                raise OSError("cable gone")
+            real_write(addr, value)
+
+        t.write_reg = write_reg  # type: ignore[method-assign]
+        with self.assertRaises(OSError):
+            with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+                with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+                    fail["on"] = True
+        self.assertNotIn("_fcapz_manager_active_cache", t.__dict__)
+        fail["on"] = False
+        with self.assertRaises(KeyError):
+            with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1)):
+                with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+                    fail["on"] = True
+                    raise KeyError("body")
+        self.assertNotIn("_fcapz_manager_active_cache", t.__dict__)
+
+    def test_nested_probe_on_another_chain_restores_the_chain(self):
+        """A probe on chain 2 inside a chain-1 slot scope must leave the
+        enclosing scope's next access on chain 1, with its select."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        sent: list[str] = []
+        send = fake.send
+        t._send = lambda tcl, check=False, **kw: (sent.append(tcl), send(tcl))[1]  # type: ignore[method-assign]
+        ela = Analyzer(t, instance=1)
+        with ela._selected():
+            Analyzer(t, chain=2).speaks_register_protocol()
+            sent.clear()
+            t.write_reg(0x0004, 1)
+        select = t._pad_dr(t._frame_bits(addr=_MGR_ACTIVE, data=1, write=True))
+        self.assertEqual(t._active_chain, 1)
+        self.assertIn(select, sent[0])
+        self.assertIn(t._irshift_tcl("_w", chain=1), sent[0])
 
     def test_selection_is_per_thread(self):
         """A raw controller on another thread (EJTAG-UART on USER3, which

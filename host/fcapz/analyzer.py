@@ -517,10 +517,8 @@ class Analyzer:
         A slot-less analyzer runs with no selection, never with the slot of
         a controller that called it.
         """
-        with self.transport.transaction_lock():
-            self._select_chain()
-            with self.transport.slot_scope(self._slot_selection()):
-                yield
+        with self.transport.slot_scope(self._slot_selection(), chain=self._chain):
+            yield
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -1108,7 +1106,7 @@ class Analyzer:
                     found = True
                 else:
                     found = self._manager_block_matches(read) and self._desc_index_writable(
-                        read, self.transport.write_reg
+                        read, self.transport.write_reg, self.transport.read_regs_after_write
                     )
             self._manager_found = found
         return self._manager_found
@@ -1137,7 +1135,7 @@ class Analyzer:
                 and bool(caps & 0x1))
 
     @staticmethod
-    def _desc_index_writable(read, write) -> bool:
+    def _desc_index_writable(read, write, write_then_read) -> bool:
         """Whether ``MGR_DESC_INDEX`` latches a write of another valid slot.
 
         A manager with descriptors (``MGR_CAPS`` bit 1) latches any index
@@ -1145,6 +1143,11 @@ class Analyzer:
         up, so the word it returns there stays put.  The original index is
         restored, even when a read fails.  Without descriptors, or with one
         slot and so no other valid index, the register match alone decides.
+
+        The probe write and its readback are one backend operation
+        (``write_then_read``, :meth:`Transport.read_regs_after_write`), so
+        another client moving ``MGR_DESC_INDEX`` in between cannot make a
+        manager read as a standalone core.
 
         A failed read or write propagates, so nothing is cached for the
         session and the next call decides afresh.
@@ -1158,9 +1161,11 @@ class Analyzer:
             if original >= count:
                 return False
             probe = (original + 1) % count
-            write(_ADDR_MGR_DESC_INDEX, probe)
             try:
-                return int(read(_ADDR_MGR_DESC_INDEX)) == probe
+                (latched,) = write_then_read(
+                    _ADDR_MGR_DESC_INDEX, probe, [_ADDR_MGR_DESC_INDEX]
+                )
+                return int(latched) == probe
             finally:
                 write(_ADDR_MGR_DESC_INDEX, original)
 
@@ -1917,10 +1922,8 @@ class CoreManager:
     def _unselected(self) -> Iterator[None]:
         """Hold the transport on the manager's chain with no slot selected:
         the manager's own registers answer for any slot."""
-        with self.transport.transaction_lock():
-            self._select_chain()
-            with self.transport.slot_scope(None):
-                yield
+        with self.transport.slot_scope(None, chain=self._chain):
+            yield
 
     def probe(self) -> Dict:
         """Read manager identity and slot count."""
