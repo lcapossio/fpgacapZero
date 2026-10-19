@@ -112,11 +112,16 @@ class RpcServer:
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
         self._uart_transport: Transport | None = None
-        # Transports the running command built but has not yet installed in a
+        # Transports a running command built but has not yet installed in a
         # session field (they are still connecting or probing).  cancel_active
-        # runs on another thread and must reach them too.
-        self._opening: list[Transport] = []
+        # runs on another thread and must reach them too, without taking any
+        # lock a command holds: writers replace this tuple whole under
+        # _opening_lock, and readers just read the attribute.  Each handle()
+        # call removes only the transports it opened (_invocation.opened): the
+        # web gateway runs some commands concurrently with a blocked one.
+        self._opening: tuple[Transport, ...] = ()
         self._opening_lock = threading.Lock()
+        self._invocation = threading.local()
         # Optional server-managed OpenOCD (None = the openocd_* commands are
         # disabled and report so). Configured only by the web server launch.
         self._openocd_launcher = openocd_launcher
@@ -145,7 +150,10 @@ class RpcServer:
         command that built it returns."""
         transport = self._build_transport(req)
         with self._opening_lock:
-            self._opening.append(transport)
+            self._opening = (*self._opening, transport)
+        opened = getattr(self._invocation, "opened", None)
+        if opened is not None:
+            opened.append(transport)
         return transport
 
     def _live_transports(self) -> list[Transport]:
@@ -157,8 +165,7 @@ class RpcServer:
         """
         found: list[Transport] = []
         seen: set[int] = set()
-        with self._opening_lock:
-            opening = list(self._opening)
+        opening = self._opening  # an immutable snapshot; see __init__
         for holder in (
             self._analyzer,
             self._eio,
@@ -847,13 +854,21 @@ class RpcServer:
         return payload
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        outer = getattr(self._invocation, "opened", None)
+        opened: list[Transport] = []
+        self._invocation.opened = opened
         try:
             return self._handle(req)
         finally:
-            # Built transports are installed in a session field or closed by
-            # now; either way cancel no longer needs this list to find them.
-            with self._opening_lock:
-                self._opening.clear()
+            self._invocation.opened = outer
+            # This call's transports are installed in a session field or
+            # closed by now; either way cancel no longer needs this list to
+            # find them.  Other calls' entries stay.
+            if opened:
+                with self._opening_lock:
+                    self._opening = tuple(
+                        t for t in self._opening if all(t is not o for o in opened)
+                    )
 
     def _handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")

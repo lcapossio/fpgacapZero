@@ -698,6 +698,40 @@ class RpcLifecycleTests(unittest.TestCase):
                 self.assertTrue(transport.cancelled)
                 self.assertNotIn(transport, server._live_transports())
 
+    def test_a_concurrent_command_keeps_another_commands_opening_transport(self):
+        # The web gateway runs openocd_status/scan_targets outside its session
+        # lock; one finishing must not unregister a connect still in progress.
+        from fcapz.rpc import RpcServer
+
+        transport = self._BlockingConnect()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        worker = threading.Thread(
+            target=lambda: self._swallow(server.handle, {"cmd": "connect", "backend": "hw_server"})
+        )
+        worker.start()
+        self.assertTrue(transport.entered.wait(5.0))
+        self._swallow(server.handle, {"cmd": "openocd_status"})
+        self.assertIn(transport, server._live_transports())
+        server.cancel_active()
+        worker.join(5.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(transport.cancelled)
+
+    def test_cancel_takes_no_lock_a_command_holds(self):
+        server = self._connected_server()
+        done = threading.Event()
+        with server._opening_lock:  # a command registering a transport
+            threading.Thread(target=lambda: (server.cancel_active(), done.set())).start()
+            self.assertTrue(done.wait(2.0), "cancel_active waited for the command's lock")
+
+    @staticmethod
+    def _swallow(fn, *args):
+        try:
+            return fn(*args)
+        except Exception:  # noqa: BLE001 - the outcome is asserted separately
+            return None
+
     def test_eio_discover_closes_a_transport_whose_connect_fails(self):
         class _FailingConnect(FakeTransport):
             closed = False
