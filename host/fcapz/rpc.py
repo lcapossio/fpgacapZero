@@ -31,6 +31,7 @@ from .transport import (
     QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
+    hw_server_chain_shape_kwargs,
     list_openocd_taps,
     list_xilinx_hw_server_targets,
 )
@@ -431,6 +432,19 @@ class RpcServer:
         return dict(table) if table is not None else None
 
     @staticmethod
+    def _pin_manager_slot(analyzer: Analyzer) -> None:
+        """Bind the session to slot 0 when *analyzer*'s chain has a core manager.
+
+        Without a slot the analyzer uses whichever slot the manager last
+        selected, and an EIO side session on that chain moves it: connect then
+        saw no ELA on USER1 and autodetected another chain, and a later
+        capture could address an EIO.  Slot 0 is the first ELA in the
+        multi-core wrappers; a pinned slot is re-selected before every access.
+        """
+        if analyzer._behind_manager():  # noqa: SLF001 - detection lives there
+            analyzer.select_instance(0)
+
+    @staticmethod
     def _resolved_ir_name(req: Dict[str, Any]) -> str:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
@@ -525,14 +539,23 @@ class RpcServer:
                 ir_table=ir,
             )
         if backend == "hw_server":
+            fpga_name = str(req.get("tap", "xc7a100t"))
+            # The part family sets the chain shape exactly as the CLI and GUI
+            # do: register-IR mode on Zynq US+ MPSoC (xck*/xczu*), 6-bit IR on
+            # standalone UltraScale.  The resolved ir_table (explicit, or
+            # inferred from the same tap) supplies the opcodes; register-IR
+            # mode names USER chains directly and does not use them.
+            shape = hw_server_chain_shape_kwargs(fpga_name)
+            shape.pop("ir_table", None)
             return XilinxHwServerTransport(
                 host=host,
                 port=int(req.get("port", 3121)),
-                fpga_name=req.get("tap", "xc7a100t"),
+                fpga_name=fpga_name,
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
                 burst=bool(req.get("burst", True)),
                 ir_table=ir,
+                **shape,
             )
         if backend == "usb_blaster":
             tap = str(req.get("tap", "auto"))
@@ -806,6 +829,15 @@ class RpcServer:
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
 
+        # Each session holds its own transport, and each transport caches the
+        # core-manager slot it last wrote.  Another session (or a transient
+        # probe) can move MGR_ACTIVE between commands, so that cache can lie:
+        # forget it, and this command's first access re-selects its own slot.
+        for transport in self._live_transports():
+            invalidate = getattr(transport, "invalidate_manager_instance_cache", None)
+            if callable(invalidate):
+                invalidate()
+
         if cmd == "connect":
             # Reconnecting must start from a clean slate: release any prior
             # session (ELA + EIO/AXI/UART transports), not just the analyzer, so
@@ -819,6 +851,7 @@ class RpcServer:
             )
             try:
                 analyzer.connect()
+                self._pin_manager_slot(analyzer)
             except Exception:
                 # Don't leak the transport's child process / socket on a failed
                 # connect (hw_server down, wrong tap, program failure, ...).
@@ -833,6 +866,7 @@ class RpcServer:
                 # different DR protocol and must not see stray shifts).
                 for chain in (2,):
                     alt = Analyzer(analyzer.transport, chain=chain)
+                    self._pin_manager_slot(alt)
                     if alt.probe_optional() is not None:
                         analyzer = alt
                         break
@@ -862,6 +896,7 @@ class RpcServer:
             if new_chain != analyzer.bscan_chain:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
                 self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+                self._pin_manager_slot(self._analyzer)
             return self._ok(
                 chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
             )

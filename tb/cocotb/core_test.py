@@ -1559,6 +1559,62 @@ async def fcapz_ejtagaxi_protocol(dut):
 
 
 @cocotb.test()
+async def fcapz_ejtagaxi_burst_fill(dut):
+    """A burst read longer than the burst FIFO fills it, stalls, and resumes.
+
+    The host drains nothing until the FIFO is full, so the R channel is held
+    off by back-pressure.  Every beat the slave hands over must be written
+    exactly once: a registered rready used to accept a beat in the cycle the
+    FIFO filled and drop it.
+    """
+    axi_ram, _ = await init_ejtagaxi(dut)
+    beats = 24  # more than FIFO_DEPTH (16)
+    base = 0x0000_0100
+    values = [0xC000_0000 + i for i in range(beats)]
+    for i, value in enumerate(values):
+        axi_ram.write_dword(base + 4 * i, value)
+
+    accepted: list[int] = []
+
+    async def watch_r() -> None:
+        while True:
+            await RisingEdge(dut.axi_clk)
+            if _signal_is_one(dut.m_axi_rvalid) and _signal_is_one(dut.m_axi_rready):
+                accepted.append(_signal_int(dut.m_axi_rdata))
+
+    cocotb.start_soon(watch_r())
+
+    setup = (0b01 << 12) | (0b010 << 8) | (beats - 1)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, base, setup, 0))
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 60)
+    assert 0 < len(accepted) < beats, (
+        f"R channel did not stall on a full FIFO ({len(accepted)} beats accepted)")
+
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming scan
+    await axi_cdc_wait(dut)
+    got = []
+    for _ in range(beats):
+        out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+        assert not (axi_status(out) & 0x4), "error_sticky set during burst read"
+        got.append(axi_rdata(out))
+        await axi_cdc_wait(dut)
+
+    def first_mismatch(seen: list[int]) -> str:
+        for index, (have, want) in enumerate(zip(seen, values)):
+            if have != want:
+                return f"beat {index}: 0x{have:08X} != 0x{want:08X}"
+        return f"{len(seen)} beats, expected {len(values)}"
+
+    assert got == values, f"bridge returned wrong data, {first_mismatch(got)}"
+    assert accepted == values, f"R-channel handshakes wrong, {first_mismatch(accepted)}"
+
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x4)
+
+
+@cocotb.test()
 async def fcapz_ejtagaxi_reset_regression(dut):
     axi_ram, axi_trace = await init_ejtagaxi(dut)
 

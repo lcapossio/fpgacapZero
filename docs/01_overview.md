@@ -179,8 +179,10 @@ The host stack supports three JTAG transports out of the box:
 - **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
   default).  Programs the FPGA, talks to BSCANE2, hardware-validated
-  on Arty A7-100T, no extra software to install if you already have
-  Vivado.
+  on Arty A7-100T and on the Kria KV260 (Zynq UltraScale+ MPSoC), no
+  extra software to install if you already have Vivado.  On MPSoC parts
+  the chain mode is picked from the tap name (see
+  [chapter 14](14_transports.md)).
 - **OpenOCD** — cross-platform, works with any OpenOCD-supported JTAG
   adapter (FTDI, WCH CH347, CMSIS-DAP, J-Link, …) on any board.  Slower
   than hw_server but vendor-neutral.  Talks to OpenOCD's TCL listener
@@ -209,7 +211,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Vendor | TAP primitive | RTL wrapper | Hardware-validated |
 |--------|--------------|-------------|---------------------|
 | AMD/Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
-| AMD/Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ❌ lint-clean, not board-validated |
+| AMD/Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ Kria KV260 (Zynq UltraScale+ MPSoC); standalone Kintex / Virtex UltraScale(+) not board-validated |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |

@@ -9,6 +9,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Kria KV260 reference design and hardware test.** `examples/kv260/`
+  puts a core on every BSCANE2 USER chain of the K26 SOM (`xck26`): the
+  multi-core manager (two ELAs, one with a 4-stage sequencer, storage
+  qualification and relational compares, and two EIOs) on USER1, the AXI
+  monitor on USER2, the `_xilinxus` JTAG-UART on USER3 and the `_xilinxus`
+  AXI bridge on USER4. `pl_clk0` comes from the PS through a minimal block
+  design. The pytest suite programs the board through RPC `connect` and
+  exercises each core over hw_server's `-register` mode, plus the RPC
+  connect paths the web UI and MCP server use. `python
+  examples/kv260/build.py` builds it.
+
 - **MCP — multi-stage trigger sequences.** The capture `config` takes
   `trigger_sequence`, one typed object per sequencer stage (compare modes
   `0`-`8`, `combine` `0`-`3`, `next_state` `0`-`3`), so a core built with
@@ -336,6 +347,56 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **RPC, web UI and MCP — hw_server on Zynq UltraScale+ MPSoC.** Only the
+  CLI and GUI chose the chain shape from the tap name, so an RPC `connect`
+  with `tap: xck26` shifted raw USER opcodes into the PS TAP and every core
+  on USER1-3 read `0x00000040`. The shape choice is now one function,
+  `fcapz.transport.hw_server_chain_shape_kwargs`, used by the CLI, GUI and
+  RPC (and so the web UI and MCP server): `xck*` / `xczu*` select
+  `use_register_ir`, standalone UltraScale(+) parts the UltraScale IR table.
+- **ELA — a plain trigger on a multi-stage core.** On a core built with
+  `TRIG_STAGES > 1` the hardware triggers only from the sequencer, so a
+  capture configured with just `trigger` never fired. The host now programs
+  such a trigger as a single final stage 0: `value_match` as EQ,
+  `edge_detect` as CHANGED, and `both` as EQ on comparator A OR CHANGED on
+  comparator B. `both` therefore means value-or-edge on these cores, as
+  documented, while single-stage cores keep their RTL behaviour; on a
+  multi-stage core built without `DUAL_COMPARE` it is refused. The stage
+  has no hit count (`count_target` 0), so a hit is never lost to the
+  16-bit stage counter wrapping. Every board validated before was built
+  with `TRIG_STAGES=1`.
+- **EJTAG-AXI — a burst read that fills the FIFO no longer loses a beat.**
+  While filling the burst FIFO the bridge drove `rready` from a register
+  holding last cycle's not-full, so in the cycle the FIFO filled the slave
+  handed over a beat that was never written. The XPM FIFO reports full at
+  `FIFO_DEPTH - 1`, so a 16-beat read on a 16-deep bridge failed with SLVERR
+  while 15 passed (seen on a KV260). `rready` is now the FIFO's own not-full
+  during the fill, so a beat is accepted exactly when it is written; a full
+  FIFO holds the slave off until the host pops. The VHDL core also wrote
+  the FIFO a cycle after accepting the beat, against a full flag that lagged
+  by that cycle; its write is now combinational too. Both HDLs; needs a
+  bitstream rebuild. A cocotb test drives a 24-beat burst through the
+  16-deep FIFO in both HDLs.
+- **EJTAG-UART — no more dropped bytes (BUG-002).** An `RX_POP` or
+  `CMD_CONFIG` result appears in the next scan's capture, and the core
+  clears it on every Update-DR of its chain. The host read it in a separate
+  JTAG operation, so an update it did not issue in between discarded a byte
+  that had already left the FIFO, with no overflow or framing error. On a
+  KV260 that lost bytes in 9 of 15 32-byte loopback messages, and every byte
+  with 50 ms between pop and readout. `recv`, `recv_line` and the identity
+  read now run each pop and its readout in one batch (one `jtag sequence`
+  on hw_server) ending in a NOP drain. `recv` starts with one pop per batch
+  and doubles up to 64 while data keeps coming, so on transports that scan
+  one at a time it still honours its idle timeout. Host-only; no bitstream
+  change.
+  The earlier explanation, an RX synchroniser missing stop bits on a
+  zero-delay wire, is withdrawn.
+- **RPC — `connect` binds manager slot 0.** Behind a multi-core manager an
+  analyzer with no instance used whichever slot was last selected, so after
+  an EIO session on slot 2 a later ELA `connect` (and the chain autodetect
+  and `rebind`) talked to the EIO. RPC now selects slot 0 explicitly, and
+  before every command it drops each session's cached slot, so an analyzer
+  or EIO session never trusts a slot another session has since changed.
 - **ELA — a refused configuration writes nothing.** A trigger sequence with
   more stages than the core has, or a wide trigger value on a core without
   `WIDE_TRIG`, used to be refused after the capture registers were already
@@ -768,7 +829,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `-register` mode needs. The
   warmup read that the hw_server transport discarded before identity and
   status reads is gone, so each of those reads is one scan sequence, not two.
-  Not yet re-validated on Zynq UltraScale+ MPSoC (`-register` mode).
+  Validated on Zynq UltraScale+ MPSoC (`-register` mode) on a KV260.
 
 - **Burst readout runs once.** Each burst used to be repeated until two
   passes agreed (hw_server single-chain, and both Quartus burst paths), and

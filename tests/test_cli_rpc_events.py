@@ -956,6 +956,42 @@ class ChainShapeKwargsTests(unittest.TestCase):
         self.assertEqual(t.dr_extra_bits, 0)
 
 
+class RpcChainShapeTests(unittest.TestCase):
+    """The RPC server (web UI, MCP) builds hw_server transports like the CLI."""
+
+    def _transport(self, **req):
+        return RpcServer()._build_transport({"backend": "hw_server", **req})
+
+    def test_mpsoc_tap_uses_register_ir(self):
+        # Without register-IR mode, raw opcodes on the PL TAP + ARM DAP chain
+        # leave USER2-4 unreachable.
+        for tap in ("xck26", "xczu7ev"):
+            with self.subTest(tap=tap):
+                self.assertTrue(self._transport(tap=tap).use_register_ir)
+
+    def test_mpsoc_explicit_ir_table_still_uses_register_ir(self):
+        t = self._transport(tap="xck26", ir_table="xilinx7")
+        self.assertTrue(t.use_register_ir)
+        self.assertEqual(t.dr_extra_bits, 0)
+
+    def test_standalone_ultrascale_uses_us_table_and_6_bit_ir(self):
+        t = self._transport(tap="xcku040")
+        self.assertFalse(t.use_register_ir)
+        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE)
+        self.assertEqual(t.ir_length, 6)
+
+    def test_explicit_ir_table_wins_over_the_inferred_one(self):
+        t = self._transport(tap="xcku040", ir_table="xilinx7")
+        self.assertNotEqual(
+            t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+
+    def test_7_series_keeps_transport_defaults(self):
+        t = self._transport(tap="xc7a100t")
+        self.assertFalse(t.use_register_ir)
+        self.assertEqual(t.ir_length, 6)
+
+
 class MakeTransportTests(unittest.TestCase):
     """CLI transport construction convenience."""
 

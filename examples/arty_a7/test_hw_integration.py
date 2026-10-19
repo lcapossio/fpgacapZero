@@ -2009,9 +2009,6 @@ class TestEjtagUartLoopback(unittest.TestCase):
         """Send a short string with distinct bytes, receive it back."""
         import time
 
-        # Internal loopback (zero wire delay) can intermittently miss
-        # start bits on back-to-back frames — see test_loopback_stress.
-        # Use a short distinct-byte string for a reliable smoke test.
         msg = b"HeLo!\n"
         self.uart.send(msg)
         time.sleep(0.2)
@@ -2054,22 +2051,12 @@ class TestEjtagUartLoopback(unittest.TestCase):
     def test_loopback_stress(self):
         """Stress: 32 consecutive bytes through internal loopback.
 
-        Known limitation: the internal loopback (TX wired directly to
-        RX with zero wire delay) intermittently drops bytes when the
-        UART TX sends back-to-back frames.  The RX 2-FF synchronizer
-        can miss the stop-to-start transition when there is no
-        propagation delay on the wire — the brief stop-bit high pulse
-        may not be captured before the next start bit pulls the line
-        low.  This affects any consecutive byte pair, not just
-        identical bytes.
-
-        This does NOT reproduce with real UART wiring (external
-        loopback jumper or cable) where wire delay provides enough
-        margin for the synchronizer.
-
-        Marked @expectedFailure so the suite stays green while keeping
-        regression pressure on this issue.  Remove when the RX module
-        is hardened or when testing with external wiring.
+        BUG-002: bytes used to drop here.  The cause was on the host: a
+        pop result read in a separate JTAG operation could be cleared by
+        an Update-DR in between.  Each pop is now read in the same batch.
+        Still marked @expectedFailure only because no Arty UART-loopback
+        bitstream is checked in to re-run it; remove the marker once it
+        passes on one.  The Kria KV260 test covers this without a marker.
         """
         import time
 

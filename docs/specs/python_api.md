@@ -2129,6 +2129,7 @@ CMD_RX_POP = 2
 CMD_TXRX = 3
 CMD_CONFIG = 14
 CMD_RESET = 15
+RX_BATCH = 64
 ```
 
 #### `EjtagUartController.connect`
@@ -2199,7 +2200,7 @@ Raises TimeoutError if the TX FIFO stays full for longer than
 recv(count: int = 0, timeout: float = 1.0) -> bytes
 ```
 
-Receive bytes from UART RX using pipelined RX_POP.
+Receive bytes from UART RX.
 
 count=0 means return all currently available bytes.
 Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
@@ -2208,9 +2209,12 @@ Timeout is an idle timeout: the deadline resets each time a
 byte is successfully received.  A slow-but-steady stream will
 not time out mid-message.
 
-Pipelined: each RX_POP scan returns the result of the
-previous pop, so back-to-back pops achieve 1 byte per scan
-(~1.5 KB/s) instead of 2 scans per byte.
+Pops run back to back in batches, each scan reading the result
+of the previous pop, so a byte costs about one scan.  A batch
+starts at one pop and doubles (up to `RX_BATCH`) only while
+every pop returns a byte; once the FIFO runs empty it polls
+one pop at a time, so the deadline is checked between polls.
+A batch never pops more than *count* bytes.
 
 #### `EjtagUartController.recv_line`
 
@@ -2220,9 +2224,9 @@ recv_line(timeout: float = 1.0) -> str
 
 Receive until newline or timeout (idle timeout).
 
-Uses non-pipelined RX_POP+NOP (2 scans/byte) to avoid
-consuming the byte after the newline.  Deadline resets on
-each successful byte.
+Pops one byte per batch (RX_POP + NOP) to avoid consuming the
+byte after the newline.  Deadline resets on each successful
+byte.
 
 Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
 

@@ -28,7 +28,7 @@ back to individual chapters as you need them.
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
 | 06 | [EIO core](06_eio_core.md) | The Embedded I/O core: read fabric signals, drive fabric signals, clock domains, host API. |
 | 07 | [EJTAG-AXI bridge](07_ejtag_axi_bridge.md) | The JTAG-to-AXI4 master bridge: architecture, FIFO_DEPTH guard rails, single vs auto-increment vs burst transfers, and the AXI4 subset supported. |
-| 08 | [EJTAG-UART bridge](08_ejtag_uart_bridge.md) | The JTAG-to-UART bridge: TX/RX async FIFOs, baud rate selection, host stream API, and the known internal-loopback caveat (BUG-002). |
+| 08 | [EJTAG-UART bridge](08_ejtag_uart_bridge.md) | The JTAG-to-UART bridge: TX/RX async FIFOs, baud rate selection, host stream API, and the dropped-byte fix (BUG-002). |
 | 09 | [Python API](09_python_api.md) | Complete reference for the `fcapz` Python package: `Analyzer`, `EioController`, `EjtagAxiController`, `EjtagUartController`, transports, events module, with worked examples. |
 | 10 | [CLI reference](10_cli_reference.md) | Every `fcapz` subcommand, every flag, with copy-pasteable examples. |
 | 11 | [JSON-RPC server](11_rpc_server.md) | Driving fpgacapZero from another language or process: the line-delimited JSON-RPC protocol, full schema, and all commands. |
@@ -78,12 +78,13 @@ and should be corrected.
 
 ## What's not in this manual
 
-- Hardware bring-up for vendor wrappers other than AMD/Xilinx 7-series and
-  the Gowin BRS-100 path. The shared core RTL is covered by simulation,
-  and the remaining vendor wrappers are lint-elaborated, but ECP5,
-  Intel, PolarFire, and UltraScale board-level smoke tests are still
-  future work. See chapter 04 for the support matrix and validation
-  levels.
+- Hardware bring-up for vendor wrappers beyond the validated boards:
+  AMD/Xilinx 7-series (Arty A7), Zynq UltraScale+ MPSoC (Kria KV260),
+  Intel / Altera (DE25-Nano) and Gowin (BRS-100). The shared core RTL is
+  covered by simulation, and the remaining vendor wrappers are
+  lint-elaborated, but ECP5, PolarFire, and standalone Kintex / Virtex
+  UltraScale(+) board-level smoke tests are still future work. See
+  chapter 04 for the support matrix and validation levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.
