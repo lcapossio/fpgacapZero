@@ -682,9 +682,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bit 3) gets a burst drain ahead of each select. Each select counts as this
   host's in `MGR_SELECT_COUNT`, and where every access selects its own slot,
   another program's selects no longer raise `ManagerResetError`; the epoch,
-  `CAPTURE_GEN` and burst-header checks stay. OpenOCD and Quartus still
-  select once per operation, and still raise when another program moves the
-  slot in between; they follow. Cost on a KV260: see the PR.
+  `CAPTURE_GEN` and burst-header checks stay. Cost on a KV260: see the PR.
+- **Quartus and OpenOCD — every core-manager access selects its own slot
+  too.** As on hw_server above: on Quartus the select is shifted inside each
+  access's own `device_lock` (register reads and writes, window reads,
+  descriptor reads, and bursts, once before `BURST_PTR`); on OpenOCD each
+  access is now one Tcl command line, which OpenOCD runs before serving
+  another client. Both get the same identification, legacy drain and
+  select counting, and a Quartus burst on the control chain now ends with
+  the drain that hw_server's has. An `Analyzer` or `EioController` with an
+  `instance` on either backend is no longer alarmed by another program's
+  selects; one without keeps the check.
+- **Run-length counts of a managed slot burst on its own chain.** Behind
+  the USB-Blaster, or a two-chain hw_server session, the run counts of a
+  core-manager slot were read through the register window, since the
+  two-chain burst never reaches a manager. They now burst on the control
+  chain, as samples and timestamps already did:
+  `read_run_length_block(..., on_control_chain=True)`.
 - **hw_server — a slot switch after a single-chain burst is no longer
   dropped.** The core manager ignores an `MGR_ACTIVE` write while the burst
   pipe fills its staging register, and on a 1-, 2- or 4-bit lane the fill

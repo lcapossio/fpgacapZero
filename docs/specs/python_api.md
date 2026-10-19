@@ -67,7 +67,9 @@ Select a core-manager slot for subsequent analyzer operations.
 
 `None` leaves the active slot untouched and preserves legacy direct-ELA
 behavior for bitstreams without a manager.  Moving to another slot
-drops the capture configuration: call `configure` again.
+drops the capture configuration: call `configure` again.  The
+hub is left on the slot, so raw transport accesses that follow reach
+it until another controller selects another one.
 
 #### `Analyzer.speaks_register_protocol`
 
@@ -580,6 +582,12 @@ All methods should raise:
 * `OSError` / `TimeoutError` — for network or process-level errors
   during `connect`.
 
+Class constants:
+
+```python
+BURST_DRAIN_IDLE_CYCLES = 258
+```
+
 #### `Transport.transaction_lock`
 
 ```python
@@ -1077,6 +1085,14 @@ Read a 32-bit register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
 
+#### `OpenOcdTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one command line.
+
 #### `OpenOcdTransport.read_block`
 
 ```python
@@ -1163,7 +1179,6 @@ _BLOCK_CHUNK = 512
 _BURST_SCANS_PER_SEQUENCE = 256
 WRITE_IDLE_CYCLES_REGISTER = 100
 BURST_PREFILL_IDLE_CYCLES = 160
-BURST_DRAIN_IDLE_CYCLES = 258
 ```
 
 #### `XilinxHwServerTransport.connect`
@@ -1376,10 +1391,16 @@ number of timestamps.
 #### `XilinxHwServerTransport.read_run_length_block`
 
 ```python
-read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+read_run_length_block(
+    n_entries: int,
+    lane_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
 ```
 
-Read one run count per captured entry via the burst DR.
+Read one run count per captured entry via the burst DR, on the
+control chain with *on_control_chain* (a core manager's slot).
 
 Counts travel on the timestamp lane, `lane_width` bits per element
 (the core's timestamp width, or its RLE_W without timestamps).  Raises
@@ -1633,6 +1654,14 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `QuartusStpTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run in one locked script.
+
 #### `QuartusStpTransport.read_timestamp_block`
 
 ```python
@@ -1644,10 +1673,17 @@ Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
 #### `QuartusStpTransport.read_run_length_block`
 
 ```python
-read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+read_run_length_block(
+    n_entries: int,
+    lane_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
 ```
 
-Read one run count per captured entry through the DATA_CHAIN burst.
+Read one run count per captured entry through the DATA_CHAIN burst,
+or with *on_control_chain* (a core manager's slot) through the
+single-chain burst on the active instance.
 
 Counts travel on the timestamp lane, `lane_width` bits per element
 (the core's timestamp width, or its RLE_W without timestamps).  Raises

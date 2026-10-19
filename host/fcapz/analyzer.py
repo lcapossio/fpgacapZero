@@ -621,7 +621,9 @@ class Analyzer:
 
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
         behavior for bitstreams without a manager.  Moving to another slot
-        drops the capture configuration: call :meth:`configure` again.
+        drops the capture configuration: call :meth:`configure` again.  The
+        hub is left on the slot, so raw transport accesses that follow reach
+        it until another controller selects another one.
         """
         with self.transport.transaction_lock():
             new_instance = None if instance is None else int(instance)
@@ -639,7 +641,14 @@ class Analyzer:
             self._manager_slot_caps = {}
             self._manager_found = None
             with self._selected():
-                pass
+                sel = self._slot_selection()
+                if sel is not None and self.transport.atomic_slot_select:
+                    # An atomic backend selects inside each access only: write
+                    # the slot once more, as a backend that selects on entry
+                    # does.  Nothing is written on an unidentified chain.
+                    self.transport.select_manager_instance_cached(
+                        sel.chain, sel.active_addr, sel.slot
+                    )
 
     def speaks_register_protocol(self, base_addr: int = 0) -> bool:
         """Whether VERSION at *base_addr* answers with an ELA or EIO identity.
@@ -1298,11 +1307,16 @@ class Analyzer:
 
         burst = getattr(self.transport, "read_run_length_block", None)
         has_burst = self._selected_slot_has_burst()
-        # A two-chain run-length burst never reaches a managed slot (see
-        # _managed_burst_off_chain): read the window instead.
-        if callable(burst) and has_burst and not self._managed_burst_off_chain(has_burst):
+        if callable(burst) and has_burst:
+            # A two-chain burst never reaches a managed slot (see
+            # _managed_burst_off_chain): burst on the control chain there.
+            kwargs = (
+                {"on_control_chain": True}
+                if self._managed_burst_off_chain(has_burst)
+                else {}
+            )
             try:
-                raw = burst(total, lane_w)
+                raw = burst(total, lane_w, **kwargs)
             except BurstUnavailableError as exc:
                 _log.info("run-length burst unavailable (%s); reading the window", exc)
             else:

@@ -379,7 +379,8 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         )
 
     def test_read_reg_sends_two_scans(self):
-        """read_reg() issues irscan + drscan + runtest + irscan + drscan."""
+        """read_reg() is one command line: irscan + drscan + runtest + irscan
+        + drscan, so no other OpenOCD client's scans land in between."""
         cmds: list[str] = []
 
         def fake_cmd(tcl: str) -> str:
@@ -391,13 +392,12 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t._cmd = fake_cmd  # type: ignore[method-assign]
         t.read_reg(0x0000)
 
-        # Expect: irscan, drscan (issue), runtest, irscan, drscan (capture)
-        self.assertEqual(len(cmds), 5)
-        self.assertTrue(any("irscan" in c for c in cmds))
-        self.assertTrue(any("runtest" in c for c in cmds))
+        self.assertEqual(len(cmds), 1)
+        parts = [c.split()[0] for c in cmds[0].split("; ")]
+        self.assertEqual(parts, ["irscan", "drscan", "runtest", "irscan", "drscan"])
 
     def test_write_reg_sends_one_scan_pair(self):
-        """write_reg() issues irscan + drscan (write-only, no runtest loop)."""
+        """write_reg() is one line: irscan + drscan (no runtest)."""
         cmds: list[str] = []
 
         def fake_cmd(tcl: str) -> str:
@@ -408,9 +408,11 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t._cmd = fake_cmd  # type: ignore[method-assign]
         t.write_reg(0x0028, 0xDEADBEEF)
 
-        self.assertEqual(len(cmds), 2)
-        self.assertTrue(any("irscan" in c for c in cmds))
-        self.assertFalse(any("runtest" in c for c in cmds))
+        self.assertEqual(len(cmds), 1)
+        frame = (1 << 48) | (0x0028 << 32) | 0xDEADBEEF
+        self.assertEqual(
+            cmds[0], f"irscan {t.tap} 2; drscan {t.tap} 49 0x{frame:013x}"
+        )
 
     def test_drscan_non_hex_response_raises_runtime_error(self):
         """OpenOCD errors should not leak raw int(..., 16) ValueError text."""
@@ -540,9 +542,12 @@ class QuartusStpTransportTests(unittest.TestCase):
         # Burst scans must target the active control chain, not the ELA's chain 2.
         self.assertIn("-instance_index 5", t.last_script)
         self.assertNotIn("-instance_index 2", t.last_script)
-        # One 256-bit DR scan per sample plus one prime scan; one 49-bit BURST_PTR write.
+        # One 256-bit DR scan per sample plus one prime scan; one 49-bit
+        # BURST_PTR write, and after the scans the 49-bit drain read.
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
-        self.assertEqual(t.last_script.count("-length 49"), 1)
+        self.assertEqual(t.last_script.count("-length 49"), 2)
+        drain = t.last_script.index("__fcapz_drain_discard")
+        self.assertGreater(drain, t.last_script.rindex("-length 256"))
 
     def test_read_sample_block_single_chain_packs_narrow_samples_at_their_width(self):
         # A managed 24-bit ELA: ten samples per 256-bit scan at 24-bit offsets
@@ -700,17 +705,20 @@ class QuartusStpTransportTests(unittest.TestCase):
             t._send(f"puts {QuartusStpTransport._SENTINEL}")
 
     def test_write_reg_uses_virtual_dr_scan(self):
-        calls: list[tuple[int, int, int | None]] = []
+        scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
-            def raw_dr_scan(self, bits, width, *, chain=None):
-                calls.append((bits, width, chain))
-                return 0
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
 
         t = FakeQuartus()
         t.write_reg(0x1234, 0xDEADBEEF)
         expected = (1 << 48) | (0x1234 << 32) | 0xDEADBEEF
-        self.assertEqual(calls, [(expected, 49, None)])
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 1)
+        self.assertIn(f"-length 49 -dr_value {expected:049b}]", scripts[0])
+        self.assertTrue(scripts[0].startswith("device_lock"))
 
     def test_open_device_auto_script_errors_on_multiple_quartus_cables(self):
         script = QuartusStpTransport()._open_device_script()
@@ -973,8 +981,13 @@ class QuartusStpTransportTests(unittest.TestCase):
                 plain = self._quartus_sync_script(sync=False, single_chain=single_chain)
                 synced = self._quartus_sync_script(sync=True, single_chain=single_chain)
                 self.assertNotIn("_sync", plain)
-                self.assertEqual(plain.count("-length 49"), 1)
-                self.assertEqual(synced.count("-length 49"), 2)
+
+                def ptr_writes(script: str) -> int:
+                    # The single-chain burst ends in a 49-bit drain read.
+                    return script.count("-length 49") - script.count("_drain_discard")
+
+                self.assertEqual(ptr_writes(plain), 1)
+                self.assertEqual(ptr_writes(synced), 2)
                 self.assertEqual(
                     synced.count("-length 256"), plain.count("-length 256") + 1
                 )
@@ -2578,6 +2591,15 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertIn(count_frame, sent[0])
         with self.assertRaises(BurstIntegrityError):
             t.read_run_length_block(33, 8)
+
+        # A core manager's slot on a two-chain session: the counts burst on
+        # the control chain, not USER2.
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t._send = fake_send  # type: ignore[method-assign]
+        sent.clear()
+        t.read_run_length_block(32, 8, on_control_chain=True)
+        self.assertIn(count_frame, sent[0])
+        self.assertNotIn(t._irshift_tcl("_bq", chain=2), sent[0])
 
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads clock idle TCKs before every captured word."""

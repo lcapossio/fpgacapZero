@@ -84,8 +84,8 @@ path for timestamp data.
   moving `MGR_ACTIVE`.  Accesses to the manager's own block
   (`0xF000`-`0xF0FF`) are never prefixed.  Otherwise the scope selects once
   on entry with `select_manager_instance_cached`, which another process can
-  undo between operations.  `XilinxHwServerTransport` is atomic; OpenOCD and
-  Quartus are not yet.
+  undo between operations.  The hw_server, Quartus and OpenOCD transports
+  are atomic.
 - `read_regs_after_write(write_addr, value, addrs)` — a selector write and
   the reads it selects (`MGR_DESC_INDEX` and the slot descriptor), as one
   backend operation on an atomic backend.
@@ -158,6 +158,10 @@ selected ELA control chain instead of switching to USER2.
 - Uses `irscan`/`drscan`/`runtest` commands.
 - Hardware-validated on Gowin BRS-100-GW1NR9. The AMD/Xilinx/OpenOCD path is still
   less exercised than the `hw_server` backend.
+- Each register access is one Tcl command line (a read is
+  `irscan; drscan; runtest; irscan; drscan`), which OpenOCD's Tcl server runs
+  before serving another client.  Inside a `slot_scope`, a line that reaches
+  a slot starts with the `MGR_ACTIVE` write and 20 idle TCKs.
 
 ### `QuartusStpTransport`
 - Connects to a persistent `quartus_stp -s` subprocess for Intel/Altera
@@ -172,6 +176,10 @@ selected ELA control chain instead of switching to USER2.
   were exercised on a DE25-Nano with Quartus Prime Pro 26.1 and an Intel
   `sld_virtual_jtag` fcapz bitstream.  Quartus Lite is expected to work with
   the same Tcl commands, but this branch was not re-validated on Lite.
+- Inside a `slot_scope`, each locked script that reaches a slot starts, after
+  `device_lock`, with the `MGR_ACTIVE` write and 20 idle TCKs: one per
+  register access and window read, and once before `BURST_PTR` in a burst.
+  A burst on the control chain ends with a `VERSION` read and 258 idle TCKs.
 
 ### `VendorStubTransport`
 - Placeholder for future vendor backends.

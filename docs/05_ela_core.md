@@ -709,30 +709,35 @@ polling, and readback. The host reads `MGR_ACTIVE` back after each switch and
 raises when a manager does not take the slot, or the slot is past
 `MGR_COUNT`.  It writes up to three times first: bitstreams built before this
 release drop a switch that lands while the pipe refills after a burst.
-On `hw_server` the select then travels in the same JTAG sequence as every
-access, so another program on the same cable moving `MGR_ACTIVE` cannot
-redirect it; OpenOCD and Quartus select once per operation, which another
-program can still undo in between, and the host raises when it sees that
-happen.
+After that first check, the select travels with every access, in one unit
+no other program on the cable can split: one JTAG sequence on `hw_server`,
+one `device_lock` on Quartus, one Tcl command line on OpenOCD.  Another
+program moving `MGR_ACTIVE` cannot redirect it.
 Moving an `Analyzer` to another slot with `select_instance()` drops its capture
 configuration, so call `configure()` again.  Do not run captures from two
 Python threads against the same transport at the same time. The transport
 serializes low-level I/O, but capture workflows still share FPGA JTAG bandwidth
 and should be sequenced deliberately.
 
-`MGR_ACTIVE` is state in the hub, not in the host, so one host session should
-own a hub at a time.  Inside one process, share one transport: the GUI and the
-RPC server already route a managed EIO through the analyzer's transport.  Two
-processes driving the same hub at once (two CLI runs, or the GUI and a script)
-can switch the slot under each other.  The host reports that instead of
-using the wrong slot's data: `Analyzer.configure()`, `arm()`, `reset()`
-(and so `force_idle()`) and every readout, and every access of an
-`EioController` with an `instance`, check that the slot stayed selected
+Two processes can therefore drive different slots of one hub at once (two
+CLI runs, or the GUI and a script), as long as each names its slot
+(`instance=`).  They cannot share one slot: the core's own settings (its
+configuration, `DATA_OFFSET`, the selected segment, EIO outputs) are state
+in the hub, and the last writer wins.  Inside one process, share one
+transport: the GUI and the RPC server already route a managed EIO through
+the analyzer's transport.
+
+An `Analyzer` without an `instance` reads whichever slot is active, so
+another program's select does move it.  The host reports that instead of
+using the wrong slot's data: `configure()`, `arm()`, `reset()` (and so
+`force_idle()`) and every readout check that the slot stayed selected
 (`MGR_SELECT_COUNT` on hubs with `MGR_CAPS[7]`, and `MGR_ACTIVE`) and raise
-`ManagerResetError` when it did not.  Retry the operation; a write that raised
-may have reached the other slot.  `status()` polls and the identity reads of
-`probe()` are single reads and not checked: a status read from another slot
-is caught by the checks at the start of the readout that follows.
+`ManagerResetError` when it did not.  Retry the operation; a write that
+raised may have reached the other slot.  `status()` polls and the identity
+reads of `probe()` are single reads and not checked: a status read from
+another slot is caught by the checks at the start of the readout that
+follows.  The hub-reset checks (slot and hub epochs, `CAPTURE_GEN`, the burst
+header) apply to every analyzer.
 
 Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
 Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected

@@ -2108,8 +2108,9 @@ class RunLengthTransport(FakeTransport):
         if burst:
             self.read_run_length_block = self._run_length_burst
 
-    def _run_length_burst(self, n_entries, lane_width):
+    def _run_length_burst(self, n_entries, lane_width, *, on_control_chain=False):
         self.burst_calls.append((n_entries, lane_width))
+        self.on_control_chain = on_control_chain
         return self.counts[:n_entries]
 
     def write_reg(self, addr, value):
@@ -2229,6 +2230,19 @@ class RunLengthTests(unittest.TestCase):
         transport = RunLengthTransport(rle_w=12, burst=True)
         self._capture(transport)
         self.assertEqual(transport.burst_calls, [(4, 12)])  # the counts' own lane
+
+    def test_managed_slot_bursts_its_counts_on_its_own_chain(self):
+        """Behind a transport whose two-chain burst misses a core manager's
+        slot (the USB-Blaster), the counts burst on the control chain."""
+        for data_chain in (False, True):
+            with self.subTest(data_chain=data_chain):
+                transport = RunLengthTransport(burst=True)
+                transport.burst_on_data_chain = data_chain
+                _, result = self._capture(transport)
+                self.assertEqual(transport.burst_calls, [(4, 8)])
+                self.assertEqual(transport.on_control_chain, data_chain)
+                self.assertEqual(result.run_lengths, [3, 1, 6, 1])
+                self.assertEqual(transport.ctrl_writes, [1])  # no window read
 
     def test_unavailable_burst_falls_back_to_the_window(self):
         transport = RunLengthTransport(burst=True)
