@@ -580,9 +580,10 @@ body carries no selection -- probes and manager-wide reads, which
 must not inherit an enclosing slot.  *chain*, if given, is selected
 for the body.
 
-On exit, also after an exception, the enclosing scope gets back its
-chain and then its slot, so a nested probe on another chain or slot
-cannot leave the enclosing controller's next access misrouted.  A
+On exit, also after an exception, a nested scope gives back the chain
+that was active when it was entered and then the enclosing slot, so a
+nested probe on another chain or slot cannot leave the enclosing
+controller's next access misrouted.  A
 top-level scope leaves its chain selected, as controllers always have.
 
 A backend with `atomic_slot_select` writes `MGR_ACTIVE` at the

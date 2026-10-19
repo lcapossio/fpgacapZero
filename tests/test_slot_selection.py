@@ -418,6 +418,20 @@ class SlotScopeTests(unittest.TestCase):
                 pass
             self.assertEqual(t._active_chain, 2)
 
+    def test_a_nested_scope_gives_back_a_chain_switched_without_a_scope(self):
+        """Code inside a scope (the GUI's subsidiary chain) switches the chain
+        without one; a scope nested there gives back that chain, not the
+        outer scope's."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1), chain=1):
+            t.select_chain(2)
+            with t.slot_scope(SlotSelection(2, _MGR_ACTIVE, 0)):
+                with t.slot_scope(None, chain=3):
+                    pass
+                self.assertEqual(t._active_chain, 2)
+            self.assertEqual(t._active_chain, 2)
+
     def test_nested_probe_on_another_chain_restores_the_chain(self):
         """A probe on chain 2 inside a chain-1 slot scope must leave the
         enclosing scope's next access on chain 1, with its select."""

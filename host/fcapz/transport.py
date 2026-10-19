@@ -313,9 +313,10 @@ class Transport(ABC):
         must not inherit an enclosing slot.  *chain*, if given, is selected
         for the body.
 
-        On exit, also after an exception, the enclosing scope gets back its
-        chain and then its slot, so a nested probe on another chain or slot
-        cannot leave the enclosing controller's next access misrouted.  A
+        On exit, also after an exception, a nested scope gives back the chain
+        that was active when it was entered and then the enclosing slot, so a
+        nested probe on another chain or slot cannot leave the enclosing
+        controller's next access misrouted.  A
         top-level scope leaves its chain selected, as controllers always have.
 
         A backend with :attr:`atomic_slot_select` writes ``MGR_ACTIVE`` at the
@@ -330,17 +331,20 @@ class Transport(ABC):
             local = self._slot_local()
             previous = getattr(local, "selection", None)
             previous_chain = getattr(local, "chain", None)
+            depth = getattr(local, "depth", 0)
+            # The chain active on entry, which a nested scope gives back: read
+            # from the transport, since code inside the enclosing body (a GUI
+            # subsidiary chain) may have switched it without a scope.  A
+            # backend that does not track it falls back to the enclosing
+            # scope's record.
+            entry_chain = self._current_chain()
+            if entry_chain is None:
+                entry_chain = previous_chain
             if chain is not None:
                 self._scope_select_chain(chain)
             local.selection = selection
-            # The chain this body runs on, for a nested scope to give back.
-            # A scope without chain= runs on whatever chain is active.
-            if chain is not None:
-                local.chain = chain
-            elif previous_chain is not None:
-                local.chain = previous_chain
-            else:
-                local.chain = self._current_chain()
+            local.chain = chain if chain is not None else entry_chain
+            local.depth = depth + 1
             failed = False
             try:
                 if selection is not None and not self.atomic_slot_select:
@@ -354,13 +358,15 @@ class Transport(ABC):
             finally:
                 local.selection = previous
                 local.chain = previous_chain
+                local.depth = depth
                 try:
                     if (
                         chain is not None
-                        and previous_chain is not None
-                        and previous_chain != chain
+                        and depth > 0
+                        and entry_chain is not None
+                        and entry_chain != chain
                     ):
-                        self._scope_select_chain(previous_chain)
+                        self._scope_select_chain(entry_chain)
                     if (
                         previous is not None
                         and previous != selection
