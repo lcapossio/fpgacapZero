@@ -248,6 +248,18 @@ class HwServerAtomicSelectionTests(unittest.TestCase):
         a = Analyzer(t, instance=0)
         self.assertTrue(a._behind_manager())
 
+    def test_an_access_select_drops_the_slot_cache(self):
+        """The per-access select moves MGR_ACTIVE behind the cache; a cached
+        select afterwards must still write."""
+        t, fake = _hw_server()
+        fake.interfere = False
+        CoreManager(t, chain=1).select_raw(0)
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 1), chain=1):
+            t.read_reg(0x0004)
+        self.assertEqual(fake.active, 1)
+        t.select_manager_instance_cached(1, _MGR_ACTIVE, 0)
+        self.assertEqual(fake.active, 0)
+
     def test_burst_selects_once_before_the_pointer_write(self):
         for single_chain in (True, False):
             for sync in (False, True):

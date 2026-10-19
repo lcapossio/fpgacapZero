@@ -728,7 +728,11 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
@@ -1287,7 +1291,11 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.

@@ -540,7 +540,11 @@ class Transport(ABC):
         may be the vendor instance identifier, such as Intel's
         ``sld_virtual_jtag`` ``instance_index``.
 
-        Subclasses that support multi-chain access must override this.
+        Subclasses that support multi-chain access must override this, and
+        keep the selected chain in ``_active_chain`` (or override
+        ``_current_chain``): :meth:`slot_scope` reads it to give an enclosing
+        scope back its chain and to write a slot select on the manager's own
+        chain.
         Raises ``ValueError`` if *chain* is invalid for that transport.
         Raises ``NotImplementedError`` on transports that only support a
         single fixed chain.
@@ -3107,6 +3111,9 @@ class XilinxHwServerTransport(Transport):
             return []
         if addrs and all(_in_manager_block(a) for a in addrs):
             return []
+        # This sequence moves MGR_ACTIVE behind the cache, and may fail
+        # after doing so: a later cached select must write for real.
+        self.invalidate_manager_instance_cache()
         n = self._user_dr_bits(self.DR_BITS)
         frame = self._pad_dr(
             self._frame_bits(addr=sel.active_addr, data=sel.slot, write=True)
