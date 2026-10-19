@@ -109,7 +109,11 @@ class EioController:
             return
         from .analyzer import Analyzer, CoreManager  # analyzer imports nothing from here
 
-        if not Analyzer(self._t, chain=self._chain)._behind_manager():  # noqa: SLF001
+        probe = Analyzer(self._t, chain=self._chain)
+        if (
+            not probe.speaks_register_protocol(self._base_addr)
+            or not probe._behind_manager()  # noqa: SLF001 - detection lives there
+        ):
             return
         if self._base_addr:
             raise RuntimeError(

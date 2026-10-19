@@ -16,6 +16,7 @@ from fcapz.analyzer import (
     CaptureConfig,
     CaptureResult,
     CORE_MANAGER_CORE_ID,
+    CoreManager,
     ELA_CORE_ID,
     ElaManager,
     SequencerStage,
@@ -495,8 +496,10 @@ class RpcManagerSlotTests(unittest.TestCase):
     def test_eio_base_addr_is_refused_behind_a_manager(self):
         transport = self._EioSelectedTransport()
         eio = EioController(transport, chain=1, base_addr=0x8000)
-        with self.assertRaisesRegex(RuntimeError, "core manager"):
+        # Refused, either as a manager chain or because nothing answers there.
+        with self.assertRaises(RuntimeError):
             eio.attach()
+        self.assertIsNone(eio.instance)
         self.assertIsNone(discover_eio(transport, chains=[1], bases=[0x8000]))
 
     def test_a_transient_analyzer_binds_the_first_ela_slot(self):
@@ -507,6 +510,74 @@ class RpcManagerSlotTests(unittest.TestCase):
         self.assertEqual(analyzer._instance, 0)
         self.assertIsNotNone(analyzer.probe_optional())
         self.assertEqual(transport._active_ela, 0)
+
+    def test_no_manager_probe_on_a_chain_without_a_register_core(self):
+        # USER4's EJTAG-AXI bridge decodes a 0xF000 read frame as burst write
+        # data; only the address-0 VERSION frame (a bridge NOP) may reach it.
+        class _BridgeChainTransport(self._EioSelectedTransport):
+            def __init__(self):
+                super().__init__()
+                self.chain4_reads: list[int] = []
+
+            def read_reg(self, addr):
+                if self._active_chain == 4:
+                    self.chain4_reads.append(addr)
+                    return 0
+                return super().read_reg(addr)
+
+        transport = _BridgeChainTransport()
+        with self.assertRaises(RuntimeError):
+            EioController(transport, chain=4).attach()
+        analyzer = Analyzer(transport, chain=4)
+        analyzer.bind_manager_slot()
+        self.assertIsNone(analyzer._instance)
+        self.assertTrue(transport.chain4_reads)
+        self.assertEqual(set(transport.chain4_reads), {0x0000})
+
+    def test_a_failed_slot_restore_leaves_no_cached_slot(self):
+        class _RestoreFails(self._EioSelectedTransport):
+            def write_reg(self, addr, value):
+                if addr == 0xF008 and getattr(self, "fail_restore", False) \
+                        and int(value) == 2 and self._active_ela == 3:
+                    raise OSError("JTAG error during restore")
+                super().write_reg(addr, value)
+
+        transport = _RestoreFails()
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        transport.fail_restore = True
+        with self.assertRaises(OSError):
+            CoreManager(transport, chain=1).slot_core_ids()
+        transport.fail_restore = False
+        # The manager is left on slot 3; the next slot-2 access must re-select.
+        transport.select_manager_instance_cached(1, 0xF008, 2)
+        self.assertEqual(transport._active_ela, 2)
+
+    def test_a_garbage_slot_count_is_refused(self):
+        transport = self._EioSelectedTransport()
+        transport._manager_regs[0xF004] = 0xFFFFFFFF
+        writes: list[int] = []
+        orig = transport.write_reg
+        transport.write_reg = lambda a, v: (writes.append(a), orig(a, v))
+        with self.assertRaisesRegex(RuntimeError, "slots"):
+            CoreManager(transport, chain=1).slot_core_ids()
+        self.assertNotIn(0xF008, writes)
+
+    def test_cli_eio_probe_reports_the_bound_slot(self):
+        import contextlib
+        import io
+        import json as _json
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        transport = self._EioSelectedTransport()
+        transport.write_reg(0xF008, 0)  # the ELA slot is active
+        out = io.StringIO()
+        with patch.object(cli, "_make_transport", return_value=transport), \
+                patch("sys.argv", ["fcapz", "eio-probe", "--chain", "1"]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(_json.loads(out.getvalue())["instance"], 2)
 
     def test_axi_monitor_reads_reselect_the_analyzer_slot(self):
         from fcapz.axi_monitor import AxiMonitor

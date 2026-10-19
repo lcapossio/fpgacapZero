@@ -45,6 +45,7 @@ ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
 CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
 _CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
+_EIO_CORE_ID = 0x494F  # fcapz.eio.EIO_CORE_ID ("IO"); eio imports this module
 
 
 def expected_ela_version_reg() -> int:
@@ -106,6 +107,8 @@ _ADDR_MGR_DESC_CAPS = 0xF01C
 # slot's pointer; on those the transport syncs the start first
 # (Transport.burst_start_sync).
 _MGR_CAP_BURST_START = 0x4
+# Most slots a core manager can report (MGR_COUNT); anything above is garbage.
+_MGR_MAX_SLOTS = 256
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
@@ -521,6 +524,20 @@ class Analyzer:
             self._manager_found = None
             self._select_instance()
 
+    def speaks_register_protocol(self, base_addr: int = 0) -> bool:
+        """Whether VERSION at *base_addr* answers with an ELA or EIO identity.
+
+        Gate any manager probe on this.  A ``0xF000`` read puts a
+        manager-address frame into whatever DR the chain has, and on an
+        EJTAG-AXI chain that frame decodes as burst write data; a VERSION read
+        is the frame every identity check already sends first.  Behind a
+        manager address 0 reaches the active slot, an ELA or an EIO.
+        """
+        with self.transport.transaction_lock():
+            self._select_chain()
+            core_id = int(self.transport.read_reg(base_addr | _ADDR_VERSION)) & 0xFFFF
+        return core_id in (_ELA_CORE_ID, _EIO_CORE_ID)
+
     def bind_manager_slot(self) -> None:
         """Bind a slot-less analyzer to its manager's first ELA slot.
 
@@ -530,7 +547,11 @@ class Analyzer:
         left as it is.  Slot 0 is used if no slot reads as an ELA.
         """
         with self.transport.transaction_lock():
-            if self._instance is not None or not self._behind_manager():
+            if (
+                self._instance is not None
+                or not self.speaks_register_protocol()
+                or not self._behind_manager()
+            ):
                 return
             slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
             self.select_instance(0 if slot is None else slot)
@@ -1111,7 +1132,8 @@ class Analyzer:
         active = int(read(_ADDR_MGR_ACTIVE))
         stride = int(read(_ADDR_MGR_STRIDE))
         caps = int(read(_ADDR_MGR_CAPS))
-        return 1 <= count <= 256 and active < count and stride == 0 and bool(caps & 0x1)
+        return (1 <= count <= _MGR_MAX_SLOTS and active < count and stride == 0
+                and bool(caps & 0x1))
 
     @staticmethod
     def _desc_index_writable(read, write) -> bool:
@@ -1925,14 +1947,24 @@ class CoreManager:
             read = self.transport.read_reg_stable
             count = int(read(_ADDR_MGR_COUNT))
             original = int(read(_ADDR_MGR_ACTIVE))
+            if not (1 <= count <= _MGR_MAX_SLOTS and original < count):
+                raise RuntimeError(
+                    f"core manager on chain {self._chain} reports {count} slots "
+                    f"with slot {original} active; refusing to walk them"
+                )
             ids: list[int] = []
+            # Drop the cache before the first raw select: if a select or the
+            # restore fails, no controller may trust a slot it cached earlier.
+            self.transport.invalidate_manager_instance_cache()
             try:
                 for slot in range(count):
                     self.transport.write_reg(_ADDR_MGR_ACTIVE, slot)
                     ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
             finally:
-                self.transport.write_reg(_ADDR_MGR_ACTIVE, original)
-                self.transport.invalidate_manager_instance_cache()
+                try:
+                    self.transport.write_reg(_ADDR_MGR_ACTIVE, original)
+                finally:
+                    self.transport.invalidate_manager_instance_cache()
             return ids
 
     def first_slot(self, core_id: int) -> int | None:

@@ -891,7 +891,7 @@ def main() -> int:
                     "in_w": eio.in_w,
                     "out_w": eio.out_w,
                     "chain": args.chain,
-                    "instance": args.instance,
+                    "instance": eio.instance,
                 }, indent=2))
             elif args.cmd == "eio-read":
                 print(f"0x{eio.read_inputs():X}")
