@@ -34,7 +34,9 @@ Four small RTL cores, all driven over JTAG:
 Plus a host stack: a **browser-based web interface** (`fcapz-web`) with an
 embedded **Surfer** waveform viewer that you can reach from the local machine or
 across the network, a **Python API**, the **`fcapz` command-line tool**, a
-**JSON-RPC server**, and an optional **PySide6 desktop GUI** (`fcapz-gui`).
+**JSON-RPC server**, an **MCP server** (`fcapz-mcp`) that exposes the lab
+controls to coding agents, and an optional **PySide6 desktop GUI**
+(`fcapz-gui`).
 
 ## Why fpgacapZero
 
@@ -56,8 +58,12 @@ across the network, a **Python API**, the **`fcapz` command-line tool**, a
 
 Any board with JTAG access works. You drive it through **OpenOCD** (any
 OpenOCD-supported adapter — FTDI, WCH CH347, CMSIS-DAP, J-Link, …), the
-**AMD/Xilinx hw_server** (Vivado), or **Quartus `quartus_stp`**
-(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5). The
+**AMD/Xilinx hw_server** (Vivado — hardware-validated on the Arty A7 and on the
+Kria KV260, a Zynq UltraScale+ MPSoC), or **Quartus `quartus_stp`**
+(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5). On
+Zynq UltraScale+ MPSoC parts (`xck*`, `xczu*`) the host picks the PS TAP's
+chain mode from the tap name, so all four USER chains work with no extra
+setup. The
 full per-vendor matrix and JTAG-chain rules are in the manual's
 [RTL integration chapter](https://github.com/lcapossio/fpgacapZero/blob/main/docs/04_rtl_integration.md); see also
 [Support status](#support-status) below.
@@ -108,6 +114,7 @@ The end-to-end walkthrough lives in
 and flag, see the [CLI reference](https://github.com/lcapossio/fpgacapZero/blob/main/docs/10_cli_reference.md); for scripting, the
 [Python API](https://github.com/lcapossio/fpgacapZero/blob/main/docs/09_python_api.md) (every signature in the
 [API reference](https://github.com/lcapossio/fpgacapZero/blob/main/docs/specs/python_api.md)) and [JSON-RPC server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/11_rpc_server.md).
+For driving fpgacapZero from a coding agent, see the [MCP server](https://github.com/lcapossio/fpgacapZero/blob/main/docs/20_mcp_server.md).
 
 ## Add it to your design
 
@@ -135,15 +142,16 @@ The canonical register / shift maps live in
 
 | Area | Status |
 |------|--------|
-| AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 |
+| AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 and Kria KV260 (Zynq UltraScale+ MPSoC) |
 | OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
 | AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
 | Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
-| UltraScale / ECP5 / PolarFire wrappers | RTL complete; host / hardware validation still limited |
+| AMD/Xilinx UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`); standalone Kintex / Virtex UltraScale(+) not yet tested |
+| ECP5 / PolarFire wrappers | RTL complete; host / hardware validation still limited |
 | Efinix (Trion / Titanium) wrapper | ⏳ Synthesized, placed and routed in Efinity 2025.1 (Trion T20F256, Titanium Ti60F225); hardware validation pending |
-| ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 (details in the manual) |
+| ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 and Kria KV260 (details in the manual) |
 
 The full, always-current matrix is in [Overview](https://github.com/lcapossio/fpgacapZero/blob/main/docs/01_overview.md) and
 [RTL integration](https://github.com/lcapossio/fpgacapZero/blob/main/docs/04_rtl_integration.md).
@@ -153,6 +161,9 @@ The full, always-current matrix is in [Overview](https://github.com/lcapossio/fp
 ```bash
 # Build the Arty A7 reference bitstream (Vivado)
 python examples/arty_a7/build.py
+
+# Or the Kria KV260 one (Zynq UltraScale+ MPSoC; needs the kv260_som board files)
+python examples/kv260/build.py
 
 # Run the host test suite — no hardware needed
 pip install -e ".[dev,hdl]"
@@ -168,7 +179,7 @@ CI jobs, and the hardware-in-the-loop tests are all documented in
 ```
 rtl/        Portable Verilog cores + vendor TAP wrappers (VHDL in rtl/vhdl/)
 host/fcapz/ Python host stack: Analyzer, transports, CLI, RPC, GUI
-examples/   Reference designs (Arty A7, Gowin BRS-100, and more)
+examples/   Reference designs (Arty A7, Kria KV260, Gowin BRS-100, and more)
 docs/       User manual (start at docs/README.md) + canonical specs
 tb/, sim/   Testbenches and simulation runners
 ```

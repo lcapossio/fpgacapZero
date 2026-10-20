@@ -65,7 +65,8 @@ module jtag_pipe_iface_tb;
         .timestamp_data(timestamp_data),
         .burst_start(burst_start),
         .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_ptr_in)
+        .burst_ptr_in(burst_ptr_in),
+        .burst_header({BURST_W{1'b0}})
     );
 
     always #5 tck = ~tck;
@@ -225,7 +226,8 @@ module jtag_pipe_iface_tb;
         .timestamp_data(1'b0),
         .burst_start(seg_burst_start),
         .burst_timestamp(1'b0),
-        .burst_ptr_in(seg_burst_ptr)
+        .burst_ptr_in(seg_burst_ptr),
+        .burst_header({BURST_W{1'b0}})
     );
 
     initial begin

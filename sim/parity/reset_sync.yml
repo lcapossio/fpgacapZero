@@ -27,6 +27,7 @@
       "clk"
     ],
     "reset_cycles": 2,
+    "init_after_reset": false,
     "modules": [
       {
         "name": "reset_sync",

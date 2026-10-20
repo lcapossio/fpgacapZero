@@ -7,6 +7,8 @@
 //
 // Use this when a reset source may be unrelated to the destination clock
 // domain, but the destination logic expects clean reset release on that clock.
+// It powers up asserted, as the VHDL twin does, and releases after STAGES
+// clocks.
 
 module reset_sync #(
     parameter STAGES = 2
@@ -17,6 +19,8 @@ module reset_sync #(
 );
 
     (* ASYNC_REG = "TRUE" *) reg [STAGES-1:0] sync_ff;
+
+    initial sync_ff = {STAGES{1'b1}};
 
     always @(posedge clk or posedge arst) begin
         if (arst)

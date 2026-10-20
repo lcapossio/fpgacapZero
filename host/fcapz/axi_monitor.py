@@ -79,16 +79,11 @@ class AxiMonitor:
         self._an = analyzer
 
     def _read(self, addr: int) -> int:
-        # Select the monitor's BSCAN chain first -- another core (e.g. the AXI
-        # bridge on a different USER chain) may have left the transport selected
-        # elsewhere.
-        t = self._an.transport
-        with t.transaction_lock():
-            try:
-                t.select_chain(self._an.bscan_chain)
-            except NotImplementedError:
-                pass
-            return t.read_reg(addr)
+        # Select the monitor's BSCAN chain and manager slot first -- another
+        # core (e.g. the AXI bridge on a different USER chain, or an EIO in
+        # another slot) may have left the transport selected elsewhere.
+        with self._an._selected():  # noqa: SLF001 - the analyzer owns its slot
+            return self._an.transport.read_reg(addr)
 
     # ---- detection / geometry ------------------------------------------
     def identity(self) -> int | None:
@@ -246,8 +241,8 @@ class AxiMonitor:
         stores a sample **only on cycles where at least one channel handshakes**
         — compressing the capture to transaction beats.
 
-        Returns the ELA storage-qualifier tuple: mode ``1`` (NEQ, i.e. store
-        when the masked bits are non-zero), value ``0``, mask = the OR of the
+        Returns the ELA storage-qualifier tuple: mode ``2`` (store on no
+        match, i.e. when the masked bits are non-zero), value ``0``, mask = the OR of the
         handshake-event bits.  Requires a DECODE_EN=1 build (the handshake bits
         do not exist otherwise).
         """
@@ -259,7 +254,7 @@ class AxiMonitor:
         mask = 0
         for name in HANDSHAKE_EVENTS:
             mask |= 1 << EVENT_BITS[name]
-        return (1, 0, mask)  # NEQ vs 0 over the handshake bits
+        return (2, 0, mask)  # no match vs 0 over the handshake bits
 
     def event_capture_config(
         self,

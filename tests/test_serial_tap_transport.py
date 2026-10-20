@@ -506,6 +506,29 @@ def test_no_burst_means_no_wide_timestamp_burst(fake_serial):
         t.read_timestamp_block_single_chain(0x0500, 2, 48)
 
 
+def test_bursts_data_window_follows_the_burst_chain(fake_serial):
+    """The analyzer reads the DATA window through read_block only when this
+    says it bursts; otherwise the burst would never run."""
+    t, _ = _connect(fake_serial)
+    assert t.burst_on_data_chain
+    assert t.bursts_data_window() and t.bursts_data_window(timestamp=True)
+    t, _ = _connect(fake_serial, burst=False)
+    assert not t.bursts_data_window()
+    assert not t.bursts_data_window(timestamp=True)
+
+
+def test_control_chain_bursts_are_refused_before_any_scan(fake_serial):
+    """A core manager answers only its own chain; the bridge bursts on the
+    data chain, so a managed slot falls back to the window."""
+    t, port = _connect_narrow(fake_serial)
+    port.timestamp_width = 48
+    with pytest.raises(BurstUnavailableError):
+        t.read_sample_block(ADDR_DATA_BASE, 2, 48, on_control_chain=True)
+    with pytest.raises(BurstUnavailableError):
+        t.read_timestamp_block_single_chain(0x0500, 2, 48, on_control_chain=True)
+    assert not port.breads
+
+
 def test_read_timestamp_block_uses_the_burst_chain(fake_serial):
     t, port = _connect(fake_serial)
     port.timestamp_width = 32
@@ -928,7 +951,7 @@ def _rpc_server():
 
 
 def test_rpc_builds_a_serial_transport_without_an_ir_table():
-    t = _rpc_server()._build_transport(
+    t = _rpc_server()._new_transport(
         {"backend": "serial", "serial_port": "COM16", "baudrate": 2_000_000}
     )
     assert isinstance(t, SerialTapTransport)
@@ -937,13 +960,13 @@ def test_rpc_builds_a_serial_transport_without_an_ir_table():
 
 def test_rpc_requires_a_serial_port():
     with pytest.raises(ValueError, match="needs a serial_port"):
-        _rpc_server()._build_transport({"backend": "serial", "serial_port": "  "})
+        _rpc_server()._new_transport({"backend": "serial", "serial_port": "  "})
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, "abc", float("nan"), 99_000_000])
 def test_rpc_rejects_an_impossible_baudrate(bad):
     with pytest.raises(ValueError, match="baudrate"):
-        _rpc_server()._build_transport(
+        _rpc_server()._new_transport(
             {"backend": "serial", "serial_port": "COM16", "baudrate": bad}
         )
 
@@ -952,7 +975,7 @@ def test_rpc_defaults_the_baudrate_when_blank():
     # A cleared number field arrives as "" (or null), which must mean "default",
     # not "0 baud".
     for blank in ("", None):
-        t = _rpc_server()._build_transport(
+        t = _rpc_server()._new_transport(
             {"backend": "serial", "serial_port": "COM16", "baudrate": blank}
         )
         assert t.baudrate == 1_000_000
@@ -987,6 +1010,17 @@ def test_rpc_refuses_serial_side_connections():
     # EIO/AXI/UART each build a SECOND transport; the analyzer already owns the
     # port exclusively, so this must fail with our message, not the OS's.
     with pytest.raises(ValueError, match="side connections"):
-        _rpc_server()._build_transport(
+        _rpc_server()._new_transport(
             {"backend": "serial", "serial_port": "COM16"}, side=True
         )
+
+
+def test_rpc_serial_target_is_its_port():
+    """An EIO on the session's port shares its transport; another port is
+    another board."""
+    srv = _rpc_server()
+    srv._analyzer_target = {"backend": "serial", "serial_port": "COM16"}
+    assert srv._same_target({})
+    assert srv._same_target({"serial_port": " COM16 "})
+    assert not srv._same_target({"serial_port": "COM17"})
+    assert not srv._same_target({"backend": "hw_server"})

@@ -46,7 +46,9 @@ module jtag_tap_xilinxus #(
     output wire capture,
     output wire shift,
     output wire update,
-    output wire sel
+    output wire sel,
+    // TAP in Test-Logic-Reset (level, TCK domain)
+    output wire tlr
 );
 
     // Direct shim — see file header for the rationale.  No code changes
@@ -55,7 +57,8 @@ module jtag_tap_xilinxus #(
     jtag_tap_xilinx7 #(.CHAIN(CHAIN)) u_tap (
         .tck(tck), .tdi(tdi), .tdo(tdo),
         .capture(capture), .shift(shift),
-        .update(update), .sel(sel)
+        .update(update), .sel(sel),
+        .tlr(tlr)
     );
 
 endmodule

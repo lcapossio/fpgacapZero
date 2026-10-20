@@ -382,12 +382,12 @@ def test_discover_boards_only_returns_compatible(monkeypatch):
 
     taps_by_port = {6666: ["GW1NR-9C.tap", "dummy.tap"], 6668: ["xc7a100t.tap"]}
 
-    def fake_list_taps(*, host, port, timeout_sec):
+    def fake_list_taps(*, host, port, timeout_sec, register=None):
         if port not in taps_by_port:
             raise OSError("nothing listening")  # e.g. port 6667 has no OpenOCD
         return taps_by_port[port]
 
-    def fake_probe(*, host, port, tap, chain, timeout_sec):
+    def fake_probe(*, host, port, tap, chain, timeout_sec, register=None):
         if tap == "dummy.tap":
             return None  # present tap, but not an fcapz ELA
         return {
@@ -417,7 +417,7 @@ def test_caller_waits_are_clamped(monkeypatch):
 
     captured = {}
 
-    def fake_list_taps(*, host, port, timeout_sec):
+    def fake_list_taps(*, host, port, timeout_sec, register=None):
         captured["timeout"] = timeout_sec
         return []
 
@@ -440,7 +440,7 @@ def test_discover_boards_budget_caps_sweep(monkeypatch):
         def monotonic() -> float:
             return clock["t"]
 
-    def fake_list_taps(*, host, port, timeout_sec):
+    def fake_list_taps(*, host, port, timeout_sec, register=None):
         assert timeout_sec <= 5.0  # per-step timeout clamped to what's left
         clock["t"] += 5.0  # this port costs the full per-step timeout
         return []
@@ -457,7 +457,7 @@ def test_discover_boards_budget_caps_sweep(monkeypatch):
 def test_discover_boards_rpc_forwards_budget(monkeypatch):
     captured = {}
 
-    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None, register=None):
         captured["budget"] = budget_sec
         return []
 
@@ -471,7 +471,7 @@ def test_discover_boards_rpc_forwards_budget(monkeypatch):
 def test_discover_boards_rpc_expands_port_span(monkeypatch):
     calls = {}
 
-    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None, register=None):
         calls["ports"] = ports
         return [{
             "backend": "openocd", "host": host, "port": ports[0],
@@ -533,7 +533,7 @@ def test_openocd_stop_runs_under_session_lock():
 def test_discover_boards_caps_port_span(monkeypatch):
     captured = {}
 
-    def fake_discover(*, host, ports, timeout_sec, budget_sec=None):
+    def fake_discover(*, host, ports, timeout_sec, budget_sec=None, register=None):
         captured["ports"] = ports
         return []
 

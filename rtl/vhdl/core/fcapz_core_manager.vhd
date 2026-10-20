@@ -9,6 +9,7 @@ library work;
 use work.fcapz_pkg.all;
 use work.fcapz_util_pkg.all;
 
+-- Active-slot manager; see fcapz_core_manager.v for the reset domains.
 entity fcapz_core_manager is
     generic (
         NUM_SLOTS      : positive := 2;
@@ -16,11 +17,15 @@ entity fcapz_core_manager is
         TIMESTAMP_W    : natural := 0;
         DEPTH          : positive := 1024;
         SLOT_CORE_IDS  : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0) := (others => '0');
-        SLOT_HAS_BURST : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0')
+        SLOT_HAS_BURST : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0');
+        HEADER_EN      : natural := 0;
+        TLR_RESET_EN   : natural := 0
     );
     port (
         jtag_clk   : in  std_logic;
         jtag_rst   : in  std_logic;
+        proto_rst  : in  std_logic;
+        tlr        : in  std_logic;
 
         jtag_wr_en : in  std_logic;
         jtag_rd_en : in  std_logic;
@@ -28,11 +33,13 @@ entity fcapz_core_manager is
         jtag_wdata : in  std_logic_vector(31 downto 0);
         jtag_rdata : out std_logic_vector(31 downto 0);
 
-        slot_wr_en : out std_logic_vector(NUM_SLOTS - 1 downto 0);
-        slot_rd_en : out std_logic_vector(NUM_SLOTS - 1 downto 0);
-        slot_addr  : out std_logic_vector(NUM_SLOTS * 16 - 1 downto 0);
-        slot_wdata : out std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
-        slot_rdata : in  std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
+        slot_wr_en   : out std_logic_vector(NUM_SLOTS - 1 downto 0);
+        slot_rd_en   : out std_logic_vector(NUM_SLOTS - 1 downto 0);
+        slot_addr    : out std_logic_vector(NUM_SLOTS * 16 - 1 downto 0);
+        slot_wdata   : out std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
+        slot_rdata   : in  std_logic_vector(NUM_SLOTS * 32 - 1 downto 0);
+        slot_rst     : in  std_logic_vector(NUM_SLOTS - 1 downto 0);
+        slot_rst_req : out std_logic_vector(NUM_SLOTS - 1 downto 0);
 
         burst_rd_addr          : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
         burst_rd_active        : in  std_logic;
@@ -47,7 +54,8 @@ entity fcapz_core_manager is
         burst_rd_ts_data       : out std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
         burst_start            : out std_logic;
         burst_timestamp        : out std_logic;
-        burst_start_ptr        : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0)
+        burst_start_ptr        : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
+        burst_header           : out std_logic_vector(159 downto 0)
     );
 end entity fcapz_core_manager;
 
@@ -59,6 +67,19 @@ architecture rtl of fcapz_core_manager is
     constant MANAGER_CORE_ID : std_logic_vector(15 downto 0) := x"434D";
     constant MANAGER_VERSION : std_logic_vector(31 downto 0) :=
         FCAPZ_VERSION_MAJOR & FCAPZ_VERSION_MINOR & MANAGER_CORE_ID;
+    constant HEADER_MAGIC : std_logic_vector(15 downto 0) := x"4248";
+
+    function manager_caps return std_logic_vector is
+        variable caps : std_logic_vector(31 downto 0) := x"000000AF";
+    begin
+        if HEADER_EN /= 0 then
+            caps(4) := '1';
+        end if;
+        if TLR_RESET_EN /= 0 then
+            caps(6) := '1';
+        end if;
+        return caps;
+    end function;
 
     constant ADDR_MGR_VERSION    : std_logic_vector(15 downto 0) := x"F000";
     constant ADDR_MGR_COUNT      : std_logic_vector(15 downto 0) := x"F004";
@@ -68,67 +89,161 @@ architecture rtl of fcapz_core_manager is
     constant ADDR_MGR_DESC_INDEX : std_logic_vector(15 downto 0) := x"F014";
     constant ADDR_MGR_DESC_CORE  : std_logic_vector(15 downto 0) := x"F018";
     constant ADDR_MGR_DESC_CAPS  : std_logic_vector(15 downto 0) := x"F01C";
+    constant ADDR_MGR_EPOCH      : std_logic_vector(15 downto 0) := x"F020";
+    constant ADDR_MGR_OWNER      : std_logic_vector(15 downto 0) := x"F024";
+    constant ADDR_MGR_CTRL       : std_logic_vector(15 downto 0) := x"F028";
+    constant ADDR_MGR_SLOT_EPOCH : std_logic_vector(15 downto 0) := x"F02C";
+    constant ADDR_MGR_TLR_COUNT  : std_logic_vector(15 downto 0) := x"F030";
+    constant ADDR_MGR_SELECT_COUNT : std_logic_vector(15 downto 0) := x"F034";
     constant ADDR_BURST_PTR      : std_logic_vector(15 downto 0) := x"002C";
 
     signal active_idx : unsigned(IDX_W - 1 downto 0) := (others => '0');
     signal desc_idx   : unsigned(IDX_W - 1 downto 0) := (others => '0');
+    signal owner      : std_logic_vector(31 downto 0) := (others => '0');
     signal burst_owner_idx   : unsigned(IDX_W - 1 downto 0) := (others => '0');
     signal burst_owner_valid : std_logic := '0';
     signal burst_rd_active_d : std_logic := '0';
     -- The burst start event the pipe sees; see fcapz_core_manager.v.
     signal burst_start_r     : std_logic := '0';
 
+    -- Not reset by anything they drive or count; power-up values only.
+    signal mgr_rst_req    : std_logic := '0';
+    signal slot_rst_req_r : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0');
+    signal mgr_rst_d      : std_logic := '0';
+    signal mgr_epoch      : unsigned(15 downto 0) := (others => '0');
+    signal slot_rst_d     : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0');
+    signal slot_epoch     : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0) := (others => '0');
+    signal tlr_d          : std_logic := '0';
+    signal tlr_count      : unsigned(15 downto 0) := (others => '0');
+    -- Every MGR_ACTIVE write, accepted or not; see fcapz_core_manager.v.
+    signal select_count   : unsigned(15 downto 0) := (others => '0');
+
+    signal mgr_rst   : std_logic;
+    signal burst_rst : std_logic;
+
     signal manager_hit         : std_logic;
     signal requested_idx_valid : std_logic;
     signal active_onehot       : std_logic_vector(NUM_SLOTS - 1 downto 0);
     signal burst_mux_idx       : unsigned(IDX_W - 1 downto 0);
+    signal burst_ptr_wr        : std_logic;
+    signal ctrl_wr             : std_logic;
 
     signal active_rdata           : std_logic_vector(31 downto 0);
     signal active_burst_data      : std_logic_vector(SAMPLE_W - 1 downto 0);
     signal active_burst_ts_data   : std_logic_vector(TS_W_SAFE - 1 downto 0);
     signal active_burst_timestamp : std_logic;
     signal active_burst_start_ptr : std_logic_vector(PTR_W - 1 downto 0);
+    signal burst_slot_epoch       : std_logic_vector(15 downto 0);
 
     signal desc_core_id   : std_logic_vector(15 downto 0);
     signal desc_has_burst : std_logic;
+    signal desc_epoch     : std_logic_vector(15 downto 0);
     signal manager_rdata  : std_logic_vector(31 downto 0);
 begin
+    mgr_rst <= jtag_rst or mgr_rst_req;
+    burst_rst <= mgr_rst or proto_rst;
+
     manager_hit <= '1' when jtag_addr(15 downto 8) = x"F0" else '0';
     requested_idx_valid <= '1' when unsigned(jtag_wdata) < NUM_SLOTS else '0';
     active_onehot <= std_logic_vector(shift_left(to_unsigned(1, NUM_SLOTS), to_integer(active_idx)));
     burst_mux_idx <= burst_owner_idx when burst_owner_valid = '1' else active_idx;
+    burst_ptr_wr <= '1' when jtag_wr_en = '1' and manager_hit = '0' and
+                             jtag_addr = ADDR_BURST_PTR and
+                             SLOT_HAS_BURST(to_integer(active_idx)) = '1'
+                    else '0';
+    ctrl_wr <= '1' when jtag_wr_en = '1' and jtag_addr = ADDR_MGR_CTRL else '0';
 
-    p_regs : process(jtag_clk, jtag_rst)
+    p_regs : process(jtag_clk, mgr_rst)
     begin
-        if jtag_rst = '1' then
+        if mgr_rst = '1' then
             active_idx <= (others => '0');
             desc_idx <= (others => '0');
-            burst_owner_idx <= (others => '0');
-            burst_owner_valid <= '0';
-            burst_rd_active_d <= '0';
-            burst_start_r <= '0';
+            owner <= (others => '0');
         elsif rising_edge(jtag_clk) then
-            burst_rd_active_d <= burst_rd_active;
-            if jtag_wr_en = '1' and manager_hit = '0' and
-               jtag_addr = ADDR_BURST_PTR and SLOT_HAS_BURST(to_integer(active_idx)) = '1' then
-                burst_owner_idx <= active_idx;
-                burst_owner_valid <= '1';
-                burst_start_r <= not burst_start_r;
-            elsif burst_rd_active = '1' and burst_rd_active_d = '0' then
-                burst_owner_idx <= active_idx;
-                burst_owner_valid <= '1';
-            end if;
-
             if jtag_wr_en = '1' then
                 if jtag_addr = ADDR_MGR_ACTIVE then
-                    if requested_idx_valid = '1' and burst_rd_active = '0' then
+                    -- Once an owner is bound the burst mux follows it, not
+                    -- ACTIVE, so a switch during a preload is safe to take.
+                    if requested_idx_valid = '1' and
+                       (burst_owner_valid = '1' or burst_rd_active = '0') then
                         active_idx <= resize(unsigned(jtag_wdata), IDX_W);
                     end if;
                 elsif jtag_addr = ADDR_MGR_DESC_INDEX then
                     if requested_idx_valid = '1' then
                         desc_idx <= resize(unsigned(jtag_wdata), IDX_W);
                     end if;
+                elsif jtag_addr = ADDR_MGR_OWNER then
+                    owner <= jtag_wdata;
                 end if;
+            end if;
+        end if;
+    end process;
+
+    p_burst_owner : process(jtag_clk, burst_rst)
+    begin
+        if burst_rst = '1' then
+            burst_owner_idx <= (others => '0');
+            burst_owner_valid <= '0';
+            burst_rd_active_d <= '0';
+        elsif rising_edge(jtag_clk) then
+            burst_rd_active_d <= burst_rd_active;
+            if burst_ptr_wr = '1' then
+                burst_owner_idx <= active_idx;
+                burst_owner_valid <= '1';
+            elsif burst_rd_active = '1' and burst_rd_active_d = '0' and
+                  burst_owner_valid = '0' then
+                -- A burst with no BURST_PTR write since reset binds the active
+                -- slot once.  Later preloads keep the bound owner: an ACTIVE
+                -- write between bursts must not move the burst to another slot.
+                burst_owner_idx <= active_idx;
+                burst_owner_valid <= '1';
+            end if;
+        end if;
+    end process;
+
+    p_burst_start : process(jtag_clk, proto_rst)
+    begin
+        if proto_rst = '1' then
+            burst_start_r <= '0';
+        elsif rising_edge(jtag_clk) then
+            if burst_ptr_wr = '1' then
+                burst_start_r <= not burst_start_r;
+            end if;
+        end if;
+    end process;
+
+    -- One-cycle reset requests; the epochs count both edges of each reset,
+    -- so an odd epoch means that reset is held now.
+    p_counters : process(jtag_clk)
+    begin
+        if rising_edge(jtag_clk) then
+            mgr_rst_req <= ctrl_wr and jtag_wdata(0);
+            for i in 0 to NUM_SLOTS - 1 loop
+                if ctrl_wr = '1' and (jtag_wdata(2) = '1' or
+                   (jtag_wdata(1) = '1' and desc_idx = to_unsigned(i, IDX_W))) then
+                    slot_rst_req_r(i) <= '1';
+                else
+                    slot_rst_req_r(i) <= '0';
+                end if;
+            end loop;
+
+            mgr_rst_d <= mgr_rst;
+            if mgr_rst_d /= mgr_rst then
+                mgr_epoch <= mgr_epoch + 1;
+            end if;
+            slot_rst_d <= slot_rst;
+            for i in 0 to NUM_SLOTS - 1 loop
+                if slot_rst_d(i) /= slot_rst(i) then
+                    slot_epoch((i + 1) * 16 - 1 downto i * 16) <= std_logic_vector(
+                        unsigned(slot_epoch((i + 1) * 16 - 1 downto i * 16)) + 1);
+                end if;
+            end loop;
+            tlr_d <= tlr;
+            if tlr = '1' and tlr_d = '0' then
+                tlr_count <= tlr_count + 1;
+            end if;
+            if jtag_wr_en = '1' and jtag_addr = ADDR_MGR_ACTIVE then
+                select_count <= select_count + 1;
             end if;
         end if;
     end process;
@@ -143,6 +258,7 @@ begin
             burst_mux_idx = to_unsigned(g, IDX_W) and SLOT_HAS_BURST(g) = '1'
             else '0';
     end generate;
+    slot_rst_req <= slot_rst_req_r;
 
     p_active : process(all)
         variable rdata_v      : std_logic_vector(31 downto 0);
@@ -150,12 +266,14 @@ begin
         variable ts_data_v    : std_logic_vector(TS_W_SAFE - 1 downto 0);
         variable timestamp_v  : std_logic;
         variable start_ptr_v  : std_logic_vector(PTR_W - 1 downto 0);
+        variable epoch_v      : std_logic_vector(15 downto 0);
     begin
         rdata_v := (others => '0');
         data_v := (others => '0');
         ts_data_v := (others => '0');
         timestamp_v := '0';
         start_ptr_v := (others => '0');
+        epoch_v := (others => '0');
 
         for i in 0 to NUM_SLOTS - 1 loop
             if active_idx = to_unsigned(i, IDX_W) then
@@ -163,6 +281,7 @@ begin
             end if;
 
             if burst_mux_idx = to_unsigned(i, IDX_W) then
+                epoch_v := slot_epoch((i + 1) * 16 - 1 downto i * 16);
                 if SLOT_HAS_BURST(i) = '1' then
                     data_v := slot_burst_rd_data((i + 1) * SAMPLE_W - 1 downto i * SAMPLE_W);
                     ts_data_v := slot_burst_rd_ts_data((i + 1) * TS_W_SAFE - 1 downto i * TS_W_SAFE);
@@ -177,24 +296,29 @@ begin
         active_burst_ts_data <= ts_data_v;
         active_burst_timestamp <= timestamp_v;
         active_burst_start_ptr <= start_ptr_v;
+        burst_slot_epoch <= epoch_v;
     end process;
 
     p_desc : process(all)
         variable core_id_v   : std_logic_vector(15 downto 0);
         variable has_burst_v : std_logic;
+        variable epoch_v     : std_logic_vector(15 downto 0);
     begin
         core_id_v := (others => '0');
         has_burst_v := '0';
+        epoch_v := (others => '0');
 
         for i in 0 to NUM_SLOTS - 1 loop
             if desc_idx = to_unsigned(i, IDX_W) then
                 core_id_v := SLOT_CORE_IDS((i + 1) * 16 - 1 downto i * 16);
                 has_burst_v := SLOT_HAS_BURST(i);
+                epoch_v := slot_epoch((i + 1) * 16 - 1 downto i * 16);
             end if;
         end loop;
 
         desc_core_id <= core_id_v;
         desc_has_burst <= has_burst_v;
+        desc_epoch <= epoch_v;
     end process;
 
     p_manager_rdata : process(all)
@@ -209,14 +333,23 @@ begin
             when ADDR_MGR_STRIDE =>
                 manager_rdata <= (others => '0');
             when ADDR_MGR_CAPS =>
-                -- bit2: burst start raised on every BURST_PTR write
-                manager_rdata <= x"00000007";
+                manager_rdata <= manager_caps;
             when ADDR_MGR_DESC_INDEX =>
                 manager_rdata <= std_logic_vector(resize(desc_idx, 32));
             when ADDR_MGR_DESC_CORE =>
                 manager_rdata <= x"0000" & desc_core_id;
             when ADDR_MGR_DESC_CAPS =>
                 manager_rdata <= std_logic_vector(to_unsigned(0, 31)) & desc_has_burst;
+            when ADDR_MGR_EPOCH =>
+                manager_rdata <= x"0000" & std_logic_vector(mgr_epoch);
+            when ADDR_MGR_OWNER =>
+                manager_rdata <= owner;
+            when ADDR_MGR_SLOT_EPOCH =>
+                manager_rdata <= x"0000" & desc_epoch;
+            when ADDR_MGR_TLR_COUNT =>
+                manager_rdata <= x"0000" & std_logic_vector(tlr_count);
+            when ADDR_MGR_SELECT_COUNT =>
+                manager_rdata <= x"0000" & std_logic_vector(select_count);
             when others =>
                 manager_rdata <= (others => '0');
         end case;
@@ -228,4 +361,12 @@ begin
     burst_start <= burst_start_r;
     burst_timestamp <= active_burst_timestamp;
     burst_start_ptr <= active_burst_start_ptr;
+    burst_header <= std_logic_vector(to_unsigned(SAMPLE_W, 16))
+                    & owner
+                    & burst_slot_epoch
+                    & std_logic_vector(mgr_epoch)
+                    & std_logic_vector(to_unsigned(0, 15)) & active_burst_timestamp
+                    & std_logic_vector(resize(unsigned(active_burst_start_ptr), 32))
+                    & std_logic_vector(resize(burst_mux_idx, 16))
+                    & HEADER_MAGIC;
 end architecture rtl;

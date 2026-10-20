@@ -177,9 +177,12 @@ probe daemon, so no `host`/`port`/`tap` and no IR table:
 }
 ```
 
-The serial session holds its port **exclusively**, so `eio_connect`,
-`eio_discover`, `axi_connect` and `uart_connect` — each of which opens a second
-transport alongside the analyzer's — are refused on this backend and report so.
+The serial session holds its port **exclusively**, so a side session that
+needs a second transport alongside the analyzer's is refused on this backend
+and reports so: `axi_connect`, `uart_connect`, and an `eio_connect` on another
+chain without an `instance`.  An EIO the session's transport can reach itself
+— `eio_discover` on the session's port, or `eio_connect` to a core-manager slot
+or on the analyzer's chain — shares that transport and works.
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
@@ -211,6 +214,11 @@ core answers there, scans chain 2 and binds to the first core found (chains
 3/4 are never scanned — bridges there speak a different DR protocol and must
 not see stray shifts). Pass an explicit `"chain"` to skip the scan and pin the
 session, e.g. to reach an AXI monitor directly.
+
+`"instance"` binds the session to a core-manager slot: the analyzer selects
+it before every access, so an EIO in another slot of the same hub cannot move
+it.  Without it the session is bound to the chain's first ELA slot, never to
+whichever slot the hub has active.
 
 #### `list_serial_ports`
 
@@ -285,6 +293,10 @@ are left untouched.
 ```json
 {"cmd": "rebind", "chain": 2}
 ```
+
+`"instance"` selects a core-manager slot (`null` for none).  Left out, a
+rebind to the same chain keeps the session's slot and one to another chain
+selects none.
 
 Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
 — `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
@@ -404,12 +416,14 @@ Response:
 
 Enumerate the fcapz cores present on the connected target. Always reports the
 connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
-USER chains (1–2) for further cores — a plain ELA or an AXI monitor — so
-clients can list everything and offer a switch. Each entry has `type`, `name`,
+USER chains (1, 2 and 5) for further cores — a plain ELA or an AXI monitor — so
+clients can list everything and offer a switch. When the connected chain is a
+core manager, the manager (`type` `manager`) and its other slots are listed
+too, each with its slot in `instance`. Each entry has `type`, `name`,
 `core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
-type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, or the
-monitor geometry `{proto, addr_w, data_w, decode, sample_width}` for
-`axi_mon`).
+type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
+manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
+sample_width}` for `axi_mon`).
 
 ```json
 {"cmd": "list_cores"}
@@ -428,6 +442,23 @@ Response:
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
+```
+
+#### `discover`
+
+List every fcapz core on the session, chain by chain, as
+`fcapz.discovery.discover_cores()` does: register cores (ELA, EIO, AXI
+monitor, a core manager and each of its slots) and the EJTAG-AXI and
+EJTAG-UART bridges.  Each chain is read only at `0x0000` until it answers as
+an ELA or EIO, which the bridges see as a NOP.  Optional `chains` narrows the
+sweep (default USER1-4, or `sld_virtual_jtag` instances 1-8);
+`"bridges": false` skips the bridge identity reads.  Entries have the
+`list_cores` fields plus `instance` (manager slot or `null`); bridge `type`s
+are `ejtag_axi` and `ejtag_uart`.  The session's chain is selected again
+afterwards and a manager's active slot is left as it was.
+
+```json
+{"cmd": "discover", "chains": [1, 4]}
 ```
 
 #### `configure`
@@ -453,11 +484,22 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
   "stor_qual_value": 0,
   "stor_qual_mask": 0,
   "trigger_delay": 0,
+  "rle": false,
   "probes": [
     {"name": "counter", "width": 8, "lsb": 0}
   ]
 }
 ```
+
+`depth` and `sample_width` must match the synthesized core; omit them to
+read them from the connected core (a `probe_file`'s `sample_width` takes
+precedence). An explicit value that disagrees is rejected.
+
+`rle` (bool, default `false`) turns on run-length capture on cores that
+report `rle_width > 0` in `probe`. Capture replies then carry a
+`run_lengths` list beside `samples`. `post_clocks` (int, default 0) also
+ends the post-trigger window that many sample clocks after the trigger; it
+needs `rle`.
 
 `probes` can also be a string in the CLI `name:width:lsb,...` form.
 Use `probe_file` with a `.prob` sidecar path to load the same information
@@ -477,9 +519,11 @@ wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 
 Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
 the same result shape and options as `capture`, but without re-configuring or
-re-arming. A `TimeoutError` here just means "still waiting" and leaves the
-core armed, so clients can hold one hardware arm across many short polls
-(this is how the web UI waits for a trigger with no deadline).
+re-arming. A `CaptureNotReady` here just means "still waiting" and leaves
+the core armed, so clients can hold one hardware arm across many short polls
+(this is how the web UI waits for a trigger with no deadline). It subclasses
+`TimeoutError`, so it is distinguishable from a transport that stopped
+answering — which is *not* safe to retry against a still-armed core.
 
 ```json
 {"cmd": "capture_wait", "timeout": 4.0, "include_vcd": true}
@@ -554,6 +598,35 @@ unbounded timeouts could starve all clients.
 ```
 
 Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+
+With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
+session's transport, so the two keep one lock and one cache of the hub's
+active slot, provided the request names the same board: connection fields it
+leaves out are the session's, and any it names (`backend`, `host`, `port`,
+`tap`, `hardware`) must match.  A request for another board opens its own
+transport, with the session's values for the fields it leaves out.
+
+#### `eio_discover`
+
+Find the EIO without knowing its chain.  On the session's board (the
+request's connection fields match, as for `eio_connect`), the server lists the
+cores on the session's own connection and attaches the first EIO there,
+standalone or in a core-manager slot, without opening a second connection; an
+analyzer the connect could not bind is bound to its first ELA slot first, as
+`eio_connect` does.  The
+response carries the EIO's `instance` (`null` when standalone).  For another
+board the server opens its own connection, taking the fields the request
+leaves out from the session, and tries each chain in `"chains"` at base
+addresses `0x0000` and `0x8000`.
+Without `"chains"` it tries every chain in the transport's IR table, or, on
+`usb_blaster` (no IR table), virtual-JTAG instances 1-3, where the Intel
+wrappers put the ELA and EIO; the bridges on 4 and 5 are left alone.
+
+```json
+{"cmd": "eio_discover", "backend": "usb_blaster", "hardware": "DE25-Nano [USB-1]"}
+```
+
+Response: as `eio_connect`, plus `"discovered": true` and the `base_addr` found.
 
 #### `eio_close`
 
@@ -812,14 +885,28 @@ errors back to the calling language.
 
 Common error types you should expect:
 
-- `RuntimeError` — `"not connected"`, `"ELA core identity check failed"`,
-  `"xsdb not found"`, `"xsdb: no bit string in output"`
+- `NotConnectedError` — `"not connected"`, for every subsystem
+- `NotEnabledError` — the subsystem exists but was not enabled for this
+  server
+- `RpcError` — the base class of both, for refusals that are neither
+- `RuntimeError` — `"ELA core identity check failed"`, `"xsdb not found"`,
+  `"xsdb: no bit string in output"`
 - `ConnectionError` — `"FPGA did not become ready within 2.0s"`,
   `"OpenOCD closed the connection"`
 - `ValueError` — argument validation, FIFO_DEPTH overflow, sequencer
   bound violations, probe overlaps
-- `TimeoutError` — capture didn't complete within timeout
+- `CaptureNotReady` — the trigger has not fired; the core is still armed
+- `TimeoutError` — a wait expired for any other reason, including a
+  transport that stopped answering
 - `AXIError` — AXI slave returned SLVERR or DECERR
+
+The first three subclass `RuntimeError` and `CaptureNotReady` subclasses
+`TimeoutError`, so a handler that catches the base class is unaffected. A
+client that compares the `type` **string** is not: refusals that used to
+report `"RuntimeError"` now report `"NotConnectedError"` or
+`"NotEnabledError"`, and a capture still waiting reports `"CaptureNotReady"`
+instead of `"TimeoutError"`. Match on the base classes, or accept both
+spellings.
 
 ## Worked example: a Tcl test harness
 

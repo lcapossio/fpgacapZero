@@ -141,6 +141,15 @@ TESTBENCHES = {
             RTL / "jtag_burst_read.v",
         ],
     ),
+    "fcapz_core_manager_select_after_burst": (
+        TB / "fcapz_core_manager_select_after_burst_tb.sv",
+        [
+            RTL / "fcapz_core_manager.v",
+            TB / "legacy" / "fcapz_core_manager_pre_burst_start.v",
+            RTL / "jtag_pipe_iface.v",
+            TB / "legacy" / "jtag_pipe_iface_pre_cmd_preload_end.v",
+        ],
+    ),
     "chan_mux": (
         TB / "chan_mux_tb.sv",
         [
@@ -155,6 +164,16 @@ TESTBENCHES = {
         [
             TB / "axi4_test_slave.v",
             RTL / "fcapz_axi_interconnect.v",
+        ],
+    ),
+    "fcapz_bridge_discovery": (
+        TB / "fcapz_bridge_discovery_tb.sv",
+        [
+            TB / "axi4_test_slave.v",
+            RTL / "fcapz_ejtagaxi.v",
+            RTL / "fcapz_ejtaguart.v",
+            RTL / "fcapz_async_fifo.v",
+            TB / "xpm_fifo_async_stub.v",
         ],
     ),
 }
@@ -173,8 +192,10 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_wrapper_ports",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",
+    "fcapz_core_manager_select_after_burst",
     "chan_mux",
     "fcapz_axi_interconnect",
+    "fcapz_bridge_discovery",
 ]
 
 LINT_TARGETS = [
@@ -191,7 +212,13 @@ LINT_TARGETS = [
     RTL / "fcapz_ela_xilinx7.v",
     RTL / "fcapz_core_manager.v",
     RTL / "fcapz_axi_interconnect.v",
+    RTL / "fcapz_debug_multi_core.v",
+    RTL / "fcapz_hub_reset.v",
+    RTL / "fcapz_debug_multi.v",
     RTL / "fcapz_debug_multi_xilinx7.v",
+    RTL / "fcapz_debug_multi_xilinxus.v",
+    # Intel (sld_virtual_jtag) -- requires sld_virtual_jtag_stub.
+    RTL / "fcapz_debug_multi_intel.v",
     RTL / "fcapz_eio.v",
     RTL / "fcapz_eio_xilinx7.v",
     RTL / "fcapz_ejtagaxi.v",
@@ -228,6 +255,7 @@ LINT_STUBS = [
     SIM / "xpm_fifo_async_stub.v",
     SIM / "ujtag_stub.v",
     SIM / "gw_jtag_stub.v",
+    SIM / "sld_virtual_jtag_stub.v",
 ]
 
 

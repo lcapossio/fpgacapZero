@@ -9,8 +9,12 @@ from .analyzer import (
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
+    entry_start_clocks,
+    expand_run_lengths,
 )
+from .axi_decode import AxiTransaction, decode_axi, looks_like_axi
 from .axi_monitor import AxiGeometry, AxiMonitor, AxiMonitorError
+from .discovery import discover_cores
 from .eio import EioController
 from .ejtagaxi import AXIError, EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -48,6 +52,8 @@ __all__ = [
     "ProbeSpec",
     "SequencerStage",
     "TriggerConfig",
+    "entry_start_clocks",
+    "expand_run_lengths",
     "Transport",
     "OpenOcdTransport",
     "XilinxHwServerTransport",
@@ -59,10 +65,14 @@ __all__ = [
     "find_bursts",
     "frequency_estimate",
     "summarize",
+    "AxiTransaction",
+    "decode_axi",
+    "looks_like_axi",
     "ProbeDefinition",
     "AxiMonitor",
     "AxiGeometry",
     "AxiMonitorError",
+    "discover_cores",
     "EioController",
     "EjtagAxiController",
     "AXIError",

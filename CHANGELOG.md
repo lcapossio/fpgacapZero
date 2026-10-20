@@ -9,6 +9,276 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Core manager — resets a host can see, and a checked burst header.** New
+  manager registers: `MGR_EPOCH` and `MGR_SLOT_EPOCH` count both edges of the
+  hub and per-slot resets (odd while a reset is held), `MGR_TLR_COUNT` counts
+  TAP Test-Logic-Reset entries (all never reset), `MGR_OWNER` holds an
+  advisory owner token, and `MGR_CTRL` resets the hub, one slot or every slot.
+  The priming scan of a burst now carries a header (magic, slot, start
+  pointer, window, both epochs, owner, sample width) instead of a stale word.
+  The host checks the header against what it read before the burst (the
+  advisory owner only against another session's token), re-reads the epochs (and, where Test-Logic-Reset cancels bursts,
+  `MGR_TLR_COUNT`) after it, and raises `BurstIntegrityError` when the burst
+  is not the one it asked for or a reset hit it. `Analyzer` holds its slot,
+  the slot epoch and the hub epoch from `configure()` through the readout and
+  raises `ManagerResetError` when the slot was reset, the hub was reset during
+  a readout, or (with no `instance`) the active slot moved; a wait that times
+  out after a slot reset says so. A failed `configure()` leaves the analyzer
+  unconfigured. `CaptureChangedError` reports a capture whose `SEG_START`
+  moved during its readout. The host writes its owner token when it first
+  selects a slot, warns about another token, and clears it on close; a
+  reconnect or a new bitstream drops the claim and identifies the managers
+  again. The hub
+  shells take `TLR_RESET_EN` (default 0) to make Test-Logic-Reset also reset
+  the burst protocol; leave it 0 behind Xilinx `hw_server`, which walks the
+  TAP through Test-Logic-Reset between scans. `MGR_CAPS` bits 3-6 report each feature. Both HDLs,
+  all three vendor shells.
+
+- **ELA — `DATA_OFFSET` pages the DATA window.** The DATA and timestamp
+  windows are register addresses, so they ended at `0xFFFF`, or at `0xF000`
+  behind a core manager: a deep core without burst readout could not be read
+  in full, and the hub refused to build one. The new `DATA_OFFSET` register
+  (`0x00F4`, `COMPARE_CAPS` bit 20) adds a word offset to every window read,
+  and the host pages reads past the limit through it. Arming or resetting the
+  ELA sets it back to 0, so an offset a host left behind cannot shift the
+  next capture. Reads keep no side
+  effects, so every transport's window readers work unchanged. The hub's
+  `0xF000` elaboration check is gone. Both HDLs.
+
+- **Core manager — `MGR_SELECT_COUNT` reveals another controller's select.**
+  A new read-only register (`0xF034`, `MGR_CAPS` bit 7) counts every
+  `MGR_ACTIVE` write, refused ones too, and is never reset. Another
+  controller that selected a slot during an analyzer's `configure()`,
+  `arm()`, `reset()` or readout and then selected the analyzer's slot back left nothing
+  to see: some writes or reads went to the other slot. The transport now
+  counts its own `MGR_ACTIVE` writes, and `Analyzer` compares the difference
+  across each of those operations and raises `ManagerResetError`. An analyzer
+  with an `instance` also reads `MGR_ACTIVE` and refuses another slot there.
+  Older hubs get the `MGR_ACTIVE` check only. Both HDLs.
+
+- **ELA — `CAPTURE_GEN` identifies a capture.** A new read-only register
+  (`0x00F8`, `COMPARE_CAPS` bit 21) counts every `CTRL` arm or reset write and
+  every release of the core's register-side reset (two when both land in
+  one cycle), and is never reset.
+  `SEG_START` could not tell captures apart: a re-arm by another controller
+  during a readout, or between `arm()` and the readout, can leave it where it
+  was while new samples overwrite the buffer. `Analyzer.arm()` now expects
+  `CAPTURE_GEN` to move by exactly one, and the readout expects the value
+  `arm()` left and compares it across the readout; either raises
+  `CaptureChangedError`. Standalone ELAs too. Cores without bit 21 are read
+  as before. Both HDLs.
+
+- **Formal parity — power-up values.** The Verilog/VHDL parity proofs matched
+  registers by name and assumed equal states, so they never compared
+  power-up values. Each configuration now also compares the state of every
+  register after the reset the proofs assume, which covers the registers the
+  reset does not clear (counters, synchronisers). GHDL keeps the power-up
+  value of an async-reset flop on an alias that yosys `proc` drops, so the
+  check keeps it under its own attribute first. `reset_sync` is compared
+  without a reset, since its power-up value is its contract.
+
+- **Host — core discovery.** `fcapz discover`, the RPC `discover` command and
+  `fcapz.discovery.discover_cores()` list every fcapz core without being told
+  a chain: ELAs, EIOs, AXI monitors, a core manager and each of its slots, and
+  the EJTAG-AXI and EJTAG-UART bridges. A chain is read only at `0x0000`, a
+  NOP on both bridges, until it answers as an ELA or EIO. A new bench,
+  `fcapz_bridge_discovery`, shifts those scans into both bridges and checks
+  that nothing moves. `list_cores` now lists the manager and its slots.
+
+- **Core manager on every vendor.** The multi-core hub is now three layers:
+  `fcapz_debug_multi_core` (manager and ELA/EIO slots, no JTAG),
+  `fcapz_debug_multi` (TAP signals, reset sync and the JTAG pipe) and a thin
+  vendor shell that only adds the TAP primitive. New shells
+  `fcapz_debug_multi_xilinxus` (UltraScale `BSCANE2`) and
+  `fcapz_debug_multi_intel` (`sld_virtual_jtag`, `CTRL_CHAIN` is the instance
+  index) join `fcapz_debug_multi_xilinx7`, which keeps its parameters, ports
+  and behaviour. Each has a VHDL twin. cocotb drives all three shells at their
+  TAP primitives in both HDLs, static and formal parity cover the new layers,
+  and an old-vs-new simulation of the Xilinx-7 wrapper matched. The layers are
+  in every Arty build, the LiteX source lists and `core.json`.
+
+- **DE25-Nano — core-manager variant.** `de25_nano_manager_top` puts two ELAs
+  and two EIOs behind one `fcapz_debug_multi_intel` hub on instance 1, with
+  EJTAG-AXI on instance 4 (`python examples/de25_nano/build.py --variant
+  manager`). `test_hw_manager.py` covers slot enumeration, captures with
+  timestamps across many burst packets, slot switches after a burst, both EIO
+  slots and the bridge.
+
+- **Host — managed bursts on USB-Blaster.** The Quartus transport reads ELA
+  bursts from a separate data instance, but a managed hub bursts on its own
+  instance. The analyzer now sends a managed slot's burst and timestamp reads
+  through the hub's instance (`Transport.burst_on_data_chain` marks
+  transports that need this) instead of the data instance.
+
+- **Kria KV260 reference design and hardware test.** `examples/kv260/`
+  puts a core on every BSCANE2 USER chain of the K26 SOM (`xck26`): the
+  multi-core manager (two ELAs, one with a 4-stage sequencer, storage
+  qualification and relational compares, and two EIOs) on USER1, the AXI
+  monitor on USER2, the `_xilinxus` JTAG-UART on USER3 and the `_xilinxus`
+  AXI bridge on USER4. `pl_clk0` comes from the PS through a minimal block
+  design. The pytest suite programs the board through RPC `connect` and
+  exercises each core over hw_server's `-register` mode, plus the RPC
+  connect paths the web UI and MCP server use. `python
+  examples/kv260/build.py` builds it.
+
+- **MCP — multi-stage trigger sequences.** The capture `config` takes
+  `trigger_sequence`, one typed object per sequencer stage (compare modes
+  `0`-`8`, `combine` `0`-`3`, `next_state` `0`-`3`), so a core built with
+  `TRIG_STAGES > 1` can be driven from an agent as it already could from RPC.
+
+- **MCP — `fcapz_connect` takes `ir_table`.** For `hw_server` and `openocd`
+  it names the JTAG IR-code preset (`xilinx7`, `ultrascale`, `gowin`) when the
+  tap name does not identify the family; omitted, RPC still infers it.
+
+- **MCP — run-length captures and the storage-qualification modes.** The
+  capture `config` takes `rle` and `post_clocks`, and `stor_qual_mode` is now
+  the enum `0`/`1`/`2` (off, store on match, store on no match) in the
+  published schema. On a run-length capture each sample record and search
+  match carries `clock` and `run_length`, and a burst's `length` counts
+  clocks, so a stored entry is never read as one clock.
+
+- **MCP — authenticated HTTP transport.** `fcapz-mcp --transport http` serves
+  streamable HTTP at `/mcp` for a remote bench. Every request needs
+  `Authorization: Bearer <token>`, with the token taken from
+  `FCAPZ_MCP_TOKEN` or `--http-token-file` (never the command line; at least
+  16 characters). It listens on `127.0.0.1:8765` by default
+  (`--http-host`/`--http-port`); a non-loopback address requires TLS
+  (`--http-tls-cert`/`--http-tls-key`) or an explicit `--http-insecure`. All
+  HTTP clients share the one hardware session.
+
+- **MCP — `--axi-write-range LO:HI` confines AXI writes.** Repeatable; it
+  implies `--allow-axi-write` but only for the named inclusive byte ranges,
+  so an agent can be given a peripheral's register window rather than the
+  whole bus. A write with any byte outside is refused whole with
+  `not_permitted`, naming the word and the allowed ranges; `fcapz_status`
+  reports them as `capabilities.axi_write_ranges`. Reads are unaffected.
+
+- **MCP — search a capture instead of paging it.** `fcapz_find_in_capture`
+  finds the edges of a named field, rising/falling edges of a bit, every
+  sample matching a value under a mask, or runs of one value (optionally at
+  least `min_length` long), and returns them paged with `total`,
+  `first_position` and `last_position` — so "the first sample where X == v" is
+  one call. Each hit carries the position `fcapz_get_capture_samples` takes,
+  and its offset from the trigger. Segmented captures are searched per
+  segment, and wide values stay exact. `fcapz_get_capture_samples` also gains
+  `around_trigger=N` for the window either side of the trigger.
+
+- **Segmented captures are reachable from MCP.** `fcapz_capture` and
+  `fcapz_capture_wait` take `segments=true` to read back every segment
+  instead of segment 0; sample paging concatenates them, tags each sample
+  with its segment, and resolves named fields from the per-segment probe map.
+
+- **Wide EIO vectors survive a JavaScript MCP client.** `fcapz_eio_read`
+  returns `value` as a hex string past 53 bits so it cannot disagree with
+  `value_hex`, and `fcapz_eio_write` accepts a base-prefixed string, which is
+  the only way such a client can drive a wide output exactly.
+
+- **The MCP tool schema is typed.** `backend`, `format`, `radix`, `kind` and
+  `trigger_mode` are `enum`s in the published schema instead of strings
+  validated after the call, and capture `config` is a named object with a
+  type per field instead of an open dictionary. The accepted key set is
+  derived from that schema, so the two cannot drift. Costs roughly 2k tokens
+  of tool surface in the default profile, and buys client-side rejection of
+  values that previously needed a round trip to refuse.
+
+- **Four MCP tools declare a real `outputSchema`.**
+  `fcapz_get_capture_samples`, `fcapz_axi_transactions`,
+  `fcapz_get_last_capture_chunk` and `fcapz_status` now publish their result
+  shape instead of `{"additionalProperties": true}`, and each returns one
+  fixed shape — every field always present, `null` where it does not apply —
+  so a caller never branches on which keys exist. The remaining tools pass an
+  RPC response through verbatim and stay open on purpose: MCP drops any field
+  an `outputSchema` does not name, so declaring a subset of a response whose
+  keys vary by backend and core would silently delete the rest.
+
+- **MCP failures carry a code and a remedy.** A failed tool call reaches an
+  agent as text and nothing else, so every failure is now rendered as one
+  JSON object — `code`, `message`, `retryable`, `action`, plus the backend's
+  own error as `detail` — instead of prose to pattern-match. Twelve codes, with
+  `busy` and `session_recovering` tagged where they are raised so a reworded
+  message cannot reclassify them, and `watchdog_timeout` kept distinct from
+  `timeout` because only one of them requires reconnecting first.
+
+- **Long captures report progress.** `fcapz_capture` and
+  `fcapz_capture_wait` emit an MCP progress notification once a second while
+  they wait — elapsed time against the caller's timeout, which is the only
+  honest measure available from inside a JTAG readout. Clients that do not
+  send a progress token are unaffected.
+
+- **The AXI decoder is reachable from the CLI and the web UI.**
+  `fcapz axi-decode CAPTURE` reassembles a saved capture JSON into AXI4-Lite
+  transactions offline — no board, no connection — with `--only-anomalies`,
+  `--kind`, `--limit` and `--json`; the probe map is inferred from the
+  capture's recorded sample width. `fcapz capture --decode-axi` prints the
+  same table straight after a live capture, and the web UI gains an **AXI
+  Txn** tab showing the last capture as transactions with faulty rows
+  highlighted. Previously the decoder had exactly one consumer, the MCP
+  server.
+
+- **Structured capture paging.** `fcapz_get_capture_samples` returns whole
+  sample records — sliced into named fields from the capture's probe map, with
+  `total` and `trigger_index` on every page — so each page is valid JSON on
+  its own. The byte-chunk tool stays for verbatim export and csv/vcd
+  captures, where its chunks must be concatenated before any of it parses.
+  RPC `capture` now echoes the probe map alongside the samples, so any
+  consumer can slice fields without re-deriving the layout.
+
+- **AXI transaction decoding.** A host-side pass (`fcapz.decode_axi`)
+  reassembles an AXI monitor capture from per-cycle samples into whole
+  AXI4-Lite transactions: address, data, byte strobes, response, the cycle
+  each beat landed on, latency, per-channel stall counts, and protocol
+  anomaly flags (`error_response`, `partial_write`, `data_before_address`,
+  half-formed writes, unaligned addresses). AXI4-Lite has no IDs, so
+  responses are paired first-in-first-out; the result states that assumption
+  and flags every transaction whose pairing a mid-flight capture window could
+  have shifted. Legal-but-notable behaviour is reported separately from
+  protocol faults. Works
+  on both `DECODE_EN` and plain monitor builds, since a beat is `VALID &
+  READY` either way. RPC `capture` attaches it on request (`decode_axi`), and
+  the MCP server exposes `fcapz_axi_transactions` to page and filter it —
+  answering "why is this write corrupt?" directly instead of returning a
+  sample dump to interpret.
+
+- **MCP server (`fcapz-mcp`).** A stdio MCP server that exposes the lab
+  controls to coding agents: connect/probe/configure/arm/poll and capture for
+  the ELA, EIO read/write, AXI read/write (single and bounded block), and UART
+  send/receive. Session state is published as `fcapz://` resources (status,
+  last probe, last capture, last EIO read). Every write-side operation is off
+  by default behind an explicit capability flag — `--allow-eio-write`,
+  `--allow-axi-write`, `--allow-uart-send`, and `--allow-program` (which can be
+  confined to a `--bitfile-root`) — and `--read-only` drops the mutating tools
+  at once. Payloads are bounded so a large capture or block read cannot flood
+  the agent's context: captures are chunked from an atomic snapshot and AXI
+  block ops are capped. All hardware commands run on a single owner thread
+  that performs each RPC and its session-state update as one step, so a
+  concurrent caller is refused with a `busy` error rather than interleaving,
+  and a command abandoned after the watchdog tears the session down instead of
+  committing late (`session_state` reports `ready`/`busy`/`poisoned`).
+  Sample values wider than 53 bits are returned as hex
+  strings (`"value_encoding": "hex"`) so they survive clients that parse JSON
+  numbers as doubles. The MCP SDK is an optional dependency:
+  `pip install fpgacapzero[mcp]`. See [MCP server](docs/20_mcp_server.md).
+
+- **Run-length capture (`RLE_W`).** A new ELA parameter (0 or 1..16, default 0)
+  adds a run-count RAM so one buffer entry holds a sample and how many sample
+  clocks it repeated, up to `2^RLE_W`. Idle or slow signals then cover far more
+  time in the same `DEPTH`. Turned on per capture with `CaptureConfig.rle`,
+  `fcapz capture --rle`, the RPC `rle` field, or a checkbox in the GUI and web
+  interface. Results gain `run_lengths`; VCD, the previews and the web viewer
+  place entries at their start clocks, and `expand_run_lengths()` restores one
+  sample per clock; a VCD ends where the last run does. Pre/post-trigger
+  windows count entries. Counts read back on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
+  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). An optional
+  post-trigger clock limit (`RLE_POST_CLKS`, 0x0090; `CaptureConfig.post_clocks`,
+  `--post-clocks`, RPC `post_clocks`, GUI and web fields) also ends the window
+  N sample clocks after the trigger, so a quiet signal cannot hold it open.
+  Both HDLs and all standalone ELA wrappers; `RLE_W=0` builds and behaves
+  exactly as before. Not combinable with decimation or storage qualification. The DE25-Nano
+  reference design builds with `RLE_W=16` and a second ELA channel that holds
+  each value for 8 clocks, and is hardware-validated with it. An AXI monitor
+  capture taken run-length decodes into transactions: the decoder expands
+  each entry back to the clocks it held (up to 1M cycles), so cycle numbers
+  and latencies count sample clocks.
 - **Web GUI — `serial` backend.** The byte-stream TAP bridge is now selectable
   in the browser, not just from the Python API. It takes a serial port and baud
   rate in place of host/port/tap, and skips JTAG discovery entirely — the
@@ -194,6 +464,105 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Host — `Analyzer.connect()` binds the first ELA slot.** An analyzer with
+  no `instance` on a chain with a core manager is bound to the manager's
+  first ELA slot when it connects, so it never reads whichever slot another
+  program left active; a reconnect looks that slot up again, since the new
+  image may differ. An explicit `instance` and a chain without a manager are
+  unchanged. The GUI no longer moves the analyzer to slot 0 when an EIO
+  is detached.
+
+- **Host — an EIO left active no longer hides a hub's ELAs.**
+  `Analyzer.probe_optional()` on a core manager whose active slot is not an
+  ELA selects the first ELA slot (when the analyzer has no slot of its own),
+  so the RPC connect and the GUI find the hub. `probe()` still reads only the
+  active slot. The GUI connects to the first slot the descriptors call an ELA
+  instead of slot 0.
+
+- **Formal parity — vector parameters.** `sim/run_formal_hdl_parity.py`
+  accepts bit-string parameters (such as a per-slot burst mask), and a
+  manifest without a `formal` section is checked for interface parity only.
+
+- **Core manager — slots the host cannot read fail elaboration.** A slot off
+  the burst engine's shape is read only through its register window, so a
+  design now fails elaboration when such a slot sets `USER1_DATA_EN=0`.
+  `BURST_W` other than 256 is rejected too. These designs built before but
+  could not be read back. Both HDLs.
+
+- **Host — manager slot selection fails loudly.** Selecting a slot past
+  `MGR_COUNT`, a negative slot, or one the manager does not take now raises
+  instead of leaving the previous slot selected. `slot_info()` checks the
+  range and confirms `MGR_DESC_INDEX`; `probe_all()` uses the descriptors to
+  skip non-ELA slots and reports an ELA slot that does not answer. Moving an
+  `Analyzer` to another slot with `select_instance()` drops its capture
+  configuration, so call `configure()` again. A manager with more than 256
+  slots is detected.
+  The manager proof now also runs with a mixed burst mask.
+
+- **MCP — fewer, broader tools.** The surface shrinks from 31 tools to 22
+  (23 with `fcapz_find_in_capture`),
+  cutting the schema every request carries. The read/write split stays, so
+  annotations and capability gating are unchanged:
+
+  | Before | Now |
+  | --- | --- |
+  | `fcapz_eio_connect` / `fcapz_axi_connect` / `fcapz_uart_connect` | `fcapz_connect(core="eio" \| "axi" \| "uart")` |
+  | `fcapz_eio_close` / `fcapz_axi_close` / `fcapz_uart_close` | `fcapz_close(core="eio" \| "axi" \| "uart")`; `core="all"` (default) is the old `fcapz_close` |
+  | `fcapz_capture_status` | `fcapz_capture_wait(status_only=true)`, still available under `--read-only` |
+  | `fcapz_axi_dump` | `fcapz_axi_read(addr, count=N, burst=...)` |
+  | `fcapz_axi_write_block` | `fcapz_axi_write(addr, data=[...], burst=...)` |
+
+  `fcapz_axi_read` always returns `words` (plus `value` for one word), and
+  AXI addresses and data now also accept hex strings such as `"0x40000000"`;
+  values outside 32 bits are rejected. ELA-only fields (`program`,
+  `single_chain_burst`) are refused for the other cores rather than ignored.
+
+- **RPC — some refusals report a narrower `type` string.** The error
+  envelope carries `exc.__class__.__name__`, and refusals that were bare
+  `RuntimeError`s are now `NotConnectedError` / `NotEnabledError` (both
+  subclass `RpcError`, which subclasses `RuntimeError`), while a capture
+  still waiting for its trigger is `CaptureNotReady` (a `TimeoutError`
+  subclass) rather than a bare `TimeoutError` — the distinction the MCP
+  layer needs to tell "still armed, poll again" from "the transport stopped
+  answering". Catching the base classes is unaffected; **migration:** a
+  client comparing the `type` string should match the base classes or
+  accept both spellings.
+
+- **MCP — `--probe-root` is a flat directory.** `probe_file` must name a file
+  sitting directly in the root; a subdirectory, a path climbing out of it, a
+  symlink/junction, or a file with a second hard link are all refused. Nesting
+  used to be allowed. It went because the lookup could not be made verifiable
+  on every platform: Windows has no directory handles to open relative to, so
+  a multi-component path can be reinterpreted between the check and the open,
+  and a check that cannot be trusted is worse than a narrower rule. With one
+  component the open is provable — `openat`/`O_NOFOLLOW` where the platform
+  has it, an identity comparison otherwise. **Migration:** move probe maps to
+  the top level of the root, or point `--probe-root` at the subdirectory in
+  use. Probe files are also capped at 1 MiB, and a missing one now reports
+  `not_found` instead of `invalid_argument`.
+
+- **MCP — `fcapz_get_last_capture(max_bytes=null)` means 8 MiB, not
+  unlimited.** `max_bytes` may lower the bound but no longer raise it past
+  that ceiling, so `null` stopped being an escape hatch for forcing an
+  arbitrarily large payload: the result is serialized back on the event loop
+  after the offloaded call returns, at roughly 5 ms of whole-server stall per
+  MB, and nothing bounded it. A capture over the ceiling returns the compact
+  truncation marker, now carrying `ceiling_bytes` so a caller can tell the
+  server's bound from its own. **Migration:** read `fcapz://last-capture` for
+  the whole payload — it serves an already-built string, costs 0 ms of stall,
+  and has no ceiling — or page it with `fcapz_get_last_capture_chunk`.
+
+- **CI — RTL lint now includes yosys's pre-synthesis check.** A new
+  `sim/run_yosys_check.py` runs `proc` then `check` (LibreLane's
+  `pre_synth_chk` step) on every Verilator lint target, with that target's
+  `-G` parameter overrides, and on every Verilog parameter set in the parity
+  manifests, and fails on any warning. Its
+  `--self-test` proves it rejects a loop index shared by two clocked blocks.
+  The `lint-rtl` job now gets Verilator and yosys from a pinned OSS CAD Suite;
+  Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
+  elaborates the RTL with the suite's newer Icarus (`run_sim.py --lint-only`),
+  which rejects a signal used before its declaration.
+
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
   EIO inputs 15:8 (cleared by EIO output 7), so the EIO there is now 16 inputs
@@ -241,6 +610,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Deprecated
 
+- **`Analyzer.pin_active_slot()`** now calls `bind_manager_slot()`, which
+  binds the first ELA slot instead of the slot the hub has active. Use
+  `bind_manager_slot()`.
+
 - **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
   (`arty_a7_top.v`, block design moved to `examples/arty_a7/legacy-microblaze/`)
   is deprecated in favour of the VexRiscv default, but retained — it proves the
@@ -249,6 +622,505 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A managed EIO access could reach another slot unseen.** Another
+  controller (a second process on the same hub) that selected another slot
+  during an `EioController` read or write sent some of it there: a read
+  returned the other core's value, a write landed on the other core. Each
+  access of an EIO with an `instance`, `connect()` and `attach()` included,
+  now runs in `Transport.held_manager_instance()`, which compares
+  `MGR_SELECT_COUNT` less the transport's own selects across the access and
+  reads `MGR_ACTIVE` after it, and raises `ManagerResetError` (now defined in
+  `fcapz.transport`, still importable from `fcapz.analyzer`). Older hubs get
+  the `MGR_ACTIVE` check only.
+
+- **EIO discovery missed an Intel EIO.** With no chains given, `eio_discover`
+  (RPC) and the desktop GUI's EIO auto-attach tried the transport's IR-table
+  chains, and `usb_blaster` has none, so only instance 1 was tried and the
+  DE25-Nano EIO on instance 3 was never found. They now try instances 1-3.
+  On the session's board, RPC `eio_discover` attaches the EIO it finds there,
+  standalone or in a core-manager slot, through the session's transport
+  instead of opening a second connection to the board. A request for another
+  board takes the connection fields it leaves out from the session, so a bare
+  request on a `usb_blaster` session no longer opens a local `hw_server`.
+
+- **JTAG pipe — a register command after a burst could read stale data.** In
+  burst mode, the Capture-DR of every scan starts a preload of the next burst
+  word, which runs for `256 / SAMPLE_W + 1` TCK cycles (257 for 1-bit
+  samples), longer than a 49-bit register scan. A register command that
+  followed went out while the preload still held the ELA's DATA window, and
+  read 0. Every register command now ends the preload its own Capture-DR
+  started. Both HDLs.
+
+- **Host — a burst-wired slot behind a transport that does not burst.**
+  OpenOCD, and hw_server for some sample widths, read `read_block(0x0100)`
+  through the register window. The analyzer handed them the whole capture
+  anyway, so a deep one overran the window instead of being paged. Transports
+  now say whether they burst (`Transport.bursts_data_window()`), and the
+  analyzer pages whenever they do not.
+
+- **RPC — the analyzer ignored `connect(instance=...)`.** The session read
+  whichever slot was active, so an EIO in another slot of the same hub took it
+  over. `connect` and `rebind` now bind the slot, and a managed `eio_connect`
+  pins an unbound session to the slot it reads. A managed `eio_connect` also
+  shares the session's transport only when it names the same board.
+
+- **Core manager — one ELA's reset could phantom-arm another.** Any ELA's
+  `ela_sample_rst` reset the whole hub's JTAG side: `MGR_ACTIVE`, every EIO
+  output, and the register side of every ELA. Another ELA's arm and reset
+  commands cross to its sample clock as toggles, and only their JTAG halves
+  were reset, so an ELA armed an odd number of times saw a phantom arm and
+  re-armed over a capture the host had not read. Each ELA now resets its
+  sample and register sides together from its own reset, and the hub resets
+  only at power-up or from `MGR_CTRL` bit 0. A cocotb test reproduces the
+  phantom arm on the old wiring on all three shells. Both HDLs.
+
+- **`reset_sync` (Verilog) powered up released.** The VHDL synchroniser powers
+  up asserted; the Verilog one had no power-up value, so it came up 0 and a
+  design whose reset input was never asserted was never reset. It now powers
+  up asserted too. Found by the new formal power-up check.
+
+- **Host — slot selection could reset an EJTAG-AXI bridge.** Selecting a
+  manager slot wrote `MGR_ACTIVE` (`0xF008`) before checking that the chain
+  held a manager; on an EJTAG-AXI bridge that frame is `CMD_RESET`. The host
+  now writes only after `0x0000` answers as an ELA or EIO and `0xF000` as a
+  manager. Likewise `discover_eio()` read `0x8000`, an AXI read command on the
+  bridge, on chains it had not identified. Neither path met a bridge on the
+  default chains.
+
+- **Core manager — a slot switch right after a burst could be dropped.** After
+  a burst the JTAG pipe refills its burst buffer on the next scan, and the
+  manager ignores an `MGR_ACTIVE` write while that refill runs. With narrow
+  samples (1-5 bits) the refill outlasted the scan, so the next analyzer kept
+  talking to the previous slot. The host now reads `MGR_ACTIVE` back after each
+  switch and writes it again, up to three times. The manager now takes that
+  write once a burst owner is bound (see the next entry), so on a new bitstream
+  the first write lands; the host loop stays for older bitstreams.
+
+- **Core manager — a slot switch could move a pending burst.** Each time the
+  burst engine started loading, the manager rebound the burst to the active
+  slot, so an `MGR_ACTIVE` write between the `BURST_PTR` write and the burst
+  read the new slot's memory from the old slot's pointer. The `BURST_PTR` write
+  now binds the owner until the next one; a burst with no `BURST_PTR` write
+  since reset still binds the active slot once. The host's sequence never hit
+  this, but custom plumbing on `fcapz_core_manager` could. Both HDLs.
+
+- **Host — bursts of 24-, 26-, 27- or 31-bit samples unpacked wrong.** Both
+  the hw_server and USB-Blaster transports unpacked a burst at
+  `256 // (256 // SAMPLE_W)` bits per sample, wider than the packing whenever
+  `SAMPLE_W` does not divide 256, so each sample picked up bits of the next
+  one. They now unpack at `SAMPLE_W`, read for every burst, so a
+  slot switch cannot leave the previous slot's width behind.
+
+- **Host — two-chain Xilinx sessions sent managed bursts to USER2.** With
+  `single_chain_burst=False` (`--two-chain-burst`) every burst went to USER2,
+  which a core manager does not answer. Managed slots now burst on the hub's
+  own chain, as on the USB-Blaster.
+
+- **RPC — a managed EIO raced the analyzer.** `eio_connect` with a manager
+  slot opened a second transport, whose cached active slot went stale when the
+  analyzer switched slots. It now shares the analyzer's transport, and
+  `eio_close` leaves that session open.
+
+- **Core manager — VHDL defaults and EIO-only builds.** The VHDL
+  `fcapz_debug_multi_xilinx7` defaulted `NUM_EIOS` to 1 and `ELA_PORT_COUNT`
+  to 2 instead of following `EIO_EN` and `NUM_ELAS` like the Verilog, and
+  rejected `NUM_ELAS=0`. Both HDLs now agree, and an EIO-only hub elaborates.
+
+- **Core manager — sized parameter overrides and width warnings.** The
+  replicated per-slot defaults now widen each scalar to 32 bits before
+  replicating it. A sized override such as `.SAMPLE_W(8'd8)` used to pack as
+  8-bit fields, so with two or more ELA slots the per-slot widths and depths
+  were wrong and elaboration failed. This also clears Verilator `WIDTHCONCAT`.
+
+- **RPC, web UI and MCP — hw_server on Zynq UltraScale+ MPSoC.** Only the
+  CLI and GUI chose the chain shape from the tap name, so an RPC `connect`
+  with `tap: xck26` shifted raw USER opcodes into the PS TAP and every core
+  on USER1-3 read `0x00000040`. The shape choice is now one function,
+  `fcapz.transport.hw_server_chain_shape_kwargs`, used by the CLI, GUI and
+  RPC (and so the web UI and MCP server): `xck*` / `xczu*` select
+  `use_register_ir`, standalone UltraScale(+) parts the UltraScale IR table.
+- **ELA — a plain trigger on a multi-stage core.** On a core built with
+  `TRIG_STAGES > 1` the hardware triggers only from the sequencer, so a
+  capture configured with just `trigger` never fired. The host now programs
+  such a trigger as a single final stage 0: `value_match` as EQ,
+  `edge_detect` as CHANGED, and `both` as EQ on comparator A OR CHANGED on
+  comparator B. `both` therefore means value-or-edge on these cores, as
+  documented, while single-stage cores keep their RTL behaviour; on a
+  multi-stage core built without `DUAL_COMPARE` it is refused. The stage
+  has no hit count (`count_target` 0), so a hit is never lost to the
+  16-bit stage counter wrapping. Every board validated before was built
+  with `TRIG_STAGES=1`.
+- **EJTAG-AXI — a burst read that fills the FIFO no longer loses a beat.**
+  While filling the burst FIFO the bridge drove `rready` from a register
+  holding last cycle's not-full, so in the cycle the FIFO filled the slave
+  handed over a beat that was never written. The XPM FIFO reports full at
+  `FIFO_DEPTH - 1`, so a 16-beat read on a 16-deep bridge failed with SLVERR
+  while 15 passed (seen on a KV260). `rready` is now the FIFO's own not-full
+  during the fill, so a beat is accepted exactly when it is written; a full
+  FIFO holds the slave off until the host pops. The VHDL core also wrote
+  the FIFO a cycle after accepting the beat, against a full flag that lagged
+  by that cycle; its write is now combinational too. Both HDLs; needs a
+  bitstream rebuild. A cocotb test drives a 24-beat burst through the
+  16-deep FIFO in both HDLs.
+- **EJTAG-UART — no more dropped bytes (BUG-002).** An `RX_POP` or
+  `CMD_CONFIG` result appears in the next scan's capture, and the core
+  clears it on every Update-DR of its chain. The host read it in a separate
+  JTAG operation, so an update it did not issue in between discarded a byte
+  that had already left the FIFO, with no overflow or framing error. On a
+  KV260 that lost bytes in 9 of 15 32-byte loopback messages, and every byte
+  with 50 ms between pop and readout. `recv`, `recv_line` and the identity
+  read now run each pop and its readout in one batch (one `jtag sequence`
+  on hw_server) ending in a NOP drain. `recv` starts with one pop per batch
+  and doubles up to 64 while data keeps coming, so on transports that scan
+  one at a time it still honours its idle timeout. Host-only; no bitstream
+  change.
+  The earlier explanation, an RX synchroniser missing stop bits on a
+  zero-delay wire, is withdrawn.
+- **RPC — `connect` binds manager slot 0.** Behind a multi-core manager an
+  analyzer with no instance used whichever slot was last selected, so after
+  an EIO session on slot 2 a later ELA `connect` (and the chain autodetect
+  and `rebind`) talked to the EIO. RPC now selects slot 0 explicitly, and
+  before every command it drops each session's cached slot, so an analyzer
+  or EIO session never trusts a slot another session has since changed.
+- **EIO and ELA — a session without a slot binds one behind a manager.** An
+  EIO opened without `instance` (CLI `eio-*`, RPC `eio_connect`, and every
+  `eio_discover`) used whichever slot was active, so once an ELA session
+  moved the manager its writes reached the ELA. It now binds the manager's
+  first EIO slot, and RPC reports it as `instance`. Discovery finds an EIO
+  slot that is not active, and refuses `base_addr` behind a manager. The
+  analyzers RPC opens for a moment to list cores, find the AXI monitor or
+  discover boards bind the first ELA slot, and AXI monitor register reads
+  re-select their analyzer's slot. CLI ELA commands without `--ela-instance`
+  bind the first ELA slot too, instead of following the slot the last tool
+  left selected (after `eio-write`, the EIO).
+- **ELA — a sequencer stage could drop a met count after 65535 hits.** A
+  stage's hit counter kept counting hits that an external trigger in AND
+  mode held back, and being 16 bits it wrapped: the count read as not met
+  again until the stage re-counted to its target, so the external trigger
+  was ignored for up to `count_target` samples. The counter now saturates
+  and the compare is 17 bits wide. Both HDLs; needs a bitstream rebuild. A
+  cocotb test drives 66536 held-back hits through a stage with target
+  0x8000 in both HDLs.
+- **RPC — cancel reaches a connection that is still opening, and failed
+  session swaps no longer leak.** `cancel_active` saw only installed
+  sessions, so a `connect`, `eio_connect`, `eio_discover`, `axi_connect`
+  or `uart_connect` hung in its handshake could not be aborted. A failed
+  `eio_discover` handshake left its transport open, and a failed
+  `eio_connect` replacement left the closed old controller installed.
+  Discovery probes (`scan_targets`, `discover_boards`, `openocd_discover`)
+  can be cancelled too: the `xsdb` child is killed and OpenOCD probe
+  sockets are closed.
+  On Quartus, `cancel` kills `quartus_stp` without taking the lock that a
+  connect in progress holds, so a hung Quartus open can be aborted.
+- **EJTAG-UART — `close` closes the transport even if a reset scan fails.**
+- **hw_server — every core-manager access selects its own slot in the same
+  JTAG sequence.** The host cached the `MGR_ACTIVE` it last wrote, so a
+  second program on the same cable (a GUI next to a CLI, two MCP clients)
+  moving the slot sent this one's next accesses to another core: EIO writes
+  into an ELA, a capture read from the wrong slot. Now each sequence that
+  reaches a slot starts with an uncaptured `MGR_ACTIVE` write: register
+  accesses, block-read chunks, pipelined reads, and bursts (once, before
+  `BURST_PTR`). Slot enumeration and descriptor reads (`MGR_DESC_INDEX`) are
+  single sequences too. New `Transport.slot_scope` / `SlotSelection` /
+  `atomic_slot_select` / `read_regs_after_write`. The first scope on a slot
+  identifies the chain's manager and verifies the slot once; a chain that
+  never answered as a manager (an EJTAG-AXI bridge, whose reset command
+  `MGR_ACTIVE` is) gets no select. A manager without epochs (`MGR_CAPS`
+  bit 3) gets a burst drain ahead of each select. Each select counts as this
+  host's in `MGR_SELECT_COUNT`, and where every access selects its own slot,
+  another program's selects no longer raise `ManagerResetError`; the epoch,
+  `CAPTURE_GEN` and burst-header checks stay. Cost on a KV260: see the PR.
+- **Quartus and OpenOCD — every core-manager access selects its own slot
+  too.** As on hw_server above: on Quartus the select is shifted inside each
+  access's own `device_lock` (register reads and writes, window reads,
+  descriptor reads, and bursts, once before `BURST_PTR`); on OpenOCD each
+  access is now one Tcl command line, which OpenOCD runs before serving
+  another client. Both get the same identification, legacy drain and
+  select counting, and a Quartus burst on the control chain now ends with
+  the drain that hw_server's has. An `Analyzer` or `EioController` with an
+  `instance` on either backend is no longer alarmed by another program's
+  selects; one without keeps the check.
+- **Run-length counts of a managed slot burst on its own chain.** Behind
+  the USB-Blaster, or a two-chain hw_server session, the run counts of a
+  core-manager slot were read through the register window, since the
+  two-chain burst never reaches a manager. They now burst on the control
+  chain, as samples and timestamps already did:
+  `read_run_length_block(..., on_control_chain=True)`.
+- **hw_server — a slot switch after a single-chain burst is no longer
+  dropped.** The core manager ignores an `MGR_ACTIVE` write while the burst
+  pipe fills its staging register, and on a 1-, 2- or 4-bit lane the fill
+  that the next scan's capture starts outlasts a select scan. The select was
+  dropped silently, and the next accesses (an EIO poll, say) reached the
+  ELA slot. A burst on the control chain (single-chain, or a manager's slot
+  on a two-chain session) now ends with an uncaptured `VERSION` read and 258
+  idle TCKs inside the same sequence. New RTL testbench
+  `fcapz_core_manager_select_after_burst`.
+- **GUI — EIO panel chain switches hold the transport lock.** Polling,
+  output writes and attach switched the shared JTAG chain without the lock,
+  so a poll during a capture could send the capture's next access down the
+  EIO's chain, then froze the window until the capture ended. A poll tick
+  now skips while a capture holds the transport; a write waits up to a
+  second, then reports that a capture is running.
+- **EJTAG-AXI and EJTAG-UART — `attach` switches the chain under the
+  transport's transaction lock**, so it cannot land between another
+  controller's register accesses on a shared transport. The GUI refuses
+  Attach (EIO, AXI, UART) while a capture runs, since the capture holds that
+  lock for its whole wait and attaching would freeze the window.
+- **ELA — a refused configuration writes nothing.** A trigger sequence with
+  more stages than the core has, or a wide trigger value on a core without
+  `WIDE_TRIG`, used to be refused after the capture registers were already
+  written, so the next arm ran settings the host did not know about. Every
+  check now runs before the first write. A stage `count_target`,
+  `next_state` or `combine` too wide for `SEQ_CFG` is refused: a
+  `count_target` of 65536 used to program 0, which fires on the first match.
+- **ELA — storage qualification is refused on a core built without it.** A
+  `stor_qual_mode` of 1 or 2 on a `STOR_QUAL=0` core was accepted and the
+  capture stored every sample, while the caller believed it was filtered.
+  It is now refused before anything is written, as run-length capture and
+  the trigger sequencer already were.
+- **EJTAG-AXI — the bridge is usable after an error response.** The bridge's
+  error flag stays set until a RESET, and the host never sent one, so after
+  one SLVERR/DECERR every later read or write failed (reporting `resp=0`)
+  until a reconnect. The host now clears the flag when it reports the error.
+- **MCP — an AXI error response is a `hardware_error`.** It was coded
+  `internal` and told the agent to report a bug in the server.
+- **CLI — `axi-decode` and `capture --decode-axi` read run-length captures.**
+  Each entry was taken as one cycle, which shortened latencies (an 8-cycle
+  wait could read as 2) and could merge back-to-back handshakes. Entries now
+  expand to the clocks they held, as the RPC decode already did.
+- **MCP — a refused reconnect keeps the live session.** `fcapz_connect`
+  closed the open session before checking its arguments, so a misspelt or
+  forbidden field dropped a working connection. Arguments are now checked
+  first.
+- **MCP — `--axi-write-range` accounts for the bridge's address width.** On a
+  bridge narrower than 32 bits a block could pass the range check and wrap
+  past the top of the address space to address 0. Such a block is refused.
+- **RPC — `configure`/`capture` no longer assume a 1024-deep core.** An
+  omitted `depth` defaulted to 1024 and an omitted `sample_width` to 8, so
+  any core built another size (the Arty AXI monitor is 256 deep) refused
+  the capture with "depth mismatch" unless the client spelled the geometry
+  out. Omitted values are now read from the connected core, as the CLI and
+  GUI already did; a probe file's `sample_width` still wins, and an explicit
+  value that disagrees with the core still fails.
+
+- **MCP — a board with no fpgacapZero cores was reported as a server bug.**
+  Transports report a board that answered wrongly as a bare `RuntimeError`,
+  which the error classifier filed under `internal` ("report this; it is a
+  bug in fcapz-mcp"). A `RuntimeError` raised from inside the hardware call
+  is now `hardware_error`; a `TypeError` or similar from the same path still
+  reads as `internal`.
+
+- **A full-capture tool result can no longer stall the server for an
+  unbounded time.** FastMCP turns a tool result back into JSON on the event
+  loop *after* the offloaded call returns, so the payload
+  `fcapz_get_last_capture` hands over is a stall nothing else can interleave
+  with — measured against the real call path at roughly 5 ms per MB, with a
+  concurrent heartbeat seeing a gap exactly as long as the whole call
+  (125 ms for a 24 MB capture). `max_bytes=null` meant "no limit", so a deep
+  capture had nothing bounding it. `max_bytes` may now lower the bound but
+  not raise it past an 8 MiB ceiling, and `null` means that ceiling; a
+  marker returned because of it carries `ceiling_bytes` so a caller can tell
+  the server's bound from its own. The whole payload stays available from
+  `fcapz://last-capture`, which serves an already-built string and measured
+  0 ms of stall for that same 24 MB capture.
+
+- **A wedged backend no longer kills the MCP session for the rest of the
+  process.** The JTAG owner is a single thread, and `RpcServer` published no
+  abort hook, so the watchdog could only mark a call abandoned and hope the
+  backend returned. When it never did — `xsdb` staying alive but silent left
+  `_send` in a `readline()` with no deadline — the owner stayed in that call
+  forever, nothing was left to clear the poison flag, and every later
+  hardware command was refused. `RpcServer.cancel_active` now aborts the
+  transports the session holds, and the XSDB transport reads its responses
+  through a queued reader with a deadline (`FCAPZ_XSDB_TIMEOUT`, default
+  60 s; `fpga -file` gets its own) that kills the process rather than
+  waiting on it, the same shape `quartus_stp` already used. Measured against
+  a backend that never returns: previously poisoned indefinitely, now ready
+  again in ~0.3 s.
+
+- **A cancel can no longer abort the wrong command.** `cancel_active` stops
+  whatever the session currently holds, so a watchdog past its grace window
+  or a recovery nudge firing as reconciliation completes could reach through
+  a finished command into the next one. The check and the abort now happen
+  together under the session lock. The same window made the watchdog re-read
+  a command's state outside the lock, fall through when the owner had
+  reconciled in between, and surface a bare `queue.Empty` instead of the
+  watchdog error.
+
+- **`probe_file` confinement no longer loses the swap race.** A path was
+  approved, opened, then re-checked by stat'ing the *same path* — which
+  follows the same newly planted link and agrees with itself, so a name
+  swapped for a link between the two was accepted. The file must now sit
+  directly in `--probe-root`, which makes the lookup verifiable: `openat`
+  with `O_NOFOLLOW` where the platform has it, and otherwise an identity
+  comparison between what was inspected and what was opened. Hard links and
+  files over 1 MiB are refused, and a missing file now reports `not_found`
+  rather than `invalid_argument`.
+
+- **A capture that stored only some cycles is no longer read as AXI.**
+  Reassembly treats a sample's position as its bus cycle and pairs each
+  response with the oldest queued request; decimation and storage
+  qualification break both, because a handshake that was never stored cannot
+  be told apart from one that never happened. A single dropped response
+  silently shifted every later pairing onto the wrong address, and "latency"
+  counted stored samples rather than cycles. `decode_axi` now takes the
+  capture's sampling provenance and refuses such a trace with
+  `decoded: false` and a reason, keeping its full result shape. The capture
+  exporter records `stor_qual_mode` (and the probe map) so an offline
+  `fcapz axi-decode` knows the same thing.
+
+- **The AXI pairing caveat reaches the reader.** The assumption that nothing
+  was outstanding when the window opened is now stated on every page of
+  `fcapz_axi_transactions`, on the capture summary, in the CLI and in the
+  web panel — unconditionally, not only when a response happened to arrive
+  with an empty queue. That evidence can disprove the assumption; nothing
+  can confirm it. `AR(A)` before the window, then `AR(B)` and `R(A)` inside
+  it, yields a clean-looking row with A's data at address B and no flag of
+  any kind, so silence on a tidy decode was the dangerous case.
+
+- **Window edges are no longer counted as bus faults.** A response whose
+  request handshook before the capture, or a write whose second beat falls
+  after it, is legal traffic seen through a keyhole. Both were in
+  `FAULT_FLAGS`, so `anomaly_count`, `--only-anomalies` and the web "Faults
+  only" filter presented boundary effects as failures. Only `error_response`
+  and `unaligned_address` — what a finite window can actually prove — count
+  now; the rest are reported as observations via `flagged_count`.
+
+- **`fcapz_capture_wait` no longer reports a wedged link as "still armed".**
+  Every `TimeoutError` was treated as "the trigger has not fired", including
+  one raised by the transport while reading status or samples, which sent
+  the caller into a poll loop against a session that would never answer. The
+  analyzer now raises `CaptureNotReady` for the expected case and only that
+  is turned into `{"triggered": false, "still_armed": true}`.
+
+- **An ordinary RPC refusal is no longer reported as a bug in this server.**
+  The MCP layer calls `RpcServer.handle` in process, so its exceptions
+  arrive as themselves rather than as an `{"ok": false}` envelope — and a
+  bare `RuntimeError("not connected")` was classified `internal`,
+  `retryable: false`, "report this bug". `fcapz_probe` while disconnected
+  was the common case. The RPC layer now raises typed refusals
+  (`NotConnectedError`, `NotEnabledError`, `RpcError`) and the classifier
+  reads both routes the same way.
+
+- **Every tool-call failure is one coded JSON object.** Argument validation
+  runs before the tool body, so a rejected enum or an unknown field used to
+  reach the agent as pydantic prose with no code, no `retryable` and no
+  remedy; a coded failure also arrived behind FastMCP's "Error executing
+  tool X:" prefix. Both are handled at one seam above validation, and the
+  body names the failing `tool`. New codes: `capture_not_ready`,
+  `unknown_tool`.
+
+- **A misspelled argument is rejected instead of dropped.** Pydantic
+  validates a TypedDict by filtering, so `config={"posttriger": 9}` was
+  discarded before the call, the capture ran with the default posttrigger,
+  and the agent was told it succeeded — the server's own unknown-key check
+  never saw it. The same held for misspelled tool arguments, which pydantic
+  ignores. The capture config now publishes `additionalProperties: false`,
+  and top-level arguments are checked against the published schema.
+  `ProbeEntry.lsb` became optional to match the parser, which defaults it
+  to 0.
+
+- **Hardware tools no longer freeze the MCP server.** FastMCP awaits a
+  synchronous tool directly on the event loop, so every JTAG round trip
+  stopped the server answering anything at all for its duration — a 300 s
+  capture blocked even `fcapz_status` for five minutes. Tools now run in a
+  worker thread; hardware access is still serialized by the owner thread.
+
+- **`probe_file` is read once, where it is checked.** The MCP layer validated
+  the path and the RPC layer opened it a queue hop later, so anyone able to
+  write inside `--probe-root` could swap the file — or an ancestor — in
+  between and have different content loaded than was approved. The probe map
+  is now read in the MCP layer and passed inline as `probes`; there is no
+  second open to race.
+
+- **Capture snapshots are built off the hardware lock.** A multi-megabyte
+  capture ran its `json.dumps` while holding the lock every other caller
+  needs, delaying `fcapz_status` and a concurrent caller's `busy` reply for
+  as long as it took. Commands may now carry a `prepare` step that runs
+  before the lock is taken; only the single publishing assignment is inside
+  it. `fcapz_status` likewise reads its whole body under one hold, so it can
+  no longer report a busy slot beside connection flags from after that
+  command committed.
+
+- **AXI decoding no longer invents pairings it cannot justify.** A response
+  is never matched to a request handshaking on the same sampled cycle (AXI
+  forbids a combinational VALID-to-VALID path, so it belongs to an earlier
+  request), an unmatched response reads the same wherever it lands in the
+  window rather than being excused by a cycle-number heuristic, and the
+  leftover transactions at the end of a window are numbered in trace order.
+
+- **Two races in the MCP hardware owner.** A close that found nothing open
+  decided and acted in two separate holds of the lock, so a connect could
+  commit in between and leave the board connected with the wrapper reporting
+  otherwise. And a watchdog whose grace window expired just as recovery
+  finished poisoned the session with nothing left to clear the flag, refusing
+  every later hardware command for the life of the process. A stalled
+  recovery teardown now also gets a second abort attempt rather than wedging
+  the owner thread.
+
+- **Non-finite watchdog and tool timeouts are rejected.** `nan` passed every
+  ordered comparison and then made the wait spin instead of expiring,
+  disabling the watchdog it was meant to configure.
+
+- **Two MCP fields that reached past the JTAG cable are now confined.**
+  `probe_file` opened any path on the server's filesystem; it now requires
+  `--probe-root DIR` and must stay inside it. `host` accepted any network
+  target for hw_server/OpenOCD; it is now loopback-only unless a host is
+  named with `--allow-host`. Both policies are reported in `fcapz_status`.
+
+- **The MCP tool list now tracks the safety flags.** A tool whose capability
+  is disabled is no longer advertised and then refused — it is left out of the
+  list, so an agent neither plans around it nor pays for its schema in every
+  request (16 tools under `--read-only`, 20 by default, 23 with all writes
+  enabled). The session-level permission checks are unchanged and remain the
+  enforcement.
+
+- **ELA — a setting written just before ARM could miss that capture.** The
+  settings crossed into the sample clock through two synchronizer flops, but
+  the arm pulse came off the first flop of its own, one clock ahead. With a
+  sample clock slower than the JTAG writes, a setting and the ARM (or
+  `STARTUP_ARM` and a soft reset) landing on the same sample clock edge gave
+  that capture the old setting. The `CTRL` write that arms or soft-resets now
+  snapshots the settings in the JTAG domain, and the sample domain copies that
+  snapshot one clock before the pulse that uses it, so a capture takes exactly
+  the settings written before its ARM and none written after. The snapshot
+  replaces the first synchronizer stage, so the cost is four flip-flops, with
+  no new timing constraints. ARM and soft reset reach the capture two sample
+  clocks later than before. Older bitstreams keep the race; `force_idle()`
+  still covers it for `STARTUP_ARM`.
+- **ELA — storage qualification stored the wrong samples.** The core took
+  `SQ_MODE` as the raw compare mode with 0 meaning off, so EQ could not be
+  selected, and the host wrote 1 for "store when match" (NEQ on the core) and 2
+  for "store when no match" (LT). The host also skipped the write for mode 0, so
+  a qualifier from an earlier capture stayed on. `SQ_MODE` now holds the compare
+  mode plus one (1 = EQ, 2 = NEQ, ... 9 = CHANGED; 0 and 10..15 = off), shown by
+  new `COMPARE_CAPS` bit 22, and the host always writes it. On older cores the
+  host maps mode 2 to NEQ and rejects mode 1. Code that writes `SQ_MODE`
+  directly must add 1 to the compare mode. `AxiMonitor.beat_storage_qual()` now
+  returns mode 2. Both HDLs. The DE25-Nano ELA now builds with `STOR_QUAL=1`,
+  and its hardware tests cover modes 0, 1 and 2.
+
+- **ELA — the sequencer loop index had two drivers before optimization.** One
+  module-level `integer si` was the loop index of two clocked blocks, so right
+  after `proc` yosys `check` reported 32 conflicting drivers, and recent
+  Verilator releases flag `MULTIDRIVENPROC`. Optimization removed the dead flops, so FPGA netlists
+  were correct, but flows that gate on the pre-synthesis check (LibreLane, Tiny
+  Tapeout) stopped at synthesis. Each block now declares its own index; the
+  synthesized netlist is unchanged.
+
+- **EJTAG-UART — yosys could not read the core.** The simulation-only baud
+  check calls `$error`/`$warning` with run-time arguments in an `initial`
+  block, which yosys rejects, so yosys-based flows stopped at read. Synthesis
+  now skips that block (`` `ifndef SYNTHESIS ``); simulators still run it.
+
+- **ELA (Gowin) — the unused user chain's TDO was undriven.** Only the
+  selected chain's TDO had a driver, leaving the other `GW_JTAG` input
+  floating. It is now tied low. Both HDLs.
+
+- **EJTAG-AXI and EJTAG-UART — newer Icarus could not elaborate them.** Each
+  used registers before declaring them, which Icarus 14 rejects. The
+  declarations (and the UART's error-flag synchronizer) now come first; the
+  logic is unchanged.
 - **Intel ELA wrapper — `PROBE_MUX_W` captured zeros above the first slice.**
   `fcapz_ela_intel.v` forwarded `PROBE_MUX_W` to the core, whose `probe_in` is
   then `PROBE_MUX_W` bits wide, but declared its own port as
@@ -454,7 +1326,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `-register` mode needs. The
   warmup read that the hw_server transport discarded before identity and
   status reads is gone, so each of those reads is one scan sequence, not two.
-  Not yet re-validated on Zynq UltraScale+ MPSoC (`-register` mode).
+  Validated on Zynq UltraScale+ MPSoC (`-register` mode) on a KV260.
 
 - **Burst readout runs once.** Each burst used to be repeated until two
   passes agreed (hw_server single-chain, and both Quartus burst paths), and

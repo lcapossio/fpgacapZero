@@ -21,6 +21,7 @@
 //   TIMESTAMP_W  - timestamp counter width (0 = disabled, 32 or 48 = enabled)
 //   NUM_SEGMENTS - number of capture segments (1 = single capture, >1 = segmented)
 //   REL_COMPARE  - 1 enables relational trigger modes (<, >, <=, >=)
+//   RLE_W        - run-length capture count width (0 = off, 1..16)
 //
 // When NUM_CHANNELS=1, probe_in width is unchanged (backward compatible).
 // All optional features are gated by parameters. The smallest core uses:
@@ -45,6 +46,7 @@ module fcapz_ela #(
     parameter REL_COMPARE = 0,      // 0=small/faster trigger, 1=enable < > <= >=
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,    // 0=disable slow USER1 DATA window readback
+    parameter RLE_W = 0,            // 0=no run-length capture, 1..16=run-count width
     parameter WIDE_TRIG = 0         // 0=trigger A value/mask are the low 32 bits only
                                     // (upper bits masked to 0); 1=make comparator A
                                     // programmable across the full SAMPLE_W via the
@@ -71,7 +73,8 @@ module fcapz_ela #(
     input  wire                      burst_rd_active,
     input  wire [$clog2(DEPTH)-1:0] burst_rd_addr,
     output wire [SAMPLE_W-1:0]      burst_rd_data,
-    output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data,
+    // Timestamps, or run counts when the burst asks for them (BURST_PTR[30]).
+    output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : (RLE_W > 0) ? RLE_W : 1)-1:0] burst_rd_ts_data,
     output reg                       burst_start,
     output reg                       burst_timestamp,
     output reg  [$clog2(DEPTH)-1:0]  burst_start_ptr
@@ -133,6 +136,18 @@ module fcapz_ela #(
     // {word index, value-or-mask}, then WIDE_DATA to load that 32-bit word.
     localparam ADDR_WIDE_SEL    = 16'h00E4;  // RW: [0]=mask(1)/value(0), [7:4]=word
     localparam ADDR_WIDE_DATA   = 16'h00F0;  // WO: 32-bit word -> selected slot
+    // RW (USER1_DATA_EN): word offset added to every DATA / timestamp window
+    // read, so a host can page through windows the 16-bit address cannot reach.
+    localparam ADDR_DATA_OFFSET = 16'h00F4;
+    // RO: [15:0] capture generation (COMPARE_CAPS bit 21); see capture_gen.
+    localparam ADDR_CAPTURE_GEN = 16'h00F8;
+    // Run-length capture (RLE_W > 0).  RLE_CTRL[0] enables it (taken on
+    // arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
+    localparam ADDR_RLE_CTRL    = 16'h00A8;  // RW
+    localparam ADDR_RLE_W       = 16'h00CC;  // RO: RLE_W (0 = no RLE)
+    // RLE only: also end the post-trigger window this many sample clocks
+    // after the trigger commit (0 = entries only).  Taken on arm.
+    localparam ADDR_RLE_POST_CLKS = 16'h0090;  // RW
 
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
@@ -151,12 +166,23 @@ module fcapz_ela #(
             $error("fcapz_ela: SAMPLE_W must be <= 256 (got %0d)", SAMPLE_W);
         if (DEFAULT_TRIG_EXT < 0 || DEFAULT_TRIG_EXT > 3)
             $error("fcapz_ela: DEFAULT_TRIG_EXT must be 0-3 (got %0d)", DEFAULT_TRIG_EXT);
+        if (RLE_W < 0 || RLE_W > 16)
+            $error("fcapz_ela: RLE_W must be 0-16 (got %0d)", RLE_W);
+        if (TIMESTAMP_W > 0 && RLE_W > TIMESTAMP_W)
+            $error("fcapz_ela: RLE_W (%0d) must not exceed TIMESTAMP_W (%0d)",
+                   RLE_W, TIMESTAMP_W);
     end
 
     // Synthesis-safe upper-bound trap for SAMPLE_W
     generate
         if (SAMPLE_W > 256)
             SAMPLE_W_must_be_at_most_256 _sample_w_check_FAILED();
+        // Counts share the timestamp lane of a core that has one, so they
+        // must fit it.
+        if (RLE_W > 16)
+            RLE_W_must_be_at_most_16 _rle_w_check_FAILED();
+        if (TIMESTAMP_W > 0 && RLE_W > TIMESTAMP_W)
+            RLE_W_must_not_exceed_TIMESTAMP_W _rle_ts_w_check_FAILED();
     endgenerate
 
     localparam PTR_W = $clog2(DEPTH);
@@ -199,6 +225,20 @@ module fcapz_ela #(
     localparam HAS_CHANNEL_MUX = (NUM_CHANNELS > 1);
     localparam HAS_PROBE_MUX = (PROBE_MUX_W > 0);
     localparam TS_MUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    localparam HAS_RLE = (RLE_W > 0);
+    localparam RLE_DATA_W = HAS_RLE ? RLE_W : 1;
+    // Aux lane (timestamp burst lane and DATA window): timestamps, or run
+    // counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    // RLE_POST_CLKS width: the most clocks a post-trigger window of entries
+    // can span ((DEPTH - 1) * 2^RLE_W < 2^(LEN_W + RLE_W)), capped at 32.
+    localparam POST_CLK_W = !HAS_RLE ? 1 : (LEN_W + RLE_W > 32) ? 32 : LEN_W + RLE_W;
+    localparam [POST_CLK_W:0] POST_CLK_TWO = 2;
+    // A clock limit can end a segment short, so segmented RLE builds keep
+    // each segment's entry count for CAPTURE_LEN.
+    localparam HAS_RLE_SEG_LEN = HAS_RLE && HAS_SEGMENTS;
+    localparam HAS_AUX = (AUX_W > 0);
+    localparam AUX_DATA_W = HAS_AUX ? AUX_W : 1;
 
     // Phase 4: segment derived params
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
@@ -221,6 +261,11 @@ module fcapz_ela #(
     // Timestamp words per entry
     localparam TS_WORDS = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 0;
     localparam TS_WORDS_SAFE = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 1;
+    localparam AUX_WORDS_SAFE = HAS_AUX ? ((AUX_W + 31) / 32) : 1;
+    // Words in the DATA window and the auxiliary (timestamp / run count)
+    // window after it.
+    localparam DATA_WINDOW_WORDS = DEPTH * WORDS_PER_SAMPLE
+                                 + (HAS_AUX ? DEPTH * AUX_WORDS_SAFE : 0);
 
     // Probe mux derived params
     localparam PROBE_MUX_SLICES = (PROBE_MUX_W > 0) ? (PROBE_MUX_W / SAMPLE_W) : 0;
@@ -239,7 +284,10 @@ module fcapz_ela #(
         COMPARE_MODE_CAPS | 32'h0002_0000 |
         (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
         (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000) |  // bit18: wide comparator A
-        32'h0008_0000;  // bit19: timestamp window base decoded at full width
+        32'h0008_0000 |  // bit19: timestamp window base decoded at full width
+        (HAS_USER1_DATA ? 32'h0010_0000 : 32'h0000_0000) |  // bit20: DATA_OFFSET
+        32'h0020_0000 |  // bit21: CAPTURE_GEN
+        32'h0040_0000;   // bit22: SQ_MODE is compare mode + 1
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -296,7 +344,7 @@ module fcapz_ela #(
     reg reset_toggle_jtag;
 
     // Storage qualification JTAG registers
-    reg [31:0] jtag_sq_mode;   // [3:0]=cmp_mode
+    reg [31:0] jtag_sq_mode;   // [3:0]=compare mode + 1, 0=off
     reg [31:0] jtag_sq_value;
     reg [31:0] jtag_sq_mask;
     wire [SAMPLE_W-1:0] jtag_sq_value_w;
@@ -351,36 +399,49 @@ module fcapz_ela #(
     // Probe mux: slice select register (jtag_clk domain)
     reg [7:0] jtag_probe_sel;
 
-    // ---- CDC sync registers ------------------------------------------------
-    reg arm_toggle_sync1, arm_toggle_sync2;
-    reg reset_toggle_sync1, reset_toggle_sync2;
+    // Run-length capture: [0]=enable, [1]=DATA window reads counts
+    reg [1:0] jtag_rle_ctrl;
+    reg       burst_rle;      // this burst reads run counts
+    reg [POST_CLK_W-1:0] jtag_rle_post_clks;  // 0 = no clock limit
 
-    // Narrowed to the bits actually used on the sample side, reducing FF count.
-    reg [LEN_W-1:0]    pretrig_len_sync1,  pretrig_len_sync2;
-    reg [LEN_W-1:0]    posttrig_len_sync1, posttrig_len_sync2;
-    reg [1:0]          trig_mode_sync1,    trig_mode_sync2;
-    reg [SAMPLE_W-1:0] trig_value_sync1,   trig_value_sync2;
-    reg [SAMPLE_W-1:0] trig_mask_sync1,    trig_mask_sync2;
-    reg [7:0]          chan_sel_sync1,     chan_sel_sync2;
-    reg [7:0]          probe_sel_sync1,   probe_sel_sync2;
-    reg [23:0]         decim_sync1,       decim_sync2;
-    reg [1:0]          trig_ext_sync1,    trig_ext_sync2;
-    reg                startup_arm_sync1, startup_arm_sync2;
-    reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
-    reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
-    reg [3:0]          sq_mode_sync1, sq_mode_sync2;
-    reg [SAMPLE_W-1:0] sq_value_sync1, sq_value_sync2;
-    reg [SAMPLE_W-1:0] sq_mask_sync1, sq_mask_sync2;
-    reg [31:0]         seq_cfg_sync1     [0:TRIG_STAGES-1];
-    reg [31:0]         seq_cfg_sync2     [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_a_sync1 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_a_sync2 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_a_sync1  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_a_sync2  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_b_sync1 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_b_sync2 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_b_sync1  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_b_sync2  [0:TRIG_STAGES-1];
+    // ---- CDC sync registers ------------------------------------------------
+    // sync1 -> sync2 synchronize the toggles.  A toggle reaching sync2 stages
+    // the settings (cfg_stage_en); sync3 ^ sync4 then pulses with them in place.
+    reg arm_toggle_sync1, arm_toggle_sync2, arm_toggle_sync3, arm_toggle_sync4;
+    reg reset_toggle_sync1, reset_toggle_sync2, reset_toggle_sync3, reset_toggle_sync4;
+
+    // Settings snapshot on ARM / RESET (*_hold, jtag_clk) and its sample_clk
+    // copy (*_stage), narrowed to the bits used on the sample side.
+    reg [LEN_W-1:0]    pretrig_len_hold,  pretrig_len_stage;
+    reg [LEN_W-1:0]    posttrig_len_hold, posttrig_len_stage;
+    reg [1:0]          trig_mode_hold,    trig_mode_stage;
+    reg [SAMPLE_W-1:0] trig_value_hold,   trig_value_stage;
+    reg [SAMPLE_W-1:0] trig_mask_hold,    trig_mask_stage;
+    reg [7:0]          chan_sel_hold,     chan_sel_stage;
+    reg [7:0]          probe_sel_hold,   probe_sel_stage;
+    reg [23:0]         decim_hold,       decim_stage;
+    reg [1:0]          trig_ext_hold,    trig_ext_stage;
+    reg                startup_arm_hold, startup_arm_stage;
+    reg [15:0]         trig_holdoff_hold, trig_holdoff_stage;
+    reg [15:0]         trig_delay_hold,   trig_delay_stage;
+    reg                rle_en_hold,       rle_en_stage;
+    reg [POST_CLK_W-1:0] rle_post_clks_hold, rle_post_clks_stage;
+    reg [3:0]          sq_mode_hold, sq_mode_stage;
+    // SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
+    // (EQ..CHANGED).  Other values turn it off too.
+    wire sq_mode_on = HAS_STOR_QUAL && (sq_mode_stage != 4'd0) && (sq_mode_stage <= 4'd9);
+    reg [SAMPLE_W-1:0] sq_value_hold, sq_value_stage;
+    reg [SAMPLE_W-1:0] sq_mask_hold, sq_mask_stage;
+    reg [31:0]         seq_cfg_hold     [0:TRIG_STAGES-1];
+    reg [31:0]         seq_cfg_stage     [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_hold [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_stage [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_hold  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_stage  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_hold [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_stage [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_hold  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_stage  [0:TRIG_STAGES-1];
 
     // ---- Channel mux (sample_clk domain) -----------------------------------
     reg [7:0] chan_sel;   // active channel, latched on arm
@@ -436,6 +497,18 @@ module fcapz_ela #(
     reg post_left_zero, post_left_one;
     reg [LEN_W-1:0] pre_count;
     reg [LEN_W-1:0] capture_len;  // can equal DEPTH
+    // RLE clock limit on the post-trigger window, latched on arm.  The
+    // trigger commit is clock 0; post_clk_left counts the clocks still
+    // allowed after it, and post_clk_last is registered
+    // (post_clk_left == 1), so the stop starts at a flop.
+    reg [POST_CLK_W-1:0] rle_post_clks;
+    reg                  post_clk_en;   // RLE on and a limit set
+    reg                  post_clk_one;  // the limit is 1
+    reg [POST_CLK_W-1:0] post_clk_left;
+    reg                  post_clk_last;
+    // Entries in each completed segment (HAS_RLE_SEG_LEN only); cleared on
+    // arm.  Read back only for captures with a clock limit.
+    reg [LEN_W-1:0] seg_len [0:NUM_SEGMENTS-1];
     reg [SAMPLE_W-1:0] probe_prev;
     // Trigger delay: when the comparator fires, count down trig_delay
     // sample-clock cycles before committing trig_ptr.  During the
@@ -495,6 +568,7 @@ module fcapz_ela #(
     reg [LEN_W-1:0]    rb_capture_len_sample;
     reg [PTR_W-1:0]    rb_start_ptr_sample;
     reg [PTR_W-1:0]    rb_seg_start_ptr_sample [0:NUM_SEGMENTS-1];
+    reg [LEN_W-1:0]    rb_seg_len_sample [0:NUM_SEGMENTS-1];
     reg                rb_meta_toggle_sync1;
     reg                rb_meta_toggle_sync2;
     reg                rb_meta_toggle_sync3;
@@ -509,6 +583,7 @@ module fcapz_ela #(
     reg [LEN_W-1:0]    rb_capture_len_jtag;
     reg [PTR_W-1:0]    rb_start_ptr_jtag;
     reg [PTR_W-1:0]    rb_seg_start_ptr_jtag [0:NUM_SEGMENTS-1];
+    reg [LEN_W-1:0]    rb_seg_len_jtag [0:NUM_SEGMENTS-1];
     reg                rb_done_jtag;
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
@@ -572,7 +647,6 @@ module fcapz_ela #(
             assign ts_dout_b = {TS_DATA_W{1'b0}};
         end
     endgenerate
-    assign burst_rd_ts_data = ts_dout_b;
 
     // ---- Sequencer state (sample domain) -----------------------------------
     reg [SEQ_STATE_W-1:0] seq_state;
@@ -590,6 +664,12 @@ module fcapz_ela #(
 
     // ---- Storage qualification state (sample domain) -----------------------
     reg sq_enable;
+    // ---- Run-length capture state (sample domain) ---------------------------
+    reg                  rle_active;  // latched on arm
+    reg                  rle_open;    // the newest entry can still be extended
+    reg [SAMPLE_W-1:0]   rle_value;   // the newest entry's sample
+    reg [RLE_DATA_W-1:0] rle_count;   // its run length - 1
+    reg [PTR_W-1:0]      rle_addr;    // its address
     reg [3:0] sq_cmp_mode;
     reg [SAMPLE_W-1:0] sq_value, sq_mask;
 
@@ -610,12 +690,38 @@ module fcapz_ela #(
     reg                 datawin_oob_q;
     reg                 datawin_is_ts_q;
     reg [31:0]          datawin_chunk_q;
+    reg [31:0]          jtag_data_offset;
+
+    // ---- Capture generation -------------------------------------------------
+    // Counts every CTRL write that arms or resets the core and every release
+    // of the register-side reset: each one can start a capture that
+    // overwrites the buffer.  A host reads it before and after a readout, and
+    // after its own arm, to tell that the samples it read are the capture it
+    // armed.  Never reset; power-up value only.  STARTUP_ARM arms and segment
+    // re-arms are not counted: the first follows a counted reset, and the
+    // second fill the segments of one capture.  A release and a write in the
+    // same cycle count two.
+    reg [15:0] capture_gen;
+    reg        capture_gen_rst_d;
+    initial begin
+        capture_gen = 16'h0;
+        capture_gen_rst_d = 1'b0;
+    end
+    wire capture_gen_release = capture_gen_rst_d && !jtag_rst;
+    wire capture_gen_write   = jtag_wr_en && !jtag_rst && jtag_addr == ADDR_CTRL
+                               && (jtag_wdata[0] || jtag_wdata[1]);
+    always @(posedge jtag_clk) begin
+        capture_gen_rst_d <= jtag_rst;
+        if (capture_gen_release || capture_gen_write)
+            capture_gen <= capture_gen
+                + ((capture_gen_release && capture_gen_write) ? 16'd2 : 16'd1);
+    end
 
     // ---- Trigger logic (combinational) -------------------------------------
-    wire arm_pulse   = arm_toggle_sync1 ^ arm_toggle_sync2;
+    wire arm_pulse   = arm_toggle_sync3 ^ arm_toggle_sync4;
     wire startup_arm_pulse = startup_arm_pending;
     wire any_arm_pulse = arm_pulse | startup_arm_pulse;
-    wire reset_pulse = reset_toggle_sync1 ^ reset_toggle_sync2;
+    wire reset_pulse = reset_toggle_sync3 ^ reset_toggle_sync4;
     // An arm or soft reset restarts the capture on this edge and takes
     // priority over every decision of the capture already running.
     wire capture_restart = any_arm_pulse | reset_pulse;
@@ -628,19 +734,24 @@ module fcapz_ela #(
     // sample is captured, counted as pre-trigger history, compared, or used
     // as the previous sample of an edge.  Arms that keep the selection pay
     // nothing.
-    wire [7:0] chan_sel_next = (HAS_CHANNEL_MUX && chan_sel_sync2 < NUM_CHANNELS)
-                               ? chan_sel_sync2 : 8'h0;
-    wire [7:0] probe_sel_next = (HAS_PROBE_MUX && probe_sel_sync2 < PROBE_MUX_SLICES)
-                                ? probe_sel_sync2 : 8'h0;
+    wire [7:0] chan_sel_next = (HAS_CHANNEL_MUX && chan_sel_stage < NUM_CHANNELS)
+                               ? chan_sel_stage : 8'h0;
+    wire [7:0] probe_sel_next = (HAS_PROBE_MUX && probe_sel_stage < PROBE_MUX_SLICES)
+                                ? probe_sel_stage : 8'h0;
     wire arm_sel_change = HAS_PROBE_MUX   ? (probe_sel_next != probe_sel) :
                           HAS_CHANNEL_MUX ? (chan_sel_next != chan_sel) : 1'b0;
     wire sel_flush_start = any_arm_pulse && arm_sel_change;
     // Arming clears the registered storage-qualification hit, so with
     // COMPARE_PIPE and qualification on, the sample right after the arm is
     // not stored and the rolling history gets a hole.
-    wire arm_sq_bubble = (COMPARE_PIPE != 0) && HAS_STOR_QUAL && (sq_mode_sync2 != 0);
+    wire arm_sq_bubble = (COMPARE_PIPE != 0) && sq_mode_on;
+    // Run-length capture is on only without decimation and qualification,
+    // so a count always means consecutive sample clocks.  Turning it on or
+    // off on an arm changes what the history entries mean.
+    wire rle_active_next = HAS_RLE && rle_en_stage && (decim_stage == 24'h0) && !sq_mode_on;
+    wire arm_rle_change = HAS_RLE && (rle_active_next != rle_active);
     // Arms after which the rolling pre-arm history cannot be trusted.
-    wire arm_voids_history = arm_sel_change || arm_sq_bubble;
+    wire arm_voids_history = arm_sel_change || arm_sq_bubble || arm_rle_change;
     reg                   sel_flush_active;
     reg [SEL_FLUSH_W-1:0] sel_flush_count;
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -759,8 +870,11 @@ module fcapz_ela #(
         end
     end
 
+    // 17-bit compare: seq_counter saturates at 16'hFFFF (see its update), and
+    // 16-bit 16'hFFFF + 1 would wrap to 0 and miss the hit (BUG-255).
     wire seq_count_reached = (seq_count_target[seq_state] == 16'h0) ||
-                             ((seq_counter + 16'h1) >= seq_count_target[seq_state]);
+                             (({1'b0, seq_counter} + 17'h1) >=
+                              {1'b0, seq_count_target[seq_state]});
     wire pretrigger_ready = pre_count >= pretrig_len;
     wire trigger_holdoff_done = !trig_holdoff_active;
 
@@ -824,17 +938,36 @@ module fcapz_ela #(
     end
 
     // Phase 1: combined store enable (storage qualification AND decimation)
-    wire store_enable = store_sample & decim_tick & !sel_flush_active;
+    wire store_enable_base = store_sample & decim_tick & !sel_flush_active;
+    // Run-length capture: the sample the RAM would store, and whether it
+    // only extends the newest entry instead of opening a new one.
+    wire [SAMPLE_W-1:0] rle_sample = (PROBE_PIPE >= 1) ? probe_prev : active_probe;
+    wire rle_repeat = rle_active && rle_open && (rle_sample == rle_value) &&
+                      (rle_count != {RLE_DATA_W{1'b1}});
+    wire store_enable = store_enable_base & !rle_repeat;
 
     // ---- JTAG-domain register writes ---------------------------------------
     wire jtag_rd_data_window = HAS_USER1_DATA && (
         (jtag_addr >= ADDR_DATA_BASE) ||
-        (TIMESTAMP_W > 0 && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
+        (HAS_AUX && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
+
+    // The window address DATA_OFFSET moves a read to.  An offset past the
+    // windows moves it to the word just past them, which reads 0.
+    wire [31:0] datawin_offset = (jtag_data_offset >= DATA_WINDOW_WORDS)
+        ? DATA_WINDOW_WORDS : jtag_data_offset;
+    wire [31:0] datawin_addr = (jtag_addr >= ADDR_DATA_BASE)
+        ? ADDR_DATA_BASE + ((({16'h0, jtag_addr} - ADDR_DATA_BASE) >> 2) + datawin_offset) * 4
+        : {16'h0, jtag_addr};
     assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
         (HAS_SEGMENTS && jtag_seg_sel < NUM_SEGMENTS) ? jtag_seg_sel : {SEG_IDX_W{1'b0}};
     wire [PTR_W-1:0] jtag_seg_start_ptr = rb_seg_start_ptr_jtag[jtag_seg_sel_clamped];
+    // Entries the DATA window and CAPTURE_LEN cover: on segmented RLE builds
+    // the selected segment's, since a clock limit can end segments short
+    // (the capture length for every segment without a limit).
+    wire [LEN_W-1:0] rb_window_len_jtag = HAS_RLE_SEG_LEN
+        ? rb_seg_len_jtag[jtag_seg_sel_clamped] : rb_capture_len_jtag;
     wire [PTR_W-1:0] datawin_start_ptr_w = HAS_SEGMENTS ? jtag_seg_start_ptr : rb_start_ptr_jtag;
     wire [PTR_W-1:0] datawin_seg_base_w;
     generate
@@ -846,7 +979,7 @@ module fcapz_ela #(
     endgenerate
 
     always @(*) begin
-        datawin_is_ts_comb = (TIMESTAMP_W > 0) && ({16'h0, jtag_addr} >= ADDR_TS_DATA_BASE);
+        datawin_is_ts_comb = HAS_AUX && (datawin_addr >= ADDR_TS_DATA_BASE);
         datawin_oob_comb = 1'b0;
         datawin_mem_addr_comb = {PTR_W{1'b0}};
         datawin_chunk_comb = 32'h0;
@@ -856,16 +989,16 @@ module fcapz_ela #(
         datawin_seg_base_comb = datawin_seg_base_w;
 
         if (datawin_is_ts_comb) begin
-            datawin_word_index_comb = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;
-            datawin_sample_index_comb = datawin_word_index_comb / TS_WORDS_SAFE;
-            datawin_chunk_comb = datawin_word_index_comb % TS_WORDS_SAFE;
+            datawin_word_index_comb = (datawin_addr - ADDR_TS_DATA_BASE) >> 2;
+            datawin_sample_index_comb = datawin_word_index_comb / AUX_WORDS_SAFE;
+            datawin_chunk_comb = datawin_word_index_comb % AUX_WORDS_SAFE;
         end else begin
-            datawin_word_index_comb = (jtag_addr - ADDR_DATA_BASE) >> 2;
+            datawin_word_index_comb = (datawin_addr - ADDR_DATA_BASE) >> 2;
             datawin_sample_index_comb = datawin_word_index_comb / WORDS_PER_SAMPLE;
             datawin_chunk_comb = datawin_word_index_comb % WORDS_PER_SAMPLE;
         end
 
-        if (datawin_sample_index_comb >= rb_capture_len_jtag) begin
+        if (datawin_sample_index_comb >= rb_window_len_jtag) begin
             datawin_oob_comb = 1'b1;
         end else begin
             datawin_mem_addr_comb = datawin_seg_base_comb
@@ -899,6 +1032,9 @@ module fcapz_ela #(
             jtag_trig_ext      <= DEFAULT_TRIG_EXT_MODE;
             jtag_seg_sel       <= {SEG_IDX_W{1'b0}};
             jtag_probe_sel     <= 8'h0;
+            jtag_rle_ctrl      <= 2'b00;
+            jtag_rle_post_clks <= {POST_CLK_W{1'b0}};
+            burst_rle          <= 1'b0;
             jtag_startup_arm   <= (STARTUP_ARM != 0);
             jtag_trig_holdoff  <= 16'h0;
             jtag_trig_delay    <= 16'h0;
@@ -918,6 +1054,7 @@ module fcapz_ela #(
             // (word 0 = the 32-bit value/mask defaults, upper words = 0 so the
             // upper sample bits are don't-care until the host programs them).
             jtag_wide_sel <= 8'h0;
+            jtag_data_offset <= 32'h0;
             for (s = 0; s < WORDS_PER_SAMPLE; s = s + 1) begin
                 wide_va[s] <= 32'h0;
                 wide_ma[s] <= (s == 0) ? 32'hFFFF_FFFF : 32'h0;
@@ -929,6 +1066,12 @@ module fcapz_ela #(
                         jtag_ctrl <= jtag_wdata;
                         if (jtag_wdata[0]) arm_toggle_jtag <= ~arm_toggle_jtag;
                         if (jtag_wdata[1]) reset_toggle_jtag <= ~reset_toggle_jtag;
+                        // Every host arms or resets before a capture, so a
+                        // DATA_OFFSET left by a session that died while
+                        // paging cannot shift the next one's reads.
+                        if (jtag_wdata[0] || jtag_wdata[1]) jtag_data_offset <= 32'h0;
+                        // Arm and reset return the DATA window to timestamps.
+                        if (jtag_wdata[0] || jtag_wdata[1]) jtag_rle_ctrl[1] <= 1'b0;
                     end
                     ADDR_PRETRIG:    jtag_pretrig_len  <= jtag_wdata;
                     ADDR_POSTTRIG:   jtag_posttrig_len <= jtag_wdata;
@@ -954,10 +1097,13 @@ module fcapz_ela #(
                     ADDR_DECIM:      if (HAS_DECIM) jtag_decim <= jtag_wdata[23:0];
                     ADDR_TRIG_EXT:   if (HAS_EXT_TRIG) jtag_trig_ext <= jtag_wdata[1:0];
                     ADDR_PROBE_SEL:  if (HAS_PROBE_MUX) jtag_probe_sel <= jtag_wdata[7:0];
+                    ADDR_RLE_CTRL:   if (HAS_RLE) jtag_rle_ctrl <= jtag_wdata[1:0];
+                    ADDR_RLE_POST_CLKS: if (HAS_RLE) jtag_rle_post_clks <= jtag_wdata[POST_CLK_W-1:0];
                     ADDR_STARTUP_ARM: jtag_startup_arm <= jtag_wdata[0];
                     ADDR_TRIG_HOLDOFF: jtag_trig_holdoff <= jtag_wdata[15:0];
                     ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
                     ADDR_SEG_SEL:    if (HAS_SEGMENTS) jtag_seg_sel <= jtag_wdata[SEG_IDX_W-1:0];
+                    ADDR_DATA_OFFSET: if (HAS_USER1_DATA) jtag_data_offset <= jtag_wdata;
                     ADDR_BURST_PTR: begin
                         // Use the completed-capture snapshot; start pointers
                         // are written in sample_clk and must not feed USER2
@@ -966,6 +1112,7 @@ module fcapz_ela #(
                             ? jtag_seg_start_ptr
                             : rb_start_ptr_jtag;
                         burst_timestamp <= jtag_wdata[31];
+                        burst_rle       <= HAS_RLE && jtag_wdata[31] && jtag_wdata[30];
                         burst_start     <= ~burst_start;
                     end
                     default: begin
@@ -1009,8 +1156,10 @@ module fcapz_ela #(
             rb_gen_sample <= 2'b00;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
-            for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
+            for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
                 rb_seg_start_ptr_sample[rb_sample_i] <= {PTR_W{1'b0}};
+                rb_seg_len_sample[rb_sample_i]       <= {LEN_W{1'b0}};
+            end
         end else begin
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
@@ -1025,11 +1174,17 @@ module fcapz_ela #(
             // three-flop toggle synchronizer is still in flight.
             if (!rb_meta_sample_busy && (rb_meta_pending_sample || rb_meta_event_sample)) begin
                 rb_done_sample <= done;
-                rb_gen_sample <= {arm_toggle_sync2, reset_toggle_sync2};
+                rb_gen_sample <= {arm_toggle_sync4, reset_toggle_sync4};
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
-                for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1)
+                for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
                     rb_seg_start_ptr_sample[rb_sample_i] <= seg_start_ptr[rb_sample_i];
+                    // Without a clock limit every segment reads the
+                    // capture length, as on a core without seg_len.
+                    rb_seg_len_sample[rb_sample_i] <= !HAS_RLE_SEG_LEN ? {LEN_W{1'b0}}
+                                                    : post_clk_en ? seg_len[rb_sample_i]
+                                                    : capture_len;
+                end
                 rb_meta_toggle_sample <= ~rb_meta_toggle_sample;
                 rb_meta_pending_sample <= 1'b0;
             end
@@ -1045,8 +1200,10 @@ module fcapz_ela #(
             rb_capture_len_jtag <= {LEN_W{1'b0}};
             rb_start_ptr_jtag <= {PTR_W{1'b0}};
             rb_done_jtag <= 1'b0;
-            for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
+            for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1) begin
                 rb_seg_start_ptr_jtag[rb_jtag_i] <= {PTR_W{1'b0}};
+                rb_seg_len_jtag[rb_jtag_i]       <= {LEN_W{1'b0}};
+            end
         end else begin
             rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
             rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
@@ -1056,8 +1213,10 @@ module fcapz_ela #(
             if (rb_meta_toggle_sync2 ^ rb_meta_toggle_sync3) begin
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
-                for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1)
+                for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1) begin
                     rb_seg_start_ptr_jtag[rb_jtag_i] <= rb_seg_start_ptr_sample[rb_jtag_i];
+                    rb_seg_len_jtag[rb_jtag_i]       <= rb_seg_len_sample[rb_jtag_i];
+                end
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
                 // Done counts only for the latest ARM / reset: a capture that
                 // completed while an ARM was still crossing is the previous
@@ -1075,109 +1234,154 @@ module fcapz_ela #(
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             arm_toggle_sync1   <= 1'b0; arm_toggle_sync2   <= 1'b0;
+            arm_toggle_sync3   <= 1'b0; arm_toggle_sync4   <= 1'b0;
             reset_toggle_sync1 <= 1'b0; reset_toggle_sync2 <= 1'b0;
+            reset_toggle_sync3 <= 1'b0; reset_toggle_sync4 <= 1'b0;
             startup_arm_pending <= (STARTUP_ARM != 0);
         end else begin
             arm_toggle_sync1   <= arm_toggle_jtag;
             arm_toggle_sync2   <= arm_toggle_sync1;
+            arm_toggle_sync3   <= arm_toggle_sync2;
+            arm_toggle_sync4   <= arm_toggle_sync3;
             reset_toggle_sync1 <= reset_toggle_jtag;
             reset_toggle_sync2 <= reset_toggle_sync1;
+            reset_toggle_sync3 <= reset_toggle_sync2;
+            reset_toggle_sync4 <= reset_toggle_sync3;
             if (reset_pulse)
-                startup_arm_pending <= startup_arm_sync2;
+                startup_arm_pending <= startup_arm_stage;
             else if (startup_arm_pulse)
                 startup_arm_pending <= 1'b0;
         end
     end
 
     // ---- CDC: config registers ---------------------------------------------
-    integer si;
-    always @(posedge sample_clk or posedge sample_rst) begin
-        if (sample_rst) begin
-            pretrig_len_sync1  <= 0; pretrig_len_sync2  <= 0;
-            posttrig_len_sync1 <= 0; posttrig_len_sync2 <= 0;
-            trig_mode_sync1    <= 0; trig_mode_sync2    <= 0;
-            trig_value_sync1   <= 0; trig_value_sync2   <= 0;
-            trig_mask_sync1    <= 0; trig_mask_sync2    <= 0;
-            chan_sel_sync1     <= 0; chan_sel_sync2     <= 0;
-            probe_sel_sync1   <= 0; probe_sel_sync2   <= 0;
-            decim_sync1       <= 0; decim_sync2       <= 0;
-            trig_ext_sync1    <= DEFAULT_TRIG_EXT_MODE; trig_ext_sync2 <= DEFAULT_TRIG_EXT_MODE;
-            startup_arm_sync1 <= (STARTUP_ARM != 0); startup_arm_sync2 <= (STARTUP_ARM != 0);
-            trig_holdoff_sync1 <= 0; trig_holdoff_sync2 <= 0;
-            trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
-            sq_mode_sync1     <= 0; sq_mode_sync2     <= 0;
-            sq_value_sync1    <= 0; sq_value_sync2    <= 0;
-            sq_mask_sync1     <= 0; sq_mask_sync2     <= 0;
-            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_cfg_sync1[si]     <= 32'h0;
-                seq_cfg_sync2[si]     <= 32'h0;
-                seq_value_a_sync1[si] <= {SAMPLE_W{1'b0}};
-                seq_value_a_sync2[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_a_sync1[si]  <= {SAMPLE_W{1'b0}};
-                seq_mask_a_sync2[si]  <= {SAMPLE_W{1'b0}};
-                seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
-                seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b0}};
-                seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b0}};
+    // A CTRL write that arms or soft-resets snapshots the settings into
+    // *_hold (jtag_clk), so a setting written after it does not reach that
+    // capture.  The toggle reaching sync2 copies the snapshot, unchanged
+    // since that write, into *_stage (sample_clk) one clock before the arm /
+    // reset pulse latches it: an ARM or RESET uses exactly the settings
+    // written before it, however slow sample_clk is.
+    wire cfg_snapshot = jtag_wr_en && jtag_addr == ADDR_CTRL &&
+                        (jtag_wdata[0] || jtag_wdata[1]);
+    wire cfg_stage_en = (arm_toggle_sync2 ^ arm_toggle_sync3) |
+                        (reset_toggle_sync2 ^ reset_toggle_sync3);
+    integer hi;
+    always @(posedge jtag_clk or posedge jtag_rst) begin
+        if (jtag_rst) begin
+            pretrig_len_hold  <= 0;
+            posttrig_len_hold <= 0;
+            trig_mode_hold    <= 0;
+            trig_value_hold   <= 0;
+            trig_mask_hold    <= 0;
+            chan_sel_hold     <= 0;
+            probe_sel_hold   <= 0;
+            decim_hold       <= 0;
+            trig_ext_hold    <= DEFAULT_TRIG_EXT_MODE;
+            startup_arm_hold <= (STARTUP_ARM != 0);
+            trig_holdoff_hold <= 0;
+            trig_delay_hold  <= 0;
+            rle_en_hold      <= 0;
+            rle_post_clks_hold <= 0;
+            sq_mode_hold     <= 0;
+            sq_value_hold    <= 0;
+            sq_mask_hold     <= 0;
+            for (hi = 0; hi < TRIG_STAGES; hi = hi + 1) begin
+                seq_cfg_hold[hi]     <= 32'h0;
+                seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
+                seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b0}};
+                seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
+                seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b0}};
             end
-        end else begin
-            pretrig_len_sync1  <= jtag_pretrig_len[LEN_W-1:0];
-            pretrig_len_sync2  <= pretrig_len_sync1;
-            posttrig_len_sync1 <= jtag_posttrig_len[LEN_W-1:0];
-            posttrig_len_sync2 <= posttrig_len_sync1;
-            trig_mode_sync1    <= jtag_trig_mode[1:0];
-            trig_mode_sync2    <= trig_mode_sync1;
-            trig_value_sync1   <= jtag_trig_value_w;
-            trig_value_sync2   <= trig_value_sync1;
-            trig_mask_sync1    <= jtag_trig_mask_w;
-            trig_mask_sync2    <= trig_mask_sync1;
-            chan_sel_sync1     <= HAS_CHANNEL_MUX ? jtag_chan_sel : 8'h0;
-            chan_sel_sync2     <= HAS_CHANNEL_MUX ? chan_sel_sync1 : 8'h0;
-            probe_sel_sync1   <= HAS_PROBE_MUX ? jtag_probe_sel : 8'h0;
-            probe_sel_sync2   <= HAS_PROBE_MUX ? probe_sel_sync1 : 8'h0;
-            decim_sync1       <= HAS_DECIM ? jtag_decim : 24'h0;
-            decim_sync2       <= HAS_DECIM ? decim_sync1 : 24'h0;
-            trig_ext_sync1    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
-            trig_ext_sync2    <= HAS_EXT_TRIG ? trig_ext_sync1 : 2'd0;
-            startup_arm_sync1 <= jtag_startup_arm;
-            startup_arm_sync2 <= startup_arm_sync1;
-            trig_holdoff_sync1 <= jtag_trig_holdoff;
-            trig_holdoff_sync2 <= trig_holdoff_sync1;
-            trig_delay_sync1  <= jtag_trig_delay;
-            trig_delay_sync2  <= trig_delay_sync1;
-            sq_mode_sync1     <= HAS_STOR_QUAL ? jtag_sq_mode[3:0] : 4'h0;
-            sq_mode_sync2     <= HAS_STOR_QUAL ? sq_mode_sync1 : 4'h0;
-            sq_value_sync1    <= HAS_STOR_QUAL ? jtag_sq_value_w : {SAMPLE_W{1'b0}};
-            sq_value_sync2    <= HAS_STOR_QUAL ? sq_value_sync1 : {SAMPLE_W{1'b0}};
-            sq_mask_sync1     <= HAS_STOR_QUAL ? jtag_sq_mask_w : {SAMPLE_W{1'b0}};
-            sq_mask_sync2     <= HAS_STOR_QUAL ? sq_mask_sync1 : {SAMPLE_W{1'b0}};
-            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
+        end else if (cfg_snapshot) begin
+            pretrig_len_hold  <= jtag_pretrig_len[LEN_W-1:0];
+            posttrig_len_hold <= jtag_posttrig_len[LEN_W-1:0];
+            trig_mode_hold    <= jtag_trig_mode[1:0];
+            trig_value_hold   <= jtag_trig_value_w;
+            trig_mask_hold    <= jtag_trig_mask_w;
+            chan_sel_hold     <= HAS_CHANNEL_MUX ? jtag_chan_sel : 8'h0;
+            probe_sel_hold   <= HAS_PROBE_MUX ? jtag_probe_sel : 8'h0;
+            decim_hold       <= HAS_DECIM ? jtag_decim : 24'h0;
+            trig_ext_hold    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
+            startup_arm_hold <= jtag_startup_arm;
+            trig_holdoff_hold <= jtag_trig_holdoff;
+            trig_delay_hold  <= jtag_trig_delay;
+            rle_en_hold      <= HAS_RLE && jtag_rle_ctrl[0];
+            rle_post_clks_hold <= HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};
+            sq_mode_hold     <= HAS_STOR_QUAL ? jtag_sq_mode[3:0] : 4'h0;
+            sq_value_hold    <= HAS_STOR_QUAL ? jtag_sq_value_w : {SAMPLE_W{1'b0}};
+            sq_mask_hold     <= HAS_STOR_QUAL ? jtag_sq_mask_w : {SAMPLE_W{1'b0}};
+            for (hi = 0; hi < TRIG_STAGES; hi = hi + 1) begin
                 if (HAS_SEQUENCER) begin
-                    seq_cfg_sync1[si]     <= jtag_seq_cfg[si];
-                    seq_cfg_sync2[si]     <= seq_cfg_sync1[si];
-                    seq_value_a_sync1[si] <= jtag_seq_value_a_w[si];
-                    seq_value_a_sync2[si] <= seq_value_a_sync1[si];
-                    seq_mask_a_sync1[si]  <= jtag_seq_mask_a_w[si];
-                    seq_mask_a_sync2[si]  <= seq_mask_a_sync1[si];
+                    seq_cfg_hold[hi]     <= jtag_seq_cfg[hi];
+                    seq_value_a_hold[hi] <= jtag_seq_value_a_w[hi];
+                    seq_mask_a_hold[hi]  <= jtag_seq_mask_a_w[hi];
                 end else begin
-                    seq_cfg_sync1[si]     <= 32'h0;
-                    seq_cfg_sync2[si]     <= 32'h0;
-                    seq_value_a_sync1[si] <= {SAMPLE_W{1'b0}};
-                    seq_value_a_sync2[si] <= {SAMPLE_W{1'b0}};
-                    seq_mask_a_sync1[si]  <= {SAMPLE_W{1'b1}};
-                    seq_mask_a_sync2[si]  <= {SAMPLE_W{1'b1}};
+                    seq_cfg_hold[hi]     <= 32'h0;
+                    seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
+                    seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b1}};
                 end
                 if (HAS_SEQUENCER && HAS_DUAL_COMPARE) begin
-                    seq_value_b_sync1[si] <= jtag_seq_value_b_w[si];
-                    seq_value_b_sync2[si] <= seq_value_b_sync1[si];
-                    seq_mask_b_sync1[si]  <= jtag_seq_mask_b_w[si];
-                    seq_mask_b_sync2[si]  <= seq_mask_b_sync1[si];
+                    seq_value_b_hold[hi] <= jtag_seq_value_b_w[hi];
+                    seq_mask_b_hold[hi]  <= jtag_seq_mask_b_w[hi];
                 end else begin
-                    seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
-                    seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
-                    seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b1}};
-                    seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b1}};
+                    seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
+                    seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b1}};
                 end
+            end
+        end
+    end
+
+    always @(posedge sample_clk or posedge sample_rst) begin : cdc_cfg
+        integer si;  // block-local: a shared one gets a driver per block
+        if (sample_rst) begin
+            pretrig_len_stage  <= 0;
+            posttrig_len_stage <= 0;
+            trig_mode_stage    <= 0;
+            trig_value_stage   <= 0;
+            trig_mask_stage    <= 0;
+            chan_sel_stage     <= 0;
+            probe_sel_stage   <= 0;
+            decim_stage       <= 0;
+            trig_ext_stage <= DEFAULT_TRIG_EXT_MODE;
+            startup_arm_stage <= (STARTUP_ARM != 0);
+            trig_holdoff_stage <= 0;
+            trig_delay_stage  <= 0;
+            rle_en_stage      <= 0;
+            rle_post_clks_stage <= 0;
+            sq_mode_stage     <= 0;
+            sq_value_stage    <= 0;
+            sq_mask_stage     <= 0;
+            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
+                seq_cfg_stage[si]     <= 32'h0;
+                seq_value_a_stage[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_a_stage[si]  <= {SAMPLE_W{1'b0}};
+                seq_value_b_stage[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_b_stage[si]  <= {SAMPLE_W{1'b0}};
+            end
+        end else if (cfg_stage_en) begin
+            pretrig_len_stage <= pretrig_len_hold;
+            posttrig_len_stage <= posttrig_len_hold;
+            trig_mode_stage <= trig_mode_hold;
+            trig_value_stage <= trig_value_hold;
+            trig_mask_stage <= trig_mask_hold;
+            chan_sel_stage <= chan_sel_hold;
+            probe_sel_stage <= probe_sel_hold;
+            decim_stage <= decim_hold;
+            trig_ext_stage <= trig_ext_hold;
+            startup_arm_stage <= startup_arm_hold;
+            trig_holdoff_stage <= trig_holdoff_hold;
+            trig_delay_stage <= trig_delay_hold;
+            rle_en_stage <= rle_en_hold;
+            rle_post_clks_stage <= rle_post_clks_hold;
+            sq_mode_stage <= sq_mode_hold;
+            sq_value_stage <= sq_value_hold;
+            sq_mask_stage <= sq_mask_hold;
+            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
+                seq_cfg_stage[si] <= seq_cfg_hold[si];
+                seq_value_a_stage[si] <= seq_value_a_hold[si];
+                seq_mask_a_stage[si] <= seq_mask_a_hold[si];
+                seq_value_b_stage[si] <= seq_value_b_hold[si];
+                seq_mask_b_stage[si] <= seq_mask_b_hold[si];
             end
         end
     end
@@ -1217,7 +1421,8 @@ module fcapz_ela #(
     endgenerate
 
     // ---- Latch config on arm -----------------------------------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
+    always @(posedge sample_clk or posedge sample_rst) begin : latch_cfg
+        integer si;
         if (sample_rst) begin
             pretrig_len      <= 0;
             posttrig_len     <= 0;
@@ -1232,6 +1437,10 @@ module fcapz_ela #(
             sq_cmp_mode      <= 4'd0;
             sq_value         <= {SAMPLE_W{1'b0}};
             sq_mask          <= {SAMPLE_W{1'b0}};
+            rle_active       <= 1'b0;
+            rle_post_clks    <= {POST_CLK_W{1'b0}};
+            post_clk_en      <= 1'b0;
+            post_clk_one     <= 1'b0;
             chan_sel         <= 8'h0;
             probe_sel        <= 8'h0;
             decim_ratio      <= 24'h0;
@@ -1250,57 +1459,61 @@ module fcapz_ela #(
                 seq_is_final[si]     <= 1'b0;
             end
         end else if (any_arm_pulse) begin
-            pretrig_len      <= pretrig_len_sync2;
-            posttrig_len     <= posttrig_len_sync2;
-            trig_value       <= trig_value_sync2;
-            trig_mask        <= trig_mask_sync2;
+            pretrig_len      <= pretrig_len_stage;
+            posttrig_len     <= posttrig_len_stage;
+            trig_value       <= trig_value_stage;
+            trig_mask        <= trig_mask_stage;
             // Stage-0 compare modes
-            if (HAS_SEQUENCER && seq_cfg_sync2[0][9:0] != 10'd0) begin
-                trig_cmp_mode_a <= seq_cfg_sync2[0][3:0];
-                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][7:4] : 4'd0;
-                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][9:8] : 2'd0;
+            if (HAS_SEQUENCER && seq_cfg_stage[0][9:0] != 10'd0) begin
+                trig_cmp_mode_a <= seq_cfg_stage[0][3:0];
+                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][7:4] : 4'd0;
+                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][9:8] : 2'd0;
             end else begin
-                trig_cmp_mode_a <= trig_mode_sync2[1] ? 4'd8 : 4'd0;
-                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
-                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
+                trig_cmp_mode_a <= trig_mode_stage[1] ? 4'd8 : 4'd0;
+                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 4'd8 : 4'd0;
+                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 2'd3 : 2'd0;
             end
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_value_b_sync2[0] : {SAMPLE_W{1'b0}};
+                                 ? seq_value_b_stage[0] : {SAMPLE_W{1'b0}};
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_mask_b_sync2[0] : {SAMPLE_W{1'b1}};
+                                 ? seq_mask_b_stage[0] : {SAMPLE_W{1'b1}};
             // Channel select (clamped to valid range)
             chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
             probe_sel        <= probe_sel_next;
             // Storage qualification
-            sq_enable        <= HAS_STOR_QUAL && (sq_mode_sync2 != 0);
-            sq_cmp_mode      <= HAS_STOR_QUAL ? sq_mode_sync2 : 4'h0;
-            sq_value         <= HAS_STOR_QUAL ? sq_value_sync2 : {SAMPLE_W{1'b0}};
-            sq_mask          <= HAS_STOR_QUAL ? sq_mask_sync2 : {SAMPLE_W{1'b0}};
+            sq_enable        <= sq_mode_on;
+            sq_cmp_mode      <= sq_mode_on ? sq_mode_stage - 4'd1 : 4'h0;
+            sq_value         <= HAS_STOR_QUAL ? sq_value_stage : {SAMPLE_W{1'b0}};
+            sq_mask          <= HAS_STOR_QUAL ? sq_mask_stage : {SAMPLE_W{1'b0}};
+            rle_active       <= rle_active_next;
+            rle_post_clks    <= rle_post_clks_stage;
+            post_clk_en      <= rle_active_next && (rle_post_clks_stage != {POST_CLK_W{1'b0}});
+            post_clk_one     <= (rle_post_clks_stage == {{(POST_CLK_W-1){1'b0}}, 1'b1});
             // Phase 1: decimation
-            decim_ratio      <= HAS_DECIM ? decim_sync2 : 24'h0;
+            decim_ratio      <= HAS_DECIM ? decim_stage : 24'h0;
             // Phase 2: external trigger
-            ext_trig_mode    <= HAS_EXT_TRIG ? trig_ext_sync2 : 2'd0;
+            ext_trig_mode    <= HAS_EXT_TRIG ? trig_ext_stage : 2'd0;
             // Trigger delay (sample clocks) — latched on arm
-            trig_delay       <= trig_delay_sync2;
+            trig_delay       <= trig_delay_stage;
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_sync2[si][3:0] : 4'd0;
+                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_stage[si][3:0] : 4'd0;
                 seq_mode_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_sync2[si][7:4] : 4'd0;
+                                         ? seq_cfg_stage[si][7:4] : 4'd0;
                 seq_combine[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_sync2[si][9:8] : 2'd0;
+                                         ? seq_cfg_stage[si][9:8] : 2'd0;
                 seq_next_state[si]   <= HAS_SEQUENCER
-                                         ? seq_cfg_sync2[si][10 +: SEQ_STATE_W]
+                                         ? seq_cfg_stage[si][10 +: SEQ_STATE_W]
                                          : {SEQ_STATE_W{1'b0}};
-                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_sync2[si][12] : 1'b0;
-                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_sync2[si][31:16] : 16'h0;
-                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_sync2[si] : {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_sync2[si] : {SAMPLE_W{1'b1}};
+                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_stage[si][12] : 1'b0;
+                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_stage[si][31:16] : 16'h0;
+                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_stage[si] : {SAMPLE_W{1'b0}};
+                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_stage[si] : {SAMPLE_W{1'b1}};
                 seq_value_b[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_value_b_sync2[si] : {SAMPLE_W{1'b0}};
+                                         ? seq_value_b_stage[si] : {SAMPLE_W{1'b0}};
                 seq_mask_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_mask_b_sync2[si] : {SAMPLE_W{1'b1}};
+                                         ? seq_mask_b_stage[si] : {SAMPLE_W{1'b1}};
             end
         end
     end
@@ -1334,7 +1547,7 @@ module fcapz_ela #(
     // ---- Capture state machine ---------------------------------------------
     wire [LEN_W-1:0] post_store_limit = posttrig_len;
     wire [LEN_W:0] config_capture_len =
-        {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
+        {1'b0, pretrig_len_stage} + {1'b0, posttrig_len_stage} + {{LEN_W{1'b0}}, 1'b1};
     wire [LEN_W:0] capture_len_next =
         {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
     wire trigger_commit_now = armed && !done && !triggered && !capture_restart &&
@@ -1343,6 +1556,14 @@ module fcapz_ela #(
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
     wire post_store_now = armed && !done && triggered && store_enable &&
                           !post_left_zero;
+    // RLE clock limit: this clock is the last the post-trigger window covers.
+    wire clk_stop_now = HAS_RLE && post_clk_en && post_clk_last;
+    // The post-trigger window (segment or capture) completes on this clock.
+    wire post_done_now = post_left_zero || (store_enable && post_left_one) || clk_stop_now;
+    // Entries in the window when it completes.  A clock stop ends it short:
+    // post_left entries are still missing, less this clock's if it opens one.
+    wire [LEN_W-1:0] capture_len_done = !clk_stop_now ? capture_len :
+        capture_len - post_left + {{(LEN_W-1){1'b0}}, (store_enable && !post_left_zero)};
     wire pre_store_now = !done && !triggered &&
                          (store_enable || trigger_commit_now);
     assign mem_we_a = pre_store_now || post_store_now;
@@ -1374,6 +1595,85 @@ module fcapz_ela #(
             end
         end
     end
+
+    // ---- Run-length capture: count RAM ------------------------------------
+    // A store opens an entry with count 0.  A repeat of the newest entry's
+    // sample in a cycle that would have stored extends it instead: the
+    // count goes up and is rewritten at the entry's address.  The count
+    // write is registered so a new entry and the next cycle's extend of it
+    // reach the RAM in order whatever PROBE_PIPE is.
+    wire rle_extend = rle_repeat && store_enable_base && !trigger_commit_now &&
+                      ((!done && !triggered) ||
+                       (armed && !done && triggered && !post_left_zero));
+    // This cycle completes the segment (or the capture); the next segment's
+    // first sample must open its own entry.
+    wire rle_seg_end = armed && !done && !capture_restart && triggered && post_done_now;
+    reg                  rle_we_q;
+    reg [PTR_W-1:0]      rle_wr_addr_q;
+    reg [RLE_DATA_W-1:0] rle_wr_count_q;
+    wire [RLE_DATA_W-1:0] rle_dout_b;
+
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            rle_open       <= 1'b0;
+            rle_value      <= {SAMPLE_W{1'b0}};
+            rle_count      <= {RLE_DATA_W{1'b0}};
+            rle_addr       <= {PTR_W{1'b0}};
+            rle_we_q       <= 1'b0;
+            rle_wr_addr_q  <= {PTR_W{1'b0}};
+            rle_wr_count_q <= {RLE_DATA_W{1'b0}};
+        end else begin
+            rle_we_q       <= HAS_RLE && (mem_we_a || rle_extend);
+            rle_wr_addr_q  <= mem_we_a ? wr_ptr : rle_addr;
+            rle_wr_count_q <= mem_we_a ? {RLE_DATA_W{1'b0}} : rle_count + 1'b1;
+            if (!HAS_RLE || capture_restart || sel_flush_active || rle_seg_end) begin
+                rle_open <= 1'b0;
+            end else if (mem_we_a) begin
+                rle_open  <= rle_active;
+                rle_value <= rle_sample;
+                rle_count <= {RLE_DATA_W{1'b0}};
+                rle_addr  <= wr_ptr;
+            end else if (rle_extend) begin
+                rle_count <= rle_count + 1'b1;
+            end
+        end
+    end
+
+    generate
+        if (HAS_RLE) begin : g_rle
+            dpram #(.WIDTH(RLE_DATA_W), .DEPTH(DEPTH)) u_rlebuf (
+                .clk_a  (sample_clk),
+                .we_a   (rle_we_q),
+                .addr_a (rle_wr_addr_q),
+                .din_a  (rle_wr_count_q),
+                .dout_a (),
+                .clk_b  (jtag_clk),
+                .addr_b (mem_addr_b),
+                .dout_b (rle_dout_b)
+            );
+        end else begin : g_no_rle
+            assign rle_dout_b = {RLE_DATA_W{1'b0}};
+        end
+    endgenerate
+
+    // Aux lane: timestamps, or run counts.
+    wire [AUX_DATA_W-1:0] aux_ts_b;
+    wire [AUX_DATA_W-1:0] aux_rle_b;
+    generate
+        if (TIMESTAMP_W > 0) begin : g_aux_ts
+            assign aux_ts_b = ts_dout_b;  // AUX_W == TIMESTAMP_W
+        end else begin : g_aux_no_ts
+            assign aux_ts_b = {AUX_DATA_W{1'b0}};
+        end
+        if (HAS_RLE && AUX_DATA_W > RLE_DATA_W) begin : g_aux_rle_pad
+            assign aux_rle_b = {{(AUX_DATA_W - RLE_DATA_W){1'b0}}, rle_dout_b};
+        end else if (HAS_RLE) begin : g_aux_rle
+            assign aux_rle_b = rle_dout_b;
+        end else begin : g_aux_no_rle
+            assign aux_rle_b = {AUX_DATA_W{1'b0}};
+        end
+    endgenerate
+    assign burst_rd_ts_data = burst_rle ? aux_rle_b : aux_ts_b;
 
     // Phase 2: trigger_out pulse
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -1424,8 +1724,12 @@ module fcapz_ela #(
             seg_count   <= {SEG_IDX_W{1'b0}};
             all_seg_done <= 1'b0;
             segment_wrapped <= 1'b0;
-            for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
+            post_clk_left <= {POST_CLK_W{1'b0}};
+            post_clk_last <= 1'b0;
+            for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1) begin
                 seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
+                seg_len[seg_i]       <= {LEN_W{1'b0}};
+            end
         end else begin
             if (reset_pulse) begin
                 armed       <= 1'b0;
@@ -1446,8 +1750,10 @@ module fcapz_ela #(
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
                 segment_wrapped <= 1'b0;
-                for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
+                for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1) begin
                     seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
+                    seg_len[seg_i]       <= {LEN_W{1'b0}};
+                end
             end
 
             if (done) begin
@@ -1474,6 +1780,9 @@ module fcapz_ela #(
                 armed       <= 1'b1;
                 triggered   <= 1'b0;
                 done        <= 1'b0;
+                if (HAS_RLE_SEG_LEN)
+                    for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
+                        seg_len[seg_i] <= {LEN_W{1'b0}};
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
                 post_left   <= {LEN_W{1'b0}};
@@ -1488,10 +1797,10 @@ module fcapz_ela #(
                     pre_count <= {LEN_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
-                trig_holdoff <= trig_holdoff_sync2;
-                trig_holdoff_active <= (trig_holdoff_sync2 != 16'h0);
-                trig_holdoff_count  <= (trig_holdoff_sync2 != 16'h0)
-                    ? (trig_holdoff_sync2 - 16'h1) : 16'h0;
+                trig_holdoff <= trig_holdoff_stage;
+                trig_holdoff_active <= (trig_holdoff_stage != 16'h0);
+                trig_holdoff_count  <= (trig_holdoff_stage != 16'h0)
+                    ? (trig_holdoff_stage - 16'h1) : 16'h0;
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
                 cur_segment <= {SEG_IDX_W{1'b0}};
@@ -1583,6 +1892,8 @@ module fcapz_ela #(
                             post_left_zero     <= (post_store_limit == {LEN_W{1'b0}});
                             post_left_one      <= (post_store_limit == LEN_ONE);
                             capture_len        <= capture_len_next[LEN_W-1:0];
+                            post_clk_left      <= rle_post_clks;
+                            post_clk_last      <= post_clk_one;
                             trig_delay_pending <= 1'b0;
                         end else begin
                             trig_delay_count <= trig_delay_count - 1'b1;
@@ -1596,6 +1907,8 @@ module fcapz_ela #(
                             post_left_zero     <= (post_store_limit == {LEN_W{1'b0}});
                             post_left_one      <= (post_store_limit == LEN_ONE);
                             capture_len <= capture_len_next[LEN_W-1:0];
+                            post_clk_left      <= rle_post_clks;
+                            post_clk_last      <= post_clk_one;
                         end else begin
                             // Enter delay countdown.  trig_delay_count is
                             // the number of *additional* cycles after this
@@ -1609,21 +1922,28 @@ module fcapz_ela #(
                         seq_counter <= 16'h0;
                     end else if (pretrigger_ready && TRIG_STAGES > 1 && seq_stage_hit) begin
                         trig_delay_count <= 16'h0;
-                        seq_counter <= seq_counter + 1'b1;
+                        // Saturate: hits held back by the external-trigger
+                        // combine keep counting and must not wrap to 0.
+                        if (seq_counter != 16'hFFFF)
+                            seq_counter <= seq_counter + 1'b1;
                     end else begin
                         trig_delay_count <= 16'h0;
                     end
                 end else begin
                     trig_delay_pending <= 1'b0;
                     trig_delay_count   <= 16'h0;
-                    // Post-trigger countdown (counts stored samples only)
-                    if (post_left_zero) begin
+                    // Post-trigger countdown (counts stored samples only).
+                    // With RLE a clock limit can end the window first.
+                    if (post_done_now) begin
                         // Segment complete
+                        capture_len <= capture_len_done;
                         if (NUM_SEGMENTS > 1) begin
                             // Ring start within this segment. Before the
                             // segment has wrapped, don't point pretrigger
                             // history into unwritten tail addresses.
                             seg_start_ptr[cur_segment] <= capture_start_ptr;
+                            if (HAS_RLE_SEG_LEN)
+                                seg_len[cur_segment] <= capture_len_done;
                             if (cur_segment == NUM_SEGMENTS - 1) begin
                                 // All segments done
                                 done      <= 1'b1;
@@ -1656,50 +1976,15 @@ module fcapz_ela #(
                             armed     <= 1'b0;
                             start_ptr <= capture_start_ptr;
                         end
-                    end else if (store_enable) begin
-                        if (post_left_one) begin
-                            // Segment complete
-                            if (NUM_SEGMENTS > 1) begin
-                                // Ring start within this segment. Before the
-                                // segment has wrapped, don't point pretrigger
-                                // history into unwritten tail addresses.
-                                seg_start_ptr[cur_segment] <= capture_start_ptr;
-                                if (cur_segment == NUM_SEGMENTS - 1) begin
-                                    // All segments done
-                                    done      <= 1'b1;
-                                    armed     <= 1'b0;
-                                    start_ptr <= seg_start_ptr[0];
-                                    all_seg_done <= 1'b1;
-                                    seg_count    <= seg_count + 1'b1;
-                                end else begin
-                                    // Auto-rearm for next segment
-                                    cur_segment <= cur_segment + 1'b1;
-                                    seg_count   <= seg_count + 1'b1;
-                                    triggered   <= 1'b0;
-                                    post_left   <= {LEN_W{1'b0}};
-                                    post_left_zero <= 1'b1;
-                                    post_left_one  <= 1'b0;
-                                    pre_count   <= {LEN_W{1'b0}};
-                                    seq_state   <= {SEQ_STATE_W{1'b0}};
-                                    seq_counter <= 16'h0;
-                                    trig_holdoff_active <= (trig_holdoff != 16'h0);
-                                    trig_holdoff_count  <= (trig_holdoff != 16'h0)
-                                        ? (trig_holdoff - 16'h1) : 16'h0;
-                                    trig_delay_pending <= 1'b0;
-                                    trig_delay_count   <= 16'h0;
-                                    // Set wr_ptr to next segment base
-                                    wr_ptr      <= (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
-                                    segment_wrapped <= 1'b0;
-                                end
-                            end else begin
-                                done      <= 1'b1;
-                                armed     <= 1'b0;
-                                start_ptr <= capture_start_ptr;
-                            end
-                        end else begin
+                    end else begin
+                        if (store_enable) begin
                             post_left      <= post_left - 1'b1;
                             post_left_zero <= 1'b0;
                             post_left_one  <= (post_left == LEN_TWO);
+                        end
+                        if (HAS_RLE) begin
+                            post_clk_left <= post_clk_left - 1'b1;
+                            post_clk_last <= ({1'b0, post_clk_left} == POST_CLK_TWO);
                         end
                     end
                 end
@@ -1726,7 +2011,8 @@ module fcapz_ela #(
                 if (datawin_oob_q)
                     jtag_rdata <= 32'h0;
                 else if (datawin_is_ts_q)
-                    jtag_rdata <= ts_chunk_word(ts_dout_b, datawin_chunk_q);
+                    jtag_rdata <= aux_chunk_word(jtag_rle_ctrl[1] ? aux_rle_b : aux_ts_b,
+                                                 datawin_chunk_q);
                 else
                     jtag_rdata <= sample_chunk_word(mem_dout_b, datawin_chunk_q);
             end
@@ -1762,17 +2048,17 @@ module fcapz_ela #(
         end
     endfunction
 
-    function [31:0] ts_chunk_word;
-        input [TS_DATA_W-1:0] sample;
+    function [31:0] aux_chunk_word;
+        input [AUX_DATA_W-1:0] sample;
         input integer chunk;
         integer bit_i;
         integer bit_base;
         begin
-            ts_chunk_word = 32'h0;
+            aux_chunk_word = 32'h0;
             bit_base = chunk * 32;
             for (bit_i = 0; bit_i < 32; bit_i = bit_i + 1) begin
-                if (bit_base + bit_i < TS_DATA_W)
-                    ts_chunk_word[bit_i] = sample[bit_base + bit_i];
+                if (bit_base + bit_i < AUX_DATA_W)
+                    aux_chunk_word[bit_i] = sample[bit_base + bit_i];
             end
         end
     endfunction
@@ -1798,7 +2084,7 @@ module fcapz_ela #(
             ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
             ADDR_PRETRIG:     jtag_rdata_mux = jtag_pretrig_len;
             ADDR_POSTTRIG:    jtag_rdata_mux = jtag_posttrig_len;
-            ADDR_CAPTURE_LEN: jtag_rdata_mux = rb_capture_len_jtag;
+            ADDR_CAPTURE_LEN: jtag_rdata_mux = rb_window_len_jtag;
             ADDR_TRIG_MODE:   jtag_rdata_mux = jtag_trig_mode;
             ADDR_TRIG_VALUE:  jtag_rdata_mux = jtag_trig_value;
             ADDR_TRIG_MASK:   jtag_rdata_mux = jtag_trig_mask;
@@ -1830,6 +2116,11 @@ module fcapz_ela #(
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
             ADDR_WIDE_SEL:    jtag_rdata_mux = HAS_WIDE_TRIG ? {24'h0, jtag_wide_sel} : 32'h0;
+            ADDR_DATA_OFFSET: jtag_rdata_mux = jtag_data_offset;
+            ADDR_CAPTURE_GEN: jtag_rdata_mux = {16'h0, capture_gen};
+            ADDR_RLE_CTRL:    jtag_rdata_mux = HAS_RLE ? {30'h0, jtag_rle_ctrl} : 32'h0;
+            ADDR_RLE_W:       jtag_rdata_mux = RLE_W;
+            ADDR_RLE_POST_CLKS: jtag_rdata_mux = HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};
 
             default: begin
                 if (seq_addr_hit) begin

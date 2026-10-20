@@ -104,7 +104,8 @@ module fcapz_axi_mon_intel #(
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+        .update(tap_update), .sel(tap_sel),
+        .tlr()
     );
 
     reset_sync u_rst_sync_ctrl (
@@ -130,7 +131,8 @@ module fcapz_axi_mon_intel #(
         .mem_active(burst_rd_active),
         .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
         .burst_start(burst_start), .burst_timestamp(burst_timestamp),
-        .burst_ptr_in(burst_start_ptr)
+        .burst_ptr_in(burst_start_ptr),
+        .burst_header({BURST_W{1'b0}})
     );
 
     fcapz_axi_mon #(

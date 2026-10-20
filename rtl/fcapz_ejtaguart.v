@@ -65,9 +65,11 @@ module fcapz_ejtaguart #(
             BAUD_RATE_too_high_for_CLK_HZ _baud_check_FAILED();
     endgenerate
 
+`ifndef SYNTHESIS
     // Simulation-only baud error check scratch registers.  Keep these outside
     // the unnamed initial block so strict Verilog parsers do not require
-    // SystemVerilog block declarations.
+    // SystemVerilog block declarations.  Synthesis skips the block: yosys
+    // rejects $error/$warning with run-time arguments in an initial block.
     integer baud_check_div;
     integer baud_check_actual;
     integer baud_check_err;
@@ -91,6 +93,7 @@ module fcapz_ejtaguart #(
             $warning("Baud rate error > 3%%: CLK_HZ=%0d BAUD_RATE=%0d divider=%0d actual=%0d",
                      CLK_HZ, BAUD_RATE, baud_check_div, baud_check_actual);
     end
+`endif
 
     // ---- Constants -----------------------------------------------------------
     localparam DR_W = 32;
@@ -268,6 +271,21 @@ module fcapz_ejtaguart #(
     // ---- Capture data mux ----------------------------------------------------
     wire [7:0] capture_rx_byte = config_valid_reg ? config_byte_reg : rx_byte_reg;
 
+    // ---- Sticky error flags (set from uart_clk domain, synced to TCK) --------
+    reg rx_overflow_uart;
+    reg frame_err_uart;
+
+    // Sync into TCK domain
+    (* ASYNC_REG = "TRUE" *) reg rx_overflow_sync1, rx_overflow_sync2;
+    (* ASYNC_REG = "TRUE" *) reg frame_err_sync1, frame_err_sync2;
+
+    always @(posedge tck) begin
+        rx_overflow_sync1 <= rx_overflow_uart;
+        rx_overflow_sync2 <= rx_overflow_sync1;
+        frame_err_sync1   <= frame_err_uart;
+        frame_err_sync2   <= frame_err_sync1;
+    end
+
     // ---- TCK: CAPTURE / SHIFT / UPDATE logic ---------------------------------
     always @(posedge tck) begin
         // Default: clear single-cycle pulses
@@ -354,21 +372,6 @@ module fcapz_ejtaguart #(
                 endcase
             end
         end
-    end
-
-    // ---- Sticky error flags (set from uart_clk domain, synced to TCK) --------
-    reg rx_overflow_uart;
-    reg frame_err_uart;
-
-    // Sync into TCK domain
-    (* ASYNC_REG = "TRUE" *) reg rx_overflow_sync1, rx_overflow_sync2;
-    (* ASYNC_REG = "TRUE" *) reg frame_err_sync1, frame_err_sync2;
-
-    always @(posedge tck) begin
-        rx_overflow_sync1 <= rx_overflow_uart;
-        rx_overflow_sync2 <= rx_overflow_sync1;
-        frame_err_sync1   <= frame_err_uart;
-        frame_err_sync2   <= frame_err_sync1;
     end
 
     // ========================================================================

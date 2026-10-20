@@ -75,6 +75,14 @@ class TestLanesFromCapture(unittest.TestCase):
         self.assertAlmostEqual(x[0], 0.0)
         self.assertAlmostEqual(x[1], 100e-9)
 
+    def test_x_axis_run_lengths(self) -> None:
+        cfg = self._cfg()
+        r = CaptureResult(config=cfg, samples=[1, 2, 3], run_lengths=[4, 2, 1])
+        x, label = _x_axis_and_label(r)
+        self.assertEqual(label, "Time (s)")
+        # Entries start at clocks 0, 4, 6 @ 100 MHz.
+        self.assertEqual([round(v * 1e9) for v in x], [0, 40, 60])
+
     def test_x_edges_for_step_plot(self) -> None:
         e = _x_edges_for_step_plot(np.array([0.0, 1.0, 2.0, 3.0]))
         self.assertEqual(e.tolist(), [-0.5, 0.5, 1.5, 2.5, 3.5])

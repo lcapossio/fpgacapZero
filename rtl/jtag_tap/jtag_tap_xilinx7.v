@@ -21,7 +21,9 @@ module jtag_tap_xilinx7 #(
     output wire capture,
     output wire shift,
     output wire update,
-    output wire sel
+    output wire sel,
+    // TAP in Test-Logic-Reset (level, TCK domain)
+    output wire tlr
 );
 
     BSCANE2 #(.JTAG_CHAIN(CHAIN)) u_bscan (
@@ -34,7 +36,7 @@ module jtag_tap_xilinx7 #(
         .SEL     (sel),
         .DRCK    (),
         .RUNTEST (),
-        .RESET   ()
+        .RESET   (tlr)
     );
 
 endmodule

@@ -45,7 +45,8 @@ module fcapz_ela_ecp5 #(
     parameter EIO_OUT_W    = 1,
     parameter REL_COMPARE  = 0,
     parameter DUAL_COMPARE = 1,
-    parameter USER1_DATA_EN = 1
+    parameter USER1_DATA_EN = 1,
+    parameter RLE_W = 0  // 0=no run-length capture, 1..16=run-count width
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -75,7 +76,9 @@ module fcapz_ela_ecp5 #(
     wire [PTR_W-1:0]    burst_rd_addr;
     wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
-    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
+    // Aux lane: timestamps, or run counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    wire [((AUX_W > 0) ? AUX_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
@@ -146,7 +149,7 @@ module fcapz_ela_ecp5 #(
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
-                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -180,7 +183,7 @@ module fcapz_ela_ecp5 #(
                 .TRIG_STAGES(TRIG_STAGES), .STOR_QUAL(STOR_QUAL),
                 .INPUT_PIPE(INPUT_PIPE), .NUM_CHANNELS(NUM_CHANNELS),
                 .TIMESTAMP_W(TIMESTAMP_W), .REL_COMPARE(REL_COMPARE),
-                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+                .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
             ) u_ela (
                 .sample_clk(sample_clk), .sample_rst(sample_rst),
                 .probe_in(probe_in),
@@ -204,7 +207,7 @@ module fcapz_ela_ecp5 #(
 
     // ---- Burst read engine ----
     jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(AUX_W),
         .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
         .arst(jtag_rst_data),

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .analyzer import discover_boards
 
@@ -120,6 +120,7 @@ def auto_discover_boards(
     chain: int = 1,
     wait_sec: float = 10.0,
     timeout_sec: float = 5.0,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> List[Dict]:
     """Filter configs by USB, probe the survivors, return confirmed boards.
 
@@ -130,6 +131,8 @@ def auto_discover_boards(
 
     ``present_usb`` defaults to a live USB scan; pass an explicit set (or
     ``None`` to skip filtering) to make the scan deterministic in tests.
+    *register* is passed to :func:`~fcapz.analyzer.discover_boards`, so a
+    caller on another thread can cancel the probes.
     """
     if present_usb is _AUTO:
         present_usb = enumerate_usb_ids()
@@ -151,6 +154,7 @@ def auto_discover_boards(
                 ports=[port],
                 chain=chain,
                 timeout_sec=timeout_sec,
+                register=register,
             )
         except Exception:
             # Adapter busy / not this config / OpenOCD failed — skip it. Only
