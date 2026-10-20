@@ -12,13 +12,15 @@ from ..transport import (
     Transport,
     XilinxHwServerTransport,
     hw_server_chain_shape_kwargs,
+    openocd_burst_default,
 )
 from .settings import ConnectionSettings, ir_table_preset
 
 
 def transport_from_connection(conn: ConnectionSettings) -> Transport:
     """Mirror CLI transport selection, including hw_server default port remap."""
-    ir = ir_table_preset(conn.ir_table)
+    # "auto" (FTDI: family from the IDCODE) leaves each transport its default.
+    ir = None if conn.ir_table == "auto" else ir_table_preset(conn.ir_table)
     if conn.backend == "openocd":
         return OpenOcdTransport(
             host=conn.host,
@@ -26,6 +28,17 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             tap=conn.tap,
             ir_table=ir,
             connect_timeout_sec=conn.connect_timeout_sec,
+            burst=openocd_burst_default(ir) and conn.burst_path != "none",
+            single_chain_burst=conn.burst_path != "two_chain",
+        )
+    if conn.backend == "ftdi":
+        from ..ftdi_transport import FtdiMpsseTransport
+
+        return FtdiMpsseTransport(
+            device=conn.hardware,
+            ir_table=ir,
+            burst=False if conn.burst_path == "none" else None,
+            single_chain_burst=conn.burst_path != "two_chain",
         )
     if conn.backend == "hw_server":
         fpga = conn.tap

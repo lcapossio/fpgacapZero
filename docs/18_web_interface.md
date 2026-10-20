@@ -81,12 +81,15 @@ connected. The panels:
 
 - **Connection** — Connect/Disconnect sit at the top of the panel, with a
   **Cancel** button while a connect or scan is in flight. Pick the backend
-  (OpenOCD, AMD/Xilinx hw_server, or Intel/Altera **USB-Blaster**), host and
-  port. For `usb_blaster` the host/port fields are replaced by a single
-  optional **Quartus cable** field (e.g. `DE25-Nano [USB-1]`; blank
-  auto-selects the sole attached cable) — the `quartus_stp` path lives on the
-  server (auto-detected, or its `--quartus-stp` flag), never in the browser, and
-  Connect goes straight to the local cable with no TCP scan. For OpenOCD, Connect
+  (OpenOCD, AMD/Xilinx hw_server, Intel/Altera **USB-Blaster**, or a direct
+  **FTDI** cable), host and port. For `usb_blaster` the host/port fields are
+  replaced by a single optional **Quartus cable** field (e.g.
+  `DE25-Nano [USB-1]`; blank auto-selects the sole attached cable) — the
+  `quartus_stp` path lives on the server (auto-detected, or its
+  `--quartus-stp` flag), never in the browser, and Connect goes straight to
+  the local cable with no TCP scan. `ftdi` works the same way with an
+  optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`); the IR table
+  comes from the device IDCODE. For OpenOCD, Connect
   **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects

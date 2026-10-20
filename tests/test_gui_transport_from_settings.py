@@ -43,6 +43,42 @@ class TestTransportFromSettings(unittest.TestCase):
         self.assertEqual(t.tap, "GW1NR-9C.tap")
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
+    def test_openocd_polarfire_ir(self) -> None:
+        c = ConnectionSettings(
+            backend="openocd",
+            host="127.0.0.1",
+            port=6666,
+            tap="MPFS095T.tap",
+            ir_table="polarfire",
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, OpenOcdTransport)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE)
+        self.assertTrue(t.burst)
+        c.burst_path = "none"
+        self.assertFalse(transport_from_connection(c).burst)
+
+    def test_openocd_burst_stays_off_outside_polarfire(self) -> None:
+        c = ConnectionSettings(backend="openocd", tap="xc7a100t.tap", ir_table="xilinx7")
+        self.assertFalse(transport_from_connection(c).burst)
+
+    def test_ftdi_auto_ir(self) -> None:
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+
+        c = ConnectionSettings(
+            backend="ftdi", hardware="Embedded FlashPro5 A", ir_table="auto"
+        )
+        t = transport_from_connection(c)
+        self.assertIsInstance(t, FtdiMpsseTransport)
+        self.assertEqual(t.device, "Embedded FlashPro5 A")
+        self.assertEqual(t.ir_table, {})
+        self.assertIsNone(t._burst_arg)
+        c.burst_path = "none"
+        c.ir_table = "polarfire"
+        t = transport_from_connection(c)
+        self.assertIs(t._burst_arg, False)
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE)
+
     def test_hw_server_port_remap_and_fpga_name(self) -> None:
         c = ConnectionSettings(
             backend="hw_server",

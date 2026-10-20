@@ -141,13 +141,14 @@ The canonical register / shift maps live in
 | Area | Status |
 |------|--------|
 | AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 and Kria KV260 (Zynq UltraScale+ MPSoC) |
-| OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
+| OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100 and the PolarFire SoC Discovery Kit; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
 | AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
 | Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
+| Microchip PolarFire wrapper | ✅ Hardware-validated on the PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
 | AMD/Xilinx UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`); standalone Kintex / Virtex UltraScale(+) not yet tested |
-| ECP5 / PolarFire wrappers | RTL complete; host / hardware validation still limited |
+| ECP5 wrappers | RTL complete; host / hardware validation still limited |
 | Efinix (Trion / Titanium) wrapper | ⏳ Planned — support pending, wrapper not yet implemented |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 and Kria KV260 (details in the manual) |
 

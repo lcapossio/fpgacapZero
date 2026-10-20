@@ -81,21 +81,22 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 
 | Field | What it does |
 |---|---|
-| **Backend** | Dropdown: `hw_server` (default), `openocd`, or `usb_blaster` |
+| **Backend** | Dropdown: `hw_server` (default), `openocd`, `usb_blaster`, or FTDI (direct JTAG on a FlashPro5 or Digilent cable; no host, port or TAP) |
 | **Host** | TCP host of the transport, default `127.0.0.1` |
 | **Port** | TCP port, default `3121` for hw_server / `6666` for openocd; ignored by USB-Blaster |
 | **FPGA target / TAP** | hw_server target name (e.g. `xc7a100t`), OpenOCD TAP name (enter `auto` to use the first tap OpenOCD reports), or Quartus device name / `auto` for USB-Blaster |
-| **Quartus hardware** | Optional Quartus hardware name for USB-Blaster, e.g. `DE25-Nano [USB-1]`; leave empty to auto-select when exactly one cable is present |
+| **Quartus hardware** / **FTDI adapter** | Optional Quartus hardware name for USB-Blaster (e.g. `DE25-Nano [USB-1]`), or FTDI channel description or serial (e.g. `Embedded FlashPro5 A`); leave empty to auto-select when exactly one cable is present |
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
 | **Bitfile** | Optional path to a `.bit` file; if set, the GUI runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected" |
-| **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `AMD/Xilinx UltraScale / UltraScale+`, or `Gowin (OpenOCD)`.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
+| **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `UltraScale+`, `Gowin`, `Microchip PolarFire`, or `Auto from IDCODE (FTDI)`, which the FTDI backend selects by itself.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
+| **Burst readout** | The bitstream's burst path: single chain (default), two chain (legacy USER2) or none (register window).  OpenOCD reads by burst for the PolarFire preset only; FTDI follows the detected family |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
 
 > [!NOTE]
 > **Gowin boards** connect over the **OpenOCD** backend (the FTDI/Gowin cable
 > driven by an already-running `openocd`): set Backend = `openocd`, Port `6666`,
-> TAP = your tap name or `auto`, IR table = **Gowin (OpenOCD)**. The ELA tab
+> TAP = your tap name or `auto`, IR table = **Gowin**. The ELA tab
 > works immediately, and **EIO is auto-discovered and attached** on connect (see
 > the EIO panel below) — no USER chain or mux offset to enter.
 

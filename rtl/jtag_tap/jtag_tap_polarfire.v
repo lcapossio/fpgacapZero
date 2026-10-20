@@ -3,27 +3,40 @@
 
 `timescale 1ns/1ps
 
-// Microchip / Microsemi PolarFire (and SmartFusion2 / IGLOO2) JTAG TAP wrapper.
+// Microchip PolarFire / PolarFire SoC JTAG TAP wrapper.  SmartFusion2 and
+// IGLOO2 have the same UJTAG port list (not validated on hardware there).
 //
-// PolarFire exposes a single user JTAG primitive (UJTAG) with two
-// user instructions, USER1 and USER2, sharing one TDR path.  The
-// active user IR is exposed on UIREG[7:0]; the wrapper decodes it
-// to gate UDRSEL/UDRCAP/UDRSH/UDRUPD per chain and to mux UTDO from
-// the chain currently selected.
+// PolarFire exposes one user JTAG primitive (UJTAG) per device.  It
+// carries the current instruction register on UIREG[7:0] and gives the
+// fabric a single user TDR path; IR values 16..127 are left to the user.
+// This wrapper decodes two of them, USER1 and USER2, gates
+// UDRCAP/UDRSH/UDRUPD per chain and muxes UTDO from the selected chain.
+// UDRCK is the TAP's TCK; UDRCAP/UDRSH/UDRUPD are high in the
+// Capture-DR/Shift-DR/Update-DR states, as with Xilinx BSCANE2.
 //
 // Because UJTAG is a single primitive per device, this TAP wrapper
 // presents BOTH chains' interfaces on its ports (chN_*) instead of
 // being instantiated twice with a CHAIN parameter.  The ELA wrapper
 // uses both chains; the EIO wrapper uses ch1 only and ties off ch2.
 //
-// USER opcodes default to the documented PolarFire values
-// (USER1=0x10, USER2=0x11) and can be overridden if your device's
-// BSDL uses different codes.
+// UJTAG's TCK/TMS/TDI/TRSTB/TDO pins must reach top-level ports of the
+// design, which Libero binds to the dedicated JTAG pins.  They are
+// passed through on the *_pad_* ports.
+//
+// USER opcodes default to 0x20/0x21.  0x10/0x11 are in the user range
+// on paper, but on PolarFire SoC the MSS RISC-V debug module answers
+// there (dtmcs/dmi), so they never reach the fabric.
 
 module jtag_tap_polarfire #(
-    parameter [7:0] IR_USER1 = 8'h10,
-    parameter [7:0] IR_USER2 = 8'h11
+    parameter [7:0] IR_USER1 = 8'h20,
+    parameter [7:0] IR_USER2 = 8'h21
 ) (
+    // JTAG pads (connect straight to top-level ports)
+    input  wire tck_pad_i,
+    input  wire tms_pad_i,
+    input  wire tdi_pad_i,
+    input  wire trstb_pad_i,
+    output wire tdo_pad_o,
     // Chain 1 (USER1) — register interface
     output wire ch1_tck,
     output wire ch1_tdi,
@@ -43,7 +56,8 @@ module jtag_tap_polarfire #(
 );
 
     wire [7:0] uireg;
-    wire       utdi, udrck, udrcap, udrsh, udrupd, urstb;
+    wire       utdi, udrck, udrcap, udrsh, udrupd;
+    wire       urstb_unused;
 
     wire is_user1 = (uireg == IR_USER1);
     wire is_user2 = (uireg == IR_USER2);
@@ -55,20 +69,18 @@ module jtag_tap_polarfire #(
               : 1'b0;
 
     UJTAG u_ujtag (
-        .UIREG0 (uireg[0]),
-        .UIREG1 (uireg[1]),
-        .UIREG2 (uireg[2]),
-        .UIREG3 (uireg[3]),
-        .UIREG4 (uireg[4]),
-        .UIREG5 (uireg[5]),
-        .UIREG6 (uireg[6]),
-        .UIREG7 (uireg[7]),
+        .TCK    (tck_pad_i),
+        .TMS    (tms_pad_i),
+        .TDI    (tdi_pad_i),
+        .TRSTB  (trstb_pad_i),
+        .TDO    (tdo_pad_o),
+        .UIREG  (uireg),
         .UTDI   (utdi),
         .UDRCK  (udrck),
         .UDRCAP (udrcap),
         .UDRSH  (udrsh),
         .UDRUPD (udrupd),
-        .URSTB  (urstb),
+        .URSTB  (urstb_unused),
         .UTDO   (utdo)
     );
 
