@@ -477,6 +477,58 @@ async def jtag_pipe_iface_protocol(dut):
     JTAG_PIPE_FUNCTIONAL_COVERAGE.hit("burst_read_second")
 
 
+@cocotb.test()
+async def jtag_pipe_iface_register_ends_preload(dut):
+    """A register command ends the preload its Capture-DR started (BUG-233).
+
+    With 1-bit samples a scan preloads 256 words, far longer than a 49-bit
+    register scan, so without the abort the read it issues meets a busy
+    memory port (the ELA then answers 0)."""
+    assert len(dut.sample_data) == 1
+    cocotb.start_soon(Clock(dut.tck, 10, unit="ns").start())
+    collisions: list[tuple[int, int]] = []
+
+    async def bus() -> None:
+        while True:
+            await RisingEdge(dut.tck)
+            dut.sample_data.value = int(dut.mem_addr.value) & 1
+            if int(dut.reg_wr_en.value) and int(dut.reg_addr.value) == 0x002C:
+                dut.burst_ptr_in.value = 0
+                dut.burst_start.value = 0 if int(dut.burst_start.value) else 1
+            access = int(dut.reg_rd_en.value) or int(dut.reg_wr_en.value)
+            if access and int(dut.mem_active.value):
+                collisions.append((int(dut.reg_addr.value), int(dut.reg_wr_en.value)))
+
+    cocotb.start_soon(bus())
+    dut.arst.value = 1
+    for name in ("tdi", "capture", "shift_en", "update", "sel", "burst_start",
+                 "burst_timestamp", "burst_ptr_in", "timestamp_data"):
+        getattr(dut, name).value = 0
+    dut.reg_rdata.value = 0x1234_5678
+    await idle_tap(dut, 4)
+    dut.arst.value = 0
+    await idle_tap(dut, 4)
+
+    def check_bits(scan: int, start: int) -> None:
+        for i in range(256):
+            assert (scan >> i) & 1 == (start + i) & 1, f"bit {i} of the burst from {start}"
+
+    for command in (make_frame(0x0100, 0, False), make_frame(0x0024, 7, True)):
+        await scan_reg(dut, make_frame(0x002C, 0, True))
+        await idle_tap(dut, 300)
+        await scan_burst(dut)                      # priming
+        check_bits(await scan_burst(dut), 0)       # its Capture-DR starts a preload
+        await scan_reg(dut, command)               # ... this command must end
+        await idle_tap(dut, 4)
+        assert collisions == [], f"register access during a burst preload: {collisions}"
+    # The aborted preload leaves nothing behind: the next burst starts clean.
+    await scan_reg(dut, make_frame(0x002C, 0, True))
+    await idle_tap(dut, 300)
+    await scan_burst(dut)
+    check_bits(await scan_burst(dut), 0)
+    check_bits(await scan_burst(dut), 256)
+
+
 async def pipe_command_monitor(dut, events: list) -> None:
     """Record every register-bus strobe as (kind, addr, wdata)."""
     while True:
@@ -809,6 +861,18 @@ async def fcapz_eio_registers(dut):
     EIO_FUNCTIONAL_COVERAGE.hit("reset_during_stress")
 
 
+def manager_reset(dut, level: int) -> None:
+    """Drive jtag_rst and proto_rst together; no Test-Logic-Reset or slot reset.
+
+    The tests of a target share one simulation, so each starts from both
+    resets: jtag_rst alone leaves the burst start event of the last test.
+    """
+    dut.jtag_rst.value = level
+    dut.proto_rst.value = level
+    dut.tlr.value = 0
+    dut.slot_rst.value = 0
+
+
 async def manager_write(dut, addr: int, data: int) -> None:
     await FallingEdge(dut.jtag_clk)
     dut.jtag_addr.value = addr
@@ -834,7 +898,7 @@ async def manager_read(dut, addr: int) -> int:
 @cocotb.test()
 async def fcapz_core_manager_mux(dut):
     cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
-    dut.jtag_rst.value = 1
+    manager_reset(dut, 1)
     dut.jtag_wr_en.value = 0
     dut.jtag_rd_en.value = 0
     dut.jtag_addr.value = 0
@@ -849,13 +913,15 @@ async def fcapz_core_manager_mux(dut):
     dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
     for _ in range(3):
         await FallingEdge(dut.jtag_clk)
-    dut.jtag_rst.value = 0
+    manager_reset(dut, 0)
     await FallingEdge(dut.jtag_clk)
 
     assert await manager_read(dut, 0xF000) == 0x0004_434D
     assert await manager_read(dut, 0xF004) == 3
-    # bit2: the burst start is raised on every BURST_PTR write
-    assert await manager_read(dut, 0xF010) == 0x7
+    # bit2: the burst start is raised on every BURST_PTR write; bits 3..6:
+    # epochs and owner, burst header, MGR_CTRL, Test-Logic-Reset resets;
+    # bit 7: MGR_SELECT_COUNT
+    assert await manager_read(dut, 0xF010) == 0xFF
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xEFFF) == 0
     assert int(dut.slot_rd_en.value) & 1
@@ -886,6 +952,17 @@ async def fcapz_core_manager_mux(dut):
     assert int(dut.burst_start_ptr.value) == 0xB
     await manager_write(dut, 0xF008, 7)
     assert await manager_read(dut, 0xF008) == 1
+    # MGR_SELECT_COUNT: every MGR_ACTIVE write, the refused one too, and
+    # nothing else; a hub soft reset keeps it.
+    assert await manager_read(dut, 0xF034) == 4
+    await manager_write(dut, 0xF014, 1)
+    await manager_write(dut, 0xF024, 5)
+    assert await manager_read(dut, 0xF034) == 4
+    await manager_write(dut, 0xF028, 1)
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF008) == 0
+    assert await manager_read(dut, 0xF034) == 4
 
 
 @cocotb.test()
@@ -898,7 +975,7 @@ async def fcapz_core_manager_burst_start_per_write(dut):
     pipe reads slot 1 from slot 0's old pointer.
     """
     cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
-    dut.jtag_rst.value = 1
+    manager_reset(dut, 1)
     dut.jtag_wr_en.value = 0
     dut.jtag_rd_en.value = 0
     dut.jtag_addr.value = 0
@@ -913,7 +990,7 @@ async def fcapz_core_manager_burst_start_per_write(dut):
     dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
     for _ in range(3):
         await FallingEdge(dut.jtag_clk)
-    dut.jtag_rst.value = 0
+    manager_reset(dut, 0)
     await FallingEdge(dut.jtag_clk)
 
     flags = [0, 0, 0]
@@ -942,6 +1019,124 @@ async def fcapz_core_manager_burst_start_per_write(dut):
     await manager_write(dut, 0xF02C, 0)
     await Timer(1, unit="ns")
     assert int(dut.burst_start.value) == seen
+
+
+@cocotb.test()
+async def fcapz_core_manager_resets(dut):
+    """Epochs, MGR_OWNER, MGR_CTRL, the Test-Logic-Reset count and the header."""
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
+    manager_reset(dut, 1)
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    dut.slot_rdata.value = 0
+    dut.slot_burst_rd_data.value = 0
+    dut.slot_burst_rd_ts_data.value = 0
+    dut.burst_rd_active.value = 0
+    dut.slot_burst_start.value = 0
+    dut.slot_burst_timestamp.value = 0b010
+    dut.slot_burst_start_ptr.value = (0xC << 8) | (0xB << 4) | 0xA
+
+    requests: list[int] = []
+
+    async def watch_requests() -> None:
+        while True:
+            await RisingEdge(dut.jtag_clk)
+            if int(dut.slot_rst_req.value):
+                requests.append(int(dut.slot_rst_req.value))
+
+    cocotb.start_soon(watch_requests())
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    manager_reset(dut, 0)
+    await FallingEdge(dut.jtag_clk)
+
+    async def slot_epoch(slot: int) -> int:
+        await manager_write(dut, 0xF014, slot)
+        return await manager_read(dut, 0xF02C)
+
+    # The counters never reset, and earlier tests of this simulation counted
+    # too: measure from here.
+    epoch = await manager_read(dut, 0xF020)
+    assert epoch >= 1
+    tlr_count = await manager_read(dut, 0xF030)
+    base = [await slot_epoch(s) for s in range(3)]
+    await manager_write(dut, 0xF024, 0xA5A5_0001)
+    assert await manager_read(dut, 0xF024) == 0xA5A5_0001
+    await manager_write(dut, 0xF008, 1)
+
+    # A slot's own reset counts in its epoch only, at both edges: odd while
+    # it is held (BUG-235).
+    dut.slot_rst.value = 0b010
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert [await slot_epoch(s) for s in range(3)] == [base[0], base[1] + 1, base[2]]
+    dut.slot_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+    assert [await slot_epoch(s) for s in range(3)] == [base[0], base[1] + 2, base[2]]
+
+    # MGR_CTRL: bit 1 requests DESC_INDEX's slot, bit 2 every slot, one
+    # cycle each; MGR_CTRL reads 0.
+    await manager_write(dut, 0xF014, 2)
+    await manager_write(dut, 0xF028, 0x2)
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert requests == [0b100], requests
+    requests.clear()
+    await manager_write(dut, 0xF028, 0x4)
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert requests == [0b111], requests
+    requests.clear()
+    assert await manager_read(dut, 0xF028) == 0
+    assert await manager_read(dut, 0xF008) == 1
+    assert await manager_read(dut, 0xF020) == epoch
+
+    # Bit 0 resets the hub: ACTIVE, DESC_INDEX and the owner; no slot request.
+    await manager_write(dut, 0xF028, 0x1)
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF020) == epoch + 2
+    assert await manager_read(dut, 0xF008) == 0
+    assert await manager_read(dut, 0xF014) == 0
+    assert await manager_read(dut, 0xF024) == 0
+    assert requests == []
+
+    # Test-Logic-Reset counts once per entry.
+    dut.tlr.value = 1
+    for _ in range(3):
+        await FallingEdge(dut.jtag_clk)
+    dut.tlr.value = 0
+    await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF030) == tlr_count + 1
+
+    # The burst header of a BURST_PTR write to slot 1.
+    await manager_write(dut, 0xF008, 1)
+    await manager_write(dut, 0xF024, 0x1234)
+    await manager_write(dut, 0x002C, 0)
+    await Timer(1, unit="ns")
+    header = int(dut.burst_header.value)
+    assert header & 0xFFFF == 0x4248
+    assert (header >> 16) & 0xFFFF == 1
+    assert (header >> 32) & 0xFFFF_FFFF == 0xB
+    assert (header >> 64) & 1 == 1
+    assert (header >> 65) & 0x7FFF == 0
+    assert (header >> 80) & 0xFFFF == epoch + 2
+    assert (header >> 96) & 0xFFFF == base[1] + 2
+    assert (header >> 112) & 0xFFFF_FFFF == 0x1234
+    assert (header >> 144) & 0xFFFF == 8
+
+    # proto_rst clears only the burst start event.
+    assert int(dut.burst_start.value) == 1
+    dut.proto_rst.value = 1
+    await FallingEdge(dut.jtag_clk)
+    dut.proto_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+    assert int(dut.burst_start.value) == 0
+    assert await manager_read(dut, 0xF008) == 1
+    assert await manager_read(dut, 0xF024) == 0x1234
+    assert await manager_read(dut, 0xF020) == epoch + 2
 
 
 @cocotb.test()
@@ -1145,6 +1340,355 @@ async def fcapz_ela_xilinx7_single_chain(dut):
         cur = sample_at(burst, i)
         assert cur == ((prev + 1) & 0xFF)
         prev = cur
+
+
+# fcapz_debug_multi_<vendor> shells as the fcapz_debug_multi_* targets in
+# sim/run_cocotb.py build them: default slots (two 8-bit ELAs, DEPTH 1024,
+# one 1-bit EIO) on a nondefault chain; the *_tlr targets add TLR_RESET_EN.
+_DEBUG_MULTI_CHAIN = 3
+_DEBUG_MULTI_SAMPLE_W = 8
+_DEBUG_MULTI_DEPTH = 1024
+_DEBUG_MULTI_BURST_W = 256
+# MGR_CAPS of the shell; bit 6 is TLR_RESET_EN.
+_DEBUG_MULTI_CAPS = 0xBF
+_MGR_CAPS_TLR_RESET = 0x40
+
+
+def _debug_multi_primitive(dut):
+    """Return (primitive, pin names, chain parameter name) for the shell's TAP stub."""
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    vendor = next(v for v in ("xilinx7", "xilinxus", "intel") if f"_{v}" in target)
+    if vendor == "intel":
+        # sld_virtual_jtag has no sel; jtag_tap_intel ties it high.
+        pins = dict(tck="tck", tdi="tdi", capture="virtual_state_cdr",
+                    shift="virtual_state_sdr", update="virtual_state_udr", sel=None,
+                    tlr="jtag_state_tlr")
+        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index"
+    pins = dict(tck="TCK", tdi="TDI", capture="CAPTURE", shift="SHIFT",
+                update="UPDATE", sel="SEL", tlr="RESET")
+    ctrl = dut.u_tap_ctrl.u_tap if vendor == "xilinxus" else dut.u_tap_ctrl
+    return ctrl.u_bscan, pins, "JTAG_CHAIN"
+
+
+def _check_burst_header(header: int, *, slot: int, mgr_epoch: int, slot_epoch: int,
+                        owner: int) -> None:
+    """The priming scan of a burst carries the manager's burst header."""
+    assert header & 0xFFFF == 0x4248, f"header magic {header & 0xFFFF:#x}"
+    assert (header >> 16) & 0xFFFF == slot, "header slot"
+    assert (header >> 32) & 0xFFFF_FFFF < _DEBUG_MULTI_DEPTH, "header start pointer"
+    assert (header >> 64) & 1 == 0, "header timestamp select"
+    assert (header >> 65) & 0x7FFF == 0, "header reserved bits"
+    assert (header >> 80) & 0xFFFF == mgr_epoch, "header MGR_EPOCH"
+    assert (header >> 96) & 0xFFFF == slot_epoch, "header slot epoch"
+    assert (header >> 112) & 0xFFFF_FFFF == owner, "header MGR_OWNER"
+    assert (header >> 144) & 0xFFFF == _DEBUG_MULTI_SAMPLE_W, "header SAMPLE_W"
+    assert header >> 160 == 0, "header upper bits"
+
+
+class _DebugMultiBench:
+    """Drives an fcapz_debug_multi_<vendor> shell at its TAP primitive's pins."""
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.prim, pins, self.chain_param = _debug_multi_primitive(dut)
+        self.pin = {role: getattr(self.prim, name) for role, name in pins.items() if name}
+        self.intel = pins["sel"] is None
+        self.rng = random.Random(0x5EED)
+        # A probe value per ELA that replaces its count while not None.
+        self.hold: list[int | None] = [None, None]
+
+    async def start(self) -> None:
+        dut = self.dut
+        if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
+            assert int(getattr(self.prim, self.chain_param).value) == _DEBUG_MULTI_CHAIN
+        for role in ("tck", "tdi", "capture", "shift", "update", "sel", "tlr"):
+            if role in self.pin:
+                self.pin[role].value = 0
+        dut.ela_sample_clk.value = 0
+        dut.ela_sample_rst.value = 0b11
+        dut.ela_probe_in.value = 0
+        dut.ela_trigger_in.value = 0
+        dut.eio_probe_in.value = 0
+        cocotb.start_soon(self._sample_clocks())
+        await self.idle(8)
+        await Timer(60, unit="ns")
+        dut.ela_sample_rst.value = 0
+        await self.idle(12)
+
+    async def _sample_clocks(self) -> None:
+        # Both ELAs on one clock; ELA0 counts up, ELA1 counts down, each held
+        # at 0 by its own sample reset.
+        dut = self.dut
+        up = down = 0
+        while True:
+            dut.ela_sample_clk.value = 0b11
+            await Timer(3, unit="ns")
+            dut.ela_sample_clk.value = 0b00
+            rst = int(dut.ela_sample_rst.value)
+            up = 0 if rst & 1 else (up + 1) & 0xFF
+            down = 0 if rst & 2 else (down - 1) & 0xFF
+            probe = [up if self.hold[0] is None else self.hold[0],
+                     down if self.hold[1] is None else self.hold[1]]
+            dut.ela_probe_in.value = (probe[1] << _DEBUG_MULTI_SAMPLE_W) | probe[0]
+            await Timer(3, unit="ns")
+
+    async def tck_tick(self) -> None:
+        tck = self.pin["tck"]
+        tck.value = 0
+        await Timer(5, unit="ns")
+        tck.value = 1
+        await Timer(1, unit="ns")
+        tck.value = 0
+        await Timer(4, unit="ns")
+
+    async def idle(self, n: int) -> None:
+        # On Intel, TCK keeps running for the other virtual JTAG instances
+        # while this one's states are low; tdi carries their traffic.
+        pin = self.pin
+        for role in ("capture", "shift", "update", "sel"):
+            if role in pin:
+                pin[role].value = 0
+        for _ in range(n):
+            pin["tdi"].value = self.rng.getrandbits(1) if self.intel else 0
+            await self.tck_tick()
+        pin["tdi"].value = 0
+
+    async def scan(self, bits: int, frame: int = 0) -> int:
+        pin = self.pin
+        captured = 0
+        if "sel" in pin:
+            pin["sel"].value = 1
+        pin["capture"].value = 1
+        await self.tck_tick()
+        pin["capture"].value = 0
+        pin["shift"].value = 1
+        for i in range(bits):
+            pin["tdi"].value = (frame >> i) & 1
+            if int(self.dut.tap_tdo.value):
+                captured |= 1 << i
+            await self.tck_tick()
+        pin["shift"].value = 0
+        pin["tdi"].value = 0
+        pin["update"].value = 1
+        await self.tck_tick()
+        pin["update"].value = 0
+        if "sel" in pin:
+            pin["sel"].value = 0
+        return captured
+
+    async def read(self, addr: int) -> int:
+        await self.scan(49, make_frame(addr, 0, False))
+        await self.idle(2)
+        data = await self.scan(49, make_frame(addr, 0, False)) & 0xFFFF_FFFF
+        await self.idle(2)
+        return data
+
+    async def write(self, addr: int, data: int) -> None:
+        await self.scan(49, make_frame(addr, data, True))
+        await self.idle(8)
+
+    async def test_logic_reset(self) -> None:
+        """The TAP passes through Test-Logic-Reset while TCK runs."""
+        self.pin["tlr"].value = 1
+        await self.idle(4)
+        self.pin["tlr"].value = 0
+        await self.idle(4)
+
+    async def slot_epoch(self, slot: int) -> int:
+        await self.write(0xF014, slot)
+        return await self.read(0xF02C)
+
+    async def slot_epochs(self) -> list[int]:
+        return [await self.slot_epoch(slot) for slot in range(3)]
+
+    async def capture(self, slot: int, pretrig: int = 8, posttrig: int = 40) -> int:
+        """Arm ELA *slot* on sample 0x80 and wait for DONE; return the capture length."""
+        await self.write(0xF008, slot)
+        assert await self.read(0xF008) == slot
+        await self.write(0x0014, pretrig)
+        await self.write(0x0018, posttrig)
+        await self.write(0x0020, 1)
+        await self.write(0x0024, 0x80)
+        await self.write(0x0028, 0xFF)
+        await self.write(0x0004, 1)
+        status = 0
+        for _ in range(200):
+            await self.idle(8)
+            status = await self.read(0x0008)
+            if status & 0x4:
+                break
+        assert status & 0x4, f"slot {slot} never reached DONE"
+        capture_len = pretrig + posttrig + 1
+        assert await self.read(0x001C) == capture_len
+        return capture_len
+
+    async def burst(self, slot: int, capture_len: int, step: int) -> int:
+        """Burst-read ELA *slot*'s capture (ACTIVE already on it); return the header."""
+        per_packet = _DEBUG_MULTI_BURST_W // _DEBUG_MULTI_SAMPLE_W
+        await self.write(0x002C, 0)
+        await self.idle(160)
+        header = await self.scan(_DEBUG_MULTI_BURST_W)  # priming scan
+        first = await self.scan(_DEBUG_MULTI_BURST_W)
+        second = await self.scan(_DEBUG_MULTI_BURST_W)
+        samples = [sample_at(first, i) for i in range(per_packet)]
+        samples += [sample_at(second, i) for i in range(capture_len - per_packet)]
+        for i in range(1, capture_len):
+            assert samples[i] == (samples[i - 1] + step) & 0xFF, \
+                f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+        return header
+
+
+@cocotb.test()
+async def fcapz_debug_multi_wrapper(dut):
+    tb = _DebugMultiBench(dut)
+    await tb.start()
+
+    # Manager identity and slot descriptors
+    assert await tb.read(0xF000) & 0xFFFF == 0x434D
+    assert await tb.read(0xF004) == 3
+    assert await tb.read(0xF010) & ~_MGR_CAPS_TLR_RESET == _DEBUG_MULTI_CAPS
+    for slot, (core, burst) in enumerate(((0x4C41, 1), (0x4C41, 1), (0x494F, 0))):
+        await tb.write(0xF014, slot)
+        assert await tb.read(0xF018) == core, f"slot {slot} core id"
+        assert await tb.read(0xF01C) == burst, f"slot {slot} burst capability"
+
+    # Each ELA: capture, then two burst packets, then straight back to the
+    # register path by switching ACTIVE.
+    await tb.write(0xF024, 0x0BAD_F00D)
+    mgr_epoch = await tb.read(0xF020)
+    epochs = await tb.slot_epochs()
+    for slot, step in ((0, 1), (1, -1)):
+        capture_len = await tb.capture(slot)
+        header = await tb.burst(slot, capture_len, step)
+        _check_burst_header(header, slot=slot, mgr_epoch=mgr_epoch,
+                            slot_epoch=epochs[slot], owner=0x0BAD_F00D)
+
+        await tb.write(0xF008, 1 - slot)
+        assert await tb.read(0xF008) == 1 - slot
+        assert await tb.read(0x0010) == _DEBUG_MULTI_DEPTH
+
+    # EIO slot
+    await tb.write(0xF008, 2)
+    assert await tb.read(0x0004) == 1
+    assert await tb.read(0x0008) == 1
+    for level in (1, 0):
+        await tb.write(0x0100, level)
+        await tb.idle(8)
+        assert int(dut.eio_probe_out.value) == level
+        dut.eio_probe_in.value = level
+        await tb.idle(8)
+        assert await tb.read(0x0010) == level
+
+
+@cocotb.test()
+async def fcapz_debug_multi_resets(dut):
+    """Each slot resets alone; MGR_CTRL resets the hub or slots (BUG-229)."""
+    tb = _DebugMultiBench(dut)
+    await tb.start()
+
+    # The hub resets only at power-up, and the counters never: tests that ran
+    # before in this simulation leave theirs.  Measure from here.
+    mgr_epoch = await tb.read(0xF020)
+    assert mgr_epoch >= 1
+    e0, e1, e2 = await tb.slot_epochs()
+
+    # ELA 1 armed once and DONE, so its arm toggle is odd; its probe then
+    # stops off the trigger value, so a phantom arm would stay armed.  EIO
+    # output high, ACTIVE on ELA 1, an owner token.
+    capture_len = await tb.capture(1)
+    tb.hold[1] = 0x00
+    await tb.write(0xF008, 2)
+    await tb.write(0x0100, 1)
+    await tb.write(0xF024, 0xC0FFEE)
+    await tb.write(0xF008, 1)
+
+    # ELA 0's own sample reset reaches only ELA 0.
+    dut.ela_sample_rst.value = 0b01
+    await tb.idle(20)
+    dut.ela_sample_rst.value = 0
+    await tb.idle(40)
+    status = await tb.read(0x0008)
+    assert status & 0x5 == 0x4, f"ELA 1 STATUS {status:#x} after ELA 0's reset (phantom arm)"
+    assert await tb.read(0x001C) == capture_len
+    assert await tb.read(0xF008) == 1, "ACTIVE lost to a slot reset"
+    assert await tb.read(0xF024) == 0xC0FFEE, "MGR_OWNER lost to a slot reset"
+    assert await tb.read(0xF020) == mgr_epoch, "a slot reset reset the hub"
+    assert int(dut.eio_probe_out.value) == 1, "EIO output lost to a slot reset"
+    assert await tb.slot_epochs() == [e0 + 2, e1, e2]
+    tb.hold[1] = None
+    # ELA 0 captures again after its reset.
+    capture_len = await tb.capture(0)
+    await tb.burst(0, capture_len, 1)
+
+    # MGR_CTRL bit 1 resets the DESC_INDEX slot only.
+    await tb.write(0xF008, 1)
+    await tb.write(0xF014, 1)
+    await tb.write(0xF028, 0x2)
+    await tb.idle(40)
+    assert await tb.read(0xF028) == 0
+    assert await tb.read(0x0008) & 0x7 == 0, "ELA 1 not reset by MGR_CTRL bit 1"
+    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2]
+    assert await tb.read(0xF008) == 1
+    assert int(dut.eio_probe_out.value) == 1
+
+    # Bit 2 resets every slot, the EIO outputs included, but not the hub.
+    await tb.write(0xF028, 0x4)
+    await tb.idle(40)
+    assert await tb.slot_epochs() == [e0 + 4, e1 + 4, e2 + 2]
+    assert int(dut.eio_probe_out.value) == 0
+    assert await tb.read(0xF008) == 1
+    assert await tb.read(0xF020) == mgr_epoch
+
+    # Bit 0 resets the hub: ACTIVE, DESC_INDEX and the owner, not the slots.
+    await tb.write(0xF008, 2)
+    await tb.write(0x0100, 1)
+    await tb.write(0xF014, 1)
+    await tb.write(0xF028, 0x1)
+    await tb.idle(8)
+    assert await tb.read(0xF020) == mgr_epoch + 2
+    assert await tb.read(0xF008) == 0
+    assert await tb.read(0xF014) == 0
+    assert await tb.read(0xF024) == 0
+    assert int(dut.eio_probe_out.value) == 1
+    assert await tb.slot_epochs() == [e0 + 4, e1 + 4, e2 + 2]
+
+
+@cocotb.test()
+async def fcapz_debug_multi_tlr(dut):
+    """Test-Logic-Reset is counted; with TLR_RESET_EN it also cancels a burst."""
+    tb = _DebugMultiBench(dut)
+    await tb.start()
+    tlr_reset = os.environ.get("FCAPZ_COCOTB_TARGET", "").endswith("_tlr")
+    caps = await tb.read(0xF010)
+    assert caps == _DEBUG_MULTI_CAPS | (_MGR_CAPS_TLR_RESET if tlr_reset else 0), hex(caps)
+    tlr_count = await tb.read(0xF030)
+    mgr_epoch = await tb.read(0xF020)
+    owner = await tb.read(0xF024)
+    slot_epoch = await tb.slot_epoch(0)
+
+    capture_len = await tb.capture(0)
+    # BURST_PTR is written, so the next scan would prime the burst ...
+    await tb.write(0x002C, 0)
+    await tb.idle(160)
+    # ... but the host restarts and walks the TAP through Test-Logic-Reset.
+    await tb.test_logic_reset()
+    first = await tb.scan(_DEBUG_MULTI_BURST_W)
+    if tlr_reset:
+        assert first & 0xFFFF != 0x4248, "burst survived Test-Logic-Reset"
+    else:
+        _check_burst_header(first, slot=0, mgr_epoch=mgr_epoch, slot_epoch=slot_epoch,
+                            owner=owner)
+    assert await tb.read(0xF030) == tlr_count + 1
+    # Only the burst protocol was reset: the hub and the capture stay.
+    assert await tb.read(0xF020) == mgr_epoch
+    assert await tb.read(0xF008) == 0
+    assert await tb.read(0x0008) & 0x4
+    header = await tb.burst(0, capture_len, 1)
+    _check_burst_header(header, slot=0, mgr_epoch=mgr_epoch, slot_epoch=slot_epoch,
+                        owner=owner)
+    await tb.test_logic_reset()
+    assert await tb.read(0xF030) == tlr_count + 2
 
 
 @cocotb.test()

@@ -47,7 +47,8 @@ _BITSTREAM_SOURCES = [
     _ROOT / "rtl" / name
     for name in (
         "fcapz_version.vh", "reset_sync.v", "dpram.v", "trig_compare.v",
-        "fcapz_ela.v", "fcapz_core_manager.v", "fcapz_debug_multi_xilinx7.v",
+        "fcapz_ela.v", "fcapz_core_manager.v", "fcapz_debug_multi_core.v",
+        "fcapz_hub_reset.v", "fcapz_debug_multi.v", "fcapz_debug_multi_xilinx7.v",
         "jtag_reg_iface.v", "jtag_pipe_iface.v", "jtag_burst_read.v",
         "jtag_tap/jtag_tap_xilinx7.v", "fcapz_async_fifo.v",
         "fcapz_ejtagaxi.v", "fcapz_ejtagaxi_xilinx7.v",

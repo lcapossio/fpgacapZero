@@ -108,7 +108,8 @@ module fcapz_ela_xilinx7 #(
     jtag_tap_xilinx7 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
         .capture(tap1_capture), .shift(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel)
+        .update(tap1_update), .sel(tap1_sel),
+        .tlr()
     );
 
     reset_sync u_rst_sync_ctrl (
@@ -137,7 +138,8 @@ module fcapz_ela_xilinx7 #(
                 .mem_active(burst_rd_active),
                 .sample_data(burst_rd_data), .timestamp_data(burst_rd_ts_data),
                 .burst_start(burst_start), .burst_timestamp(burst_timestamp),
-                .burst_ptr_in(burst_start_ptr)
+                .burst_ptr_in(burst_start_ptr),
+                .burst_header({BURST_W{1'b0}})
             );
         end else begin : g_reg_iface
             jtag_reg_iface u_reg (
@@ -240,7 +242,8 @@ module fcapz_ela_xilinx7 #(
             jtag_tap_xilinx7 #(.CHAIN(DATA_CHAIN)) u_tap_data (
                 .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
                 .capture(tap2_capture), .shift(tap2_shift),
-                .update(tap2_update), .sel(tap2_sel)
+                .update(tap2_update), .sel(tap2_sel),
+                .tlr()
             );
 
             reset_sync u_rst_sync_data (

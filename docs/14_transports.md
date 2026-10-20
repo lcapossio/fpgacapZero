@@ -272,6 +272,12 @@ The transport opens a TCP socket to OpenOCD's TCL listener,
 sends commands like `irscan xc7a100t.tap 0x02 ; drscan xc7a100t.tap 49 0x...`,
 parses the hex responses.  No subprocess, no Vivado required.
 
+Each register access is one command line: a read is
+`irscan; drscan; runtest; irscan; drscan`.  OpenOCD's Tcl server runs a
+whole line before it serves another client, so behind a core manager the
+slot select at the head of the line holds for the access even with a second
+program on the same OpenOCD server.
+
 OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
@@ -329,7 +335,9 @@ each Tcl request with sentinels, and uses `device_lock` around composite
 operations so a read transaction is not interleaved with SignalTap,
 Programmer, or another Quartus Tcl session.  `read_reg()`,
 `read_block()`, and `raw_dr_scan_batch()` are emitted as single locked
-Tcl blocks where atomicity matters.
+Tcl blocks where atomicity matters.  Behind a core manager each block that
+reaches a slot starts with that slot's select, inside the same lock, so
+another program on the cable cannot redirect it.
 
 Auto device selection opens the first Quartus device whose name starts
 with `@1`.  If the FPGA is at another JTAG position, pass the exact

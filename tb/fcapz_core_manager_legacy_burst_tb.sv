@@ -133,12 +133,13 @@ module legacy_burst_case #(
                 .DEPTH(DEPTH), .SLOT_CORE_IDS({16'h4C41, 16'h4C41}),
                 .SLOT_HAS_BURST(2'b11)
             ) mgr (
-                .jtag_clk(tck), .jtag_rst(arst),
+                .jtag_clk(tck), .jtag_rst(arst), .proto_rst(arst), .tlr(1'b0),
                 .jtag_wr_en(mgr_wr_en), .jtag_rd_en(mgr_rd_en),
                 .jtag_addr(mgr_addr), .jtag_wdata(mgr_wdata), .jtag_rdata(mgr_rdata),
                 .slot_wr_en(slot_wr_en), .slot_rd_en(slot_rd_en),
                 .slot_addr(slot_addr), .slot_wdata(slot_wdata),
                 .slot_rdata({NUM_SLOTS*32{1'b0}}),
+                .slot_rst({NUM_SLOTS{arst}}), .slot_rst_req(),
                 .burst_rd_addr(rd_addr), .burst_rd_active(rd_active),
                 .slot_burst_rd_addr(slot_rd_addr), .slot_burst_rd_active(slot_rd_active),
                 .slot_burst_rd_data(slot_rd_data),
@@ -147,7 +148,8 @@ module legacy_burst_case #(
                 .slot_burst_timestamp({NUM_SLOTS{1'b0}}),
                 .slot_burst_start_ptr(slot_ptr),
                 .burst_rd_data(rd_data), .burst_rd_ts_data(rd_ts_data),
-                .burst_start(bstart), .burst_timestamp(bts), .burst_start_ptr(bptr)
+                .burst_start(bstart), .burst_timestamp(bts), .burst_start_ptr(bptr),
+                .burst_header()
             );
         end
 
@@ -163,7 +165,8 @@ module legacy_burst_case #(
                 .reg_addr(pipe_addr), .reg_wdata(pipe_wdata), .reg_rdata(mgr_rdata),
                 .mem_addr(rd_addr), .mem_active(rd_active),
                 .sample_data(rd_data), .timestamp_data(1'b0),
-                .burst_start(bstart), .burst_timestamp(bts), .burst_ptr_in(bptr)
+                .burst_start(bstart), .burst_timestamp(bts), .burst_ptr_in(bptr),
+                .burst_header({BURST_W{1'b0}})
             );
         end else begin : g_chain
             assign pipe_wr_en = 1'b0;

@@ -6,26 +6,35 @@
 // A slot switch right after a single-chain burst.
 //
 // The core manager ignores an MGR_ACTIVE write while the pipe is filling its
-// burst staging register (burst_rd_active).  Until a command scan ends burst
-// mode, every capture on the chain starts another fill, including the
-// capture of the select scan itself, and a fill takes 256 / SAMPLE_W TCKs.
-// On a lane of 4 bits or fewer that outlasts the 49-bit select scan, so the
-// select is dropped and the next access reaches the previous slot.
+// burst staging register (burst_rd_active).  On bitstreams from before the
+// reset epochs (MGR_CAPS bit 3; the frozen models in tb/legacy/), until a
+// command scan ends burst mode every capture on the chain starts another
+// fill, including the capture of the select scan itself, and a fill takes
+// 256 / SAMPLE_W TCKs.  On a lane of 4 bits or fewer that outlasts the 49-bit
+// select scan, so the select is dropped and the next access reaches the
+// previous slot.  The current pipe ends that fill on the command itself.
 //
-// The host (XilinxHwServerTransport._read_block_burst) therefore ends every
-// single-chain burst with an uncaptured VERSION read and
-// BURST_DRAIN_IDLE_CYCLES idle TCKs.  Each case runs a burst on slot 0, then
-// selects slot 1 with the host's register-write framing:
-//   DRAIN=0  select straight after the last burst scan (the old host);
+// The host (XilinxHwServerTransport) therefore ends every burst on the
+// control chain with an uncaptured VERSION read and BURST_DRAIN_IDLE_CYCLES
+// idle TCKs, and puts the same drain ahead of a per-access select on a
+// manager without epochs.  Each case runs a burst on slot 0, then selects
+// slot 1 with the host's register-write framing:
+//   DRAIN=0  select straight after the last burst scan;
 //   DRAIN=1  the host's drain first.
-// With the drain the select must land for every lane width.  Without it the
-// select must be dropped on a 1-bit lane, which shows the case reaches the
-// hazard the drain is for.
+// Three builds: current manager and pipe; the current manager on the legacy
+// pipe (a bitstream with MGR_CAPS bit 3 from before the pipe fix, which the
+// host does not drain for: the manager takes the write once a burst owner is
+// bound); legacy manager and pipe.  With the drain the select must land on
+// every build at every lane width.  Without it the first two must still take
+// it, and the legacy build must drop it on a 1-bit lane, which shows the case
+// reaches the hazard the drain is for.
 
 module select_after_burst_case #(
     parameter SAMPLE_W = 4,
     parameter DRAIN = 1,
-    parameter DRAIN_IDLE = 258
+    parameter DRAIN_IDLE = 258,
+    parameter LEGACY_MGR = 0,
+    parameter LEGACY_PIPE = 0
 ) (
     output reg       done,
     output reg [7:0] active
@@ -79,41 +88,88 @@ module select_after_burst_case #(
         end
     end
 
-    fcapz_core_manager #(
-        .NUM_SLOTS(NUM_SLOTS), .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0),
-        .DEPTH(DEPTH), .SLOT_CORE_IDS({16'h4C41, 16'h4C41}),
-        .SLOT_HAS_BURST(2'b11)
-    ) mgr (
-        .jtag_clk(tck), .jtag_rst(arst),
-        .jtag_wr_en(pipe_wr_en), .jtag_rd_en(pipe_rd_en),
-        .jtag_addr(pipe_addr), .jtag_wdata(pipe_wdata), .jtag_rdata(mgr_rdata),
-        .slot_wr_en(slot_wr_en), .slot_rd_en(slot_rd_en),
-        .slot_addr(slot_addr), .slot_wdata(slot_wdata),
-        .slot_rdata({NUM_SLOTS*32{1'b0}}),
-        .burst_rd_addr(rd_addr), .burst_rd_active(rd_active),
-        .slot_burst_rd_addr(slot_rd_addr), .slot_burst_rd_active(slot_rd_active),
-        .slot_burst_rd_data({NUM_SLOTS*SAMPLE_W{1'b0}}),
-        .slot_burst_rd_ts_data({NUM_SLOTS{1'b0}}),
-        .slot_burst_start(slot_flag),
-        .slot_burst_timestamp({NUM_SLOTS{1'b0}}),
-        .slot_burst_start_ptr(slot_ptr),
-        .burst_rd_data(rd_data), .burst_rd_ts_data(rd_ts),
-        .burst_start(bstart), .burst_timestamp(bts), .burst_start_ptr(bptr)
-    );
+    generate
+        if (LEGACY_MGR) begin : g_mgr
+            fcapz_core_manager_pre_burst_start #(
+                .NUM_SLOTS(NUM_SLOTS), .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0),
+                .DEPTH(DEPTH), .SLOT_CORE_IDS({16'h4C41, 16'h4C41}),
+                .SLOT_HAS_BURST(2'b11)
+            ) mgr (
+                .jtag_clk(tck), .jtag_rst(arst),
+                .jtag_wr_en(pipe_wr_en), .jtag_rd_en(pipe_rd_en),
+                .jtag_addr(pipe_addr), .jtag_wdata(pipe_wdata), .jtag_rdata(mgr_rdata),
+                .slot_wr_en(slot_wr_en), .slot_rd_en(slot_rd_en),
+                .slot_addr(slot_addr), .slot_wdata(slot_wdata),
+                .slot_rdata({NUM_SLOTS*32{1'b0}}),
+                .burst_rd_addr(rd_addr), .burst_rd_active(rd_active),
+                .slot_burst_rd_addr(slot_rd_addr), .slot_burst_rd_active(slot_rd_active),
+                .slot_burst_rd_data({NUM_SLOTS*SAMPLE_W{1'b0}}),
+                .slot_burst_rd_ts_data({NUM_SLOTS{1'b0}}),
+                .slot_burst_start(slot_flag),
+                .slot_burst_timestamp({NUM_SLOTS{1'b0}}),
+                .slot_burst_start_ptr(slot_ptr),
+                .burst_rd_data(rd_data), .burst_rd_ts_data(rd_ts),
+                .burst_start(bstart), .burst_timestamp(bts), .burst_start_ptr(bptr)
+            );
+        end else begin : g_mgr
+            fcapz_core_manager #(
+                .NUM_SLOTS(NUM_SLOTS), .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0),
+                .DEPTH(DEPTH), .SLOT_CORE_IDS({16'h4C41, 16'h4C41}),
+                .SLOT_HAS_BURST(2'b11)
+            ) mgr (
+                .jtag_clk(tck), .jtag_rst(arst), .proto_rst(arst), .tlr(1'b0),
+                .jtag_wr_en(pipe_wr_en), .jtag_rd_en(pipe_rd_en),
+                .jtag_addr(pipe_addr), .jtag_wdata(pipe_wdata), .jtag_rdata(mgr_rdata),
+                .slot_wr_en(slot_wr_en), .slot_rd_en(slot_rd_en),
+                .slot_addr(slot_addr), .slot_wdata(slot_wdata),
+                .slot_rdata({NUM_SLOTS*32{1'b0}}),
+                .slot_rst({NUM_SLOTS{arst}}), .slot_rst_req(),
+                .burst_rd_addr(rd_addr), .burst_rd_active(rd_active),
+                .slot_burst_rd_addr(slot_rd_addr), .slot_burst_rd_active(slot_rd_active),
+                .slot_burst_rd_data({NUM_SLOTS*SAMPLE_W{1'b0}}),
+                .slot_burst_rd_ts_data({NUM_SLOTS{1'b0}}),
+                .slot_burst_start(slot_flag),
+                .slot_burst_timestamp({NUM_SLOTS{1'b0}}),
+                .slot_burst_start_ptr(slot_ptr),
+                .burst_rd_data(rd_data), .burst_rd_ts_data(rd_ts),
+                .burst_start(bstart), .burst_timestamp(bts), .burst_start_ptr(bptr),
+                .burst_header()
+            );
+        end
+    endgenerate
 
-    jtag_pipe_iface #(
-        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0), .DEPTH(DEPTH),
-        .BURST_W(BURST_W), .SEG_DEPTH(DEPTH)
-    ) pipe (
-        .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo),
-        .capture(capture), .shift_en(shift_en), .update(update), .sel(sel),
-        .reg_clk(), .reg_rst(),
-        .reg_wr_en(pipe_wr_en), .reg_rd_en(pipe_rd_en),
-        .reg_addr(pipe_addr), .reg_wdata(pipe_wdata), .reg_rdata(mgr_rdata),
-        .mem_addr(rd_addr), .mem_active(rd_active),
-        .sample_data(rd_data), .timestamp_data(1'b0),
-        .burst_start(bstart), .burst_timestamp(bts), .burst_ptr_in(bptr)
-    );
+    generate
+        if (LEGACY_PIPE) begin : g_pipe
+            jtag_pipe_iface_pre_cmd_preload_end #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0), .DEPTH(DEPTH),
+                .BURST_W(BURST_W), .SEG_DEPTH(DEPTH)
+            ) pipe (
+                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo),
+                .capture(capture), .shift_en(shift_en), .update(update), .sel(sel),
+                .reg_clk(), .reg_rst(),
+                .reg_wr_en(pipe_wr_en), .reg_rd_en(pipe_rd_en),
+                .reg_addr(pipe_addr), .reg_wdata(pipe_wdata), .reg_rdata(mgr_rdata),
+                .mem_addr(rd_addr), .mem_active(rd_active),
+                .sample_data(rd_data), .timestamp_data(1'b0),
+                .burst_start(bstart), .burst_timestamp(bts), .burst_ptr_in(bptr)
+            );
+        end else begin : g_pipe
+            jtag_pipe_iface #(
+                .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0), .DEPTH(DEPTH),
+                .BURST_W(BURST_W), .SEG_DEPTH(DEPTH)
+            ) pipe (
+                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo),
+                .capture(capture), .shift_en(shift_en), .update(update), .sel(sel),
+                .reg_clk(), .reg_rst(),
+                .reg_wr_en(pipe_wr_en), .reg_rd_en(pipe_rd_en),
+                .reg_addr(pipe_addr), .reg_wdata(pipe_wdata), .reg_rdata(mgr_rdata),
+                .mem_addr(rd_addr), .mem_active(rd_active),
+                .sample_data(rd_data), .timestamp_data(1'b0),
+                .burst_start(bstart), .burst_timestamp(bts), .burst_ptr_in(bptr),
+                .burst_header({BURST_W{1'b0}})
+            );
+        end
+    endgenerate
 
     task tick;
         begin
@@ -180,45 +236,62 @@ module select_after_burst_case #(
         end
         command(1'b1, 16'hF008, 32'd1);
         idle(WRITE_IDLE);
-        active = mgr.active_idx;
+        active = g_mgr.mgr.active_idx;
         done = 1'b1;
     end
 endmodule
 
 module fcapz_core_manager_select_after_burst_tb;
     localparam N = 6;
-    wire [N-1:0] done_drain, done_naive;
-    wire [N*8-1:0] active_drain, active_naive;
+    // Kind k = build * 2 + DRAIN; build 0 current, 1 current manager on the
+    // legacy pipe, 2 legacy.  One case per lane width in each.
+    localparam K = 6;
+    wire [K*N-1:0] done_c;
+    wire [N*8-1:0] active_c [0:K-1];
 
     // Lane widths 1, 2, 4, 8, 16, 32.
-    genvar g;
+    genvar g, k;
     generate
-        for (g = 0; g < N; g = g + 1) begin : g_case
-            select_after_burst_case #(.SAMPLE_W(1 << g), .DRAIN(1)) drain (
-                .done(done_drain[g]), .active(active_drain[g*8 +: 8])
-            );
-            select_after_burst_case #(.SAMPLE_W(1 << g), .DRAIN(0)) naive (
-                .done(done_naive[g]), .active(active_naive[g*8 +: 8])
-            );
+        for (k = 0; k < K; k = k + 1) begin : g_kind
+            for (g = 0; g < N; g = g + 1) begin : g_case
+                select_after_burst_case #(
+                    .SAMPLE_W(1 << g), .DRAIN(k % 2),
+                    .LEGACY_MGR(k / 2 == 2), .LEGACY_PIPE(k / 2 >= 1)
+                ) c (
+                    .done(done_c[k*N + g]), .active(active_c[k][g*8 +: 8])
+                );
+            end
         end
     endgenerate
 
-    integer i;
+    integer i, b;
     integer fails;
     initial begin
-        wait (&done_drain && &done_naive);
+        wait (&done_c);
         fails = 0;
         for (i = 0; i < N; i = i + 1) begin
-            $display("SAMPLE_W=%0d: with drain slot %0d, without slot %0d",
-                     1 << i, active_drain[i*8 +: 8], active_naive[i*8 +: 8]);
-            if (active_drain[i*8 +: 8] !== 8'd1) begin
-                fails = fails + 1;
-                $display("FAIL: SAMPLE_W=%0d: select after the drained burst was dropped", 1 << i);
+            $display("SAMPLE_W=%0d: current %0d/%0d, bit-3 manager on legacy pipe %0d/%0d, legacy %0d/%0d (with/without drain)",
+                     1 << i, active_c[1][i*8 +: 8], active_c[0][i*8 +: 8],
+                     active_c[3][i*8 +: 8], active_c[2][i*8 +: 8],
+                     active_c[5][i*8 +: 8], active_c[4][i*8 +: 8]);
+            for (b = 0; b < 3; b = b + 1) begin
+                if (active_c[b*2 + 1][i*8 +: 8] !== 8'd1) begin
+                    fails = fails + 1;
+                    $display("FAIL: SAMPLE_W=%0d build %0d: select after the drained burst was dropped",
+                             1 << i, b);
+                end
+            end
+            for (b = 0; b < 2; b = b + 1) begin
+                if (active_c[b*2][i*8 +: 8] !== 8'd1) begin
+                    fails = fails + 1;
+                    $display("FAIL: SAMPLE_W=%0d build %0d: an undrained select was dropped",
+                             1 << i, b);
+                end
             end
         end
-        if (active_naive[7:0] !== 8'd0) begin
+        if (active_c[4][7:0] !== 8'd0) begin
             fails = fails + 1;
-            $display("FAIL: SAMPLE_W=1 without the drain: select landed, so this case no longer reaches the hazard");
+            $display("FAIL: SAMPLE_W=1 on the legacy build without the drain: select landed, so this case no longer reaches the hazard");
         end
         $display("\n=== fcapz_core_manager select after burst summary: %0d failed ===", fails);
         if (fails != 0)

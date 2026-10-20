@@ -73,3 +73,26 @@ def test_arty_vhdl_build_and_freshness_lists_include_monitor_sources() -> None:
         r'_ROOT\s*/\s*"rtl"\s*/\s*"vhdl"\s*/\s*"core"\s*/\s*"fcapz_axi_mon\.vhd"',
         hw_test,
     ), "test_hw_integration.py VHDL list missing rtl/vhdl/core/fcapz_axi_mon.vhd"
+
+
+def test_arty_builds_and_freshness_lists_include_the_manager_layers() -> None:
+    # fcapz_debug_multi_xilinx7 is a TAP shell over the vendor-free
+    # fcapz_debug_multi and fcapz_debug_multi_core; every Arty variant
+    # compiles all three, and a stale bitstream check must watch them too.
+    layers = ("fcapz_debug_multi_core.v", "fcapz_debug_multi.v", "fcapz_debug_multi_xilinx7.v")
+    for build in ("build_arty.tcl", "build_arty_vex.tcl", "build_arty_vhdl.tcl"):
+        text = _read(ARTY / build).replace("\\", "/")
+        for layer in layers:
+            assert f"rtl/{layer}" in text, f"{build} missing rtl/{layer}"
+
+    hw_test = _read(ARTY / "test_hw_integration.py")
+    for name in ("VERILOG", "VHDL", "VEX"):
+        block = re.search(
+            rf"_BITSTREAM_SOURCES_{name}\s*=\s*\[(?P<body>.*?)\n\]", hw_test, re.S
+        )
+        assert block is not None, f"_BITSTREAM_SOURCES_{name} not found"
+        for layer in layers:
+            pattern = rf'_ROOT\s*/\s*"rtl"\s*/\s*"{re.escape(layer)}"'
+            assert re.search(pattern, block.group("body")), (
+                f"_BITSTREAM_SOURCES_{name} missing rtl/{layer}"
+            )

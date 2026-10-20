@@ -20,6 +20,9 @@ and EIO wrappers, plus the Intel EJTAG-AXI wrapper, using `sld_virtual_jtag`.
 | `build_de25_nano_vex.tcl` | Quartus batch build script used by `build_de25_nano_vex.py` |
 | `run_hw_tests.py` | Build, program, probe, and optional capture runner |
 | `test_hw_integration.py` | Pytest hardware integration regression tests (both tops; `FPGACAP_BITSTREAM_VARIANT=vex` targets the VexRiscv one) |
+| `de25_nano_manager_top.v` | Core-manager variant: two ELAs and two EIOs behind one hub on instance 1 |
+| `build_de25_nano_manager.tcl` | Quartus batch build script for the manager variant (`build.py --variant manager`) |
+| `test_hw_manager.py` | Pytest hardware tests for the manager variant |
 
 ## JTAG Instances
 
@@ -54,6 +57,39 @@ wraps the vendored `VexRiscv_Lite.v` (`third_party/vexriscv/`, verified offline
 by `examples/common/vexriscv/get_deps.py`) with a Wishbone→AXI bridge and a
 64 KB `$readmemh` BRAM. Only this board's `vex/fw/main.c` workload is local; it
 is the same shared subsystem the Arty A7 VexRiscv variant uses.
+
+## Core-manager variant
+
+`de25_nano_manager_top` puts four debug slots behind one
+`fcapz_debug_multi_intel` hub on virtual JTAG instance 1, the Intel twin of the
+Arty A7 USER1 hub. It uses the same vendor-free `fcapz_debug_multi` layers with
+an `sld_virtual_jtag` shell instead of `BSCANE2`.
+
+| Instance | Slot | Core |
+| --- | --- | --- |
+| 1 | 0 | ELA0: 8-bit up counter, 32-bit timestamps, 4 segments |
+| 1 | 1 | ELA1: second counter XORed with `0xA5`, same options |
+| 1 | 2 | EIO0: in `{SW, 1 Hz counter}`, out drives `LEDR` |
+| 1 | 3 | EIO1: in `{counter[3:0], 2'b00, ~KEY}`, out is readback only |
+| 4 | - | EJTAG-AXI bridge on an `axi4_test_slave` |
+
+The hub reads bursts back through instance 1 itself, not a separate data
+instance; the host routes managed bursts there on its own.
+
+```sh
+python examples/de25_nano/build.py --variant manager
+quartus_pgm -c "DE25-Nano [USB-1]" -m jtag   -o "p;examples/de25_nano/output_files/de25_nano_manager_fcapz.sof@1"
+FPGACAP_QUARTUS_HARDWARE="DE25-Nano [USB-1]"   python -m pytest examples/de25_nano/test_hw_manager.py -v
+```
+
+```python
+from fcapz.analyzer import Analyzer, ElaManager
+from fcapz.eio import EioController
+
+manager = ElaManager(transport, chain=1)
+ela1 = Analyzer(transport, chain=1, instance=1)
+eio0 = EioController(transport, chain=1, instance=2)
+```
 
 ## Board I/O
 

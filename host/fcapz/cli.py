@@ -16,6 +16,7 @@ from .analyzer import (
     SequencerStage,
     TriggerConfig,
 )
+from .discovery import discover_cores
 from .axi_decode import FAULT_FLAGS, decode_axi, looks_like_axi
 from .axi_layout import PROBE_MAPS, axi_probes
 from .axi_layout import sample_width as axi_sample_width
@@ -314,6 +315,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
+    discover = sub.add_parser(
+        "discover",
+        help="List every fcapz core on the JTAG session, chain by chain",
+    )
+    discover.add_argument(
+        "--chains",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="N",
+        help=(
+            "Chains (Intel: sld_virtual_jtag instances) to scan "
+            "(default: USER1-4, or instances 1-8 on Intel)"
+        ),
+    )
+    discover.add_argument(
+        "--no-bridges",
+        action="store_true",
+        help="Do not send the EJTAG-AXI/UART identity reads to unanswered chains",
+    )
     sub.add_parser("arm", help="Arm capture without configuring (advanced)")
 
     p_axi_mon = sub.add_parser(
@@ -1011,6 +1032,13 @@ def main() -> int:
         if args.cmd == "ela-list":
             manager = ElaManager(transport, chain=args.chain)
             print(json.dumps(manager.probe_all(), indent=2))
+            return 0
+
+        if args.cmd == "discover":
+            cores = discover_cores(
+                transport, chains=args.chains, bridges=not args.no_bridges
+            )
+            print(json.dumps(cores, indent=2))
             return 0
 
         if args.cmd == "probe":

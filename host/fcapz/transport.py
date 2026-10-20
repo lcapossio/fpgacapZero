@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import shutil
 import socket
 import sys
@@ -19,7 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from typing import IO, Any, Callable, List
+from typing import IO, Any, Callable, List, NamedTuple
 
 # Character whitelist for the JTAG target filter (XSDB `jtag targets -set
 # -filter {name =~ "..."}`).  This value is interpolated inside a
@@ -44,6 +45,7 @@ _OPENOCD_TAP_RE = re.compile(r'^[A-Za-z0-9._:\-]+$')
 
 _hw_log = logging.getLogger("fcapz.transport.hw_server")
 _quartus_log = logging.getLogger("fcapz.transport.quartus_stp")
+_log = logging.getLogger(__name__)
 # xsdb marks the selected target with ``*``, after its number in ``jtag
 # targets`` (``2* xc7a100t``) and before it in ``targets`` (``* 2  ...``).
 _XSDB_TARGET_RE = re.compile(r"^\s*\*?\s*\d+\*?\s+(.+?)\s*$")
@@ -195,12 +197,79 @@ class DataWindowError(RuntimeError):
     """A DATA / timestamp window read would leave the addressable window."""
 
 
+class ManagerResetError(RuntimeError):
+    """The core manager moved away from the slot an operation used.
+
+    A reset invalidated it: the slot was reset after
+    :meth:`Analyzer.configure`, so the core went back to its build defaults
+    and a capture armed or read since is not the one configured (call
+    ``configure()`` again), the hub was reset, which moves ``MGR_ACTIVE`` to
+    slot 0, or, on a hub whose Test-Logic-Reset resets the JTAG protocol
+    (``MGR_CAPS`` bit 6), the TAP passed through Test-Logic-Reset during a
+    readout, which can drop a register command.  Or another controller
+    selected another slot while the operation ran, so some of its accesses
+    went to that slot.
+    """
+
+
 class BurstIntegrityError(RuntimeError):
     """A burst ran but returned the wrong number of scans or values.
 
     That is a defect in the readout, not a missing burst capability, so it is
     raised to the caller instead of being read again through the window.
     """
+
+
+class BurstHeader(NamedTuple):
+    """The header a core manager loads into the priming scan of a burst.
+
+    Present when ``MGR_CAPS`` bit 4 is set.  The epochs are the low 16 bits of
+    ``MGR_EPOCH`` and the owner slot's ``MGR_SLOT_EPOCH`` when the burst
+    started.
+    """
+
+    slot: int
+    start_ptr: int
+    timestamp: bool
+    mgr_epoch: int
+    slot_epoch: int
+    owner: int
+    sample_w: int
+
+    MAGIC = 0x4248  # "BH"
+
+    @classmethod
+    def parse(cls, scan: int) -> "BurstHeader | None":
+        """Decode a priming scan; ``None`` when it is not a burst header."""
+        if scan & 0xFFFF != cls.MAGIC or (scan >> 65) & 0x7FFF or scan >> 160:
+            return None
+        return cls(
+            slot=(scan >> 16) & 0xFFFF,
+            start_ptr=(scan >> 32) & 0xFFFF_FFFF,
+            timestamp=bool((scan >> 64) & 1),
+            mgr_epoch=(scan >> 80) & 0xFFFF,
+            slot_epoch=(scan >> 96) & 0xFFFF,
+            owner=(scan >> 112) & 0xFFFF_FFFF,
+            sample_w=(scan >> 144) & 0xFFFF,
+        )
+
+
+class BurstExpectation(NamedTuple):
+    """What the header of the next burst must say (:attr:`Transport.burst_expect`).
+
+    ``start_ptr`` is ``SEG_START`` read just before the burst: the pointer the
+    ``BURST_PTR`` write latches, so another value means the capture or the
+    segment selection changed in between.  ``sample_w`` is the slot's
+    ``SAMPLE_W``.  ``tlr_count`` is ``MGR_TLR_COUNT`` before the burst on a hub
+    whose Test-Logic-Reset cancels bursts (``MGR_CAPS`` bit 6), else ``None``:
+    a cancel after the priming scan leaves the header valid and turns the rest
+    of the burst into register data, so only the count shows it.
+    """
+
+    slot: int
+    start_ptr: int
+    sample_w: int
+    tlr_count: int | None = None
 
 
 class BurstUnavailableError(RuntimeError):
@@ -212,6 +281,21 @@ class BurstUnavailableError(RuntimeError):
     reads the register window instead.  A burst that runs and fails raises
     something else, and that is never read around.
     """
+
+
+def _burst_element_width(sample_w: int, burst_bits: int) -> int:
+    """Bits per sample in a burst scan for a core reporting *sample_w*.
+
+    jtag_burst_read packs ``burst_bits // SAMPLE_W`` samples at a stride of
+    exactly ``SAMPLE_W`` (sample 0 in the low bits), so a width that does not
+    divide the scan leaves unused high bits rather than widening each sample.
+    A width of 0 (no core answering) reads as 8; one wider than the scan is
+    clamped to it.
+    """
+    sample_w = int(sample_w)
+    if sample_w < 1:
+        return 8
+    return min(sample_w, burst_bits)
 
 
 def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> None:
@@ -230,6 +314,38 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
             f"0x{end:X}: this capture is too large for the register window; "
             "read it with burst readout instead"
         )
+
+
+#: ACTIVE writes :meth:`Transport.select_manager_instance_cached` makes before
+#: it stops confirming a slot switch (see there).
+MANAGER_SELECT_ATTEMPTS = 3
+
+# VERSION[15:0] of a core manager at 0xF000 (ASCII "CM").
+_CORE_MANAGER_ID = 0x434D
+
+#: VERSION[15:0] at ``0x0000`` of the cores that speak the 49-bit register
+#: protocol: an ELA (``"LA"``) or an EIO (``"IO"``).  A core manager presents
+#: its active slot there.
+REGISTER_PIPE_CORE_IDS = (0x4C41, 0x494F)
+
+
+def register_pipe_identity(transport: "Transport", chain: int) -> int | None:
+    """Return VERSION at ``0x0000`` on *chain* if an fcapz register core answers.
+
+    Returns ``None`` when the chain answers anything else.  Only ``0x0000`` is
+    read.  A read frame for an address below ``0x2000`` puts command 0 (NOP) in
+    the command field of the EJTAG-AXI and EJTAG-UART bridges, so this is safe
+    on a chain nobody has identified.  Higher addresses are not: a read of
+    ``0xF000`` is a burst-data command on the bridge, and a write of
+    ``0xF008`` is its reset.  Read anything else only after this returns a
+    value.  Raises the transport's error for a chain it cannot select, such as
+    a missing ``sld_virtual_jtag`` instance.
+    """
+    # Unselected: an inherited slot selection would put an MGR_ACTIVE write
+    # ahead of the read on an atomic backend, on a chain nobody identified.
+    with transport.slot_scope(None, chain=int(chain)):
+        version = int(transport.read_reg(0x0000))
+    return version if (version & 0xFFFF) in REGISTER_PIPE_CORE_IDS else None
 
 
 # The core manager's own registers.  The manager answers these itself, for
@@ -322,7 +438,9 @@ class Transport(ABC):
         A backend with :attr:`atomic_slot_select` writes ``MGR_ACTIVE`` at the
         head of every backend operation in the scope that reaches a slot (an
         access to the manager's own block, ``0xF000``-``0xF0FF``, does not),
-        so a second process on the same cable cannot redirect the access.
+        so a second process on the same cable cannot redirect the access.  It
+        does that only on a chain identified as holding a manager, which the
+        first scope on each slot does with one verified select.
         Other backends select once on entry through
         :meth:`select_manager_instance_cached`, which another process can
         still undo between operations.
@@ -347,10 +465,13 @@ class Transport(ABC):
             local.depth = depth + 1
             failed = False
             try:
-                if selection is not None and not self.atomic_slot_select:
-                    self.select_manager_instance_cached(
-                        selection.chain, selection.active_addr, selection.slot
-                    )
+                if selection is not None:
+                    if self.atomic_slot_select:
+                        local.selection = self._checked_atomic_selection(selection)
+                    else:
+                        self.select_manager_instance_cached(
+                            selection.chain, selection.active_addr, selection.slot
+                        )
                 yield
             except BaseException:
                 failed = True
@@ -393,6 +514,29 @@ class Transport(ABC):
         """The chain register accesses go to now, or ``None`` if untracked."""
         return getattr(self, "_active_chain", None)
 
+    def _checked_atomic_selection(
+        self, selection: SlotSelection
+    ) -> SlotSelection | None:
+        """The selection an :attr:`atomic_slot_select` scope publishes for
+        its accesses to carry.
+
+        The first scope on a slot selects it once through
+        :meth:`select_manager_instance_cached`: that identifies the chain
+        (nothing writes ``MGR_ACTIVE`` on a chain before it is known to hold a
+        manager), and fails loudly for a slot the manager does not take.  On a
+        chain without an identified manager the scope carries no selection,
+        as for a standalone core."""
+        key = (int(selection.chain), int(selection.slot))
+        checked = self.__dict__.setdefault("_fcapz_checked_slots", set())
+        if key not in checked:
+            self.select_manager_instance_cached(
+                selection.chain, selection.active_addr, selection.slot
+            )
+        if selection.chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            return None
+        checked.add(key)
+        return selection
+
     def _scope_select_chain(self, chain: int) -> None:
         try:
             self.select_chain(chain)
@@ -422,36 +566,316 @@ class Transport(ABC):
         active_addr: int,
         instance: int,
     ) -> None:
-        """Write a core-manager active slot only when the transport changed.
+        """Make *instance* the core manager's active slot on *chain*.
 
-        The active manager slot is a sticky hardware register.  On a backend
-        without :attr:`atomic_slot_select`, :meth:`slot_scope` selects through
-        this cache under :meth:`transaction_lock`, avoiding redundant JTAG
-        writes while Analyzer/EIO/CoreManager agree on which slot was last
-        selected.  Another process can move the slot behind the cache.
+        The active slot is a sticky hardware register that something else can
+        move: a hub reset (power-up, ``MGR_CTRL`` bit 0, or any ELA sample
+        reset on bitstreams before per-slot resets) returns it to slot 0, and
+        another host session can select its own slot.  So the slot is always
+        read back before it is trusted, and written only when it differs.  On
+        a backend without :attr:`atomic_slot_select`, :meth:`slot_scope`
+        selects through here on entry; an atomic backend comes here once per
+        slot, to identify the manager and check the slot, and then selects
+        inside every access.  Call under :meth:`transaction_lock`.
+
+        Raises ``ValueError`` for a negative slot and ``RuntimeError`` when a
+        core manager answers on *chain* but does not take the slot (out of
+        range, or still refusing after :data:`MANAGER_SELECT_ATTEMPTS`
+        writes).  The first time it meets a chain it reads ``0x0000`` and then
+        the manager VERSION, and writes nothing unless both answer: an
+        ``MGR_ACTIVE`` write is the reset command of an EJTAG-AXI bridge (see
+        :func:`register_pipe_identity`).  A chain with an fcapz core but no
+        manager is remembered as standalone and not written; a chain with
+        neither is left alone and checked again next time.  The write and its
+        readback are one backend operation (:meth:`read_regs_after_write`),
+        and *chain* is selected for them and the chain active before restored.
         """
-        key = (int(chain), int(instance))
-        if self.__dict__.get("_fcapz_manager_active_cache") == key:
+        chain = int(chain)
+        instance = int(instance)
+        if instance < 0:
+            raise ValueError(f"core-manager slot must be >= 0, got {instance}")
+        standalone = self.__dict__.setdefault("_fcapz_manager_standalone_chains", set())
+        if chain in standalone:
             return
-        # A write that fails may still have reached the hardware: until it
-        # succeeds the slot is unknown, not the previously cached one.
-        self.__dict__.pop("_fcapz_manager_active_cache", None)
         current = self._current_chain()
-        if current is None or current == int(chain):
-            self.write_reg(active_addr, int(instance))
-        else:
+        switch = current is not None and current != chain
+        if switch:
             # The manager lives on *chain*; another chain's 0xF008 is some
             # other core's register.
-            self._scope_select_chain(int(chain))
-            try:
-                self.write_reg(active_addr, int(instance))
-            finally:
+            self._scope_select_chain(chain)
+        try:
+            with self._no_slot_selection():
+                self._select_manager_slot(chain, active_addr, instance)
+        finally:
+            if switch:
                 self._scope_select_chain(current)
-        self.__dict__["_fcapz_manager_active_cache"] = key
+
+    def _select_manager_slot(self, chain: int, active_addr: int, instance: int) -> None:
+        """:meth:`select_manager_instance_cached` with *chain* selected and no
+        slot selection in force, so no access here carries a prefix."""
+        standalone = self.__dict__.setdefault("_fcapz_manager_standalone_chains", set())
+        if chain in standalone:
+            return
+        managers = self.__dict__.setdefault("_fcapz_manager_chains", set())
+        base = active_addr & 0xFF00
+        if chain not in managers:
+            if (int(self.read_reg(0x0000)) & 0xFFFF) not in REGISTER_PIPE_CORE_IDS:
+                return
+            if (int(self.read_reg(base)) & 0xFFFF) != _CORE_MANAGER_ID:
+                standalone.add(chain)
+                return
+            managers.add(chain)
+            self.manager_chain_caps(chain)
+            self._claim_manager(chain, base)
+        cached = self.__dict__.get("_fcapz_manager_active_cache")
+        if cached == (chain, instance) and int(self.read_reg(active_addr)) == instance:
+            return
+        # A write that fails may still have reached the hardware: until one
+        # is confirmed the slot is unknown, not the previously cached one.
+        self.__dict__.pop("_fcapz_manager_active_cache", None)
+        # The manager ignores an ACTIVE write while its burst engine loads.
+        # After a burst the pipe preloads once more, at the next scan's
+        # capture, for ~256 / SAMPLE_W TCKs, so on bitstreams built before
+        # the burst owner was made stable a switch straight after a narrow
+        # (SAMPLE_W <= 5) burst can be dropped.  Write again: two rounds
+        # outlast the longest preload.
+        for _ in range(MANAGER_SELECT_ATTEMPTS):
+            self._count_manager_select(chain)
+            (got,) = self.read_regs_after_write(active_addr, instance, [active_addr])
+            if int(got) == instance:
+                self.__dict__["_fcapz_manager_active_cache"] = (chain, instance)
+                return
+        count = int(self.read_reg(base + 0x4))
+        detail = (
+            f"it has {count} slot(s)"
+            if instance >= count
+            else f"ACTIVE still reads {int(self.read_reg(active_addr))}"
+        )
+        raise RuntimeError(
+            f"core manager on chain {chain} did not select slot {instance}: {detail}"
+        )
+
+    @contextmanager
+    def _no_slot_selection(self) -> Iterator[None]:
+        """Run the block with no slot selection in force on this thread, and
+        no hardware action on the way in or out (unlike ``slot_scope(None)``,
+        which restores the enclosing slot on a fallback backend)."""
+        local = self._slot_local()
+        previous = getattr(local, "selection", None)
+        local.selection = None
+        try:
+            yield
+        finally:
+            local.selection = previous
+
+    def _count_manager_select(self, chain: int) -> None:
+        """Count one ``MGR_ACTIVE`` write of this transport on *chain*; see
+        :meth:`manager_select_writes`."""
+        writes = self.__dict__.setdefault("_fcapz_manager_select_writes", {})
+        writes[int(chain)] = (writes.get(int(chain), 0) + 1) & 0xFFFF
+
+    def manager_chain_caps(self, chain: int) -> int | None:
+        """``MGR_CAPS`` of the identified core manager on *chain*, read once
+        per identification; ``None`` when *chain* holds no identified manager.
+        Call with *chain* selected and no slot selection in force."""
+        chain = int(chain)
+        if chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            return None
+        caps = self.__dict__.setdefault("_fcapz_manager_caps", {})
+        if chain not in caps:
+            caps[chain] = int(self.read_reg(_MGR_BLOCK_START + 0x10))
+        return caps[chain]
+
+    def slot_routing_isolated(self, chain: int, slot: int) -> bool:
+        """Whether every access in the calling thread's scope reaches *slot*
+        on *chain* whatever other controllers select.
+
+        True only on an :attr:`atomic_slot_select` backend whose scope carries
+        that slot of an identified manager: each access then writes the slot
+        in its own uninterrupted sequence, and the manager takes the write
+        (one with epochs, ``MGR_CAPS`` bit 3, takes it even mid-preload; an
+        older one gets a burst drain ahead of it).  Another controller's
+        select can then not redirect an access, so a moved ``MGR_ACTIVE`` or
+        ``MGR_SELECT_COUNT`` is not evidence that one was.  It is no
+        protection against another controller writing this same slot."""
+        if not self.atomic_slot_select:
+            return False
+        sel = self.current_slot_selection()
+        return (
+            sel is not None
+            and sel.chain == int(chain)
+            and sel.slot == int(slot)
+            and sel.chain in self.__dict__.get("_fcapz_manager_chains", ())
+        )
+
+    @contextmanager
+    def held_manager_instance(
+        self,
+        chain: int,
+        active_addr: int,
+        instance: int,
+    ) -> Iterator[None]:
+        """Select *instance* as :meth:`select_manager_instance_cached` does,
+        then check, after the block, that every access in it reached that
+        slot.  Call under :meth:`transaction_lock`, and access only that slot
+        in the block.
+
+        Another controller can select another slot at any time, and select
+        this one back before the block ends: ``MGR_ACTIVE`` reads the same,
+        but the accesses in between went elsewhere.  ``MGR_SELECT_COUNT``
+        (``MGR_CAPS`` bit 7) counts every ``MGR_ACTIVE`` write, so a count
+        that moved by more than this transport's own writes says one
+        happened.  ``MGR_ACTIVE`` is read after the block too, for a hub
+        reset (it moves the active slot to 0 without a select) and for hubs
+        without the count.  Raises :class:`ManagerResetError` in either
+        case; the block is not checked when it raises.  Nothing is checked on
+        a chain without a core manager.
+
+        The order makes the count cover the block: count, then ``MGR_ACTIVE``
+        (this slot, so no select since the count took it away), the block,
+        ``MGR_ACTIVE`` (a hub reset in the block shows, or a select back
+        after it moved the count), then the count.
+        """
+        chain = int(chain)
+        instance = int(instance)
+        if self.slot_routing_isolated(chain, instance):
+            # Every access in the block selects the slot itself.
+            yield
+            return
+        self.select_manager_instance_cached(chain, active_addr, instance)
+        if chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            yield
+            return
+        base = active_addr & 0xFF00
+        caps = self.__dict__.setdefault("_fcapz_manager_caps", {})
+        if chain not in caps:
+            caps[chain] = int(self.read_reg(base + 0x10))
+        count_addr = base + 0x34 if caps[chain] & 0x80 else None
+
+        def foreign_selects() -> int:
+            own = self.manager_select_writes(chain)
+            return (int(self.read_reg(count_addr)) - own) & 0xFFFF
+
+        before = None if count_addr is None else foreign_selects()
+
+        def check_active(when: str) -> None:
+            active = int(self.read_reg(active_addr))
+            if active != instance:
+                raise ManagerResetError(
+                    f"the core manager's active slot on chain {chain} is "
+                    f"{active}, not {instance}, {when} an access to slot "
+                    f"{instance}: another controller selected it, or the hub "
+                    "was reset, and some of the access went there"
+                )
+
+        if before is not None:
+            check_active("at the start of")
+        yield
+        check_active("after")
+        if before is not None:
+            moved = (foreign_selects() - before) & 0xFFFF
+            if moved:
+                raise ManagerResetError(
+                    f"another controller wrote the core manager's active slot "
+                    f"on chain {chain} {moved} time(s) during an access to slot "
+                    f"{instance}: some of the access may have reached another slot"
+                )
+
+    def _claim_manager(self, chain: int, base: int) -> None:
+        """Write this session's owner token to the manager at *base* on *chain*.
+
+        Only managers with ``MGR_OWNER`` (``MGR_CAPS`` bit 3).  The token is
+        advisory: a token of another session is reported, not obeyed, since
+        a session that exited without closing leaves its token behind too.
+        Call with *chain* selected.
+        """
+        if not int(self.read_reg(base + 0x10)) & 0x08:
+            return
+        token = self.__dict__.setdefault("_fcapz_owner_token", secrets.randbits(31) | 1)
+        owner = int(self.read_reg(base + 0x24))
+        if owner not in (0, token):
+            _log.warning(
+                "core manager on chain %d carries owner token 0x%08X: another "
+                "host session may be using it, or one exited without closing",
+                chain,
+                owner,
+            )
+        self.write_reg(base + 0x24, token)
+        self.__dict__.setdefault("_fcapz_owned_managers", set()).add((chain, base))
+
+    def release_manager_ownership(self) -> None:
+        """Clear this session's owner token from the managers it claimed.
+
+        A manager whose ``MGR_OWNER`` holds another value (another session
+        took it, or the hub was reset) is left alone.
+        """
+        token = self.__dict__.get("_fcapz_owner_token")
+        owned = self.__dict__.pop("_fcapz_owned_managers", set())
+        if token is None or not owned:
+            return
+        with self.transaction_lock():
+            for chain, base in sorted(owned):
+                try:
+                    self.select_chain(chain)
+                except NotImplementedError:
+                    if chain != 1:
+                        continue
+                if int(self.read_reg(base + 0x24)) == token:
+                    self.write_reg(base + 0x24, 0)
+
+    def _release_ownership_on_close(self) -> None:
+        """:meth:`release_manager_ownership` for ``close()``, best effort.
+
+        Skipped while another thread holds the transaction lock: a close must
+        not wait on a scan in flight.  A failure is logged, and the close goes
+        on.
+        """
+        if not self.__dict__.get("_fcapz_owned_managers"):
+            return
+        lock = self.transaction_lock()
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            self.release_manager_ownership()
+        except Exception as exc:  # noqa: BLE001 - closing anyway
+            _log.warning("could not clear MGR_OWNER: %s", exc)
+        finally:
+            lock.release()
+
+    def manager_select_writes(self, chain: int) -> int:
+        """``MGR_ACTIVE`` writes this transport made to the core manager on
+        *chain*, modulo 2**16.  The manager counts every one, from every
+        controller, in ``MGR_SELECT_COUNT`` (``MGR_CAPS`` bit 7): the
+        difference is the other controllers' selects.  Every select of this
+        host goes through :meth:`select_manager_instance_cached`, which
+        counts them; the count survives
+        :meth:`invalidate_manager_instance_cache`."""
+        return self.__dict__.get("_fcapz_manager_select_writes", {}).get(int(chain), 0)
 
     def invalidate_manager_instance_cache(self) -> None:
-        """Forget the cached core-manager active slot selection."""
+        """Forget the cached core-manager active slot selection, so the next
+        cached select writes and confirms it.  Which chains hold a manager is
+        kept; see :meth:`forget_manager_chains`."""
         self.__dict__.pop("_fcapz_manager_active_cache", None)
+
+    def forget_manager_chains(self) -> None:
+        """Forget everything learned about the core managers: the cached
+        active slot, which chains hold a manager or a standalone core, their
+        ``MGR_CAPS`` and the slots already checked.  For a new session or a
+        new bitstream."""
+        self.invalidate_manager_instance_cache()
+        self.__dict__.pop("_fcapz_manager_standalone_chains", None)
+        self.__dict__.pop("_fcapz_manager_chains", None)
+        self.__dict__.pop("_fcapz_manager_caps", None)
+        self.__dict__.pop("_fcapz_checked_slots", None)
+
+    def _forget_hub_state(self) -> None:
+        """:meth:`forget_manager_chains`, and the managers this session
+        claimed, unreleased: a new connection or a new bitstream may put
+        anything on those chains, and an ``MGR_OWNER`` read or write there
+        would be a command to whatever core is there now."""
+        self.forget_manager_chains()
+        self.__dict__.pop("_fcapz_owned_managers", None)
 
     @abstractmethod
     def connect(self) -> None:
@@ -516,6 +940,15 @@ class Transport(ABC):
         bursts need not override it."""
         return self.read_block(addr, words)
 
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        """Whether ``read_block(0x0100, ...)`` (with *timestamp*,
+        ``read_timestamp_block``) runs a burst rather than reading the
+        register window.  A burst is not limited by
+        :attr:`data_window_end`; a window read is, so the analyzer pages it
+        (``DATA_OFFSET``) when it would pass the end.  Transports that burst
+        override this, and decide their ``read_block`` with it."""
+        return False
+
     #: One past the last address a DATA / timestamp window read may touch.
     #: :class:`~fcapz.analyzer.Analyzer` lowers it to the manager block
     #: (``0xF000``) for a core behind a core manager.
@@ -531,6 +964,79 @@ class Transport(ABC):
     #: engine's copy match the new owner's toggle), and writes ``BURST_PTR``
     #: again: that second toggle the engine cannot miss.
     burst_start_sync: bool = False
+
+    #: Set by :class:`~fcapz.analyzer.Analyzer` before a burst through a core
+    #: manager that loads a burst header into the priming scan (``MGR_CAPS``
+    #: bit 4): what that header must say.  A bursting transport then checks
+    #: the priming scan (:meth:`_check_burst_header`) and keeps the header in
+    #: :attr:`last_burst_header`.  ``None``: no header expected.
+    burst_expect: BurstExpectation | None = None
+
+    #: The header of the last checked burst, for the epoch check after it.
+    last_burst_header: BurstHeader | None = None
+
+    def _check_burst_header(self, prime_scan: int, *, timestamp: bool) -> None:
+        """Check a burst's priming scan against :attr:`burst_expect`.
+
+        Raises :class:`BurstIntegrityError` when the scan is not the header of
+        the expected burst: the data that follow would belong to another
+        burst, another slot or segment, a slot held in reset, or no burst at
+        all.  ``MGR_OWNER`` is advisory: another session's token is reported.
+        """
+        expect = self.burst_expect
+        if expect is None:
+            return
+        header = BurstHeader.parse(prime_scan)
+        if header is None:
+            raise BurstIntegrityError(
+                f"burst priming scan is not a burst header ({prime_scan:#x}): "
+                "the hub did not start this burst"
+            )
+        if header.slot != expect.slot or header.timestamp != timestamp:
+            raise BurstIntegrityError(
+                f"burst header is for slot {header.slot} "
+                f"({'timestamps' if header.timestamp else 'samples'}), expected "
+                f"slot {expect.slot} ({'timestamps' if timestamp else 'samples'})"
+            )
+        if header.start_ptr != expect.start_ptr:
+            raise BurstIntegrityError(
+                f"burst header starts at sample {header.start_ptr}, expected "
+                f"{expect.start_ptr}: the capture or its segment selection "
+                "changed before the burst started"
+            )
+        if header.sample_w != expect.sample_w:
+            raise BurstIntegrityError(
+                f"burst header is for {header.sample_w}-bit samples, slot "
+                f"{expect.slot} reports SAMPLE_W={expect.sample_w}"
+            )
+        if header.slot_epoch & 1:
+            raise BurstIntegrityError(
+                f"slot {expect.slot} is held in reset (MGR_SLOT_EPOCH "
+                f"{header.slot_epoch} is odd): its capture is not readable"
+            )
+        token = self.__dict__.get("_fcapz_owner_token")
+        if token is not None and header.owner not in (0, token):
+            _log.warning(
+                "burst from slot %d started while MGR_OWNER holds 0x%08X, not "
+                "this session's token: another host session may be using the hub",
+                expect.slot,
+                header.owner,
+            )
+        self.last_burst_header = header
+
+    #: True when :meth:`read_block` and ``read_timestamp_block`` burst on a
+    #: separate data chain (the unmanaged two-chain ELA's DATA_CHAIN).  A core
+    #: manager answers bursts only on its own chain, so
+    #: :class:`~fcapz.analyzer.Analyzer` then reads a managed slot through the
+    #: single-chain ``read_sample_block`` / ``read_timestamp_block_single_chain``,
+    #: passing ``on_control_chain=True`` so they burst on the active chain.
+    burst_on_data_chain: bool = False
+
+    #: Idle TCKs after the command scan that ends a burst on a control chain:
+    #: one full staging fill (256 / lane-width words, 256 for a 1-bit lane)
+    #: plus margin.  A core manager without epochs (``MGR_CAPS`` bit 3)
+    #: ignores an ``MGR_ACTIVE`` write while a fill runs.
+    BURST_DRAIN_IDLE_CYCLES = 258
 
     def select_chain(self, chain: int) -> None:
         """Select the transport-defined JTAG user chain for later accesses.
@@ -550,6 +1056,13 @@ class Transport(ABC):
         single fixed chain.
         """
         raise NotImplementedError
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        """Chains :func:`~fcapz.discovery.discover_cores` looks at by default.
+
+        USER1-4 here; transports narrow it to the chains they can select.
+        """
+        return (1, 2, 3, 4)
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan of *width* bits, shifting in *bits*.
@@ -661,6 +1174,7 @@ class OpenOcdTransport(Transport):
         self._sock_lock = threading.Lock()
 
     def connect(self) -> None:
+        self._forget_hub_state()
         self._sock = socket.create_connection(
             (self.host, self.port),
             timeout=self._connect_timeout_sec,
@@ -694,6 +1208,11 @@ class OpenOcdTransport(Transport):
 
     def close(self) -> None:
         if self._sock:
+            self._release_ownership_on_close()
+        self._close_socket()
+
+    def _close_socket(self) -> None:
+        if self._sock:
             try:
                 self._sock.close()
             except OSError:
@@ -701,7 +1220,9 @@ class OpenOcdTransport(Transport):
             self._sock = None
 
     def cancel(self) -> None:
-        self.close()
+        # No MGR_OWNER release: that is scans from the cancelling thread,
+        # racing the operation being aborted.  The owner's close() does it.
+        self._close_socket()
 
     def _cmd(self, tcl: str) -> str:
         if not self._sock:
@@ -722,14 +1243,12 @@ class OpenOcdTransport(Transport):
             raise ValueError(f"chain {chain} not in ir_table {self.ir_table}")
         self._active_chain = chain
 
+    def discovery_chains(self) -> tuple[int, ...]:
+        return tuple(sorted(self.ir_table))
+
     def _select_ir(self, chain: int | None = None) -> None:
         ir = self.ir_table[chain if chain is not None else self._active_chain]
         self._cmd(f"irscan {self.tap} {ir}")
-
-    def _dr_scan(self, value: int) -> int:
-        hex_in = f"0x{value:013x}"
-        result = self._cmd(f"drscan {self.tap} 49 {hex_in}")
-        return self._parse_drscan_result(result, command="drscan", width=49)
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via irscan + drscan on the OpenOCD socket."""
@@ -749,19 +1268,103 @@ class OpenOcdTransport(Transport):
                 f"for tap {self.tap!r}, width {width}: {result!r}"
             ) from exc
 
+    # Each access is one Tcl command line, the slot selection at its head:
+    # OpenOCD's Tcl server runs a whole line before it serves another client.
+    atomic_slot_select = True
+
+    def _scan_tcl(self, frame: int) -> str:
+        """IR scan of the active chain's opcode, then one 49-bit DR scan."""
+        ir = self.ir_table[self._active_chain]
+        return f"irscan {self.tap} {ir}; drscan {self.tap} 49 0x{frame:013x}"
+
+    def _run_line(self, cmds: list[str]) -> str:
+        return self._cmd("; ".join(cmds))
+
+    def _slot_select_cmds(self, addrs: List[int]) -> list[str]:
+        """Commands that write the calling thread's slot selection (see
+        :meth:`Transport.slot_scope`), for the head of a command line whose
+        accesses reach *addrs* on the active chain.
+
+        Nothing when no slot is selected, when the access is on another
+        chain, or when every address is in the manager's own block: the
+        manager answers those for any slot, and a select ahead of a read of
+        ``MGR_ACTIVE`` would overwrite what the read is after.
+        """
+        sel = self.current_slot_selection()
+        if sel is None or sel.chain != self._active_chain:
+            return []
+        if sel.chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            # Not (or no longer) known to hold a manager: on any other core
+            # 0xF008 is some other register, an EJTAG-AXI bridge's reset.
+            return []
+        if addrs and all(_in_manager_block(a) for a in addrs):
+            return []
+        # This line moves MGR_ACTIVE behind the cache, and may fail after
+        # doing so: a later cached select must write for real.
+        self.invalidate_manager_instance_cache()
+        self._count_manager_select(sel.chain)
+        cmds: list[str] = []
+        caps = self.__dict__.get("_fcapz_manager_caps", {}).get(sel.chain, 0)
+        if not caps & 0x08:
+            # A manager without epochs (MGR_CAPS bit 3) ignores an ACTIVE
+            # write while its burst engine loads, which another client's burst
+            # can leave it doing: a VERSION read ends burst mode first, and the
+            # idle outlasts the last fill.
+            cmds += [self._scan_tcl(0), f"runtest {self.BURST_DRAIN_IDLE_CYCLES}"]
+        frame = (
+            (1 << 48) | ((sel.active_addr & 0xFFFF) << 32) | (sel.slot & 0xFFFFFFFF)
+        )
+        return cmds + [self._scan_tcl(frame), f"runtest {self.READ_IDLE_CYCLES}"]
+
     def write_reg(self, addr: int, value: int) -> None:
         frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
-        self._select_ir()
-        self._dr_scan(frame)
+        result = self._run_line([*self._slot_select_cmds([addr]), self._scan_tcl(frame)])
+        self._parse_drscan_result(result, command="drscan", width=49)
 
     def read_reg(self, addr: int) -> int:
         read_frame = ((addr & 0xFFFF) << 32)
-        self._select_ir()
-        self._dr_scan(read_frame)
-        self._cmd(f"runtest {self.READ_IDLE_CYCLES}")
-        self._select_ir()
-        shifted_out = self._dr_scan(read_frame)
-        return shifted_out & 0xFFFFFFFF
+        result = self._run_line([
+            *self._slot_select_cmds([addr]),
+            self._scan_tcl(read_frame),
+            f"runtest {self.READ_IDLE_CYCLES}",
+            self._scan_tcl(read_frame),
+        ])
+        return self._parse_drscan_result(result, command="drscan", width=49) & 0xFFFFFFFF
+
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """The write and the reads run as one command line."""
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+            cmds = [
+                *self._slot_select_cmds([write_addr, *addrs]),
+                self._scan_tcl(frame),
+                f"runtest {self.READ_IDLE_CYCLES}",
+            ]
+            for i, addr in enumerate(addrs):
+                read_frame = (addr & 0xFFFF) << 32
+                cmds += [
+                    self._scan_tcl(read_frame),
+                    f"runtest {self.READ_IDLE_CYCLES}",
+                    f"set __fcapz_read_{i} [{self._scan_tcl(read_frame)}]",
+                ]
+            cmds.append("list " + " ".join(f"$__fcapz_read_{i}" for i in range(len(addrs))))
+            tokens = self._run_line(cmds).split()
+            if len(tokens) != len(addrs):
+                raise RuntimeError(
+                    f"OpenOCD returned {len(tokens)} values for {len(addrs)} reads: "
+                    f"{' '.join(tokens)!r}"
+                )
+            return [
+                self._parse_drscan_result(token, command="drscan", width=49) & 0xFFFFFFFF
+                for token in tokens
+            ]
 
     def read_block(self, addr: int, words: int) -> List[int]:
         check_data_window(addr, words, self.data_window_end)
@@ -874,6 +1477,8 @@ class QuartusStpTransport(Transport):
     # fcapz Intel wrappers set sld_ir_width=1 and drive ir_out=0, so the
     # virtual IR value is currently fixed at zero.
     VIRTUAL_IR_VALUE = 0
+    # read_block / read_timestamp_block burst on burst_data_chain.
+    burst_on_data_chain = True
     _SENTINEL = "<<FCAPZ_QUARTUS_STP_DONE>>"
     # close() teardown budget.  The healthy path costs none of it -
     # quartus_stp exits promptly on stdin EOF - and only a wedged process
@@ -940,6 +1545,7 @@ class QuartusStpTransport(Transport):
         return None if session is None else session.proc
 
     def connect(self) -> None:
+        self._forget_hub_state()
         argv = self._quartus_stp_argv
         if argv is None:
             quartus_stp = find_quartus_stp(self._quartus_stp_path)
@@ -1004,6 +1610,8 @@ class QuartusStpTransport(Transport):
         _quartus_log.info("Opened Quartus JTAG device %s", opened_device)
 
     def close(self) -> None:
+        if self._session is not None:
+            self._release_ownership_on_close()
         self._acquire_life_lock_killing()
         try:
             self._close_locked()
@@ -1235,6 +1843,13 @@ class QuartusStpTransport(Transport):
             raise ValueError(f"virtual JTAG instance index must be >= 1, got {chain}")
         self._active_chain = chain
 
+    #: ``sld_virtual_jtag`` instance indices discovery tries.  A missing
+    #: instance fails its first scan without shifting anything.
+    DISCOVERY_INSTANCES = tuple(range(1, 9))
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        return self.DISCOVERY_INSTANCES
+
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         if width < 1:
             raise ValueError(f"DR scan width must be positive, got {width}")
@@ -1289,7 +1904,20 @@ class QuartusStpTransport(Transport):
 
     def write_reg(self, addr: int, value: int) -> None:
         frame = (1 << 48) | ((addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
-        self.raw_dr_scan(frame, self.DR_BITS)
+        instance = self._active_chain
+        self._validate_instance(instance)
+        self._send(
+            self._locked_script(
+                body=[
+                    *self._slot_select_body(instance, [addr]),
+                    self._virtual_ir_tcl(instance),
+                    self._dr_shift_tcl(instance, frame, self.DR_BITS, "__fcapz_capture"),
+                ],
+                result="__fcapz_capture",
+                status="__fcapz_scan_status",
+                error="__fcapz_scan_error",
+            )
+        )
 
     def read_reg(self, addr: int) -> int:
         read_frame = (addr & 0xFFFF) << 32
@@ -1297,6 +1925,7 @@ class QuartusStpTransport(Transport):
         shifted_out = self._send(
             self._locked_script(
                 body=[
+                    *self._slot_select_body(instance, [addr]),
                     self._virtual_ir_tcl(instance),
                     self._dr_shift_tcl(
                         instance, read_frame, self.DR_BITS, "__fcapz_discard"
@@ -1313,10 +1942,13 @@ class QuartusStpTransport(Transport):
         )
         return self._shift_string_to_int(shifted_out, self.DR_BITS) & 0xFFFFFFFF
 
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        return self._burst_available
+
     def read_block(self, addr: int, words: int) -> List[int]:
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available:
+        if addr == 0x0100 and self.bursts_data_window():
             return self._read_block_burst(words)
         return self.read_window_block(addr, words)
 
@@ -1324,11 +1956,41 @@ class QuartusStpTransport(Transport):
         if words <= 0:
             return []
         check_data_window(addr, words, self.data_window_end)
+        return self._locked_reads([addr + i * 4 for i in range(words)], head=[])
+
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """The write and the reads run in one locked script."""
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            instance = self._active_chain
+            frame = (1 << 48) | ((write_addr & 0xFFFF) << 32) | (value & 0xFFFFFFFF)
+            head = [
+                self._virtual_ir_tcl(instance),
+                self._dr_shift_tcl(instance, frame, self.DR_BITS, "__fcapz_write_discard"),
+                f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
+            ]
+            return self._locked_reads(addrs, head=head, select_addrs=[write_addr])
+
+    def _locked_reads(
+        self, addrs: List[int], *, head: list[str], select_addrs: List[int] = ()
+    ) -> List[int]:
+        """Read each of *addrs* on the active instance in one locked script,
+        after the slot selection for all of them and the commands in *head*."""
         instance = self._active_chain
-        body = ["set __fcapz_reads {}"]
-        body.append(self._virtual_ir_tcl(instance))
-        for i in range(words):
-            read_frame = ((addr + i * 4) & 0xFFFF) << 32
+        body = [
+            "set __fcapz_reads {}",
+            *self._slot_select_body(instance, [*select_addrs, *addrs]),
+            *head,
+            self._virtual_ir_tcl(instance),
+        ]
+        for i, addr in enumerate(addrs):
+            read_frame = (addr & 0xFFFF) << 32
             body.append(
                 self._dr_shift_tcl(
                     instance, read_frame, self.DR_BITS, f"__fcapz_discard_{i}"
@@ -1350,10 +2012,10 @@ class QuartusStpTransport(Transport):
             )
         )
         tokens = captured.split()
-        if len(tokens) != words:
+        if len(tokens) != len(addrs):
             raise RuntimeError(
-                f"Quartus read_block returned {len(tokens)} values, expected {words}: "
-                f"{captured!r}"
+                f"Quartus read_block returned {len(tokens)} values, expected "
+                f"{len(addrs)}: {captured!r}"
             )
         return [
             self._shift_string_to_int(token, self.DR_BITS) & 0xFFFFFFFF
@@ -1366,7 +2028,7 @@ class QuartusStpTransport(Transport):
         """Read timestamp words through the Intel/Altera DATA_CHAIN burst path."""
         if words <= 0:
             return []
-        if timestamp_width > 0 and self._burst_available:
+        if timestamp_width > 0 and self.bursts_data_window(timestamp=True):
             return self._read_block_burst(
                 words,
                 timestamp=True,
@@ -1374,8 +2036,12 @@ class QuartusStpTransport(Transport):
             )
         return self.read_block(addr, words)
 
-    def read_run_length_block(self, n_entries: int, lane_width: int) -> List[int]:
-        """Read one run count per captured entry through the DATA_CHAIN burst.
+    def read_run_length_block(
+        self, n_entries: int, lane_width: int, *, on_control_chain: bool = False
+    ) -> List[int]:
+        """Read one run count per captured entry through the DATA_CHAIN burst,
+        or with *on_control_chain* (a core manager's slot) through the
+        single-chain burst on the active instance.
 
         Counts travel on the timestamp lane, ``lane_width`` bits per element
         (the core's timestamp width, or its RLE_W without timestamps).  Raises
@@ -1386,6 +2052,10 @@ class QuartusStpTransport(Transport):
             return []
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
+        if on_control_chain:
+            return self._single_chain_burst(
+                n_entries, lane_width, timestamp=True, run_lengths=True
+            )
         return self._read_block_burst(
             n_entries,
             timestamp=True,
@@ -1398,14 +2068,10 @@ class QuartusStpTransport(Transport):
         """Declared by the ``burst`` constructor argument, never probed."""
         return self.burst
 
-    @property
-    def _burst_samples_per_scan(self) -> int:
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def _burst_sample_width(self) -> int:
+        """Bits per sample in a burst scan: the selected core's SAMPLE_W, read
+        for every burst so a slot switch cannot leave a stale width."""
+        return _burst_element_width(self.read_reg(0x000C), self.BURST_DR_BITS)
 
     def _read_block_burst(
         self,
@@ -1420,8 +2086,8 @@ class QuartusStpTransport(Transport):
                 element_width = 32
             per_scan = max(1, self.BURST_DR_BITS // element_width)
         else:
-            per_scan = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // per_scan
+            element_width = self._burst_sample_width()
+            per_scan = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + per_scan - 1) // per_scan
         prime_scans = 1
         ctrl_chain = self._active_chain
@@ -1441,7 +2107,13 @@ class QuartusStpTransport(Transport):
                 f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
             ]
 
-        body = ["set __fcapz_burst {}", *write_ptr()]
+        # Select the slot before BURST_PTR, which makes it the burst owner;
+        # never between burst scans, where any command scan ends burst mode.
+        body = [
+            "set __fcapz_burst {}",
+            *self._slot_select_body(ctrl_chain, [self.ADDR_BURST_PTR]),
+            *write_ptr(),
+        ]
         if self.burst_start_sync:
             # See Transport.burst_start_sync.
             body += [
@@ -1460,6 +2132,8 @@ class QuartusStpTransport(Transport):
                 )
             )
             body.append(f"lappend __fcapz_burst ${var}")
+        if self.burst_data_chain == ctrl_chain:
+            body += self._burst_drain_body(ctrl_chain)
         captured = self._send(
             self._locked_script(
                 body=body,
@@ -1468,8 +2142,14 @@ class QuartusStpTransport(Transport):
                 error="__fcapz_burst_error",
             )
         )
+        tokens = captured.split()
+        if tokens and self.burst_data_chain == ctrl_chain:
+            self._check_burst_header(
+                self._shift_string_to_int(tokens[0], self.BURST_DR_BITS),
+                timestamp=timestamp,
+            )
         return self._parse_burst_tokens(
-            captured.split(),
+            tokens,
             words,
             skip_scans=prime_scans,
             element_width=element_width,
@@ -1502,9 +2182,13 @@ class QuartusStpTransport(Transport):
         return values
 
     def read_sample_block(
-        self, base_addr: int, n_samples: int, sample_width: int
+        self, base_addr: int, n_samples: int, sample_width: int,
+        *, on_control_chain: bool = True,
     ) -> List[int]:
         """Read *n_samples* whole samples via single-chain burst on the active chain.
+
+        *on_control_chain* is accepted for the shared signature; this reader
+        always bursts on the active chain.
 
         Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
         sample — the exact flat layout ``Analyzer.capture()`` reassembles.
@@ -1539,7 +2223,8 @@ class QuartusStpTransport(Transport):
         return words
 
     def read_timestamp_block_single_chain(
-        self, base_addr: int, n_timestamps: int, timestamp_width: int
+        self, base_addr: int, n_timestamps: int, timestamp_width: int,
+        *, on_control_chain: bool = True,
     ) -> List[int]:
         """Read per-sample timestamps via single-chain burst on the active chain.
 
@@ -1560,12 +2245,18 @@ class QuartusStpTransport(Transport):
         )
 
     def _single_chain_burst(
-        self, n_elements: int, element_width: int, *, timestamp: bool
+        self,
+        n_elements: int,
+        element_width: int,
+        *,
+        timestamp: bool,
+        run_lengths: bool = False,
     ) -> List[int]:
         """Stream ``n_elements`` of ``element_width`` bits, all on the active
         (control) chain -- one 256-bit DR carries ``256 // element_width``
         elements.  ``timestamp`` selects the burst engine's timestamp window
-        instead of the sample window.  Returns masked element values."""
+        instead of the sample window; with ``run_lengths`` too it carries the
+        run counts of a run-length capture.  Returns masked element values."""
         if n_elements <= 0:
             return []
         if element_width < 1:
@@ -1575,18 +2266,24 @@ class QuartusStpTransport(Transport):
         prime_scans = 1
         chain = self._active_chain
         # write bit | BURST_PTR addr | data: bit31 selects the timestamp window,
-        # else 0 to start at sample 0.
+        # bit30 with it the run counts, else 0 to start at sample 0.
         burst_frame = (
             (1 << 48)
             | (self.ADDR_BURST_PTR << 32)
             | (0x80000000 if timestamp else 0)
+            | (0x40000000 if timestamp and run_lengths else 0)
         )
 
         write_ptr = [
             self._dr_shift_tcl(chain, burst_frame, self.DR_BITS, "__fcapz_scb_ptr"),
             f"device_run_test_idle -num_clocks {self.burst_prefill_idle_cycles}",
         ]
-        body = ["set __fcapz_scb {}", self._virtual_ir_tcl(chain), *write_ptr]
+        body = [
+            "set __fcapz_scb {}",
+            *self._slot_select_body(chain, [self.ADDR_BURST_PTR]),
+            self._virtual_ir_tcl(chain),
+            *write_ptr,
+        ]
         if self.burst_start_sync:
             # See Transport.burst_start_sync.
             body += [
@@ -1600,6 +2297,7 @@ class QuartusStpTransport(Transport):
                 self._dr_shift_tcl(chain, 0, self.BURST_DR_BITS, var)
             )
             body.append(f"lappend __fcapz_scb ${var}")
+        body += self._burst_drain_body(chain)
         captured = self._send(
             self._locked_script(
                 body=body,
@@ -1608,8 +2306,14 @@ class QuartusStpTransport(Transport):
                 error="__fcapz_scb_error",
             )
         )
+        tokens = captured.split()
+        if tokens:
+            self._check_burst_header(
+                self._shift_string_to_int(tokens[0], self.BURST_DR_BITS),
+                timestamp=timestamp,
+            )
         return self._parse_single_chain_burst(
-            captured.split(),
+            tokens,
             n_elements,
             element_width,
             skip_scans=prime_scans,
@@ -1646,6 +2350,65 @@ class QuartusStpTransport(Transport):
             raise ValueError(
                 f"virtual JTAG instance index must be >= 1, got {instance}"
             )
+
+    # The selection is shifted inside the access's own device_lock, and the
+    # JTAG server runs no other client's scans on the device while it is held.
+    atomic_slot_select = True
+
+    def _slot_select_body(self, instance: int, addrs: List[int]) -> list[str]:
+        """Commands that write the calling thread's slot selection (see
+        :meth:`Transport.slot_scope`), for the head of a locked script whose
+        accesses reach *addrs* on *instance*.
+
+        Nothing when no slot is selected, when the access is on another
+        instance, or when every address is in the manager's own block: the
+        manager answers those for any slot, and a select ahead of a read of
+        ``MGR_ACTIVE`` would overwrite what the read is after.
+        """
+        sel = self.current_slot_selection()
+        if sel is None or sel.chain != instance:
+            return []
+        if sel.chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            # Not (or no longer) known to hold a manager: on any other core
+            # 0xF008 is some other register, an EJTAG-AXI bridge's reset.
+            return []
+        if addrs and all(_in_manager_block(a) for a in addrs):
+            return []
+        # This script moves MGR_ACTIVE behind the cache, and may fail after
+        # doing so: a later cached select must write for real.
+        self.invalidate_manager_instance_cache()
+        self._count_manager_select(sel.chain)
+        body = [self._virtual_ir_tcl(sel.chain)]
+        caps = self.__dict__.get("_fcapz_manager_caps", {}).get(sel.chain, 0)
+        if not caps & 0x08:
+            # A manager without epochs (MGR_CAPS bit 3) ignores an ACTIVE
+            # write while its burst engine loads, which another client's burst
+            # can leave it doing: a VERSION read ends burst mode first, and the
+            # idle outlasts the last fill.
+            body += [
+                self._dr_shift_tcl(sel.chain, 0, self.DR_BITS, "__fcapz_select_drain"),
+                f"device_run_test_idle -num_clocks {self.BURST_DRAIN_IDLE_CYCLES}",
+            ]
+        frame = (
+            (1 << 48) | ((sel.active_addr & 0xFFFF) << 32) | (sel.slot & 0xFFFFFFFF)
+        )
+        return body + [
+            self._dr_shift_tcl(sel.chain, frame, self.DR_BITS, "__fcapz_select_discard"),
+            f"device_run_test_idle -num_clocks {self.read_idle_cycles}",
+        ]
+
+    def _burst_drain_body(self, instance: int) -> list[str]:
+        """Commands that leave *instance*'s pipe idle after a burst on it.
+
+        Until a command scan ends burst mode, every capture on the chain
+        starts another staging fill, and a core manager without epochs
+        ignores an ``MGR_ACTIVE`` write while one runs.  A VERSION read ends
+        it, and the idle outlasts the fill."""
+        return [
+            self._virtual_ir_tcl(instance),
+            self._dr_shift_tcl(instance, 0, self.DR_BITS, "__fcapz_drain_discard"),
+            f"device_run_test_idle -num_clocks {self.BURST_DRAIN_IDLE_CYCLES}",
+        ]
 
     def _virtual_ir_tcl(self, instance: int) -> str:
         return (
@@ -2107,6 +2870,7 @@ class XilinxHwServerTransport(Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        self._forget_hub_state()
         timing = connect_timing_logs_enabled()
         marks: list[tuple[str, float]] = [("start", time.monotonic())]
 
@@ -2413,9 +3177,13 @@ class XilinxHwServerTransport(Transport):
             timeout_sec=max(self.read_timeout_sec, self.PROGRAM_TIMEOUT_SEC),
         )
         self._send(f"after {int(self.post_program_delay_ms)}")
+        # A new bitstream: which chains hold a manager, and what this
+        # session claimed, are no longer known.
+        self._forget_hub_state()
 
     def close(self) -> None:
         if self._proc and self._proc.stdin:
+            self._release_ownership_on_close()
             try:
                 self._proc.stdin.write("exit\n")
                 self._proc.stdin.flush()
@@ -2484,6 +3252,11 @@ class XilinxHwServerTransport(Transport):
         elif chain not in self.ir_table:
             raise ValueError(f"chain {chain} not in ir_table {self.ir_table}")
         self._active_chain = chain
+
+    def discovery_chains(self) -> tuple[int, ...]:
+        if self.use_register_ir:
+            return (1, 2, 3, 4)
+        return tuple(sorted(self.ir_table))
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         """Perform a raw DR scan via XSDB jtag sequence (irscan + drscan)."""
@@ -2558,7 +3331,7 @@ class XilinxHwServerTransport(Transport):
         """
         if words <= 0:
             return []
-        if addr == 0x0100 and self._burst_available and self._burst_sample_ok():
+        if addr == 0x0100 and self.bursts_data_window():
             return self._burst_with_hint(words)
         # Non-burst path needs flush to reset the 49-bit register pipeline.
         return self._read_block_user1(addr, words)
@@ -2567,6 +3340,11 @@ class XilinxHwServerTransport(Transport):
         if words <= 0:
             return []
         return self._read_block_user1(addr, words)
+
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        if timestamp:
+            return self._burst_available
+        return self._burst_available and self._burst_sample_ok()
 
     @property
     def _burst_available(self) -> bool:
@@ -2591,14 +3369,15 @@ class XilinxHwServerTransport(Transport):
         return sw < 1 or sw <= 32
 
     @property
-    def _burst_samples_per_scan(self) -> int:
-        """Samples per 256-bit burst scan, based on hardware SAMPLE_W."""
-        if not hasattr(self, "_cached_sps"):
-            sw = self.read_reg_stable(0x000C)  # ADDR_SAMPLE_W
-            if sw < 1:
-                sw = 8
-            self._cached_sps = max(1, self.BURST_DR_BITS // sw)
-        return self._cached_sps
+    def burst_on_data_chain(self) -> bool:  # type: ignore[override]
+        """A two-chain session (``single_chain_burst=False``) bursts on USER2,
+        which a core manager never answers."""
+        return not self.single_chain_burst
+
+    def _burst_sample_width(self) -> int:
+        """Bits per sample in a burst scan: the selected core's SAMPLE_W, read
+        for every burst so a slot switch cannot leave a stale width."""
+        return _burst_element_width(self.read_reg_stable(0x000C), self.BURST_DR_BITS)
 
     def _read_block_burst(
         self,
@@ -2606,10 +3385,13 @@ class XilinxHwServerTransport(Transport):
         *,
         timestamp: bool = False,
         element_width: int | None = None,
+        on_control_chain: bool = False,
         run_lengths: bool = False,
     ) -> List[int]:
         """Read *words* samples via the 256-bit burst DR.
 
+        The scans go on the control chain on a single-chain session or with
+        *on_control_chain* (a core manager), otherwise on USER2.
         ``timestamp`` reads the timestamp lane instead; with ``run_lengths``
         too it carries the run counts of a run-length capture.
 
@@ -2626,11 +3408,9 @@ class XilinxHwServerTransport(Transport):
         """
         if timestamp and element_width is None:
             element_width = 32
-        if element_width is not None:
-            sps = max(1, self.BURST_DR_BITS // element_width)
-        else:
-            sps = self._burst_samples_per_scan
-            element_width = self.BURST_DR_BITS // sps
+        if element_width is None:
+            element_width = self._burst_sample_width()
+        sps = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (words + sps - 1) // sps
         prime_scans = 1
 
@@ -2649,7 +3429,9 @@ class XilinxHwServerTransport(Transport):
         user_total = self._user_dr_bits(self.DR_BITS)
         ctrl_chain = self._active_chain
         ir1_cmd = self._irshift_tcl("_bq", chain=ctrl_chain)
-        burst_chain = ctrl_chain if self.single_chain_burst else 2
+        burst_chain = (
+            ctrl_chain if (self.single_chain_burst or on_control_chain) else 2
+        )
         ir_burst_cmd = self._irshift_tcl("_bq", chain=burst_chain)
 
         # The BURST_PTR write ends in an explicit UPDATE-DR, like every
@@ -2684,7 +3466,7 @@ class XilinxHwServerTransport(Transport):
                 *write_ptr,
             ]
         tail: list[str] = []
-        if self.single_chain_burst:
+        if burst_chain == ctrl_chain:
             # Leave the pipe idle.  Until a command scan ends burst mode, every
             # capture on the chain starts another staging fill, and the core
             # manager ignores an MGR_ACTIVE write while one runs.  On a narrow
@@ -2714,6 +3496,7 @@ class XilinxHwServerTransport(Transport):
             skip_scans=prime_scans,
             element_width=element_width,
             expected_scans=n_scans + prime_scans,
+            header_timestamp=timestamp if burst_chain == ctrl_chain else None,
         )
 
     # Wide scans per xsdb send.  A deep wide-sample burst is thousands of
@@ -2743,9 +3526,13 @@ class XilinxHwServerTransport(Transport):
         return ["; ".join(s) for s in sends]
 
     def read_sample_block(
-        self, base_addr: int, n_samples: int, sample_width: int
+        self, base_addr: int, n_samples: int, sample_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
         """Read *n_samples* whole samples via the burst DR.
+
+        With *on_control_chain* the scans stay on the control chain even on a
+        two-chain session: a core manager answers bursts only there.
 
         Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
         sample, the flat layout ``Analyzer.capture()`` reassembles.  This is the
@@ -2771,7 +3558,9 @@ class XilinxHwServerTransport(Transport):
             )
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
-        samples = self._burst_with_hint(n_samples, element_width=sample_width)
+        samples = self._burst_with_hint(
+            n_samples, element_width=sample_width, on_control_chain=on_control_chain
+        )
         if len(samples) != n_samples:
             raise BurstIntegrityError(
                 f"sample burst returned {len(samples)} samples, expected {n_samples}"
@@ -2784,7 +3573,8 @@ class XilinxHwServerTransport(Transport):
         return words
 
     def read_timestamp_block_single_chain(
-        self, base_addr: int, n_timestamps: int, timestamp_width: int
+        self, base_addr: int, n_timestamps: int, timestamp_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
         """Read one timestamp per captured sample via the burst DR.
 
@@ -2800,7 +3590,8 @@ class XilinxHwServerTransport(Transport):
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
         values = self._burst_with_hint(
-            n_timestamps, timestamp=True, element_width=timestamp_width
+            n_timestamps, timestamp=True, element_width=timestamp_width,
+            on_control_chain=on_control_chain,
         )
         if len(values) != n_timestamps:
             raise BurstIntegrityError(
@@ -2808,8 +3599,11 @@ class XilinxHwServerTransport(Transport):
             )
         return values
 
-    def read_run_length_block(self, n_entries: int, lane_width: int) -> List[int]:
-        """Read one run count per captured entry via the burst DR.
+    def read_run_length_block(
+        self, n_entries: int, lane_width: int, *, on_control_chain: bool = False
+    ) -> List[int]:
+        """Read one run count per captured entry via the burst DR, on the
+        control chain with *on_control_chain* (a core manager's slot).
 
         Counts travel on the timestamp lane, ``lane_width`` bits per element
         (the core's timestamp width, or its RLE_W without timestamps).  Raises
@@ -2822,7 +3616,11 @@ class XilinxHwServerTransport(Transport):
         if not self._burst_available:
             raise BurstUnavailableError("burst readout is off for this transport")
         values = self._burst_with_hint(
-            n_entries, timestamp=True, element_width=lane_width, run_lengths=True
+            n_entries,
+            timestamp=True,
+            element_width=lane_width,
+            run_lengths=True,
+            on_control_chain=on_control_chain,
         )
         if len(values) != n_entries:
             raise BurstIntegrityError(
@@ -2834,7 +3632,7 @@ class XilinxHwServerTransport(Transport):
         """Read timestamp words through the configured burst mode when available."""
         if words <= 0:
             return []
-        if self._burst_available and timestamp_width > 0:
+        if timestamp_width > 0 and self.bursts_data_window(timestamp=True):
             return self._burst_with_hint(
                 words,
                 timestamp=True,
@@ -2873,20 +3671,21 @@ class XilinxHwServerTransport(Transport):
         skip_scans: int = 0,
         element_width: int | None = None,
         expected_scans: int | None = None,
+        header_timestamp: bool | None = None,
     ) -> List[int]:
         """Parse burst DR output: each token is a 256-bit string packing
         samples (SAMPLE_W bits each, LSB first).
 
         With *expected_scans*, any other number of scan tokens raises
         :class:`BurstIntegrityError` rather than returning a short or
-        misaligned burst.
+        misaligned burst.  With *header_timestamp* (the burst ran on the
+        hub's chain), the first skipped scan is checked as the burst header
+        (:meth:`_check_burst_header`).
         """
         if element_width is None:
-            sps = self._burst_samples_per_scan
-            sw = self.BURST_DR_BITS // sps  # bits per sample
-        else:
-            sw = element_width
-            sps = max(1, self.BURST_DR_BITS // sw)
+            element_width = self._burst_sample_width()
+        sw = element_width
+        sps = max(1, self.BURST_DR_BITS // sw)
         values: list[int] = []
         scan_idx = 0
         burst_offset = self._dr_data_offset()
@@ -2898,6 +3697,11 @@ class XilinxHwServerTransport(Transport):
             if set(token) - {"0", "1"}:
                 continue
             if scan_idx < skip_scans:
+                if scan_idx == 0 and header_timestamp is not None:
+                    self._check_burst_header(
+                        self._bits_to_int(token, burst_offset, self.BURST_DR_BITS),
+                        timestamp=header_timestamp,
+                    )
                 scan_idx += 1
                 continue
             scan_idx += 1
@@ -3022,17 +3826,20 @@ class XilinxHwServerTransport(Transport):
         self, write_addr: int, value: int, addrs: List[int]
     ) -> List[int]:
         """The write and the reads run as one ``jtag sequence``."""
-        if not addrs:
-            self.write_reg(write_addr, value)
-            return []
-        n = self._user_dr_bits(self.DR_BITS)
-        frame = self._pad_dr(self._frame_bits(addr=write_addr, data=value, write=True))
-        head = [
-            *self._slot_select_tcl("_pq", [write_addr, *addrs]),
-            f"{self._irshift_tcl('_pq')}; $_pq drshift -state DRUPDATE -bits {n} {frame}",
-            f"$_pq state IDLE {self._write_idle_cycles}",
-        ]
-        return self._pipelined_reads(addrs, head)
+        # One unit with the chain and slot read once: hold off any other
+        # thread's scope, as the base implementation does.
+        with self.transaction_lock():
+            if not addrs:
+                self.write_reg(write_addr, value)
+                return []
+            n = self._user_dr_bits(self.DR_BITS)
+            frame = self._pad_dr(self._frame_bits(addr=write_addr, data=value, write=True))
+            head = [
+                *self._slot_select_tcl("_pq", [write_addr, *addrs]),
+                f"{self._irshift_tcl('_pq')}; $_pq drshift -state DRUPDATE -bits {n} {frame}",
+                f"$_pq state IDLE {self._write_idle_cycles}",
+            ]
+            return self._pipelined_reads(addrs, head)
 
     def _pipelined_reads(self, addrs: List[int], head: List[str]) -> List[int]:
         """Pipelined reads of *addrs* in one sequence, after the scans in *head*."""
@@ -3078,10 +3885,6 @@ class XilinxHwServerTransport(Transport):
     # READ_IDLE_CYCLES (20) suffices.
     WRITE_IDLE_CYCLES_REGISTER = 100
     BURST_PREFILL_IDLE_CYCLES = 160
-    # Idle TCKs after the command scan that ends a single-chain burst: one
-    # full staging fill (256 / lane-width words, 256 for a 1-bit lane) plus
-    # margin.  See _read_block_burst.
-    BURST_DRAIN_IDLE_CYCLES = 258
 
     @property
     def _write_idle_cycles(self) -> int:
@@ -3109,18 +3912,36 @@ class XilinxHwServerTransport(Transport):
         sel = self.current_slot_selection()
         if sel is None or sel.chain != self._active_chain:
             return []
+        if sel.chain not in self.__dict__.get("_fcapz_manager_chains", ()):
+            # Not (or no longer) known to hold a manager: on any other core
+            # 0xF008 is some other register, an EJTAG-AXI bridge's reset.
+            return []
         if addrs and all(_in_manager_block(a) for a in addrs):
             return []
         # This sequence moves MGR_ACTIVE behind the cache, and may fail
         # after doing so: a later cached select must write for real.
         self.invalidate_manager_instance_cache()
+        self._count_manager_select(sel.chain)
         n = self._user_dr_bits(self.DR_BITS)
+        ir = self._irshift_tcl(seq_var, chain=sel.chain)
+        tcl: List[str] = []
+        caps = self.__dict__.get("_fcapz_manager_caps", {}).get(sel.chain, 0)
+        if not caps & 0x08:
+            # A manager without epochs (MGR_CAPS bit 3) predates the stable
+            # burst owner and ignores an ACTIVE write while its burst engine
+            # loads, which another client's burst can leave it doing.  A
+            # command scan (an uncaptured VERSION read) ends burst mode and
+            # the idle outlasts the last fill, as after a burst.
+            neutral = self._pad_dr(self._frame_bits(addr=0x0000, data=0, write=False))
+            tcl += [
+                f"{ir}; ${seq_var} drshift -state DRUPDATE -bits {n} {neutral}",
+                f"${seq_var} state IDLE {self.BURST_DRAIN_IDLE_CYCLES}",
+            ]
         frame = self._pad_dr(
             self._frame_bits(addr=sel.active_addr, data=sel.slot, write=True)
         )
-        return [
-            f"{self._irshift_tcl(seq_var, chain=sel.chain)}; "
-            f"${seq_var} drshift -state DRUPDATE -bits {n} {frame}",
+        return tcl + [
+            f"{ir}; ${seq_var} drshift -state DRUPDATE -bits {n} {frame}",
             f"${seq_var} state IDLE {self._write_idle_cycles}",
         ]
 

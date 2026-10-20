@@ -33,6 +33,14 @@ class CoreParity:
     constants: tuple[str, ...]
 
 
+# Scalar parameters shared by the core-manager wrapper layers and shells
+_DEBUG_MULTI_PARAMETERS = (
+    "NUM_ELAS", "EIO_EN", "SAMPLE_W", "DEPTH", "TRIG_STAGES", "STOR_QUAL",
+    "INPUT_PIPE", "NUM_CHANNELS", "DECIM_EN", "EXT_TRIG_EN", "TIMESTAMP_W",
+    "NUM_SEGMENTS", "PROBE_MUX_W", "STARTUP_ARM", "DEFAULT_TRIG_EXT",
+    "REL_COMPARE", "DUAL_COMPARE", "USER1_DATA_EN", "EIO_IN_W", "EIO_OUT_W",
+)
+
 CORES = (
     CoreParity(
         name="fcapz_eio",
@@ -139,6 +147,30 @@ CORES = (
             "GEOM_CHANNELS",
         ),
     ),
+    CoreParity(
+        name="fcapz_debug_multi_core",
+        verilog=RTL / "fcapz_debug_multi_core.v",
+        vhdl=RTL_VHDL / "fcapz_debug_multi_core.vhd",
+        parameters=(*_DEBUG_MULTI_PARAMETERS, "BURST_EN"),
+        constants=(),
+    ),
+    CoreParity(
+        name="fcapz_debug_multi",
+        verilog=RTL / "fcapz_debug_multi.v",
+        vhdl=RTL_VHDL / "fcapz_debug_multi.vhd",
+        parameters=(*_DEBUG_MULTI_PARAMETERS, "BURST_W"),
+        constants=(),
+    ),
+    *(
+        CoreParity(
+            name=f"fcapz_debug_multi_{vendor}",
+            verilog=RTL / f"fcapz_debug_multi_{vendor}.v",
+            vhdl=RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd",
+            parameters=(*_DEBUG_MULTI_PARAMETERS, "BURST_W", "CTRL_CHAIN"),
+            constants=(),
+        )
+        for vendor in ("xilinx7", "xilinxus", "intel")
+    ),
 )
 
 
@@ -195,7 +227,12 @@ def parse_vhdl_generics(text: str) -> dict[str, int]:
         body,
         flags=re.I,
     ):
-        found[match.group(1)] = parse_int_literal(match.group(2))
+        try:
+            found[match.group(1)] = parse_int_literal(match.group(2))
+        except ValueError:
+            # Defaults derived from other generics (NUM_EIOS := EIO_EN)
+            # have no literal to compare.
+            pass
     return found
 
 

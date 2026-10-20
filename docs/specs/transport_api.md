@@ -29,7 +29,9 @@ path for timestamp data.
   request at all, raised before any scan (burst off, a non-DATA base, or a
   sample width outside 1..256).  The analyzer then reads the register window.
 - `BurstIntegrityError(RuntimeError)` — a burst ran but returned the wrong
-  number of scans or values.  Raised to the caller.
+  number of scans or values, its priming scan was not the burst header the
+  analyzer expected, or the hub or slot was reset under it (epochs changed).
+  Raised to the caller.
 - Any other exception from a burst propagates; nothing reads around it.
 - `burst: bool = True` (constructor of the hw_server and Quartus transports) —
   declares whether the bitstream has a burst path.  It is never probed:
@@ -40,6 +42,32 @@ path for timestamp data.
   and in the same JTAG transaction, one burst-length scan that is not
   returned and a second `BURST_PTR` write (see `MGR_CAPS` in
   [`register_map.md`](register_map.md)).
+- `burst_expect: BurstExpectation | None` (attribute, default `None`) — set
+  by the analyzer before a burst through a core manager with `MGR_CAPS` bit 4:
+  what the burst header must say.  `BurstExpectation(slot, start_ptr,
+  sample_w, tlr_count=None)` holds the slot, `SEG_START` and `SAMPLE_W` read
+  just before the burst, and, on a hub with `MGR_CAPS` bit 6, `MGR_TLR_COUNT`.
+  The transport decodes the priming scan as a `BurstHeader` and raises
+  `BurstIntegrityError` unless it is a header for that slot, window, start
+  pointer and sample width with an even slot epoch; another session's
+  `MGR_OWNER` token is logged as a warning.  The header is kept in
+  `last_burst_header`, and the analyzer compares its epochs with `MGR_EPOCH`
+  / `MGR_SLOT_EPOCH`, and `tlr_count` with `MGR_TLR_COUNT`, after the burst.
+  The analyzer clears both after every read.
+- `bursts_data_window(*, timestamp=False) -> bool` — whether
+  `read_block(0x0100, ...)` (with `timestamp`, `read_timestamp_block`) runs a
+  burst rather than reading the register window.  A window read ends at
+  `data_window_end`, so the analyzer pages it through `DATA_OFFSET` when it
+  would pass the end; a burst does not.  The base returns `False`; the
+  hw_server and Quartus transports return whether they would burst, and
+  decide their own `read_block` with it.
+- `release_manager_ownership()` — writes 0 to `MGR_OWNER` on each manager
+  where this session wrote its token and the token is still there.  The
+  token is written the first time the session selects a slot on a manager
+  with `MGR_CAPS` bit 3; a different nonzero token found there is logged as a
+  warning, not obeyed.  The hw_server, Quartus and OpenOCD transports call
+  it from `close()` (not `close_fast()`), unless a scan is in flight on
+  another thread.
 
 ### Core-manager slot selection
 
@@ -56,8 +84,8 @@ path for timestamp data.
   moving `MGR_ACTIVE`.  Accesses to the manager's own block
   (`0xF000`-`0xF0FF`) are never prefixed.  Otherwise the scope selects once
   on entry with `select_manager_instance_cached`, which another process can
-  undo between operations.  `XilinxHwServerTransport` is atomic; OpenOCD and
-  Quartus are not yet.
+  undo between operations.  The hw_server, Quartus and OpenOCD transports
+  are atomic.
 - `read_regs_after_write(write_addr, value, addrs)` — a selector write and
   the reads it selects (`MGR_DESC_INDEX` and the slot descriptor), as one
   backend operation on an atomic backend.
@@ -130,6 +158,10 @@ selected ELA control chain instead of switching to USER2.
 - Uses `irscan`/`drscan`/`runtest` commands.
 - Hardware-validated on Gowin BRS-100-GW1NR9. The AMD/Xilinx/OpenOCD path is still
   less exercised than the `hw_server` backend.
+- Each register access is one Tcl command line (a read is
+  `irscan; drscan; runtest; irscan; drscan`), which OpenOCD's Tcl server runs
+  before serving another client.  Inside a `slot_scope`, a line that reaches
+  a slot starts with the `MGR_ACTIVE` write and 20 idle TCKs.
 
 ### `QuartusStpTransport`
 - Connects to a persistent `quartus_stp -s` subprocess for Intel/Altera
@@ -144,6 +176,10 @@ selected ELA control chain instead of switching to USER2.
   were exercised on a DE25-Nano with Quartus Prime Pro 26.1 and an Intel
   `sld_virtual_jtag` fcapz bitstream.  Quartus Lite is expected to work with
   the same Tcl commands, but this branch was not re-validated on Lite.
+- Inside a `slot_scope`, each locked script that reaches a slot starts, after
+  `device_lock`, with the `MGR_ACTIVE` write and 20 idle TCKs: one per
+  register access and window read, and once before `BURST_PTR` in a burst.
+  A burst on the control chain ends with a `VERSION` read and 258 idle TCKs.
 
 ### `VendorStubTransport`
 - Placeholder for future vendor backends.

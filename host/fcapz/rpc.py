@@ -21,7 +21,8 @@ from .analyzer import (
 )
 from .axi_decode import decode_axi, looks_like_axi
 from .axi_monitor import AXI_MON_MAGIC, AxiMonitor
-from .eio import EioController, discover_eio
+from .discovery import discover_cores
+from .eio import EioController, default_eio_chains, discover_eio
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
 from .events import ProbeDefinition, summarize
@@ -35,6 +36,7 @@ from .transport import (
     hw_server_chain_shape_kwargs,
     list_openocd_taps,
     list_xilinx_hw_server_targets,
+    register_pipe_identity,
 )
 
 _SCHEMA_VERSION = "1.1"
@@ -107,7 +109,12 @@ class RpcServer:
         quartus_stp_path: str | None = None,
     ):
         self._analyzer: Analyzer | None = None
+        # Target fields of the connect that opened the analyzer's transport.
+        self._analyzer_target: Dict[str, Any] = {}
         self._eio: EioController | None = None
+        # True when the EIO borrows the analyzer's transport (a core-manager
+        # slot): dropping it must not close the analyzer's session.
+        self._eio_shared = False
         self._axi: EjtagAxiController | None = None
         self._axi_transport: Transport | None = None
         self._uart: EjtagUartController | None = None
@@ -139,6 +146,13 @@ class RpcServer:
             raise NotConnectedError("not connected")
         return self._analyzer
 
+    def _drop_eio(self) -> None:
+        """Forget the EIO session, closing its transport only if it owns one."""
+        eio, shared = self._eio, self._eio_shared
+        self._eio = None
+        self._eio_shared = False
+        if eio is not None and not shared:
+            eio.close()
     # Where each held object keeps its transport. A controller is asked for
     # its own attribute rather than being closed directly, because cancelling
     # has to reach the thing that is actually blocked -- the socket or the
@@ -239,8 +253,11 @@ class RpcServer:
                 except Exception:
                     pass
 
-        _shut(self._analyzer)
+        if self._eio_shared:
+            self._eio = None  # the analyzer's transport, closed just below
+            self._eio_shared = False
         _shut(self._eio)
+        _shut(self._analyzer)
         _shut(self._axi if self._axi is not None else self._axi_transport)
         _shut(self._uart if self._uart is not None else self._uart_transport)
         self._analyzer = None
@@ -255,8 +272,10 @@ class RpcServer:
 
         Always reports the connected ELA; adds the EIO if one is discoverable
         (reusing an already-attached controller, else a read-only probe that
-        restores chain 1). Other core types (AXI/UART/core-manager) are not yet
-        auto-scanned here. Each entry: ``{type, name, core_id, chain, base_addr,
+        restores chain 1). When the connected chain is a core manager, the
+        manager and its other slots are listed too, each with its ``instance``.
+        Bridges are not scanned here; the ``discover`` command scans every
+        chain. Each entry: ``{type, name, core_id, chain, base_addr,
         version_major, version_minor, info}``.
         """
         cores: list[Dict[str, Any]] = []
@@ -271,12 +290,40 @@ class RpcServer:
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
                 "base_addr": 0,
+                "instance": analyzer.instance,
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
                 "info": ela,
             })
 
+        # A core manager on the connected chain: list it and its other slots.
+        # The manager block is read only once 0x0000 has answered as an ELA
+        # or EIO: the session may be on a bridge chain, where 0xF000 is a
+        # burst command.
+        slots: list[Dict[str, Any]] = []
+        try:
+            transport = analyzer.transport
+            if (
+                register_pipe_identity(transport, analyzer.bscan_chain) is not None
+                and analyzer._behind_manager()  # noqa: SLF001
+            ):
+                slots = discover_cores(
+                    transport, chains=(analyzer.bscan_chain,), bridges=False
+                )
+        except Exception:
+            slots = []
+        for entry in slots:
+            if (
+                ela is not None
+                and entry["type"] in ("ela", "axi_mon")
+                and entry["instance"] == analyzer.instance
+            ):
+                continue
+            cores.append(entry)
+
         eio = self._eio
+        if eio is None and any(e["type"] == "eio" for e in slots):
+            eio = False  # the manager's EIO slots are listed above
         if eio is None:
             transport = analyzer.transport
             try:
@@ -287,7 +334,7 @@ class RpcServer:
                 transport.invalidate_manager_instance_cache()
             except Exception:
                 pass
-        if eio is not None:
+        if eio:
             cores.append({
                 "type": "eio",
                 "name": _CORE_NAMES.get(eio.core_id, "Embedded I/O"),
@@ -559,6 +606,66 @@ class RpcServer:
         except Exception:
             pass
         return result
+
+    # Request fields that pick the board a transport opens (_build_transport).
+    _TARGET_FIELDS = ("backend", "host", "port", "tap", "hardware")
+
+    @classmethod
+    def _target_fields(cls, req: Dict[str, Any]) -> Dict[str, Any]:
+        return {f: req[f] for f in cls._TARGET_FIELDS if req.get(f) is not None}
+
+    @staticmethod
+    def _resolved_target(fields: Dict[str, Any]) -> tuple:
+        """The board *fields* open, with _build_transport's defaults."""
+        backend = str(fields.get("backend", "hw_server"))
+        if backend == "usb_blaster":
+            tap = str(fields.get("tap", "auto"))
+            if tap in ("", "xc7a100t.tap"):
+                tap = "auto"
+            return (backend, fields.get("hardware"), tap)
+        port = int(fields.get("port", 6666 if backend == "openocd" else 3121))
+        tap = str(fields.get("tap", "xc7a100t.tap" if backend == "openocd" else "xc7a100t"))
+        return (backend, str(fields.get("host", "127.0.0.1")), port, tap)
+
+    def _same_target(self, req: Dict[str, Any]) -> bool:
+        """Whether *req* names the analyzer's board.  Fields it leaves out are
+        the analyzer's."""
+        base = self._analyzer_target
+        merged = {**base, **self._target_fields(req)}
+        return self._resolved_target(merged) == self._resolved_target(base)
+
+    def _with_session_target(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """*req* with the target fields it leaves out taken from the session,
+        as :meth:`_same_target` reads them (BUG-243/247)."""
+        return {
+            **req,
+            **{f: v for f, v in self._analyzer_target.items() if req.get(f) is None},
+        }
+
+    @staticmethod
+    def _session_eio(analyzer: Analyzer, req: Dict[str, Any]) -> Dict[str, Any] | None:
+        """The :func:`discover_cores` entry of the first EIO on the session's
+        transport, standalone or in a core-manager slot, on ``req["chains"]``
+        or the transport's discovery chains; ``None`` if there is none.  The
+        session's chain is selected again after."""
+        raw = req.get("chains")
+        transport = analyzer.transport
+        try:
+            found = discover_cores(
+                transport,
+                chains=tuple(int(c) for c in raw) if raw else None,
+                bridges=False,
+            )
+        finally:
+            try:
+                transport.select_chain(analyzer.bscan_chain)
+            except NotImplementedError:
+                pass
+            transport.invalidate_manager_instance_cache()
+        for entry in found:
+            if entry["type"] == "eio":
+                return entry
+        return None
 
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
@@ -894,10 +1001,15 @@ class RpcServer:
             # stale side sessions can't survive still pointing at the old board.
             self._close_all()
             requested = req.get("chain")
+            # A core-manager slot: the analyzer selects it before every access,
+            # so a side session in another slot cannot move it (BUG-231).
+            instance = req.get("instance")
+            instance = None if instance is None else int(instance)
             transport = self._new_transport(req)
             analyzer = Analyzer(
                 transport,
                 chain=int(requested) if requested is not None else 1,
+                instance=instance,
             )
             try:
                 analyzer.connect()
@@ -915,12 +1027,13 @@ class RpcServer:
                 # the conservative scan set (USER1/2 — bridges on 3/4 speak a
                 # different DR protocol and must not see stray shifts).
                 for chain in (2,):
-                    alt = Analyzer(analyzer.transport, chain=chain)
+                    alt = Analyzer(analyzer.transport, chain=chain, instance=instance)
                     self._pin_manager_slot(alt)
                     if alt.probe_optional() is not None:
                         analyzer = alt
                         break
             self._analyzer = analyzer
+            self._analyzer_target = self._target_fields(req)
             # Echo the resolved preset/chain so a client that omitted them can
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
@@ -943,9 +1056,22 @@ class RpcServer:
             if requested is None:
                 raise ValueError("rebind requires a chain")
             new_chain = int(requested)
-            if new_chain != analyzer.bscan_chain:
+            # ``instance`` names the core-manager slot on the new chain; left
+            # out, a rebind to the same chain keeps the slot and one to
+            # another chain binds that chain's first ELA slot, if it has a
+            # manager.
+            if "instance" in req:
+                instance = req["instance"]
+                new_instance = None if instance is None else int(instance)
+            elif new_chain == analyzer.bscan_chain:
+                new_instance = analyzer.instance
+            else:
+                new_instance = None
+            if new_chain != analyzer.bscan_chain or new_instance != analyzer.instance:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(analyzer.transport, chain=new_chain)
+                self._analyzer = Analyzer(
+                    analyzer.transport, chain=new_chain, instance=new_instance
+                )
                 self._pin_manager_slot(self._analyzer)
             return self._ok(
                 chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
@@ -1053,6 +1179,25 @@ class RpcServer:
         if cmd == "list_cores":
             return self._ok(cores=self._list_cores(analyzer))
 
+        if cmd == "discover":
+            # Every fcapz core on the session, chain by chain: register cores
+            # (ELA, EIO, core manager slots, AXI monitor) and the bridges.
+            # `chains` narrows the sweep; the session's chain is restored.
+            raw = req.get("chains")
+            try:
+                found = discover_cores(
+                    analyzer.transport,
+                    chains=tuple(int(c) for c in raw) if raw else None,
+                    bridges=bool(req.get("bridges", True)),
+                )
+            finally:
+                try:
+                    analyzer.transport.select_chain(analyzer.bscan_chain)
+                except NotImplementedError:
+                    pass
+                analyzer.transport.invalidate_manager_instance_cache()
+            return self._ok(cores=found)
+
         if cmd == "axi_mon_probe":
             # Detect an AXI monitor and return its geometry + the bundled
             # probe map so the client can capture with named AXI fields. The
@@ -1132,35 +1277,50 @@ class RpcServer:
             return self._ok(**analyzer.status())
 
         if cmd == "eio_connect":
-            if self._eio is not None:
-                # Drop it before building the replacement: a failed connect
-                # must not leave this closed controller installed.
-                try:
-                    self._eio.close()
-                except Exception:
-                    pass
-                self._eio = None
+            self._drop_eio()
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
-            transport = self._new_transport(req)
+            # A core-manager slot shares the hub's ACTIVE register with the
+            # analyzer, so it goes through the analyzer's transport: one lock
+            # and one slot cache.  A second transport would race it.  That is
+            # a named slot, or an EIO on the analyzer's chain, which binds
+            # itself to the first EIO slot when the chain has a manager.  Only
+            # for the analyzer's target: a request that names another board
+            # gets its own transport (BUG-238).
+            shared = (
+                self._analyzer is not None
+                and (instance is not None or chain == self._analyzer.bscan_chain)
+                and self._same_target(req)
+            )
+            if shared and chain == self._analyzer.bscan_chain:
+                # The EIO's selects move MGR_ACTIVE: an analyzer that reads
+                # whichever slot is active must keep the one it reads now.
+                self._analyzer.pin_active_slot()
+            target_req = req
+            if instance is not None and self._analyzer is not None and not shared:
+                # Another board, named by the fields given; the rest are the
+                # session's, as for the comparison (BUG-243).
+                target_req = self._with_session_target(req)
             eio = EioController(
-                transport,
+                self._analyzer.transport if shared else self._new_transport(target_req),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
             )
             try:
-                eio.connect()
+                if shared:
+                    eio.attach()
+                else:
+                    eio.connect()
             except Exception:
-                # Mirror axi_connect / eio_discover: close the transport and
-                # leave self._eio unset rather than leaking a half-open session.
-                try:
-                    transport.close()
-                except Exception:
-                    pass
+                if not shared:
+                    try:
+                        eio.close()
+                    except Exception:
+                        pass
                 raise
-            self._eio = eio
+            self._eio, self._eio_shared = eio, shared
             return self._ok(
                 in_w=eio.in_w,
                 out_w=eio.out_w,
@@ -1170,20 +1330,41 @@ class RpcServer:
             )
 
         if cmd == "eio_discover":
-            if self._eio is not None:
-                try:
-                    self._eio.close()
-                except Exception:
-                    pass
-                self._eio = None
-            transport = self._new_transport(req)
+            self._drop_eio()
+            # On the session's board the EIO, standalone or in a core-manager
+            # slot, goes through the session's transport: one lock and one
+            # slot cache, and no second connection to the board.  An unbound
+            # analyzer is pinned first, as eio_connect does (BUG-247).
+            if self._same_target(req):
+                entry = self._session_eio(analyzer, req)
+                if entry is None:
+                    raise RuntimeError("no EIO core found on the target")
+                chain, base_addr = int(entry["chain"]), int(entry["base_addr"])
+                instance = entry["instance"]
+                if instance is not None and chain == analyzer.bscan_chain:
+                    analyzer.pin_active_slot()
+                eio = EioController(
+                    analyzer.transport, chain=chain, base_addr=base_addr,
+                    instance=None if instance is None else int(instance),
+                )
+                eio.attach()
+                self._eio, self._eio_shared = eio, True
+                return self._ok(
+                    discovered=True,
+                    in_w=eio.in_w,
+                    out_w=eio.out_w,
+                    chain=chain,
+                    base_addr=base_addr,
+                    instance=instance,
+                )
+            # Another board: the fields the request leaves out are the
+            # session's, as for the comparison.
+            transport = self._new_transport(self._with_session_target(req))
             try:
                 transport.connect()
                 chains = req.get("chains")
                 chains = (
-                    [int(c) for c in chains]
-                    if chains
-                    else sorted(getattr(transport, "ir_table", {}).keys()) or [1]
+                    [int(c) for c in chains] if chains else default_eio_chains(transport)
                 )
                 eio = discover_eio(transport, chains=chains)
                 if eio is None:
@@ -1205,9 +1386,7 @@ class RpcServer:
                 raise
 
         if cmd == "eio_close":
-            if self._eio is not None:
-                self._eio.close()
-                self._eio = None
+            self._drop_eio()
             return self._ok()
 
         if cmd == "eio_read":

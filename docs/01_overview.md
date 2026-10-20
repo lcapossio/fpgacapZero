@@ -118,10 +118,11 @@ chapter 17 for details.
 By default, each core uses a **separate JTAG USER chain** (USER1 through
 USER4 on AMD/Xilinx 7-series / UltraScale, equivalent on other vendors), so
 multiple cores can coexist in the same bitstream and the host stack can
-talk to all of them in one xsdb / OpenOCD session.  AMD/Xilinx 7-series
-designs can also put multiple ELA and EIO slots behind one USER1 core
-manager (`fcapz_debug_multi_xilinx7`) when you want more debug endpoints
-than free USER chains.
+talk to all of them in one xsdb / OpenOCD session.  Designs can also put
+multiple ELA and EIO slots behind one core manager on a single chain when you
+want more debug endpoints than free USER chains: `fcapz_debug_multi_xilinx7`,
+`fcapz_debug_multi_xilinxus` and `fcapz_debug_multi_intel` share one
+vendor-free core and differ only in the TAP primitive.
 
 | Core | Default chain | Default IR (7-series) | Default IR (UltraScale) |
 |------|---------------|-----------------------|-------------------------|

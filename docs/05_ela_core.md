@@ -549,17 +549,61 @@ fcapz_debug_multi_xilinx7 #(
 );
 ```
 
-The lower-level `fcapz_core_manager` is also available if you already have
-custom TAP plumbing and want to instantiate the manager and `fcapz_ela` slots
-yourself.  At this revision the packaged multi-core wrapper is AMD/Xilinx
-7-series only; other vendors still use their single-core wrappers until
-equivalent debug-manager wrappers are added.
+The hub is built in three layers, and only the outermost one is
+vendor-specific:
+
+| Layer | What it holds |
+|---|---|
+| `fcapz_debug_multi_core` | The manager plus the ELA/EIO slots, on the 49-bit register bus and the burst bus. No JTAG at all. |
+| `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tlr`, `tdo` out): hub resets (`fcapz_hub_reset`), `jtag_pipe_iface`, then the core. |
+| `fcapz_debug_multi_<vendor>` | One `jtag_tap_<vendor>` on `CTRL_CHAIN` feeding `fcapz_debug_multi`. |
+
+Packaged vendor shells (all share the parameter and port list shown above):
+
+| Wrapper | TAP | `CTRL_CHAIN` means |
+|---|---|---|
+| `fcapz_debug_multi_xilinx7` | `BSCANE2` | USER chain 1..4 |
+| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | USER chain 1..4 |
+| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `sld_instance_index` |
+
+Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  A new
+vendor needs only a shell when its `jtag_tap_<vendor>` presents the same single
+`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel` interface, as the ECP5 and
+PolarFire wrappers do; the manager, slots and pipe are already covered by the
+shared simulation and parity checks, but that TAP's CAPTURE/UPDATE timing still
+needs a board test.  Gowin's TAP has separate `shift_in`/`shift_out` strobes,
+which the shared pipe does not take, so a Gowin hub needs its own adapter: a
+register-only one can drive `fcapz_debug_multi_core` with `BURST_EN=0`, and
+every slot is then read through its register window.  UltraScale reuses the
+Xilinx 7 TAP code and has no board test yet.  The lower-level
+`fcapz_core_manager` is still available if you want to wire the manager and
+`fcapz_ela` slots to custom plumbing yourself.
+
+On Intel the hub reads bursts back through its own virtual JTAG instance.  The
+USB-Blaster transport normally reads ELA bursts from a separate data instance,
+so the host sends a managed slot's burst to the hub's instance instead; this is
+automatic, as it is for a Xilinx session opened with `single_chain_burst=False`
+(`--two-chain-burst`).  The DE25-Nano `manager` variant
+(`python examples/de25_nano/build.py --variant manager`) is the hardware
+reference: two ELAs and two EIOs on instance 1, EJTAG-AXI on instance 4.
 
 Each managed ELA has its own `ela_sample_clk[i]` and `ela_sample_rst[i]`.
 Use `{NUM_ELAS{clk}}` / `{NUM_ELAS{rst}}` when every ELA samples the same
 domain, or pass different clocks and resets to capture unrelated fabric
-domains behind one USER chain.  The wrapper resets the shared JTAG pipe when
-any ELA reset is asserted.
+domains behind one USER chain.  `ela_sample_rst[i]` resets ELA `i` alone:
+its sample side, and its register side through a TCK synchroniser.  The shared
+JTAG pipe and the manager reset at power-up and stay reset until the ELA
+resets are first released; later ELA resets do not reach them.  With `TLR_RESET_EN=1` the shell
+also resets the burst protocol whenever the TAP passes through
+Test-Logic-Reset, so a host that restarts mid-burst cannot leave the pipe in
+burst mode.  Enable it only behind a JTAG server that leaves the TAP out of
+Test-Logic-Reset between scans, and check with `MGR_TLR_COUNT` first.  Quartus
+`quartus_stp` does (the count stays put for a whole session); Xilinx
+`hw_server`/`xsdb` does not: with a session open it walks the TAP through
+Test-Logic-Reset many times a second between the host's scans (about 170 with
+Vivado 2025.2), which would cancel bursts.  Leave `TLR_RESET_EN=0` on Xilinx
+boards.  `MGR_TLR_COUNT` is 16 bits and wraps, so behind `hw_server` it only
+says something across a short interval.
 
 Each ELA can also override the scalar/default wrapper settings with packed
 per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the
@@ -579,7 +623,10 @@ fcapz_debug_multi_xilinx7 #(
 ) u_debug (...);
 ```
 
-The scalar parameters remain the defaults for existing designs.  Per-slot
+The scalar parameters remain the defaults for existing designs.  Each scalar
+is widened to a 32-bit lane before it is replicated into the per-slot vectors,
+so pass it as a plain integer or a literal no wider than 32 bits
+(`.SAMPLE_W(8)` or `.SAMPLE_W(8'd8)`, not `.SAMPLE_W(64'd8)`).  Per-slot
 vectors exist for ELA sample width, depth, trigger stages, storage
 qualification, input pipe, channel count, decimation, external trigger,
 timestamp width, segment count, probe mux width, startup arm, default external
@@ -589,7 +636,11 @@ Fast 256-bit burst readout is available only for managed ELA slots whose
 `SAMPLE_W`, `DEPTH`, `TIMESTAMP_W`, and `NUM_SEGMENTS` match the wrapper's
 max/default burst-pipe shape.  Heterogeneous slots still work through the
 normal 49-bit DATA window; the host checks the manager descriptor and falls
-back automatically.
+back automatically.  Such a slot is readable only through that window, so
+elaboration fails if it sets `USER1_DATA_EN=0`.  Words past the manager
+registers at `0xF000` (about 15k words in) are read in pages through
+`DATA_OFFSET` (see the register map).  `BURST_W` must stay 256, the host's
+burst scan width.
 
 Manager registers:
 
@@ -597,19 +648,50 @@ Manager registers:
 |---|---|
 | `0xF000` | MGR_VERSION | RO | Manager identity `{major, minor, "CM"}`. |
 | `0xF004` | MGR_COUNT | RO | Number of slots. |
-| `0xF008` | MGR_ACTIVE | RW | Active ELA slot for non-manager register accesses. Burst readback latches the active slot on the `BURST_PTR` write and routes the burst through that owner. |
+| `0xF008` | MGR_ACTIVE | RW | Active slot for non-manager register accesses. A `BURST_PTR` write binds the burst to the active slot; a later `MGR_ACTIVE` write, even one during a burst, moves register accesses only, and the burst stays on its owner until the next `BURST_PTR` write. Writes of a slot at or past `MGR_COUNT` are ignored. |
 | `0xF00C` | MGR_STRIDE | RO | `0` for active-slot mode. |
-| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write (see the register map). |
-| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor reads. |
-| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots. |
+| `0xF010` | MGR_CAPS | RO | Bit 0 set when active-slot selection is supported; bit 1 set when descriptor registers are present; bit 2 set when the burst start is raised on every `BURST_PTR` write; bit 3 epochs and `MGR_OWNER`; bit 4 burst header; bit 5 `MGR_CTRL` and per-slot resets; bit 6 Test-Logic-Reset resets the burst protocol; bit 7 `MGR_SELECT_COUNT` (see the register map). |
+| `0xF014` | MGR_DESC_INDEX | RW | Slot index for descriptor and `MGR_SLOT_EPOCH` reads, and for `MGR_CTRL` bit 1. |
+| `0xF018` | MGR_DESC_CORE | RO | Selected slot core ID, `"LA"` for ELA slots and `"IO"` for EIO slots. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Bit 0 set when the slot supports burst readback. |
+| `0xF020` | MGR_EPOCH | RO | Both edges of the hub reset (odd while held); never reset. |
+| `0xF024` | MGR_OWNER | RW | Advisory owner token of the host session. |
+| `0xF028` | MGR_CTRL | WO | Bit 0 resets the hub, bit 1 the `MGR_DESC_INDEX` slot, bit 2 every slot. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | Both edges of the `MGR_DESC_INDEX` slot's reset (odd while held); never reset. |
+| `0xF030` | MGR_TLR_COUNT | RO | TAP Test-Logic-Reset entries; never reset. |
+| `0xF034` | MGR_SELECT_COUNT | RO | `MGR_ACTIVE` writes from any controller, refused ones too; never reset. |
 
-Host-side, select the ELA instance explicitly:
+Each slot resets alone: an ELA's `ela_sample_rst` resets that ELA only, and no
+longer `MGR_ACTIVE`, the EIO outputs or the other ELAs.  `TLR_RESET_EN=1` on
+the hub shell makes the TAP's Test-Logic-Reset also reset the burst protocol.
+See [Resets](specs/register_map.md#regmap-manager-resets) in the register map.
+
+Host-side, list what the hub holds, then select the ELA instance explicitly:
 
 ```bash
+fcapz --backend hw_server --tap xc7a100t discover
 fcapz --backend hw_server --tap xc7a100t ela-list
 fcapz --backend hw_server --tap xc7a100t --ela-instance 1 probe
 ```
+
+`discover` (and `fcapz.discovery.discover_cores()`, and the RPC `discover`
+command) needs no chain.  It reads `VERSION` at `0x0000` on every USER chain
+(on Intel, `sld_virtual_jtag` instances 1-8), and reads further only on a
+chain that answers `"LA"` or `"IO"`.  That first read is safe on a chain
+nobody has identified: a register read below `0x2000` lands as a NOP in the
+command field of the EJTAG-AXI and EJTAG-UART bridges, while a read of
+`0xF000` would be a burst command on the AXI bridge and a write of
+`MGR_ACTIVE` its reset.  On a manager it lists every slot, whatever slot is
+active, and leaves `MGR_ACTIVE` as it found it.  Chains that answer neither
+get the bridges' own identity reads.  The host's slot selection follows the
+same rule: it writes `MGR_ACTIVE` on a chain only after `0x0000` and the
+manager block have answered.
+
+`Analyzer.probe()` reads whatever slot is active and fails on an EIO.
+`Analyzer.probe_optional()` does not: when the analyzer has no slot of its
+own and the hub's active slot is not an ELA (an EIO left selected, say), it
+selects the first ELA slot and keeps it.  The GUI connects to the first slot
+the descriptors call an ELA.
 
 ```python
 transport = XilinxHwServerTransport(fpga_name="xc7a100t")
@@ -623,18 +705,39 @@ ela1 = Analyzer(transport, instance=1)
 
 Multiple `Analyzer` objects can share one transport session; each analyzer
 re-selects its configured manager slot before probe, configure, arm, status
-polling, and readback. On `hw_server` the select travels in the same JTAG
-sequence as every access, so another program on the same cable moving
-`MGR_ACTIVE` cannot redirect it; OpenOCD and Quartus select once per
-operation, which another program can still undo in between. Do not run
-captures from two Python threads against the same transport at the same time. The transport serializes low-level I/O,
-but capture workflows still share FPGA JTAG bandwidth and should be sequenced
-deliberately.
+polling, and readback. The host reads `MGR_ACTIVE` back after each switch and
+raises when a manager does not take the slot, or the slot is past
+`MGR_COUNT`.  It writes up to three times first: bitstreams built before this
+release drop a switch that lands while the pipe refills after a burst.
+After that first check, the select travels with every access, in one unit
+no other program on the cable can split: one JTAG sequence on `hw_server`,
+one `device_lock` on Quartus, one Tcl command line on OpenOCD.  Another
+program moving `MGR_ACTIVE` cannot redirect it.
+Moving an `Analyzer` to another slot with `select_instance()` drops its capture
+configuration, so call `configure()` again.  Do not run captures from two
+Python threads against the same transport at the same time. The transport
+serializes low-level I/O, but capture workflows still share FPGA JTAG bandwidth
+and should be sequenced deliberately.
 
-The first manager implementation assumes homogeneous burst shape across slots
-(`SAMPLE_W`, `TIMESTAMP_W`, and `DEPTH` match). If we need heterogeneous ELAs,
-the manager should grow per-slot metadata and mux to a maximum-width burst
-pipe, or we should group different shapes under separate manager instances.
+Two processes can therefore drive different slots of one hub at once (two
+CLI runs, or the GUI and a script), as long as each names its slot
+(`instance=`).  They cannot share one slot: the core's own settings (its
+configuration, `DATA_OFFSET`, the selected segment, EIO outputs) are state
+in the hub, and the last writer wins.  Inside one process, share one
+transport: the GUI and the RPC server already route a managed EIO through
+the analyzer's transport.
+
+An `Analyzer` without an `instance` reads whichever slot is active, so
+another program's select does move it.  The host reports that instead of
+using the wrong slot's data: `configure()`, `arm()`, `reset()` (and so
+`force_idle()`) and every readout check that the slot stayed selected
+(`MGR_SELECT_COUNT` on hubs with `MGR_CAPS[7]`, and `MGR_ACTIVE`) and raise
+`ManagerResetError` when it did not.  Retry the operation; a write that
+raised may have reached the other slot.  `status()` polls and the identity
+reads of `probe()` are single reads and not checked: a status read from
+another slot is caught by the checks at the start of the readout that
+follows.  The hub-reset checks (slot and hub epochs, `CAPTURE_GEN`, the burst
+header) apply to every analyzer.
 
 Set `NUM_EIOS>0` when the same USER chain should host EIO slots as well.
 Slot order is ELA `0..NUM_ELAS-1`, then EIO `0..NUM_EIOS-1`. Each selected

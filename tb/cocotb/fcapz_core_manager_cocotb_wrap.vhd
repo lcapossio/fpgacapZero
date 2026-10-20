@@ -8,6 +8,8 @@ entity fcapz_core_manager_cocotb_wrap is
     port (
         jtag_clk   : in  std_logic;
         jtag_rst   : in  std_logic;
+        proto_rst  : in  std_logic;
+        tlr        : in  std_logic;
         jtag_wr_en : in  std_logic;
         jtag_rd_en : in  std_logic;
         jtag_addr  : in  std_logic_vector(15 downto 0);
@@ -19,6 +21,8 @@ entity fcapz_core_manager_cocotb_wrap is
         slot_addr  : out std_logic_vector(47 downto 0);
         slot_wdata : out std_logic_vector(95 downto 0);
         slot_rdata : in  std_logic_vector(95 downto 0);
+        slot_rst     : in  std_logic_vector(2 downto 0);
+        slot_rst_req : out std_logic_vector(2 downto 0);
 
         burst_rd_addr         : in  std_logic_vector(3 downto 0);
         slot_burst_rd_addr    : out std_logic_vector(11 downto 0);
@@ -33,7 +37,8 @@ entity fcapz_core_manager_cocotb_wrap is
         burst_rd_ts_data      : out std_logic_vector(3 downto 0);
         burst_start           : out std_logic;
         burst_timestamp       : out std_logic;
-        burst_start_ptr       : out std_logic_vector(3 downto 0)
+        burst_start_ptr       : out std_logic_vector(3 downto 0);
+        burst_header          : out std_logic_vector(159 downto 0)
     );
 end entity fcapz_core_manager_cocotb_wrap;
 
@@ -46,11 +51,15 @@ begin
             TIMESTAMP_W => 4,
             DEPTH => 16,
             SLOT_CORE_IDS => x"494F_4C41_4C41",
-            SLOT_HAS_BURST => "011"
+            SLOT_HAS_BURST => "011",
+            HEADER_EN => 1,
+            TLR_RESET_EN => 1
         )
         port map (
             jtag_clk => jtag_clk,
             jtag_rst => jtag_rst,
+            proto_rst => proto_rst,
+            tlr => tlr,
             jtag_wr_en => jtag_wr_en,
             jtag_rd_en => jtag_rd_en,
             jtag_addr => jtag_addr,
@@ -61,6 +70,8 @@ begin
             slot_addr => slot_addr,
             slot_wdata => slot_wdata,
             slot_rdata => slot_rdata,
+            slot_rst => slot_rst,
+            slot_rst_req => slot_rst_req,
             burst_rd_addr => burst_rd_addr,
             slot_burst_rd_addr => slot_burst_rd_addr,
             slot_burst_rd_data => slot_burst_rd_data,
@@ -74,6 +85,7 @@ begin
             burst_rd_ts_data => burst_rd_ts_data,
             burst_start => burst_start,
             burst_timestamp => burst_timestamp,
-            burst_start_ptr => burst_start_ptr
+            burst_start_ptr => burst_start_ptr,
+            burst_header => burst_header
         );
 end architecture sim;

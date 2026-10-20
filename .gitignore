@@ -66,6 +66,7 @@ tests/_tmp/
 .claude/
 examples/de25_nano/de25_nano_quartus/
 examples/de25_nano/de25_nano_vex_quartus/
+examples/de25_nano/de25_nano_manager_quartus/
 examples/de25_nano/output_files/
 examples/de25_nano/captures/
 

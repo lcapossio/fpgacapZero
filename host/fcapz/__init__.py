@@ -14,6 +14,7 @@ from .analyzer import (
 )
 from .axi_decode import AxiTransaction, decode_axi, looks_like_axi
 from .axi_monitor import AxiGeometry, AxiMonitor, AxiMonitorError
+from .discovery import discover_cores
 from .eio import EioController
 from .ejtagaxi import AXIError, EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -71,6 +72,7 @@ __all__ = [
     "AxiMonitor",
     "AxiGeometry",
     "AxiMonitorError",
+    "discover_cores",
     "EioController",
     "EjtagAxiController",
     "AXIError",

@@ -240,6 +240,11 @@ architecture rtl of fcapz_ela is
     constant ADDR_COMPARE_CAPS : natural := 16#00E0#;
     constant ADDR_WIDE_SEL     : natural := 16#00E4#;
     constant ADDR_WIDE_DATA    : natural := 16#00F0#;
+    -- RW (USER1_DATA_EN): word offset added to every DATA / timestamp window
+    -- read, so a host can page through windows the 16-bit address cannot reach.
+    constant ADDR_DATA_OFFSET  : natural := 16#00F4#;
+    -- RO: [15:0] capture generation (COMPARE_CAPS bit 21); see p_capture_gen.
+    constant ADDR_CAPTURE_GEN  : natural := 16#00F8#;
     -- Run-length capture (RLE_W > 0).  RLE_CTRL[0] enables it (taken on
     -- arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
     constant ADDR_RLE_CTRL     : natural := 16#00A8#;  -- RW
@@ -252,6 +257,11 @@ architecture rtl of fcapz_ela is
     -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
     constant HAS_WIDE_TRIG : boolean := (WIDE_TRIG /= 0) and (SAMPLE_W > 32);
     constant ADDR_TS_DATA_BASE : natural := ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4;
+    -- Words in the DATA window and the auxiliary (timestamp / run count)
+    -- window after it.
+    constant DATA_WINDOW_WORDS : natural := DEPTH * WORDS_PER_SAMPLE
+                                          + DEPTH * AUX_WORDS;
+    constant DATA_OFFSET_W     : positive := fcapz_clog2(DATA_WINDOW_WORDS + 1);
 
     constant FEATURES : std_logic_vector(31 downto 0) :=
         std_logic_vector(to_unsigned(TIMESTAMP_W, 8)) &
@@ -571,6 +581,10 @@ architecture rtl of fcapz_ela is
     signal datawin_oob_q          : std_logic := '0';
     signal datawin_is_ts_q        : std_logic := '0';
     signal datawin_chunk_q        : natural := 0;
+    signal jtag_data_offset       : std_logic_vector(31 downto 0) := (others => '0');
+    -- Never reset; power-up value only (p_capture_gen).
+    signal capture_gen            : unsigned(15 downto 0) := (others => '0');
+    signal capture_gen_rst_d      : std_logic := '0';
 
     function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
         variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
@@ -1355,6 +1369,32 @@ begin
         end if;
     end process;
 
+    -- Capture generation: counts every CTRL write that arms or resets the
+    -- core and every release of the register-side reset: each one can start
+    -- a capture that overwrites the buffer.  A host reads it before and after
+    -- a readout, and after its own arm, to tell that the samples it read are
+    -- the capture it armed.  STARTUP_ARM arms and segment re-arms are not
+    -- counted: the first follows a counted reset, and the second fill the
+    -- segments of one capture.  A release and a write in the same cycle
+    -- count two.
+    p_capture_gen : process(jtag_clk)
+        variable next_gen : unsigned(15 downto 0);
+    begin
+        if rising_edge(jtag_clk) then
+            capture_gen_rst_d <= jtag_rst;
+            next_gen := capture_gen;
+            if capture_gen_rst_d = '1' and jtag_rst = '0' then
+                next_gen := next_gen + 1;
+            end if;
+            if jtag_wr_en = '1' and jtag_rst = '0'
+                    and to_integer(unsigned(jtag_addr)) = ADDR_CTRL
+                    and (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                next_gen := next_gen + 1;
+            end if;
+            capture_gen <= next_gen;
+        end if;
+    end process;
+
     p_jtag_regs : process(jtag_clk, jtag_rst)
         variable addr : natural;
         variable seq_stage : natural;
@@ -1371,6 +1411,7 @@ begin
             -- Wide comparator-A words (WIDE_TRIG): value words 0, mask word 0
             -- all-ones (match nothing masked out), higher mask words 0.
             jtag_wide_sel <= (others => '0');
+            jtag_data_offset <= (others => '0');
             for s in 0 to WORDS_PER_SAMPLE - 1 loop
                 wide_va(s) <= (others => '0');
                 if s = 0 then
@@ -1421,8 +1462,13 @@ begin
                         if jtag_wdata(1) = '1' then
                             reset_toggle_jtag <= not reset_toggle_jtag;
                         end if;
-                        -- Arm and reset return the DATA window to timestamps.
+                        -- Every host arms or resets before a capture, so a
+                        -- DATA_OFFSET left by a session that died while
+                        -- paging cannot shift the next one's reads.
+                        -- Arm and reset also return the DATA window to
+                        -- timestamps.
                         if jtag_wdata(0) = '1' or jtag_wdata(1) = '1' then
+                            jtag_data_offset <= (others => '0');
                             jtag_rle_ctrl(1) <= '0';
                         end if;
                     when ADDR_PRETRIG =>
@@ -1497,6 +1543,10 @@ begin
                         end if;
                     when ADDR_STARTUP_ARM =>
                         jtag_startup_arm <= jtag_wdata(0);
+                    when ADDR_DATA_OFFSET =>
+                        if USER1_DATA_EN /= 0 then
+                            jtag_data_offset <= jtag_wdata;
+                        end if;
                     when ADDR_TRIG_DELAY =>
                         jtag_trig_delay <= jtag_wdata(15 downto 0);
                     when ADDR_TRIG_HOLDOFF =>
@@ -1541,13 +1591,24 @@ begin
 
     p_datawin_decode : process(all)
         variable addr : natural;
+        variable offset_v : natural;
         variable word_index : natural;
         variable sample_index : natural;
         variable start_ptr_v : natural;
         variable seg_base_v : natural;
         variable mem_addr_v : natural;
     begin
+        -- The window address DATA_OFFSET moves a read to.  An offset past the
+        -- windows moves it to the word just past them, which reads 0.
         addr := to_integer(unsigned(jtag_addr));
+        if addr >= ADDR_DATA_BASE then
+            if unsigned(jtag_data_offset) >= DATA_WINDOW_WORDS then
+                offset_v := DATA_WINDOW_WORDS;
+            else
+                offset_v := to_integer(unsigned(jtag_data_offset(DATA_OFFSET_W - 1 downto 0)));
+            end if;
+            addr := ADDR_DATA_BASE + ((addr - ADDR_DATA_BASE) / 4 + offset_v) * 4;
+        end if;
         word_index := 0;
         sample_index := 0;
         start_ptr_v := rb_start_ptr_jtag;
@@ -2321,12 +2382,20 @@ begin
                     r(18) := '1';  -- full-width comparator A programmable
                 end if;
                 r(19) := '1';  -- timestamp window base decoded at full width
+                if USER1_DATA_EN /= 0 then
+                    r(20) := '1';  -- DATA_OFFSET
+                end if;
+                r(21) := '1';  -- CAPTURE_GEN
                 r(22) := '1';  -- SQ_MODE is compare mode + 1
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then
                     r(7 downto 0) := jtag_wide_sel;
                 end if;
+            when ADDR_DATA_OFFSET =>
+                r := jtag_data_offset;
+            when ADDR_CAPTURE_GEN =>
+                r := x"0000" & std_logic_vector(capture_gen);
             when ADDR_RLE_CTRL =>
                 r := (others => '0');
                 if HAS_RLE then

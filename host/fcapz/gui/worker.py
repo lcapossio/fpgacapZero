@@ -10,11 +10,12 @@ import time
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..analyzer import Analyzer, CaptureConfig, ElaManager
+from ..analyzer import ELA_CORE_ID, Analyzer, CaptureConfig, ElaManager
 from ..transport import (
     connect_timing_logs_enabled,
     list_openocd_taps,
     list_xilinx_hw_server_targets,
+    register_pipe_identity,
 )
 from .connect_errors import format_connect_error
 from .settings import ConnectionSettings
@@ -188,11 +189,15 @@ class ConnectWorker(QObject):
                 self.cancelled.emit()
                 return
             topology = None
-            try:
-                manager = ElaManager(transport)
-                manager_info = manager.probe()
-            except RuntimeError:
-                manager_info = None
+            manager_info = None
+            # Ask for the manager block only once USER1 has answered as an
+            # fcapz register core: on a bridge, 0xF000 is a burst command.
+            if register_pipe_identity(transport, 1) is not None:
+                try:
+                    manager = ElaManager(transport)
+                    manager_info = manager.probe()
+                except RuntimeError:
+                    manager_info = None
             if manager_info is not None:
                 slots = []
                 for idx in range(max(0, int(manager_info.get("num_slots", 0)))):
@@ -201,10 +206,18 @@ class ConnectWorker(QObject):
                     except RuntimeError:
                         slots.append({"instance": idx, "core_id": 0, "capabilities": 0})
                 topology = {"chain": 1, "manager": manager_info, "slots": slots}
-                analyzer.select_instance(0)
+                # Capture on the first slot described as an ELA.  Without
+                # descriptors, probe_optional() below finds it.
+                first_ela = next(
+                    (s["instance"] for s in slots if s.get("core_id") == ELA_CORE_ID),
+                    None,
+                )
+                if first_ela is not None:
+                    analyzer.select_instance(first_ela)
                 _conn_log.info(
-                    "USER1 core manager detected: %d slots; GUI ELA capture defaults to slot 0",
+                    "USER1 core manager detected: %d slots; GUI ELA capture defaults to slot %s",
                     int(manager_info.get("num_slots", 0)),
+                    "the first ELA" if first_ela is None else first_ela,
                 )
             info = analyzer.probe_optional()
             t_probe = time.monotonic()

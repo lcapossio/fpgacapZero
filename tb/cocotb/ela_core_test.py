@@ -47,6 +47,8 @@ ADDR_TRIG_HOLDOFF = 0x00DC
 ADDR_COMPARE_CAPS = 0x00E0
 ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
+ADDR_DATA_OFFSET = 0x00F4
+ADDR_CAPTURE_GEN = 0x00F8
 ADDR_RLE_CTRL = 0x00A8
 ADDR_RLE_W = 0x00CC
 ADDR_RLE_POST_CLKS = 0x0090
@@ -669,6 +671,61 @@ async def segmented_capture(dut):
 
 
 @cocotb.test()
+async def capture_gen_counts_restarts(dut):
+    """CAPTURE_GEN counts the CTRL writes that arm or reset the core and the
+    releases of the register-side reset, nothing else: not the capture, not
+    segment re-arms, not other register writes (BUG-246)."""
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 21)
+    gen = await ela.read(ADDR_CAPTURE_GEN)
+    assert gen >> 16 == 0
+    for ctrl in (0x1, 0x2, 0x3):
+        await ela.write(ADDR_CTRL, ctrl)
+        gen += 1
+        assert await ela.read(ADDR_CAPTURE_GEN) == gen, f"CTRL {ctrl:#x}"
+    await ela.write(ADDR_CTRL, 0)
+    await ela.write(ADDR_PRETRIG, 2)
+    await ela.write(ADDR_SEG_SEL, 0)
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen
+    await ela.reset_core()
+    gen += 1
+
+    # One arm, every segment of one capture: one count.
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=0, post=3, value=3, mask=0x03)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen + 1
+    gen += 1
+
+    # The register-side reset clears the registers, not the count; its
+    # release counts once.
+    dut.jtag_rst.value = 1
+    await ela.wait_jtag(3)
+    dut.jtag_rst.value = 0
+    await ela.wait_jtag(2)
+    assert await ela.read(ADDR_CAPTURE_GEN) == gen + 1
+    gen += 1
+
+    # A release and an arm write in the same cycle count two: each can start
+    # a capture.
+    dut.jtag_rst.value = 1
+    await ela.wait_jtag(3)
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_rst.value = 0
+    dut.jtag_addr.value = ADDR_CTRL
+    dut.jtag_wdata.value = 0x1
+    dut.jtag_wr_en.value = 1
+    await RisingEdge(dut.jtag_clk)
+    dut.jtag_wr_en.value = 0
+    await ela.wait_jtag(2)
+    assert await ela.read(ADDR_CAPTURE_GEN) == (gen + 2) & 0xFFFF
+    await ela.reset_core()
+
+
+@cocotb.test()
 async def segment_restart_keeps_the_first_sample(dut):
     """The first sample after a segment completes can trigger the next one.
     With pretrigger 0, post 3 and a trigger on low bits == 3, every segment's
@@ -1076,6 +1133,73 @@ async def deep_timestamp_base_does_not_alias_data(dut):
 
 
 @cocotb.test()
+async def data_offset_moves_the_window(dut):
+    """DATA_OFFSET moves every DATA / timestamp window read by its value in
+    words: the DATA words, then the timestamp words, then 0."""
+    assert TIMESTAMP_W == 32
+    ela = await setup(dut)
+    assert await ela.read(ADDR_COMPARE_CAPS) & (1 << 20)
+    await ela.configure_value_capture(pre=1, post=4, value=8)
+    await ela.arm()
+    await ela.drive_counter(30)
+    assert await ela.wait_done(250) & 0x4
+    data = [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(6)]
+    ts = [await ela.read(ADDR_TS_DATA_BASE + 4 * i) for i in range(6)]
+    assert [d & 0xFF for d in data] == list(range(7, 13))
+    total = DEPTH * (WORDS_PER_SAMPLE + 1)
+
+    await ela.write(ADDR_DATA_OFFSET, 2)
+    assert await ela.read(ADDR_DATA_OFFSET) == 2
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(4)] == data[2:6]
+    # The timestamp window's own addresses move too.
+    assert await ela.read(ADDR_TS_DATA_BASE) == ts[2]
+    # Into the timestamp window from the DATA window's addresses.
+    await ela.write(ADDR_DATA_OFFSET, DEPTH * WORDS_PER_SAMPLE + 1)
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(3)] == ts[1:4]
+    # Past both windows: 0, however large the offset.
+    for offset in (total, total + 7, 0xFFFF_FFFF):
+        await ela.write(ADDR_DATA_OFFSET, offset)
+        assert await ela.read(ADDR_DATA_OFFSET) == offset
+        assert await ela.read(ADDR_DATA_BASE) == 0
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(6)] == data
+
+    # A host that never writes DATA_OFFSET arms or resets before reading, and
+    # either clears an offset another session left (BUG-236).
+    for ctrl in (0x2, 0x1, 0x3):
+        await ela.write(ADDR_DATA_OFFSET, 5)
+        await ela.write(ADDR_CTRL, ctrl)
+        assert await ela.read(ADDR_DATA_OFFSET) == 0, f"CTRL {ctrl:#x} kept DATA_OFFSET"
+    # Other CTRL writes leave it.
+    await ela.write(ADDR_DATA_OFFSET, 5)
+    await ela.write(ADDR_CTRL, 0)
+    assert await ela.read(ADDR_DATA_OFFSET) == 5
+    await ela.write(ADDR_DATA_OFFSET, 0)
+
+
+@cocotb.test()
+async def data_offset_reaches_deep_timestamps(dut):
+    """256 x 2048: no 16-bit address reaches the timestamp window (0x10100);
+    DATA_OFFSET does."""
+    assert TIMESTAMP_W > 0 and ADDR_TS_DATA_BASE > 0xFFFF
+    ela = await setup(dut)
+    await ela.configure_value_capture(pre=0, post=3, value=0x33, mask=0xFF)
+    await ela.arm()
+    ela.dut.probe_in.value = 0x33
+    await ela.wait_sample(8)
+    assert await ela.wait_done() & 0x4
+    await ela.write(ADDR_DATA_OFFSET, DEPTH * WORDS_PER_SAMPLE)
+    ts = [await ela.read(ADDR_DATA_BASE + 4 * i) for i in range(4)]
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert [b - a for a, b in zip(ts, ts[1:])] == [1, 1, 1], ts
+    # A sample word read through the offset matches its window address.
+    await ela.write(ADDR_DATA_OFFSET, 2 * WORDS_PER_SAMPLE)
+    moved = await ela.read(ADDR_DATA_BASE)
+    await ela.write(ADDR_DATA_OFFSET, 0)
+    assert moved == await ela.read(ADDR_DATA_BASE + 2 * WORDS_PER_SAMPLE * 4)
+
+
+@cocotb.test()
 async def wide_trigger_upper_bit(dut):
     """WIDE_TRIG: program comparator A above bit 31 through the WIDE window and
     prove the trigger fires on a high bit the 32-bit register path can't reach.
@@ -1116,7 +1240,7 @@ async def wide_trigger_upper_bit(dut):
 async def config_minimal(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_FEATURES) == 0x0001_0101
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004A_01C3
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x007A_01C3
     disabled_regs = (
         ADDR_SQ_MODE, ADDR_SQ_VALUE, ADDR_SQ_MASK,
         ADDR_CHAN_SEL, ADDR_DECIM, ADDR_TRIG_EXT,
@@ -1137,13 +1261,17 @@ async def config_user1_disabled(dut):
     await ela.drive_counter(20)
     assert await ela.wait_done() & 0x4
     assert await ela.read(ADDR_DATA_BASE) == 0
+    # No window, so no DATA_OFFSET either.
+    assert not await ela.read(ADDR_COMPARE_CAPS) & (1 << 20)
+    await ela.write(ADDR_DATA_OFFSET, 5)
+    assert await ela.read(ADDR_DATA_OFFSET) == 0
     FUNCTIONAL_COVERAGE.hit("user1_disabled")
 
 
 @cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004A_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x007A_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1002)
@@ -1165,7 +1293,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x004B_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x007B_01FF
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 2)  # NEQ

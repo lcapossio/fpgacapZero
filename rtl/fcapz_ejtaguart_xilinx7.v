@@ -37,7 +37,8 @@ module fcapz_ejtaguart_xilinx7 #(
     jtag_tap_xilinx7 #(.CHAIN(JTAG_CHAIN)) u_tap (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
         .capture(tap_capture), .shift(tap_shift),
-        .update(tap_update), .sel(tap_sel)
+        .update(tap_update), .sel(tap_sel),
+        .tlr()
     );
 
     // ---- JTAG-to-UART core ----

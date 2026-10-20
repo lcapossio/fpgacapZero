@@ -136,6 +136,11 @@ module fcapz_ela #(
     // {word index, value-or-mask}, then WIDE_DATA to load that 32-bit word.
     localparam ADDR_WIDE_SEL    = 16'h00E4;  // RW: [0]=mask(1)/value(0), [7:4]=word
     localparam ADDR_WIDE_DATA   = 16'h00F0;  // WO: 32-bit word -> selected slot
+    // RW (USER1_DATA_EN): word offset added to every DATA / timestamp window
+    // read, so a host can page through windows the 16-bit address cannot reach.
+    localparam ADDR_DATA_OFFSET = 16'h00F4;
+    // RO: [15:0] capture generation (COMPARE_CAPS bit 21); see capture_gen.
+    localparam ADDR_CAPTURE_GEN = 16'h00F8;
     // Run-length capture (RLE_W > 0).  RLE_CTRL[0] enables it (taken on
     // arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
     localparam ADDR_RLE_CTRL    = 16'h00A8;  // RW
@@ -257,6 +262,10 @@ module fcapz_ela #(
     localparam TS_WORDS = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 0;
     localparam TS_WORDS_SAFE = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 1;
     localparam AUX_WORDS_SAFE = HAS_AUX ? ((AUX_W + 31) / 32) : 1;
+    // Words in the DATA window and the auxiliary (timestamp / run count)
+    // window after it.
+    localparam DATA_WINDOW_WORDS = DEPTH * WORDS_PER_SAMPLE
+                                 + (HAS_AUX ? DEPTH * AUX_WORDS_SAFE : 0);
 
     // Probe mux derived params
     localparam PROBE_MUX_SLICES = (PROBE_MUX_W > 0) ? (PROBE_MUX_W / SAMPLE_W) : 0;
@@ -276,6 +285,8 @@ module fcapz_ela #(
         (HAS_DUAL_COMPARE ? 32'h0001_0000 : 32'h0000_0000) |
         (HAS_WIDE_TRIG ? 32'h0004_0000 : 32'h0000_0000) |  // bit18: wide comparator A
         32'h0008_0000 |  // bit19: timestamp window base decoded at full width
+        (HAS_USER1_DATA ? 32'h0010_0000 : 32'h0000_0000) |  // bit20: DATA_OFFSET
+        32'h0020_0000 |  // bit21: CAPTURE_GEN
         32'h0040_0000;   // bit22: SQ_MODE is compare mode + 1
 
     // ---- Compare mode encoding -----------------------------------------------
@@ -679,6 +690,32 @@ module fcapz_ela #(
     reg                 datawin_oob_q;
     reg                 datawin_is_ts_q;
     reg [31:0]          datawin_chunk_q;
+    reg [31:0]          jtag_data_offset;
+
+    // ---- Capture generation -------------------------------------------------
+    // Counts every CTRL write that arms or resets the core and every release
+    // of the register-side reset: each one can start a capture that
+    // overwrites the buffer.  A host reads it before and after a readout, and
+    // after its own arm, to tell that the samples it read are the capture it
+    // armed.  Never reset; power-up value only.  STARTUP_ARM arms and segment
+    // re-arms are not counted: the first follows a counted reset, and the
+    // second fill the segments of one capture.  A release and a write in the
+    // same cycle count two.
+    reg [15:0] capture_gen;
+    reg        capture_gen_rst_d;
+    initial begin
+        capture_gen = 16'h0;
+        capture_gen_rst_d = 1'b0;
+    end
+    wire capture_gen_release = capture_gen_rst_d && !jtag_rst;
+    wire capture_gen_write   = jtag_wr_en && !jtag_rst && jtag_addr == ADDR_CTRL
+                               && (jtag_wdata[0] || jtag_wdata[1]);
+    always @(posedge jtag_clk) begin
+        capture_gen_rst_d <= jtag_rst;
+        if (capture_gen_release || capture_gen_write)
+            capture_gen <= capture_gen
+                + ((capture_gen_release && capture_gen_write) ? 16'd2 : 16'd1);
+    end
 
     // ---- Trigger logic (combinational) -------------------------------------
     wire arm_pulse   = arm_toggle_sync3 ^ arm_toggle_sync4;
@@ -913,6 +950,14 @@ module fcapz_ela #(
     wire jtag_rd_data_window = HAS_USER1_DATA && (
         (jtag_addr >= ADDR_DATA_BASE) ||
         (HAS_AUX && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
+
+    // The window address DATA_OFFSET moves a read to.  An offset past the
+    // windows moves it to the word just past them, which reads 0.
+    wire [31:0] datawin_offset = (jtag_data_offset >= DATA_WINDOW_WORDS)
+        ? DATA_WINDOW_WORDS : jtag_data_offset;
+    wire [31:0] datawin_addr = (jtag_addr >= ADDR_DATA_BASE)
+        ? ADDR_DATA_BASE + ((({16'h0, jtag_addr} - ADDR_DATA_BASE) >> 2) + datawin_offset) * 4
+        : {16'h0, jtag_addr};
     assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
@@ -934,7 +979,7 @@ module fcapz_ela #(
     endgenerate
 
     always @(*) begin
-        datawin_is_ts_comb = HAS_AUX && ({16'h0, jtag_addr} >= ADDR_TS_DATA_BASE);
+        datawin_is_ts_comb = HAS_AUX && (datawin_addr >= ADDR_TS_DATA_BASE);
         datawin_oob_comb = 1'b0;
         datawin_mem_addr_comb = {PTR_W{1'b0}};
         datawin_chunk_comb = 32'h0;
@@ -944,11 +989,11 @@ module fcapz_ela #(
         datawin_seg_base_comb = datawin_seg_base_w;
 
         if (datawin_is_ts_comb) begin
-            datawin_word_index_comb = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;
+            datawin_word_index_comb = (datawin_addr - ADDR_TS_DATA_BASE) >> 2;
             datawin_sample_index_comb = datawin_word_index_comb / AUX_WORDS_SAFE;
             datawin_chunk_comb = datawin_word_index_comb % AUX_WORDS_SAFE;
         end else begin
-            datawin_word_index_comb = (jtag_addr - ADDR_DATA_BASE) >> 2;
+            datawin_word_index_comb = (datawin_addr - ADDR_DATA_BASE) >> 2;
             datawin_sample_index_comb = datawin_word_index_comb / WORDS_PER_SAMPLE;
             datawin_chunk_comb = datawin_word_index_comb % WORDS_PER_SAMPLE;
         end
@@ -1009,6 +1054,7 @@ module fcapz_ela #(
             // (word 0 = the 32-bit value/mask defaults, upper words = 0 so the
             // upper sample bits are don't-care until the host programs them).
             jtag_wide_sel <= 8'h0;
+            jtag_data_offset <= 32'h0;
             for (s = 0; s < WORDS_PER_SAMPLE; s = s + 1) begin
                 wide_va[s] <= 32'h0;
                 wide_ma[s] <= (s == 0) ? 32'hFFFF_FFFF : 32'h0;
@@ -1020,6 +1066,10 @@ module fcapz_ela #(
                         jtag_ctrl <= jtag_wdata;
                         if (jtag_wdata[0]) arm_toggle_jtag <= ~arm_toggle_jtag;
                         if (jtag_wdata[1]) reset_toggle_jtag <= ~reset_toggle_jtag;
+                        // Every host arms or resets before a capture, so a
+                        // DATA_OFFSET left by a session that died while
+                        // paging cannot shift the next one's reads.
+                        if (jtag_wdata[0] || jtag_wdata[1]) jtag_data_offset <= 32'h0;
                         // Arm and reset return the DATA window to timestamps.
                         if (jtag_wdata[0] || jtag_wdata[1]) jtag_rle_ctrl[1] <= 1'b0;
                     end
@@ -1053,6 +1103,7 @@ module fcapz_ela #(
                     ADDR_TRIG_HOLDOFF: jtag_trig_holdoff <= jtag_wdata[15:0];
                     ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
                     ADDR_SEG_SEL:    if (HAS_SEGMENTS) jtag_seg_sel <= jtag_wdata[SEG_IDX_W-1:0];
+                    ADDR_DATA_OFFSET: if (HAS_USER1_DATA) jtag_data_offset <= jtag_wdata;
                     ADDR_BURST_PTR: begin
                         // Use the completed-capture snapshot; start pointers
                         // are written in sample_clk and must not feed USER2
@@ -2065,6 +2116,8 @@ module fcapz_ela #(
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
             ADDR_WIDE_SEL:    jtag_rdata_mux = HAS_WIDE_TRIG ? {24'h0, jtag_wide_sel} : 32'h0;
+            ADDR_DATA_OFFSET: jtag_rdata_mux = jtag_data_offset;
+            ADDR_CAPTURE_GEN: jtag_rdata_mux = {16'h0, capture_gen};
             ADDR_RLE_CTRL:    jtag_rdata_mux = HAS_RLE ? {30'h0, jtag_rle_ctrl} : 32'h0;
             ADDR_RLE_W:       jtag_rdata_mux = RLE_W;
             ADDR_RLE_POST_CLKS: jtag_rdata_mux = HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};

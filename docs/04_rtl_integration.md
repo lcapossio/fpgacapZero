@@ -332,7 +332,7 @@ module fcapz_ela_xilinx7 #(
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
-| `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_xilinx7` only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility. |
+| `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_*` wrappers only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility; `NUM_ELAS=0` with `NUM_EIOS>0` builds an EIO-only hub. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
@@ -431,9 +431,10 @@ eio.write_outputs(0x1)
 - You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
   `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
   USER chain).
-- For multiple ELAs plus EIO on one AMD/Xilinx 7-series chain, prefer
-  `fcapz_debug_multi_xilinx7`; it uses the descriptor-capable `"CM"`
-  active-slot manager instead of the older fixed `0x8000` EIO address window.
+- For multiple ELAs plus EIO on one chain, prefer the
+  `fcapz_debug_multi_<vendor>` hub (`xilinx7`, `xilinxus`, `intel`); it uses
+  the descriptor-capable `"CM"` active-slot manager instead of the older fixed
+  `0x8000` EIO address window.
 
 ## EIO wrapper parameter reference
 
