@@ -1664,6 +1664,7 @@ class TapBridgeTransport(Transport):
 
     def close(self) -> None:
         if self._open_channel:
+            self._release_ownership_on_close()
             try:
                 self._close()
             except Exception:  # pragma: no cover - best effort

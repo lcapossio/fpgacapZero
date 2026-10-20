@@ -1024,3 +1024,41 @@ def test_rpc_serial_target_is_its_port():
     assert srv._same_target({"serial_port": " COM16 "})
     assert not srv._same_target({"serial_port": "COM17"})
     assert not srv._same_target({"backend": "hw_server"})
+
+
+def test_rpc_eio_needing_its_own_serial_transport_is_refused_plainly():
+    """An EIO on another chain, no slot named, would open the port a second
+    time: refuse it with our message, not the OS's."""
+    srv = _rpc_server()
+    srv._analyzer = types.SimpleNamespace(bscan_chain=1, transport=None)
+    srv._analyzer_target = {"backend": "serial", "serial_port": "COM16"}
+    with pytest.raises(ValueError, match="side connections"):
+        srv.handle(
+            {"cmd": "eio_connect", "backend": "serial", "serial_port": "COM16", "chain": 3}
+        )
+
+
+def test_discovery_never_probes_the_burst_chain(fake_serial, monkeypatch):
+    """Not even when the caller names it: a scan there is the wrong
+    protocol, and burst data can look like a core."""
+    from fcapz import discovery
+
+    t, _ = _connect(fake_serial)
+    probed = []
+    monkeypatch.setattr(
+        discovery, "register_pipe_identity", lambda tr, chain: probed.append(chain)
+    )
+    monkeypatch.setattr(
+        discovery, "_bridge_entry", lambda tr, chain: probed.append(("bridge", chain))
+    )
+    discovery.discover_cores(t, chains=(1, 2))
+    assert probed == [1, ("bridge", 1)]
+
+
+def test_close_releases_manager_ownership(fake_serial, monkeypatch):
+    t, _ = _connect(fake_serial)
+    released = []
+    monkeypatch.setattr(t, "_release_ownership_on_close", lambda: released.append(1))
+    t.close()
+    t.close()
+    assert released == [1]

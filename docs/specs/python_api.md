@@ -2269,7 +2269,9 @@ and `instance` is the manager slot or `None`.  A manager's active slot
 is left as it was found.  Set *bridges* to `False` to skip the bridge
 identity reads on chains no register core answered.  Chains the transport
 cannot select, such as a missing `sld_virtual_jtag` instance, are
-skipped; connection errors propagate.  Chain 1 is selected on return.
+skipped, and so are its `unprobeable_chains` (a TAP bridge's burst
+data chain), even when named in *chains*; connection errors propagate.
+Chain 1 is selected on return.
 
 ## `fcapz.eio`
 

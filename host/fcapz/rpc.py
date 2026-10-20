@@ -1387,7 +1387,8 @@ class RpcServer:
                 # session's, as for the comparison (BUG-243).
                 target_req = self._with_session_target(req)
             eio = EioController(
-                self._analyzer.transport if shared else self._new_transport(target_req),
+                self._analyzer.transport if shared
+                else self._new_transport(target_req, side=True),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
@@ -1443,7 +1444,7 @@ class RpcServer:
                 )
             # Another board: the fields the request leaves out are the
             # session's, as for the comparison.
-            transport = self._new_transport(self._with_session_target(req))
+            transport = self._new_transport(self._with_session_target(req), side=True)
             try:
                 transport.connect()
                 chains = req.get("chains")
