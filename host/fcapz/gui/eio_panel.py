@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from ..eio import EioController
 from ..transport import Transport
-from .jtag_chain_scope import subsidiary_jtag_chain
+from .jtag_chain_scope import JtagBusyError, subsidiary_jtag_chain
 
 _MAX_BITS_UI = 32
 _POLL_MS_PRESETS = (25, 50, 100, 250, 500, 1000)
@@ -410,9 +410,13 @@ class EioPanel(QGroupBox):
         if self._eio is None or self._transport is None:
             return
         try:
-            with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain):
+            # A capture holds the transport for its whole wait: skip the tick
+            # rather than block the window behind it.
+            with subsidiary_jtag_chain(self._transport, self._eio.bscan_chain, timeout=0):
                 inv = self._eio.read_inputs()
                 outv = self._eio.read_outputs()
+        except JtagBusyError:
+            return
         except OSError as exc:
             self._poll_timer.stop()
             self._poll_enable.setChecked(False)

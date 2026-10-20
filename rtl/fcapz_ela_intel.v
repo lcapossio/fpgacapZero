@@ -33,7 +33,8 @@ module fcapz_ela_intel #(
     parameter DATA_CHAIN  = 2,   // BSCANE2 USER chain for burst data
     parameter REL_COMPARE = 0,
     parameter DUAL_COMPARE = 1,
-    parameter USER1_DATA_EN = 1
+    parameter USER1_DATA_EN = 1,
+    parameter RLE_W = 0  // 0=no run-length capture, 1..16=run-count width
 ) (
     input  wire                          sample_clk,
     input  wire                          sample_rst,
@@ -65,7 +66,9 @@ module fcapz_ela_intel #(
     wire [PTR_W-1:0]    burst_rd_addr;
     wire                burst_rd_active;
     wire [SAMPLE_W-1:0] burst_rd_data;
-    wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data;
+    // Aux lane: timestamps, or run counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    wire [((AUX_W > 0) ? AUX_W : 1)-1:0] burst_rd_ts_data;
     wire                burst_start;
     wire                burst_timestamp;
     wire [PTR_W-1:0]    burst_start_ptr;
@@ -76,13 +79,15 @@ module fcapz_ela_intel #(
     jtag_tap_intel #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
         .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
         .capture(tap1_capture), .shift(tap1_shift),
-        .update(tap1_update), .sel(tap1_sel)
+        .update(tap1_update), .sel(tap1_sel),
+        .tlr()
     );
 
     jtag_tap_intel #(.CHAIN(DATA_CHAIN)) u_tap_data (
         .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
         .capture(tap2_capture), .shift(tap2_shift),
-        .update(tap2_update), .sel(tap2_sel)
+        .update(tap2_update), .sel(tap2_sel),
+        .tlr()
     );
 
     reset_sync u_rst_sync_ctrl (
@@ -118,7 +123,7 @@ module fcapz_ela_intel #(
         .TIMESTAMP_W(TIMESTAMP_W), .NUM_SEGMENTS(NUM_SEGMENTS),
         .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
         .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
-        .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN)
+        .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN), .RLE_W(RLE_W)
     ) u_ela (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
@@ -138,7 +143,7 @@ module fcapz_ela_intel #(
 
     // ---- Burst read engine ----
     jtag_burst_read #(
-        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(TIMESTAMP_W),
+        .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(AUX_W),
         .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
     ) u_burst (
         .arst(jtag_rst_data),

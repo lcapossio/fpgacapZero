@@ -21,7 +21,8 @@ entity fcapz_ela_intel is
         DATA_CHAIN   : positive := 2;
         REL_COMPARE  : natural := 0;
         DUAL_COMPARE : natural := 1;
-        USER1_DATA_EN : natural := 1
+        USER1_DATA_EN : natural := 1;
+        RLE_W         : natural := 0   -- 0 = no run-length capture, 1..16 = run-count width
     );
     port (
         sample_clk : in  std_logic;
@@ -32,7 +33,9 @@ end entity fcapz_ela_intel;
 
 architecture rtl of fcapz_ela_intel is
     constant PTR_W     : positive := fcapz_clog2(DEPTH);
-    constant TS_W_SAFE : positive := fcapz_nonzero_width(TIMESTAMP_W);
+    -- Aux lane: timestamps, or run counts on a core without timestamps.
+    constant AUX_W      : natural := fcapz_ela_aux_w(TIMESTAMP_W, RLE_W);
+    constant AUX_W_SAFE : positive := fcapz_nonzero_width(AUX_W);
 
     signal tap1_tck, tap1_tdi, tap1_tdo : std_logic;
     signal tap1_capture, tap1_shift, tap1_update, tap1_sel : std_logic;
@@ -44,7 +47,7 @@ architecture rtl of fcapz_ela_intel is
     signal burst_rd_addr : std_logic_vector(PTR_W - 1 downto 0);
     signal burst_rd_active : std_logic;
     signal burst_rd_data : std_logic_vector(SAMPLE_W - 1 downto 0);
-    signal burst_rd_ts_data : std_logic_vector(TS_W_SAFE - 1 downto 0);
+    signal burst_rd_ts_data : std_logic_vector(AUX_W_SAFE - 1 downto 0);
     signal burst_start, burst_timestamp : std_logic;
     signal burst_start_ptr : std_logic_vector(PTR_W - 1 downto 0);
     signal jtag_rst_ctrl, jtag_rst_data : std_logic;
@@ -90,7 +93,7 @@ begin
             TRIG_STAGES => TRIG_STAGES, STOR_QUAL => STOR_QUAL,
             INPUT_PIPE => INPUT_PIPE, NUM_CHANNELS => NUM_CHANNELS,
             TIMESTAMP_W => TIMESTAMP_W, REL_COMPARE => REL_COMPARE,
-            DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN
+            DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN, RLE_W => RLE_W
         )
         port map (
             sample_clk => sample_clk, sample_rst => sample_rst,
@@ -109,7 +112,7 @@ begin
 
     u_burst : entity work.jtag_burst_read
         generic map (
-            SAMPLE_W => SAMPLE_W, TIMESTAMP_W => TIMESTAMP_W,
+            SAMPLE_W => SAMPLE_W, TIMESTAMP_W => AUX_W,
             DEPTH => DEPTH, BURST_W => BURST_W, SEG_DEPTH => DEPTH
         )
         port map (

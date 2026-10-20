@@ -18,7 +18,7 @@ entity BSCANE2 is
         SEL     : out std_logic;
         DRCK    : out std_logic;
         RUNTEST : out std_logic;
-        RESET   : out std_logic
+        RESET   : out std_logic := '0'
     );
 end entity BSCANE2;
 

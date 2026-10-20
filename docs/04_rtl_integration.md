@@ -29,7 +29,8 @@ features they expose.
 |---|---|---|
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
 | AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
-| AMD/Xilinx Artix / Kintex / Virtex / Zynq UltraScale+ | `_xilinxus` | ❌ same as above |
+| AMD/Xilinx Zynq UltraScale+ MPSoC | `_xilinxus` | ✅ Kria KV260 (`xck26`) over hw_server `-register` mode |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `_xilinxus` | ❌ same shim, not yet HW-validated on a standalone part |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
 | Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
@@ -53,9 +54,15 @@ Wrapper coverage is currently lighter than core coverage. The lint target
 elaborates the vendor wrappers and catches parameter/port drift, while the
 Arty A7 hardware test validates the AMD/Xilinx 7-series reference bitstream and
 the BRS-100 smoke/stress path validates the Gowin wrapper. The DE25-Nano
-and PolarFire SoC Discovery Kit tests validate the Intel and PolarFire
-wrappers. ECP5 and UltraScale wrappers should be treated as RTL-implemented
-and lint-clean until a board-level smoke test is added for that family.
+test validates the Intel wrapper, and the PolarFire SoC Discovery Kit test
+validates the PolarFire wrapper. The Kria KV260 test
+([`examples/kv260`](../examples/kv260/)) validates Zynq UltraScale+ MPSoC: the
+`_xilinxus` JTAG-UART and AXI bridge, and the `_xilinx7` multi-core manager
+(4-stage sequencer, storage qualification, relational compares) and AXI
+monitor, all on `xck26` over hw_server's `-register` mode. ECP5 and
+standalone Kintex / Virtex UltraScale(+) wrappers should be treated as
+RTL-implemented and lint-clean until a board-level smoke test is added for
+that family.
 
 > [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
@@ -296,7 +303,8 @@ module fcapz_ela_xilinx7 #(
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
     parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,     // 0=disable slow USER1 DATA window readback
-    parameter WIDE_TRIG    = 0       // 1=comparator A programmable across full SAMPLE_W
+    parameter WIDE_TRIG    = 0,      // 1=comparator A programmable across full SAMPLE_W
+    parameter RLE_W        = 0       // 0=off, 1..16=run-length capture count width
 ) ( ... );
 ```
 
@@ -311,6 +319,7 @@ module fcapz_ela_xilinx7 #(
 | `DECIM_EN` | bit | 0/1 | Enables the `--decimation` runtime option.  +24-bit divider.  Free if disabled. |
 | `EXT_TRIG_EN` | bit | 0/1 | Enables `trigger_in` / `trigger_out` ports.  Free if disabled. |
 | `TIMESTAMP_W` | int | 0, 32, 48 | Per-sample timestamp counter width.  `0` = off (no timestamps in capture results); `32` or `48` enable a parallel timestamp BRAM the same depth as the sample BRAM.  +1 BRAM.  The wrapper propagates `TIMESTAMP_W` into the burst read engine so it knows how many timestamps fit per 256-bit scan and can serve timestamp bursts when `BURST_PTR[31]=1`. |
+| `RLE_W` | int | 0, 1..16 | Run-length capture: a parallel count RAM (`DEPTH x RLE_W`) lets one buffer entry hold a sample and how many clocks it repeated, up to `2^RLE_W`. `0` (default) builds none of it. With timestamps, `RLE_W` must not exceed `TIMESTAMP_W`; the counts share the timestamp burst lane. The post-trigger clock limit adds about 5 x `min(32, clog2(DEPTH+1) + RLE_W)` flip-flops, plus 3 x `NUM_SEGMENTS` x `clog2(DEPTH+1)` with segments. See [Run-length capture](05_ela_core.md#run-length-capture). |
 | `NUM_SEGMENTS` | int | 1..16, **power of 2 dividing DEPTH** | Splits the buffer into N segments and auto-rearms after each segment fills.  Useful for capturing multiple trigger events in one run. |
 | `PROBE_MUX_W` | int | 0 or N×SAMPLE_W | Runtime probe mux: connect a wide bus and runtime-select a SAMPLE_W slice via the `PROBE_SEL` register.  `0` disables the feature. |
 | `STARTUP_ARM` | bit | 0/1 | Power-up default for the `STARTUP_ARM` register. When `1`, the core leaves reset already armed, which is handy for captures that need to begin immediately after configuration. |
@@ -326,7 +335,7 @@ module fcapz_ela_xilinx7 #(
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `IR_USER1` / `IR_USER2` | 8-bit | `0x10..0x7F` | PolarFire wrappers only, in place of `CTRL_CHAIN` / `DATA_CHAIN`: the `UJTAG` IR opcodes of the two chains. Default `0x20` / `0x21`, clear of the PolarFire SoC MSS debug module at `0x10` / `0x11`. |
 | `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
-| `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_xilinx7` only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility. |
+| `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_*` wrappers only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility; `NUM_ELAS=0` with `NUM_EIOS>0` builds an EIO-only hub. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
 
@@ -376,8 +385,8 @@ Two cases to use this mode:
    IR mode.**  Through xsdb, raw hex IR opcodes reach only USER1 on
    these parts (USER2..USER4 alias to USER1 or put the TAP in BYPASS).
    The hw_server transport's named-register mode
-   (`use_register_ir=True`, which `fcapz --tap xck…` / `--tap xczu…`
-   selects automatically) reaches all four USER chains, so a standalone
+   (`use_register_ir=True`, which a tap named `xck…` / `xczu…`
+   selects automatically in the CLI, GUI, RPC server and MCP server) reaches all four USER chains, so a standalone
    `fcapz_eio_xilinxus` works there — see [chapter 14 "Zynq UltraScale+
    MPSoC — how the JTAG chain works with xsdb"](14_transports.md#zynq-ultrascale-mpsoc--how-the-jtag-chain-works-with-xsdb).
    Only when you drive the PL TAP without that mode, set `EIO_EN=1` on
@@ -425,9 +434,10 @@ eio.write_outputs(0x1)
 - You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
   `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
   USER chain).
-- For multiple ELAs plus EIO on one AMD/Xilinx 7-series chain, prefer
-  `fcapz_debug_multi_xilinx7`; it uses the descriptor-capable `"CM"`
-  active-slot manager instead of the older fixed `0x8000` EIO address window.
+- For multiple ELAs plus EIO on one chain, prefer the
+  `fcapz_debug_multi_<vendor>` hub (`xilinx7`, `xilinxus`, `intel`); it uses
+  the descriptor-capable `"CM"` active-slot manager instead of the older fixed
+  `0x8000` EIO address window.
 
 ## EIO wrapper parameter reference
 

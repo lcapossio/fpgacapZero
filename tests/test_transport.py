@@ -115,44 +115,63 @@ class XsdbTargetParserTests(unittest.TestCase):
         """
         self.assertEqual(parse_xsdb_jtag_targets(raw), ["xck26"])
 
-    @patch("shutil.which", return_value="xsdb")
-    @patch("subprocess.run")
-    def test_list_jtag_targets_uses_minimal_scan_script(
-        self,
-        run_mock: MagicMock,
-        _which_mock: MagicMock,
-    ) -> None:
+    @staticmethod
+    def _xsdb_proc(stdout: str) -> MagicMock:
         proc = MagicMock()
         proc.returncode = 0
-        proc.stdout = "  1  jsn-JTAG-HS3-210299\n* 2  xck26\n"
-        proc.stderr = ""
-        run_mock.return_value = proc
+        proc.communicate.return_value = (stdout, "")
+        return proc
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_uses_minimal_scan_script(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = self._xsdb_proc("  1  jsn-JTAG-HS3-210299\n* 2  xck26\n")
+        popen_mock.return_value = proc
 
         self.assertEqual(
             list_xilinx_hw_server_targets(host="localhost", port=3121),
             ["jsn-JTAG-HS3-210299", "xck26"],
         )
 
-        script = run_mock.call_args.kwargs["input"]
+        script = proc.communicate.call_args.args[0]
         self.assertIn("connect -url tcp:localhost:3121", script)
         self.assertIn("puts [jtag targets]", script)
         self.assertNotIn("configparams", script)
 
     @patch("shutil.which", return_value="xsdb")
-    @patch("subprocess.run")
+    @patch("subprocess.Popen")
     def test_list_jtag_targets_rejects_autolaunch_without_target_output(
         self,
-        run_mock: MagicMock,
+        popen_mock: MagicMock,
         _which_mock: MagicMock,
     ) -> None:
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.stdout = "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
-        proc.stderr = ""
-        run_mock.return_value = proc
+        popen_mock.return_value = self._xsdb_proc(
+            "INFO: To connect to this hw_server instance use url: TCP:127.0.0.1:3121\n"
+        )
 
         with self.assertRaisesRegex(RuntimeError, "launched hw_server"):
             list_xilinx_hw_server_targets(host="localhost", port=3121)
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_registers_a_handle_that_kills_xsdb(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        proc = self._xsdb_proc("* 1  xck26\n")
+        popen_mock.return_value = proc
+        handles: list = []
+
+        list_xilinx_hw_server_targets(host="localhost", port=3121, register=handles.append)
+
+        self.assertEqual(len(handles), 1)
+        handles[0].cancel()
+        proc.kill.assert_called_once()
 
 # ---------------------------------------------------------------------------
 # Transport ABC contract
@@ -365,7 +384,8 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         )
 
     def test_read_reg_sends_two_scans(self):
-        """read_reg() issues irscan + drscan + runtest + irscan + drscan."""
+        """read_reg() is one command line: irscan + drscan + runtest + irscan
+        + drscan, so no other OpenOCD client's scans land in between."""
         cmds: list[str] = []
 
         def fake_cmd(tcl: str) -> str:
@@ -377,13 +397,12 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t._cmd = fake_cmd  # type: ignore[method-assign]
         t.read_reg(0x0000)
 
-        # Expect: irscan, drscan (issue), runtest, irscan, drscan (capture)
-        self.assertEqual(len(cmds), 5)
-        self.assertTrue(any("irscan" in c for c in cmds))
-        self.assertTrue(any("runtest" in c for c in cmds))
+        self.assertEqual(len(cmds), 1)
+        parts = [c.split()[0] for c in cmds[0].split("; ")]
+        self.assertEqual(parts, ["irscan", "drscan", "runtest", "irscan", "drscan"])
 
     def test_write_reg_sends_one_scan_pair(self):
-        """write_reg() issues irscan + drscan (write-only, no runtest loop)."""
+        """write_reg() is one line: irscan + drscan (no runtest)."""
         cmds: list[str] = []
 
         def fake_cmd(tcl: str) -> str:
@@ -394,9 +413,11 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t._cmd = fake_cmd  # type: ignore[method-assign]
         t.write_reg(0x0028, 0xDEADBEEF)
 
-        self.assertEqual(len(cmds), 2)
-        self.assertTrue(any("irscan" in c for c in cmds))
-        self.assertFalse(any("runtest" in c for c in cmds))
+        self.assertEqual(len(cmds), 1)
+        frame = (1 << 48) | (0x0028 << 32) | 0xDEADBEEF
+        self.assertEqual(
+            cmds[0], f"irscan {t.tap} 2; drscan {t.tap} 49 0x{frame:013x}"
+        )
 
     def test_drscan_non_hex_response_raises_runtime_error(self):
         """OpenOCD errors should not leak raw int(..., 16) ValueError text."""
@@ -420,6 +441,26 @@ class QuartusStpTransportTests(unittest.TestCase):
         for idx, value in enumerate(values):
             packed |= (value & mask) << (idx * element_width)
         return f"{packed:0256b}"
+
+    def test_quartus_burst_unpacks_widths_that_do_not_divide_the_scan(self):
+        for width in (9, 24, 26, 27, 31):
+            with self.subTest(width=width):
+                per_scan = 256 // width
+                values = [((1 << width) - 1) ^ i for i in range(2 * per_scan)]
+                prime = self._quartus_burst_token([0] * per_scan, width)
+                tokens = [prime] + [
+                    self._quartus_burst_token(values[i:i + per_scan], width)
+                    for i in range(0, len(values), per_scan)
+                ]
+
+                class FakeQuartus(QuartusStpTransport):
+                    def read_reg(self, addr, w=width):
+                        return w if addr == 0x000C else 0
+
+                    def _send(self, script, out=" ".join(tokens)):
+                        return out
+
+                self.assertEqual(FakeQuartus()._read_block_burst(len(values)), values)
 
     def test_find_quartus_stp_explicit_passthrough(self):
         self.assertEqual(find_quartus_stp("/x/quartus_stp"), "/x/quartus_stp")
@@ -506,9 +547,32 @@ class QuartusStpTransportTests(unittest.TestCase):
         # Burst scans must target the active control chain, not the ELA's chain 2.
         self.assertIn("-instance_index 5", t.last_script)
         self.assertNotIn("-instance_index 2", t.last_script)
-        # One 256-bit DR scan per sample plus one prime scan; one 49-bit BURST_PTR write.
+        # One 256-bit DR scan per sample plus one prime scan; one 49-bit
+        # BURST_PTR write, and after the scans the 49-bit drain read.
         self.assertEqual(t.last_script.count("-length 256"), len(samples) + 1)
-        self.assertEqual(t.last_script.count("-length 49"), 1)
+        self.assertEqual(t.last_script.count("-length 49"), 2)
+        drain = t.last_script.index("__fcapz_drain_discard")
+        self.assertGreater(drain, t.last_script.rindex("-length 256"))
+
+    def test_read_sample_block_single_chain_packs_narrow_samples_at_their_width(self):
+        # A managed 24-bit ELA: ten samples per 256-bit scan at 24-bit offsets
+        # (jtag_pipe_iface), so twelve samples take two scans after the prime.
+        samples = [0xA00000 + i for i in range(12)]
+        scans = [0, 0]
+        for i, s in enumerate(samples):
+            scans[i // 10] |= s << (24 * (i % 10))
+        payload = " ".join(["0" * 256] + [f"{v:0256b}" for v in scans])
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                self.last_script = script
+                return payload
+
+        t = FakeQuartus()
+        t.select_chain(1)  # the manager's instance
+        self.assertEqual(t.read_sample_block(0x0100, len(samples), 24), samples)
+        self.assertNotIn("-instance_index 2", t.last_script)
+        self.assertEqual(t.last_script.count("-length 256"), 3)
 
     def test_read_sample_block_single_chain_short_reply_is_an_integrity_error(self):
         # Prime scan plus one sample scan, but two samples requested.
@@ -646,17 +710,20 @@ class QuartusStpTransportTests(unittest.TestCase):
             t._send(f"puts {QuartusStpTransport._SENTINEL}")
 
     def test_write_reg_uses_virtual_dr_scan(self):
-        calls: list[tuple[int, int, int | None]] = []
+        scripts: list[str] = []
 
         class FakeQuartus(QuartusStpTransport):
-            def raw_dr_scan(self, bits, width, *, chain=None):
-                calls.append((bits, width, chain))
-                return 0
+            def _send(self, script):
+                scripts.append(script)
+                return "0" * 49
 
         t = FakeQuartus()
         t.write_reg(0x1234, 0xDEADBEEF)
         expected = (1 << 48) | (0x1234 << 32) | 0xDEADBEEF
-        self.assertEqual(calls, [(expected, 49, None)])
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(scripts[0].count("device_virtual_dr_shift"), 1)
+        self.assertIn(f"-length 49 -dr_value {expected:049b}]", scripts[0])
+        self.assertTrue(scripts[0].startswith("device_lock"))
 
     def test_open_device_auto_script_errors_on_multiple_quartus_cables(self):
         script = QuartusStpTransport()._open_device_script()
@@ -812,7 +879,7 @@ class QuartusStpTransportTests(unittest.TestCase):
                 return f"{stale} {fresh0} {fresh1}"
 
         t = FakeQuartus()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         self.assertEqual(t._read_block_burst(33), list(range(33)))
         self.assertEqual(len(scripts), 1)  # one pass, no repeat
         self.assertEqual(scripts[0].count("-length 256"), 3)
@@ -835,6 +902,24 @@ class QuartusStpTransportTests(unittest.TestCase):
         timestamp_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0x80000000
         self.assertIn(t._int_to_shift_string(timestamp_frame, t.DR_BITS), scripts[0])
         self.assertEqual(scripts[0].count("-length 256"), 2)
+
+    def test_quartus_run_length_burst_selects_the_count_stream(self):
+        """Run counts burst on the timestamp lane with BURST_PTR[31:30] = 0b11."""
+        scripts: list[str] = []
+        stale = self._quartus_burst_token([0xEE] * 16, element_width=16)
+        fresh = self._quartus_burst_token(list(range(16)), element_width=16)
+
+        class FakeQuartus(QuartusStpTransport):
+            def _send(self, script):
+                scripts.append(script)
+                return f"{stale} {fresh}"
+
+        t = FakeQuartus()
+        self.assertEqual(t.read_run_length_block(16, 16), list(range(16)))
+        count_frame = (1 << 48) | (t.ADDR_BURST_PTR << 32) | 0xC0000000
+        self.assertIn(t._int_to_shift_string(count_frame, t.DR_BITS), scripts[0])
+        with self.assertRaises(BurstUnavailableError):
+            FakeQuartus(burst=False).read_run_length_block(16, 16)
 
     def test_quartus_failed_burst_is_raised_not_read_around(self):
         scripts: list[str] = []
@@ -888,7 +973,7 @@ class QuartusStpTransportTests(unittest.TestCase):
         if single_chain:
             t.read_sample_block(0x0100, n, 256)
         else:
-            t._cached_sps = 32
+            t._burst_sample_width = lambda: 8
             t._read_block_burst(n)
         self.assertEqual(len(scripts), 1)
         return scripts[0]
@@ -901,8 +986,13 @@ class QuartusStpTransportTests(unittest.TestCase):
                 plain = self._quartus_sync_script(sync=False, single_chain=single_chain)
                 synced = self._quartus_sync_script(sync=True, single_chain=single_chain)
                 self.assertNotIn("_sync", plain)
-                self.assertEqual(plain.count("-length 49"), 1)
-                self.assertEqual(synced.count("-length 49"), 2)
+
+                def ptr_writes(script: str) -> int:
+                    # The single-chain burst ends in a 49-bit drain read.
+                    return script.count("-length 49") - script.count("_drain_discard")
+
+                self.assertEqual(ptr_writes(plain), 1)
+                self.assertEqual(ptr_writes(synced), 2)
                 self.assertEqual(
                     synced.count("-length 256"), plain.count("-length 256") + 1
                 )
@@ -1233,6 +1323,37 @@ class QuartusStpTransportTests(unittest.TestCase):
         self.assertIsNotNone(proc.poll(), "the cancelled quartus_stp is still running")
         self.assertIsNone(t._proc)
 
+    def test_quartus_cancel_takes_no_lock(self):
+        """cancel_active runs on another thread from the call it aborts and
+        must not wait on a lock that call holds; connect() holds _life_lock
+        through its open handshake."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        t = QuartusStpTransport(read_timeout_sec=5.0)
+        session = _install_session(t, proc)
+        t._life_lock.acquire()
+        try:
+            canceller = threading.Thread(target=t.cancel, daemon=True)
+            canceller.start()
+            canceller.join(timeout=2)
+            self.assertFalse(canceller.is_alive(), "cancel() waited on _life_lock")
+        finally:
+            t._life_lock.release()
+        proc.kill.assert_called()
+        self.assertTrue(session.dead)
+
+    def test_quartus_cancel_before_the_session_is_published_aborts_connect(self):
+        """A cancel landing before connect() has started quartus_stp has no
+        process to kill; connect() must still refuse to finish the open."""
+        t = self._fake_quartus()
+        t.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            t.connect()
+        self.assertIsNone(t._proc)
+        t.connect()  # the refused connect consumed the cancel
+        self.addCleanup(t.close)
+        self.assertIsNotNone(t._proc)
+
     def test_quartus_concurrent_closes_both_return_and_reap(self):
         """A second close() arriving while the first is still tearing down
         waits its turn or kills the session; either way both return and the
@@ -1420,9 +1541,11 @@ class QuartusStpTransportTests(unittest.TestCase):
 class _FakeXsdbProc:
     """Minimal stand-in for the piped xsdb process.
 
-    ``_send`` only needs a stdin to write to and a stdout to read lines from,
-    so a canned list of reply lines is enough to exercise the framing and the
-    ``check=True`` error path without launching Vivado.
+    ``_send`` only needs a stdin to write to and reply lines to read, so a
+    canned list of reply lines is enough to exercise the framing and the
+    ``check=True`` error path without launching Vivado.  Install it with
+    ``_install_fake_xsdb``: ``_send`` reads the transport's stdout queue, which
+    a reader thread fills from the real pipe.
     """
 
     def __init__(self, reply_lines):
@@ -1443,6 +1566,13 @@ class _FakeXsdbProc:
         if not self._replies:
             return ""
         return self._replies.pop(0) + "\n"
+
+
+def _install_fake_xsdb(t, reply_lines):
+    t._proc = _FakeXsdbProc(reply_lines)
+    for line in reply_lines:
+        t._stdout_lines.put(line + "\n")
+    return t._proc
 
 
 class XilinxHwServerConnectFailureTests(unittest.TestCase):
@@ -1466,14 +1596,125 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
-        mock_proc.stdout.readline.return_value = ""  # EOF = process exited
 
         t = XilinxHwServerTransport()
         t._proc = mock_proc
         t._stderr_lines = ["error: hw_server unreachable"]
+        # What the reader thread pushes when the pipe reaches EOF.
+        t._stdout_lines.put(None)
 
         with self.assertRaises(ConnectionError):
             t._send("puts hello")
+
+    def test_send_times_out_instead_of_waiting_forever(self):
+        """A live xsdb that stops answering must not wedge its caller.
+
+        `readline()` on a process that is still running but will never emit
+        the sentinel returns never. For the MCP server that call is made by
+        the single hardware owner thread, so losing it would refuse every
+        later command for the life of the process.
+        """
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None  # still alive, just silent
+
+        t = XilinxHwServerTransport(read_timeout_sec=0.05)
+        t._proc = proc
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "sentinel"):
+            t._send("puts hello")
+        self.assertLess(time.monotonic() - started, 5.0)
+        proc.kill.assert_called_once()
+
+        # The stale reply is still in flight, so the transport refuses to be
+        # reused rather than pairing it with the next request.
+        with self.assertRaisesRegex(RuntimeError, "reconnect"):
+            t._send("puts again")
+
+    def test_a_deadline_is_not_reset_by_a_dribble_of_output(self):
+        # Per-line timeouts would let a process that emits one line per
+        # interval hold the caller forever without ever finishing.
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+
+        t = XilinxHwServerTransport(read_timeout_sec=0.3)
+        t._proc = proc
+        stop = threading.Event()
+
+        def dribble():
+            while not stop.wait(0.02):
+                t._stdout_lines.put("noise\n")
+
+        feeder = threading.Thread(target=dribble, daemon=True)
+        feeder.start()
+        self.addCleanup(stop.set)
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            t._send("puts hello")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_cancel_releases_a_send_that_is_still_waiting(self):
+        """cancel() from another thread must end the wait promptly.
+
+        This is the hook the MCP watchdog uses; if it only killed the
+        process and left the reader blocked, the owner thread would still
+        sit out the full read budget.
+        """
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.poll.return_value = None
+
+        t = XilinxHwServerTransport(read_timeout_sec=30.0)
+        t._proc = proc
+        outcome = []
+
+        def call():
+            try:
+                t._send("puts hello")
+            except BaseException as exc:
+                outcome.append(exc)
+
+        caller = threading.Thread(target=call, daemon=True)
+        caller.start()
+        time.sleep(0.1)
+        t.cancel()
+        caller.join(timeout=5.0)
+
+        self.assertFalse(caller.is_alive(), "cancel() did not release the caller")
+        self.assertTrue(outcome, "the call should have failed, not returned")
+        self.assertIsInstance(outcome[0], (ConnectionError, RuntimeError))
+
+    def test_cancel_does_not_write_to_a_stalled_stdin(self):
+        """A _send stuck writing to an xsdb that stopped reading holds the
+        pipe; cancel() must kill the process without writing to it."""
+        proc = MagicMock()
+        stdin_lock = threading.Lock()
+        stdin_lock.acquire()  # the stalled writer holds it
+        self.addCleanup(stdin_lock.release)
+
+        def write(_data):
+            with stdin_lock:
+                pass
+
+        proc.stdin.write.side_effect = write
+        t = XilinxHwServerTransport()
+        t._proc = proc
+        done = threading.Event()
+        canceller = threading.Thread(
+            target=lambda: (t.cancel(), done.set()), daemon=True
+        )
+        canceller.start()
+        self.assertTrue(done.wait(2.0), "cancel() blocked on stdin")
+        proc.kill.assert_called_once()
+        proc.stdin.write.assert_not_called()
+        # The owner's thread may be mid-_send or about to close(): the
+        # process stays for it to fail on and reap.
+        self.assertIs(t._proc, proc)
 
     def test_close_when_not_connected_is_safe(self):
         """close() is idempotent when called before connect()."""
@@ -1597,12 +1838,21 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         t = XilinxHwServerTransport(fpga_name="xck26")
         seen: list[tuple[str, bool]] = []
 
-        def fake_send(tcl: str, *, check: bool = False) -> str:
+        budgets: dict[str, float | None] = {}
+
+        def fake_send(
+            tcl: str, *, check: bool = False, timeout_sec: float | None = None
+        ) -> str:
             seen.append((tcl, check))
+            budgets[tcl] = timeout_sec
             return ""
 
         t._send = fake_send  # type: ignore[method-assign]
         t.program("C:/tmp/design.bit")
+        # The load gets its own long budget; a bitstream takes minutes.
+        self.assertGreaterEqual(
+            budgets["fpga -file {C:/tmp/design.bit}"], t.PROGRAM_TIMEOUT_SEC
+        )
         checked = {tcl: chk for tcl, chk in seen}
         self.assertTrue(
             all(chk for tcl, chk in seen if tcl.startswith(("targets -set", "fpga -file")))
@@ -1612,9 +1862,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_send_check_raises_on_an_xsdb_error_line(self):
         """check=True turns a printed xsdb error into an exception."""
         t = XilinxHwServerTransport()
-        t._proc = _FakeXsdbProc(
-            [f"{t._ERR_MARKER} no targets found", t._SENTINEL]
-        )
+        _install_fake_xsdb(t, [f"{t._ERR_MARKER} no targets found", t._SENTINEL])
         with self.assertRaises(RuntimeError) as caught:
             t._send("targets -set -filter {name =~ \"nope\"}", check=True)
         self.assertIn("no targets found", str(caught.exception))
@@ -1622,13 +1870,13 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_send_check_is_quiet_on_success(self):
         """A successful checked command returns empty and raises nothing."""
         t = XilinxHwServerTransport()
-        t._proc = _FakeXsdbProc([t._SENTINEL])
+        _install_fake_xsdb(t, [t._SENTINEL])
         self.assertEqual(t._send("targets -set -filter {x}", check=True), "")
 
     def test_send_without_check_keeps_swallowing(self):
         """Default behaviour is unchanged: output is returned, not inspected."""
         t = XilinxHwServerTransport()
-        t._proc = _FakeXsdbProc(["some output", t._SENTINEL])
+        _install_fake_xsdb(t, ["some output", t._SENTINEL])
         self.assertEqual(t._send("puts [jtag targets]"), "some output")
 
     def test_select_fpga_target_selects_present_target(self):
@@ -1861,10 +2109,36 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                 bits[base + bit_idx] = "1" if (value >> bit_idx) & 1 else "0"
         return "".join(bits)
 
+    def test_burst_unpacks_widths_that_do_not_divide_the_scan(self):
+        """jtag_burst_read packs 256 // SAMPLE_W samples at a stride of
+        exactly SAMPLE_W; the leftover high bits are not part of a sample."""
+        for width in (9, 24, 26, 27, 31):
+            with self.subTest(width=width):
+                t = XilinxHwServerTransport()
+                t.read_reg_stable = lambda addr, w=width: w if addr == 0x000C else 0
+                per_scan = 256 // width
+                values = [((1 << width) - 1) ^ i for i in range(2 * per_scan)]
+                tokens = " ".join(
+                    self._burst_token(values[i:i + per_scan], width)
+                    for i in range(0, len(values), per_scan)
+                )
+                self.assertEqual(t._parse_burst_bits(tokens, len(values)), values)
+
+    def test_burst_width_follows_the_selected_slot(self):
+        """The width is read for every burst: a slot switch between two
+        bursts must not unpack the second with the first slot's width."""
+        t = XilinxHwServerTransport()
+        width = {"w": 8}
+        t.read_reg_stable = lambda addr: width["w"] if addr == 0x000C else 0
+        self.assertEqual(t._parse_burst_bits(self._burst_token([0x5A] * 32), 1), [0x5A])
+        width["w"] = 24
+        token = self._burst_token([0xABCDEF] * 10, 24)
+        self.assertEqual(t._parse_burst_bits(token, 10), [0xABCDEF] * 10)
+
     def test_parse_burst_bits_can_skip_priming_scan(self):
         """Burst parsing discards the priming scan when requested."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
 
@@ -1875,7 +2149,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_read_block_burst_primes_user2_before_returned_scans(self):
         """Burst reads discard the first USER2 scan while staging fills."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh0 = self._burst_token(list(range(32)))
@@ -1892,11 +2166,44 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(vals, list(range(33)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 3)
 
+    def test_two_chain_session_reports_bursts_on_a_data_chain(self):
+        self.assertTrue(XilinxHwServerTransport(single_chain_burst=False).burst_on_data_chain)
+        self.assertFalse(XilinxHwServerTransport().burst_on_data_chain)
+
+    def test_two_chain_session_bursts_a_managed_slot_on_its_own_chain(self):
+        """A core manager on USER3 answers bursts only on USER3, so a
+        two-chain session must not move the scans to USER2."""
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t.select_chain(3)
+        t._burst_sample_width = lambda: 8
+        sent: list[str] = []
+        stale = self._burst_token([0] * 4, 64)
+        fresh = self._burst_token([0x1234_5678_9ABC_DEF0, 1, 2, 3], 64)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            return f"{stale} {fresh}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+        user2 = t._irshift_tcl("_bq", chain=2)
+        user3 = t._irshift_tcl("_bq", chain=3)
+
+        words = t.read_sample_block(0x0100, 4, 64, on_control_chain=True)
+
+        self.assertEqual(words[:2], [0x9ABC_DEF0, 0x1234_5678])
+        self.assertNotIn(user2, sent[0])
+        # BURST_PTR, 2 scans, and the command scan that drains the pipe after.
+        self.assertEqual(sent[0].count(user3), 4)
+
+        sent.clear()
+        t.read_sample_block(0x0100, 4, 64)
+        self.assertIn(user2, sent[0])  # an unmanaged two-chain core: USER2
+
     def test_single_chain_burst_uses_active_chain_for_wide_scans(self):
         """Single-chain burst keeps BURST_PTR and 256-bit scans on the ELA chain."""
         t = XilinxHwServerTransport()
         t.select_chain(2)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -1917,7 +2224,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_two_chain_burst_can_be_selected_for_legacy_builds(self):
         """Legacy two-chain burst keeps 256-bit scans on USER2."""
         t = XilinxHwServerTransport(single_chain_burst=False)
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         sent: list[str] = []
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -2040,7 +2347,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         """A narrow-core burst that comes back a scan short is a readout
         defect: it is raised, not hidden behind a DATA-window re-read."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         t._burst_sample_ok = MagicMock(return_value=True)  # type: ignore[method-assign]
         stale = self._burst_token([0xEE] * 32)
         fresh = self._burst_token(list(range(32)))
@@ -2064,7 +2371,7 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
     def test_burst_with_extra_scans_is_refused(self):
         """More scans than were queued means the output is not this burst."""
         t = XilinxHwServerTransport()
-        t._cached_sps = 32
+        t._burst_sample_width = lambda: 8
         tok = self._burst_token(list(range(32)))
         t._send = MagicMock(return_value=" ".join([tok] * 3))  # type: ignore[method-assign]
         with self.assertRaises(BurstIntegrityError):
@@ -2205,7 +2512,12 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                     body = "; ".join(sent)
                     self.assertEqual(body.count("[jtag sequence]"), 1)
                     self.assertEqual(body.count("-capture"), n + 1)
-                    self.assertEqual(body.count("-bits 49"), 2 if sync else 1)
+                    # A single-chain burst ends with one uncaptured command
+                    # scan (see test_single_chain_burst_ends_with_a_drain).
+                    self.assertEqual(
+                        body.count("-bits 49"),
+                        (2 if sync else 1) + (1 if single_chain else 0),
+                    )
                     self.assertEqual(
                         body.count("-bits 256"), n + 1 + (1 if sync else 0)
                     )
@@ -2215,6 +2527,36 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
                         self.assertLess(ptr[0], first_burst)
                         self.assertLess(first_burst, ptr[1])
                         self.assertLess(ptr[1], body.index("-capture"))
+
+    def test_single_chain_burst_ends_with_a_drain(self):
+        """A single-chain burst leaves the pipe out of burst mode with its
+        staging fill drained: otherwise the core manager ignores an
+        MGR_ACTIVE write that follows on a narrow (1-4 bit) lane.  The drain
+        is one uncaptured VERSION read and the drain idle, after the last
+        burst scan, in the same sequence; the parse is unchanged."""
+        for single_chain in (True, False):
+            with self.subTest(single_chain=single_chain):
+                t = XilinxHwServerTransport(single_chain_burst=single_chain)
+                n = 2
+                tokens = [self._burst_token([0xEE], 256)] + [
+                    self._burst_token([s], 256) for s in range(n)
+                ]
+                sent: list[str] = []
+                t._send = self._fake_xsdb_sequence(tokens, sent)  # type: ignore[method-assign]
+                words = t.read_sample_block(0x0100, n, 256)
+                self.assertEqual(words[::8], list(range(n)))
+                body = "; ".join(sent)
+                drain = f"state IDLE {t.BURST_DRAIN_IDLE_CYCLES}"
+                if not single_chain:
+                    self.assertNotIn(drain, body)
+                    continue
+                neutral = t._pad_dr(t._frame_bits(addr=0x0000, data=0, write=False))
+                last_burst = body.rindex("-bits 256")
+                read = body.index(f"-bits 49 {neutral}")
+                self.assertLess(last_burst, read)
+                self.assertLess(read, body.index(drain))
+                self.assertLess(body.index(drain), body.index("run -bits"))
+                self.assertNotIn("-capture -bits 49", body)
 
     def test_timestamp_burst_primes_before_returned_scan(self):
         """Timestamp burst reads also discard the first fill scan."""
@@ -2233,6 +2575,36 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
 
         self.assertEqual(vals, list(range(8)))
         self.assertEqual(sent[0].count("drshift -state DRUPDATE -capture"), 2)
+
+    def test_run_length_burst_selects_the_count_stream(self):
+        """Run counts burst on the timestamp lane with BURST_PTR[31:30] = 0b11."""
+        t = XilinxHwServerTransport()
+        sent: list[str] = []
+        stale = self._burst_token([0xEE] * 32, sample_w=8)
+        first = self._burst_token(list(range(32)), sample_w=8)
+
+        def fake_send(tcl: str, check: bool = False) -> str:
+            sent.append(tcl)
+            return f"{stale} {first}"
+
+        t._send = fake_send  # type: ignore[method-assign]
+
+        self.assertEqual(t.read_run_length_block(32, 8), list(range(32)))
+        count_frame = t._pad_dr(
+            t._frame_bits(addr=t.ADDR_BURST_PTR, data=0xC0000000, write=True)
+        )
+        self.assertIn(count_frame, sent[0])
+        with self.assertRaises(BurstIntegrityError):
+            t.read_run_length_block(33, 8)
+
+        # A core manager's slot on a two-chain session: the counts burst on
+        # the control chain, not USER2.
+        t = XilinxHwServerTransport(single_chain_burst=False)
+        t._send = fake_send  # type: ignore[method-assign]
+        sent.clear()
+        t.read_run_length_block(32, 8, on_control_chain=True)
+        self.assertIn(count_frame, sent[0])
+        self.assertNotIn(t._irshift_tcl("_bq", chain=2), sent[0])
 
     def test_user1_block_read_has_idle_before_each_capture(self):
         """USER1 pipelined reads clock idle TCKs before every captured word."""

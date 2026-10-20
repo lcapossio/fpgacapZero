@@ -99,9 +99,20 @@ t = XilinxHwServerTransport(
     ir_table=None,                        # default = 7-series IR codes
     ready_probe_addr=0x0000,              # ELA VERSION register
     ready_probe_timeout=2.0,              # seconds
+    read_timeout_sec=None,                # None = $FCAPZ_XSDB_TIMEOUT or 60 s
 )
 t.connect()
 ```
+
+Responses are read through a reader thread and a queue, never straight
+from the pipe, so every call has a deadline. `xsdb` can stay alive and
+stop answering, and a bare `readline()` on that returns never — which
+wedges whatever thread is driving the transport. When the deadline
+passes the process is killed and the transport refuses further use until
+reconnected, because the unread reply would otherwise be paired with the
+next request. `cancel()` (used by the MCP watchdog) does the same from
+another thread, ending a wait immediately. `fpga -file` gets its own,
+much longer budget — a large bitstream is minutes, not seconds.
 
 What `connect()` does:
 
@@ -261,6 +272,12 @@ The transport opens a TCP socket to OpenOCD's TCL listener,
 sends commands like `irscan xc7a100t.tap 0x02 ; drscan xc7a100t.tap 49 0x...`,
 parses the hex responses.  No subprocess, no Vivado required.
 
+Each register access is one command line: a read is
+`irscan; drscan; runtest; irscan; drscan`.  OpenOCD's Tcl server runs a
+whole line before it serves another client, so behind a core manager the
+slot select at the head of the line holds for the access even with a second
+program on the same OpenOCD server.
+
 OpenOCD does **not** program the FPGA from this transport — you do
 that separately with `pld load`, an `init`-time script, or your own
 `openocd -c "...; init; pld load 0 my.bit; exit"`.
@@ -365,7 +382,9 @@ each Tcl request with sentinels, and uses `device_lock` around composite
 operations so a read transaction is not interleaved with SignalTap,
 Programmer, or another Quartus Tcl session.  `read_reg()`,
 `read_block()`, and `raw_dr_scan_batch()` are emitted as single locked
-Tcl blocks where atomicity matters.
+Tcl blocks where atomicity matters.  Behind a core manager each block that
+reaches a slot starts with that slot's select, inside the same lock, so
+another program on the cable cannot redirect it.
 
 Auto device selection opens the first Quartus device whose name starts
 with `@1`.  If the FPGA is at another JTAG position, pass the exact
@@ -482,10 +501,11 @@ then shifts plain 49-bit / 256-bit frames.  The raw-opcode path
 reach the PL BSCANE2 through xsdb on MPSoC (see below), and which end of
 the scan the DAP bit sits on is not established (next section).
 
-CLI users don't have to pick manually: `fcapz --tap xck26 …` auto-selects
-`use_register_ir=True` for MPSoC, and `fcapz --tap xcku040 …`
-auto-selects `IR_TABLE_XILINX_ULTRASCALE`.
-See `host/fcapz/cli.py::_chain_shape_kwargs`.
+CLI, GUI, RPC (web UI) and MCP users don't have to pick manually: a tap
+named `xck26` (or any `xck*` / `xczu*`) selects `use_register_ir=True`,
+and `xcku040` (any `xcku*` / `xcvu*` / `xcau*`) selects
+`IR_TABLE_XILINX_ULTRASCALE` with a 6-bit IR.  All of them use
+`fcapz.transport.hw_server_chain_shape_kwargs`.
 
 ### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
@@ -551,8 +571,9 @@ the PL still sees it as one extra shift clock on every DR scan (a
 49-bit command is 50 TCKs in Shift-DR).  The pipe interface therefore
 decodes a command from the last 49 bits of any scan that is at least
 49 and fewer than `BURST_W` shifts long, instead of requiring exactly
-49 (see the changelog).  Single-chain and multi-core
-wrappers have not yet been re-verified on MPSoC hardware.
+49 (see the changelog).  The single-chain multi-core manager on USER1,
+with the AXI monitor, JTAG-UART and AXI bridge on USER2-4, has since been
+verified on a KV260 ([`examples/kv260`](../examples/kv260/)).
 
 #### Register access sequence
 
@@ -653,6 +674,29 @@ a = Analyzer(t)
 a.connect()
 print(a.probe())
 ```
+
+### Example: Zynq UltraScale+ MPSoC (Kria KV260)
+
+```python
+from fcapz import XilinxHwServerTransport, Analyzer
+from fcapz.transport import hw_server_chain_shape_kwargs
+
+t = XilinxHwServerTransport(
+    port=3121,
+    fpga_name="xck26",
+    bitfile="examples/kv260/kv260_top.bit",                 # loaded through the PS TAP
+    **hw_server_chain_shape_kwargs("xck26"),                # → use_register_ir=True
+)
+a = Analyzer(t)
+a.connect()
+print(a.probe())
+```
+
+The CLI, GUI, RPC server (web UI) and MCP server make the same choice
+from the tap name, so `fcapz --backend hw_server --tap xck26 ...` needs
+nothing else.  [`examples/kv260`](../examples/kv260/) is a reference
+design with a core on every USER chain, and its hardware test exercises
+them all.
 
 The desktop GUI ([chapter 12](12_gui.md)) has an "IR table" dropdown
 in the Connection panel that selects between the two presets, so

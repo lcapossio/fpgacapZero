@@ -420,8 +420,8 @@ module fcapz_ela_config_matrix_tb;
         read_min(ADDR_FEATURES, rdata);
         check("minimal features report no optional gates", rdata == 32'h0001_0101);
         read_min(ADDR_COMPARE_CAPS, rdata);
-        check("minimal compare caps are A-only EQ/NEQ/edges/changed",
-              rdata == 32'h000A_01C3);
+        check("minimal compare caps are A-only EQ/NEQ/edges/changed, DATA_OFFSET",
+              rdata == 32'h007A_01C3);
         read_min(ADDR_SQ_MODE, rdata);
         check("disabled SQ_MODE ignores writes", rdata == 32'h0);
         read_min(ADDR_SQ_VALUE, rdata);
@@ -477,11 +477,13 @@ module fcapz_ela_config_matrix_tb;
         check("USER1_DATA_EN=0 capture length is valid", cap_len == 32'd4);
         read_nouser1(ADDR_DATA_BASE, rdata);
         check("USER1_DATA_EN=0 DATA window reads zero", rdata == 32'h0);
+        read_nouser1(ADDR_COMPARE_CAPS, rdata);
+        check("USER1_DATA_EN=0 compare caps have no DATA_OFFSET", rdata[20] == 1'b0);
 
         $display("\n=== Config 3: REL_COMPARE=1, INPUT_PIPE=1, DUAL_COMPARE=0 ===");
         read_rel(ADDR_COMPARE_CAPS, rdata);
         check("relational compare caps include LT/GT/LE/GE and A-only",
-              rdata == 32'h000A_01FF);
+              rdata == 32'h007A_01FF);
         write_rel(ADDR_SEQ_BASE + 16'd12, 32'hDEAD_BEEF);
         write_rel(ADDR_SEQ_BASE + 16'd16, 32'h1234_5678);
         read_rel(ADDR_SEQ_BASE + 16'd12, rdata);
@@ -508,13 +510,13 @@ module fcapz_ela_config_matrix_tb;
               ((rdata & 32'h10) != 0) && (((rdata >> 16) & 8'hFF) == 8'd4));
         read_combo(ADDR_COMPARE_CAPS, rdata);
         check("combo compare caps include relational and dual comparator",
-              rdata == 32'h000B_01FF);
+              rdata == 32'h007B_01FF);
 
         probe_combo = 8'h00;
         write_combo(ADDR_CTRL, 32'h2);
         write_combo(ADDR_PRETRIG, 32'd0);
         write_combo(ADDR_POSTTRIG, 32'd2);
-        write_combo(ADDR_SQ_MODE, 32'd1);
+        write_combo(ADDR_SQ_MODE, 32'd2); // NEQ
         write_combo(ADDR_SQ_VALUE, 32'd0);
         write_combo(ADDR_SQ_MASK, 32'd1);
         write_combo(ADDR_SEQ_BASE + 16'd0, 32'h0000_1306); // final changed A OR B
@@ -523,6 +525,9 @@ module fcapz_ela_config_matrix_tb;
         write_combo(ADDR_SEQ_BASE + 16'd12, 32'd0);
         write_combo(ADDR_SEQ_BASE + 16'd16, 32'hFF);
         write_combo(ADDR_CTRL, 32'h1);
+        // The counter below is timed for an ARM that landed two sample
+        // clocks sooner, before the settings snapshot gained its stage.
+        repeat (2) @(posedge sample_clk);
         wait_done_combo(status);
         read_combo(ADDR_CAPTURE_LEN, cap_len);
         check("combo capture remains active until all segments complete", status[2] == 1'b0);

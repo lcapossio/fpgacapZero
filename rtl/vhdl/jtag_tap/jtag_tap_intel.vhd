@@ -15,7 +15,9 @@ entity jtag_tap_intel is
         capture : out std_logic;
         shift   : out std_logic;
         update  : out std_logic;
-        sel     : out std_logic
+        sel     : out std_logic;
+        -- TAP in Test-Logic-Reset (level, TCK domain)
+        tlr     : out std_logic
     );
 end entity jtag_tap_intel;
 
@@ -34,7 +36,8 @@ architecture rtl of jtag_tap_intel is
             virtual_state_sdr : out std_logic;
             virtual_state_udr : out std_logic;
             ir_in             : out std_logic_vector(0 downto 0);
-            ir_out            : in  std_logic_vector(0 downto 0)
+            ir_out            : in  std_logic_vector(0 downto 0);
+            jtag_state_tlr    : out std_logic
         );
     end component;
 
@@ -54,7 +57,8 @@ begin
             virtual_state_sdr => shift,
             virtual_state_udr => update,
             ir_in             => ir_in_unused,
-            ir_out            => "0"
+            ir_out            => "0",
+            jtag_state_tlr    => tlr
         );
 
     sel <= '1';

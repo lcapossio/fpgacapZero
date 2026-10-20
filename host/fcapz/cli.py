@@ -16,6 +16,10 @@ from .analyzer import (
     SequencerStage,
     TriggerConfig,
 )
+from .discovery import discover_cores
+from .axi_decode import FAULT_FLAGS, decode_axi, looks_like_axi
+from .axi_layout import PROBE_MAPS, axi_probes
+from .axi_layout import sample_width as axi_sample_width
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -27,6 +31,7 @@ from .transport import (
     QuartusStpTransport,
     openocd_burst_default,
     XilinxHwServerTransport,
+    hw_server_chain_shape_kwargs,
 )
 
 
@@ -176,51 +181,18 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
         startup_arm=getattr(args, "startup_arm", False),
         trigger_holdoff=getattr(args, "trigger_holdoff", 0),
         trigger_delay=getattr(args, "trigger_delay", 0),
+        rle=getattr(args, "rle", False),
+        post_clocks=getattr(args, "post_clocks", 0),
     )
 
 
 def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
-    """Return the transport kwargs appropriate for *fpga_name*'s part family.
+    """Transport kwargs for *fpga_name*'s part family.
 
-    The return value is meant to be ``**``-unpacked into
-    :class:`XilinxHwServerTransport` alongside the usual host/port/bitfile
-    arguments.  An empty dict means "use transport defaults" (7-series
-    single-device 6-bit IR, no bypass padding, no read retries).
-
-    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
-    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
-    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
-    itself, so the host shifts plain fcapz frames.  The PL still sees one
-    extra shift clock per DR scan, which the RTL tolerates.
-
-    The detection is purely a CLI-layer convenience and lives here, not
-    in the transport, so the transport stays a dumb data-shifter.
-
-    Note: Versal parts (xcvm/xcvc/xcvp/xcve/xcvh) don't use BSCANE2 and
-    aren't supported by fcapz; they fall through to defaults and fail
-    loudly at identity check rather than silently pretending to work.
+    See :func:`fcapz.transport.hw_server_chain_shape_kwargs`, which the GUI
+    and RPC server share.
     """
-    name_lc = fpga_name.lower()
-    # Standalone UltraScale / UltraScale+ (Kintex, Virtex, Artix US+):
-    # 6-bit IR, different USER opcodes from 7-series.  Must be checked
-    # before the xck* / xczu* branch below because ``xcku040`` starts
-    # with ``xck``.
-    if name_lc.startswith(("xcku", "xcvu", "xcau")):
-        return {
-            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-            "ir_length": 6,
-        }
-    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*).  xsdb's
-    # ``-register userN`` named-IR mode handles both the multi-TAP IR
-    # routing (PL TAP + ARM DAP) and the DR BYPASS padding internally,
-    # so no ir_table / ir_length / dr_extra_bits are needed — just the
-    # single flag.  Verified on xck26 / KV260: reads, writes, and USER2
-    # burst all work in this mode.
-    if name_lc.startswith(("xck", "xczu")):
-        return {"use_register_ir": True}
-    # 7-series (xc7a / xc7k / xc7v / xc7s / xc7z) and anything else:
-    # fall back to the transport's default 7-series table.
-    return {}
+    return hw_server_chain_shape_kwargs(fpga_name)
 
 
 _DEFAULT_TAP = "xc7a100t.tap"
@@ -381,7 +353,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="Core-manager ELA slot on the selected chain (default: current/legacy slot)",
+        help="Core-manager ELA slot on the selected chain "
+        "(default: the first ELA slot behind a core manager)",
     )
     p.add_argument(
         "--program",
@@ -397,6 +370,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
+    discover = sub.add_parser(
+        "discover",
+        help="List every fcapz core on the JTAG session, chain by chain",
+    )
+    discover.add_argument(
+        "--chains",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="N",
+        help=(
+            "Chains (Intel: sld_virtual_jtag instances) to scan "
+            "(default: USER1-4, or instances 1-8 on Intel)"
+        ),
+    )
+    discover.add_argument(
+        "--no-bridges",
+        action="store_true",
+        help="Do not send the EJTAG-AXI/UART identity reads to unanswered chains",
+    )
     sub.add_parser("arm", help="Arm capture without configuring (advanced)")
 
     p_axi_mon = sub.add_parser(
@@ -408,8 +401,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the matching .prob probe map to PATH (use with capture --probe-file)",
     )
 
+    axi_decode = sub.add_parser(
+        "axi-decode",
+        help="Reassemble a saved AXI monitor capture into AXI4-Lite transactions",
+    )
+    axi_decode.add_argument("capture", help="Capture JSON written by `capture --format json`")
+    axi_decode.add_argument(
+        "--probe-file",
+        help="Probe map for the capture; inferred from its sample width when omitted",
+    )
+    axi_decode.add_argument(
+        "--only-anomalies", action="store_true", help="Show only transactions with a fault flag"
+    )
+    axi_decode.add_argument("--kind", choices=["read", "write"], help="Show only reads or writes")
+    axi_decode.add_argument(
+        "--limit", type=int, default=0, help="Show at most N transactions (0 = all)"
+    )
+    axi_decode.add_argument("--json", action="store_true", help="Emit the decode as JSON")
+
     cfg = sub.add_parser("configure", help="Write capture configuration without arming")
     cap = sub.add_parser("capture", help="Configure, arm, capture and export to a file")
+    cap.add_argument(
+        "--decode-axi",
+        action="store_true",
+        help="Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only)",
+    )
 
     for parser in [cfg, cap]:
         parser.add_argument(
@@ -543,6 +559,27 @@ def build_parser() -> argparse.ArgumentParser:
                 "Post-trigger delay in sample-clock cycles (0..65535). "
                 "Shifts the committed trigger sample N cycles after the "
                 "trigger event to compensate for upstream pipeline latency."
+            ),
+        )
+        parser.add_argument(
+            "--rle",
+            action="store_true",
+            help=(
+                "Run-length capture: store each run of a repeated sample once, "
+                "with its length. Pre/post-trigger lengths then count runs. "
+                "Needs a core built with RLE_W; not with decimation or "
+                "storage qualification."
+            ),
+        )
+        parser.add_argument(
+            "--post-clocks",
+            type=_non_negative_int,
+            default=0,
+            metavar="N",
+            help=(
+                "With --rle: also end the post-trigger window N sample clocks "
+                "after the trigger, if --posttrigger runs have not ended it "
+                "first (0 = no clock limit)."
             ),
         )
         parser.add_argument(
@@ -770,8 +807,153 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _axi_probes_for_capture(data: dict, probe_file: str | None):
+    """The probe map to read a saved AXI capture with.
+
+    In order of trust: the map the user named, the map the capture itself
+    records, and only then one guessed from the flattened sample width.
+    Guessing is a last resort because the width does not identify a geometry:
+    a 32/32 monitor with the decode word is 160 bits, and so is a 36/32 one
+    without it. Captures written before the exporter recorded its probe map
+    still land here, so the guess stays -- but it says so on stderr.
+    """
+    if probe_file:
+        return load_probe_file(probe_file).probes
+    recorded = data.get("probes")
+    if recorded:
+        return [
+            ProbeSpec(
+                name=str(entry["name"]),
+                width=int(entry["width"]),
+                lsb=int(entry.get("lsb", 0)),
+            )
+            for entry in recorded
+        ]
+    sample_width = data.get("sample_width")
+    for (addr_w, data_w, decode) in PROBE_MAPS:
+        if axi_sample_width(addr_w, data_w, decode) == sample_width:
+            print(
+                "warning: this capture records no probe map; assuming the "
+                f"bundled addr_w={addr_w} data_w={data_w} "
+                f"decode={'on' if decode else 'off'} geometry from its "
+                f"{sample_width}-bit samples. Other geometries share that "
+                "width -- pass --probe-file if the fields look shifted.",
+                file=sys.stderr,
+            )
+            return axi_probes(addr_w, data_w, decode)
+    raise ValueError(
+        f"the capture records no probe map and no bundled AXI geometry has "
+        f"sample_width={sample_width}; pass --probe-file "
+        "(fcapz axi-mon --write-probe-file writes one)"
+    )
+
+
+def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit: int) -> None:
+    if not decoded.get("decoded", True):
+        print(f"cannot decode: {decoded['unavailable_reason']}", file=sys.stderr)
+        return
+    rows = [
+        txn
+        for txn in decoded["transactions"]
+        if (not only_anomalies or FAULT_FLAGS.intersection(txn.get("flags") or ()))
+        and (kind is None or txn["kind"] == kind)
+    ]
+    shown = rows[:limit] if limit > 0 else rows
+
+    print(
+        f"{decoded['transaction_count']} transactions "
+        f"({decoded['write_count']} write, {decoded['read_count']} read), "
+        f"{decoded['error_count']} error responses, "
+        f"{decoded['anomaly_count']} bus faults, "
+        f"{decoded['flagged_count']} flagged"
+    )
+    pre_window = decoded["pairing"]["pre_window_traffic_observed"]
+    if pre_window:
+        print(
+            "warning: the capture opened with "
+            f"{'/'.join(pre_window)} transactions already outstanding, so "
+            "responses are paired with the wrong request from that point on",
+            file=sys.stderr,
+        )
+    else:
+        # Printed even when nothing looks wrong. An in-order pairing that
+        # started misaligned produces rows that read perfectly; the only
+        # place the reader can learn that is here.
+        print(
+            "note: addresses assume the bus was idle when the window opened "
+            "(AXI4-Lite has no IDs, so responses pair first-in-first-out); "
+            "a finite capture cannot prove it",
+            file=sys.stderr,
+        )
+    if not shown:
+        print("(no matching transactions)")
+        return
+
+    header = (
+        f"{'#':>4}  {'kind':<5} {'addr':<12} {'data':<12} "
+        f"{'strb':<5} {'resp':<6} {'lat':>4}  flags"
+    )
+    print(header)
+    print("-" * len(header))
+    for txn in shown:
+        latency = txn.get("latency")
+        print(
+            f"{txn['index']:>4}  {txn['kind']:<5} "
+            f"{txn.get('addr') or '-':<12} {txn.get('data') or '-':<12} "
+            f"{txn.get('strb') or '-':<5} {txn.get('resp') or '-':<6} "
+            f"{('-' if latency is None else latency):>4}  "
+            f"{','.join(txn.get('flags') or []) or '-'}"
+        )
+    if len(shown) < len(rows):
+        print(f"... {len(rows) - len(shown)} more (raise --limit)")
+
+
+def _run_axi_decode(args: argparse.Namespace) -> int:
+    """Decode a saved capture. Touches no hardware."""
+    try:
+        data = json.loads(Path(args.capture).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    samples = [entry["value"] for entry in data.get("samples", [])]
+    # A run-length export pairs each sample with the clocks it held.
+    run_lengths = [entry["value"] for entry in data.get("run_lengths") or []] or None
+    if not samples:
+        print(f"error: {args.capture} carries no samples", file=sys.stderr)
+        return 1
+    try:
+        probes = _axi_probes_for_capture(data, args.probe_file)
+        decoded = decode_axi(
+            samples,
+            probes,
+            # Recorded by the exporter. An older capture that predates that
+            # records neither, and reads as contiguous -- which is what it
+            # was, for every capture the previous default produced.
+            decimation=int(data.get("decimation") or 0),
+            storage_qualified=bool(data.get("stor_qual_mode") or 0),
+            run_lengths=run_lengths,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(decoded, indent=2))
+    else:
+        _print_axi_transactions(
+            decoded,
+            only_anomalies=args.only_anomalies,
+            kind=args.kind,
+            limit=args.limit,
+        )
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    if args.cmd == "axi-decode":
+        # Offline: no transport, no board.
+        return _run_axi_decode(args)
     transport = _make_transport(args)
 
     # -- EIO commands ------------------------------------------------------
@@ -786,7 +968,7 @@ def main() -> int:
                     "in_w": eio.in_w,
                     "out_w": eio.out_w,
                     "chain": args.chain,
-                    "instance": args.instance,
+                    "instance": eio.instance,
                 }, indent=2))
             elif args.cmd == "eio-read":
                 print(f"0x{eio.read_inputs():X}")
@@ -898,10 +1080,20 @@ def main() -> int:
     analyzer = Analyzer(transport, chain=args.chain, instance=args.ela_instance)
 
     try:
+        # Without --ela-instance, connect() binds the first ELA slot behind a
+        # manager: the active slot is whatever the last tool left, e.g. an EIO
+        # after eio-write.
         analyzer.connect()
         if args.cmd == "ela-list":
             manager = ElaManager(transport, chain=args.chain)
             print(json.dumps(manager.probe_all(), indent=2))
+            return 0
+
+        if args.cmd == "discover":
+            cores = discover_cores(
+                transport, chains=args.chains, bridges=not args.no_bridges
+            )
+            print(json.dumps(cores, indent=2))
             return 0
 
         if args.cmd == "probe":
@@ -1003,6 +1195,28 @@ def main() -> int:
                     for probe in cfg.probes
                 ]
             print(json.dumps(summarize(result, probe_defs), indent=2))
+
+        if getattr(args, "decode_axi", False):
+            if not looks_like_axi(probe.name for probe in cfg.probes):
+                print(
+                    "error: --decode-axi needs an AXI monitor probe map; run "
+                    "`fcapz axi-mon --write-probe-file P` and capture with "
+                    "--probe-file P",
+                    file=sys.stderr,
+                )
+                return 2
+            _print_axi_transactions(
+                decode_axi(
+                    result.samples,
+                    cfg.probes,
+                    decimation=cfg.decimation,
+                    storage_qualified=bool(cfg.stor_qual_mode),
+                    run_lengths=result.run_lengths or None,
+                ),
+                only_anomalies=False,
+                kind=None,
+                limit=0,
+            )
 
         open_in = getattr(args, "open_in", None)
         if open_in:

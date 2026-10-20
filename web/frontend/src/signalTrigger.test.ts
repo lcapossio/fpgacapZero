@@ -401,6 +401,8 @@ describe("describeElaTrigger", () => {
       useSequencer: false,
       sequenceJson: "",
       segmented: false,
+      rle: false,
+      postClocks: "0",
       probesText: "",
       ...patch,
     };

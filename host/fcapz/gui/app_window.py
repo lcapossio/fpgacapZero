@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
-from ..eio import EIO_CORE_ID, EioController, discover_eio
+from ..eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
 from .branding import GUI_DISPLAY_TITLE
@@ -1226,8 +1226,9 @@ class MainWindow(QMainWindow):
     def _discover_eio(self, transport, eio_slots) -> EioController | None:
         """Probe known locations for the EIO core; never raise into the UI."""
         try:
-            chains = sorted(getattr(transport, "ir_table", {}).keys()) or [1]
-            return discover_eio(transport, chains=chains, instances=eio_slots or None)
+            return discover_eio(
+                transport, chains=default_eio_chains(transport), instances=eio_slots or None
+            )
         except Exception:  # noqa: BLE001 - discovery must not break the UI
             _log.exception("EIO discovery failed")
             return None
@@ -1253,8 +1254,24 @@ class MainWindow(QMainWindow):
         self._eio_panel.bind_eio(transport, eio)
         _log.info("EIO auto-attached (chain=%d)", eio.bscan_chain)
 
+    def _attach_blocked_by_capture(self, what: str) -> bool:
+        """Refuse an attach while a capture runs.
+
+        The capture worker holds the transport's transaction lock for its whole
+        wait, and attach takes that lock on the Qt thread: it would freeze the
+        window (Stop included) until the capture ends or times out.
+        """
+        if not self._capture_running():
+            return False
+        QMessageBox.information(
+            self, f"{what} attach",
+            "A capture is running and holds the JTAG connection. "
+            "Stop it, then attach.",
+        )
+        return True
+
     def _on_eio_attach(self) -> None:
-        if self._analyzer is None:
+        if self._analyzer is None or self._attach_blocked_by_capture("EIO"):
             return
         t = self._analyzer.transport
         # Auto-discover first so the user needn't pick a USER chain / offset.
@@ -1280,11 +1297,6 @@ class MainWindow(QMainWindow):
     def _on_eio_detach(self) -> None:
         self._eio = None
         self._eio_panel.detach_eio()
-        if self._analyzer is not None and self._ela_present:
-            try:
-                self._analyzer.select_instance(0)
-            except (OSError, RuntimeError, ValueError):
-                pass
         self.statusBar().showMessage("EIO detached")
         _log.info("EIO detached")
 
@@ -1315,7 +1327,7 @@ class MainWindow(QMainWindow):
         self._sync_toolbar_actions()
 
     def _on_axi_attach(self) -> None:
-        if self._analyzer is None:
+        if self._analyzer is None or self._attach_blocked_by_capture("AXI"):
             return
         t = self._analyzer.transport
         try:
@@ -1330,7 +1342,7 @@ class MainWindow(QMainWindow):
         _log.info("AXI bridge attached (chain=%d)", self._axi_panel.chain())
 
     def _on_uart_attach(self) -> None:
-        if self._analyzer is None:
+        if self._analyzer is None or self._attach_blocked_by_capture("UART"):
             return
         t = self._analyzer.transport
         try:

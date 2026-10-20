@@ -33,6 +33,8 @@ export interface Identity {
   has_timestamp?: boolean;
   timestamp_width?: number;
   has_dual_compare?: boolean;
+  /** Run-count width (RLE_W); 0 or absent = no run-length capture. */
+  rle_width?: number;
   /** Comparator modes the bitstream supports (0=EQ .. 8=CHANGED). */
   compare_modes?: number[];
   /** WIDE_TRIG core: triggers reach the full sample width, not just 32 bits

@@ -1,0 +1,391 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - www.bard0.com - <hello@bard0.com>
+
+`timescale 1ns/1ps
+
+// Frozen copy of fcapz_debug_multi_xilinx7 before the vendor-free split
+// (origin/main 44d1059). Reference model for tb/fcapz_debug_multi_equiv_tb.sv;
+// not for synthesis.
+//
+// Its manager is the frozen fcapz_core_manager_pre_reset_split, so the bench
+// compares today's hub with the one before per-slot resets and the burst
+// header; the new pipe ports are tied off.
+//
+// Mixed debug wrapper: multiple ELAs plus optional EIOs behind one USER chain.
+// Slot order is ELA[0..NUM_ELAS-1], then EIO[0..NUM_EIOS-1].
+
+module fcapz_debug_multi_xilinx7_ref #(
+    parameter NUM_ELAS = 2,
+    parameter EIO_EN = 1,
+    parameter NUM_EIOS = EIO_EN,
+    parameter SAMPLE_W = 8,
+    parameter DEPTH = 1024,
+    parameter TRIG_STAGES = 1,
+    parameter STOR_QUAL = 0,
+    parameter INPUT_PIPE = 0,
+    parameter NUM_CHANNELS = 1,
+    parameter DECIM_EN = 0,
+    parameter EXT_TRIG_EN = 0,
+    parameter TIMESTAMP_W = 0,
+    parameter NUM_SEGMENTS = 1,
+    parameter PROBE_MUX_W = 0,
+    parameter STARTUP_ARM = 0,
+    parameter DEFAULT_TRIG_EXT = 0,
+    parameter BURST_W = 256,
+    parameter CTRL_CHAIN = 1,
+    parameter REL_COMPARE = 0,
+    parameter DUAL_COMPARE = 1,
+    parameter USER1_DATA_EN = 1,
+    parameter EIO_IN_W = 1,
+    parameter EIO_OUT_W = 1,
+    parameter ELA_PORT_COUNT = (NUM_ELAS > 0) ? NUM_ELAS : 1,
+    // Per-slot overrides. The scalar parameters above remain the max/default
+    // shape so existing instantiations can keep using one shared setting.
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_SAMPLE_WS = {ELA_PORT_COUNT{SAMPLE_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DEPTHS = {ELA_PORT_COUNT{DEPTH}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_TRIG_STAGES = {ELA_PORT_COUNT{TRIG_STAGES}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_STOR_QUALS = {ELA_PORT_COUNT{STOR_QUAL}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_INPUT_PIPES = {ELA_PORT_COUNT{INPUT_PIPE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_NUM_CHANNELS = {ELA_PORT_COUNT{NUM_CHANNELS}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DECIM_ENS = {ELA_PORT_COUNT{DECIM_EN}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_EXT_TRIG_ENS = {ELA_PORT_COUNT{EXT_TRIG_EN}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_TIMESTAMP_WS = {ELA_PORT_COUNT{TIMESTAMP_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_NUM_SEGMENTS = {ELA_PORT_COUNT{NUM_SEGMENTS}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_PROBE_MUX_WS = {ELA_PORT_COUNT{PROBE_MUX_W}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_STARTUP_ARMS = {ELA_PORT_COUNT{STARTUP_ARM}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DEFAULT_TRIG_EXTS = {ELA_PORT_COUNT{DEFAULT_TRIG_EXT}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_REL_COMPARES = {ELA_PORT_COUNT{REL_COMPARE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_DUAL_COMPARES = {ELA_PORT_COUNT{DUAL_COMPARE}},
+    parameter [ELA_PORT_COUNT*32-1:0] ELA_USER1_DATA_ENS = {ELA_PORT_COUNT{USER1_DATA_EN}},
+    parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_IN_WS =
+        {((NUM_EIOS > 0) ? NUM_EIOS : 1){EIO_IN_W}},
+    parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_OUT_WS =
+        {((NUM_EIOS > 0) ? NUM_EIOS : 1){EIO_OUT_W}}
+) (
+    input  wire [ELA_PORT_COUNT-1:0] ela_sample_clk,
+    input  wire [ELA_PORT_COUNT-1:0] ela_sample_rst,
+    input  wire [ELA_PORT_COUNT*(PROBE_MUX_W > 0 ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS)-1:0] ela_probe_in,
+    input  wire [ELA_PORT_COUNT-1:0] ela_trigger_in,
+    output wire [ELA_PORT_COUNT-1:0] ela_trigger_out,
+    output wire [ELA_PORT_COUNT-1:0] ela_armed_out,
+    input  wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_IN_W-1:0] eio_probe_in,
+    output wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_OUT_W-1:0] eio_probe_out
+);
+
+    localparam EIO_COUNT = (NUM_EIOS > 0) ? NUM_EIOS : 0;
+    localparam EIO_PORT_COUNT = (NUM_EIOS > 0) ? NUM_EIOS : 1;
+    localparam NUM_SLOTS = NUM_ELAS + EIO_COUNT;
+    localparam PTR_W = $clog2(DEPTH);
+    localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    localparam PROBE_W = (PROBE_MUX_W > 0) ? PROBE_MUX_W : SAMPLE_W*NUM_CHANNELS;
+    localparam BURST_SEG_DEPTH = DEPTH / NUM_SEGMENTS;
+    localparam EIO_SLOT_BASE = NUM_ELAS;
+    function [NUM_SLOTS*16-1:0] make_slot_core_ids;
+        input integer unused;
+        integer idx;
+        begin
+            make_slot_core_ids = {NUM_SLOTS{16'h0000}};
+            for (idx = 0; idx < NUM_ELAS; idx = idx + 1)
+                make_slot_core_ids[idx*16 +: 16] = 16'h4C41;
+            for (idx = 0; idx < EIO_COUNT; idx = idx + 1)
+                make_slot_core_ids[(EIO_SLOT_BASE + idx)*16 +: 16] = 16'h494F;
+        end
+    endfunction
+
+    localparam [NUM_SLOTS*16-1:0] SLOT_CORE_IDS = make_slot_core_ids(0);
+
+    function integer ela_param32;
+        input [ELA_PORT_COUNT*32-1:0] values;
+        input integer idx;
+        begin
+            ela_param32 = values[idx*32 +: 32];
+        end
+    endfunction
+
+    function integer eio_param32;
+        input [EIO_PORT_COUNT*32-1:0] values;
+        input integer idx;
+        begin
+            eio_param32 = values[idx*32 +: 32];
+        end
+    endfunction
+
+    function [NUM_SLOTS-1:0] make_slot_has_burst;
+        input integer unused;
+        integer idx;
+        begin
+            make_slot_has_burst = {NUM_SLOTS{1'b0}};
+            for (idx = 0; idx < NUM_ELAS; idx = idx + 1) begin
+                make_slot_has_burst[idx] =
+                    (ela_param32(ELA_SAMPLE_WS, idx) == SAMPLE_W) &&
+                    (ela_param32(ELA_DEPTHS, idx) == DEPTH) &&
+                    (ela_param32(ELA_TIMESTAMP_WS, idx) == TIMESTAMP_W) &&
+                    (ela_param32(ELA_NUM_SEGMENTS, idx) == NUM_SEGMENTS);
+            end
+        end
+    endfunction
+
+    localparam [NUM_SLOTS-1:0] SLOT_HAS_BURST = make_slot_has_burst(0);
+    wire debug_arst = |ela_sample_rst;
+
+    wire tap_tck, tap_tdi, tap_tdo;
+    wire tap_capture, tap_shift, tap_update, tap_sel;
+    wire jtag_rst_ctrl;
+    wire jtag_clk, jtag_rst;
+    wire jtag_wr_en, jtag_rd_en;
+    wire [15:0] jtag_addr;
+    wire [31:0] jtag_wdata, jtag_rdata;
+
+    wire [PTR_W-1:0] burst_rd_addr;
+    wire burst_rd_active;
+    wire [SAMPLE_W-1:0] burst_rd_data;
+    wire [TS_W_SAFE-1:0] burst_rd_ts_data;
+    wire burst_start;
+    wire burst_timestamp;
+    wire [PTR_W-1:0] burst_start_ptr;
+
+    wire [NUM_SLOTS-1:0] slot_wr_en;
+    wire [NUM_SLOTS-1:0] slot_rd_en;
+    wire [NUM_SLOTS*16-1:0] slot_addr;
+    wire [NUM_SLOTS*32-1:0] slot_wdata;
+    wire [NUM_SLOTS*32-1:0] slot_rdata;
+    wire [NUM_SLOTS*PTR_W-1:0] slot_burst_rd_addr;
+    wire [NUM_SLOTS-1:0] slot_burst_rd_active;
+    wire [NUM_SLOTS*SAMPLE_W-1:0] slot_burst_rd_data;
+    wire [NUM_SLOTS*TS_W_SAFE-1:0] slot_burst_rd_ts_data;
+    wire [NUM_SLOTS-1:0] slot_burst_start;
+    wire [NUM_SLOTS-1:0] slot_burst_timestamp;
+    wire [NUM_SLOTS*PTR_W-1:0] slot_burst_start_ptr;
+
+    jtag_tap_xilinx7 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .capture(tap_capture), .shift(tap_shift),
+        .update(tap_update), .sel(tap_sel),
+        .tlr()
+    );
+
+    reset_sync u_rst_sync_ctrl (
+        .clk(tap_tck),
+        .arst(debug_arst),
+        .srst(jtag_rst_ctrl)
+    );
+
+    jtag_pipe_iface #(
+        .SAMPLE_W(SAMPLE_W),
+        .TIMESTAMP_W(TIMESTAMP_W),
+        .DEPTH(DEPTH),
+        .BURST_W(BURST_W),
+        .SEG_DEPTH(BURST_SEG_DEPTH),
+        .BURST_PTR_ADDR(16'h002C)
+    ) u_pipe (
+        .arst(jtag_rst_ctrl),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .capture(tap_capture), .shift_en(tap_shift),
+        .update(tap_update), .sel(tap_sel),
+        .reg_clk(jtag_clk), .reg_rst(jtag_rst),
+        .reg_wr_en(jtag_wr_en), .reg_rd_en(jtag_rd_en),
+        .reg_addr(jtag_addr), .reg_wdata(jtag_wdata),
+        .reg_rdata(jtag_rdata),
+        .mem_addr(burst_rd_addr),
+        .mem_active(burst_rd_active),
+        .sample_data(burst_rd_data),
+        .timestamp_data(burst_rd_ts_data),
+        .burst_start(burst_start),
+        .burst_timestamp(burst_timestamp),
+        .burst_ptr_in(burst_start_ptr),
+        .burst_header({BURST_W{1'b0}})
+    );
+
+    fcapz_core_manager_pre_reset_split #(
+        .NUM_SLOTS(NUM_SLOTS),
+        .SAMPLE_W(SAMPLE_W),
+        .TIMESTAMP_W(TIMESTAMP_W),
+        .DEPTH(DEPTH),
+        .SLOT_CORE_IDS(SLOT_CORE_IDS),
+        .SLOT_HAS_BURST(SLOT_HAS_BURST)
+    ) u_manager (
+        .jtag_clk(jtag_clk),
+        .jtag_rst(jtag_rst),
+        .jtag_wr_en(jtag_wr_en),
+        .jtag_rd_en(jtag_rd_en),
+        .jtag_addr(jtag_addr),
+        .jtag_wdata(jtag_wdata),
+        .jtag_rdata(jtag_rdata),
+        .slot_wr_en(slot_wr_en),
+        .slot_rd_en(slot_rd_en),
+        .slot_addr(slot_addr),
+        .slot_wdata(slot_wdata),
+        .slot_rdata(slot_rdata),
+        .burst_rd_addr(burst_rd_addr),
+        .burst_rd_active(burst_rd_active),
+        .slot_burst_rd_addr(slot_burst_rd_addr),
+        .slot_burst_rd_active(slot_burst_rd_active),
+        .slot_burst_rd_data(slot_burst_rd_data),
+        .slot_burst_rd_ts_data(slot_burst_rd_ts_data),
+        .slot_burst_start(slot_burst_start),
+        .slot_burst_timestamp(slot_burst_timestamp),
+        .slot_burst_start_ptr(slot_burst_start_ptr),
+        .burst_rd_data(burst_rd_data),
+        .burst_rd_ts_data(burst_rd_ts_data),
+        .burst_start(burst_start),
+        .burst_timestamp(burst_timestamp),
+        .burst_start_ptr(burst_start_ptr)
+    );
+
+    genvar i;
+    generate
+        for (i = 0; i < NUM_ELAS; i = i + 1) begin : g_elas
+            localparam integer ELA_SAMPLE_W = ela_param32(ELA_SAMPLE_WS, i);
+            localparam integer ELA_DEPTH = ela_param32(ELA_DEPTHS, i);
+            localparam integer ELA_TRIG_STAGES_I = ela_param32(ELA_TRIG_STAGES, i);
+            localparam integer ELA_STOR_QUAL = ela_param32(ELA_STOR_QUALS, i);
+            localparam integer ELA_INPUT_PIPE = ela_param32(ELA_INPUT_PIPES, i);
+            localparam integer ELA_NUM_CHANNELS_I = ela_param32(ELA_NUM_CHANNELS, i);
+            localparam integer ELA_DECIM_EN = ela_param32(ELA_DECIM_ENS, i);
+            localparam integer ELA_EXT_TRIG_EN = ela_param32(ELA_EXT_TRIG_ENS, i);
+            localparam integer ELA_TIMESTAMP_W = ela_param32(ELA_TIMESTAMP_WS, i);
+            localparam integer ELA_NUM_SEGMENTS_I = ela_param32(ELA_NUM_SEGMENTS, i);
+            localparam integer ELA_PROBE_MUX_W = ela_param32(ELA_PROBE_MUX_WS, i);
+            localparam integer ELA_STARTUP_ARM = ela_param32(ELA_STARTUP_ARMS, i);
+            localparam integer ELA_DEFAULT_TRIG_EXT = ela_param32(ELA_DEFAULT_TRIG_EXTS, i);
+            localparam integer ELA_REL_COMPARE = ela_param32(ELA_REL_COMPARES, i);
+            localparam integer ELA_DUAL_COMPARE = ela_param32(ELA_DUAL_COMPARES, i);
+            localparam integer ELA_USER1_DATA_EN = ela_param32(ELA_USER1_DATA_ENS, i);
+            localparam integer ELA_PROBE_W =
+                (ELA_PROBE_MUX_W > 0) ? ELA_PROBE_MUX_W : ELA_SAMPLE_W*ELA_NUM_CHANNELS_I;
+            localparam integer ELA_PTR_W = $clog2(ELA_DEPTH);
+            localparam integer ELA_TS_W_SAFE = (ELA_TIMESTAMP_W > 0) ? ELA_TIMESTAMP_W : 1;
+            wire [ELA_SAMPLE_W-1:0] ela_burst_rd_data;
+            wire [ELA_TS_W_SAFE-1:0] ela_burst_rd_ts_data;
+            wire [ELA_PTR_W-1:0] ela_burst_start_ptr;
+
+            initial begin
+                if (ELA_PROBE_W > PROBE_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d probe width %0d exceeds scalar slot width %0d",
+                           i, ELA_PROBE_W, PROBE_W);
+                end
+                if (ELA_SAMPLE_W > SAMPLE_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d SAMPLE_W %0d exceeds scalar SAMPLE_W %0d",
+                           i, ELA_SAMPLE_W, SAMPLE_W);
+                end
+                if (ELA_TS_W_SAFE > TS_W_SAFE) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d TIMESTAMP_W %0d exceeds scalar TIMESTAMP_W %0d",
+                           i, ELA_TIMESTAMP_W, TIMESTAMP_W);
+                end
+                if (ELA_PTR_W > PTR_W) begin
+                    $error("fcapz_debug_multi_xilinx7: ELA %0d DEPTH %0d exceeds scalar DEPTH %0d",
+                           i, ELA_DEPTH, DEPTH);
+                end
+            end
+
+            fcapz_ela #(
+                .SAMPLE_W(ELA_SAMPLE_W),
+                .DEPTH(ELA_DEPTH),
+                .TRIG_STAGES(ELA_TRIG_STAGES_I),
+                .STOR_QUAL(ELA_STOR_QUAL),
+                .INPUT_PIPE(ELA_INPUT_PIPE),
+                .NUM_CHANNELS(ELA_NUM_CHANNELS_I),
+                .DECIM_EN(ELA_DECIM_EN),
+                .EXT_TRIG_EN(ELA_EXT_TRIG_EN),
+                .TIMESTAMP_W(ELA_TIMESTAMP_W),
+                .NUM_SEGMENTS(ELA_NUM_SEGMENTS_I),
+                .PROBE_MUX_W(ELA_PROBE_MUX_W),
+                .STARTUP_ARM(ELA_STARTUP_ARM),
+                .DEFAULT_TRIG_EXT(ELA_DEFAULT_TRIG_EXT),
+                .REL_COMPARE(ELA_REL_COMPARE),
+                .DUAL_COMPARE(ELA_DUAL_COMPARE),
+                .USER1_DATA_EN(ELA_USER1_DATA_EN)
+            ) u_ela (
+                .sample_clk(ela_sample_clk[i]),
+                .sample_rst(ela_sample_rst[i]),
+                .probe_in(ela_probe_in[i*PROBE_W +: ELA_PROBE_W]),
+                .trigger_in(ela_trigger_in[i]),
+                .trigger_out(ela_trigger_out[i]),
+                .armed_out(ela_armed_out[i]),
+                .jtag_clk(jtag_clk),
+                .jtag_rst(jtag_rst),
+                .jtag_wr_en(slot_wr_en[i]),
+                .jtag_rd_en(slot_rd_en[i]),
+                .jtag_addr(slot_addr[i*16 +: 16]),
+                .jtag_wdata(slot_wdata[i*32 +: 32]),
+                .jtag_rdata(slot_rdata[i*32 +: 32]),
+                .burst_rd_active(slot_burst_rd_active[i]),
+                .burst_rd_addr(slot_burst_rd_addr[i*PTR_W +: ELA_PTR_W]),
+                .burst_rd_data(ela_burst_rd_data),
+                .burst_rd_ts_data(ela_burst_rd_ts_data),
+                .burst_start(slot_burst_start[i]),
+                .burst_timestamp(slot_burst_timestamp[i]),
+                .burst_start_ptr(ela_burst_start_ptr)
+            );
+
+            if (ELA_SAMPLE_W < SAMPLE_W) begin : g_data_pad
+                assign slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W] =
+                    {{(SAMPLE_W-ELA_SAMPLE_W){1'b0}}, ela_burst_rd_data};
+            end else begin : g_data_no_pad
+                assign slot_burst_rd_data[i*SAMPLE_W +: SAMPLE_W] = ela_burst_rd_data[SAMPLE_W-1:0];
+            end
+
+            if (ELA_TS_W_SAFE < TS_W_SAFE) begin : g_ts_pad
+                assign slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE] =
+                    {{(TS_W_SAFE-ELA_TS_W_SAFE){1'b0}}, ela_burst_rd_ts_data};
+            end else begin : g_ts_no_pad
+                assign slot_burst_rd_ts_data[i*TS_W_SAFE +: TS_W_SAFE] = ela_burst_rd_ts_data[TS_W_SAFE-1:0];
+            end
+
+            if (ELA_PTR_W < PTR_W) begin : g_ptr_pad
+                assign slot_burst_start_ptr[i*PTR_W +: PTR_W] =
+                    {{(PTR_W-ELA_PTR_W){1'b0}}, ela_burst_start_ptr};
+            end else begin : g_ptr_no_pad
+                assign slot_burst_start_ptr[i*PTR_W +: PTR_W] = ela_burst_start_ptr[PTR_W-1:0];
+            end
+        end
+
+        for (i = 0; i < EIO_COUNT; i = i + 1) begin : g_eios
+            localparam integer EIO_IN_W_I = eio_param32(EIO_IN_WS, i);
+            localparam integer EIO_OUT_W_I = eio_param32(EIO_OUT_WS, i);
+            wire [EIO_OUT_W_I-1:0] eio_probe_out_i;
+
+            initial begin
+                if (EIO_IN_W_I > EIO_IN_W) begin
+                    $error("fcapz_debug_multi_xilinx7: EIO %0d IN_W %0d exceeds scalar EIO_IN_W %0d",
+                           i, EIO_IN_W_I, EIO_IN_W);
+                end
+                if (EIO_OUT_W_I > EIO_OUT_W) begin
+                    $error("fcapz_debug_multi_xilinx7: EIO %0d OUT_W %0d exceeds scalar EIO_OUT_W %0d",
+                           i, EIO_OUT_W_I, EIO_OUT_W);
+                end
+            end
+
+            fcapz_eio #(
+                .IN_W(EIO_IN_W_I),
+                .OUT_W(EIO_OUT_W_I)
+            ) u_eio (
+                .probe_in(eio_probe_in[i*EIO_IN_W +: EIO_IN_W_I]),
+                .probe_out(eio_probe_out_i),
+                .jtag_clk(jtag_clk),
+                .jtag_rst(jtag_rst),
+                .jtag_wr_en(slot_wr_en[EIO_SLOT_BASE+i]),
+                .jtag_addr(slot_addr[(EIO_SLOT_BASE+i)*16 +: 16]),
+                .jtag_wdata(slot_wdata[(EIO_SLOT_BASE+i)*32 +: 32]),
+                .jtag_rdata(slot_rdata[(EIO_SLOT_BASE+i)*32 +: 32])
+            );
+
+            if (EIO_OUT_W_I < EIO_OUT_W) begin : g_eio_out_pad
+                assign eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W] =
+                    {{(EIO_OUT_W-EIO_OUT_W_I){1'b0}}, eio_probe_out_i};
+            end else begin : g_eio_out_no_pad
+                assign eio_probe_out[i*EIO_OUT_W +: EIO_OUT_W] = eio_probe_out_i[EIO_OUT_W-1:0];
+            end
+            assign slot_burst_rd_data[(EIO_SLOT_BASE+i)*SAMPLE_W +: SAMPLE_W] = {SAMPLE_W{1'b0}};
+            assign slot_burst_rd_ts_data[(EIO_SLOT_BASE+i)*TS_W_SAFE +: TS_W_SAFE] = {TS_W_SAFE{1'b0}};
+            assign slot_burst_start[EIO_SLOT_BASE+i] = 1'b0;
+            assign slot_burst_timestamp[EIO_SLOT_BASE+i] = 1'b0;
+            assign slot_burst_start_ptr[(EIO_SLOT_BASE+i)*PTR_W +: PTR_W] = {PTR_W{1'b0}};
+        end
+
+        if (EIO_COUNT == 0) begin : g_no_eio
+            assign eio_probe_out = {EIO_PORT_COUNT*EIO_OUT_W{1'b0}};
+        end
+    endgenerate
+
+endmodule

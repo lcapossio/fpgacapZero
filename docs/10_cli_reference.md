@@ -44,7 +44,7 @@ subcommand follows:
 | `--burst` | off | openocd/ftdi: read captures by burst where the default is the register window (openocd bursts by default only for PolarFire; ftdi only for families whose wrapper builds a burst path) |
 | `--no-burst` | off | hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
-| `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: current/legacy slot) |
+| `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
 | `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
 
 <!-- END GENERATED cli:global -->
@@ -86,8 +86,10 @@ elsewhere in the JTAG chain, pass the exact Quartus device name with `--tap`.
 |---|---|
 | `probe` | Read core identity registers |
 | `ela-list` | Read core manager and probe all ELA slots |
+| `discover` | List every fcapz core on the JTAG session, chain by chain |
 | `arm` | Arm capture without configuring (advanced) |
 | `axi-mon` | Detect an AXI monitor; print its identity and probe map |
+| `axi-decode` | Reassemble a saved AXI monitor capture into AXI4-Lite transactions |
 | `configure` | Write capture configuration without arming |
 | `capture` | Configure, arm, capture and export to a file |
 | `eio-probe` | Read EIO core identity and widths |
@@ -169,6 +171,36 @@ No options of its own; the [global options](#global-options) apply.
 
 <!-- END GENERATED cli:ela-list -->
 
+## `discover`
+
+List every fcapz core on the JTAG session without naming a chain: ELAs, EIOs
+(including one behind the register mux at `0x8000`), a core manager and each of
+its slots, AXI monitors, and the EJTAG-AXI and EJTAG-UART bridges.  Each chain
+is first read only at `0x0000`, which the bridges see as a NOP, and is read
+further only once it answers as an ELA or EIO; see
+[chapter 5](05_ela_core.md).  A manager's active slot is left as it was.
+
+```bash
+fcapz --backend hw_server --tap xc7a100t discover
+fcapz --backend usb_blaster --tap auto discover --chains 1 2 5
+```
+
+Each entry has `type` (`ela`, `axi_mon`, `eio`, `manager`, `ejtag_uart`,
+`ejtag_axi`, or `unknown` for a manager slot of another core), `name`,
+`core_id`, `chain`, `base_addr`, `instance` (the manager slot, or `null`),
+`version_major`/`version_minor` and a type-specific `info`.
+
+<!-- BEGIN GENERATED cli:discover (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] discover [--chains N] [--no-bridges]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--chains N` | — | Chains (Intel: sld_virtual_jtag instances) to scan (default: USER1-4, or instances 1-8 on Intel) |
+| `--no-bridges` | off | Do not send the EJTAG-AXI/UART identity reads to unanswered chains |
+
+<!-- END GENERATED cli:discover -->
+
 ## `arm`
 
 Arm the core with the configuration it already holds, for example after a
@@ -232,6 +264,8 @@ Usage: `fcapz [global options] configure [options]`
 | `--startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
 | `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
 | `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
+| `--rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
+| `--post-clocks N` | `0` | With --rle: also end the post-trigger window N sample clocks after the trigger, if --posttrigger runs have not ended it first (0 = no clock limit). |
 | `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
 
 <!-- END GENERATED cli:configure -->
@@ -244,6 +278,7 @@ Options `capture` has in addition to those of `configure`:
 
 | Option | Default | Description |
 |---|---|---|
+| `--decode-axi` | off | Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only) |
 | `--timeout SEC` | `10.0` | Seconds to wait for the capture to complete (trigger and post-trigger samples) |
 | `--out FILE` | required | Output file |
 | `--format {json,csv,vcd}` | `json` | Export format (not inferred from the --out extension) |
@@ -614,6 +649,55 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         axi-load --addr 0x10000000 --file firmware.bin
 loaded 4096 words @ 0x10000000
 ```
+
+### `axi-decode`
+
+<!-- BEGIN GENERATED cli:axi-decode (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] axi-decode [options] CAPTURE`
+
+| Option | Default | Description |
+|---|---|---|
+| `CAPTURE` | required | Capture JSON written by `capture --format json` |
+| `--probe-file PROBE_FILE` | — | Probe map for the capture; inferred from its sample width when omitted |
+| `--only-anomalies` | off | Show only transactions with a fault flag |
+| `--kind {read,write}` | — | Show only reads or writes |
+| `--limit LIMIT` | `0` | Show at most N transactions (0 = all) |
+| `--json` | off | Emit the decode as JSON |
+
+<!-- END GENERATED cli:axi-decode -->
+
+Reassembles a capture JSON (written by `capture --format json`) into whole
+AXI4-Lite transactions — address, data, byte strobes, response, latency and
+protocol flags — instead of a per-cycle sample dump. Reads a file and touches
+no hardware, so it needs no connection and no board.
+
+```console
+$ fcapz axi-decode cap.json --only-anomalies
+3 transactions (2 write, 1 read), 1 error responses, 1 bus faults, 2 flagged
+   #  kind  addr         data         strb  resp    lat  flags
+--------------------------------------------------------------
+   2  write 0x00002000   0x00000011   0x3   SLVERR    2  error_response,partial_write
+```
+
+The probe map comes from `--probe-file` if given, otherwise from the map the
+capture records, otherwise it is guessed from the flattened sample width —
+and the guess says so on stderr, because a width does not identify a
+geometry (32/32 with the decode word is 160 bits, and so is 36/32 without
+it). `fcapz axi-mon --write-probe-file P` writes a map.
+
+`--only-anomalies` keeps only transactions the bus got wrong — an error
+response or a misaligned address — not the ones clipped by the edges of the
+capture window, which are flagged but legal. `--kind` keeps reads or writes,
+`--limit` caps the rows, and `--json` emits the decode itself.
+
+Two caveats go to stderr on every run. Pairing is first-in-first-out, so
+addresses are only right if nothing was outstanding when the window opened;
+a finite capture cannot prove that, and a window that opened mid-transaction
+produces rows that read perfectly and are wrong. When a response *did* arrive
+with no visible request, that assumption is disproved and the note becomes a
+warning. A capture taken with decimation or storage qualification is refused
+outright: it stored only selected cycles, and reassembly needs every one.
 
 ## UART subcommands
 

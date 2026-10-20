@@ -46,6 +46,9 @@ def test_ela_rtl_sources_includes_common_and_vendor_files():
     assert "rtl/fcapz_ela.v" in sources
     assert "rtl/fcapz_core_manager.v" in sources
     assert "rtl/fcapz_debug_multi_xilinx7.v" in sources
+    assert "rtl/fcapz_debug_multi.v" in sources
+    assert "rtl/fcapz_debug_multi_core.v" in sources
+    assert "rtl/fcapz_hub_reset.v" in sources
     assert "rtl/jtag_pipe_iface.v" in sources
     assert "rtl/fcapz_ela_xilinx7.v" in sources
     assert "rtl/jtag_tap/jtag_tap_xilinx7.v" in sources
@@ -63,4 +66,5 @@ def test_add_ela_sources_adds_manifest_to_platform():
 
     source_names = {source.as_posix() for source in platform.sources}
     assert "rtl/fcapz_ela_xilinxus.v" in source_names
+    assert "rtl/fcapz_debug_multi_xilinxus.v" in source_names
     assert "rtl/fcapz_ela_xilinx7.v" in source_names

@@ -45,6 +45,17 @@ instance -> int | None
 
 Core-manager slot selected before accesses, or `None` for legacy direct mode.
 
+#### `Analyzer.pin_active_slot`
+
+```python
+pin_active_slot() -> None
+```
+
+Deprecated: use `bind_manager_slot`, which this calls.
+
+It used to bind the slot the manager had active, which another session
+or tool may have moved to an EIO; it now binds the first ELA slot.
+
 #### `Analyzer.select_instance`
 
 ```python
@@ -54,7 +65,37 @@ select_instance(instance: int | None) -> None
 Select a core-manager slot for subsequent analyzer operations.
 
 `None` leaves the active slot untouched and preserves legacy direct-ELA
-behavior for bitstreams without a manager.
+behavior for bitstreams without a manager.  Moving to another slot
+drops the capture configuration: call `configure` again.  The
+hub is left on the slot, so raw transport accesses that follow reach
+it until another controller selects another one.
+
+#### `Analyzer.speaks_register_protocol`
+
+```python
+speaks_register_protocol(base_addr: int = 0) -> bool
+```
+
+Whether VERSION at *base_addr* answers with an ELA or EIO identity.
+
+Gate any manager probe on this.  A `0xF000` read puts a
+manager-address frame into whatever DR the chain has, and on an
+EJTAG-AXI chain that frame decodes as burst write data; a VERSION read
+is the frame every identity check already sends first.  Behind a
+manager address 0 reaches the active slot, an ELA or an EIO.
+
+#### `Analyzer.bind_manager_slot`
+
+```python
+bind_manager_slot() -> None
+```
+
+Bind a slot-less analyzer to its manager's first ELA slot.
+
+Without a slot every access reaches whichever slot the manager has
+active, which another session or tool may have moved to an EIO.  An
+analyzer that already has a slot, or a chain without a manager, is
+left as it is.  Slot 0 is used if no slot reads as an ELA.
 
 #### `Analyzer.connect`
 
@@ -63,6 +104,12 @@ connect() -> None
 ```
 
 Connect the transport and select this analyzer's chain and slot.
+
+An analyzer with no slot on a chain with a core manager is bound to
+the manager's first ELA slot (see `bind_manager_slot`), never
+left on whichever slot the manager has active.  A slot bound that way
+is looked up again: the new connection may hold another image.  The
+configuration is kept only when the slot is the same.
 
 #### `Analyzer.close`
 
@@ -122,17 +169,18 @@ cannot be changed from the host. `configure` instead clears the
 subsequent resets.
 
 A startup-armed core re-loads its auto-arm flag from that register on
-every soft reset, so a single reset can race the configuration
+every soft reset. Current cores take the register with the reset write,
+but on older ones a single reset can race the configuration
 clock-domain crossing and come back still armed. `force_idle` polls
 STATUS after the reset and, if the core re-armed, resets again -- by which
 point the runtime STARTUP_ARM register cleared by `configure` has
 crossed into the sample domain -- up to `max_resets` times.
 
 Timing assumption: a STATUS read round-trips over JTAG far slower than
-the core's reset-to-re-arm latency (a couple of sample clocks), so the
+the core's reset-to-re-arm latency (a few sample clocks), so the
 first post-reset STATUS read reliably observes the settled state. This
 holds for any practical sample clock; only a sample clock so slow that a
-full JTAG access spans fewer than ~2 sample cycles could read a
+full JTAG access spans fewer than ~5 sample cycles could read a
 transient idle before a pending re-arm propagates.
 
 Note this is intentionally lossy: it discards any in-flight or
@@ -159,7 +207,11 @@ configure(config: CaptureConfig) -> None
 Validate `config` and write it to the core; does not arm.
 
 Raises `ValueError` if the window does not fit `depth` or a field is
-out of range for the core.
+out of range for the core, and `ManagerResetError` if the
+core's core-manager slot is held in reset, or was reset (or, with no
+`instance`, the hub's active slot moved) while it was written.  A
+configure that raises leaves the analyzer unconfigured: the core may
+hold part of the new configuration.
 
 #### `Analyzer.immediate_variant`
 
@@ -184,6 +236,12 @@ arm() -> None
 
 Arm the core with the configuration it holds.
 
+Raises `ManagerResetError` if the core's slot was reset since
+`configure`: it would arm its build defaults.  On a core with
+`CAPTURE_GEN` (`COMPARE_CAPS` bit 21), raises
+`CaptureChangedError` if another controller armed or reset the
+core at the same time; the capture read later must be this arm's.
+
 #### `Analyzer.wait_done`
 
 ```python
@@ -191,6 +249,10 @@ wait_done(timeout: float = 10.0, poll_interval: float = 0.05) -> bool
 ```
 
 Poll STATUS until the capture is done; `False` if `timeout` expires first.
+
+A slot reset clears DONE, so a configured analyzer checks for one
+before it reports the timeout, and raises `ManagerResetError`
+instead.
 
 #### `Analyzer.status`
 
@@ -214,7 +276,11 @@ capture(timeout: float = 10.0) -> CaptureResult
 Wait for the armed capture to finish and read it back.
 
 Call `configure` and `arm` first.  Raises `TimeoutError` if the core
-is not done within `timeout` seconds.
+is not done within `timeout` seconds.  Behind a core manager with
+epochs, raises `ManagerResetError` if the slot was reset (or,
+with no `instance`, the hub's active slot moved) since
+`configure` or during the readout, and
+`CaptureChangedError` if the capture changed under it.
 
 #### `Analyzer.wait_all_segments_done`
 
@@ -231,6 +297,8 @@ capture_segment(seg_idx: int, timeout: float = 10.0) -> CaptureResult
 ```
 
 Read back data from a specific segment after all segments are done.
+
+Raises like `capture`.
 
 #### `Analyzer.export_json`
 
@@ -254,7 +322,8 @@ Write `result` to `out_path` as JSON.
 export_csv_text(result: CaptureResult) -> str
 ```
 
-Return `result` as CSV text: `index,value` (plus `timestamp` if present).
+Return `result` as CSV text: `index,value`, plus `timestamp` and
+`run_length` columns when the capture has them.
 
 #### `Analyzer.write_csv`
 
@@ -327,6 +396,12 @@ Use this when the host should stay connected for subsidiary BSCAN cores
 (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
 not present the `'LA'` core id.  JTAG/transport errors still propagate.
 
+Unlike `probe`, this can switch a core manager's slot.  When the
+analyzer has no slot of its own (`instance` is `None`) and the chain
+is a manager whose active slot is not an ELA, for instance an EIO left
+selected, it selects the manager's first ELA slot and keeps it, so
+`instance` is set afterwards.
+
 #### `Analyzer.probe`
 
 ```python
@@ -381,6 +456,8 @@ Everything `Analyzer.configure` writes to the ELA before a capture.
 | `startup_arm` | `bool` | `False` | runtime STARTUP_ARM register (0xD8): if True a soft reset re-arms the core. Distinct from the compile-time STARTUP_ARM RTL parameter, which sets the power-up (boot-armed) value. |
 | `trigger_holdoff` | `int` | `0` | sample-clock cycles to ignore triggers after arm/re-arm |
 | `trigger_delay` | `int` | `0` | post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event, compensating for upstream pipeline latency |
+| `rle` | `bool` | `False` | run-length capture (cores built with RLE_W): each stored entry is a sample plus how many sample clocks it held. Pre/post-trigger lengths then count entries, not clocks. |
+| `post_clocks` | `int` | `0` | run-length only: also end the post-trigger window this many sample clocks after the trigger, if posttrigger entries have not ended it first (0 = no clock limit) |
 
 ### `CaptureResult`
 
@@ -397,7 +474,8 @@ One capture read back by `Analyzer.capture`, with the config that made it.
 | `samples` | `List[int]` | `list()` |  |
 | `overflow` | `bool` | `False` |  |
 | `timestamps` | `List[int]` | `list()` |  |
-| `segment` | `int` | `0` | which segment this result is from |
+| `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry is cut where the capture ends: on the clock it starts (length 1) when posttrigger entries end it, or on the post_clocks stop clock. The signal may have held longer. |
+| `run_lengths` | `List[int]` | `list()` |  |
 
 ### `ProbeSpec`
 
@@ -459,6 +537,27 @@ Comparator trigger: `mode` is `value_match`, `edge_detect` or `both`.
 | `value` | `int` | required |  |
 | `mask` | `int` | required |  |
 
+### `entry_start_clocks`
+
+```python
+entry_start_clocks(result: CaptureResult) -> list[int]
+```
+
+Sample clock, from the first entry, at which each entry starts.
+
+`0 .. n-1` when the capture is not run-length.
+
+### `expand_run_lengths`
+
+```python
+expand_run_lengths(result: CaptureResult, max_samples: int = 16777216) -> list[int]
+```
+
+One sample per sample clock: each entry repeated for its run length.
+
+Returns `result.samples` unchanged when the capture is not run-length.
+Raises `ValueError` when the expansion would exceed `max_samples`.
+
 ## `fcapz.transport`
 
 ### `Transport`
@@ -488,6 +587,12 @@ All methods should raise:
 * `OSError` / `TimeoutError` — for network or process-level errors
   during `connect`.
 
+Class constants:
+
+```python
+BURST_DRAIN_IDLE_CYCLES = 258
+```
+
 #### `Transport.transaction_lock`
 
 ```python
@@ -501,18 +606,171 @@ selecting different core-manager slots.  This lock serializes those
 higher-level register sequences so one controller cannot switch
 `MGR_ACTIVE` between another controller's read/modify/write halves.
 
+#### `Transport.current_slot_selection`
+
+```python
+current_slot_selection() -> SlotSelection | None
+```
+
+The calling thread's innermost `slot_scope` selection, or `None`.
+
+#### `Transport.slot_scope`
+
+```python
+slot_scope(
+    selection: SlotSelection | None,
+    *,
+    chain: int | None = None,
+) -> Iterator[None]
+```
+
+Run the body's register accesses on *chain* against *selection*'s slot.
+
+Holds `transaction_lock` throughout.  The selection belongs to
+the calling thread and lasts only for the body.  `None` means the
+body carries no selection -- probes and manager-wide reads, which
+must not inherit an enclosing slot.  *chain*, if given, is selected
+for the body.
+
+On exit, also after an exception, a nested scope gives back the chain
+that was active when it was entered and then the enclosing slot, so a
+nested probe on another chain or slot cannot leave the enclosing
+controller's next access misrouted.  A
+top-level scope leaves its chain selected, as controllers always have.
+
+A backend with `atomic_slot_select` writes `MGR_ACTIVE` at the
+head of every backend operation in the scope that reaches a slot (an
+access to the manager's own block, `0xF000`-`0xF0FF`, does not),
+so a second process on the same cable cannot redirect the access.  It
+does that only on a chain identified as holding a manager, which the
+first scope on each slot does with one verified select.
+Other backends select once on entry through
+`select_manager_instance_cached`, which another process can
+still undo between operations.
+
+#### `Transport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+Write *value* to *write_addr*, then read each of *addrs*.
+
+For a selector register and the registers it selects, such as
+`MGR_DESC_INDEX` and the slot descriptor.  A backend with
+`atomic_slot_select` does it all in one backend operation, so
+no other client can move the selector in between; this default is
+separate accesses.
+
 #### `Transport.select_manager_instance_cached`
 
 ```python
 select_manager_instance_cached(chain: int, active_addr: int, instance: int) -> None
 ```
 
-Write a core-manager active slot only when the transport changed.
+Make *instance* the core manager's active slot on *chain*.
 
-The active manager slot is a sticky hardware register.  Host controllers
-sharing one transport use this cache under `transaction_lock` to
-avoid redundant JTAG writes while still making Analyzer/EIO/CoreManager
-agree on which slot was last selected.
+The active slot is a sticky hardware register that something else can
+move: a hub reset (power-up, `MGR_CTRL` bit 0, or any ELA sample
+reset on bitstreams before per-slot resets) returns it to slot 0, and
+another host session can select its own slot.  So the slot is always
+read back before it is trusted, and written only when it differs.  On
+a backend without `atomic_slot_select`, `slot_scope`
+selects through here on entry; an atomic backend comes here once per
+slot, to identify the manager and check the slot, and then selects
+inside every access.  Call under `transaction_lock`.
+
+Raises `ValueError` for a negative slot and `RuntimeError` when a
+core manager answers on *chain* but does not take the slot (out of
+range, or still refusing after `MANAGER_SELECT_ATTEMPTS`
+writes).  The first time it meets a chain it reads `0x0000` and then
+the manager VERSION, and writes nothing unless both answer: an
+`MGR_ACTIVE` write is the reset command of an EJTAG-AXI bridge (see
+`register_pipe_identity`).  A chain with an fcapz core but no
+manager is remembered as standalone and not written; a chain with
+neither is left alone and checked again next time.  The write and its
+readback are one backend operation (`read_regs_after_write`),
+and *chain* is selected for them and the chain active before restored.
+
+#### `Transport.manager_chain_caps`
+
+```python
+manager_chain_caps(chain: int) -> int | None
+```
+
+`MGR_CAPS` of the identified core manager on *chain*, read once
+per identification; `None` when *chain* holds no identified manager.
+Call with *chain* selected and no slot selection in force.
+
+#### `Transport.slot_routing_isolated`
+
+```python
+slot_routing_isolated(chain: int, slot: int) -> bool
+```
+
+Whether every access in the calling thread's scope reaches *slot*
+on *chain* whatever other controllers select.
+
+True only on an `atomic_slot_select` backend whose scope carries
+that slot of an identified manager: each access then writes the slot
+in its own uninterrupted sequence, and the manager takes the write
+(one with epochs, `MGR_CAPS` bit 3, takes it even mid-preload; an
+older one gets a burst drain ahead of it).  Another controller's
+select can then not redirect an access, so a moved `MGR_ACTIVE` or
+`MGR_SELECT_COUNT` is not evidence that one was.  It is no
+protection against another controller writing this same slot.
+
+#### `Transport.held_manager_instance`
+
+```python
+held_manager_instance(chain: int, active_addr: int, instance: int) -> Iterator[None]
+```
+
+Select *instance* as `select_manager_instance_cached` does,
+then check, after the block, that every access in it reached that
+slot.  Call under `transaction_lock`, and access only that slot
+in the block.
+
+Another controller can select another slot at any time, and select
+this one back before the block ends: `MGR_ACTIVE` reads the same,
+but the accesses in between went elsewhere.  `MGR_SELECT_COUNT`
+(`MGR_CAPS` bit 7) counts every `MGR_ACTIVE` write, so a count
+that moved by more than this transport's own writes says one
+happened.  `MGR_ACTIVE` is read after the block too, for a hub
+reset (it moves the active slot to 0 without a select) and for hubs
+without the count.  Raises `ManagerResetError` in either
+case; the block is not checked when it raises.  Nothing is checked on
+a chain without a core manager.
+
+The order makes the count cover the block: count, then `MGR_ACTIVE`
+(this slot, so no select since the count took it away), the block,
+`MGR_ACTIVE` (a hub reset in the block shows, or a select back
+after it moved the count), then the count.
+
+#### `Transport.release_manager_ownership`
+
+```python
+release_manager_ownership() -> None
+```
+
+Clear this session's owner token from the managers it claimed.
+
+A manager whose `MGR_OWNER` holds another value (another session
+took it, or the hub was reset) is left alone.
+
+#### `Transport.manager_select_writes`
+
+```python
+manager_select_writes(chain: int) -> int
+```
+
+`MGR_ACTIVE` writes this transport made to the core manager on
+*chain*, modulo 2**16.  The manager counts every one, from every
+controller, in `MGR_SELECT_COUNT` (`MGR_CAPS` bit 7): the
+difference is the other controllers' selects.  Every select of this
+host goes through `select_manager_instance_cached`, which
+counts them; the count survives
+`invalidate_manager_instance_cache`.
 
 #### `Transport.invalidate_manager_instance_cache`
 
@@ -520,7 +778,20 @@ agree on which slot was last selected.
 invalidate_manager_instance_cache() -> None
 ```
 
-Forget the cached core-manager active slot selection.
+Forget the cached core-manager active slot selection, so the next
+cached select writes and confirms it.  Which chains hold a manager is
+kept; see `forget_manager_chains`.
+
+#### `Transport.forget_manager_chains`
+
+```python
+forget_manager_chains() -> None
+```
+
+Forget everything learned about the core managers: the cached
+active slot, which chains hold a manager or a standalone core, their
+`MGR_CAPS` and the slots already checked.  For a new session or a
+new bitstream.
 
 #### `Transport.connect`
 
@@ -541,6 +812,14 @@ close() -> None
 ```
 
 Close the transport.  Must be idempotent — safe to call multiple times.
+
+#### `Transport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
 
 #### `Transport.read_reg`
 
@@ -599,6 +878,19 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `Transport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `Transport.select_chain`
 
 ```python
@@ -612,10 +904,24 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `Transport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `Transport.raw_dr_scan`
 
@@ -733,6 +1039,14 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `OpenOcdTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
+
 #### `OpenOcdTransport.select_chain`
 
 ```python
@@ -740,6 +1054,16 @@ select_chain(chain: int) -> None
 ```
 
 Select BSCANE2 USER chain for subsequent register accesses.
+
+#### `OpenOcdTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `OpenOcdTransport.raw_dr_scan`
 
@@ -770,6 +1094,14 @@ Read a 32-bit register at *addr*.
 
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
+
+#### `OpenOcdTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one command line.
 
 #### `OpenOcdTransport.read_block`
 
@@ -803,6 +1135,7 @@ XilinxHwServerTransport(
     ir_table: dict[int, int] | None = None,
     ready_probe_addr: int | None = 0,
     ready_probe_timeout: float = 2.0,
+    read_timeout_sec: float | None = None,
     *,
     post_program_delay_ms: int = 200,
     ready_poll_interval_sec: float = 0.02,
@@ -851,6 +1184,7 @@ DR_BITS = 49
 BURST_DR_BITS = 256
 ADDR_BURST_PTR = 44
 READ_IDLE_CYCLES = 20
+PROGRAM_TIMEOUT_SEC = 600.0
 RAW_DR_IDLE_CYCLES = 8
 USER1_PIPE_PRIME_READS = 3
 _SENTINEL = '<<XSDB_DONE>>'
@@ -902,6 +1236,14 @@ close_fast() -> None
 
 Kill `xsdb` quickly for console interrupt; normal `close` may wait 5s.
 
+#### `XilinxHwServerTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Best-effort abort for an in-flight backend operation.
+
 #### `XilinxHwServerTransport.select_chain`
 
 ```python
@@ -909,6 +1251,16 @@ select_chain(chain: int) -> None
 ```
 
 Select BSCANE2 USER chain for subsequent register accesses.
+
+#### `XilinxHwServerTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `XilinxHwServerTransport.raw_dr_scan`
 
@@ -983,13 +1335,45 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `XilinxHwServerTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
+#### `XilinxHwServerTransport.burst_on_data_chain`
+
+```python
+@property
+burst_on_data_chain -> bool
+```
+
+A two-chain session (`single_chain_burst=False`) bursts on USER2,
+which a core manager never answers.
+
 #### `XilinxHwServerTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via the burst DR.
+
+With *on_control_chain* the scans stay on the control chain even on a
+two-chain session: a core manager answers bursts only there.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample, the flat layout `Analyzer.capture()` reassembles.  This is the
@@ -1009,6 +1393,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = False,
 ) -> List[int]
 ```
 
@@ -1020,6 +1406,26 @@ so it must not be read through the window.  Raises
 `BurstUnavailableError` when burst readout is off, and
 `BurstIntegrityError` when a burst ran but returned the wrong
 number of timestamps.
+
+#### `XilinxHwServerTransport.read_run_length_block`
+
+```python
+read_run_length_block(
+    n_entries: int,
+    lane_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
+```
+
+Read one run count per captured entry via the burst DR, on the
+control chain with *on_control_chain* (a core manager's slot).
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, and `BurstIntegrityError` when a burst ran but returned the
+wrong number of counts.
 
 #### `XilinxHwServerTransport.read_timestamp_block`
 
@@ -1040,6 +1446,14 @@ Read several CSR addresses in one `jtag sequence` / `_send` round-trip.
 Uses the same USER1 pipelined capture pattern as `_burst_read_tcl`
 (IR+DR per step; capture carries the previous address's data).  A final
 `read_reg` to VERSION flushes the JTAG pipeline for later accesses.
+
+#### `XilinxHwServerTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one `jtag sequence`.
 
 ### `QuartusStpTransport`
 
@@ -1084,6 +1498,7 @@ CLOSE_TERM_SEC = 2.0
 CLOSE_KILL_SEC = 2.0
 CLOSE_JOIN_SEC = 1.0
 CLOSE_CONTEND_SEC = 0.5
+DISCOVERY_INSTANCES = (1, 2, 3, 4, 5, 6, 7, 8)
 ```
 
 #### `QuartusStpTransport.connect`
@@ -1105,6 +1520,19 @@ close() -> None
 ```
 
 Close the transport.  Must be idempotent — safe to call multiple times.
+
+#### `QuartusStpTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Abort an in-flight request or connect from another thread.
+
+Kills `quartus_stp` without taking any lock: a connect() holds
+`_life_lock` through its open handshake, and a cancel must never
+wait on a lock the call it aborts holds.  The owner reconciles with
+`close`.
 
 #### `QuartusStpTransport.close_fast`
 
@@ -1131,10 +1559,24 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
+
+#### `QuartusStpTransport.discovery_chains`
+
+```python
+discovery_chains() -> tuple[int, ...]
+```
+
+Chains `fcapz.discovery.discover_cores` looks at by default.
+
+USER1-4 here; transports narrow it to the chains they can select.
 
 #### `QuartusStpTransport.raw_dr_scan`
 
@@ -1196,6 +1638,19 @@ Read a 32-bit register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.  Returns the raw 32-bit value (unsigned).
 
+#### `QuartusStpTransport.bursts_data_window`
+
+```python
+bursts_data_window(*, timestamp: bool = False) -> bool
+```
+
+Whether `read_block(0x0100, ...)` (with *timestamp*,
+`read_timestamp_block`) runs a burst rather than reading the
+register window.  A burst is not limited by
+`data_window_end`; a window read is, so the analyzer pages it
+(`DATA_OFFSET`) when it would pass the end.  Transports that burst
+override this, and decide their `read_block` with it.
+
 #### `QuartusStpTransport.read_block`
 
 ```python
@@ -1218,6 +1673,14 @@ never a burst.  For a core-manager slot with no burst wiring, whose
 burst reads return zeros.  Transports whose `read_block` never
 bursts need not override it.
 
+#### `QuartusStpTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run in one locked script.
+
 #### `QuartusStpTransport.read_timestamp_block`
 
 ```python
@@ -1226,13 +1689,42 @@ read_timestamp_block(addr: int, words: int, timestamp_width: int) -> List[int]
 
 Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
 
+#### `QuartusStpTransport.read_run_length_block`
+
+```python
+read_run_length_block(
+    n_entries: int,
+    lane_width: int,
+    *,
+    on_control_chain: bool = False,
+) -> List[int]
+```
+
+Read one run count per captured entry through the DATA_CHAIN burst,
+or with *on_control_chain* (a core manager's slot) through the
+single-chain burst on the active instance.
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, so the caller can read the window instead.
+
 #### `QuartusStpTransport.read_sample_block`
 
 ```python
-read_sample_block(base_addr: int, n_samples: int, sample_width: int) -> List[int]
+read_sample_block(
+    base_addr: int,
+    n_samples: int,
+    sample_width: int,
+    *,
+    on_control_chain: bool = True,
+) -> List[int]
 ```
 
 Read *n_samples* whole samples via single-chain burst on the active chain.
+
+*on_control_chain* is accepted for the shared signature; this reader
+always bursts on the active chain.
 
 Returns `ceil(sample_width / 32)` little-endian 32-bit words per
 sample — the exact flat layout `Analyzer.capture()` reassembles.
@@ -1259,6 +1751,8 @@ read_timestamp_block_single_chain(
     base_addr: int,
     n_timestamps: int,
     timestamp_width: int,
+    *,
+    on_control_chain: bool = True,
 ) -> List[int]
 ```
 
@@ -1425,7 +1919,11 @@ mapped through the backend's IR table.  For virtual-JTAG transports it
 may be the vendor instance identifier, such as Intel's
 `sld_virtual_jtag` `instance_index`.
 
-Subclasses that support multi-chain access must override this.
+Subclasses that support multi-chain access must override this, and
+keep the selected chain in `_active_chain` (or override
+`_current_chain`): `slot_scope` reads it to give an enclosing
+scope back its chain and to write a slot select on the manager's own
+chain.
 Raises `ValueError` if *chain* is invalid for that transport.
 Raises `NotImplementedError` on transports that only support a
 single fixed chain.
@@ -1602,6 +2100,93 @@ Produce a structured summary of the capture for LLM consumption.
 Returns a dict with overview stats, value ranges, edge counts, and
 notable patterns for each probe (or the raw sample if no probes).
 
+## `fcapz.axi_decode`
+
+### `AxiTransaction`
+
+```python
+@dataclass
+class AxiTransaction
+```
+
+One reconstructed AXI4-Lite read or write.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `index` | `int` | required |  |
+| `kind` | `str` | required | "write" \| "read" |
+| `addr` | <code>int &#124; None</code> | `None` |  |
+| `prot` | <code>int &#124; None</code> | `None` |  |
+| `data` | <code>int &#124; None</code> | `None` |  |
+| `strb` | <code>int &#124; None</code> | `None` |  |
+| `resp` | <code>str &#124; None</code> | `None` |  |
+| `addr_cycle` | <code>int &#124; None</code> | `None` |  |
+| `data_cycle` | <code>int &#124; None</code> | `None` |  |
+| `resp_cycle` | <code>int &#124; None</code> | `None` |  |
+| `addr_stall` | `int` | `0` |  |
+| `data_stall` | `int` | `0` |  |
+| `resp_stall` | `int` | `0` |  |
+| `flags` | `list[str]` | `list()` |  |
+
+#### `AxiTransaction.latency`
+
+```python
+@property
+latency -> int | None
+```
+
+Cycles from the first request beat to the response.
+
+#### `AxiTransaction.to_json`
+
+```python
+to_json(addr_digits: int, data_digits: int) -> dict[str, Any]
+```
+
+Compact, JSON-number-safe form (wide values as hex strings).
+
+### `decode_axi`
+
+```python
+decode_axi(
+    samples: Sequence[int],
+    probes: Sequence[Any],
+    *,
+    decimation: int = 0,
+    storage_qualified: bool = False,
+    run_lengths: Sequence[int] | None = None,
+) -> dict[str, Any]
+```
+
+Reconstruct AXI4-Lite transactions from a capture's samples.
+
+`probes` is the monitor's probe map (objects with `name`/`width`/
+`lsb`). Raises `ValueError` if the map is not an AXI one.
+
+`decimation` and `storage_qualified` describe how the capture was
+taken. Reassembly reads the sample stream as consecutive bus cycles: a
+beat's position *is* its cycle, and a response pairs with the oldest
+request still queued. Decimation and storage qualification both break
+that -- a handshake that was never stored cannot be distinguished from
+one that never happened, so a dropped response silently shifts every
+later pairing onto the wrong address, and "latency" becomes a count of
+stored samples. There is no way to recover the missing beats after the
+fact, so such a capture is refused rather than misread.
+
+`run_lengths` are a run-length capture's sample clocks per entry. The
+samples are expanded back to one per cycle before decoding, so cycle
+numbers and latencies count sample clocks, not stored entries.
+
+### `looks_like_axi`
+
+```python
+looks_like_axi(probe_names: Iterable[str]) -> bool
+```
+
+True when a probe map carries every AXI4-Lite handshake signal.
+
+## `fcapz.events`
+
 ### `ProbeDefinition`
 
 ```python
@@ -1762,8 +2347,8 @@ in the low byte, so a NEQ-vs-zero storage qualifier over their mask
 stores a sample **only on cycles where at least one channel handshakes**
 — compressing the capture to transaction beats.
 
-Returns the ELA storage-qualifier tuple: mode `1` (NEQ, i.e. store
-when the masked bits are non-zero), value `0`, mask = the OR of the
+Returns the ELA storage-qualifier tuple: mode `2` (store on no
+match, i.e. when the masked bits are non-zero), value `0`, mask = the OR of the
 handshake-event bits.  Requires a DECODE_EN=1 build (the handshake bits
 do not exist otherwise).
 
@@ -1839,6 +2424,32 @@ AxiMonitorError
 Subclass of `RuntimeError`.
 
 Raised when an AXI monitor is required but absent or unsupported.
+
+## `fcapz.discovery`
+
+### `discover_cores`
+
+```python
+discover_cores(
+    transport: Transport,
+    *,
+    chains: Optional[Iterable[int]] = None,
+    bridges: bool = True,
+) -> List[Dict[str, Any]]
+```
+
+List every fcapz core reachable on an open *transport*.
+
+*chains* defaults to `fcapz.transport.Transport.discovery_chains`.
+Each entry is `{type, name, core_id, chain, base_addr, instance,
+version_major, version_minor, info}`, where `type` is `"ela"`,
+`"axi_mon"`, `"eio"`, `"manager"`, `"ejtag_uart"`,
+`"ejtag_axi"` or `"unknown"` (a manager slot of another core type),
+and `instance` is the manager slot or `None`.  A manager's active slot
+is left as it was found.  Set *bridges* to `False` to skip the bridge
+identity reads on chains no register core answered.  Chains the transport
+cannot select, such as a missing `sld_virtual_jtag` instance, are
+skipped; connection errors propagate.  Chain 1 is selected on return.
 
 ## `fcapz.eio`
 
@@ -2037,7 +2648,9 @@ Like `connect` but assume the transport is already open.
 
 Restores JTAG chain 1 (ELA) before returning so a shared
 session can continue using USER1 register access. Also primes the
-bridge before any subsequent command traffic.
+bridge before any subsequent command traffic.  Holds the transport's
+transaction lock: switching its chain must not land between another
+controller's register accesses.
 
 #### `EjtagAxiController.axi_write`
 
@@ -2153,6 +2766,7 @@ CMD_RX_POP = 2
 CMD_TXRX = 3
 CMD_CONFIG = 14
 CMD_RESET = 15
+RX_BATCH = 64
 ```
 
 #### `EjtagUartController.connect`
@@ -2188,7 +2802,8 @@ attach() -> dict
 Like `connect` but assume the transport is already open.
 
 Restores JTAG chain 1 before returning. Does not close the transport on
-failure.
+failure.  Holds the transport's transaction lock: switching its chain
+must not land between another controller's register accesses.
 
 #### `EjtagUartController.close`
 
@@ -2200,7 +2815,8 @@ Reset bridge, drain to ensure reset completes, close transport.
 
 The FIFO reset counter runs on TCK, so we must send follow-up
 scans to clock it down.  4 NOP scans guarantees the 4-cycle
-fifo_rst hold period has elapsed.
+fifo_rst hold period has elapsed.  The transport is closed even if a
+reset scan fails.
 
 #### `EjtagUartController.send`
 
@@ -2223,7 +2839,7 @@ Raises TimeoutError if the TX FIFO stays full for longer than
 recv(count: int = 0, timeout: float = 1.0) -> bytes
 ```
 
-Receive bytes from UART RX using pipelined RX_POP.
+Receive bytes from UART RX.
 
 count=0 means return all currently available bytes.
 Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
@@ -2232,9 +2848,12 @@ Timeout is an idle timeout: the deadline resets each time a
 byte is successfully received.  A slow-but-steady stream will
 not time out mid-message.
 
-Pipelined: each RX_POP scan returns the result of the
-previous pop, so back-to-back pops achieve 1 byte per scan
-(~1.5 KB/s) instead of 2 scans per byte.
+Pops run back to back in batches, each scan reading the result
+of the previous pop, so a byte costs about one scan.  A batch
+starts at one pop and doubles (up to `RX_BATCH`) only while
+every pop returns a byte; once the FIFO runs empty it polls
+one pop at a time, so the deadline is checked between polls.
+A batch never pops more than *count* bytes.
 
 #### `EjtagUartController.recv_line`
 
@@ -2244,9 +2863,9 @@ recv_line(timeout: float = 1.0) -> str
 
 Receive until newline or timeout (idle timeout).
 
-Uses non-pipelined RX_POP+NOP (2 scans/byte) to avoid
-consuming the byte after the newline.  Deadline resets on
-each successful byte.
+Pops one byte per batch (RX_POP + NOP) to avoid consuming the
+byte after the newline.  Deadline resets on each successful
+byte.
 
 Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
 

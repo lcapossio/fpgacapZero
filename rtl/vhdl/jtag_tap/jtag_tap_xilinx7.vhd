@@ -15,7 +15,9 @@ entity jtag_tap_xilinx7 is
         capture : out std_logic;
         shift   : out std_logic;
         update  : out std_logic;
-        sel     : out std_logic
+        sel     : out std_logic;
+        -- TAP in Test-Logic-Reset (level, TCK domain)
+        tlr     : out std_logic
     );
 end entity jtag_tap_xilinx7;
 
@@ -40,7 +42,6 @@ architecture rtl of jtag_tap_xilinx7 is
 
     signal drck_unused    : std_logic;
     signal runtest_unused : std_logic;
-    signal reset_unused   : std_logic;
 begin
     u_bscan : BSCANE2
         generic map (
@@ -56,6 +57,6 @@ begin
             SEL     => sel,
             DRCK    => drck_unused,
             RUNTEST => runtest_unused,
-            RESET   => reset_unused
+            RESET   => tlr
         );
 end architecture rtl;

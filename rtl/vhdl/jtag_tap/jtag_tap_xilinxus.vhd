@@ -15,7 +15,9 @@ entity jtag_tap_xilinxus is
         capture : out std_logic;
         shift   : out std_logic;
         update  : out std_logic;
-        sel     : out std_logic
+        sel     : out std_logic;
+        -- TAP in Test-Logic-Reset (level, TCK domain)
+        tlr     : out std_logic
     );
 end entity jtag_tap_xilinxus;
 
@@ -32,6 +34,7 @@ begin
             capture => capture,
             shift   => shift,
             update  => update,
-            sel     => sel
+            sel     => sel,
+            tlr     => tlr
         );
 end architecture rtl;

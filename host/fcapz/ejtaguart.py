@@ -11,6 +11,15 @@ are read with ``CMD_CONFIG`` over byte addresses ``0x0``–``0xF`` (see
 Uses a 32-bit pipelined DR — each scan shifts in a command + tx_byte and
 shifts out status + rx_byte + tx_free.
 
+A ``RX_POP`` or ``CMD_CONFIG`` result appears in the *next* scan's capture,
+and the core clears it on every Update-DR of its chain.  Updates the host does
+not issue can land between two separate scans: on a Zynq UltraScale+ MPSoC
+under hw_server they arrive many times a second.  So every scan that returns
+a result runs in one batch with the scan that reads it
+(:meth:`~fcapz.transport.Transport.raw_dr_scan_batch`, a single uninterrupted
+``jtag sequence`` on hw_server), and each batch ends in a NOP that drains the
+last result.
+
 DR format (32 bits, LSB first):
   Shift-in:  [7:0]=tx_byte, [27:8]=reserved, [31:28]=cmd
   Shift-out: [7:0]=rx_byte, [15:8]=tx_free, [23:16]=rsvd,
@@ -51,6 +60,9 @@ class EjtagUartController:
     CMD_TXRX    = CMD_TXRX
     CMD_CONFIG  = CMD_CONFIG
     CMD_RESET   = CMD_RESET
+
+    # Most RX_POPs per batch; one more scan drains the last result.
+    RX_BATCH = 64
 
     def __init__(self, transport: Transport, chain: int = 4):
         self._transport = transport
@@ -159,36 +171,41 @@ class EjtagUartController:
         """Like :meth:`connect` but assume the transport is already open.
 
         Restores JTAG chain 1 before returning. Does not close the transport on
-        failure.
+        failure.  Holds the transport's transaction lock: switching its chain
+        must not land between another controller's register accesses.
         """
-        self._transport.select_chain(self._chain)
-        try:
-            identity_or_version = self._config_read_u32(0x00)
-            uid = identity_or_version & 0xFFFF
-            if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
-                self._scan(cmd=self.CMD_NOP)
-                self._scan(cmd=self.CMD_NOP)
+        with self._transport.transaction_lock():
+            self._transport.select_chain(self._chain)
+            try:
                 identity_or_version = self._config_read_u32(0x00)
-            legacy_version = (
-                self._config_read_u32(0x04)
-                if identity_or_version == _LEGACY_UART_ID
-                else None
-            )
-            return self._decode_identity(identity_or_version, legacy_version)
-        finally:
-            self._transport.select_chain(1)
+                uid = identity_or_version & 0xFFFF
+                if uid != self.UART_ID and identity_or_version != _LEGACY_UART_ID:
+                    self._scan(cmd=self.CMD_NOP)
+                    self._scan(cmd=self.CMD_NOP)
+                    identity_or_version = self._config_read_u32(0x00)
+                legacy_version = (
+                    self._config_read_u32(0x04)
+                    if identity_or_version == _LEGACY_UART_ID
+                    else None
+                )
+                return self._decode_identity(identity_or_version, legacy_version)
+            finally:
+                self._transport.select_chain(1)
 
     def close(self) -> None:
         """Reset bridge, drain to ensure reset completes, close transport.
 
         The FIFO reset counter runs on TCK, so we must send follow-up
         scans to clock it down.  4 NOP scans guarantees the 4-cycle
-        fifo_rst hold period has elapsed.
+        fifo_rst hold period has elapsed.  The transport is closed even if a
+        reset scan fails.
         """
-        self._scan(cmd=self.CMD_RESET)
-        for _ in range(4):
-            self._scan(cmd=self.CMD_NOP)
-        self._transport.close()
+        try:
+            self._scan(cmd=self.CMD_RESET)
+            for _ in range(4):
+                self._scan(cmd=self.CMD_NOP)
+        finally:
+            self._transport.close()
 
     def send(self, data: bytes, timeout: float = 30.0) -> None:
         """Send bytes to UART TX. Blocks until all accepted or timeout.
@@ -224,7 +241,7 @@ class EjtagUartController:
             offset += batch_size
 
     def recv(self, count: int = 0, timeout: float = 1.0) -> bytes:
-        """Receive bytes from UART RX using pipelined RX_POP.
+        """Receive bytes from UART RX.
 
         count=0 means return all currently available bytes.
         Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
@@ -233,55 +250,54 @@ class EjtagUartController:
         byte is successfully received.  A slow-but-steady stream will
         not time out mid-message.
 
-        Pipelined: each RX_POP scan returns the result of the
-        previous pop, so back-to-back pops achieve 1 byte per scan
-        (~1.5 KB/s) instead of 2 scans per byte.
+        Pops run back to back in batches, each scan reading the result
+        of the previous pop, so a byte costs about one scan.  A batch
+        starts at one pop and doubles (up to ``RX_BATCH``) only while
+        every pop returns a byte; once the FIFO runs empty it polls
+        one pop at a time, so the deadline is checked between polls.
+        A batch never pops more than *count* bytes.
         """
         result = bytearray()
         deadline = time.monotonic() + timeout
-        popping = False  # True if we have an outstanding RX_POP
+        batch = 1
         while True:
-            if not popping:
-                # Prime: issue first RX_POP
-                self._scan(cmd=self.CMD_RX_POP)
-                popping = True
-                continue
-
-            # Pipeline: issue next RX_POP (or NOP to drain) while
-            # reading the result of the previous pop
-            need_more = (count == 0) or (len(result) < count - 1)
-            next_cmd = self.CMD_RX_POP if need_more else self.CMD_NOP
-            status, _, rx_byte = self._scan(cmd=next_cmd)
-            self._check_errors(status)
-
-            if status & 0x10:  # RX_VALID
-                result.append(rx_byte)
+            want = batch
+            if count > 0:
+                want = min(want, count - len(result))
+            got = 0
+            drained = False
+            for status, rx_byte in self._pop_batch(want):
+                self._check_errors(status)
+                if status & 0x10:  # RX_VALID
+                    result.append(rx_byte)
+                    got += 1
+                else:
+                    drained = True  # FIFO was empty at that pop
+            if count > 0 and len(result) >= count:
+                return bytes(result)
+            if got:
                 deadline = time.monotonic() + timeout  # reset on progress
-                if count > 0 and len(result) >= count:
-                    return bytes(result[:count])
-            else:
-                # FIFO was empty on the previous pop
-                popping = False
-                if count == 0:
+            if drained:
+                if count == 0 or time.monotonic() >= deadline:
                     return bytes(result)
-                if time.monotonic() >= deadline:
-                    return bytes(result)
+                batch = 1
                 time.sleep(0.001)
+            else:
+                batch = min(batch * 2, self.RX_BATCH)
 
     def recv_line(self, timeout: float = 1.0) -> str:
         """Receive until newline or timeout (idle timeout).
 
-        Uses non-pipelined RX_POP+NOP (2 scans/byte) to avoid
-        consuming the byte after the newline.  Deadline resets on
-        each successful byte.
+        Pops one byte per batch (RX_POP + NOP) to avoid consuming the
+        byte after the newline.  Deadline resets on each successful
+        byte.
 
         Raises RuntimeError on RX_OVERFLOW or FRAME_ERR.
         """
         result = bytearray()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            self._scan(cmd=self.CMD_RX_POP)
-            status, _, rx_byte = self._scan(cmd=self.CMD_NOP)
+            ((status, rx_byte),) = self._pop_batch(1)
             self._check_errors(status)
             if status & 0x10:  # RX_VALID
                 result.append(rx_byte)
@@ -326,19 +342,31 @@ class EjtagUartController:
         status  = (out >> 24) & 0xFF
         return status, tx_free, rx_byte
 
+    def _pop_batch(self, pops: int) -> list[tuple[int, int]]:
+        """Issue *pops* RX_POPs and a NOP drain as one batch.
+
+        Returns ``(status_8bit, rx_byte)`` for each pop, in order.
+        """
+        scans = [(self.CMD_RX_POP << 28, DR_WIDTH)] * pops
+        scans.append((self.CMD_NOP << 28, DR_WIDTH))
+        outs = self._transport.raw_dr_scan_batch(scans, chain=self._chain)
+        return [((out >> 24) & 0xFF, out & 0xFF) for out in outs[1:]]
+
     def _config_read_u32(self, base_addr: int) -> int:
         """Read 32-bit config register (4 CONFIG scans + 1 NOP drain).
 
-        Pipelined: CONFIG[i] returns byte from CONFIG[i-1].
+        Pipelined, as one batch: CONFIG[i] returns byte from CONFIG[i-1].
         Scan 1: CONFIG addr+0 -> no result
         Scan 2: CONFIG addr+1 -> byte 0
         Scan 3: CONFIG addr+2 -> byte 1
         Scan 4: CONFIG addr+3 -> byte 2
         Scan 5: NOP            -> byte 3
         """
-        self._scan(cmd=self.CMD_CONFIG, tx_byte=base_addr + 0)  # prime
-        _, _, b0 = self._scan(cmd=self.CMD_CONFIG, tx_byte=base_addr + 1)
-        _, _, b1 = self._scan(cmd=self.CMD_CONFIG, tx_byte=base_addr + 2)
-        _, _, b2 = self._scan(cmd=self.CMD_CONFIG, tx_byte=base_addr + 3)
-        _, _, b3 = self._scan(cmd=self.CMD_NOP)  # drain
+        scans = [
+            ((self.CMD_CONFIG << 28) | ((base_addr + i) & 0xFF), DR_WIDTH)
+            for i in range(4)
+        ]
+        scans.append((self.CMD_NOP << 28, DR_WIDTH))
+        outs = self._transport.raw_dr_scan_batch(scans, chain=self._chain)
+        b0, b1, b2, b3 = (out & 0xFF for out in outs[1:])
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)

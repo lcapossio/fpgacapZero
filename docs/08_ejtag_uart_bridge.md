@@ -4,7 +4,7 @@
 > **Goal**: deep dive on the JTAG-to-UART bridge.  By the end of
 > this chapter you will know how to wire it into your design, how
 > to send and receive bytes from the host, and what the known
-> internal-loopback caveat (BUG-002) means in practice.
+> dropped-byte issue (BUG-002) turned out to be.
 
 ## What it is
 
@@ -158,11 +158,11 @@ timeout is an **idle timeout**: the deadline resets every time a
 byte is successfully received, so a slow-but-steady stream will
 not time out mid-message.
 
-The implementation uses **pipelined RX_POP** so steady streaming
-approaches about **one byte per JTAG round trip**.  Each `RX_POP` scan returns
-the result of the previous pop, so back-to-back pops achieve
-"one byte per round-trip" instead of "one byte per two
-round-trips".
+The implementation uses **pipelined RX_POP**: each `RX_POP` scan
+returns the result of the previous pop, so a byte costs about one
+scan.  Up to 64 pops and a final NOP drain run as one batch (one
+JTAG round trip on hw_server), so no pop result is left waiting
+between round trips (see BUG-002 below).
 
 ### Receive a line
 
@@ -172,7 +172,7 @@ print(line)
 ```
 
 Convenience wrapper that reads bytes until newline (`\n`) or
-timeout.  Uses non-pipelined `RX_POP + NOP` (2 scans per byte) so
+timeout.  Uses one `RX_POP + NOP` batch per byte (2 scans) so
 it can stop exactly at the newline without consuming the next
 byte.
 
@@ -309,72 +309,41 @@ The `recv_line()` deadline is an **idle** timeout, so even on a
 slow downstream the call returns the moment the response is
 fully buffered, not after the full 1-second wait.
 
-## BUG-002: internal loopback drops bytes at 115200
+## BUG-002: dropped bytes on back-to-back traffic
 
-There is a known limitation when **the bridge is wired in
-internal loopback** (TX directly connected to RX inside the FPGA
-with zero wire delay) at 115200 baud and high traffic rates: the
-RX synchroniser can occasionally miss the stop-to-start transition
-between back-to-back frames.
+Internal-loopback tests used to lose bytes on back-to-back frames at
+115200 baud: on a Kria KV260, 9 of 15 32-byte messages lost bytes,
+and even short messages occasionally did.  No RX overflow or framing
+error was ever reported, because no byte was lost on the UART line.
 
-### Why it happens
+### Why it happened
 
-The bridge's RX path uses a 2-FF synchroniser on `uart_rxd` to
-sample the line into the `uart_clk` domain.  When TX feeds RX
-directly with zero wire delay, the brief stop-bit-high pulse
-(one bit period at 115200 baud = ~8.7 µs) may not be captured
-before the next start bit pulls the line low again, depending on
-clock-domain alignment.  The synchroniser sees "low → low → low"
-and misses the rising edge that indicates "this is a new frame".
+The loss was on the JTAG side.  An `RX_POP` (or `CMD_CONFIG`) result
+appears in the *next* scan's capture, and the core clears it on every
+Update-DR of its chain.  The host used to issue the pop and the scan
+that reads it as two separate JTAG operations.  Any update the host did
+not issue that landed between them discarded the popped byte: it had
+left the FIFO, and its valid flag was gone before it was read.  On the
+KV260 such updates arrive many times a second.  With 50 ms between a
+pop and its readout, every byte was lost.
 
-### When it does NOT happen
+### The fix
 
-- **External loopback** (TX wire jumpered to RX externally, even
-  on the same FPGA's package).  Wire propagation delay + I/O
-  buffer hysteresis is enough.
-- **Real UART traffic** to/from another device.  Cable delay is
-  always more than enough margin.
-- **Lower baud rates** (9600, 38400).  Longer bit periods leave
-  more synchroniser margin.
-- **Sparse traffic** at 115200.  The bug only fires on consecutive
-  back-to-back frames.
-
-### How to detect it
-
-If you see the symptom in your loopback testbench, you can confirm
-it by checking the sticky `frame_error` flag in `uart.status()`
-after a transfer that should have round-tripped cleanly:
-
-```python
-uart.send(b"X")
-time.sleep(0.05)
-data = uart.recv(count=1, timeout=2.0)
-if data != b"X":
-    print("BUG-002 reproduced:", uart.status())
-```
-
-### Workaround
-
-Test with **external loopback** (a 2-pin jumper across two FPGA
-GPIOs that map to `uart_txd` and `uart_rxd`).  This is what
-production users will typically have anyway — they care about
-talking to a real device, not internal loopback.
-
-The hardware integration test `test_loopback_stress` is marked
-`@expectedFailure` in
-[`test_hw_integration.py`](../examples/arty_a7/test_hw_integration.py)
-to keep regression pressure on this issue.  All other UART tests
-(`test_loopback_block`, `test_send_recv_single_byte`,
-`test_send_recv_string`, `test_recv_line`,
-`test_status_non_destructive`) pass against internal loopback
-because they use shorter or sparser traffic patterns that the
-synchroniser handles correctly.
+The host now runs each result-returning scan in one batch with the scan
+that reads it (`Transport.raw_dr_scan_batch`, a single uninterrupted
+`jtag sequence` on hw_server).  Each batch ends in a NOP that drains the
+last result, so nothing is in flight between batches.  The KV260 test
+loops 95-byte messages back with no loss.
 
 ### Status
 
-This is a known low-priority issue. The fix is RTL: harden the RX
-synchroniser path or change the loopback testbench to insert a small
-wire delay. Not blocking any release.
+Fixed on the host; no bitstream change is needed.  The Arty A7
+`test_loopback_stress` is still marked `@expectedFailure`: its UART
+loopback bitstream is built separately and has not been re-run since
+the fix.  The earlier explanation, that the RX synchroniser misses the
+stop bit with zero wire delay, does not fit what was seen.  TX and RX
+share `uart_clk`, the receiver samples every bit at its centre, and a
+misframed byte would set `frame_error`.
 
 ## Resource usage
 
@@ -401,8 +370,8 @@ need a separate bitstream from the main Arty A7 reference design
 (the main one uses USER4 for the AXI bridge):
 
 ```bash
-# Build the UART loopback bitstream first (separate from the main design)
-# ... see examples/arty_a7/uart_loopback/ ...
+# Build a UART loopback bitstream first (separate from the main design;
+# none is checked in for the Arty)
 
 # Then run the gated tests
 FPGACAP_UART_HW=1 pytest examples/arty_a7/test_hw_integration.py -k uart
@@ -416,7 +385,11 @@ FPGACAP_UART_HW=1 pytest examples/arty_a7/test_hw_integration.py -k uart
 | `test_recv_line` | `recv_line()` stops at newline |
 | `test_loopback_block` | 4-byte block round-trip |
 | `test_status_non_destructive` | `status()` does NOT consume RX data |
-| `test_loopback_stress` | 32 consecutive bytes (BUG-002, marked expectedFailure) |
+| `test_loopback_stress` | 32 consecutive bytes (BUG-002, marked expectedFailure; not re-run since the fix) |
+
+The Kria KV260 reference design ([`examples/kv260`](../examples/kv260/))
+carries the bridge on USER3 with TX looped to RX, and its hardware test
+runs a short loopback and a repeated 95-byte stress loopback by default.
 
 Unit tests in [`../tests/test_ejtaguart.py`](../tests/test_ejtaguart.py)
 cover the controller against a fake transport that simulates the

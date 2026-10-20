@@ -6,16 +6,34 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 from ._version import _version_tuple
-from .registers import ADDR_MGR_ACTIVE
+from .registers import (
+    ADDR_MGR_ACTIVE,
+    ADDR_MGR_EPOCH,
+    ADDR_MGR_SELECT_COUNT,
+    ADDR_MGR_SLOT_EPOCH,
+    ADDR_MGR_TLR_COUNT,
+    MGR_CAP_BURST_HEADER,
+    MGR_CAP_EPOCH_OWNER,
+    MGR_CAP_SELECT_COUNT,
+    MGR_CAP_TLR_RESET,
+)
 from .transport import (
+    SlotSelection,
     REG_ADDR_SPACE_END,
+    REGISTER_PIPE_CORE_IDS,
+    BurstExpectation,
+    BurstHeader,
+    BurstIntegrityError,
     BurstUnavailableError,
+    ManagerResetError,
     OpenOcdTransport,
     Transport,
     check_data_window,
@@ -23,6 +41,19 @@ from .transport import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+class CaptureNotReady(TimeoutError):
+    """The armed capture has not completed yet.
+
+    A ``TimeoutError`` subclass so every existing ``except TimeoutError``
+    still catches it, but a distinct type because it is the one timeout that
+    is *expected*: the trigger simply has not fired, the core is still armed,
+    and the right response is to wait longer. A timeout from the transport
+    while reading status or sample data means something else entirely -- the
+    link may be wedged -- and must not be mistaken for it.
+    """
+
 
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
@@ -32,6 +63,7 @@ ELA_CORE_ID = 0x4C41
 _ELA_CORE_ID = ELA_CORE_ID  # in-module alias
 CORE_MANAGER_CORE_ID = 0x434D  # ASCII "CM" (mixed core manager)
 _CORE_MANAGER_CORE_ID = CORE_MANAGER_CORE_ID
+_EIO_CORE_ID = 0x494F  # fcapz.eio.EIO_CORE_ID ("IO"); eio imports this module
 
 
 def expected_ela_version_reg() -> int:
@@ -72,6 +104,7 @@ _ADDR_SEG_SEL = 0x00C0
 _ADDR_SEG_START = 0x00C8
 _ADDR_TIMESTAMP_W = 0x00C4
 _ADDR_FEATURES = 0x003C
+_FEATURE_STOR_QUAL = 1 << 4  # FEATURES[4]: built with STOR_QUAL
 _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
@@ -92,9 +125,21 @@ _ADDR_MGR_DESC_CAPS = 0xF01C
 # slot's pointer; on those the transport syncs the start first
 # (Transport.burst_start_sync).
 _MGR_CAP_BURST_START = 0x4
+# Most slots a core manager can report: MGR_COUNT is 16 bits wide, and
+# NUM_SLOTS has no smaller bound.  Anything above is garbage.
+_MGR_MAX_SLOTS = 0xFFFF
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
+# Run-length capture (RLE_W cores).  RLE_W reads 0 on cores without it.
+_ADDR_RLE_CTRL = 0x00A8
+_ADDR_RLE_W = 0x00CC
+# Post-trigger clock limit, RLE only (0 = none).  min(32, LEN_W + RLE_W) bits.
+_ADDR_RLE_POST_CLKS = 0x0090
+_RLE_CTRL_ENABLE = 1 << 0         # taken on arm
+_RLE_CTRL_WINDOW_COUNTS = 1 << 1  # timestamp DATA window returns run counts
+# BURST_PTR[31:30] = 0b11 bursts run counts on the timestamp lane.
+_RLE_MAX_W = 16
 
 _COMPARE_CAPS_LEGACY_FULL = 0x1FF
 _COMPARE_CAPS_LIGHTWEIGHT = 0x1C3
@@ -112,6 +157,7 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
     _ADDR_NUM_SEGMENTS,
     _ADDR_PROBE_MUX_W,
     _ADDR_COMPARE_CAPS,
+    _ADDR_RLE_W,
 )
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
@@ -124,6 +170,17 @@ _COMPARE_CAPS_WIDE_TRIG = 1 << 18
 # COMPARE_CAPS bit 19: the timestamp window base is decoded at full width.
 # Cores without it decode a base past 0x10000 at its low 16 bits.
 _COMPARE_CAPS_TS_BASE_FULL = 1 << 19
+# COMPARE_CAPS bit 20: DATA_OFFSET, a word offset added to every DATA /
+# timestamp window read, pages the windows past the 16-bit address space.
+_COMPARE_CAPS_DATA_OFFSET = 1 << 20
+# COMPARE_CAPS bit 21: CAPTURE_GEN counts the CTRL writes that arm or reset
+# the core and the releases of its register-side reset.
+_COMPARE_CAPS_CAPTURE_GEN = 1 << 21
+_ADDR_CAPTURE_GEN = 0x00F8
+_ADDR_DATA_OFFSET = 0x00F4
+# COMPARE_CAPS bit 22: SQ_MODE holds the compare mode plus one (1 = EQ,
+# 2 = NEQ).  Cores without it take the raw compare mode, so EQ (0) means off.
+_COMPARE_CAPS_SQ_MODE_PLUS1 = 1 << 22
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -171,6 +228,18 @@ class SequencerStage:
         return cfg
 
 
+def _validate_stage_fields(stage: SequencerStage, label: str) -> None:
+    """Refuse a field SEQ_CFG would truncate rather than program it changed.
+
+    `pack_cfg` masks each field to its width, so a count_target of 65536
+    would program 0, which the sequencer reads as already reached.
+    """
+    for name, top in (("combine", 3), ("next_state", 3), ("count_target", 0xFFFF)):
+        value = getattr(stage, name)
+        if not 0 <= value <= top:
+            raise ValueError(f"{label} {name} must be 0..{top}, got {value}")
+
+
 def _compare_mode_available(caps: int, mode: int) -> bool:
     """Return True when a 4-bit compare mode is implemented by the bitstream."""
     return 0 <= mode <= 8 and bool(caps & (1 << mode))
@@ -184,9 +253,55 @@ def _validate_compare_mode(caps: int, mode: int, context: str) -> None:
         )
 
 
+def _sq_mode_register(caps: int, mode: int) -> int:
+    """SQ_MODE register value for ``stor_qual_mode`` 0 (off), 1 (match), 2 (no match)."""
+    if mode not in (0, 1, 2):
+        raise ValueError(f"stor_qual_mode must be 0, 1, or 2, got {mode}")
+    if mode == 0 or caps & _COMPARE_CAPS_SQ_MODE_PLUS1:
+        return mode
+    if mode == 2:
+        return 1  # NEQ in the raw encoding
+    raise ValueError(
+        "store-when-match (stor_qual_mode=1) needs COMPARE_CAPS bit 22; "
+        "this bitstream's storage qualifier cannot select EQ. Rebuild the core."
+    )
+
+
 def _dual_compare_available(caps: int) -> bool:
     """Legacy bitstreams omitted this flag but always had comparator B."""
     return not (caps & _COMPARE_CAP_SCHEMA) or bool(caps & _COMPARE_CAP_DUAL)
+
+
+def _simple_trigger_stage(trigger: TriggerConfig) -> SequencerStage:
+    """The one final sequencer stage equivalent to a plain *trigger*.
+
+    A core built with TRIG_STAGES > 1 triggers only from its sequencer;
+    TRIG_MODE/VALUE/MASK feed the single-stage path those builds bypass.
+
+    ``count_target=0`` skips the count check.  The default of 1 means the
+    same on current RTL, whose hit counter saturates; bitstreams from fcapz
+    0.4.9 and earlier wrap the 16-bit counter, so after 65535 matches the
+    external trigger gate held back, a target of 1 read as not reached for
+    one sample.
+    """
+    if (trigger.value >> 32) or (trigger.mask >> 32):
+        raise ValueError(
+            "trigger value/mask exceed 32 bits; a multi-stage sequencer stage "
+            "compares only the low 32 bits"
+        )
+    value, mask = trigger.value & 0xFFFF_FFFF, trigger.mask & 0xFFFF_FFFF
+    eq, changed = 0, 8
+    if trigger.mode == "value_match":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              is_final=True, count_target=0)
+    if trigger.mode == "edge_detect":
+        return SequencerStage(cmp_mode_a=changed, value_a=value, mask_a=mask,
+                              is_final=True, count_target=0)
+    if trigger.mode == "both":
+        return SequencerStage(cmp_mode_a=eq, value_a=value, mask_a=mask,
+                              cmp_mode_b=changed, value_b=value, mask_b=mask,
+                              combine=3, is_final=True, count_target=0)
+    raise ValueError("invalid trigger mode")
 
 
 def _validate_dual_compare(caps: int, stage: SequencerStage, context: str) -> None:
@@ -241,6 +356,14 @@ class CaptureConfig:
                                # (0..65535) — shifts the committed trigger
                                # sample N cycles after the trigger event,
                                # compensating for upstream pipeline latency
+    rle: bool = False          # run-length capture (cores built with RLE_W):
+                               # each stored entry is a sample plus how many
+                               # sample clocks it held.  Pre/post-trigger
+                               # lengths then count entries, not clocks.
+    post_clocks: int = 0       # run-length only: also end the post-trigger
+                               # window this many sample clocks after the
+                               # trigger, if posttrigger entries have not
+                               # ended it first (0 = no clock limit)
 
 
 @dataclass
@@ -251,13 +374,55 @@ class CaptureResult:
     overflow: bool = False
     timestamps: List[int] = field(default_factory=list)
     segment: int = 0  # which segment this result is from
+    # Run-length capture: sample clocks each entry in ``samples`` held (empty
+    # when the capture was not run-length).  The last entry is cut where the
+    # capture ends: on the clock it starts (length 1) when posttrigger
+    # entries end it, or on the post_clocks stop clock.  The signal may have
+    # held longer.
+    run_lengths: List[int] = field(default_factory=list)
+
+
+def entry_start_clocks(result: CaptureResult) -> list[int]:
+    """Sample clock, from the first entry, at which each entry starts.
+
+    ``0 .. n-1`` when the capture is not run-length.
+    """
+    n = len(result.samples)
+    if len(result.run_lengths) != n:
+        return list(range(n))
+    out: list[int] = []
+    clock = 0
+    for length in result.run_lengths:
+        out.append(clock)
+        clock += int(length)
+    return out
+
+
+def expand_run_lengths(result: CaptureResult, max_samples: int = 1 << 24) -> list[int]:
+    """One sample per sample clock: each entry repeated for its run length.
+
+    Returns ``result.samples`` unchanged when the capture is not run-length.
+    Raises `ValueError` when the expansion would exceed ``max_samples``.
+    """
+    if len(result.run_lengths) != len(result.samples):
+        return list(result.samples)
+    total = sum(int(n) for n in result.run_lengths)
+    if total > max_samples:
+        raise ValueError(
+            f"expanding the run lengths gives {total} samples, over max_samples={max_samples}"
+        )
+    out: list[int] = []
+    for value, length in zip(result.samples, result.run_lengths):
+        out.extend([value] * int(length))
+    return out
 
 
 def vcd_simulation_times(result: CaptureResult) -> list[int]:
     """Per-sample times for VCD ``#`` lines (``len(result.samples)`` entries).
 
     Without hardware timestamps this is ``0 .. n-1`` (one time unit per stored
-    sample, matching the historical behaviour).
+    sample, matching the historical behaviour), or for a run-length capture
+    each entry's start clock (:func:`entry_start_clocks`).
 
     With timestamps, values are **shifted by the first sample** so each dump
     starts at 0 while preserving relative spacing. Raw counters often jump
@@ -280,15 +445,74 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
             out.append(t)
             last = t
         return out
-    return list(range(n))
+    return entry_start_clocks(result)
+
+
+def _last_entry_clocks(result: CaptureResult) -> int:
+    """Clocks the last entry stands for: its run length on a run-length
+    capture, else one."""
+    runs = result.run_lengths
+    if runs and len(runs) == len(result.samples):
+        return int(runs[-1])
+    return 1
+
+
+class CaptureChangedError(RuntimeError):
+    """The capture under a readout changed while it was read: it was re-armed,
+    or another session selected another segment (``SEG_START`` moved), so the
+    samples and timestamps read may come from different captures."""
+
+
+class _SlotState(NamedTuple):
+    """The core-manager slot an analyzer reads, with ``MGR_SLOT_EPOCH`` of
+    that slot, ``MGR_EPOCH`` and the other controllers' ``MGR_ACTIVE``
+    writes (``None`` without ``MGR_SELECT_COUNT``).  The last one changes
+    whenever another controller selects a slot, so it is compared only
+    across one operation, never from :meth:`Analyzer.configure` to a later
+    one."""
+
+    slot: int
+    slot_epoch: int
+    hub_epoch: int
+    foreign_selects: int | None
+
+
+class _Readout(NamedTuple):
+    """What :meth:`Analyzer._readout_end` compares with at the end of a
+    readout."""
+
+    state: _SlotState | None
+    tlr_count: int | None
+    start_ptr: int | None
+    capture_gen: int | None
 
 
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _burst_epoch_checked(method):
+    """Check the epochs of a header-checked burst after it (see
+    :meth:`Analyzer._check_burst_epochs`), then drop the header expectation so
+    no later burst on this transport inherits it."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        transport = self.transport
+        transport.last_burst_header = None
+        try:
+            result = method(self, *args, **kwargs)
+            header = transport.last_burst_header
+            if header is not None:
+                self._check_burst_epochs(header, transport.burst_expect)
+            return result
+        finally:
+            transport.burst_expect = None
+            transport.last_burst_header = None
 
     return wrapper
 
@@ -326,9 +550,13 @@ class Analyzer:
         self.transport = transport
         self._chain = int(chain)
         self._instance = None if instance is None else int(instance)
+        # The slot was bound by core type, not given: a new connection, which
+        # may hold another image, binds it again.
+        self._slot_bound_by_type = False
         self._manager_override = None if manager is None else bool(manager)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
+        self._hw_rle_w: int = 0
         self._hw_num_segments: int = 1
         self._hw_compare_caps: int = 0
         # (MGR_CAPS, MGR_COUNT), read once per session.
@@ -336,6 +564,13 @@ class Analyzer:
         # MGR_DESC_CAPS per slot index.
         self._manager_slot_caps: dict[int, int] = {}
         self._manager_found: bool | None = None
+        # Slot state when configure() finished; None without epochs.
+        self._config_state: _SlotState | None = None
+        # SEG_START of the readout in progress, for its burst headers.
+        self._readout_start_ptr: int | None = None
+        # CAPTURE_GEN right after this analyzer's arm; None when it did not
+        # arm the capture there is now, or the core has no CAPTURE_GEN.
+        self._armed_gen: int | None = None
 
     @property
     def bscan_chain(self) -> int:
@@ -354,39 +589,129 @@ class Analyzer:
             if self._chain != 1:
                 raise
 
-    def _select_instance(self) -> None:
-        with self.transport.transaction_lock():
-            self._select_chain()
-            if self._instance is not None:
-                self.transport.select_manager_instance_cached(
-                    self._chain,
-                    _ADDR_MGR_ACTIVE,
-                    self._instance,
-                )
+    def _slot_selection(self) -> SlotSelection | None:
+        if self._instance is None:
+            return None
+        return SlotSelection(self._chain, _ADDR_MGR_ACTIVE, self._instance)
+
+    @contextmanager
+    def _selected(self) -> Iterator[None]:
+        """Hold the transport, on this core's chain, with every access in the
+        body reaching this core's slot (see :meth:`Transport.slot_scope`).
+
+        A slot-less analyzer runs with no selection, never with the slot of
+        a controller that called it.
+        """
+        with self.transport.slot_scope(self._slot_selection(), chain=self._chain):
+            yield
+
+    def pin_active_slot(self) -> None:
+        """Deprecated: use :meth:`bind_manager_slot`, which this calls.
+
+        It used to bind the slot the manager had active, which another session
+        or tool may have moved to an EIO; it now binds the first ELA slot."""
+        self.bind_manager_slot()
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
 
         ``None`` leaves the active slot untouched and preserves legacy direct-ELA
-        behavior for bitstreams without a manager.
+        behavior for bitstreams without a manager.  Moving to another slot
+        drops the capture configuration: call :meth:`configure` again.  The
+        hub is left on the slot, so raw transport accesses that follow reach
+        it until another controller selects another one.
         """
         with self.transport.transaction_lock():
-            self._instance = None if instance is None else int(instance)
+            new_instance = None if instance is None else int(instance)
+            self._slot_bound_by_type = False
+            if new_instance != self._instance:
+                # The configuration and geometry belong to the old slot; a
+                # capture read with them would misread the new slot's data.
+                self._config = None
+                self._config_state = None
+                self._armed_gen = None
+                self._hw_timestamp_w = 0
+                self._hw_num_segments = 1
+                self._hw_compare_caps = 0
+            self._instance = new_instance
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            with self._selected():
+                sel = self._slot_selection()
+                if sel is not None and self.transport.atomic_slot_select:
+                    # An atomic backend selects inside each access only: write
+                    # the slot once more, as a backend that selects on entry
+                    # does.  Nothing is written on an unidentified chain.
+                    self.transport.select_manager_instance_cached(
+                        sel.chain, sel.active_addr, sel.slot
+                    )
+
+    def speaks_register_protocol(self, base_addr: int = 0) -> bool:
+        """Whether VERSION at *base_addr* answers with an ELA or EIO identity.
+
+        Gate any manager probe on this.  A ``0xF000`` read puts a
+        manager-address frame into whatever DR the chain has, and on an
+        EJTAG-AXI chain that frame decodes as burst write data; a VERSION read
+        is the frame every identity check already sends first.  Behind a
+        manager address 0 reaches the active slot, an ELA or an EIO.
+        """
+        with self._selected():
+            core_id = int(self.transport.read_reg(base_addr | _ADDR_VERSION)) & 0xFFFF
+        return core_id in (_ELA_CORE_ID, _EIO_CORE_ID)
+
+    def bind_manager_slot(self) -> None:
+        """Bind a slot-less analyzer to its manager's first ELA slot.
+
+        Without a slot every access reaches whichever slot the manager has
+        active, which another session or tool may have moved to an EIO.  An
+        analyzer that already has a slot, or a chain without a manager, is
+        left as it is.  Slot 0 is used if no slot reads as an ELA.
+        """
+        with self.transport.transaction_lock():
+            if self._instance is not None:
+                return
+            slot = self._manager_ela_slot()
+            if slot is not None:
+                self.select_instance(slot)
+                self._slot_bound_by_type = True
+
+    def _manager_ela_slot(self) -> int | None:
+        """The slot :meth:`bind_manager_slot` binds, or ``None`` for a chain
+        without a manager."""
+        if not self.speaks_register_protocol() or not self._behind_manager():
+            return None
+        slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
+        return 0 if slot is None else slot
 
     def connect(self) -> None:
-        """Connect the transport and select this analyzer's chain and slot."""
+        """Connect the transport and select this analyzer's chain and slot.
+
+        An analyzer with no slot on a chain with a core manager is bound to
+        the manager's first ELA slot (see :meth:`bind_manager_slot`), never
+        left on whichever slot the manager has active.  A slot bound that way
+        is looked up again: the new connection may hold another image.  The
+        configuration is kept only when the slot is the same.
+        """
         with self.transport.transaction_lock():
             self._select_chain()
             self.transport.connect()
-            self.transport.invalidate_manager_instance_cache()
+            self.transport.forget_manager_chains()
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self._select_instance()
+            if self._slot_bound_by_type:
+                bound, self._instance = self._instance, None
+                try:
+                    slot = self._manager_ela_slot()
+                finally:
+                    self._instance = bound
+                self.select_instance(slot)
+                self._slot_bound_by_type = slot is not None
+            else:
+                self.bind_manager_slot()
+            with self._selected():
+                pass
 
     def close(self, *, fast: bool = False) -> None:
         """Close the JTAG transport. ``fast=True`` skips long waits (e.g. Ctrl+C)."""
@@ -405,8 +730,18 @@ class Analyzer:
         (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
         next step needs a verified idle core.
         """
-        self._select_instance()
+        self._armed_gen = None
+        state = self._slot_state()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
+        if state is not None:
+            after = self._slot_state()
+            if after != state:
+                raise ManagerResetError(
+                    "the core manager changed during reset() (slot, slot epoch, "
+                    f"hub epoch, other controllers' selects {tuple(state)} "
+                    f"before, {tuple(after)} after): the reset may have gone to "
+                    "another slot"
+                )
 
     def force_idle(
         self,
@@ -440,17 +775,18 @@ class Analyzer:
         subsequent resets.
 
         A startup-armed core re-loads its auto-arm flag from that register on
-        every soft reset, so a single reset can race the configuration
+        every soft reset. Current cores take the register with the reset write,
+        but on older ones a single reset can race the configuration
         clock-domain crossing and come back still armed. ``force_idle`` polls
         STATUS after the reset and, if the core re-armed, resets again -- by which
         point the runtime STARTUP_ARM register cleared by :meth:`configure` has
         crossed into the sample domain -- up to ``max_resets`` times.
 
         Timing assumption: a STATUS read round-trips over JTAG far slower than
-        the core's reset-to-re-arm latency (a couple of sample clocks), so the
+        the core's reset-to-re-arm latency (a few sample clocks), so the
         first post-reset STATUS read reliably observes the settled state. This
         holds for any practical sample clock; only a sample clock so slow that a
-        full JTAG access spans fewer than ~2 sample cycles could read a
+        full JTAG access spans fewer than ~5 sample cycles could read a
         transient idle before a pending re-arm propagates.
 
         Note this is intentionally lossy: it discards any in-flight or
@@ -473,15 +809,14 @@ class Analyzer:
         last_status = -1
         attempt = 0
         for attempt in range(max(1, max_resets)):
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
+                self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
             attempt_deadline = time.monotonic() + _FORCE_IDLE_SETTLE_S
             while True:
-                with self.transport.transaction_lock():
-                    self._select_instance()
+                with self._selected():
                     last_status = read_status(_ADDR_STATUS)
                 if (last_status & _STATUS_BUSY) == 0:
                     return
@@ -526,9 +861,15 @@ class Analyzer:
         """Validate ``config`` and write it to the core; does not arm.
 
         Raises `ValueError` if the window does not fit ``depth`` or a field is
-        out of range for the core.
+        out of range for the core, and :class:`ManagerResetError` if the
+        core's core-manager slot is held in reset, or was reset (or, with no
+        ``instance``, the hub's active slot moved) while it was written.  A
+        configure that raises leaves the analyzer unconfigured: the core may
+        hold part of the new configuration.
         """
-        self._select_instance()
+        self._config = None
+        self._config_state = None
+        self._armed_gen = None
         if config.pretrigger < 0 or config.posttrigger < 0:
             raise ValueError("pretrigger/posttrigger must be >= 0")
         if config.pretrigger + config.posttrigger + 1 > config.depth:
@@ -543,8 +884,23 @@ class Analyzer:
             raise ValueError(
                 f"trigger_holdoff must be 0..65535, got {config.trigger_holdoff}"
             )
+        if config.post_clocks < 0:
+            raise ValueError(f"post_clocks must be >= 0, got {config.post_clocks}")
+        if config.post_clocks and not config.rle:
+            raise ValueError("post_clocks needs run-length capture (rle=True)")
 
         self._validate_probes(config.probes, config.sample_width)
+
+        # Writes to a slot held in reset are lost; a reset during them loses
+        # some, and a hub reset sends the rest to slot 0.  The slot state
+        # before and after says which (BUG-234/235/240).
+        state_before = self._slot_state()
+        if state_before is not None and state_before.slot_epoch & 1:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot {state_before.slot} is held in reset "
+                f"(MGR_SLOT_EPOCH {state_before.slot_epoch} is odd): a "
+                "configuration written now is lost"
+            )
 
         # Validate host config against the synthesized core to avoid silent
         # mismatch between CLI defaults and FPGA bitstream parameters.
@@ -569,8 +925,29 @@ class Analyzer:
         raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
         self._hw_compare_caps = raw_compare_caps
         hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
+        # Without the qualifier SQ_MODE is not decoded, and the capture would
+        # store every sample while the caller believes it was filtered.
+        if config.stor_qual_mode and not hw_features & _FEATURE_STOR_QUAL:
+            raise ValueError(
+                "storage qualification not present in this bitstream (STOR_QUAL=0)"
+            )
+        sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
+        hw_rle_w = int(_read(_ADDR_RLE_W))
+        self._hw_rle_w = hw_rle_w if 0 < hw_rle_w <= _RLE_MAX_W else 0
+        if config.rle:
+            # Checked before any write, like the SQ mode above.
+            if not self._hw_rle_w:
+                raise ValueError(
+                    "run-length capture not present in this bitstream (RLE_W=0)"
+                )
+            if config.decimation:
+                raise ValueError("run-length capture cannot be combined with decimation")
+            if config.stor_qual_mode:
+                raise ValueError(
+                    "run-length capture cannot be combined with storage qualification"
+                )
 
         # Segment depth check
         if self._hw_num_segments > 1:
@@ -580,6 +957,31 @@ class Analyzer:
                     f"pre+post+1 exceeds segment depth {seg_depth}"
                 )
 
+        sequence = config.sequence
+        if sequence is None and hw_trig_stages > 1:
+            # A multi-stage core ignores TRIG_MODE/VALUE/MASK, so a plain
+            # trigger left in them would arm whatever sequence the core last
+            # held (after reset, one that never fires).  Program it as stage 0.
+            sequence = [_simple_trigger_stage(config.trigger)]
+
+        if sequence is not None:
+            # All of it before any write: a sequence refused halfway would
+            # leave the core holding settings this Analyzer does not know.
+            if hw_trig_stages == 0:
+                raise ValueError(
+                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
+                )
+            if len(sequence) > hw_trig_stages:
+                raise ValueError(
+                    f"sequence has {len(sequence)} stages but hw supports "
+                    f"only {hw_trig_stages}"
+                )
+            for idx, stage in enumerate(sequence):
+                _validate_stage_fields(stage, f"stage {idx}")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
+                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+
         mode_bits = 0
         if config.trigger.mode in ("value_match", "both"):
             mode_bits |= _TRIG_VALUE_MATCH
@@ -587,6 +989,13 @@ class Analyzer:
             mode_bits |= _TRIG_EDGE_DETECT
         if mode_bits == 0:
             raise ValueError("invalid trigger mode")
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
 
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
@@ -601,13 +1010,6 @@ class Analyzer:
         # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
         # always-true) trigger leaves the upper mask bits set, so the trigger is
         # not actually always-true and never fires (the capture never completes).
-        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
-        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
-            raise ValueError(
-                "trigger value/mask exceed 32 bits but this core lacks "
-                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
-                "comparator A are programmable"
-            )
         if wide:
             words = (config.sample_width + 31) // 32
             for k in range(1, words):
@@ -626,25 +1028,30 @@ class Analyzer:
         self.transport.write_reg(_ADDR_STARTUP_ARM, int(bool(config.startup_arm)))
         self.transport.write_reg(_ADDR_TRIG_HOLDOFF, config.trigger_holdoff)
         self.transport.write_reg(_ADDR_TRIG_DELAY, config.trigger_delay)
-        if config.stor_qual_mode:
-            self.transport.write_reg(_ADDR_SQ_MODE, config.stor_qual_mode)
-            self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value)
-            self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask)
+        if raw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
+            # A paged read puts it back to 0, but not one cut short.
+            self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
+        # Always written, so mode 0 turns off a qualifier left by an earlier
+        # capture.
+        self.transport.write_reg(_ADDR_SQ_MODE, sq_mode)
+        self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value & 0xFFFF_FFFF)
+        self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask & 0xFFFF_FFFF)
+        if self._hw_rle_w:
+            # Always written on RLE cores, so rle=False turns off a run-length
+            # capture left by an earlier configure().
+            self.transport.write_reg(
+                _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE if config.rle else 0
+            )
+            # Clamped to the register: a larger limit would never be reached
+            # (a window of DEPTH entries spans fewer clocks).
+            post_clk_max = (1 << min(32, hw_depth.bit_length() + self._hw_rle_w)) - 1
+            self.transport.write_reg(
+                _ADDR_RLE_POST_CLKS,
+                min(config.post_clocks, post_clk_max) if config.rle else 0,
+            )
 
-        if config.sequence is not None:
-            if hw_trig_stages == 0:
-                raise ValueError(
-                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
-                )
-            if len(config.sequence) > hw_trig_stages:
-                raise ValueError(
-                    f"sequence has {len(config.sequence)} stages but hw supports "
-                    f"only {hw_trig_stages}"
-                )
-            for idx, stage in enumerate(config.sequence):
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
-                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+        if sequence is not None:
+            for idx, stage in enumerate(sequence):
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
@@ -652,6 +1059,16 @@ class Analyzer:
                 self.transport.write_reg(base + 12, stage.value_b)
                 self.transport.write_reg(base + 16, stage.mask_b)
 
+        state_after = self._slot_state()
+        if state_after != state_before:
+            raise ManagerResetError(
+                "the ELA's core manager changed while it was configured (slot, "
+                "slot epoch, hub epoch, other controllers' selects "
+                f"{tuple(state_before)} before, {tuple(state_after)} after): a "
+                "reset, or another controller's slot select, sent some writes "
+                "elsewhere"
+            )
+        self._config_state = state_after
         self._config = config
 
     @_selected_transaction
@@ -665,7 +1082,6 @@ class Analyzer:
         External trigger gating is disabled (``ext_trigger_mode=0``) so AND/OR modes
         cannot block an immediate run.
         """
-        self._select_instance()
         _read = self.transport.read_reg_stable
         hw_features = int(_read(_ADDR_FEATURES))
         hw_trig_stages = int(hw_features & 0xF)
@@ -697,21 +1113,57 @@ class Analyzer:
 
     @_selected_transaction
     def arm(self) -> None:
-        """Arm the core with the configuration it holds."""
-        self._select_instance()
+        """Arm the core with the configuration it holds.
+
+        Raises :class:`ManagerResetError` if the core's slot was reset since
+        :meth:`configure`: it would arm its build defaults.  On a core with
+        ``CAPTURE_GEN`` (``COMPARE_CAPS`` bit 21), raises
+        :class:`CaptureChangedError` if another controller armed or reset the
+        core at the same time; the capture read later must be this arm's.
+        """
+        state = self._check_configured_state("at arm")
+        self._armed_gen = None
+        before = self._capture_gen()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
+        # Read before the slot check, so it covers this read too.
+        after = None if before is None else self._capture_gen()
+        if state is not None:
+            after_state = self._slot_state()
+            if after_state != state:
+                raise ManagerResetError(
+                    "the core manager changed during arm() (slot, slot epoch, hub "
+                    f"epoch, other controllers' selects {tuple(state)} before, "
+                    f"{tuple(after_state)} after): the arm may have gone to "
+                    "another slot"
+                )
+        if before is None:
+            return
+        if after != (before + 1) & 0xFFFF:
+            raise CaptureChangedError(
+                f"CAPTURE_GEN went from {before} to {after} across this arm, not "
+                "by one: another controller armed or reset the core at the same "
+                "time"
+            )
+        self._armed_gen = after
 
     def wait_done(self, timeout: float = 10.0, poll_interval: float = 0.05) -> bool:
-        """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first."""
+        """Poll STATUS until the capture is done; ``False`` if ``timeout`` expires first.
+
+        A slot reset clears DONE, so a configured analyzer checks for one
+        before it reports the timeout, and raises :class:`ManagerResetError`
+        instead.
+        """
         deadline = time.monotonic() + timeout
         read_status = self.transport.read_reg_stable
         while time.monotonic() < deadline:
-            with self.transport.transaction_lock():
-                self._select_instance()
+            with self._selected():
                 status = read_status(_ADDR_STATUS)
             if status & _STATUS_DONE:
                 return True
             time.sleep(poll_interval)
+        if self._config_state is not None:
+            with self._selected():
+                self._check_configured_state("while waiting for the capture")
         return False
 
     def status(self) -> dict[str, bool]:
@@ -723,8 +1175,7 @@ class Analyzer:
         "reading back" instead of blanketing both under one blocking capture.
         """
         read_status = self.transport.read_reg_stable
-        with self.transport.transaction_lock():
-            self._select_instance()
+        with self._selected():
             s = int(read_status(_ADDR_STATUS))
         return {
             "armed": bool(s & _STATUS_ARMED),
@@ -755,9 +1206,9 @@ class Analyzer:
         self.transport.data_window_end = end
 
     @_selected_transaction
+    @_burst_epoch_checked
     def _read_timestamps(self, total: int) -> list[int]:
         """Read timestamp values for captured samples."""
-        self._select_instance()
         if self._hw_timestamp_w == 0:
             return []
         self._set_data_window_end()
@@ -771,16 +1222,19 @@ class Analyzer:
         # Wide, single-chain cores (the 160-bit AXI monitor) keep their timestamp
         # window on the same BSCAN instance as their samples, so the two-chain
         # DATA_CHAIN burst below can never reach it -- read it the same way the
-        # samples were (see _read_data_words).  Gated on sw>32 and the slot's
-        # burst capability to mirror that sample-path decision exactly.
+        # samples were (see _read_data_words).  So does a managed slot behind a
+        # transport whose two-chain burst cannot reach it.  Gated exactly like
+        # that sample-path decision.
         has_burst = self._selected_slot_has_burst()
-        if sw > 32 and has_burst:
+        managed_off_chain = self._managed_burst_off_chain(has_burst)
+        if (sw > 32 and has_burst) or managed_off_chain:
             ts_single = getattr(
                 self.transport, "read_timestamp_block_single_chain", None
             )
             if callable(ts_single):
+                kwargs = {"on_control_chain": True} if managed_off_chain else {}
                 try:
-                    raw = ts_single(ts_base, total, self._hw_timestamp_w)
+                    raw = ts_single(ts_base, total, self._hw_timestamp_w, **kwargs)
                 except BurstUnavailableError as exc:
                     _log.info("timestamp burst unavailable (%s); reading the window", exc)
                 else:
@@ -792,15 +1246,119 @@ class Analyzer:
                     return [v & mask for v in raw]
             # The two-chain burst can't reach a single-chain core, so skip it and
             # read the timestamp words directly (deterministic, just slower).
-            raw = self.transport.read_block(ts_base, ts_word_count)
+            raw = self._read_window(
+                ts_base, ts_word_count, self.transport.read_block,
+                self.transport.read_window_block,
+            )
             return _join_timestamp_words(raw, ts_words_per, mask)
 
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
-        if ts_words_per == 1 and callable(timestamp_burst) and has_burst:
+        if (
+            ts_words_per == 1
+            and callable(timestamp_burst)
+            and has_burst
+            and self.transport.bursts_data_window(timestamp=True)
+        ):
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
         else:
-            raw = self.transport.read_block(ts_base, ts_word_count)
+            raw = self._read_window(
+                ts_base, ts_word_count, self.transport.read_block,
+                self.transport.read_window_block,
+            )
         return _join_timestamp_words(raw, ts_words_per, mask)
+
+    def _read_window(self, addr: int, words: int, read, page_read) -> list[int]:
+        """Read *words* DATA / timestamp window words from window address *addr*.
+
+        *read(addr, words)* reads them where the 16-bit address reaches, which
+        ends at ``transport.data_window_end``.  Past it, a core with
+        DATA_OFFSET (COMPARE_CAPS bit 20) is read in pages: each page sets
+        DATA_OFFSET to its first word and reads ``0x0100`` on with
+        *page_read*, a reader that never bursts (``read_block(0x0100)`` may),
+        and DATA_OFFSET goes back to 0 after.  A core without it is left to
+        *read*, which raises :class:`DataWindowError`.
+        """
+        end = min(self.transport.data_window_end, REG_ADDR_SPACE_END)
+        if addr + 4 * words <= end or not self._hw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
+            return read(addr, words)
+        page = (end - _ADDR_DATA_BASE) // 4
+        first = (addr - _ADDR_DATA_BASE) // 4
+        out: list[int] = []
+        try:
+            for start in range(0, words, page):
+                self.transport.write_reg(_ADDR_DATA_OFFSET, first + start)
+                out.extend(page_read(_ADDR_DATA_BASE, min(page, words - start)))
+        finally:
+            self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
+        return out
+
+    def _managed_burst_off_chain(self, has_burst: bool) -> bool:
+        """Return whether the transport's two-chain burst would miss this slot.
+
+        A core manager bursts on its own chain (jtag_pipe_iface).  A transport
+        whose ``read_block`` bursts on a separate data chain
+        (:attr:`Transport.burst_on_data_chain`, the USB-Blaster) never reaches
+        it, so a burst-capable managed slot takes the single-chain burst at
+        every sample width, not only the wide ones.
+        """
+        return (
+            has_burst
+            and getattr(self.transport, "burst_on_data_chain", False)
+            and self._behind_manager()
+        )
+
+    @_selected_transaction
+    @_burst_epoch_checked
+    def _read_run_lengths(self, total: int) -> list[int]:
+        """Read the run length (sample clocks) of each captured entry.
+
+        Empty unless the configured capture is run-length.  Counts travel on
+        the timestamp lane: a burst with ``BURST_PTR[31:30] = 0b11`` when the
+        transport has one, else the timestamp DATA window with
+        ``RLE_CTRL[1]`` set.
+        """
+        if not (self._config is not None and self._config.rle and self._hw_rle_w):
+            return []
+        if total <= 0:
+            return []
+        # The lane is as wide as the timestamps, or the counts without them.
+        lane_w = self._hw_timestamp_w or self._hw_rle_w
+        mask = (1 << self._hw_rle_w) - 1
+
+        burst = getattr(self.transport, "read_run_length_block", None)
+        has_burst = self._selected_slot_has_burst()
+        if callable(burst) and has_burst:
+            # A two-chain burst never reaches a managed slot (see
+            # _managed_burst_off_chain): burst on the control chain there.
+            kwargs = (
+                {"on_control_chain": True}
+                if self._managed_burst_off_chain(has_burst)
+                else {}
+            )
+            try:
+                raw = burst(total, lane_w, **kwargs)
+            except BurstUnavailableError as exc:
+                _log.info("run-length burst unavailable (%s); reading the window", exc)
+            else:
+                return [(v & mask) + 1 for v in raw]
+
+        self._set_data_window_end()
+        words_per_sample = (self._config.sample_width + 31) // 32
+        base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
+        words_per = (lane_w + 31) // 32
+        # Bit 0 is kept: it is taken on arm, and a re-arm without configure()
+        # (continuous capture) must still capture run-length.
+        self.transport.write_reg(
+            _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE | _RLE_CTRL_WINDOW_COUNTS
+        )
+        try:
+            raw = self._read_window(
+                base, total * words_per, self.transport.read_block,
+                self.transport.read_window_block,
+            )
+        finally:
+            self.transport.write_reg(_ADDR_RLE_CTRL, _RLE_CTRL_ENABLE)
+        return [c + 1 for c in _join_timestamp_words(raw, words_per, mask)]
 
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
@@ -823,8 +1381,7 @@ class Analyzer:
         if self._manager_override is not None:
             return self._manager_override
         if self._manager_found is None:
-            with self.transport.transaction_lock():
-                self._select_chain()
+            with self._selected():
                 read = self.transport.read_reg_stable
                 version = int(read(_ADDR_MGR_VERSION))
                 if (version & 0xFFFF) != _CORE_MANAGER_CORE_ID:
@@ -833,7 +1390,7 @@ class Analyzer:
                     found = True
                 else:
                     found = self._manager_block_matches(read) and self._desc_index_writable(
-                        read, self.transport.write_reg
+                        read, self.transport.write_reg, self.transport.read_regs_after_write
                     )
             self._manager_found = found
         return self._manager_found
@@ -844,8 +1401,9 @@ class Analyzer:
         inside its DATA + timestamp windows (``DEPTH`` bounds the capture)."""
         sample_w = max(1, int(read(_ADDR_SAMPLE_W)))
         depth = int(read(_ADDR_DEPTH))
-        ts_w = int(read(_ADDR_TIMESTAMP_W))
-        words_per_sample = (sample_w + 31) // 32 + (ts_w + 31) // 32
+        # The aux window holds timestamps, or run counts on a core without them.
+        aux_w = int(read(_ADDR_TIMESTAMP_W)) or int(read(_ADDR_RLE_W))
+        words_per_sample = (sample_w + 31) // 32 + (aux_w + 31) // 32
         return addr < _ADDR_DATA_BASE + depth * words_per_sample * 4
 
     @staticmethod
@@ -857,10 +1415,11 @@ class Analyzer:
         active = int(read(_ADDR_MGR_ACTIVE))
         stride = int(read(_ADDR_MGR_STRIDE))
         caps = int(read(_ADDR_MGR_CAPS))
-        return 1 <= count <= 256 and active < count and stride == 0 and bool(caps & 0x1)
+        return (1 <= count <= _MGR_MAX_SLOTS and active < count and stride == 0
+                and bool(caps & 0x1))
 
     @staticmethod
-    def _desc_index_writable(read, write) -> bool:
+    def _desc_index_writable(read, write, write_then_read) -> bool:
         """Whether ``MGR_DESC_INDEX`` latches a write of another valid slot.
 
         A manager with descriptors (``MGR_CAPS`` bit 1) latches any index
@@ -868,6 +1427,11 @@ class Analyzer:
         up, so the word it returns there stays put.  The original index is
         restored, even when a read fails.  Without descriptors, or with one
         slot and so no other valid index, the register match alone decides.
+
+        The probe write and its readback are one backend operation
+        (``write_then_read``, :meth:`Transport.read_regs_after_write`), so
+        another client moving ``MGR_DESC_INDEX`` in between cannot make a
+        manager read as a standalone core.
 
         A failed read or write propagates, so nothing is cached for the
         session and the next call decides afresh.
@@ -881,9 +1445,11 @@ class Analyzer:
             if original >= count:
                 return False
             probe = (original + 1) % count
-            write(_ADDR_MGR_DESC_INDEX, probe)
             try:
-                return int(read(_ADDR_MGR_DESC_INDEX)) == probe
+                (latched,) = write_then_read(
+                    _ADDR_MGR_DESC_INDEX, probe, [_ADDR_MGR_DESC_INDEX]
+                )
+                return int(latched) == probe
             finally:
                 write(_ADDR_MGR_DESC_INDEX, original)
 
@@ -902,11 +1468,11 @@ class Analyzer:
         active slot is read from ``MGR_ACTIVE`` on every call: another
         controller, or :meth:`CoreManager.select_raw`, may have moved it.
         """
-        with self.transport.transaction_lock():
+        with self._selected():
             self.transport.burst_start_sync = False
+            self.transport.burst_expect = None
             if not self._behind_manager():
                 return True
-            self._select_chain()
             read = self.transport.read_reg
             if self._manager_caps is None:
                 self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
@@ -921,14 +1487,249 @@ class Analyzer:
             slot = self._instance
             if slot is None:
                 slot = int(read(_ADDR_MGR_ACTIVE))
+            # The hub then loads a header into the burst's priming scan; the
+            # transport checks it (Transport.burst_expect).  SEG_START reads
+            # the pointer the BURST_PTR write latches.
+            if mgr_caps & MGR_CAP_BURST_HEADER:
+                stable = self.transport.read_reg_stable
+                self.transport.burst_expect = BurstExpectation(
+                    slot=slot,
+                    start_ptr=(
+                        self._readout_start_ptr
+                        if self._readout_start_ptr is not None
+                        else int(stable(_ADDR_SEG_START))
+                    ),
+                    sample_w=int(stable(_ADDR_SAMPLE_W)) & 0xFFFF,
+                    tlr_count=self._tlr_count(),
+                )
             caps = self._manager_slot_caps.get(slot)
             if caps is None:
-                self.transport.write_reg(_ADDR_MGR_DESC_INDEX, slot)
-                caps = int(read(_ADDR_MGR_DESC_CAPS))
-                self._manager_slot_caps[slot] = caps
+                # One backend operation: another client moving DESC_INDEX in
+                # between would hand this slot another slot's capabilities.
+                (caps,) = self.transport.read_regs_after_write(
+                    _ADDR_MGR_DESC_INDEX, slot, [_ADDR_MGR_DESC_CAPS]
+                )
+                self._manager_slot_caps[slot] = int(caps)
             return bool(caps & 0x1)
 
+    def _check_burst_epochs(
+        self, header: BurstHeader, expect: BurstExpectation | None = None
+    ) -> None:
+        """Raise when the hub or the burst's slot was reset during the burst,
+        or (``expect.tlr_count``) a Test-Logic-Reset cancelled it.
+
+        The header holds both epochs as the burst started.  A reset after that
+        changes the capture under the burst, which the scans cannot show.  A
+        cancel after the priming scan turns the remaining scans into register
+        data, which the scans cannot show either.
+        """
+        read = self.transport.read_reg
+        if expect is not None and expect.tlr_count is not None:
+            tlr = int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
+            if tlr != expect.tlr_count:
+                raise BurstIntegrityError(
+                    f"the TAP passed through Test-Logic-Reset during the burst "
+                    f"from slot {header.slot} (MGR_TLR_COUNT {expect.tlr_count} "
+                    f"before, {tlr} after), which cancels a burst on this hub"
+                )
+        epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
+        # One backend operation: another client moving DESC_INDEX in between
+        # would hand this burst another slot's epoch.
+        (slot_epoch,) = self.transport.read_regs_after_write(
+            _ADDR_MGR_DESC_INDEX, header.slot, [ADDR_MGR_SLOT_EPOCH]
+        )
+        slot_epoch = int(slot_epoch) & 0xFFFF
+        if (epoch, slot_epoch) != (header.mgr_epoch, header.slot_epoch):
+            raise BurstIntegrityError(
+                f"slot {header.slot} or its core manager was reset during the "
+                f"burst: epochs {header.mgr_epoch}/{header.slot_epoch} "
+                f"(hub/slot) at its start, {epoch}/{slot_epoch} after"
+            )
+
+    def _slot_state(self) -> _SlotState | None:
+        """The hub's active slot, that slot's ``MGR_SLOT_EPOCH`` (odd while
+        it is held in reset), ``MGR_EPOCH`` and the other controllers'
+        selects (``MGR_SELECT_COUNT`` less this transport's own); ``None``
+        without a core manager that has epochs (``MGR_CAPS`` bit 3).  Call
+        with this analyzer selected.
+
+        Raises :class:`ManagerResetError` if an analyzer with an ``instance``
+        finds another slot active: another controller selected it after this
+        analyzer did, and the accesses since went there.
+
+        A hub reset resets no slot but moves ``MGR_ACTIVE`` to 0, which sends
+        the reads that follow, until the next select, to slot 0: the hub
+        epoch says one happened.  Another controller's select and its select
+        back leave ``MGR_ACTIVE`` as it was: the select count says one
+        happened.  It is read before ``MGR_ACTIVE``, so an unchanged count
+        later means the slot read here stayed active in between.
+
+        Where the transport proves every access reaches this analyzer's slot
+        whatever other controllers select
+        (:meth:`Transport.slot_routing_isolated`), neither ``MGR_ACTIVE`` nor
+        the select count is evidence of a misrouted access, and neither is
+        checked: the slot is the analyzer's own, and the select count
+        ``None``."""
+        if not self._behind_manager():
+            return None
+        read = self.transport.read_reg
+        if self._manager_caps is None:
+            self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
+        caps = self._manager_caps[0]
+        if not caps & MGR_CAP_EPOCH_OWNER:
+            return None
+        if self._instance is not None and self.transport.slot_routing_isolated(
+            self._chain, self._instance
+        ):
+            hub_epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
+            return _SlotState(
+                self._instance, self._slot_epoch(self._instance), hub_epoch, None
+            )
+        foreign = None
+        if caps & MGR_CAP_SELECT_COUNT:
+            own = self.transport.manager_select_writes(self._chain)
+            foreign = (int(read(ADDR_MGR_SELECT_COUNT)) - own) & 0xFFFF
+        hub_epoch = int(read(ADDR_MGR_EPOCH)) & 0xFFFF
+        slot = int(read(_ADDR_MGR_ACTIVE))
+        if self._instance is not None and slot != self._instance:
+            raise ManagerResetError(
+                f"the core manager's active slot is {slot}, not this analyzer's "
+                f"slot {self._instance}: another controller selected it, or the "
+                f"hub was reset (MGR_EPOCH {hub_epoch}), after this analyzer "
+                "selected its slot"
+            )
+        return _SlotState(slot, self._slot_epoch(slot), hub_epoch, foreign)
+
+    def _slot_epoch(self, slot: int) -> int:
+        """``MGR_SLOT_EPOCH`` of *slot*, selected through ``MGR_DESC_INDEX``
+        in the same backend operation as the read, so another client moving
+        ``DESC_INDEX`` in between cannot hand back another slot's epoch."""
+        (epoch,) = self.transport.read_regs_after_write(
+            _ADDR_MGR_DESC_INDEX, slot, [ADDR_MGR_SLOT_EPOCH]
+        )
+        return int(epoch) & 0xFFFF
+
+    def _tlr_count(self) -> int | None:
+        """``MGR_TLR_COUNT`` on a hub whose Test-Logic-Reset resets the JTAG
+        protocol (``MGR_CAPS`` bit 6), else ``None``: elsewhere a
+        Test-Logic-Reset (hw_server issues them all the time) disturbs nothing."""
+        if not self._behind_manager():
+            return None
+        read = self.transport.read_reg
+        if self._manager_caps is None:
+            self._manager_caps = (int(read(_ADDR_MGR_CAPS)), int(read(_ADDR_MGR_COUNT)))
+        if not self._manager_caps[0] & MGR_CAP_TLR_RESET:
+            return None
+        return int(read(ADDR_MGR_TLR_COUNT)) & 0xFFFF
+
+    def _capture_gen(self) -> int | None:
+        """``CAPTURE_GEN`` on a core that has it (``COMPARE_CAPS`` bit 21,
+        read by :meth:`configure`), else ``None``."""
+        if not self._hw_compare_caps & _COMPARE_CAPS_CAPTURE_GEN:
+            return None
+        return int(self.transport.read_reg_stable(_ADDR_CAPTURE_GEN)) & 0xFFFF
+
+    def _check_configured_state(self, when: str) -> _SlotState | None:
+        """Raise :class:`ManagerResetError` unless this analyzer still reads
+        the slot :meth:`configure` wrote, not reset since.  A hub reset alone
+        leaves the slot's configuration, and every select reads ``MGR_ACTIVE``
+        back, so the baseline follows it.  Returns the state now."""
+        now = self._slot_state()
+        base = self._config_state
+        if base is None or now is None:
+            return now
+        if now.slot != base.slot:
+            raise ManagerResetError(
+                f"the core manager's active slot is {now.slot} {when}, not slot "
+                f"{base.slot} that configure() wrote: another controller "
+                "selected it, or the hub was reset.  Give the analyzer its slot "
+                "(instance=) and call configure() again"
+            )
+        if now.slot_epoch != base.slot_epoch:
+            raise ManagerResetError(
+                f"the ELA's core-manager slot {base.slot} was reset since "
+                f"configure() (MGR_SLOT_EPOCH {base.slot_epoch} then, "
+                f"{now.slot_epoch} {when}): it is back at its build defaults; "
+                "call configure() again"
+            )
+        self._config_state = now
+        return now
+
+    def _readout_begin(self, seg_idx: int | None = None) -> _Readout:
+        """Start of a readout: check the slot (:meth:`_check_configured_state`)
+        and that the capture is the one this analyzer armed (``CAPTURE_GEN``),
+        select segment *seg_idx*, and record what :meth:`_readout_end`
+        compares: the slot state, ``MGR_TLR_COUNT``, ``SEG_START`` (which the
+        readout's burst headers must also carry) and ``CAPTURE_GEN``."""
+        state = self._check_configured_state("before the readout")
+        gen = self._capture_gen()
+        if self._armed_gen is not None and gen != self._armed_gen:
+            raise CaptureChangedError(
+                f"the core was armed or reset again since arm() (CAPTURE_GEN "
+                f"{self._armed_gen} then, {gen} now): the capture there is not "
+                "the one this analyzer armed"
+            )
+        if seg_idx is not None:
+            self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
+        start = None
+        if state is not None:
+            start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
+        self._readout_start_ptr = start
+        return _Readout(state, self._tlr_count(), start, gen)
+
+    def _readout_end(self, begin: _Readout) -> None:
+        """End of a readout: raise when anything recorded at its start
+        changed.  The samples and timestamps may then come from different
+        captures or slots, or from the build defaults, and a window read may
+        have lost a command."""
+        self._readout_start_ptr = None
+        tlr = self._tlr_count()
+        if tlr != begin.tlr_count:
+            raise ManagerResetError(
+                f"the TAP passed through Test-Logic-Reset during the readout "
+                f"(MGR_TLR_COUNT {begin.tlr_count} before, {tlr} after), which "
+                "resets this hub's JTAG protocol"
+            )
+        # Read SEG_START and CAPTURE_GEN before the slot check, so it covers
+        # them, and compare them after it: a slot reset also moves them, and
+        # ManagerResetError says more.
+        start = None
+        if begin.state is not None:
+            start = int(self.transport.read_reg_stable(_ADDR_SEG_START))
+        gen = self._capture_gen()
+        if begin.state is not None:
+            now = self._slot_state()
+            if now != begin.state:
+                raise ManagerResetError(
+                    "the core manager changed during the readout (slot, slot "
+                    f"epoch, hub epoch, other controllers' selects "
+                    f"{tuple(begin.state)} before, {tuple(now)} after): a reset, "
+                    "or another controller's slot select, may have mixed in "
+                    "another slot's data or the build defaults"
+                )
+            if start != begin.start_ptr:
+                raise CaptureChangedError(
+                    f"SEG_START moved from {begin.start_ptr} to {start} during "
+                    "the readout: the core was re-armed, or another session "
+                    "selected another segment"
+                )
+        if gen != begin.capture_gen:
+            raise CaptureChangedError(
+                f"CAPTURE_GEN moved from {begin.capture_gen} to {gen} during the "
+                "readout: the core was armed or reset again, and the samples "
+                "read may mix two captures"
+            )
+
+    def _read_data_block(self, total_words: int) -> list[int]:
+        """DATA words from a slot with burst wiring: ``read_block`` when the
+        transport bursts it, else the register window, paged past its end."""
+        if self.transport.bursts_data_window():
+            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+        window_block = self.transport.read_window_block
+        return self._read_window(_ADDR_DATA_BASE, total_words, window_block, window_block)
+
     @_selected_transaction
+    @_burst_epoch_checked
     def _read_data_words(self, total_words: int) -> list[int]:
         self._set_data_window_end()
         sw = self._config.sample_width if self._config else 8
@@ -942,15 +1743,17 @@ class Analyzer:
         # before the burst-slot question because it holds regardless of how the
         # core is presented (standalone or behind the core manager).
         has_burst = self._selected_slot_has_burst()
-        if sw > 32:
+        managed_off_chain = self._managed_burst_off_chain(has_burst)
+        if sw > 32 or managed_off_chain:
             # A manager slot without burst wiring reads zeros from the shared
             # burst engine, so only the window path is safe there.
             sample_burst = getattr(self.transport, "read_sample_block", None)
             if sample_burst is not None and has_burst:
                 words_per_sample = (sw + 31) // 32
                 n_samples = total_words // words_per_sample
+                kwargs = {"on_control_chain": True} if managed_off_chain else {}
                 try:
-                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw)
+                    words = sample_burst(_ADDR_DATA_BASE, n_samples, sw, **kwargs)
                 except BurstUnavailableError as exc:
                     # Raised before any scan: this session has no burst for
                     # the request.  A burst that ran and failed propagates.
@@ -964,60 +1767,40 @@ class Analyzer:
                     return words
             # The pipelined word path (fast on hw_server; slow per-word on
             # quartus_stp when its DATA_CHAIN burst can't reach this core).
-            if not has_burst:
-                return self.transport.read_window_block(_ADDR_DATA_BASE, total_words)
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+            if not has_burst or managed_off_chain:
+                window_block = self.transport.read_window_block
+                return self._read_window(_ADDR_DATA_BASE, total_words, window_block, window_block)
+            return self._read_data_block(total_words)
         if has_burst:
-            return self.transport.read_block(_ADDR_DATA_BASE, total_words)
+            return self._read_data_block(total_words)
         # Narrow, non-burst slot: per-word reads (avoids a burst the slot lacks).
-        check_data_window(_ADDR_DATA_BASE, total_words, self.transport.data_window_end)
+        return self._read_window(
+            _ADDR_DATA_BASE, total_words, self._read_window_words, self._read_window_words
+        )
+
+    def _read_window_words(self, addr: int, words: int) -> list[int]:
+        """Read window words one register read each."""
+        check_data_window(addr, words, self.transport.data_window_end)
         read = self.transport.read_reg_stable
-        return [int(read(_ADDR_DATA_BASE + i * 4)) for i in range(total_words)]
+        return [int(read(addr + i * 4)) for i in range(words)]
 
     def capture(self, timeout: float = 10.0) -> CaptureResult:
         """Wait for the armed capture to finish and read it back.
 
         Call `configure` and `arm` first.  Raises `TimeoutError` if the core
-        is not done within ``timeout`` seconds.
+        is not done within ``timeout`` seconds.  Behind a core manager with
+        epochs, raises :class:`ManagerResetError` if the slot was reset (or,
+        with no ``instance``, the hub's active slot moved) since
+        :meth:`configure` or during the readout, and
+        :class:`CaptureChangedError` if the capture changed under it.
         """
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
-            raise TimeoutError("capture did not complete within timeout")
+            raise CaptureNotReady("capture did not complete within timeout")
 
-        with self.transport.transaction_lock():
-            self._select_instance()
-            read_reg = self.transport.read_reg_stable
-            status = read_reg(_ADDR_STATUS)
-            fallback_total = self._config.pretrigger + self._config.posttrigger + 1
-            reported_total = int(read_reg(_ADDR_CAPTURE_LEN))
-            if 0 < reported_total <= self._config.depth:
-                total = reported_total
-            else:
-                total = fallback_total
-            sw = self._config.sample_width
-            words_per_sample = (sw + 31) // 32
-            raw = self._read_data_words(total * words_per_sample)
-            mask = (1 << sw) - 1
-            if words_per_sample == 1:
-                samples = [v & mask for v in raw]
-            else:
-                # Wide samples: reassemble from 32-bit chunks.
-                samples = []
-                for i in range(0, len(raw), words_per_sample):
-                    val = 0
-                    for j in range(min(words_per_sample, len(raw) - i)):
-                        val |= (raw[i + j] & 0xFFFFFFFF) << (j * 32)
-                    samples.append(val & mask)
-
-            timestamps = self._read_timestamps(total)
-
-        return CaptureResult(
-            config=self._config,
-            samples=samples,
-            overflow=bool(status & _STATUS_OVERFLOW),
-            timestamps=timestamps,
-        )
+        with self._selected():
+            return self._read_capture(None)
 
     def wait_all_segments_done(
         self, timeout: float = 10.0, poll_interval: float = 0.05
@@ -1027,15 +1810,19 @@ class Analyzer:
 
     @_selected_transaction
     def capture_segment(self, seg_idx: int, timeout: float = 10.0) -> CaptureResult:
-        """Read back data from a specific segment after all segments are done."""
-        self._select_instance()
+        """Read back data from a specific segment after all segments are done.
+
+        Raises like :meth:`capture`."""
         if self._config is None:
             raise RuntimeError("call configure() before capture_segment()")
+        return self._read_capture(seg_idx)
 
-        # Select segment for readback.  seg_start_ptr[seg_sel] is read
-        # directly by the burst engine (stable after all_seg_done).
-        self.transport.write_reg(_ADDR_SEG_SEL, seg_idx)
-
+    def _read_capture(self, seg_idx: int | None) -> CaptureResult:
+        """Read the finished capture: segment *seg_idx* (selected through
+        SEG_SEL; the burst engine reads seg_start_ptr[seg_sel], stable after
+        all_seg_done), or with ``None`` whichever SEG_SEL selects.  Call with
+        this analyzer selected, in a transaction."""
+        readout = self._readout_begin(seg_idx)
         read_reg = self.transport.read_reg_stable
         status = read_reg(_ADDR_STATUS)
         fallback_total = self._config.pretrigger + self._config.posttrigger + 1
@@ -1044,7 +1831,6 @@ class Analyzer:
             total = reported_total
         else:
             total = fallback_total
-
         sw = self._config.sample_width
         words_per_sample = (sw + 31) // 32
         raw = self._read_data_words(total * words_per_sample)
@@ -1052,6 +1838,7 @@ class Analyzer:
         if words_per_sample == 1:
             samples = [v & mask for v in raw]
         else:
+            # Wide samples: reassemble from 32-bit chunks.
             samples = []
             for i in range(0, len(raw), words_per_sample):
                 val = 0
@@ -1060,13 +1847,16 @@ class Analyzer:
                 samples.append(val & mask)
 
         timestamps = self._read_timestamps(total)
+        run_lengths = self._read_run_lengths(total)
+        self._readout_end(readout)
 
         return CaptureResult(
             config=self._config,
             samples=samples,
             overflow=bool(status & _STATUS_OVERFLOW),
             timestamps=timestamps,
-            segment=seg_idx,
+            segment=0 if seg_idx is None else seg_idx,
+            run_lengths=run_lengths,
         )
 
     def export_json(self, result: CaptureResult) -> Dict:
@@ -1081,6 +1871,10 @@ class Analyzer:
             "posttrigger": cfg.posttrigger,
             "channel": cfg.channel,
             "decimation": cfg.decimation,
+            # Recorded so an offline reader knows whether the samples are
+            # consecutive cycles. AXI reassembly, for one, is only sound when
+            # they are (see axi_decode.decode_axi).
+            "stor_qual_mode": cfg.stor_qual_mode,
             "ext_trigger_mode": cfg.ext_trigger_mode,
             "trigger": {
                 "mode": cfg.trigger.mode,
@@ -1091,9 +1885,22 @@ class Analyzer:
             "segment": result.segment,
             "samples": [{"index": i, "value": v} for i, v in enumerate(result.samples)],
         }
+        if cfg.probes:
+            # The field map, so a reader does not have to guess it back from
+            # the flattened width -- several geometries share one width.
+            d["probes"] = [
+                {"name": pr.name, "width": pr.width, "lsb": pr.lsb}
+                for pr in cfg.probes
+            ]
         if result.timestamps:
             d["timestamps"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)
+            ]
+        if result.run_lengths:
+            # Sample clocks per entry; the last one is cut where the capture
+            # ended (see CaptureResult.run_lengths).
+            d["run_lengths"] = [
+                {"index": i, "value": v} for i, v in enumerate(result.run_lengths)
             ]
         return d
 
@@ -1104,15 +1911,21 @@ class Analyzer:
         )
 
     def export_csv_text(self, result: CaptureResult) -> str:
-        """Return ``result`` as CSV text: ``index,value`` (plus ``timestamp`` if present)."""
+        """Return ``result`` as CSV text: ``index,value``, plus ``timestamp`` and
+        ``run_length`` columns when the capture has them."""
+        n = len(result.samples)
+        columns: list[tuple[str, list[int]]] = []
         if result.timestamps:
-            lines = ["index,value,timestamp"]
-            for i, (v, t) in enumerate(zip(result.samples, result.timestamps)):
-                lines.append(f"{i},{v},{t}")
-        else:
-            lines = ["index,value"]
-            for i, v in enumerate(result.samples):
-                lines.append(f"{i},{v}")
+            columns.append(("timestamp", result.timestamps))
+        if len(result.run_lengths) == n and n:
+            columns.append(("run_length", result.run_lengths))
+        if result.timestamps:
+            # Rows stop at the shorter of samples and timestamps, as before.
+            n = min(n, len(result.timestamps))
+        lines = [",".join(["index", "value", *(name for name, _ in columns)])]
+        for i in range(n):
+            row = [str(i), str(result.samples[i]), *(str(col[i]) for _, col in columns)]
+            lines.append(",".join(row))
         return "\n".join(lines) + "\n"
 
     def write_csv(self, result: CaptureResult, out_path: str) -> None:
@@ -1186,6 +1999,9 @@ class Analyzer:
             if ts_var_id and i < len(result.timestamps):
                 ts_bits = format(result.timestamps[i], f"0{ts_w}b")
                 lines.append(f"b{ts_bits} {ts_var_id}")
+        if sim_times and _last_entry_clocks(result) > 1:
+            # Close the dump where the last run ends, so its length survives.
+            lines.append(f"#{sim_times[-1] + _last_entry_clocks(result)}")
         return "\n".join(lines) + "\n"
 
     def write_vcd(self, result: CaptureResult, out_path: str) -> None:
@@ -1255,7 +2071,10 @@ class Analyzer:
                     val = (sample >> lsb) & ((1 << width) - 1)
                     lines.append(f"b{val:0{width}b} {var_id}")
             if sim_times:
-                offset += sim_times[-1] + 1
+                # The next segment starts where this one's last entry ends.
+                offset += sim_times[-1] + _last_entry_clocks(result)
+        if results[-1].samples and _last_entry_clocks(results[-1]) > 1:
+            lines.append(f"#{offset}")
         return "\n".join(lines) + "\n"
 
     def capture_continuous(
@@ -1293,9 +2112,8 @@ class Analyzer:
     @_selected_transaction
     def _read_ela_probe_registers_raw(
         self,
-    ) -> tuple[int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         """Read ELA identity / feature registers on this analyzer's chain."""
-        self._select_instance()
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
         if callable(piped):
             vals = piped(list(_ELA_PROBE_ADDRS))
@@ -1308,6 +2126,7 @@ class Analyzer:
             num_segments = max(1, int(vals[6]))
             probe_mux_w = int(vals[7])
             compare_caps = int(vals[8])
+            rle_w = int(vals[9])
         else:
             _vread = self.transport.read_reg_stable
             version = int(_vread(_ADDR_VERSION))
@@ -1319,6 +2138,9 @@ class Analyzer:
             num_segments = max(1, int(_vread(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(_vread(_ADDR_PROBE_MUX_W))
             compare_caps = int(_vread(_ADDR_COMPARE_CAPS))
+            rle_w = int(_vread(_ADDR_RLE_W))
+        if not 0 <= rle_w <= _RLE_MAX_W:
+            rle_w = 0
         if compare_caps == 0:
             compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
@@ -1331,6 +2153,7 @@ class Analyzer:
             num_segments,
             probe_mux_w,
             compare_caps,
+            rle_w,
         )
 
     @staticmethod
@@ -1344,6 +2167,7 @@ class Analyzer:
         num_segments: int,
         probe_mux_w: int,
         compare_caps: int,
+        rle_w: int = 0,
     ) -> Dict:
         core_id = version & 0xFFFF
         return {
@@ -1354,7 +2178,7 @@ class Analyzer:
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
             "trig_stages": int(features & 0xF),
-            "has_storage_qualification": bool(features & (1 << 4)),
+            "has_storage_qualification": bool(features & _FEATURE_STOR_QUAL),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),
@@ -1368,6 +2192,8 @@ class Analyzer:
             # their full sample width, not just comparator A's low 32 bits, via
             # the wide-comparator window that configure() programs.
             "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
+            # Run-count width of a run-length capture core (0 = not built).
+            "rle_width": rle_w,
         }
 
     def probe_optional(self) -> Optional[Dict]:
@@ -1376,13 +2202,39 @@ class Analyzer:
         Use this when the host should stay connected for subsidiary BSCAN cores
         (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
         not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
+
+        Unlike :meth:`probe`, this can switch a core manager's slot.  When the
+        analyzer has no slot of its own (``instance`` is ``None``) and the chain
+        is a manager whose active slot is not an ELA, for instance an EIO left
+        selected, it selects the manager's first ELA slot and keeps it, so
+        ``instance`` is set afterwards.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
-            self._read_ela_probe_registers_raw()
-        )
-        if (version & 0xFFFF) != _ELA_CORE_ID:
+        raw = self._read_ela_probe_registers_raw()
+        if (raw[0] & 0xFFFF) != _ELA_CORE_ID:
+            slot = self._first_ela_slot_behind_manager(raw[0])
+            if slot is None:
+                return None
+            self.select_instance(slot)
+            self._slot_bound_by_type = True
+            raw = self._read_ela_probe_registers_raw()
+            if (raw[0] & 0xFFFF) != _ELA_CORE_ID:
+                return None
+        return self._probe_dict_from_raw(*raw)
+
+    def _first_ela_slot_behind_manager(self, version: int) -> Optional[int]:
+        """First ELA slot of a manager on this chain, or ``None``.
+
+        *version* is what ``0x0000`` read.  Only a chain that answered as an
+        fcapz register core is asked for the manager block (see
+        :func:`~fcapz.transport.register_pipe_identity`).
+        """
+        if self._instance is not None or (version & 0xFFFF) not in REGISTER_PIPE_CORE_IDS:
             return None
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        try:
+            core_ids = CoreManager(self.transport, chain=self._chain).slot_core_ids()
+        except RuntimeError:
+            return None
+        return next((i for i, c in enumerate(core_ids) if c == _ELA_CORE_ID), None)
 
     def probe(self) -> Dict:
         """Read the ELA identity and feature registers.
@@ -1404,7 +2256,7 @@ class Analyzer:
         trigger sequencer depth, 0 if absent), `has_storage_qualification`
         (FEATURES[4]), and the rest of the feature flags.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew = (
             self._read_ela_probe_registers_raw()
         )
         core_id = version & 0xFFFF
@@ -1414,7 +2266,9 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        return self._probe_dict_from_raw(
+            version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew
+        )
 
 
 def _infer_ir_table_name(tap: str) -> str:
@@ -1452,7 +2306,13 @@ def _board_label(tap: str, port: int, identity: Dict) -> str:
 
 
 def _probe_openocd_board(
-    *, host: str, port: int, tap: str, chain: int, timeout_sec: float
+    *,
+    host: str,
+    port: int,
+    tap: str,
+    chain: int,
+    timeout_sec: float,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> Optional[Dict]:
     """Probe one OpenOCD tap for an fcapz ELA, trying each IR-table preset.
 
@@ -1467,6 +2327,8 @@ def _probe_openocd_board(
     transport = OpenOcdTransport(
         host=host, port=port, tap=tap, connect_timeout_sec=timeout_sec
     )
+    if register is not None:
+        register(transport)
     try:
         transport.connect()
     except OSError:
@@ -1479,9 +2341,11 @@ def _probe_openocd_board(
                 if table is not None
                 else dict(OpenOcdTransport.DEFAULT_IR_TABLE)
             )
-            transport.invalidate_manager_instance_cache()
+            transport.forget_manager_chains()
             try:
-                identity = Analyzer(transport, chain=chain).probe_optional()
+                candidate = Analyzer(transport, chain=chain)
+                candidate.bind_manager_slot()
+                identity = candidate.probe_optional()
             except (OSError, RuntimeError, KeyError, ValueError):
                 identity = None
             if identity:
@@ -1509,6 +2373,7 @@ def discover_boards(
     chain: int = 1,
     timeout_sec: float = 5.0,
     budget_sec: Optional[float] = None,
+    register: Optional[Callable[[Any], None]] = None,
 ) -> List[Dict]:
     """Find fpgacapZero-compatible boards across running OpenOCD instances.
 
@@ -1531,6 +2396,8 @@ def discover_boards(
     Without it a multi-port sweep against filtered ports can take
     ``len(ports) * timeout_sec`` and outlive the caller's own deadline (the web
     client aborts its request, but that cannot cancel this work server-side).
+    *register*, if given, receives each transport before it connects, so a
+    caller on another thread can ``cancel()`` the sweep.
     """
     deadline = None if budget_sec is None else time.monotonic() + float(budget_sec)
 
@@ -1546,7 +2413,9 @@ def discover_boards(
         if step <= 0:
             break  # budget spent — return what we have
         try:
-            taps = list_openocd_taps(host=host, port=port, timeout_sec=step)
+            taps = list_openocd_taps(
+                host=host, port=port, timeout_sec=step, register=register
+            )
         except OSError:
             continue  # nothing listening on this port — skip, don't fail
         for tap in taps:
@@ -1554,7 +2423,8 @@ def discover_boards(
             if step <= 0:
                 break
             entry = _probe_openocd_board(
-                host=host, port=port, tap=tap, chain=chain, timeout_sec=step
+                host=host, port=port, tap=tap, chain=chain, timeout_sec=step,
+                register=register,
             )
             if entry is not None:
                 boards.append(entry)
@@ -1579,10 +2449,16 @@ class CoreManager:
             if self._chain != 1:
                 raise
 
+    @contextmanager
+    def _unselected(self) -> Iterator[None]:
+        """Hold the transport on the manager's chain with no slot selected:
+        the manager's own registers answer for any slot."""
+        with self.transport.slot_scope(None, chain=self._chain):
+            yield
+
     def probe(self) -> Dict:
         """Read manager identity and slot count."""
-        with self.transport.transaction_lock():
-            self._select_chain()
+        with self._unselected():
             read = self.transport.read_reg_stable
             version = int(read(_ADDR_MGR_VERSION))
             core_id = version & 0xFFFF
@@ -1605,19 +2481,94 @@ class CoreManager:
             return info
 
     def slot_info(self, instance: int) -> Dict:
-        """Return descriptor info for one slot when the manager supports it."""
-        with self.transport.transaction_lock():
-            self._select_chain()
-            self.transport.write_reg(_ADDR_MGR_DESC_INDEX, int(instance))
+        """Return descriptor info for one slot.
+
+        Raises ``ValueError`` for a slot outside the manager's count and
+        ``RuntimeError`` when the descriptor index does not take the slot.  A
+        manager without descriptors (``MGR_CAPS`` bit 1 clear) reports core ID
+        and capabilities 0.
+        """
+        instance = int(instance)
+        with self._unselected():
+            read = self.transport.read_reg
+            count = int(read(_ADDR_MGR_COUNT))
+            if not 0 <= instance < count:
+                raise ValueError(
+                    f"slot {instance} is out of range: the manager on chain "
+                    f"{self._chain} has {count} slot(s)"
+                )
+            if not int(read(_ADDR_MGR_CAPS)) & 0x2:
+                return {"instance": instance, "core_id": 0, "capabilities": 0}
+            # One backend operation, so another client cannot move
+            # DESC_INDEX between the write and the reads.
+            selected, core, caps = self.transport.read_regs_after_write(
+                _ADDR_MGR_DESC_INDEX,
+                instance,
+                [_ADDR_MGR_DESC_INDEX, _ADDR_MGR_DESC_CORE, _ADDR_MGR_DESC_CAPS],
+            )
+            if int(selected) != instance:
+                raise RuntimeError(
+                    f"core manager on chain {self._chain} did not select "
+                    f"descriptor {instance} (DESC_INDEX reads {int(selected)})"
+                )
             return {
-                "instance": int(instance),
-                "core_id": int(self.transport.read_reg(_ADDR_MGR_DESC_CORE)) & 0xFFFF,
-                "capabilities": int(self.transport.read_reg(_ADDR_MGR_DESC_CAPS)),
+                "instance": instance,
+                "core_id": int(core) & 0xFFFF,
+                "capabilities": int(caps),
             }
 
+    def slot_core_ids(self) -> list[int]:
+        """Core ID (``VERSION[15:0]``) of every slot, in order.
+
+        Read from the descriptors when the manager has them (``MGR_CAPS``
+        bit 1).  Without them each slot is selected in turn, its VERSION read,
+        and the slot that was active is selected again.  Raises
+        ``RuntimeError`` if no manager answers on this chain.  Each VERSION read
+        carries its own slot (see :meth:`Transport.slot_scope`).  The
+        transport's slot cache is dropped: the next pinned access re-selects
+        its own slot.
+        """
+        with self._unselected():
+            info = self.probe()
+            if info["capabilities"] & 0x2:
+                return [int(self.slot_info(i)["core_id"]) for i in range(info["num_slots"])]
+            read = self.transport.read_reg_stable
+            count = int(read(_ADDR_MGR_COUNT))
+            original = int(read(_ADDR_MGR_ACTIVE))
+            if not (1 <= count <= _MGR_MAX_SLOTS and original < count):
+                raise RuntimeError(
+                    f"core manager on chain {self._chain} reports {count} slots "
+                    f"with slot {original} active; refusing to walk them"
+                )
+            ids: list[int] = []
+            # Drop the cache before the first raw select: if a select or the
+            # restore fails, no controller may trust a slot it cached earlier.
+            self.transport.invalidate_manager_instance_cache()
+            try:
+                for slot in range(count):
+                    selection = SlotSelection(self._chain, _ADDR_MGR_ACTIVE, slot)
+                    with self.transport.slot_scope(selection):
+                        ids.append(int(read(_ADDR_VERSION)) & 0xFFFF)
+            finally:
+                # A counted, verified select (MGR_SELECT_COUNT tells this
+                # host's selects from other controllers').
+                self.transport.invalidate_manager_instance_cache()
+                self.transport.select_manager_instance_cached(
+                    self._chain, _ADDR_MGR_ACTIVE, original
+                )
+            return ids
+
+    def first_slot(self, core_id: int) -> int | None:
+        """Lowest slot holding *core_id*, or ``None`` if no slot does."""
+        for slot, cid in enumerate(self.slot_core_ids()):
+            if cid == core_id:
+                return slot
+        return None
+
     def select_raw(self, instance: int) -> None:
-        with self.transport.transaction_lock():
-            self._select_chain()
+        """Write *instance* to ``MGR_ACTIVE`` now, whatever was cached."""
+        with self._unselected():
+            self.transport.invalidate_manager_instance_cache()
             self.transport.select_manager_instance_cached(
                 self._chain,
                 _ADDR_MGR_ACTIVE,
@@ -1643,17 +2594,28 @@ class CoreManager:
         ]
 
     def probe_all(self) -> list[Dict]:
-        """Probe every LA slot and include the slot index in each dict."""
+        """Probe every LA slot and include the slot index in each dict.
+
+        With descriptors the slot type decides, and a failed probe of an LA
+        slot is raised, not skipped.  A manager without descriptors gives no
+        type, so a slot whose probe fails is taken to be another core.
+        """
+        info = self.probe()
+        has_descriptors = bool(info["capabilities"] & 0x2)
         out: list[Dict] = []
-        for idx, analyzer in enumerate(self.analyzers()):
-            try:
-                info = analyzer.probe()
-            except RuntimeError:
+        for idx in range(max(0, int(info["num_slots"]))):
+            if has_descriptors and self.slot_info(idx)["core_id"] != ELA_CORE_ID:
                 continue
-            else:
-                info["instance"] = idx
-                info["chain"] = self._chain
-                out.append(info)
+            analyzer = Analyzer(self.transport, chain=self._chain, instance=idx)
+            try:
+                slot = analyzer.probe()
+            except RuntimeError:
+                if has_descriptors:
+                    raise
+                continue
+            slot["instance"] = idx
+            slot["chain"] = self._chain
+            out.append(slot)
         return out
 
 

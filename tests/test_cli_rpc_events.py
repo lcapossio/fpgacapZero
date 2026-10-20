@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -318,6 +321,222 @@ class SummarizeSchemaTests(unittest.TestCase):
         self.assertIsNone(sig["last_edge"])
 
 
+class CliAxiDecodeTests(unittest.TestCase):
+    """`fcapz axi-decode` reads a saved capture; it must not need a board."""
+
+    def setUp(self):
+        from fcapz import axi_layout
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.probes = axi_layout.axi_probes(32, 32, True)
+        self.by_name = {probe.name: probe for probe in self.probes}
+        self.samples = []
+
+    def _cycle(self, **fields):
+        word = 0
+        for name, value in fields.items():
+            probe = self.by_name[name]
+            word |= (value & ((1 << probe.width) - 1)) << probe.lsb
+        self.samples.append(word)
+
+    def _write(self, addr, data, resp=0, strb=0xF):
+        self._cycle()
+        self._cycle(awvalid=1, awready=1, awaddr=addr)
+        self._cycle(wvalid=1, wready=1, wdata=data, wstrb=strb)
+        self._cycle(bvalid=1, bready=1, bresp=resp)
+
+    def _capture_file(self, sample_width=None, **extra):
+        from fcapz import axi_layout
+
+        path = Path(self._dir.name) / "cap.json"
+        path.write_text(
+            json.dumps({
+                "version": "1.0",
+                "sample_width": (
+                    axi_layout.sample_width(32, 32, True)
+                    if sample_width is None
+                    else sample_width
+                ),
+                "samples": [
+                    {"index": i, "value": v} for i, v in enumerate(self.samples)
+                ],
+                **extra,
+            }),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def _recorded_probes(self):
+        return [
+            {"name": probe.name, "width": probe.width, "lsb": probe.lsb}
+            for probe in self.probes
+        ]
+
+    def _run(self, *argv):
+        from unittest.mock import patch
+
+        from fcapz import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["fcapz", *argv]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def test_it_decodes_a_saved_capture_without_a_transport(self):
+        self._write(0x1000, 0xCAFEBABE)
+        self._write(0x2000, 0x11, resp=2, strb=0x3)
+
+        code, out, _ = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("2 transactions", out)
+        self.assertIn("0x00001000", out)
+        self.assertIn("SLVERR", out)
+
+    def test_a_recorded_probe_map_is_used_as_is(self):
+        # The exporter records the map, so nothing has to be guessed.
+        self._write(0x40, 0x5)
+        code, out, err = self._run(
+            "axi-decode", self._capture_file(probes=self._recorded_probes())
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("0x00000040", out)
+        self.assertNotIn("assuming", err)
+
+    def test_inference_from_the_width_alone_says_it_is_a_guess(self):
+        # A width does not identify a geometry -- 32/32 with the decode word
+        # and 36/32 without it are both 160 bits -- so the fallback has to
+        # name what it assumed instead of shifting every field in silence.
+        self._write(0x40, 0x5)
+        code, out, err = self._run("axi-decode", self._capture_file())
+        self.assertEqual(code, 0)
+        self.assertIn("0x00000040", out)
+        self.assertIn("records no probe map", err)
+        self.assertIn("--probe-file", err)
+
+    def test_an_unknown_width_asks_for_a_probe_file(self):
+        self._write(0x40, 0x5)
+        code, _, err = self._run("axi-decode", self._capture_file(sample_width=999))
+        self.assertEqual(code, 2)
+        self.assertIn("--probe-file", err)
+
+    def test_only_anomalies_filters(self):
+        self._write(0x1000, 0xCAFEBABE)
+        self._write(0x2000, 0x11, resp=2)
+
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--only-anomalies")
+
+        self.assertEqual(code, 0)
+        self.assertIn("0x00002000", out)
+        self.assertNotIn("0x00001000", out)
+
+    def test_json_output_is_the_decode_itself(self):
+        self._write(0x1000, 0xCAFEBABE)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--json")
+
+        self.assertEqual(code, 0)
+        decoded = json.loads(out)
+        self.assertEqual(decoded["protocol"], "axi4lite")
+        self.assertEqual(decoded["transactions"][0]["addr"], "0x00001000")
+
+    def test_a_run_length_capture_decodes_like_the_dense_one(self):
+        # Idle cycles before the response collapse into one run-length entry;
+        # read entry by entry, the latency would shrink from 7 cycles to 3.
+        self._cycle()
+        self._cycle(awvalid=1, awready=1, awaddr=0x1000)
+        self._cycle(wvalid=1, wready=1, wdata=0x5, wstrb=0xF)
+        for _ in range(5):
+            self._cycle()
+        self._cycle(bvalid=1, bready=1, bresp=0)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--json")
+        self.assertEqual(code, 0)
+        dense = json.loads(out)["transactions"]
+
+        values, runs = [], []
+        for sample in self.samples:
+            if values and values[-1] == sample:
+                runs[-1] += 1
+            else:
+                values.append(sample)
+                runs.append(1)
+        self.samples = values
+        code, out, _ = self._run("axi-decode", self._capture_file(run_lengths=[
+            {"index": i, "value": n} for i, n in enumerate(runs)
+        ]), "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["transactions"], dense)
+        self.assertEqual(dense[0]["latency"], 7)
+
+    def test_a_capture_with_no_samples_is_reported(self):
+        code, _, err = self._run("axi-decode", self._capture_file())
+        self.assertEqual(code, 1)
+        self.assertIn("no samples", err)
+
+    def test_a_missing_file_is_reported(self):
+        code, _, err = self._run(
+            "axi-decode", str(Path(self._dir.name) / "nope.json")
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("error:"))
+
+    def test_pre_window_traffic_is_warned_about_not_hidden(self):
+        # A response with no visible request means the pairing of everything
+        # after it may be shifted; the user has to be told.
+        self._cycle(bvalid=1, bready=1, bresp=0)
+        self._write(0x1000, 0xCAFEBABE)
+
+        code, _, err = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("already outstanding", err)
+
+    def test_a_decimated_capture_is_refused_not_misread(self):
+        # Only selected cycles were stored, so handshakes are missing and
+        # in-order pairing would put data at the wrong address.
+        self._write(0x1000, 0xCAFEBABE)
+        code, out, err = self._run("axi-decode", self._capture_file(decimation=3))
+
+        self.assertEqual(code, 0)
+        self.assertIn("cannot decode", err)
+        self.assertNotIn("0x00001000", out)
+
+    def test_a_storage_qualified_capture_is_refused_too(self):
+        self._write(0x1000, 0xCAFEBABE)
+        code, _, err = self._run("axi-decode", self._capture_file(stor_qual_mode=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("storage qualification", err)
+
+    def test_the_pairing_assumption_is_stated_even_when_nothing_looks_wrong(self):
+        # The dangerous case: a window that opened mid-transaction yields
+        # rows that read perfectly and carry the wrong address. Nothing in
+        # the trace marks them, so the note cannot be conditional on
+        # evidence.
+        self._write(0x1000, 0xCAFEBABE)
+        code, _, err = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("assume the bus was idle", err)
+
+    def test_window_edges_are_not_counted_as_bus_faults(self):
+        # A write whose W beat falls past the end of the window is legal.
+        self._cycle(awvalid=1, awready=1, awaddr=0x40)
+        code, out, _ = self._run("axi-decode", self._capture_file())
+
+        self.assertEqual(code, 0)
+        self.assertIn("0 bus faults", out)
+        self.assertIn("1 flagged", out)
+
+    def test_only_anomalies_does_not_surface_a_window_edge(self):
+        self._cycle(awvalid=1, awready=1, awaddr=0x40)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--only-anomalies")
+
+        self.assertEqual(code, 0)
+        self.assertIn("no matching transactions", out)
+
+
 class CliTriggerSequenceTests(unittest.TestCase):
     """Tests for --trigger-sequence JSON parsing edge cases."""
 
@@ -550,6 +769,19 @@ class RpcBooleanValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RpcServer._build_config({"startup_arm": raw})
 
+    def test_rle_flag(self):
+        self.assertFalse(RpcServer._build_config({}).rle)
+        self.assertTrue(RpcServer._build_config({"rle": True}).rle)
+        with self.assertRaises(ValueError):
+            RpcServer._build_config({"rle": 2})
+
+    def test_post_clocks(self):
+        self.assertEqual(RpcServer._build_config({}).post_clocks, 0)
+        cfg = RpcServer._build_config({"rle": True, "post_clocks": 300})
+        self.assertEqual(cfg.post_clocks, 300)
+        with self.assertRaises(ValueError):
+            RpcServer._build_config({"post_clocks": -1})
+
 
 class CliTests(unittest.TestCase):
     def test_eio_parsers_accept_base_addr_for_shared_chain(self):
@@ -593,6 +825,15 @@ class CliTests(unittest.TestCase):
         config = _build_config(args)
         self.assertTrue(config.startup_arm)
         self.assertEqual(config.trigger_holdoff, 12)
+
+    def test_capture_parser_accepts_rle(self):
+        parser = build_parser()
+        base = ["capture", "--out", "capture.json"]
+        self.assertFalse(_build_config(parser.parse_args(base)).rle)
+        self.assertTrue(_build_config(parser.parse_args([*base, "--rle"])).rle)
+        args = parser.parse_args([*base, "--rle", "--post-clocks", "500"])
+        self.assertEqual(_build_config(args).post_clocks, 500)
+        self.assertEqual(_build_config(parser.parse_args(base)).post_clocks, 0)
 
 
 class RpcServerHarness(RpcServer):
@@ -640,6 +881,20 @@ class RpcTests(unittest.TestCase):
         )
         self.assertEqual(vcd_resp["format"], "vcd")
         self.assertIn("$enddefinitions $end", vcd_resp["content"])
+
+    def test_omitted_geometry_is_read_from_the_core(self):
+        """A 256-deep, 16-bit core needs no depth/sample_width from the client."""
+        server = RpcServerHarness(FakeTransport(sample_w=16, depth=256))
+        server.handle({"cmd": "connect"})
+        server.handle({"cmd": "configure", "pretrigger": 2, "posttrigger": 5})
+        cfg = server._analyzer._config  # noqa: SLF001
+        self.assertEqual((cfg.depth, cfg.sample_width), (256, 16))
+
+    def test_explicit_geometry_still_wins_and_fails_loudly(self):
+        server = RpcServerHarness(FakeTransport(depth=256))
+        server.handle({"cmd": "connect"})
+        with self.assertRaisesRegex(ValueError, "depth mismatch: config=1024, hw=256"):
+            server.handle({"cmd": "configure", "depth": 1024})
 
 
 class ChainShapeKwargsTests(unittest.TestCase):
@@ -699,6 +954,42 @@ class ChainShapeKwargsTests(unittest.TestCase):
         self.assertTrue(t.use_register_ir)
         # In register mode, dr_extra_bits is forced to 0 (xsdb handles bypass).
         self.assertEqual(t.dr_extra_bits, 0)
+
+
+class RpcChainShapeTests(unittest.TestCase):
+    """The RPC server (web UI, MCP) builds hw_server transports like the CLI."""
+
+    def _transport(self, **req):
+        return RpcServer()._build_transport({"backend": "hw_server", **req})
+
+    def test_mpsoc_tap_uses_register_ir(self):
+        # Without register-IR mode, raw opcodes on the PL TAP + ARM DAP chain
+        # leave USER2-4 unreachable.
+        for tap in ("xck26", "xczu7ev"):
+            with self.subTest(tap=tap):
+                self.assertTrue(self._transport(tap=tap).use_register_ir)
+
+    def test_mpsoc_explicit_ir_table_still_uses_register_ir(self):
+        t = self._transport(tap="xck26", ir_table="xilinx7")
+        self.assertTrue(t.use_register_ir)
+        self.assertEqual(t.dr_extra_bits, 0)
+
+    def test_standalone_ultrascale_uses_us_table_and_6_bit_ir(self):
+        t = self._transport(tap="xcku040")
+        self.assertFalse(t.use_register_ir)
+        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE)
+        self.assertEqual(t.ir_length, 6)
+
+    def test_explicit_ir_table_wins_over_the_inferred_one(self):
+        t = self._transport(tap="xcku040", ir_table="xilinx7")
+        self.assertNotEqual(
+            t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
+        )
+
+    def test_7_series_keeps_transport_defaults(self):
+        t = self._transport(tap="xc7a100t")
+        self.assertFalse(t.use_register_ir)
+        self.assertEqual(t.ir_length, 6)
 
 
 class MakeTransportTests(unittest.TestCase):

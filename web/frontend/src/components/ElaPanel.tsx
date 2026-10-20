@@ -72,6 +72,38 @@ export function ElaPanel() {
           />
           Read all segments
         </label>
+        {Number(identity?.rle_width) > 0 ? (
+          <label
+            className="inline"
+            title={`Store a repeated sample once with how many clocks it held (up to ${
+              2 ** Number(identity?.rle_width)
+            }). The window then counts entries, not clocks.`}
+          >
+            <input
+              type="checkbox"
+              checked={ela.rle}
+              onChange={(e) => setEla({ rle: e.target.checked })}
+            />
+            Run-length capture
+          </label>
+        ) : null}
+        {Number(identity?.rle_width) > 0 && ela.rle ? (
+          <label
+            title={
+              "Also end the post-trigger window this many sample clocks " +
+              "after the trigger, if the post-trigger entries have not ended " +
+              "it first. 0 = off."
+            }
+          >
+            Post-trigger clock limit
+            <input
+              type="number"
+              min={0}
+              value={ela.postClocks}
+              onChange={(e) => setEla({ postClocks: e.target.value })}
+            />
+          </label>
+        ) : null}
       </div>
       <input
         type="range"
