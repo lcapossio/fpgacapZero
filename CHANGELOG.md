@@ -415,6 +415,47 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bound and timing met. The USER1/USER2 opcodes match Efinity's BSDL for both
   families. Hardware validation is pending.
 
+- **Direct FTDI JTAG transport (`--backend ftdi`).** `FtdiMpsseTransport`
+  drives an FTDI MPSSE cable through FTDI's D2XX library, with no OpenOCD or
+  vendor server. On Windows that is the driver the embedded FlashPro5 and
+  Digilent cables already use, so PolarFire boards need no driver swap. The
+  transport reads the IDCODE and IR length and picks the IR table (PolarFire,
+  AMD/Xilinx 7-series, Gowin) and the burst default from them. It is offered
+  by the CLI (`--hardware`, `--tck-mhz`), the RPC server, the desktop GUI and
+  the web UI. Sessions in one process share the channel. On the PolarFire
+  Discovery Kit all 11 hardware tests pass, a register read takes 0.14 ms and
+  a 1024-sample burst 3 ms. On an Arty A7 the Digilent channel identifies the
+  device; AMD/Xilinx register and burst access over this transport are not
+  yet hardware-validated.
+
+- **Burst readback over OpenOCD.** `OpenOcdTransport(burst=True)` reads
+  captures through the ELA's 256-bit burst engine, with the `BURST_PTR`
+  write and every scan in one Tcl command line, which no other Tcl client
+  can interleave. Behind a core manager the line selects its slot first, and
+  the burst is drained and header-checked as on `hw_server`. Run-length
+  counts burst as well. It is on by default for the PolarFire preset only. Other
+  presets opt in with the CLI's new `--burst` or the RPC's `"burst": true`,
+  and `--two-chain-burst` / `--no-burst` now apply to OpenOCD as well. On
+  the PolarFire Discovery Kit a 1024-sample capture read back in 3.4 s
+  instead of 41 s, measured with an earlier form that split a burst over
+  several Tcl lines; the one-line form has not yet run on hardware.
+
+- **Microchip PolarFire — hardware-validated, with a Discovery Kit example.**
+  `examples/mpfs_disco_kit/` puts an 8-bit × 1024 ELA and a shared-chain EIO on
+  the PolarFire SoC Discovery Kit (MPFS095T), with a Libero batch flow
+  (`build.py --program`), an OpenOCD config for the on-board FlashPro5 and
+  hardware tests. All 11 hardware tests pass over OpenOCD. The host gains
+  `OpenOcdTransport.IR_TABLE_POLARFIRE` (USER1/USER2 = `0x20`/`0x21`), selected
+  for `MPF*` tap names by the CLI and board discovery and offered by the GUIs.
+  The board config's OpenOCD `ftdi` path has not yet run on hardware: on
+  Windows, Microchip's FlashPro driver owns the JTAG channel.
+
+- **PolarFire ELA wrapper: the full parameter set.** `fcapz_ela_polarfire`
+  (Verilog and VHDL) now offers everything `fcapz_ela_xilinx7` does:
+  decimation, external trigger, timestamps, segments, probe mux, and burst
+  readout on USER1 (`SINGLE_CHAIN_BURST=1`, the default) or USER2. A new
+  testbench, `tb/fcapz_ela_polarfire_tb.sv`, drives it through `UJTAG`.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -562,6 +603,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
   elaborates the RTL with the suite's newer Icarus (`run_sim.py --lint-only`),
   which rejects a signal used before its declaration.
+
+- **BREAKING (PolarFire wrappers): JTAG pad ports and new USER IR defaults.**
+  `fcapz_ela_polarfire`, `fcapz_eio_polarfire` and `jtag_tap_polarfire`
+  (Verilog and VHDL) gain `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`
+  and `tdo_pad_o`. Connect them to top-level ports of the same direction;
+  Libero binds them to the dedicated JTAG pins. `IR_USER1`/`IR_USER2` now
+  default to `0x20`/`0x21`, because on PolarFire SoC the MSS debug module
+  answers at the old `0x10`/`0x11`. `fcapz_ela_polarfire` also gains
+  `trigger_in`, `trigger_out` and `armed_out`; tie `trigger_in` low when it is
+  unused. No working design is affected: the old wrapper could not elaborate
+  in Libero (see Fixed).
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -1149,6 +1201,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   included. `/api/ws` now requires the handshake's `Origin` to be the server's
   own, a `--cors-origin`, or a loopback page on a loopback client (the Vite dev
   proxy). Clients that send no `Origin` (scripts) are unchanged.
+
+- **PolarFire — `UJTAG` instantiation.** `jtag_tap_polarfire` used per-bit
+  `UIREG0..7` ports and left out the JTAG pins, which do not match Libero's
+  `UJTAG`. It now uses the `UIREG[7:0]` bus and passes the pins through. The
+  simulation stub, which had copied the wrong port list, now matches Libero's.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

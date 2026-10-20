@@ -37,7 +37,9 @@ def ir_table_preset(name: str) -> dict[int, int]:
     Map a short preset name to an IR-length table for OpenOCD / hw_server transports.
 
     Aliases: ``xilinx7``, ``7series`` → 7-series table; ``ultrascale``, ``us`` → US+ table;
-    ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD only).
+    ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD, FTDI);
+    ``polarfire``, ``microchip`` → PolarFire UJTAG table.  ``auto`` (FTDI:
+    family from the IDCODE) is resolved by the transport, not here.
     """
     key = name.strip().lower().replace("-", "_")
     if key in ("xilinx7", "7series", "series7"):
@@ -46,6 +48,8 @@ def ir_table_preset(name: str) -> dict[int, int]:
         return dict(OpenOcdTransport.IR_TABLE_US)
     if key in ("gowin", "gw"):
         return dict(OpenOcdTransport.IR_TABLE_GOWIN)
+    if key in ("polarfire", "microchip"):
+        return dict(OpenOcdTransport.IR_TABLE_POLARFIRE)
     raise ValueError(f"unknown ir_table preset {name!r}")
 
 
@@ -75,8 +79,9 @@ class ConnectionSettings:
     #: Sleep between non-ready polls while waiting for the probe register (ms).
     hw_ready_poll_interval_ms: int = 20
     #: The bitstream's burst readout path: ``single_chain`` (default),
-    #: ``two_chain`` (legacy USER2, hw_server only) or ``none`` (read every
-    #: capture through the register window).
+    #: ``two_chain`` (legacy USER2) or ``none`` (read every capture through
+    #: the register window).  OpenOCD reads by burst only with the PolarFire
+    #: preset; FTDI follows the detected family.
     burst_path: str = "single_chain"
 
 

@@ -1,29 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-// Simulation stub for Microchip / Microsemi UJTAG primitive.
-// Provides a quiet, inactive TAP — enough for iverilog elaboration/lint
-// of the PolarFire / PolarFire SoC / SmartFusion2 / IGLOO2 wrappers.
+// Simulation stub for the Microchip PolarFire / PolarFire SoC UJTAG primitive.
+// Port list matches Libero's polarfire/comps.v.  Provides a quiet, inactive
+// TAP — enough for iverilog elaboration/lint of the PolarFire wrappers.
 `timescale 1ns/1ps
 
 module UJTAG (
-    output reg UIREG0 = 0,
-    output reg UIREG1 = 0,
-    output reg UIREG2 = 0,
-    output reg UIREG3 = 0,
-    output reg UIREG4 = 0,
-    output reg UIREG5 = 0,
-    output reg UIREG6 = 0,
-    output reg UIREG7 = 0,
-    output reg UTDI   = 0,
-    output reg UDRCK  = 0,
-    output reg UDRCAP = 0,
-    output reg UDRSH  = 0,
-    output reg UDRUPD = 0,
-    output reg URSTB  = 1,
-    input      UTDO
+    input            TCK,
+    input            TMS,
+    input            TDI,
+    input            TRSTB,
+    output           TDO,
+    output reg [7:0] UIREG  = 8'h00,
+    output reg       UTDI   = 1'b0,
+    output reg       UDRCK  = 1'b0,
+    output reg       UDRCAP = 1'b0,
+    output reg       UDRSH  = 1'b0,
+    output reg       UDRUPD = 1'b0,
+    output reg       URSTB  = 1'b1,
+    input            UTDO
 );
-    // synthesis translate_off
-    // All outputs remain de-asserted in simulation.
-    // synthesis translate_on
+    // All user-side outputs remain de-asserted in simulation.
+    assign TDO = 1'b0;
 endmodule

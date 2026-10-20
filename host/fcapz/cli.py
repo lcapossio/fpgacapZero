@@ -30,6 +30,7 @@ from .transport import (
     OpenOcdTransport,
     QuartusStpTransport,
     SerialTapTransport,
+    openocd_burst_default,
     XilinxHwServerTransport,
     hw_server_chain_shape_kwargs,
     list_serial_ports,
@@ -205,6 +206,23 @@ def _chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     return hw_server_chain_shape_kwargs(fpga_name)
 
 
+_DEFAULT_TAP = "xc7a100t.tap"
+
+
+def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
+    """IR table preset implied by an OpenOCD TAP / device name prefix."""
+    tap_name = tap.removesuffix(".tap").lower()
+    if tap_name.startswith(("xcku", "xcvu", "xcau")):
+        return OpenOcdTransport.IR_TABLE_US
+    if tap_name.startswith("gw"):
+        return OpenOcdTransport.IR_TABLE_GOWIN
+    if tap_name.startswith("mpf"):
+        return OpenOcdTransport.IR_TABLE_POLARFIRE
+    if tap_name.startswith(("trion", "titanium", "efinix")):
+        return OpenOcdTransport.IR_TABLE_EFINIX
+    return None
+
+
 def _make_transport(args: argparse.Namespace):
     if args.backend == "serial":
         # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port in place
@@ -218,17 +236,29 @@ def _make_transport(args: argparse.Namespace):
                 "(run 'fcapz list-ports' to see what is attached)"
             )
         return SerialTapTransport(args.serial_port, baudrate=args.baud)
+    no_burst = getattr(args, "no_burst", False)
+    want_burst = getattr(args, "burst", False)
+    two_chain = getattr(args, "two_chain_burst", False)
     if args.backend == "openocd":
-        tap_name = args.tap.removesuffix(".tap")
-        tap_lc = tap_name.lower()
-        if tap_lc.startswith("gw"):
-            ir_table = OpenOcdTransport.IR_TABLE_GOWIN
-        elif tap_lc.startswith(("trion", "titanium", "efinix")):
-            ir_table = OpenOcdTransport.IR_TABLE_EFINIX
-        else:
-            ir_table = None
+        ir_table = _ir_table_for_tap(args.tap)
         return OpenOcdTransport(
             host=args.host, port=args.port, tap=args.tap, ir_table=ir_table,
+            burst=(openocd_burst_default(ir_table) or want_burst) and not no_burst,
+            single_chain_burst=not two_chain,
+        )
+    if args.backend == "ftdi":
+        from .ftdi_transport import FtdiMpsseTransport
+
+        # The family (IR table, burst default) comes from the IDCODE unless
+        # --tap names one explicitly.
+        tap = getattr(args, "tap", _DEFAULT_TAP)
+        ir_table = None if tap == _DEFAULT_TAP else _ir_table_for_tap(tap)
+        return FtdiMpsseTransport(
+            device=getattr(args, "hardware", None),
+            ir_table=ir_table,
+            tck_hz=getattr(args, "tck_mhz", 6.0) * 1e6,
+            burst=False if no_burst else (True if want_burst else None),
+            single_chain_burst=not two_chain,
         )
     if args.backend == "usb_blaster":
         device_name = None if args.tap in QUARTUS_AUTO_DEVICE_TAPS else args.tap
@@ -260,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--backend",
-        choices=["openocd", "hw_server", "usb_blaster", "serial"],
+        choices=["openocd", "hw_server", "usb_blaster", "ftdi", "serial"],
         default="hw_server",
         help="Transport to use (serial is the byte-stream TAP bridge, not a JTAG probe)",
     )
@@ -279,23 +309,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--tap",
-        default="xc7a100t.tap",
+        default=_DEFAULT_TAP,
         help=(
             "OpenOCD TAP name, hw_server FPGA target, or Quartus device name "
-            "(usb_blaster: auto, empty, or this default selects the first device)"
+            "(usb_blaster: auto, empty, or this default selects the first device; "
+            "ftdi: this default detects the family from the IDCODE)"
         ),
     )
     p.add_argument(
         "--hardware",
         default=None,
         metavar="NAME",
-        help="usb_blaster only: Quartus hardware name; default selects first USB-Blaster",
+        help=(
+            "usb_blaster: Quartus hardware name (default: first USB-Blaster); "
+            "ftdi: adapter channel description or serial (default: the one "
+            "FlashPro/Digilent channel A found)"
+        ),
     )
     p.add_argument(
         "--quartus-stp",
         default=None,
         metavar="PATH",
         help="usb_blaster only: path to quartus_stp executable (default: found on PATH)",
+    )
+    p.add_argument(
+        "--tck-mhz",
+        type=float,
+        default=6.0,
+        metavar="MHZ",
+        help="ftdi only: JTAG clock in MHz (30 MHz / integer divisor; default 6)",
     )
     p.add_argument(
         "--serial-port",
@@ -312,15 +354,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--two-chain-burst",
         action="store_true",
-        help="hw_server only: use legacy ELA builds with 256-bit burst reads on USER2",
+        help=(
+            "hw_server/openocd/ftdi: use legacy ELA builds with 256-bit burst "
+            "reads on USER2"
+        ),
+    )
+    p.add_argument(
+        "--burst",
+        action="store_true",
+        help=(
+            "openocd/ftdi: read captures by burst where the default is the "
+            "register window (openocd bursts by default only for PolarFire; "
+            "ftdi only for families whose wrapper builds a burst path)"
+        ),
     )
     p.add_argument(
         "--no-burst",
         action="store_true",
         help=(
-            "hw_server/usb_blaster: the bitstream has no burst readout path "
-            "(e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture "
-            "through the register window. A failed burst is otherwise an error."
+            "hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst "
+            "readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read "
+            "every capture through the register window. A failed burst is "
+            "otherwise an error."
         ),
     )
     p.add_argument(
@@ -618,7 +673,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
 
     eio_read = sub.add_parser("eio-read", help="Read EIO input probes")
@@ -638,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
 
     eio_write = sub.add_parser("eio-write", help="Write EIO output probes")
@@ -658,7 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda x: int(x, 0),
         default=0,
         metavar="ADDR",
-        help="Register-bus mux offset for a shared-chain EIO (Gowin EIO_EN=1: 0x8000)",
+        help="Register-bus mux offset for a shared-chain EIO (Gowin or PolarFire EIO_EN=1: 0x8000)",
     )
     eio_write.add_argument(
         "value", type=lambda x: int(x, 0), metavar="VALUE",

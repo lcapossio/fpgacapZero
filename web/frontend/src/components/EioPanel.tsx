@@ -9,12 +9,14 @@ function range(n: number): number[] {
 const POLL_PRESETS = [25, 50, 100, 250, 500, 1000];
 
 export function EioPanel({ conn }: { conn: ConnectionParams }) {
-  const gowin = conn.ir_table === "gowin";
+  // Gowin and PolarFire have one user TAP primitive, so EIO shares the ELA
+  // chain at mux offset 0x8000 (EIO_EN=1 on the ELA wrapper).
+  const sharedChain = conn.ir_table === "gowin" || conn.ir_table === "polarfire";
   const [phase, setPhase] = useState<"discovering" | "attached" | "manual">(
     "discovering",
   );
-  const [chain, setChain] = useState(gowin ? "1" : "3");
-  const [base, setBase] = useState(gowin ? "0x8000" : "0x0");
+  const [chain, setChain] = useState(sharedChain ? "1" : "3");
+  const [base, setBase] = useState(sharedChain ? "0x8000" : "0x0");
   const [inW, setInW] = useState(0);
   const [outW, setOutW] = useState(0);
   // JS bitwise operators are 32-bit; EIO can be multiword, so track bits as BigInt.

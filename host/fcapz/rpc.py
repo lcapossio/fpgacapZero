@@ -30,6 +30,7 @@ from .openocd_launcher import OpenOcdLauncher
 from .probes import load_probe_file
 from .transport import (
     OpenOcdTransport,
+    openocd_burst_default,
     QuartusStpTransport,
     SerialTapTransport,
     Transport,
@@ -526,11 +527,15 @@ class RpcServer:
         "us": OpenOcdTransport.IR_TABLE_US,
         "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
+        "polarfire": OpenOcdTransport.IR_TABLE_POLARFIRE,
+        "microchip": OpenOcdTransport.IR_TABLE_POLARFIRE,
         "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
         "trion": OpenOcdTransport.IR_TABLE_EFINIX,
         "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
         "intel": None,
         "altera": None,
+        # FTDI: read the family from the IDCODE at connect.
+        "auto": None,
     }
 
     @classmethod
@@ -554,7 +559,7 @@ class RpcServer:
         analyzer.bind_manager_slot()
 
     @staticmethod
-    def _resolved_ir_name(req: Dict[str, Any]) -> str:
+    def _resolved_ir_name(req: Dict[str, Any]) -> str | None:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
         # The byte-stream TAP bridge has no IR at all -- it addresses chains
@@ -572,6 +577,10 @@ class RpcServer:
         # Xilinx-7 preset (which mislabeled Agilex/Cyclone boards in the GUI).
         if req.get("backend") == "usb_blaster":
             return "intel"
+        # The FTDI transport reads the family from the IDCODE; connect echoes
+        # the detected one.
+        if req.get("backend") == "ftdi":
+            return "auto"
         return _infer_ir_table_name(str(req.get("tap", "")))
 
     @staticmethod
@@ -721,12 +730,26 @@ class RpcServer:
                 raise ValueError("serial backend needs a serial_port")
             return SerialTapTransport(name, baudrate=validate_baudrate(req.get("baudrate")))
         ir = self._ir_table(self._resolved_ir_name(req))
+        burst = req.get("burst")
+        single_chain_burst = bool(req.get("single_chain_burst", True))
         if backend == "openocd":
             return OpenOcdTransport(
                 host=host,
                 port=int(req.get("port", 6666)),
                 tap=req.get("tap", "xc7a100t.tap"),
                 ir_table=ir,
+                burst=openocd_burst_default(ir) if burst is None else bool(burst),
+                single_chain_burst=single_chain_burst,
+            )
+        if backend == "ftdi":
+            from .ftdi_transport import FtdiMpsseTransport
+
+            return FtdiMpsseTransport(
+                device=req.get("hardware") or None,
+                ir_table=ir,
+                tck_hz=float(req.get("tck_mhz", 6.0)) * 1e6,
+                burst=None if burst is None else bool(burst),
+                single_chain_burst=single_chain_burst,
             )
         if backend == "hw_server":
             fpga_name = str(req.get("tap", "xc7a100t"))
@@ -1105,6 +1128,9 @@ class RpcServer:
             # label the session and reuse them for eio/axi side connects, plus
             # the actual FPGA the backend opened (when it can name it) so the UI
             # shows the connected device, not just the vendor.
+            ir_name = self._resolved_ir_name(req)
+            if ir_name == "auto":
+                ir_name = getattr(analyzer.transport, "family", None) or ir_name
             # ``link`` describes what we are talking *through* (the byte-stream
             # bridge negotiates a protocol version, chain count and DR width on
             # connect); a plain JTAG probe has nothing to report and answers
@@ -1115,7 +1141,7 @@ class RpcServer:
             except Exception:  # noqa: BLE001 - a third-party transport may not have it
                 link = None
             return self._ok(
-                ir_table=self._resolved_ir_name(req),
+                ir_table=ir_name,
                 transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
                 link=link,
                 chain=analyzer.bscan_chain,
@@ -1183,6 +1209,11 @@ class RpcServer:
                     register=self._register_opening,
                 )
                 return self._ok(backend="hw_server", targets=targets)
+            if backend == "ftdi":
+                from .ftdi_transport import list_ftdi_devices
+
+                targets = [d.description for d in list_ftdi_devices() if d.description]
+                return self._ok(backend="ftdi", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
 
         if cmd == "discover_boards":

@@ -71,6 +71,8 @@ def format_connect_error(exc: BaseException, conn: ConnectionSettings) -> str:
 def _endpoint_label(conn: ConnectionSettings) -> str:
     if conn.backend == "openocd":
         return f"{conn.host}:{conn.port} (OpenOCD)"
+    if conn.backend == "ftdi":
+        return f"{conn.hardware or 'first FlashPro/Digilent channel A'} (FTDI)"
     if conn.backend == "usb_blaster":
         hardware = conn.hardware or "first available Quartus cable"
         tap = conn.tap if conn.tap not in ("", "auto") else "first @1 device"
