@@ -667,6 +667,9 @@ class RpcServer:
         backend = str(fields.get("backend", "hw_server"))
         if backend == "serial":
             return (backend, str(fields.get("serial_port", "") or "").strip())
+        if backend == "ftdi":
+            # The adapter, by D2XX description or serial; none is the only one.
+            return (backend, fields.get("hardware") or None)
         if backend == "usb_blaster":
             tap = str(fields.get("tap", "auto"))
             if tap in ("", "xc7a100t.tap"):

@@ -1026,6 +1026,19 @@ def test_rpc_serial_target_is_its_port():
     assert not srv._same_target({"backend": "hw_server"})
 
 
+def test_rpc_ftdi_target_is_its_adapter():
+    """An FTDI board is its adapter (``hardware``), not a host and port: an
+    EIO naming another adapter is another board."""
+    srv = _rpc_server()
+    srv._analyzer_target = {"backend": "ftdi", "hardware": "Embedded FlashPro5 A"}
+    assert srv._same_target({})
+    assert srv._same_target({"hardware": "Embedded FlashPro5 A"})
+    assert not srv._same_target({"hardware": "Digilent USB Device A"})
+    srv._analyzer_target = {"backend": "ftdi"}
+    assert srv._same_target({"backend": "ftdi"})
+    assert not srv._same_target({"hardware": "Digilent USB Device A"})
+
+
 def test_rpc_eio_needing_its_own_serial_transport_is_refused_plainly():
     """An EIO on another chain, no slot named, would open the port a second
     time: refuse it with our message, not the OS's."""

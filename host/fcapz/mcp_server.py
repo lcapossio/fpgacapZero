@@ -64,6 +64,7 @@ from .analyzer import CaptureNotReady
 from .axi_decode import FAULT_FLAGS, PAIRING_ASSUMPTION
 from .ejtagaxi import AXIError
 from .probes import load_probe_text
+from .transport import validate_baudrate
 from .rpc import (
     _SCHEMA_VERSION,
     NotConnectedError,
@@ -79,9 +80,9 @@ JsonDict = dict[str, Any]
 # schema and can reject a bad value before spending a round trip on it. The
 # session still validates: a schema is the client's contract, not the
 # server's guarantee.
-Backend = Literal["hw_server", "openocd", "usb_blaster"]
+Backend = Literal["hw_server", "openocd", "usb_blaster", "ftdi", "serial"]
 # JTAG IR-code presets; omitted, RPC infers one from the tap name.
-IrTable = Literal["xilinx7", "ultrascale", "gowin"]
+IrTable = Literal["xilinx7", "ultrascale", "gowin", "polarfire", "efinix"]
 # The debug cores one fcapz_connect can open. RPC `close` tears the whole
 # board session down, so the ELA has no close of its own: "all" is it.
 Core = Literal["ela", "eio", "axi", "uart"]
@@ -1245,6 +1246,44 @@ class FcapzMcpSession:
                 f"{', '.join(present)} not supported for backend {backend!r}"
             )
 
+    # FtdiMpsseTransport's TCK range.
+    _TCK_MHZ_RANGE = (0.001, 30.0)
+
+    @classmethod
+    def _validated_tck_mhz(cls, tck_mhz: float) -> float:
+        lo, hi = cls._TCK_MHZ_RANGE
+        value = float(tck_mhz)
+        if not lo <= value <= hi:  # also refuses NaN
+            raise ValueError(f"tck_mhz must be in {lo}..{hi}, got {tck_mhz!r}")
+        return value
+
+    @staticmethod
+    def _validated_serial_port(serial_port: str | None) -> str:
+        """Confine `serial_port` to a serial port this machine has.
+
+        The transport opens it as a device path, so an arbitrary string would
+        let an agent open any file the server can.  Only a name that the OS
+        lists as a serial port is passed on.
+        """
+        name = str(serial_port or "").strip()
+        if not name:
+            raise ValueError("the serial backend needs serial_port")
+        try:
+            from serial.tools import list_ports
+        except ImportError as exc:
+            raise ValueError(
+                "the serial backend needs pyserial; install fpgacapzero[serial]"
+            ) from exc
+        ports = sorted(p.device for p in list_ports.comports())
+        fold = str.casefold if os.name == "nt" else (lambda v: v)
+        for device in ports:
+            if fold(device) == fold(name):
+                return device
+        raise ValueError(
+            f"serial_port {name!r} is not a serial port on this machine"
+            + (f"; present: {', '.join(ports)}" if ports else "; none is present")
+        )
+
     @staticmethod
     def _validated_port(port: int) -> int:
         port_i = int(port)
@@ -1263,6 +1302,9 @@ class FcapzMcpSession:
         hardware: str | None,
         quartus_stp: str | None,
         ir_table: IrTable | None,
+        serial_port: str | None,
+        baudrate: int | None,
+        tck_mhz: float | None,
     ) -> None:
         if backend in ("hw_server", "openocd"):
             self._reject_fields(
@@ -1270,6 +1312,9 @@ class FcapzMcpSession:
                 {
                     "hardware": hardware,
                     "quartus_stp": quartus_stp,
+                    "serial_port": serial_port,
+                    "baudrate": baudrate,
+                    "tck_mhz": tck_mhz,
                 },
             )
             req["host"] = self._validated_host(host)
@@ -1280,6 +1325,49 @@ class FcapzMcpSession:
                 req["port"] = self._validated_port(port)
             return
 
+        if backend == "ftdi":
+            # A USB adapter in this machine: `hardware` names it (D2XX
+            # description or serial), and the IR codes come from the IDCODE
+            # unless `ir_table` says otherwise.
+            self._reject_fields(
+                backend,
+                {
+                    "host": host,
+                    "port": port,
+                    "tap": tap,
+                    "quartus_stp": quartus_stp,
+                    "serial_port": serial_port,
+                    "baudrate": baudrate,
+                },
+            )
+            if hardware is not None:
+                req["hardware"] = hardware
+            if ir_table is not None:
+                req["ir_table"] = ir_table
+            if tck_mhz is not None:
+                req["tck_mhz"] = self._validated_tck_mhz(tck_mhz)
+            return
+
+        if backend == "serial":
+            # The byte-stream TAP bridge: a serial port, no JTAG probe, so
+            # nothing JTAG-shaped applies.
+            self._reject_fields(
+                backend,
+                {
+                    "host": host,
+                    "port": port,
+                    "tap": tap,
+                    "hardware": hardware,
+                    "quartus_stp": quartus_stp,
+                    "ir_table": ir_table,
+                    "tck_mhz": tck_mhz,
+                },
+            )
+            req["serial_port"] = self._validated_serial_port(serial_port)
+            if baudrate is not None:
+                req["baudrate"] = validate_baudrate(baudrate)
+            return
+
         if backend == "usb_blaster":
             self._reject_fields(
                 backend,
@@ -1288,6 +1376,9 @@ class FcapzMcpSession:
                     "port": port,
                     "host": host,
                     "ir_table": ir_table,
+                    "serial_port": serial_port,
+                    "baudrate": baudrate,
+                    "tck_mhz": tck_mhz,
                 },
             )
             if hardware is not None:
@@ -1322,6 +1413,9 @@ class FcapzMcpSession:
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         program_path = self._validated_program_path(program, backend=backend)
         req: JsonDict = {
@@ -1339,6 +1433,9 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
         if backend == "hw_server":
             req["single_chain_burst"] = single_chain_burst
@@ -2547,6 +2644,9 @@ class FcapzMcpSession:
         hardware: str | None,
         quartus_stp: str | None,
         ir_table: IrTable | None,
+        serial_port: str | None,
+        baudrate: int | None,
+        tck_mhz: float | None,
     ) -> JsonDict:
         req: JsonDict = {
             "cmd": cmd,
@@ -2562,6 +2662,9 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
         return req
 
@@ -2576,6 +2679,9 @@ class FcapzMcpSession:
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         req: JsonDict = {
             "cmd": "eio_connect",
@@ -2591,6 +2697,9 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
         if self.eio_connected:  # after validation, as in connect()
             self.eio_close()
@@ -2643,6 +2752,9 @@ class FcapzMcpSession:
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         req = self._bridge_connect_req(
             cmd="axi_connect",
@@ -2654,6 +2766,9 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
         if self.axi_connected:  # after validation, as in connect()
             self.axi_close()
@@ -2758,6 +2873,9 @@ class FcapzMcpSession:
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         req = self._bridge_connect_req(
             cmd="uart_connect",
@@ -2769,6 +2887,9 @@ class FcapzMcpSession:
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
         if self.uart_connected:  # after validation, as in connect()
             self.uart_close()
@@ -2829,6 +2950,9 @@ class FcapzMcpSession:
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         """Open one debug core; the MCP surface has a single connect tool."""
         fields: JsonDict = {
@@ -2840,6 +2964,9 @@ class FcapzMcpSession:
             "hardware": hardware,
             "quartus_stp": quartus_stp,
             "ir_table": ir_table,
+            "serial_port": serial_port,
+            "baudrate": baudrate,
+            "tck_mhz": tck_mhz,
         }
         if core == "ela":
             return self.connect(
@@ -3304,6 +3431,9 @@ def build_mcp_server(
         hardware: str | None = None,
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        tck_mhz: float | None = None,
     ) -> JsonDict:
         """Connect to a debug core: the ELA (default), EIO, AXI or UART bridge.
 
@@ -3315,17 +3445,28 @@ def build_mcp_server(
         to 3 (0 on usb_blaster) for "eio" and to 4 for "axi"/"uart".
 
         Backends: "hw_server" (AMD/Xilinx hw_server, the default), "openocd"
-        (any OpenOCD-supported adapter), and "usb_blaster" (Intel/Altera via
-        Quartus). For usb_blaster, `hardware` selects the Quartus cable and
-        `quartus_stp` names the quartus_stp executable — the latter spawns a
-        host process, so it is rejected unless fcapz-mcp was started with
-        --allow-program (omit it to use the server's configured toolchain).
-        `hardware`/`quartus_stp` are rejected for the other backends, and
-        host/port/tap/ir_table are rejected for usb_blaster. `ir_table` picks
-        the JTAG IR codes for hw_server/openocd; omit it to infer them from
-        the tap name (gw* is Gowin, xcku/xcvu/xcau UltraScale, else 7-series). `program` (ELA only,
-        hw_server only) is disabled unless started with --allow-program and
-        must be an existing .bit file; `single_chain_burst` is ELA only.
+        (any OpenOCD-supported adapter), "usb_blaster" (Intel/Altera via
+        Quartus), "ftdi" (an FTDI MPSSE adapter such as the PolarFire kits'
+        FlashPro5, driven directly with no daemon) and "serial" (the
+        byte-stream TAP bridge over a serial port, e.g. Efinix Trion).
+        host/port/tap apply to hw_server/openocd only. For usb_blaster,
+        `hardware` selects the Quartus cable and `quartus_stp` names the
+        quartus_stp executable — the latter spawns a host process, so it is
+        rejected unless fcapz-mcp was started with --allow-program (omit it to
+        use the server's configured toolchain). For ftdi, `hardware` names
+        the adapter by D2XX description or serial (omit it for the only one
+        attached) and `tck_mhz` sets TCK (default 6). For serial,
+        `serial_port` (required) names a port this machine lists, e.g. "COM5"
+        or "/dev/ttyACM0", and `baudrate` defaults to 1000000. The ELA
+        session holds a serial port exclusively, so on serial an EIO works
+        only in a core-manager slot on the ELA's own chain (pass that
+        `chain`) and AXI/UART are not available. A field that does not apply
+        to the backend is rejected. `ir_table` picks the JTAG IR codes for
+        hw_server/openocd/ftdi; omit it to infer them from the tap name (gw*
+        is Gowin, xcku/xcvu/xcau UltraScale, else 7-series) or, on ftdi, from
+        the IDCODE. `program` (ELA only, hw_server only) is disabled unless
+        started with --allow-program and must be an existing .bit file;
+        `single_chain_burst` is ELA only.
         """
 
         return session.connect_core(
@@ -3340,6 +3481,9 @@ def build_mcp_server(
             hardware=hardware,
             quartus_stp=quartus_stp,
             ir_table=ir_table,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            tck_mhz=tck_mhz,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)

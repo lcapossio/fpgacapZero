@@ -336,6 +336,97 @@ class FcapzMcpSessionTests(unittest.TestCase):
         for flag in ("connected", "eio_connected", "axi_connected", "uart_connected"):
             self.assertTrue(status[flag], flag)
 
+    def test_connect_forwards_ftdi_options(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        session.connect(backend="ftdi", hardware="Embedded FlashPro5 A",
+                        ir_table="polarfire", tck_mhz=3)
+        session.eio_connect(backend="ftdi")
+
+        req = rpc.requests[0]
+        self.assertEqual(req["backend"], "ftdi")
+        self.assertEqual(req["hardware"], "Embedded FlashPro5 A")
+        self.assertEqual(req["ir_table"], "polarfire")
+        self.assertEqual(req["tck_mhz"], 3.0)
+        for field in ("host", "port", "tap", "serial_port"):
+            self.assertNotIn(field, req)
+        self.assertEqual(rpc.requests[-1]["chain"], 3)
+        self.assertNotIn("hardware", rpc.requests[-1])  # the only adapter
+
+    def test_ftdi_rejects_fields_that_do_not_apply(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        for field, value in (("host", "127.0.0.1"), ("port", 3121),
+                             ("tap", "xc7a100t"), ("quartus_stp", "quartus_stp"),
+                             ("serial_port", "COM5"), ("baudrate", 115200)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, f"{field} not supported"):
+                    session.connect(backend="ftdi", **{field: value})
+
+    def test_ftdi_tck_out_of_range_is_refused(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        for bad in (0, 31, float("nan")):
+            with self.subTest(tck_mhz=bad):
+                with self.assertRaisesRegex(ValueError, "tck_mhz"):
+                    session.connect(backend="ftdi", tck_mhz=bad)
+
+    def _ports(self, *names):
+        from types import SimpleNamespace
+
+        return mock.patch(
+            "serial.tools.list_ports.comports",
+            return_value=[SimpleNamespace(device=n) for n in names],
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_connect_forwards_serial_options(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        with self._ports("COM5", "/dev/ttyACM0"):
+            session.connect(backend="serial", serial_port="COM5", baudrate=921600)
+
+        req = rpc.requests[0]
+        self.assertEqual(req["serial_port"], "COM5")
+        self.assertEqual(req["baudrate"], 921600)
+        for field in ("host", "port", "tap", "hardware", "ir_table"):
+            self.assertNotIn(field, req)
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_serial_port_must_be_a_present_port(self):
+        """serial_port is opened as a device path: only a port the OS lists
+        is passed on, never an arbitrary file."""
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        with self._ports("COM5"):
+            for bad in ("/etc/passwd", "COM6", "", None):
+                with self.subTest(serial_port=bad):
+                    with self.assertRaisesRegex(ValueError, "serial_port"):
+                        session.connect(backend="serial", serial_port=bad)
+        self.assertEqual(rpc.requests, [])
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_serial_rejects_fields_that_do_not_apply(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        with self._ports("COM5"):
+            for field, value in (("host", "127.0.0.1"), ("port", 3121),
+                                 ("tap", "xc7a100t"), ("hardware", "x"),
+                                 ("ir_table", "efinix"), ("tck_mhz", 6)):
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(ValueError, f"{field} not supported"):
+                        session.connect(backend="serial", serial_port="COM5",
+                                        **{field: value})
+            with self.assertRaisesRegex(ValueError, "baudrate"):
+                session.connect(backend="serial", serial_port="COM5", baudrate=0)
+
+    def test_serial_and_ftdi_fields_are_refused_on_jtag_backends(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        for backend in ("hw_server", "openocd", "usb_blaster"):
+            for field, value in (("serial_port", "COM5"), ("baudrate", 115200),
+                                 ("tck_mhz", 6)):
+                with self.subTest(backend=backend, field=field):
+                    with self.assertRaisesRegex(ValueError, f"{field} not supported"):
+                        session.connect(backend=backend, **{field: value})
+
     def test_connect_leaves_the_ir_table_to_rpc_when_omitted(self):
         # RPC infers the preset from the tap name; MCP must not pin one.
         rpc = FakeRpc()
@@ -1682,7 +1773,9 @@ class TypedToolSchemaTests(unittest.TestCase):
         tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
 
         connect = tools["fcapz_connect"].inputSchema["properties"]["backend"]
-        self.assertEqual(connect["enum"], ["hw_server", "openocd", "usb_blaster"])
+        self.assertEqual(
+            connect["enum"], ["hw_server", "openocd", "usb_blaster", "ftdi", "serial"]
+        )
 
         capture = tools["fcapz_capture"].inputSchema
         self.assertEqual(
