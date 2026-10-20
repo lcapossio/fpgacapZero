@@ -332,8 +332,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Host — `Analyzer.connect()` binds the first ELA slot.** An analyzer with
   no `instance` on a chain with a core manager is bound to the manager's
   first ELA slot when it connects, so it never reads whichever slot another
-  program left active. An explicit `instance` and a chain without a manager
-  are unchanged. The GUI no longer moves the analyzer to slot 0 when an EIO
+  program left active; a reconnect looks that slot up again, since the new
+  image may differ. An explicit `instance` and a chain without a manager are
+  unchanged. The GUI no longer moves the analyzer to slot 0 when an EIO
   is detached.
 
 - **Host — an EIO left active no longer hides a hub's ELAs.**

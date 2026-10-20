@@ -909,6 +909,46 @@ class InterimContractTests(unittest.TestCase):
         for _ in range(4):
             self.assertTrue(ela.status()["done"])
 
+    def _reconnectable(self):
+        t, fake = _hw_server()
+        t.connect = t._forget_hub_state  # type: ignore[method-assign]
+        return t, fake
+
+    @staticmethod
+    def _swap_slots(fake, a: int, b: int) -> None:
+        """Another image: the cores of slots *a* and *b* trade places."""
+        fake.slots[a], fake.slots[b] = fake.slots[b], fake.slots[a]
+        fake.desc[a], fake.desc[b] = fake.desc[b], fake.desc[a]
+
+    def test_a_reconnect_binds_by_type_again(self):
+        t, fake = self._reconnectable()
+        ela = Analyzer(t)
+        ela.connect()
+        self.assertEqual(ela.instance, 0)
+        self._swap_slots(fake, 0, 2)  # EIO, ELA, ELA, EIO
+        ela.connect()
+        self.assertEqual(ela.instance, 1)
+
+    def test_a_reconnect_keeps_a_given_slot(self):
+        t, fake = self._reconnectable()
+        ela = Analyzer(t, instance=0)
+        ela.connect()
+        self._swap_slots(fake, 0, 2)
+        ela.connect()
+        self.assertEqual(ela.instance, 0)
+
+    def test_a_reconnect_to_the_same_slot_keeps_the_configuration(self):
+        t, fake = self._reconnectable()
+        ela = Analyzer(t)
+        ela.connect()
+        ela._config = object()  # type: ignore[assignment]  # configured
+        ela.connect()
+        self.assertEqual(ela.instance, 0)
+        self.assertIsNotNone(ela._config)
+        self._swap_slots(fake, 0, 2)
+        ela.connect()
+        self.assertIsNone(ela._config)
+
     def test_every_backend_connect_forgets_the_hub(self):
         from unittest.mock import patch
 

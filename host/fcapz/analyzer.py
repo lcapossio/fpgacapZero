@@ -550,6 +550,9 @@ class Analyzer:
         self.transport = transport
         self._chain = int(chain)
         self._instance = None if instance is None else int(instance)
+        # The slot was bound by core type, not given: a new connection, which
+        # may hold another image, binds it again.
+        self._slot_bound_by_type = False
         self._manager_override = None if manager is None else bool(manager)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
@@ -620,6 +623,7 @@ class Analyzer:
         """
         with self.transport.transaction_lock():
             new_instance = None if instance is None else int(instance)
+            self._slot_bound_by_type = False
             if new_instance != self._instance:
                 # The configuration and geometry belong to the old slot; a
                 # capture read with them would misread the new slot's data.
@@ -665,21 +669,29 @@ class Analyzer:
         left as it is.  Slot 0 is used if no slot reads as an ELA.
         """
         with self.transport.transaction_lock():
-            if (
-                self._instance is not None
-                or not self.speaks_register_protocol()
-                or not self._behind_manager()
-            ):
+            if self._instance is not None:
                 return
-            slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
-            self.select_instance(0 if slot is None else slot)
+            slot = self._manager_ela_slot()
+            if slot is not None:
+                self.select_instance(slot)
+                self._slot_bound_by_type = True
+
+    def _manager_ela_slot(self) -> int | None:
+        """The slot :meth:`bind_manager_slot` binds, or ``None`` for a chain
+        without a manager."""
+        if not self.speaks_register_protocol() or not self._behind_manager():
+            return None
+        slot = CoreManager(self.transport, chain=self._chain).first_slot(_ELA_CORE_ID)
+        return 0 if slot is None else slot
 
     def connect(self) -> None:
         """Connect the transport and select this analyzer's chain and slot.
 
         An analyzer with no slot on a chain with a core manager is bound to
         the manager's first ELA slot (see :meth:`bind_manager_slot`), never
-        left on whichever slot the manager has active.
+        left on whichever slot the manager has active.  A slot bound that way
+        is looked up again: the new connection may hold another image.  The
+        configuration is kept only when the slot is the same.
         """
         with self.transport.transaction_lock():
             self._select_chain()
@@ -688,7 +700,16 @@ class Analyzer:
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
-            self.bind_manager_slot()
+            if self._slot_bound_by_type:
+                bound, self._instance = self._instance, None
+                try:
+                    slot = self._manager_ela_slot()
+                finally:
+                    self._instance = bound
+                self.select_instance(slot)
+                self._slot_bound_by_type = slot is not None
+            else:
+                self.bind_manager_slot()
             with self._selected():
                 pass
 
@@ -2194,6 +2215,7 @@ class Analyzer:
             if slot is None:
                 return None
             self.select_instance(slot)
+            self._slot_bound_by_type = True
             raw = self._read_ela_probe_registers_raw()
             if (raw[0] & 0xFFFF) != _ELA_CORE_ID:
                 return None

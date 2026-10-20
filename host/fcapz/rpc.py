@@ -1294,9 +1294,9 @@ class RpcServer:
                 and self._same_target(req)
             )
             if shared and chain == self._analyzer.bscan_chain:
-                # The EIO's selects move MGR_ACTIVE: an analyzer connect could
-                # not bind (its chain's active slot did not answer then) is
-                # bound to its first ELA slot before they start.
+                # The EIO's selects move MGR_ACTIVE: an analyzer that connect
+                # could not bind (its chain's active slot did not answer then)
+                # is bound to its first ELA slot before they start.
                 self._analyzer.bind_manager_slot()
             target_req = req
             if instance is not None and self._analyzer is not None and not shared:

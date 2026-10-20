@@ -107,7 +107,9 @@ Connect the transport and select this analyzer's chain and slot.
 
 An analyzer with no slot on a chain with a core manager is bound to
 the manager's first ELA slot (see `bind_manager_slot`), never
-left on whichever slot the manager has active.
+left on whichever slot the manager has active.  A slot bound that way
+is looked up again: the new connection may hold another image.  The
+configuration is kept only when the slot is the same.
 
 #### `Analyzer.close`
 
