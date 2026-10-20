@@ -14,6 +14,12 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
 
+# VERSION register prefix ({major, minor} in bits 31:16) of this release.
+_MAJOR, _MINOR, _ = (
+    int(x) for x in (Path(__file__).resolve().parents[2] / "VERSION").read_text().split(".")
+)
+_VERSION_HI = (_MAJOR << 24) | (_MINOR << 16)
+
 try:
     from cocotb.binary import BinaryValue
 except ModuleNotFoundError:
@@ -916,7 +922,7 @@ async def fcapz_core_manager_mux(dut):
     manager_reset(dut, 0)
     await FallingEdge(dut.jtag_clk)
 
-    assert await manager_read(dut, 0xF000) == 0x0004_434D
+    assert await manager_read(dut, 0xF000) == _VERSION_HI | 0x434D
     assert await manager_read(dut, 0xF004) == 3
     # bit2: the burst start is raised on every BURST_PTR write; bits 3..6:
     # epochs and owner, burst header, MGR_CTRL, Test-Logic-Reset resets;
@@ -925,7 +931,7 @@ async def fcapz_core_manager_mux(dut):
     assert await manager_read(dut, 0xF008) == 0
     assert await manager_read(dut, 0xEFFF) == 0
     assert int(dut.slot_rd_en.value) & 1
-    assert await manager_read(dut, 0xF000) == 0x0004_434D
+    assert await manager_read(dut, 0xF000) == _VERSION_HI | 0x434D
     assert int(dut.slot_rd_en.value) == 0
 
     await manager_write(dut, 0xF014, 2)
@@ -2139,13 +2145,13 @@ async def fcapz_ejtagaxi_protocol(dut):
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_read")
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_0000, 0, 0), "S9 version")
-    assert axi_rdata(out) == 0x0004_4A58
+    assert axi_rdata(out) == _VERSION_HI | 0x4A58
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_version")
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(
         dut, axi_cmd(CMD_CONFIG, 0x0000_0004, 0, 0), "S9 version alias")
-    assert axi_rdata(out) == 0x0004_4A58
+    assert axi_rdata(out) == _VERSION_HI | 0x4A58
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_002C, 0, 0), "S9 features")
@@ -2413,10 +2419,10 @@ async def fcapz_ejtaguart_protocol(dut):
     assert uart_rx_byte(out) == 0x4A
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x03))
-    assert uart_rx_byte(out) == 0x04
+    assert uart_rx_byte(out) == _MINOR
     await uart_cdc_wait(dut)
     out = await dr_scan_32(dut, uart_cmd(UART_CMD_NOP, 0x00))
-    assert uart_rx_byte(out) == 0x00
+    assert uart_rx_byte(out) == _MAJOR
     await uart_cdc_wait(dut)
     await dr_scan_32(dut, uart_cmd(UART_CMD_CONFIG, 0x04))
     await uart_cdc_wait(dut)

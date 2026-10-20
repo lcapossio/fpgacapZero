@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
 `timescale 1ns/1ps
+`include "fcapz_version.vh"
 
 module fcapz_core_manager_case #(
     parameter integer NUM_SLOTS = 3,
@@ -215,7 +216,7 @@ module fcapz_core_manager_case #(
         proto_rst = 1'b0;
         repeat (1) @(negedge clk);
 
-        read_reg(16'hF000, 32'h0004_434D, "manager version");
+        read_reg(16'hF000, {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, 16'h434D}, "manager version");
         read_reg(16'hF004, NUM_SLOTS[31:0], "manager slot count");
         // bit2 burst start per BURST_PTR write, bit3 epochs/owner, bit4
         // header (HEADER_EN), bit5 MGR_CTRL, bit7 MGR_SELECT_COUNT; no TLR
@@ -226,7 +227,7 @@ module fcapz_core_manager_case #(
         read_reg(16'hF024, 32'h0000_0000, "owner clear after reset");
         read_reg(16'hF008, 32'h0000_0000, "reset active slot");
         check_active_slot(0, "0xEFFF routes to active slot 0");
-        read_reg(16'hF000, 32'h0004_434D, "0xF000 stays in manager window");
+        read_reg(16'hF000, {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, 16'h434D}, "0xF000 stays in manager window");
         expect_bits({7'b0, |slot_rd_en}, 8'h00, "0xF000 did not touch slots");
 
         write_reg(16'hF014, NUM_SLOTS - 1);
