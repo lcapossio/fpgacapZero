@@ -11,12 +11,25 @@ import re
 import unittest
 
 from fcapz.transport import (
+    BurstExpectation,
     BurstIntegrityError,
     BurstUnavailableError,
     OpenOcdTransport,
+    SlotSelection,
     Transport,
     _ScanBurstMixin,
 )
+
+_MGR_ACTIVE = 0xF008
+
+# A whole-line Tcl loop, as OpenOcdTransport._run_scans writes one.
+_LOOP = re.compile(
+    r"for \{set __fcapz_i 0\} \{\$__fcapz_i < (\d+)\} \{incr __fcapz_i\} \{(.*?)\}(?=; |$)"
+)
+
+
+def _expand_loops(tcl: str) -> str:
+    return _LOOP.sub(lambda m: "; ".join([m.group(2)] * int(m.group(1))), tcl)
 
 
 class _BurstEngineModel:
@@ -33,6 +46,8 @@ class _BurstEngineModel:
         self.sample_w = sample_w
         self.ts_w = ts_w
         self.ptr_writes: list[int] = []
+        self.selects: list[int] = []  # MGR_ACTIVE writes
+        self.commands: list[int] = []  # other 49-bit scans
         self.irs: list[int] = []
         self._pos = None
         self._ts = False
@@ -47,7 +62,15 @@ class _BurstEngineModel:
                 if width == 49 and value >> 48 == 1 and (value >> 32) & 0xFFFF == 0x2C:
                     self.ptr_writes.append(value & 0xFFFFFFFF)
                     self._ts = bool(value & 0x80000000)
+                    self.run_lengths = bool(value & 0x40000000)
                     self._pos = -1  # next capture primes
+                    continue
+                if width == 49 and value >> 48 == 1 and (value >> 32) & 0xFFFF == _MGR_ACTIVE:
+                    self.selects.append(value & 0xFFFFFFFF)
+                    continue
+                if width == 49:
+                    self._pos = None  # a command scan ends burst mode
+                    self.commands.append(value)
                     continue
                 if width == 256 and self._pos is not None:
                     if self._pos < 0:
@@ -173,7 +196,54 @@ class ScanBurstMixinTests(unittest.TestCase):
     def test_single_chain_burst_stays_on_control_chain(self):
         t = _FakeScanTransport(_BurstEngineModel(list(range(40))))
         t.read_block(0x0100, 40)
-        self.assertEqual(t.model.irs, [1, 1])
+        # BURST_PTR, the burst scans, then the command scan that drains.
+        self.assertEqual(t.model.irs, [1, 1, 1])
+
+    def test_control_chain_burst_ends_with_a_drain(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(40))))
+        ops, _prime, on_ctrl = t._burst_ops(2, timestamp=False)
+        self.assertTrue(on_ctrl)
+        self.assertEqual(
+            ops[-3:],
+            [("ir", 1), ("dr", 0, 49, False), ("idle", t.BURST_DRAIN_IDLE_CYCLES)],
+        )
+
+    def test_data_chain_burst_has_no_drain(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(40))), single_chain=False)
+        ops, _prime, on_ctrl = t._burst_ops(2, timestamp=False)
+        self.assertFalse(on_ctrl)
+        self.assertEqual(ops[-1], ("idle", t.BURST_SCAN_IDLE_CYCLES))
+
+    def test_a_two_chain_session_bursts_a_managed_slot_on_its_own_chain(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(16))), single_chain=False)
+        self.assertTrue(t.burst_on_data_chain)
+        words = t.read_sample_block(0x0100, 16, 8, on_control_chain=True)
+        self.assertEqual(words, list(range(16)))
+        self.assertNotIn(2, t.model.irs)
+        self.assertFalse(
+            _FakeScanTransport(_BurstEngineModel([0])).burst_on_data_chain
+        )
+
+    def test_run_lengths_set_ptr_bit30(self):
+        counts = [5, 1, 300, 7]
+        t = _FakeScanTransport(_BurstEngineModel([], timestamps=counts, ts_w=16))
+        self.assertEqual(t.read_run_length_block(4, 16), counts)
+        self.assertEqual(t.model.ptr_writes, [0xC0000000])
+
+    def test_a_control_chain_burst_checks_its_header(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(8))))
+        t.burst_expect = BurstExpectation(slot=1, start_ptr=0, sample_w=8)
+        with self.assertRaisesRegex(BurstIntegrityError, "not a burst header"):
+            t.read_block(0x0100, 8)
+
+    def test_a_data_chain_burst_has_no_header_to_check(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(8))), single_chain=False)
+        t.burst_expect = BurstExpectation(slot=1, start_ptr=0, sample_w=8)
+        self.assertEqual(t.read_block(0x0100, 8), list(range(8)))
+
+    def test_a_scope_selecting_transport_adds_no_select(self):
+        t = _FakeScanTransport(_BurstEngineModel(list(range(8))))
+        self.assertEqual(t._slot_select_ops(0x002C), [])
 
     def test_burst_start_sync_writes_ptr_twice(self):
         t = _FakeScanTransport(_BurstEngineModel(list(range(10))))
@@ -211,7 +281,7 @@ class OpenOcdBurstTests(unittest.TestCase):
         def fake_cmd(tcl: str) -> str:
             scripts.append(tcl)
             ops = []
-            for part in tcl.split("; "):
+            for part in _expand_loops(tcl).split("; "):
                 m = re.fullmatch(r"irscan \S+ (\d+)", part)
                 if m:
                     ir = int(m.group(1))
@@ -239,17 +309,70 @@ class OpenOcdBurstTests(unittest.TestCase):
         self.assertTrue(script.startswith("set __fcapz_r {}; irscan MPFS095T.tap 32; "))
         self.assertIn("drscan MPFS095T.tap 49 0x1002c00000000", script)
         self.assertIn("runtest 160", script)
-        self.assertEqual(script.count("lappend __fcapz_r [drscan MPFS095T.tap 256 "), 3)
+        # Priming scan + 2 data scans, as one loop.
+        self.assertIn(
+            "for {set __fcapz_i 0} {$__fcapz_i < 3} {incr __fcapz_i} "
+            "{lappend __fcapz_r [drscan MPFS095T.tap 256 ",
+            script,
+        )
         self.assertTrue(script.endswith("set __fcapz_r"))
 
-    def test_deep_burst_is_split_but_complete(self):
+    def test_deep_burst_is_one_short_line(self):
+        """No other Tcl client can run between two scans of one burst, and
+        the line stays far under OpenOCD's 4 MiB limit at any depth."""
         samples = [i & 0xFF for i in range(1024 * 10)]
         model = _BurstEngineModel(samples)
         t, scripts = self._transport(model, burst=True)
-        t._SCANS_PER_SCRIPT = 100
         self.assertEqual(t.read_block(0x0100, len(samples)), samples)
-        self.assertGreater(len(scripts), 1)
-        self.assertEqual(sum(s.count("lappend") for s in scripts), 321)
+        self.assertEqual(len(scripts), 1)
+        self.assertIn("{$__fcapz_i < 321}", scripts[0])
+        self.assertLess(len(scripts[0]), 1000)
+
+    def _managed(self, t):
+        """Mark chain 1 as an identified manager with slot 2 verified."""
+        t.__dict__["_fcapz_manager_chains"] = {1}
+        t.__dict__["_fcapz_manager_caps"] = {1: 0x0F}
+        t.__dict__["_fcapz_checked_slots"] = {(1, 2)}
+
+    def test_a_managed_burst_selects_its_slot_at_the_head_of_the_line(self):
+        model = _BurstEngineModel(list(range(16)))
+        t, scripts = self._transport(model, burst=True)
+        self._managed(t)
+        with t.slot_scope(SlotSelection(1, _MGR_ACTIVE, 2)):
+            self.assertEqual(t.read_block(0x0100, 16), list(range(16)))
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(model.selects, [2])
+        script = scripts[0]
+        self.assertLess(
+            script.index("drscan MPFS095T.tap 49 0x1f00800000002"),
+            script.index("drscan MPFS095T.tap 49 0x1002c00000000"),
+        )
+        # One select only: none between the burst scans.
+        self.assertEqual(script.count("0x1f008"), 1)
+
+    def test_an_unmanaged_burst_writes_no_select(self):
+        model = _BurstEngineModel(list(range(16)))
+        t, scripts = self._transport(model, burst=True)
+        t.read_block(0x0100, 16)
+        self.assertEqual(model.selects, [])
+
+    def test_a_deep_burst_waits_longer_for_its_reply(self):
+        class _Sock:
+            def __init__(self):
+                self.timeouts: list[float] = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        model = _BurstEngineModel([i & 0xFF for i in range(2048)])
+        t, _scripts = self._transport(model, burst=True)
+        t._sock = _Sock()  # type: ignore[assignment]
+        t.read_block(0x0100, 2048)
+        n_scans = 2048 // 32 + 1
+        self.assertEqual(
+            t._sock.timeouts,
+            [5.0 + 0.05 * n_scans, 5.0],
+        )
 
     def test_two_chain_burst_selects_user2(self):
         model = _BurstEngineModel(list(range(32)))

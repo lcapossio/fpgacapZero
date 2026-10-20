@@ -294,12 +294,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   yet hardware-validated.
 
 - **Burst readback over OpenOCD.** `OpenOcdTransport(burst=True)` reads
-  captures through the ELA's 256-bit burst engine, batching the scans into a
-  few Tcl scripts. It is on by default for the PolarFire preset only. Other
+  captures through the ELA's 256-bit burst engine, with the `BURST_PTR`
+  write and every scan in one Tcl command line, which no other Tcl client
+  can interleave. Behind a core manager the line selects its slot first, and
+  the burst is drained and header-checked as on `hw_server`. Run-length
+  counts burst as well. It is on by default for the PolarFire preset only. Other
   presets opt in with the CLI's new `--burst` or the RPC's `"burst": true`,
   and `--two-chain-burst` / `--no-burst` now apply to OpenOCD as well. On
-  the PolarFire Discovery Kit a 1024-sample capture reads back in 3.4 s
-  instead of 41 s.
+  the PolarFire Discovery Kit a 1024-sample capture read back in 3.4 s
+  instead of 41 s, measured with an earlier form that split a burst over
+  several Tcl lines; the one-line form has not yet run on hardware.
 
 - **Microchip PolarFire — hardware-validated, with a Discovery Kit example.**
   `examples/mpfs_disco_kit/` puts an 8-bit × 1024 ELA and a shared-chain EIO on

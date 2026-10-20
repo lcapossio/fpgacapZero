@@ -1117,7 +1117,11 @@ class _ScanBurstMixin:
     between the ``BURST_PTR`` write and the last burst scan is decoded as a
     register command and ends burst mode, so nothing else may reach the chain
     in between; ``_run_scans`` must hold the transport's I/O lock for the
-    whole batch.
+    whole batch.  A transport that writes the slot selection inside each
+    access (:attr:`Transport.atomic_slot_select`) puts it at the head of the
+    batch, before ``BURST_PTR`` (:meth:`_slot_select_ops`).  A burst on the
+    control chain is checked against its header and ends with a command scan
+    and a drain, as on ``hw_server``.
 
     The host class provides ``burst``, ``single_chain_burst``,
     ``burst_data_chain``, ``_active_chain`` and :meth:`read_reg_stable`.
@@ -1143,6 +1147,18 @@ class _ScanBurstMixin:
         """Run *ops* atomically; return the captured DR values in order."""
         raise NotImplementedError
 
+    def _slot_select_ops(self, addr: int) -> list[ScanOp]:
+        """Ops that write the calling thread's slot selection at the head of a
+        batch reaching *addr*; none for a transport that selects on entering
+        :meth:`Transport.slot_scope`."""
+        return []
+
+    @property
+    def burst_on_data_chain(self) -> bool:
+        """A two-chain session (``single_chain_burst=False``) bursts on its
+        data chain, which a core manager never answers."""
+        return not self.single_chain_burst
+
     # -- Analyzer-facing burst methods --------------------------------------
 
     def _burst_block_or_none(self, addr: int, words: int) -> List[int] | None:
@@ -1157,9 +1173,13 @@ class _ScanBurstMixin:
         return self._burst_with_hint(words, element_width=max(1, sample_w))
 
     def read_sample_block(
-        self, base_addr: int, n_samples: int, sample_width: int
+        self, base_addr: int, n_samples: int, sample_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
         """Read *n_samples* whole samples via the burst DR.
+
+        With *on_control_chain* the scans stay on the control chain even on a
+        two-chain session: a core manager answers bursts only there.
 
         Returns ``ceil(sample_width / 32)`` little-endian 32-bit words per
         sample.  Raises :class:`BurstUnavailableError`, before any scan, when
@@ -1179,7 +1199,9 @@ class _ScanBurstMixin:
             )
         if not self.burst:
             raise BurstUnavailableError("burst readout is off for this transport")
-        samples = self._burst_with_hint(n_samples, element_width=sample_width)
+        samples = self._burst_with_hint(
+            n_samples, element_width=sample_width, on_control_chain=on_control_chain
+        )
         words_per_sample = (sample_width + 31) // 32
         words: List[int] = []
         for sample in samples:
@@ -1188,15 +1210,34 @@ class _ScanBurstMixin:
         return words
 
     def read_timestamp_block_single_chain(
-        self, base_addr: int, n_timestamps: int, timestamp_width: int
+        self, base_addr: int, n_timestamps: int, timestamp_width: int,
+        *, on_control_chain: bool = False,
     ) -> List[int]:
-        """Read one timestamp per captured sample via the burst DR."""
+        """Read one timestamp per captured sample via the burst DR, on the
+        control chain with *on_control_chain* (a core manager's slot)."""
         if n_timestamps <= 0:
             return []
         if not self.burst:
             raise BurstUnavailableError("burst readout is off for this transport")
         return self._burst_with_hint(
-            n_timestamps, timestamp=True, element_width=timestamp_width
+            n_timestamps, timestamp=True, element_width=timestamp_width,
+            on_control_chain=on_control_chain,
+        )
+
+    def read_run_length_block(
+        self, n_entries: int, lane_width: int, *, on_control_chain: bool = False
+    ) -> List[int]:
+        """Read one run count per captured entry via the burst DR: the
+        timestamp lane with ``BURST_PTR[30]`` set, ``lane_width`` bits per
+        element.  Raises :class:`BurstUnavailableError`, before any scan,
+        when burst readout is off."""
+        if n_entries <= 0:
+            return []
+        if not self.burst:
+            raise BurstUnavailableError("burst readout is off for this transport")
+        return self._burst_with_hint(
+            n_entries, timestamp=True, element_width=lane_width,
+            run_lengths=True, on_control_chain=on_control_chain,
         )
 
     def read_timestamp_block(
@@ -1214,23 +1255,29 @@ class _ScanBurstMixin:
     # -- burst engine --------------------------------------------------------
 
     def _burst_ops(
-        self, n_scans: int, *, timestamp: bool
-    ) -> tuple[list[ScanOp], int]:
-        """Return the op batch for a burst of *n_scans* data scans and the
-        number of leading captures (priming scans) to discard."""
+        self, n_scans: int, *, timestamp: bool, run_lengths: bool = False,
+        on_control_chain: bool = False,
+    ) -> tuple[list[ScanOp], int, bool]:
+        """Return the op batch for a burst of *n_scans* data scans, the
+        number of leading captures (priming scans) to discard, and whether
+        the burst runs on the control chain."""
         ctrl = self._active_chain
-        burst_chain = ctrl if self.single_chain_burst else self.burst_data_chain
+        on_ctrl = self.single_chain_burst or on_control_chain
+        burst_chain = ctrl if on_ctrl else self.burst_data_chain
         frame = (
             (1 << 48)
             | (self.ADDR_BURST_PTR << 32)
             | (0x80000000 if timestamp else 0)
+            | (0x40000000 if timestamp and run_lengths else 0)
         )
         write_ptr: list[ScanOp] = [
             ("ir", ctrl),
             ("dr", frame, self.DR_BITS, False),
             ("idle", self.BURST_PREFILL_IDLE_CYCLES),
         ]
-        ops = list(write_ptr)
+        # Select the slot before BURST_PTR, which makes it the burst owner;
+        # never between burst scans, where any command scan ends burst mode.
+        ops = [*self._slot_select_ops(self.ADDR_BURST_PTR), *write_ptr]
         if self.burst_start_sync:
             # See Transport.burst_start_sync: one burst scan whose capture
             # matches the engine's copy to the new owner's start toggle, then
@@ -1242,20 +1289,37 @@ class _ScanBurstMixin:
         for _ in range(n_scans + prime):
             ops.append(("dr", 0, self.BURST_DR_BITS, True))
             ops.append(("idle", self.BURST_SCAN_IDLE_CYCLES))
-        return ops, prime
+        if on_ctrl:
+            # Leave the pipe idle: until a command scan ends burst mode every
+            # capture starts another staging fill, and a core manager ignores
+            # an MGR_ACTIVE write while one runs (see BURST_DRAIN_IDLE_CYCLES).
+            # The VERSION read is not captured.
+            ops += [
+                ("ir", ctrl),
+                ("dr", 0, self.DR_BITS, False),
+                ("idle", self.BURST_DRAIN_IDLE_CYCLES),
+            ]
+        return ops, prime, on_ctrl
 
     def _read_block_burst(
-        self, count: int, *, timestamp: bool = False, element_width: int = 8
+        self, count: int, *, timestamp: bool = False, element_width: int = 8,
+        run_lengths: bool = False, on_control_chain: bool = False,
     ) -> List[int]:
         """Read *count* elements of *element_width* bits via the burst DR."""
         per_scan = max(1, self.BURST_DR_BITS // element_width)
         n_scans = (count + per_scan - 1) // per_scan
-        ops, prime = self._burst_ops(n_scans, timestamp=timestamp)
+        ops, prime, on_ctrl = self._burst_ops(
+            n_scans, timestamp=timestamp, run_lengths=run_lengths,
+            on_control_chain=on_control_chain,
+        )
         scans = self._run_scans(ops)
         if len(scans) != n_scans + prime:
             raise BurstIntegrityError(
                 f"burst returned {len(scans)} scans, expected {n_scans + prime}"
             )
+        if on_ctrl:
+            # A core manager loads the burst header into the priming scan.
+            self._check_burst_header(scans[0], timestamp=timestamp)
         mask = (1 << element_width) - 1
         values: List[int] = []
         for scan in scans[prime:]:
@@ -1592,56 +1656,84 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         check_data_window(addr, words, self.data_window_end)
         return [self.read_reg(addr + i * 4) for i in range(words)]
 
-    #: Data scans per Tcl script.  A deep burst is split over several
-    #: scripts, all sent under one hold of the socket lock.
-    _SCANS_PER_SCRIPT = 256
+    #: Read timeout for a scan batch: OpenOCD answers only once the whole
+    #: line has run, so a deep burst gets a base plus a margin per scan.
+    _BATCH_TIMEOUT_SEC = 5.0
+    _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+
+    def _slot_select_ops(self, addr: int) -> list[ScanOp]:
+        return [("tcl", cmd) for cmd in self._slot_select_cmds([addr])]
 
     def _run_scans(self, ops: list[ScanOp]) -> list[int]:
-        """Run *ops* as Tcl scripts, one round trip per script."""
-        scripts: list[list[str]] = [[]]
-        captures: list[int] = [0]
-        scans = 0
-        for op in ops:
+        """Run *ops* as ONE Tcl command line, which OpenOCD's Tcl server runs
+        before it serves another client: no other client's scan can end
+        burst mode, or move the slot, between two scans of a batch.  A run of
+        identical captured scans becomes a ``for`` loop, so the line stays
+        short at any depth (OpenOCD drops a line over 4 MiB).
+        """
+        cmds = ["set __fcapz_r {}"]
+        expected = 0
+        i = 0
+        while i < len(ops):
+            op = ops[i]
             kind = op[0]
             if kind == "ir":
-                cmd = f"irscan {self.tap} {self.ir_table[op[1]]}"
+                cmds.append(f"irscan {self.tap} {self.ir_table[op[1]]}")
             elif kind == "idle":
-                cmd = f"runtest {int(op[1])}"
+                cmds.append(f"runtest {int(op[1])}")
+            elif kind == "tcl":
+                cmds.append(op[1])
             elif kind == "dr":
                 _, value, width, capture = op
-                if scans >= self._SCANS_PER_SCRIPT:
-                    # A new script re-selects nothing: the IR stays loaded.
-                    scripts.append([])
-                    captures.append(0)
-                    scans = 0
-                scans += 1
-                cmd = f"drscan {self.tap} {width} 0x{value:0{(width + 3) // 4}x}"
-                if capture:
-                    cmd = f"lappend __fcapz_r [{cmd}]"
-                    captures[-1] += 1
+                scan = f"drscan {self.tap} {width} 0x{value:0{(width + 3) // 4}x}"
+                if not capture:
+                    cmds.append(scan)
+                else:
+                    pair = ops[i:i + 2]
+                    idle = pair[1] if len(pair) == 2 and pair[1][0] == "idle" else None
+                    unit = pair if idle is not None else [op]
+                    repeats = 1
+                    while ops[i + repeats * len(unit):i + (repeats + 1) * len(unit)] == unit:
+                        repeats += 1
+                    body = f"lappend __fcapz_r [{scan}]"
+                    if idle is not None:
+                        body += f"; runtest {int(idle[1])}"
+                    if repeats == 1:
+                        cmds.append(body)
+                    else:
+                        cmds.append(
+                            "for {set __fcapz_i 0} "
+                            f"{{$__fcapz_i < {repeats}}} {{incr __fcapz_i}} {{{body}}}"
+                        )
+                    expected += repeats
+                    i += repeats * len(unit)
+                    continue
             else:
                 raise ValueError(f"unknown scan op {op!r}")
-            scripts[-1].append(cmd)
-        out: list[int] = []
+            i += 1
+        cmds.append("set __fcapz_r")
         with self._sock_lock:
-            for body, expected in zip(scripts, captures):
-                script = "; ".join(["set __fcapz_r {}", *body, "set __fcapz_r"])
-                result = self._cmd(script)
-                tokens = result.split()
-                try:
-                    values = [int(t, 16) for t in tokens]
-                except ValueError as exc:
-                    raise RuntimeError(
-                        f"OpenOCD scan batch failed for tap {self.tap!r}: {result!r}"
-                    ) from exc
-                if len(values) != expected:
-                    raise BurstIntegrityError(
-                        f"OpenOCD scan batch returned {len(values)} values, "
-                        f"expected {expected}"
-                    )
-                out.extend(values)
-        return out
-
+            sock = self._sock
+            if sock is not None:
+                sock.settimeout(
+                    self._BATCH_TIMEOUT_SEC + self._BATCH_TIMEOUT_PER_SCAN_SEC * expected
+                )
+            try:
+                result = self._run_line(cmds)
+            finally:
+                if sock is not None:
+                    sock.settimeout(self._BATCH_TIMEOUT_SEC)
+        try:
+            values = [int(t, 16) for t in result.split()]
+        except ValueError as exc:
+            raise RuntimeError(
+                f"OpenOCD scan batch failed for tap {self.tap!r}: {result!r}"
+            ) from exc
+        if len(values) != expected:
+            raise BurstIntegrityError(
+                f"OpenOCD scan batch returned {len(values)} values, expected {expected}"
+            )
+        return values
 
 def openocd_burst_default(ir_table: dict[int, int] | None) -> bool:
     """Whether an OpenOCD session with *ir_table* reads captures by burst

@@ -295,11 +295,13 @@ for the OpenOCD backend.
 
 With `burst=True` the transport reads the ELA data window through the
 wrapper's 256-bit burst engine instead of one 49-bit register read per
-sample.  It writes `BURST_PTR`, then sends the burst scans as one Tcl
-script per 256 scans, collecting every `drscan` result with `lappend`, so
-a capture costs a few TCL round trips instead of two per sample.  On the
-PolarFire Discovery Kit (through a `remote_bitbang` adapter), 1024 8-bit
-samples come back in about 3.4 s instead of about 41 s.
+sample.  The `BURST_PTR` write and every burst scan go in one Tcl
+command line, the scans in a `for` loop that collects each `drscan` result
+with `lappend`, so a capture costs one TCL round trip instead of two per
+sample.  On the PolarFire Discovery Kit (through a `remote_bitbang`
+adapter), 1024 8-bit samples came back in about 3.4 s instead of about
+41 s, measured with the earlier form that split a burst over several Tcl
+lines.
 
 - **Default:** on for the PolarFire preset (`openocd_burst_default()`), off
   otherwise.  The CLI's `--burst` / `--no-burst` and the RPC's `"burst"`
@@ -311,8 +313,16 @@ samples come back in about 3.4 s instead of about 41 s.
   and timestamps go through `read_sample_block` / `read_timestamp_block`, as
   on hw_server.
 - Any 49-bit scan between the `BURST_PTR` write and the last burst scan
-  ends a single-chain burst.  The whole burst therefore holds the
-  transport's socket lock.
+  ends a single-chain burst.  OpenOCD's Tcl server runs a whole line before
+  it serves another client, so no other program's scan lands inside it.
+- Behind a core manager the line starts with the slot select, before
+  `BURST_PTR`, and a burst on the control chain ends with a VERSION read and
+  idle clocks that let the last staging fill finish, as on `hw_server`.  Its
+  priming scan is checked against the burst header.  A two-chain session
+  bursts a managed slot on the control chain, the only chain a manager
+  answers on.  Run-length counts burst too (`read_run_length_block`).
+- OpenOCD answers only when the whole line has run, so the read timeout
+  grows with the burst: 5 s plus 50 ms per scan.
 
 #### Gowin over OpenOCD
 
