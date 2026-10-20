@@ -727,8 +727,11 @@ in the hub, and the last writer wins.  Inside one process, share one
 transport: the GUI and the RPC server already route a managed EIO through
 the analyzer's transport.
 
-An `Analyzer` without an `instance` reads whichever slot is active, so
-another program's select does move it.  The host reports that instead of
+`Analyzer.connect()` binds an analyzer without an `instance` to the first
+ELA slot of its chain's manager (`bind_manager_slot()`).  Only an analyzer
+built on a transport that is already connected has no slot until it is
+probed or bound, and it reads whichever slot is active, so another
+program's select does move it.  The host reports that instead of
 using the wrong slot's data: `configure()`, `arm()`, `reset()` (and so
 `force_idle()`) and every readout check that the slot stayed selected
 (`MGR_SELECT_COUNT` on hubs with `MGR_CAPS[7]`, and `MGR_ACTIVE`) and raise

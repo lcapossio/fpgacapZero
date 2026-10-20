@@ -329,6 +329,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Host — `Analyzer.connect()` binds the first ELA slot.** An analyzer with
+  no `instance` on a chain with a core manager is bound to the manager's
+  first ELA slot when it connects, so it never reads whichever slot another
+  program left active; a reconnect looks that slot up again, since the new
+  image may differ. An explicit `instance` and a chain without a manager are
+  unchanged. The GUI no longer moves the analyzer to slot 0 when an EIO
+  is detached.
+
 - **Host — an EIO left active no longer hides a hub's ELAs.**
   `Analyzer.probe_optional()` on a core manager whose active slot is not an
   ELA selects the first ELA slot (when the analyzer has no slot of its own),
@@ -466,6 +474,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hw_server and Quartus transports.
 
 ### Deprecated
+
+- **`Analyzer.pin_active_slot()`** now calls `bind_manager_slot()`, which
+  binds the first ELA slot instead of the slot the hub has active. Use
+  `bind_manager_slot()`.
 
 - **Arty A7 MicroBlaze variant.** The proprietary MicroBlaze design
   (`arty_a7_top.v`, block design moved to `examples/arty_a7/legacy-microblaze/`)

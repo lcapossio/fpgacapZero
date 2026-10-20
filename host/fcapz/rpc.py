@@ -1012,8 +1012,8 @@ class RpcServer:
                 instance=instance,
             )
             try:
+                # Binds the first ELA slot when the chain has a manager.
                 analyzer.connect()
-                self._pin_manager_slot(analyzer)
             except Exception:
                 # Don't leak the transport's child process / socket on a failed
                 # connect (hw_server down, wrong tap, program failure, ...).
@@ -1294,9 +1294,10 @@ class RpcServer:
                 and self._same_target(req)
             )
             if shared and chain == self._analyzer.bscan_chain:
-                # The EIO's selects move MGR_ACTIVE: an analyzer that reads
-                # whichever slot is active must keep the one it reads now.
-                self._analyzer.pin_active_slot()
+                # The EIO's selects move MGR_ACTIVE: an analyzer that connect
+                # could not bind (its chain's active slot did not answer then)
+                # is bound to its first ELA slot before they start.
+                self._analyzer.bind_manager_slot()
             target_req = req
             if instance is not None and self._analyzer is not None and not shared:
                 # Another board, named by the fields given; the rest are the
@@ -1334,7 +1335,7 @@ class RpcServer:
             # On the session's board the EIO, standalone or in a core-manager
             # slot, goes through the session's transport: one lock and one
             # slot cache, and no second connection to the board.  An unbound
-            # analyzer is pinned first, as eio_connect does (BUG-247).
+            # analyzer is bound first, as eio_connect does (BUG-247).
             if self._same_target(req):
                 entry = self._session_eio(analyzer, req)
                 if entry is None:
@@ -1342,7 +1343,7 @@ class RpcServer:
                 chain, base_addr = int(entry["chain"]), int(entry["base_addr"])
                 instance = entry["instance"]
                 if instance is not None and chain == analyzer.bscan_chain:
-                    analyzer.pin_active_slot()
+                    analyzer.bind_manager_slot()
                 eio = EioController(
                     analyzer.transport, chain=chain, base_addr=base_addr,
                     instance=None if instance is None else int(instance),

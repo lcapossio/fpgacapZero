@@ -1025,10 +1025,10 @@ def main() -> int:
     analyzer = Analyzer(transport, chain=args.chain, instance=args.ela_instance)
 
     try:
+        # Without --ela-instance, connect() binds the first ELA slot behind a
+        # manager: the active slot is whatever the last tool left, e.g. an EIO
+        # after eio-write.
         analyzer.connect()
-        # Without --ela-instance, bind the first ELA slot behind a manager: the
-        # active slot is whatever the last tool left, e.g. an EIO after eio-write.
-        analyzer.bind_manager_slot()
         if args.cmd == "ela-list":
             manager = ElaManager(transport, chain=args.chain)
             print(json.dumps(manager.probe_all(), indent=2))

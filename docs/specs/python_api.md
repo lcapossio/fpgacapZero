@@ -51,11 +51,10 @@ Core-manager slot selected before accesses, or `None` for legacy direct mode.
 pin_active_slot() -> None
 ```
 
-Bind an analyzer with no selected slot to the slot the core manager
-has active now, so another controller that moves `MGR_ACTIVE` on the
-same transport (an EIO in another slot) does not move this analyzer.
-The configuration is kept: the slot is the same.  No effect without a
-manager or with a slot already selected.
+Deprecated: use `bind_manager_slot`, which this calls.
+
+It used to bind the slot the manager had active, which another session
+or tool may have moved to an EIO; it now binds the first ELA slot.
 
 #### `Analyzer.select_instance`
 
@@ -105,6 +104,12 @@ connect() -> None
 ```
 
 Connect the transport and select this analyzer's chain and slot.
+
+An analyzer with no slot on a chain with a core manager is bound to
+the manager's first ELA slot (see `bind_manager_slot`), never
+left on whichever slot the manager has active.  A slot bound that way
+is looked up again: the new connection may hold another image.  The
+configuration is kept only when the slot is the same.
 
 #### `Analyzer.close`
 
