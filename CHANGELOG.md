@@ -436,9 +436,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   counts burst as well. It is on by default for the PolarFire preset only. Other
   presets opt in with the CLI's new `--burst` or the RPC's `"burst": true`,
   and `--two-chain-burst` / `--no-burst` now apply to OpenOCD as well. On
-  the PolarFire Discovery Kit a 1024-sample capture read back in 3.4 s
-  instead of 41 s, measured with an earlier form that split a burst over
-  several Tcl lines; the one-line form has not yet run on hardware.
+  the PolarFire Discovery Kit the one-line form passes all 11 hardware tests
+  through a `remote_bitbang` bridge, and a 1024-sample capture reads back in
+  about 0.06 s (an earlier multi-line form took 3.4 s through a slower
+  bridge; the register window took 41 s).
 
 - **Microchip PolarFire — hardware-validated, with a Discovery Kit example.**
   `examples/mpfs_disco_kit/` puts an 8-bit × 1024 ELA and a shared-chain EIO on

@@ -301,10 +301,10 @@ wrapper's 256-bit burst engine instead of one 49-bit register read per
 sample.  The `BURST_PTR` write and every burst scan go in one Tcl
 command line, the scans in a `for` loop that collects each `drscan` result
 with `lappend`, so a capture costs one TCL round trip instead of two per
-sample.  On the PolarFire Discovery Kit (through a `remote_bitbang`
-adapter), 1024 8-bit samples came back in about 3.4 s instead of about
-41 s, measured with the earlier form that split a burst over several Tcl
-lines.
+sample.  On the PolarFire Discovery Kit, through a `remote_bitbang`
+bridge on the FlashPro5, 1024 8-bit samples come back in about 0.06 s; the
+same capture through the register window took about 41 s.  How fast it goes
+depends mostly on the adapter path.
 
 - **Default:** on for the PolarFire preset (`openocd_burst_default()`), off
   otherwise.  The CLI's `--burst` / `--no-burst` and the RPC's `"burst"`

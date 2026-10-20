@@ -131,8 +131,9 @@ board.
 - **eNVM.** Programming this fabric-only design replaces whatever the device
   held before, including MSS firmware in eNVM.
 - **Readback speed.** A full 1024-sample window reads back in about 3 ms over
-  `--backend ftdi`. Over OpenOCD with `remote_bitbang` it takes about 3.4 s,
-  against about 41 s through the register window before burst readout.
+  `--backend ftdi`. Over OpenOCD it depends on the adapter path: about
+  0.06 s through a `remote_bitbang` bridge on the FlashPro5, against about
+  41 s through the register window before burst readout.
 - **Second chain.** The wrapper keeps burst data on USER1
   (`SINGLE_CHAIN_BURST=1`, the default). IR `0x21` (USER2) is used only by a
   `SINGLE_CHAIN_BURST=0` build.

@@ -1855,8 +1855,7 @@ def openocd_burst_default(ir_table: dict[int, int] | None) -> bool:
     unless told otherwise.
 
     True only for the PolarFire preset: its wrapper builds single-chain burst
-    by default, and its burst path was validated over OpenOCD (in an earlier
-    multi-line form; the one-line form awaits a PolarFire run).  Gowin
+    by default, and its burst path is hardware-validated over OpenOCD.  Gowin
     wrappers have no burst path, and the other presets stay on the register
     window until validated; ``OpenOcdTransport(burst=True)`` (CLI ``--burst``)
     opts in.
