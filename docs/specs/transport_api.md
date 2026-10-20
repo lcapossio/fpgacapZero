@@ -162,7 +162,8 @@ selected ELA control chain instead of switching to USER2.
 - With `burst=True` (the default for the PolarFire IR table), captures are
   read by burst.  The whole burst, with its slot select ahead of `BURST_PTR`,
   is one Tcl command line; repeated scans become a Tcl `for` loop, so the line
-  stays short at any depth.  This one-line form has not yet run on hardware.
+  stays short at any depth.  Hardware-validated on the PolarFire SoC
+  Discovery Kit.
 - Each register access is one Tcl command line (a read is
   `irscan; drscan; runtest; irscan; drscan`), which OpenOCD's Tcl server runs
   before serving another client.  Inside a `slot_scope`, a line that reaches
