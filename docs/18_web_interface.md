@@ -13,9 +13,13 @@ There is no bespoke web protocol.
 ## Install and run
 
 ```bash
-pip install -e ".[web]"     # adds fastapi + uvicorn to the host stack
-fcapz-web                    # serves on http://127.0.0.1:7373
+pip install -e ".[web]"          # adds fastapi + uvicorn to the host stack
+pip install -e ".[web,serial]"   # ...plus pyserial, for the serial backend
+fcapz-web                        # serves on http://127.0.0.1:7373
 ```
+
+The `serial` extra is only needed for the **serial** backend (the byte-stream
+TAP bridge, [chapter 14](14_transports.md)); the JTAG backends do not use it.
 
 Open <http://127.0.0.1:7373>. Connection parameters (backend, host/port, an
 optional tap — the IR table is inferred from the tap name) live in the UI, not
@@ -35,10 +39,25 @@ WebSocket, and the UI hides the token field until a server asks for it. There is
 trusted network. `fcapz-web` prints a warning if you bind a non-localhost host
 without a token.
 
+Serial ports get a rule of their own. `list_serial_ports` and a `connect` with
+`backend: "serial"` are refused for **remote** clients on a server started
+without `--token`, because opening a serial port asserts DTR/RTS — on a
+development machine that resets RP2040/RP2350 boards and disturbs JTAG probes
+and programmers, which all appear as serial ports too. Once a serial session is
+open, the same remote clients are refused **every** session command (`probe`,
+`capture`, `close`, a `connect` that would replace it, …), since those drive the
+serial port even though they name no backend. Loopback clients are unaffected,
+and a remote client with a token may use them normally. (Enumeration itself
+never opens a port, on any path.)
+
 Cross-origin API access is **off by default** (the bundled UI is same-origin,
 and `npm run dev` proxies `/api`), so a random website cannot drive the board;
 enable it only if you serve the frontend from a different origin, with
-`--cors-origin`. When bound to a loopback address the server also rejects
+`--cors-origin`. CORS does not apply to WebSockets, so `/api/ws` checks the
+handshake's `Origin` itself: it must be the server's own origin (scheme, host
+and port), a `--cors-origin`, or a loopback page connecting from loopback (the
+dev proxy). A client that sends no `Origin` — a script rather than a browser —
+is governed by the token as before. When bound to a loopback address the server also rejects
 requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
 
 | Flag | Default | Meaning |

@@ -109,6 +109,40 @@ TESTBENCHES = {
             RTL / "fcapz_eio.v",
         ],
     ),
+    "fcapz_ela_wrapper_ports": (
+        TB / "fcapz_ela_wrapper_ports_tb.sv",
+        [
+            RTL / "fcapz_ela_uart.v",
+            RTL / "fcapz_ela_efinix.v",
+            RTL / "jtag_tap" / "jtag_tap_efinix.v",
+            RTL / "fcapz_ela_intel.v",
+            RTL / "jtag_tap" / "jtag_tap_intel.v",
+            SIM / "sld_virtual_jtag_stub.v",
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_tap_bridge.v",
+            RTL / "jtag_reg_iface.v",
+            RTL / "jtag_burst_read.v",
+            RTL / "reset_sync.v",
+            RTL / "fcapz_ela.v",
+            RTL / "dpram.v",
+            RTL / "trig_compare.v",
+        ],
+    ),
+    "fcapz_uart_tap": (
+        TB / "fcapz_uart_tap_tb.sv",
+        [
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_tap_bridge.v",
+            RTL / "jtag_reg_iface.v",
+        ],
+    ),
+    "fcapz_uart_tap_timeout": (
+        TB / "fcapz_uart_tap_timeout_tb.sv",
+        [
+            RTL / "fcapz_uart_tap.v",
+            RTL / "fcapz_tap_bridge.v",
+        ],
+    ),
     "fcapz_core_manager": (
         TB / "fcapz_core_manager_tb.sv",
         [
@@ -171,6 +205,9 @@ DEFAULT_TESTBENCHES = [
     "fcapz_ela_xilinx7_single_chain",
     "fcapz_ela_polarfire",
     "fcapz_eio",
+    "fcapz_uart_tap",
+    "fcapz_uart_tap_timeout",
+    "fcapz_ela_wrapper_ports",
     "fcapz_core_manager",
     "fcapz_core_manager_legacy_burst",
     "fcapz_core_manager_select_after_burst",

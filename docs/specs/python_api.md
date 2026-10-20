@@ -593,6 +593,19 @@ Class constants:
 BURST_DRAIN_IDLE_CYCLES = 258
 ```
 
+#### `Transport.link_info`
+
+```python
+link_info() -> dict | None
+```
+
+Facts about the link itself, or `None` when there are none.
+
+Distinct from the core identity a `probe` returns: this describes what
+the host is talking *through*, which for a byte-stream bridge is a real
+negotiated thing (protocol version, chain count, DR width) rather than a
+constant of the wire.
+
 #### `Transport.transaction_lock`
 
 ```python
@@ -1004,6 +1017,7 @@ IR_TABLE_XILINX7 = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX_ULTRASCALE = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
 IR_TABLE_POLARFIRE = {1: 32, 2: 33}
+IR_TABLE_EFINIX = {1: 8, 2: 9}
 IR_TABLE_XILINX_ZYNQUS = {1: 36, 2: 37, 3: 38, 4: 39}
 IR_TABLE_US = {1: 36, 2: 37, 3: 38, 4: 39}
 USER1_IR = 2
@@ -2450,7 +2464,9 @@ and `instance` is the manager slot or `None`.  A manager's active slot
 is left as it was found.  Set *bridges* to `False` to skip the bridge
 identity reads on chains no register core answered.  Chains the transport
 cannot select, such as a missing `sld_virtual_jtag` instance, are
-skipped; connection errors propagate.  Chain 1 is selected on return.
+skipped, and so are its `unprobeable_chains` (a TAP bridge's burst
+data chain), even when named in *chains*; connection errors propagate.
+Chain 1 is selected on return.
 
 ## `fcapz.eio`
 

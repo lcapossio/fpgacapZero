@@ -182,10 +182,14 @@ def discover_cores(
     is left as it was found.  Set *bridges* to ``False`` to skip the bridge
     identity reads on chains no register core answered.  Chains the transport
     cannot select, such as a missing ``sld_virtual_jtag`` instance, are
-    skipped; connection errors propagate.  Chain 1 is selected on return.
+    skipped, and so are its ``unprobeable_chains`` (a TAP bridge's burst
+    data chain), even when named in *chains*; connection errors propagate.
+    Chain 1 is selected on return.
     """
     if chains is None:
         chains = transport.discovery_chains()
+    blocked = getattr(transport, "unprobeable_chains", ())
+    chains = [c for c in chains if int(c) not in blocked]
     found: List[Dict[str, Any]] = []
     unanswered: List[int] = []
     # Unselected: a caller's slot must not prefix the probes of other chains'

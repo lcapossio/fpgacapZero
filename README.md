@@ -14,7 +14,7 @@ JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
 Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
-and Microchip** parts (with **Efinix** support pending), plus a Python / CLI / GUI
+and Microchip** parts (with **Efinix** support synthesized in Efinity, hardware validation pending), plus a Python / CLI / GUI
 host stack on top.
 
 > 📖 **New here? Start with the [User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — especially
@@ -43,7 +43,9 @@ controls to coding agents, and an optional **PySide6 desktop GUI**
 - **Vendor-agnostic** — one portable core with thin TAP wrappers for AMD/Xilinx
   7-series, AMD/Xilinx UltraScale / UltraScale+, Lattice ECP5, Intel / Altera,
   Gowin, and Microchip PolarFire-family devices. An **Efinix (Trion / Titanium)**
-  wrapper is planned — support pending.
+  wrapper (two JTAG User TAP blocks via the Efinity Interface Designer)
+  synthesizes, places and routes in Efinity on Trion and Titanium; hardware
+  validation is pending.
 - **Small, and only as big as you need** — a usable 8-bit / 1024-sample ELA
   fits in about **600 LUTs + 0.5 BRAM**. Extra triggers, timestamps,
   decimation, segmenting, and more are compile-time options you enable only
@@ -149,7 +151,7 @@ The canonical register / shift maps live in
 | Microchip PolarFire wrapper | ✅ Hardware-validated on the PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
 | AMD/Xilinx UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`); standalone Kintex / Virtex UltraScale(+) not yet tested |
 | ECP5 wrappers | RTL complete; host / hardware validation still limited |
-| Efinix (Trion / Titanium) wrapper | ⏳ Planned — support pending, wrapper not yet implemented |
+| Efinix (Trion / Titanium) wrapper | ⏳ Synthesized, placed and routed in Efinity 2025.1 (Trion T20F256, Titanium Ti60F225); hardware validation pending |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 and Kria KV260 (details in the manual) |
 
 The full, always-current matrix is in [Overview](https://github.com/lcapossio/fpgacapZero/blob/main/docs/01_overview.md) and

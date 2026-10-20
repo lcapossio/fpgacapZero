@@ -36,7 +36,7 @@ features they expose.
 | Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC | `_polarfire` | ✅ PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
 | Microchip SmartFusion2 / IGLOO2 | `_polarfire` | ❌ same `UJTAG` ports as PolarFire, not yet HW-validated |
-| Efinix Trion / Titanium | `_efinix` *(planned)* | ⏳ support pending — wrapper not yet implemented |
+| Efinix Trion / Titanium | `_efinix` | ⏳ synthesized, placed and routed in Efinity on Trion T20F256 and Titanium Ti60F225 (two JTAG User TAP blocks via the Efinity Interface Designer); hardware validation pending |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
 
 If your vendor isn't on the list, see [chapter 14](14_transports.md)

@@ -1252,19 +1252,26 @@ class Analyzer:
             )
             return _join_timestamp_words(raw, ts_words_per, mask)
 
+        # read_timestamp_block returns whole timestamps.  The JTAG transports
+        # burst only one-word ones; a transport that packs wider ones whole
+        # (the byte-stream TAP bridge) says how wide through
+        # timestamp_burst_max_width.
         timestamp_burst = getattr(self.transport, "read_timestamp_block", None)
+        burst_max_w = getattr(self.transport, "timestamp_burst_max_width", 32)
+        if not isinstance(burst_max_w, int):
+            burst_max_w = 32
         if (
-            ts_words_per == 1
+            self._hw_timestamp_w <= burst_max_w
             and callable(timestamp_burst)
             and has_burst
             and self.transport.bursts_data_window(timestamp=True)
         ):
             raw = timestamp_burst(ts_base, total, self._hw_timestamp_w)
-        else:
-            raw = self._read_window(
-                ts_base, ts_word_count, self.transport.read_block,
-                self.transport.read_window_block,
-            )
+            return [v & mask for v in raw]
+        raw = self._read_window(
+            ts_base, ts_word_count, self.transport.read_block,
+            self.transport.read_window_block,
+        )
         return _join_timestamp_words(raw, ts_words_per, mask)
 
     def _read_window(self, addr: int, words: int, read, page_read) -> list[int]:
@@ -2292,6 +2299,7 @@ _DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
     "ultrascale": OpenOcdTransport.IR_TABLE_US,
     "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
     "polarfire": OpenOcdTransport.IR_TABLE_POLARFIRE,
+    "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
 }
 
 

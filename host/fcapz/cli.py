@@ -29,9 +29,12 @@ from .transport import (
     QUARTUS_AUTO_DEVICE_TAPS,
     OpenOcdTransport,
     QuartusStpTransport,
+    SerialTapTransport,
     openocd_burst_default,
     XilinxHwServerTransport,
     hw_server_chain_shape_kwargs,
+    list_serial_ports,
+    validate_baudrate,
 )
 
 
@@ -57,6 +60,14 @@ def _positive_float(value: str) -> float:
     if f <= 0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {f}")
     return f
+
+
+def _baud(value: str) -> int:
+    """argparse type: a usable serial baud rate."""
+    try:
+        return validate_baudrate(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _tcp_port(value: str) -> int:
@@ -207,10 +218,24 @@ def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
         return OpenOcdTransport.IR_TABLE_GOWIN
     if tap_name.startswith("mpf"):
         return OpenOcdTransport.IR_TABLE_POLARFIRE
+    if tap_name.startswith(("trion", "titanium", "efinix")):
+        return OpenOcdTransport.IR_TABLE_EFINIX
     return None
 
 
 def _make_transport(args: argparse.Namespace):
+    if args.backend == "serial":
+        # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port in place
+        # of a probe daemon, so no host/port/tap and no IR table -- chains are
+        # addressed by index.  Unlike the long-lived web session, one CLI run
+        # builds exactly one transport, so eio-*/axi-*/uart-* work here: nothing
+        # else is holding the port.
+        if not args.serial_port:
+            raise SystemExit(
+                "error: --backend serial needs --serial-port "
+                "(run 'fcapz list-ports' to see what is attached)"
+            )
+        return SerialTapTransport(args.serial_port, baudrate=args.baud)
     no_burst = getattr(args, "no_burst", False)
     want_burst = getattr(args, "burst", False)
     two_chain = getattr(args, "two_chain_burst", False)
@@ -265,9 +290,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--backend",
-        choices=["openocd", "hw_server", "usb_blaster", "ftdi"],
+        choices=["openocd", "hw_server", "usb_blaster", "ftdi", "serial"],
         default="hw_server",
-        help="JTAG transport to use",
+        help="Transport to use (serial is the byte-stream TAP bridge, not a JTAG probe)",
     )
     p.add_argument(
         "--host", default="127.0.0.1", help="Transport host (hw_server or OpenOCD)"
@@ -313,6 +338,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=6.0,
         metavar="MHZ",
         help="ftdi only: JTAG clock in MHz (30 MHz / integer divisor; default 6)",
+    )
+    p.add_argument(
+        "--serial-port",
+        default=None,
+        metavar="PORT",
+        help="serial only: port of the TAP bridge, e.g. COM5 or /dev/ttyACM0",
+    )
+    p.add_argument(
+        "--baud",
+        type=_baud,
+        default=1_000_000,
+        help="serial only: baud rate of the TAP bridge (default 1000000)",
     )
     p.add_argument(
         "--two-chain-burst",
@@ -368,6 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser(
+        "list-ports",
+        help="List this machine's serial ports (for --backend serial)",
+    )
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     discover = sub.add_parser(
@@ -954,6 +995,24 @@ def main() -> int:
     if args.cmd == "axi-decode":
         # Offline: no transport, no board.
         return _run_axi_decode(args)
+
+    # Needs no transport, and deliberately opens nothing: opening a port
+    # asserts DTR/RTS, which resets an RP2040/RP2350 and disturbs the JTAG
+    # probes and programmers that also enumerate as serial ports.
+    if args.cmd == "list-ports":
+        ports = list_serial_ports()
+        if not ports:
+            print(
+                "no serial ports found "
+                "(pyserial installed? pip install 'fpgacapzero[serial]')",
+                file=sys.stderr,
+            )
+            return 1
+        for p in ports:
+            detail = p["description"] or p["hwid"]
+            print(f"{p['device']}	{detail}" if detail else p["device"])
+        return 0
+
     transport = _make_transport(args)
 
     # -- EIO commands ------------------------------------------------------

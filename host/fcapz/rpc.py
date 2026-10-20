@@ -7,7 +7,7 @@ import base64
 import json
 import threading
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .analyzer import (
     Analyzer,
@@ -32,12 +32,15 @@ from .transport import (
     OpenOcdTransport,
     openocd_burst_default,
     QuartusStpTransport,
+    SerialTapTransport,
     Transport,
     XilinxHwServerTransport,
     hw_server_chain_shape_kwargs,
     list_openocd_taps,
+    list_serial_ports,
     list_xilinx_hw_server_targets,
     register_pipe_identity,
+    validate_baudrate,
 )
 
 _SCHEMA_VERSION = "1.1"
@@ -103,6 +106,17 @@ _CORE_NAMES = {
 _ELA_SCAN_CHAINS = (1, 2, 5)
 
 
+def _scan_chains(transport, chains=_ELA_SCAN_CHAINS) -> tuple[int, ...]:
+    """*chains* minus the ones this transport says are not register interfaces.
+
+    A byte-stream TAP bridge dedicates one chain to the burst reader's data DR
+    (see ``TapBridgeTransport.unprobeable_chains``); probing it would be the
+    wrong protocol on that chain and could report a core that is not there.
+    """
+    blocked = getattr(transport, "unprobeable_chains", ())
+    return tuple(c for c in chains if c not in blocked)
+
+
 class RpcServer:
     def __init__(
         self,
@@ -160,9 +174,23 @@ class RpcServer:
     # child process -- not the wrapper around it.
     _TRANSPORT_ATTRS = ("transport", "_t", "_transport")
 
-    def _new_transport(self, req: Dict[str, Any]) -> Transport:
+    def _new_transport(self, req: Dict[str, Any], *, side: bool = False) -> Transport:
         """Build a transport and register it for cancellation until the
-        command that built it returns."""
+        command that built it returns.
+
+        *side* marks an EIO/AXI/UART controller's own transport, a SECOND one
+        alongside the analyzer's.  On a JTAG probe that is fine -- the probe
+        daemon multiplexes them.  A serial bridge owns its port exclusively,
+        so a second one can only fail, and with the OS's error rather than
+        ours.  Say so plainly instead.  (An EIO on the session's own port
+        shares the analyzer's transport and never gets here.)
+        """
+        if side and req.get("backend") == "serial":
+            raise ValueError(
+                "the serial backend does not support EIO/AXI/UART side "
+                "connections on their own transport: the analyzer holds the "
+                "port exclusively, so a second connection to it cannot be opened"
+            )
         transport = self._build_transport(req)
         self._register_opening(transport)
         return transport
@@ -328,7 +356,7 @@ class RpcServer:
         if eio is None:
             transport = analyzer.transport
             try:
-                eio = discover_eio(transport, chains=(1, 2))
+                eio = discover_eio(transport, chains=_scan_chains(transport, (1, 2)))
             except Exception:
                 eio = None
             try:
@@ -357,7 +385,7 @@ class RpcServer:
         # Other ELA-protocol chains (see _ELA_SCAN_CHAINS): a plain or monitor
         # ELA the client can switch the session to — chains are an
         # implementation detail the UI resolves with a "use this core" action.
-        for chain in _ELA_SCAN_CHAINS:
+        for chain in _scan_chains(analyzer.transport):
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -501,6 +529,9 @@ class RpcServer:
         "gw": OpenOcdTransport.IR_TABLE_GOWIN,
         "polarfire": OpenOcdTransport.IR_TABLE_POLARFIRE,
         "microchip": OpenOcdTransport.IR_TABLE_POLARFIRE,
+        "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
+        "trion": OpenOcdTransport.IR_TABLE_EFINIX,
+        "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
         "intel": None,
         "altera": None,
         # FTDI: read the family from the IDCODE at connect.
@@ -528,9 +559,16 @@ class RpcServer:
         analyzer.bind_manager_slot()
 
     @staticmethod
-    def _resolved_ir_name(req: Dict[str, Any]) -> str:
+    def _resolved_ir_name(req: Dict[str, Any]) -> str | None:
         # No explicit ir_table: infer the preset from the tap name so every
         # client (CLI, GUI, web) gets the same default from one place.
+        # The byte-stream TAP bridge has no IR at all -- it addresses chains
+        # directly by index -- so there is no preset to resolve and nothing a
+        # client could sensibly pass.  Answer null rather than inventing a
+        # sentinel preset name, and do it before honouring an explicit value so
+        # an arbitrary string cannot be echoed back unvalidated.
+        if req.get("backend") == "serial":
+            return None
         name = req.get("ir_table")
         if name is not None and str(name).strip():
             return str(name)
@@ -593,7 +631,7 @@ class RpcServer:
         if geo is not None:
             return analyzer.bscan_chain, geo, mon.probe_map(geo).probes
         result = None
-        for chain in _ELA_SCAN_CHAINS:
+        for chain in _scan_chains(analyzer.transport):
             if chain == analyzer.bscan_chain:
                 continue
             try:
@@ -617,7 +655,7 @@ class RpcServer:
         return result
 
     # Request fields that pick the board a transport opens (_build_transport).
-    _TARGET_FIELDS = ("backend", "host", "port", "tap", "hardware")
+    _TARGET_FIELDS = ("backend", "host", "port", "tap", "hardware", "serial_port")
 
     @classmethod
     def _target_fields(cls, req: Dict[str, Any]) -> Dict[str, Any]:
@@ -627,6 +665,8 @@ class RpcServer:
     def _resolved_target(fields: Dict[str, Any]) -> tuple:
         """The board *fields* open, with _build_transport's defaults."""
         backend = str(fields.get("backend", "hw_server"))
+        if backend == "serial":
+            return (backend, str(fields.get("serial_port", "") or "").strip())
         if backend == "usb_blaster":
             tap = str(fields.get("tap", "auto"))
             if tap in ("", "xc7a100t.tap"):
@@ -679,6 +719,16 @@ class RpcServer:
     def _build_transport(self, req: Dict[str, Any]):
         backend = req.get("backend", "hw_server")
         host = req.get("host", "127.0.0.1")
+        if backend == "serial":
+            # Byte-stream virtual TAP (rtl/fcapz_uart_tap.v): a serial port
+            # instead of a JTAG probe, so there is no host/port/tap here.  The
+            # bridge's identity probe runs inside connect(), so pointing this
+            # at the wrong port fails with a clear message rather than
+            # returning garbage.
+            name = str(req.get("serial_port", "") or "").strip()
+            if not name:
+                raise ValueError("serial backend needs a serial_port")
+            return SerialTapTransport(name, baudrate=validate_baudrate(req.get("baudrate")))
         ir = self._ir_table(self._resolved_ir_name(req))
         burst = req.get("burst")
         single_chain_burst = bool(req.get("single_chain_burst", True))
@@ -989,6 +1039,18 @@ class RpcServer:
                 )
         return payload
 
+    def session_transport_kind(self) -> Optional[str]:
+        """``transport_kind`` of the open session's link, or ``None``.
+
+        Lets a front end authorise a request against the session it will
+        actually act on, not just against what the request names: a
+        ``capture`` carries no backend, yet on a serial session it drives the
+        serial port.
+        """
+        if self._analyzer is None:
+            return None
+        return getattr(self._analyzer.transport, "transport_kind", "jtag")
+
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         outer = getattr(self._invocation, "opened", None)
         opened: list[Transport] = []
@@ -1037,24 +1099,29 @@ class RpcServer:
             try:
                 # Binds the first ELA slot when the chain has a manager.
                 analyzer.connect()
-            except Exception:
-                # Don't leak the transport's child process / socket on a failed
-                # connect (hw_server down, wrong tap, program failure, ...).
+                if requested is None and analyzer.probe_optional() is None:
+                    # No chain given and no ELA on the default chain:
+                    # autodetect on the conservative scan set (USER1/2 —
+                    # bridges on 3/4 speak a different DR protocol and must not
+                    # see stray shifts), minus any chain the transport reserves
+                    # for a non-register protocol such as a burst data DR.
+                    for chain in _scan_chains(transport, (2,)):
+                        alt = Analyzer(transport, chain=chain, instance=instance)
+                        self._pin_manager_slot(alt)
+                        if alt.probe_optional() is not None:
+                            analyzer = alt
+                            break
+            except BaseException:
+                # Nothing owns this transport until it lands in self._analyzer,
+                # so a failure here (wrong port, board unplugged mid-probe,
+                # hw_server down, program failure) would otherwise leak an open
+                # handle that ``close`` can no longer reach — on Windows an
+                # exclusive serial port that blocks the user's next attempt.
                 try:
                     transport.close()
-                except Exception:
+                except Exception:  # noqa: BLE001 - already failing
                     pass
                 raise
-            if requested is None and analyzer.probe_optional() is None:
-                # No chain given and no ELA on the default chain: autodetect on
-                # the conservative scan set (USER1/2 — bridges on 3/4 speak a
-                # different DR protocol and must not see stray shifts).
-                for chain in (2,):
-                    alt = Analyzer(analyzer.transport, chain=chain, instance=instance)
-                    self._pin_manager_slot(alt)
-                    if alt.probe_optional() is not None:
-                        analyzer = alt
-                        break
             self._analyzer = analyzer
             self._analyzer_target = self._target_fields(req)
             # Echo the resolved preset/chain so a client that omitted them can
@@ -1064,8 +1131,19 @@ class RpcServer:
             ir_name = self._resolved_ir_name(req)
             if ir_name == "auto":
                 ir_name = getattr(analyzer.transport, "family", None) or ir_name
+            # ``link`` describes what we are talking *through* (the byte-stream
+            # bridge negotiates a protocol version, chain count and DR width on
+            # connect); a plain JTAG probe has nothing to report and answers
+            # null.  ``transport_kind`` says whether IR-table semantics apply at
+            # all, so a client does not have to infer that from the backend name.
+            try:
+                link = analyzer.transport.link_info()
+            except Exception:  # noqa: BLE001 - a third-party transport may not have it
+                link = None
             return self._ok(
                 ir_table=ir_name,
+                transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
+                link=link,
                 chain=analyzer.bscan_chain,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
@@ -1106,6 +1184,11 @@ class RpcServer:
         if cmd == "close":
             self._close_all()
             return self._ok()
+
+        if cmd == "list_serial_ports":
+            # Identification only -- nothing is opened, so this cannot reset a
+            # board or disturb an unrelated debug probe.  Needs no connection.
+            return self._ok(ports=list_serial_ports())
 
         if cmd == "scan_targets":
             backend = req.get("backend", "hw_server")
@@ -1335,7 +1418,8 @@ class RpcServer:
                 # session's, as for the comparison (BUG-243).
                 target_req = self._with_session_target(req)
             eio = EioController(
-                self._analyzer.transport if shared else self._new_transport(target_req),
+                self._analyzer.transport if shared
+                else self._new_transport(target_req, side=True),
                 chain=chain,
                 base_addr=base_addr,
                 instance=None if instance is None else int(instance),
@@ -1391,7 +1475,7 @@ class RpcServer:
                 )
             # Another board: the fields the request leaves out are the
             # session's, as for the comparison.
-            transport = self._new_transport(self._with_session_target(req))
+            transport = self._new_transport(self._with_session_target(req), side=True)
             try:
                 transport.connect()
                 chains = req.get("chains")
@@ -1451,7 +1535,7 @@ class RpcServer:
                     pass
                 self._axi_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._new_transport(req)
+            transport = self._new_transport(req, side=True)
             ctrl = EjtagAxiController(transport, chain=chain)
             try:
                 info = ctrl.connect()  # opens transport + probes bridge
@@ -1533,7 +1617,7 @@ class RpcServer:
                     pass
                 self._uart_transport = None
             chain = int(req.get("chain", 4))
-            transport = self._new_transport(req)
+            transport = self._new_transport(req, side=True)
             ctrl = EjtagUartController(transport, chain=chain)
             try:
                 info = ctrl.connect()
