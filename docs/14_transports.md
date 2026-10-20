@@ -538,7 +538,8 @@ The window is not a safe second try: a core built with `USER1_DATA_EN=0`
 answers it with zeros, which would turn a link fault into a capture of zeros.
 The burst runs only on the bridge's data chain, which a core manager never
 answers, so a core-manager slot behind the bridge is read through the register
-window; build such a slot with `USER1_DATA_EN=1`.
+window; build such a slot with `USER1_DATA_EN=1` (on one built without it,
+the host raises `DataWindowError`).
 
 Unlike the hard-TAP burst, this one takes a core of **any width** up to the
 burst DR.  `jtag_burst_read` packs `BURST_W // SAMPLE_W` whole samples per

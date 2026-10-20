@@ -267,6 +267,8 @@ def list_openocd_taps(
 
 
 REG_ADDR_SPACE_END = 0x10000
+# First DATA window address; see check_data_window.
+_DATA_WINDOW_BASE = 0x0100
 
 
 class DataWindowError(RuntimeError):
@@ -381,9 +383,17 @@ def check_data_window(addr: int, words: int, end: int = REG_ADDR_SPACE_END) -> N
     Register addresses are 16 bits, so a read past ``0x10000`` wraps onto the
     core's own registers; behind a core manager the window must also stop at
     the manager block (``0xF000``).  Either way the hardware returns register
-    values instead of samples, with no error.
+    values instead of samples, with no error.  An *end* at the window base
+    (``0x0100``) means the core has no window (``USER1_DATA_EN=0``) and
+    answers it with zeros.
     """
     stop = addr + 4 * max(0, words)
+    if words > 0 and end <= _DATA_WINDOW_BASE and addr >= _DATA_WINDOW_BASE:
+        raise DataWindowError(
+            f"window read at 0x{addr:04X} ({words} words): this core was built "
+            "with USER1_DATA_EN=0 and has no register window, so it must be "
+            "read by burst, and this read had none"
+        )
     if stop > min(end, REG_ADDR_SPACE_END):
         raise DataWindowError(
             f"window read 0x{addr:04X}..0x{stop - 4:X} ({words} words) runs past "
