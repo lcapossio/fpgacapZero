@@ -1161,6 +1161,17 @@ class _ScanBurstMixin:
 
     # -- Analyzer-facing burst methods --------------------------------------
 
+    def bursts_data_window(self, *, timestamp: bool = False) -> bool:
+        """Whether :meth:`read_block` bursts the DATA window (a core with
+        ``SAMPLE_W <= 32``) or, with *timestamp*, :meth:`read_timestamp_block`
+        bursts the timestamps.  Read fresh, as :meth:`_burst_block_or_none`
+        decides, so a slot switch cannot leave a stale answer."""
+        if not self.burst:
+            return False
+        if timestamp:
+            return True
+        return int(self.read_reg_stable(self._ADDR_SAMPLE_W)) <= 32
+
     def _burst_block_or_none(self, addr: int, words: int) -> List[int] | None:
         """Burst-read a narrow core's DATA window, or ``None`` when the
         request belongs to the register window (not the DATA base, burst off,
@@ -1722,7 +1733,12 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
                 result = self._run_line(cmds)
             finally:
                 if sock is not None:
-                    sock.settimeout(self._BATCH_TIMEOUT_SEC)
+                    try:
+                        sock.settimeout(self._BATCH_TIMEOUT_SEC)
+                    except OSError:
+                        # cancel() closed the socket: keep the error that
+                        # ended the batch, not this one.
+                        pass
         try:
             values = [int(t, 16) for t in result.split()]
         except ValueError as exc:
@@ -1740,7 +1756,8 @@ def openocd_burst_default(ir_table: dict[int, int] | None) -> bool:
     unless told otherwise.
 
     True only for the PolarFire preset: its wrapper builds single-chain burst
-    by default and the path is hardware-validated over OpenOCD.  Gowin
+    by default, and its burst path was validated over OpenOCD (in an earlier
+    multi-line form; the one-line form awaits a PolarFire run).  Gowin
     wrappers have no burst path, and the other presets stay on the register
     window until validated; ``OpenOcdTransport(burst=True)`` (CLI ``--burst``)
     opts in.

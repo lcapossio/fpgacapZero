@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unittest
 
+from fcapz.analyzer import Analyzer
 from fcapz.transport import (
     BurstExpectation,
     BurstIntegrityError,
@@ -158,6 +159,25 @@ class ScanBurstMixinTests(unittest.TestCase):
         t = _FakeScanTransport(_BurstEngineModel([1]))
         t.read_block(0x0000, 2)
         self.assertEqual(t.window_reads, [(0x0000, 2)])
+
+    def test_bursts_data_window_answers_as_read_block_decides(self):
+        """The analyzer reads the DATA window through read_block only when
+        this says it bursts; without it the burst never runs."""
+        t = _FakeScanTransport(_BurstEngineModel([1]))
+        self.assertTrue(t.bursts_data_window())
+        self.assertTrue(t.bursts_data_window(timestamp=True))
+        t.sample_w = 64
+        self.assertFalse(t.bursts_data_window())
+        t = _FakeScanTransport(_BurstEngineModel([1]), burst=False)
+        self.assertFalse(t.bursts_data_window())
+        self.assertFalse(t.bursts_data_window(timestamp=True))
+
+    def test_the_analyzer_bursts_a_narrow_core(self):
+        samples = [(i * 5) & 0xFF for i in range(100)]
+        t = _FakeScanTransport(_BurstEngineModel(samples))
+        self.assertEqual(Analyzer(t)._read_data_block(100), samples)
+        self.assertEqual(t.window_reads, [])
+        self.assertEqual(t.model.ptr_writes, [0])
 
     def test_wide_sample_block_splits_words(self):
         samples = [(0xA5 << 40) | i for i in range(10)]
@@ -373,6 +393,27 @@ class OpenOcdBurstTests(unittest.TestCase):
             t._sock.timeouts,
             [5.0 + 0.05 * n_scans, 5.0],
         )
+
+    def test_a_cancelled_batch_keeps_its_own_error(self):
+        """cancel() closes the socket mid-batch; restoring its timeout then
+        fails, and must not replace the error that ended the batch."""
+        class _ClosedSock:
+            def __init__(self):
+                self.calls = 0
+
+            def settimeout(self, value):
+                self.calls += 1
+                if self.calls > 1:
+                    raise OSError("socket closed")
+
+        def cancelled(tcl):
+            raise ConnectionError("cancelled")
+
+        t, _scripts = self._transport(_BurstEngineModel([1, 2]), burst=True)
+        t._sock = _ClosedSock()  # type: ignore[assignment]
+        t._cmd = cancelled  # type: ignore[method-assign]
+        with self.assertRaisesRegex(ConnectionError, "cancelled"):
+            t.read_block(0x0100, 2)
 
     def test_two_chain_burst_selects_user2(self):
         model = _BurstEngineModel(list(range(32)))
