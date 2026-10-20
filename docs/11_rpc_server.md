@@ -186,9 +186,8 @@ session, e.g. to reach an AXI monitor directly.
 
 `"instance"` binds the session to a core-manager slot: the analyzer selects
 it before every access, so an EIO in another slot of the same hub cannot move
-it.  Without it the session reads whichever slot the hub has active; a later
-`eio_connect` with an `instance` on the same chain then binds it to the slot
-active at that moment.
+it.  Without it the session is bound to the chain's first ELA slot, never to
+whichever slot the hub has active.
 
 #### `discover_boards`
 
@@ -566,7 +565,8 @@ Find the EIO without knowing its chain.  On the session's board (the
 request's connection fields match, as for `eio_connect`), the server lists the
 cores on the session's own connection and attaches the first EIO there,
 standalone or in a core-manager slot, without opening a second connection; an
-unbound analyzer is pinned to its slot first, as `eio_connect` does.  The
+analyzer the connect could not bind is bound to its first ELA slot first, as
+`eio_connect` does.  The
 response carries the EIO's `instance` (`null` when standalone).  For another
 board the server opens its own connection, taking the fields the request
 leaves out from the session, and tries each chain in `"chains"` at base

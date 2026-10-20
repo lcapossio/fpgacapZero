@@ -481,12 +481,13 @@ class HubResetTests(unittest.TestCase):
 
 class UnboundSlotTests(unittest.TestCase):
     """With no instance the analyzer reads the hub's active slot: the
-    baseline records which one (BUG-241)."""
+    baseline records which one (BUG-241).  Only an analyzer built on a
+    connected transport has none: connect() binds one."""
 
     def setUp(self):
         self.t = EpochElaTransport(slots=2)
+        self.t.connect()
         self.a = Analyzer(self.t)
-        self.a.connect()
         self.a.configure(epoch_config())
 
     def test_other_active_slot_with_the_same_epoch_raises(self):

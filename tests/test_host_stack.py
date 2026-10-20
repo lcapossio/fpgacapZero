@@ -510,6 +510,38 @@ class RpcManagerSlotTests(unittest.TestCase):
         self.assertIsNotNone(analyzer.probe_optional())
         self.assertEqual(transport._active_ela, 0)
 
+    def test_connect_binds_the_first_ela_slot(self):
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.connect()
+        self.assertEqual(analyzer.instance, 0)
+        self.assertEqual(transport._active_ela, 0)
+        # Another controller moves the hub to the EIO: the analyzer stays.
+        transport.write_reg(0xF008, 2)
+        transport.invalidate_manager_instance_cache()
+        self.assertIsNotNone(analyzer.probe_optional())
+        self.assertEqual(transport._active_ela, 0)
+
+    def test_connect_keeps_a_given_slot(self):
+        transport = self._EioSelectedTransport()
+        analyzer = Analyzer(transport, chain=1, instance=1)
+        analyzer.connect()
+        self.assertEqual(analyzer.instance, 1)
+        self.assertEqual(transport._active_ela, 1)
+
+    def test_connect_leaves_a_chain_without_a_manager_unbound(self):
+        transport = FakeTransport()
+        del transport._manager_regs[0xF000]
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.connect()
+        self.assertIsNone(analyzer.instance)
+
+    def test_pin_active_slot_binds_the_first_ela_not_the_active_slot(self):
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        analyzer = Analyzer(transport, chain=1)
+        analyzer.pin_active_slot()
+        self.assertEqual(analyzer.instance, 0)
+
     def test_probe_optional_binds_the_first_ela_slot_itself(self):
         transport = self._EioSelectedTransport()  # an EIO slot is active
         analyzer = Analyzer(transport, chain=1)
@@ -1053,10 +1085,12 @@ class AnalyzerTests(unittest.TestCase):
     def _wide_capture(
         self, *, managed: bool, capture_len: int, sample_burst: bool, slot_caps: int = 1,
         instance: int | None = None, timestamp_w: int = 0, compare_caps: int | None = None,
-        mgr_count: int = 1, mgr_caps: int = 0x7,
+        mgr_count: int = 1, mgr_caps: int = 0x7, bind: bool = True,
     ):
         """Capture from a 256-bit x 2048 core whose DATA window is read as
-        32-bit words through a range-checked register window."""
+        32-bit words through a range-checked register window.  ``bind=False``
+        builds the analyzer on a connected transport, so connect() does not
+        bind a slot."""
 
         class WideTransport(FakeTransport):
             def __init__(self):
@@ -1105,7 +1139,10 @@ class AnalyzerTests(unittest.TestCase):
 
         transport = WideTransport()
         analyzer = Analyzer(transport, instance=instance)
-        analyzer.connect()
+        if bind:
+            analyzer.connect()
+        else:
+            transport.connect()
         analyzer.configure(replace(
             self._make_cfg(), sample_width=256, depth=2048,
             pretrigger=64, posttrigger=2048 - 65,
@@ -1205,7 +1242,7 @@ class AnalyzerTests(unittest.TestCase):
         must drop it again."""
         transport, analyzer = self._wide_capture(
             managed=True, capture_len=16, sample_burst=True, instance=None,
-            mgr_count=2, mgr_caps=0x7,
+            mgr_count=2, mgr_caps=0x7, bind=False,
         )
         slot_caps = {0: 0x0, 1: 0x1}
         read_reg = transport.read_reg
@@ -1881,8 +1918,8 @@ class RpcSharedEioTests(unittest.TestCase):
 
     def test_unbound_analyzer_is_pinned_before_a_shared_eio(self):
         """connect without instance binds the first ELA slot; an analyzer
-        still unbound when a shared EIO connects is pinned to the active slot
-        first, so the EIO's select does not take it over."""
+        still unbound when a shared EIO connects is bound to it first, so the
+        EIO's select does not take it over."""
         server, hub, _ = self._server()
         server.handle({"cmd": "connect", "chain": 1})
         self.assertEqual(server._analyzer.instance, 0)

@@ -1297,11 +1297,6 @@ class MainWindow(QMainWindow):
     def _on_eio_detach(self) -> None:
         self._eio = None
         self._eio_panel.detach_eio()
-        if self._analyzer is not None and self._ela_present:
-            try:
-                self._analyzer.select_instance(0)
-            except (OSError, RuntimeError, ValueError):
-                pass
         self.statusBar().showMessage("EIO detached")
         _log.info("EIO detached")
 

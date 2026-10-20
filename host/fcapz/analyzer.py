@@ -603,18 +603,11 @@ class Analyzer:
             yield
 
     def pin_active_slot(self) -> None:
-        """Bind an analyzer with no selected slot to the slot the core manager
-        has active now, so another controller that moves ``MGR_ACTIVE`` on the
-        same transport (an EIO in another slot) does not move this analyzer.
-        The configuration is kept: the slot is the same.  No effect without a
-        manager or with a slot already selected."""
-        with self.transport.transaction_lock():
-            if self._instance is not None or not self._behind_manager():
-                return
-            with self.transport.slot_scope(None, chain=self._chain):
-                self._instance = int(self.transport.read_reg_stable(_ADDR_MGR_ACTIVE))
-            with self._selected():
-                pass
+        """Deprecated: use :meth:`bind_manager_slot`, which this calls.
+
+        It used to bind the slot the manager had active, which another session
+        or tool may have moved to an EIO; it now binds the first ELA slot."""
+        self.bind_manager_slot()
 
     def select_instance(self, instance: int | None) -> None:
         """Select a core-manager slot for subsequent analyzer operations.
@@ -682,7 +675,12 @@ class Analyzer:
             self.select_instance(0 if slot is None else slot)
 
     def connect(self) -> None:
-        """Connect the transport and select this analyzer's chain and slot."""
+        """Connect the transport and select this analyzer's chain and slot.
+
+        An analyzer with no slot on a chain with a core manager is bound to
+        the manager's first ELA slot (see :meth:`bind_manager_slot`), never
+        left on whichever slot the manager has active.
+        """
         with self.transport.transaction_lock():
             self._select_chain()
             self.transport.connect()
@@ -690,6 +688,7 @@ class Analyzer:
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None
+            self.bind_manager_slot()
             with self._selected():
                 pass
 

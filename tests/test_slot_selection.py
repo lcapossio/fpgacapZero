@@ -894,6 +894,21 @@ class InterimContractTests(unittest.TestCase):
             pass
         self.assertTrue(sent)  # identified again
 
+    def test_connect_binds_the_first_ela_slot_while_another_client_moves_it(self):
+        """Behind a manager, no analyzer that connected reads whichever slot
+        is active: the hub is moved after every sequence here."""
+        t, fake = _hw_server()
+        fake.slots[0], fake.slots[2] = fake.slots[2], fake.slots[0]
+        fake.desc[0], fake.desc[2] = fake.desc[2], fake.desc[0]  # EIO, ELA, ELA, EIO
+        t.connect = t._forget_hub_state  # type: ignore[method-assign]
+        ela = Analyzer(t)
+        ela.connect()
+        self.assertEqual(ela.instance, 1)
+        fake.slots[1][0x0008] = 0x4  # STATUS done in slot 1 only
+        fake.slots[2][0x0008] = 0x0
+        for _ in range(4):
+            self.assertTrue(ela.status()["done"])
+
     def test_every_backend_connect_forgets_the_hub(self):
         from unittest.mock import patch
 
