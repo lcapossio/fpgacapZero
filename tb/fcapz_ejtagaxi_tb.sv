@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
 `timescale 1ns/1ps
+`include "fcapz_version.vh"
 
 // EJTAG-to-AXI4 bridge testbench.
 // Drives raw TAP signals into fcapz_ejtagaxi with an axi4_test_slave backend.
@@ -169,6 +170,7 @@ module fcapz_ejtagaxi_tb;
 
     // ---- Command encoding constants ------------------------------------------
 
+    localparam [31:0] JX_VERSION = {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, 16'h4A58};
     localparam [3:0] CMD_NOP          = 4'h0;
     localparam [3:0] CMD_WRITE        = 4'h1;
     localparam [3:0] CMD_READ         = 4'h2;
@@ -449,7 +451,7 @@ module fcapz_ejtagaxi_tb;
         // ==================================================================
         $display("\n=== Scenario 9: CONFIG reads ===");
 
-        // VERSION = {major=0, minor=4, core_id="JX"=16'h4A58}
+        // VERSION = {major, minor, core_id="JX"=16'h4A58}
         scan_in = make_cmd(CMD_CONFIG, 32'h0000_0000, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         cdc_wait();
@@ -458,7 +460,7 @@ module fcapz_ejtagaxi_tb;
         dr_scan_72(scan_in, scan_out);
         rdata  = get_rdata(scan_out);
         status = get_status(scan_out);
-        check("S9: VERSION=0x00044A58",  rdata == 32'h0004_4A58);
+        check("S9: VERSION", rdata == JX_VERSION);
         check("S9: VERSION prev_valid=1", status[0] == 1'b1);
         cdc_wait();
 
@@ -469,7 +471,7 @@ module fcapz_ejtagaxi_tb;
         scan_in = make_cmd(CMD_NOP, 32'h0, 32'h0, 4'h0);
         dr_scan_72(scan_in, scan_out);
         rdata = get_rdata(scan_out);
-        check("S9: VERSION alias=0x00044A58", rdata == 32'h0004_4A58);
+        check("S9: VERSION alias", rdata == JX_VERSION);
         cdc_wait();
 
         // FEATURES: {8'd0, (FIFO_DEPTH-1)[7:0]=15, DATA_W[7:0]=32, ADDR_W[7:0]=32}

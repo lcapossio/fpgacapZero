@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
 `timescale 1ns/1ps
+`include "fcapz_version.vh"
 
 // EJTAG-to-UART bridge testbench.
 // Drives raw TAP signals into fcapz_ejtaguart with a UART loopback and
@@ -245,7 +246,7 @@ module fcapz_ejtaguart_tb;
         $display("\n=== Scenario 1: CONFIG read (VERSION) ===");
 
         // Read VERSION: 4 CONFIG scans + 1 NOP drain.
-        // VERSION = {major=0, minor=4, core_id="JU"=16'h4A55}.
+        // VERSION = {major, minor, core_id="JU"=16'h4A55}.
         scan_in = make_cmd(CMD_CONFIG, 8'h00);
         dr_scan_32(scan_in, scan_out);
         cdc_wait();
@@ -265,13 +266,15 @@ module fcapz_ejtaguart_tb;
         scan_in = make_cmd(CMD_CONFIG, 8'h03);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: VERSION byte2=0x04", rx_byte == 8'h04);
+        check("S1: VERSION byte2 == `FCAPZ_VERSION_MINOR",
+              rx_byte == `FCAPZ_VERSION_MINOR);
         cdc_wait();
 
         scan_in = make_cmd(CMD_NOP, 8'h00);
         dr_scan_32(scan_in, scan_out);
         rx_byte = get_rx_byte(scan_out);
-        check("S1: VERSION byte3=0x00", rx_byte == 8'h00);
+        check("S1: VERSION byte3 == `FCAPZ_VERSION_MAJOR",
+              rx_byte == `FCAPZ_VERSION_MAJOR);
         cdc_wait();
 
         // Read mirrored VERSION byte 4
