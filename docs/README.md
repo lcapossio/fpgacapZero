@@ -80,8 +80,9 @@ and should be corrected.
 
 - Hardware bring-up for vendor wrappers beyond the validated boards:
   AMD/Xilinx 7-series (Arty A7), Zynq UltraScale+ MPSoC (Kria KV260),
-  Intel / Altera (DE25-Nano), Gowin (BRS-100) and PolarFire (Discovery
-  Kit). The shared core RTL is covered by simulation, and the remaining
+  Intel / Altera (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery
+  Kit) and the serial TAP bridge on an Efinix Trion (Forgix). The shared
+  core RTL is covered by simulation, and the remaining
   vendor wrappers are lint-elaborated, but ECP5 and standalone Kintex /
   Virtex UltraScale(+) board-level smoke tests are still future work. See
   chapter 04 for the support matrix and validation levels.

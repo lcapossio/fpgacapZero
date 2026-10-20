@@ -156,8 +156,13 @@ selected ELA control chain instead of switching to USER2.
 ### `OpenOcdTransport`
 - Connects to OpenOCD TCL socket (default port 6666).
 - Uses `irscan`/`drscan`/`runtest` commands.
-- Hardware-validated on Gowin BRS-100-GW1NR9. The AMD/Xilinx/OpenOCD path is still
-  less exercised than the `hw_server` backend.
+- Hardware-validated on Gowin BRS-100-GW1NR9 and on the PolarFire SoC
+  Discovery Kit. The AMD/Xilinx/OpenOCD path is still less exercised than the
+  `hw_server` backend.
+- With `burst=True` (the default for the PolarFire IR table), captures are
+  read by burst.  The whole burst, with its slot select ahead of `BURST_PTR`,
+  is one Tcl command line; repeated scans become a Tcl `for` loop, so the line
+  stays short at any depth.  This one-line form has not yet run on hardware.
 - Each register access is one Tcl command line (a read is
   `irscan; drscan; runtest; irscan; drscan`), which OpenOCD's Tcl server runs
   before serving another client.  Inside a `slot_scope`, a line that reaches
@@ -180,6 +185,29 @@ selected ELA control chain instead of switching to USER2.
   `device_lock`, with the `MGR_ACTIVE` write and 20 idle TCKs: one per
   register access and window read, and once before `BURST_PTR` in a burst.
   A burst on the control chain ends with a `VERSION` read and 258 idle TCKs.
+
+### `FtdiMpsseTransport`
+- Drives an FTDI MPSSE cable directly through FTDI's D2XX library; no
+  OpenOCD or vendor server.  Single-device chains; the IR table comes from the
+  IDCODE.
+- Burst readout uses the same raw-scan burst engine as `OpenOcdTransport`.
+- The channel is exclusive to one program, so the slot is selected once on
+  entering a `slot_scope` (no `atomic_slot_select`).
+- Hardware-validated on the PolarFire SoC Discovery Kit's embedded FlashPro5.
+  See [chapter 14](../14_transports.md#ftdimpssetransport).
+
+### `TapBridgeTransport` / `SerialTapTransport`
+- A byte-stream bridge to a TAP rebuilt in the fabric (`fcapz_tap_bridge`,
+  UART PHY `fcapz_uart_tap`, ELA wrapper `fcapz_ela_uart`).  Chains are
+  addressed by index; there is no IR table.
+- The burst runs on the bridge's data chain at any sample width up to the
+  burst DR, and that chain is excluded from core discovery
+  (`unprobeable_chains`).  A core-manager slot is read through the register
+  window, since the manager does not answer the data chain.
+- The serial port is exclusive, so the slot is selected once on entering a
+  `slot_scope` (no `atomic_slot_select`).
+- Hardware-validated on the Forgix board (Efinix Trion T8F49).  See
+  [chapter 14](../14_transports.md).
 
 ### `VendorStubTransport`
 - Placeholder for future vendor backends.
