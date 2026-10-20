@@ -662,6 +662,10 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   process share one handle: for example the ELA, EIO and bridge sessions of
   the RPC server or the GUI.  The first transport's clock and layout apply,
   and the channel closes with the last transport.
+- **Validated** on the PolarFire SoC Discovery Kit's embedded FlashPro5: all
+  11 hardware tests of
+  [`examples/mpfs_disco_kit`](../examples/mpfs_disco_kit/README.md) pass, in
+  about 2 s.
 
 Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 

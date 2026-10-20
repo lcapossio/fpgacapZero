@@ -199,6 +199,15 @@ The host stack supports three JTAG transports out of the box:
   Hardware-validated on the DE25-Nano (Agilex 5); see
   [`specs/transport_api.md`](specs/transport_api.md) for the tested
   Quartus edition.
+- **Direct FTDI (`ftdi`)** — drives an FTDI MPSSE cable (the FlashPro5
+  on Microchip boards, Digilent cables) through FTDI's D2XX library, with
+  no OpenOCD or vendor server.  The IR table comes from the device
+  IDCODE.  Hardware-validated on the PolarFire SoC Discovery Kit.
+- **Serial TAP bridge (`serial`)** — for boards with no JTAG to the
+  fabric.  The design instantiates `fcapz_ela_uart`, which rebuilds the
+  TAP contract from a byte stream on two pins, and the host talks to it
+  over a serial port.  Hardware-validated on the Forgix board (Efinix
+  Trion T8F49).  See [chapter 14](14_transports.md).
 
 All transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To
@@ -218,6 +227,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC | `UJTAG` | [`fcapz_*_polarfire.v`](../rtl/) | ✅ PolarFire SoC Discovery Kit (MPFS095T) |
 | Efinix Trion / Titanium | Efinity JTAG User TAP (×2, Interface Designer) | [`fcapz_ela_efinix.v`](../rtl/) | ⏳ Synthesized, placed and routed in Efinity (T20F256, Ti60F225) — hardware validation pending |
+| Any FPGA without fabric JTAG | none: UART TAP bridge on two pins | [`fcapz_ela_uart.v`](../rtl/) | ✅ Forgix (Efinix Trion T8F49) |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 
 The wrappers are all single-instantiation: pick the one for your

@@ -241,6 +241,32 @@ FlashPro5 on Microchip PolarFire boards and Digilent's FTDI-based cables.
 See [chapter 14](14_transports.md#ftdimpssetransport) for what this
 transport supports and what has been validated on hardware.
 
+### Option E: serial TAP bridge (no fabric JTAG)
+
+`--backend serial` talks to a design built with `fcapz_ela_uart`, which
+rebuilds the TAP from a byte stream on two pins, over a serial port.  Use it
+on boards that expose no JTAG to the fabric.
+
+1. **Install pyserial** with the `serial` extra:
+   ```bash
+   pip install -e ".[serial]"
+   ```
+
+2. **Find the port** (this lists ports without opening them):
+   ```bash
+   fcapz list-ports
+   ```
+
+3. **Smoke test**:
+   ```bash
+   fcapz --backend serial --serial-port COM5 probe     # /dev/ttyACM0 on Linux
+   ```
+   `--baud` sets the rate (default 1000000).  The port is held exclusively
+   while a session is open.
+
+See [chapter 14](14_transports.md) for the bridge protocol and the
+[Forgix example](../examples/forgix/README.md) for a worked board.
+
 ## Step 4: get a fpgacapZero bitstream onto an FPGA
 
 The `fcapz probe` smoke test from step 3 will fail unless an FPGA

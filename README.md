@@ -60,7 +60,12 @@ Any board with JTAG access works. You drive it through **OpenOCD** (any
 OpenOCD-supported adapter — FTDI, WCH CH347, CMSIS-DAP, J-Link, …), the
 **AMD/Xilinx hw_server** (Vivado — hardware-validated on the Arty A7 and on the
 Kria KV260, a Zynq UltraScale+ MPSoC), or **Quartus `quartus_stp`**
-(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5). On
+(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5), or
+**directly over an FTDI cable** (`--backend ftdi`: the FlashPro5 on Microchip
+boards or a Digilent cable, no OpenOCD or vendor server — hardware-validated on
+the PolarFire SoC Discovery Kit). A board with **no JTAG to the fabric** can
+use the **serial TAP bridge** instead: two spare pins and a UART
+(`--backend serial`; hardware-validated on the Forgix board's Efinix Trion). On
 Zynq UltraScale+ MPSoC parts (`xck*`, `xczu*`) the host picks the PS TAP's
 chain mode from the tap name, so all four USER chains work with no extra
 setup. The
@@ -145,6 +150,8 @@ The canonical register / shift maps live in
 | AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 and Kria KV260 (Zynq UltraScale+ MPSoC) |
 | OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100 and the PolarFire SoC Discovery Kit; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
+| Direct FTDI backend (`--backend ftdi`, FTDI D2XX) | ✅ Hardware-validated on the PolarFire SoC Discovery Kit's embedded FlashPro5 |
+| Serial TAP bridge (`--backend serial`, `fcapz_ela_uart`) | ✅ Hardware-validated on Forgix (Efinix Trion T8F49, over its configuration pins) |
 | AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
 | Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
@@ -180,7 +187,8 @@ CI jobs, and the hardware-in-the-loop tests are all documented in
 ```
 rtl/        Portable Verilog cores + vendor TAP wrappers (VHDL in rtl/vhdl/)
 host/fcapz/ Python host stack: Analyzer, transports, CLI, RPC, GUI
-examples/   Reference designs (Arty A7, Kria KV260, Gowin BRS-100, and more)
+examples/   Reference designs (Arty A7, Kria KV260, DE25-Nano, Gowin BRS-100,
+            PolarFire SoC Discovery Kit, Forgix, and more)
 docs/       User manual (start at docs/README.md) + canonical specs
 tb/, sim/   Testbenches and simulation runners
 ```
