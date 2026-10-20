@@ -7,6 +7,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A core built with `USER1_DATA_EN=0` is no longer read as zeros.** Such a
+  core has no DATA / timestamp register window and answers it with zeros, so
+  a capture that fell back to the window (no burst, `--no-burst`, or a manager
+  slot the transport's burst cannot reach) "succeeded" with fabricated
+  samples. The host now raises `DataWindowError` instead. It recognises the
+  core by `COMPARE_CAPS` bit 21 without bit 20; cores older than bit 21 cannot
+  say and are read as before.
+
 ## [0.5.0] — 2026-10-20
 
 ### Added

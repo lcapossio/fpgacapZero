@@ -14,6 +14,7 @@ from fcapz.transport import DataWindowError, Transport, check_data_window
 
 _DATA_OFFSET = 0x00F4
 _CAP_DATA_OFFSET = 1 << 20
+_CAP_CAPTURE_GEN = 1 << 21
 
 
 class ElaWindowTransport(Transport):
@@ -23,16 +24,21 @@ class ElaWindowTransport(Transport):
     ``0x1000_0000 + k``.  DATA_OFFSET moves every window read by its value,
     as the RTL does.  *burst* is the slot's burst wiring (``DESC_CAPS``);
     *bursting* whether this transport bursts ``read_block(0x0100)`` at all
-    (OpenOCD does not; hw_server not for some sample widths).
+    (OpenOCD does not; hw_server not for some sample widths).  *data_offset*
+    is ``USER1_DATA_EN``: without it the window reads as zeros.
+    *capture_gen* adds COMPARE_CAPS bit 21, which a core that reports bit 20
+    has.
     """
 
     def __init__(self, *, sample_w, depth, timestamp_w=0, data_offset=True,
-                 managed=False, burst=False, bursting=None):
+                 managed=False, burst=False, bursting=None, capture_gen=False):
         self.sample_w, self.depth, self.timestamp_w = sample_w, depth, timestamp_w
         self.words_per_sample = (sample_w + 31) // 32
         self.ts_words = (timestamp_w + 31) // 32
         self.total_words = depth * (self.words_per_sample + self.ts_words)
         caps = 0x3_01FF | (1 << 19) | (_CAP_DATA_OFFSET if data_offset else 0)
+        caps |= _CAP_CAPTURE_GEN if capture_gen else 0
+        self.window = data_offset
         self.regs = {
             0x0000: ((_version_tuple()[0] & 0xFF) << 24)
             | ((_version_tuple()[1] & 0xFF) << 16) | 0x4C41,
@@ -107,6 +113,8 @@ class ElaWindowTransport(Transport):
     def read_window_block(self, addr, words):
         check_data_window(addr, words, self.data_window_end)
         self.window_reads.append((addr, words))
+        if not self.window:
+            return [0] * words
         return [self._window_word(addr + 4 * i) for i in range(words)]
 
 
@@ -197,6 +205,53 @@ class DataOffsetTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             capture(t, instance=0)
         self.assertEqual(t.offset, 0)
+
+
+class NoDataWindowTests(unittest.TestCase):
+    """A core built with USER1_DATA_EN=0 (BUG-263): its window reads zeros,
+    so only a burst may read it."""
+
+    def test_window_read_raises_instead_of_returning_zeros(self):
+        t = ElaWindowTransport(sample_w=8, depth=1024, data_offset=False,
+                               capture_gen=True)
+        with self.assertRaisesRegex(DataWindowError, "USER1_DATA_EN=0"):
+            capture(t)
+        self.assertEqual(t.window_reads, [])
+
+    def test_managed_slot_without_burst_raises(self):
+        t = ElaWindowTransport(sample_w=8, depth=1024, managed=True,
+                               data_offset=False, capture_gen=True)
+        with self.assertRaisesRegex(DataWindowError, "USER1_DATA_EN=0"):
+            capture(t, instance=0)
+        self.assertEqual(t.window_reads, [])
+
+    def test_wide_core_raises(self):
+        t = ElaWindowTransport(sample_w=256, depth=64, managed=True,
+                               data_offset=False, capture_gen=True)
+        with self.assertRaisesRegex(DataWindowError, "USER1_DATA_EN=0"):
+            capture(t, instance=0)
+
+    def test_burst_still_reads_it(self):
+        t = ElaWindowTransport(sample_w=8, depth=1024, managed=True, burst=True,
+                               data_offset=False, capture_gen=True)
+        result = capture(t, instance=0)
+        self.assertEqual(result.samples, [(0x1000_0000 + k) & 0xFF for k in range(1024)])
+        self.assertEqual(t.burst_reads, 1)
+        self.assertEqual(t.window_reads, [])
+
+    def test_core_older_than_bit_21_is_read_as_before(self):
+        """No bit 21: the core cannot report USER1_DATA_EN, so the window is
+        read (this one has it)."""
+        t = ElaWindowTransport(sample_w=8, depth=1024, data_offset=False)
+        t.window = True
+        result = capture(t)
+        self.assertEqual(result.samples, [(0x1000_0000 + k) & 0xFF for k in range(1024)])
+
+    def test_check_data_window_at_base(self):
+        with self.assertRaisesRegex(DataWindowError, "USER1_DATA_EN=0"):
+            check_data_window(0x0100, 1, 0x0100)
+        check_data_window(0x0100, 0, 0x0100)
+        check_data_window(0x0040, 4, 0x0100)
 
 
 if __name__ == "__main__":

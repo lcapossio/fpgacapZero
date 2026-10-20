@@ -1184,6 +1184,13 @@ class Analyzer:
             "overflow": bool(s & _STATUS_OVERFLOW),
         }
 
+    def _no_data_window(self) -> bool:
+        """Return whether the core was built without the DATA / timestamp
+        register window (``USER1_DATA_EN=0``): COMPARE_CAPS has bit 21, so it
+        reports bit 20, and bit 20 is clear."""
+        caps = self._hw_compare_caps
+        return bool(caps & _COMPARE_CAPS_CAPTURE_GEN) and not caps & _COMPARE_CAPS_DATA_OFFSET
+
     def _set_data_window_end(self) -> None:
         """Tell the transport where DATA / timestamp window reads must stop.
 
@@ -1192,7 +1199,16 @@ class Analyzer:
         a timestamp window base past 0x10000 at its low 16 bits, which turns
         every DATA read from there on into a timestamp read, so the window
         stops there on such cores.
+
+        A core built with ``USER1_DATA_EN=0`` has no window at all and answers
+        it with zeros, so the window ends at its base and any read of it
+        raises :class:`DataWindowError` (a burst is not limited by it).  Such
+        a core reports COMPARE_CAPS bit 21 without bit 20; a core older than
+        bit 21 cannot say, and is read as before.
         """
+        if self._no_data_window():
+            self.transport.data_window_end = _ADDR_DATA_BASE
+            return
         end = _ADDR_MGR_VERSION if self._behind_manager() else REG_ADDR_SPACE_END
         if (
             self._hw_timestamp_w

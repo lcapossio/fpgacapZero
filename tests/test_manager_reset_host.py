@@ -265,7 +265,8 @@ class EpochElaTransport(Transport):
 
     ``hooks`` maps a register address to a function run when that address is
     written (or, for the DATA window, read): tests reset the slot there.
-    With ``capture_gen`` the ELA has CAPTURE_GEN (COMPARE_CAPS bit 21).
+    With ``capture_gen`` the ELA has CAPTURE_GEN (COMPARE_CAPS bit 21), and
+    bit 20 too: such a core reports its DATA window (BUG-263).
     """
 
     def __init__(self, *, caps: int = 0x0B, slot_caps: int = 0, bursting: bool = False,
@@ -283,7 +284,7 @@ class EpochElaTransport(Transport):
             ADDR_MGR_SELECT_COUNT: 0xFFF0,  # other controllers' selects; wraps
         }
         if capture_gen:
-            self.regs[0x00E0] |= 1 << 21
+            self.regs[0x00E0] |= (1 << 21) | (1 << 20)
             self.regs[_CAPTURE_GEN] = 0xFFFE  # wraps during the tests
         self.bursting = bursting
         self.hooks: dict[int, object] = {}
