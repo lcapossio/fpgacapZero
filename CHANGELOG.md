@@ -7,6 +7,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-20
+
 ### Added
 
 - **Core manager — resets a host can see, and a checked burst header.** New
