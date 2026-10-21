@@ -1008,7 +1008,7 @@ def _run_axi_decode(args: argparse.Namespace) -> int:
 
 def _run_openocd_bridge(args: argparse.Namespace) -> int:
     """``fcapz openocd-bridge``: OpenOCD's remote_bitbang on an FTDI adapter."""
-    from .ftdi_transport import FtdiMpsseTransport
+    from .ftdi_transport import FtdiMpsseTransport, trst_pin_for
     from .rbb_bridge import DEFAULT_PORT, openocd_config, serve
 
     port = DEFAULT_PORT if args.listen_port is None else args.listen_port
@@ -1018,13 +1018,16 @@ def _run_openocd_bridge(args: argparse.Namespace) -> int:
     pins = FtdiMpsseTransport(device=getattr(args, "hardware", None))
     layout = pins.open_pins()
     try:
+        trst = trst_pin_for(pins.adapter.description)
+
         def ready(bound: int) -> None:
-            print(f"serving {pins.adapter.description!r} to OpenOCD on 127.0.0.1:{bound}")
+            print(f"serving {pins.adapter.description!r} to OpenOCD on 127.0.0.1:{bound}"
+                  + ("" if trst else " (no TRST pin: SRST/TRST are not driven)"))
             print("OpenOCD adapter config:")
-            print(openocd_config(bound), end="", flush=True)
+            print(openocd_config(bound, trst=bool(trst)), end="", flush=True)
 
         try:
-            serve(pins, layout, port=port, once=args.once, ready=ready,
+            serve(pins, layout, trst=trst, port=port, once=args.once, ready=ready,
                   log=lambda m: print(m, flush=True))
         except KeyboardInterrupt:
             print("stopped")

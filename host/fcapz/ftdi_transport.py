@@ -120,6 +120,16 @@ ADAPTER_LAYOUTS: tuple[tuple[str, int, int], ...] = (
 )
 #: Layout for adapters not listed above: TMS high, TCK/TDI/TMS outputs.
 DEFAULT_LAYOUT = (0x08, 0x0B)
+#: Active-low nTRST pin of known adapters, by the same description match.
+ADAPTER_TRST: tuple[tuple[str, int], ...] = (("FlashPro", 0x10),)
+
+
+def trst_pin_for(description: str) -> int:
+    """The adapter's nTRST ADBUS mask, or 0 when it has none we know of."""
+    for key, mask in ADAPTER_TRST:
+        if key in description:
+            return mask
+    return 0
 
 
 def _layout_for(description: str) -> tuple[int, int] | None:

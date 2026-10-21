@@ -369,7 +369,9 @@ FlashPro5, Digilent cables) are bound to FTDI's D2XX driver, and OpenOCD's
 through D2XX and serves it to OpenOCD over `remote_bitbang` on `127.0.0.1`
 (see the [CLI reference](10_cli_reference.md#openocd-bridge)).  OpenOCD then
 uses `adapter driver remote_bitbang` in place of the `ftdi` adapter lines; the
-TAP declarations and everything above stay the same.  On the PolarFire
+TAP declarations and everything above stay the same.  TRST is driven on the
+FlashPro5's nTRST pin; on other adapters use `reset_config none`, which the
+bridge prints with the adapter lines.  On the PolarFire
 Discovery Kit the full hardware suite runs this way, captures by burst
 (1024 samples in about 0.05 s).  The bridge drives each TCK edge as a pin
 write, so it is slower than OpenOCD's own `ftdi` driver for long scans; for

@@ -171,8 +171,15 @@ remote_bitbang port 3335
 transport select jtag
 ```
 
-TCK runs as fast as OpenOCD's bit stream crosses USB, and TRST/SRST are not
-driven.  See [OpenOCD on Windows](14_transports.md#openocd-on-windows-through-fcapz-openocd-bridge).
+TCK runs as fast as OpenOCD's bit stream crosses USB.  TRST drives the
+FlashPro5's nTRST pin, so a `reset_config trst_only` config works there; other
+adapters have no TRST here, and the bridge then prints `reset_config none`
+with the adapter lines.  SRST is never driven.  OpenOCD's
+`remote_bitbang use_remote_sleep on` delays are honoured in order.  The pin
+layouts are the ones `--backend ftdi` knows (FlashPro5, and Digilent cables
+wired like the Arty's: buffer enable on ADBUS7); a Digilent JTAG-HS2 needs a
+layout that is not there yet.  See
+[OpenOCD on Windows](14_transports.md#openocd-on-windows-through-fcapz-openocd-bridge).
 
 <!-- BEGIN GENERATED cli:openocd-bridge (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
 

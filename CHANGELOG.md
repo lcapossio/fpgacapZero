@@ -14,8 +14,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bound to FTDI's D2XX driver, which OpenOCD's `ftdi` driver cannot open.
   The bridge opens the cable through D2XX and serves it to OpenOCD over
   `remote_bitbang` on `127.0.0.1`, so OpenOCD flows work without swapping the
-  driver (which breaks Libero and Vivado). `FtdiMpsseTransport.open_pins()`
-  and `exchange()` give it the adapter without a chain scan.
+  driver (which breaks Libero and Vivado). TRST is driven on the FlashPro5;
+  OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
+  `exchange()` give it the adapter without a chain scan.
 
 ### Fixed
 
