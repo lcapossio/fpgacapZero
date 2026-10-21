@@ -355,10 +355,27 @@ The CLI and board discovery select it for a tap name starting with `MPF`.
   `SINGLE_CHAIN_BURST=0` build (`single_chain_burst=False`).
 - On Windows, Microchip's FlashPro driver owns the embedded FlashPro5's JTAG
   channel, so OpenOCD's `ftdi` driver cannot open it.  Use
-  [`FtdiMpsseTransport`](#ftdimpssetransport) instead: it goes through that
-  same driver.
+  [`FtdiMpsseTransport`](#ftdimpssetransport) instead, which goes through that
+  same driver, or keep OpenOCD and run it through
+  [`fcapz openocd-bridge`](#openocd-on-windows-through-fcapz-openocd-bridge).
 
 See the [Discovery Kit example](../examples/mpfs_disco_kit/README.md).
+
+#### OpenOCD on Windows through `fcapz openocd-bridge`
+
+On Windows, FTDI-based cables that ship with a vendor driver (the embedded
+FlashPro5, Digilent cables) are bound to FTDI's D2XX driver, and OpenOCD's
+`ftdi` driver cannot open them.  `fcapz openocd-bridge` opens the cable
+through D2XX and serves it to OpenOCD over `remote_bitbang` on `127.0.0.1`
+(see the [CLI reference](10_cli_reference.md#openocd-bridge)).  OpenOCD then
+uses `adapter driver remote_bitbang` in place of the `ftdi` adapter lines; the
+TAP declarations and everything above stay the same.  TRST is driven on the
+FlashPro5's nTRST pin; on other adapters use `reset_config none`, which the
+bridge prints with the adapter lines.  On the PolarFire
+Discovery Kit the full hardware suite runs this way, captures by burst
+(1024 samples in about 0.05 s).  The bridge drives each TCK edge as a pin
+write, so it is slower than OpenOCD's own `ftdi` driver for long scans; for
+fcapz alone, [`FtdiMpsseTransport`](#ftdimpssetransport) is faster still.
 
 #### Efinix (Trion / Titanium) over OpenOCD
 

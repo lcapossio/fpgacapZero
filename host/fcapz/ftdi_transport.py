@@ -21,7 +21,7 @@ import ctypes
 import os
 import sys
 import threading
-from typing import List, NamedTuple
+from typing import Any, List, NamedTuple
 
 from .transport import (
     BurstIntegrityError,
@@ -120,6 +120,16 @@ ADAPTER_LAYOUTS: tuple[tuple[str, int, int], ...] = (
 )
 #: Layout for adapters not listed above: TMS high, TCK/TDI/TMS outputs.
 DEFAULT_LAYOUT = (0x08, 0x0B)
+#: Active-low nTRST pin of known adapters, by the same description match.
+ADAPTER_TRST: tuple[tuple[str, int], ...] = (("FlashPro", 0x10),)
+
+
+def trst_pin_for(description: str) -> int:
+    """The adapter's nTRST ADBUS mask, or 0 when it has none we know of."""
+    for key, mask in ADAPTER_TRST:
+        if key in description:
+            return mask
+    return 0
 
 
 def _layout_for(description: str) -> tuple[int, int] | None:
@@ -380,6 +390,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.ir_length: int | None = None
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
+        #: ``(ADBUS value, direction)`` set up by :meth:`open_pins`.
+        self.pin_layout: tuple[int, int] | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -403,8 +415,9 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self.close()
             raise
 
-    def _open_channel(self) -> _OpenChannel:
-        """Open, set up and identify a channel no transport holds yet."""
+    def _open_mpsse(self) -> tuple[Any, ctypes.c_void_p, FtdiDevice, tuple[int, int]]:
+        """Open the device and put it in MPSSE mode: ``(lib, handle, device,
+        layout)``, with ``_lib``/``_handle`` set.  Released again on failure."""
         lib = _load_d2xx()
         dev = _pick_device(list_ftdi_devices(), self.device)
         layout = self.layout or _layout_for(dev.description) or DEFAULT_LAYOUT
@@ -418,6 +431,16 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self._lib, self._handle = lib, handle
         try:
             self._setup_mpsse(layout)
+        except Exception:
+            self._handle = None
+            _release(lib, handle)
+            raise
+        return lib, handle, dev, layout
+
+    def _open_channel(self) -> _OpenChannel:
+        """Open, set up and identify a channel no transport holds yet."""
+        lib, handle, dev, _layout = self._open_mpsse()
+        try:
             self._identify()
         except Exception:
             self._handle = None
@@ -428,6 +451,37 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         ch.family, ch.actual_tck_hz = self.family, self.actual_tck_hz
         return ch
 
+    def open_pins(self) -> tuple[int, int]:
+        """Open the channel for code that drives the JTAG pins itself.
+
+        Sets up MPSSE like :meth:`connect` but does not scan the chain, so any
+        chain works, and the channel is not shared: no transport in this
+        process can join it.  Drive it with :meth:`exchange`; :meth:`close`
+        releases it.  Returns the ``(ADBUS value, direction)`` layout in
+        force.  For ``fcapz openocd-bridge``.
+        """
+        with _OPEN_CHANNELS_LOCK:
+            if self._channel is not None:
+                raise RuntimeError("this transport already holds its channel")
+            lib, handle, dev, layout = self._open_mpsse()
+            ch = _OpenChannel(lib, handle, dev)
+            ch.users = 1
+            self._channel, self.adapter = ch, dev
+            self._io_lock = ch.lock
+            self.pin_layout = layout
+            return layout
+
+    def exchange(self, commands: bytes, reply_bytes: int) -> bytes:
+        """Send raw MPSSE *commands*, then read *reply_bytes* bytes of reply.
+
+        For a channel opened with :meth:`open_pins`; *commands* must end with
+        a send-immediate (``0x87``) when a reply is expected.
+        """
+        with self._io_lock:
+            if commands:
+                self._write(commands)
+            return self._read(reply_bytes)
+
     def close(self) -> None:
         with _OPEN_CHANNELS_LOCK:
             ch, self._channel = self._channel, None
@@ -437,7 +491,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             ch.users -= 1
             if ch.users > 0:
                 return
-            _OPEN_CHANNELS.remove(ch)
+            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+                _OPEN_CHANNELS.remove(ch)
             with ch.lock:
                 _release(ch.lib, ch.handle)
 

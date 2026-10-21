@@ -116,6 +116,7 @@ class _FakeD2xx:
         self.writes = 0
         self.tms = 1
         self.divisor = None
+        self.pins = None  # last ADBUS value set with 0x80
 
     # enumeration
     def FT_CreateDeviceInfoList(self, count):
@@ -172,7 +173,11 @@ class _FakeD2xx:
                 self.divisor = cmd[i + 1] | (cmd[i + 2] << 8)
                 i += 3
             elif op == 0x80:
+                self.pins = cmd[i + 1]
                 i += 3
+            elif op == 0x81:  # read ADBUS: the pins as last driven
+                self.rx.append(self.pins or 0)
+                i += 1
             elif op in (0x19, 0x39):
                 n = (cmd[i + 1] | (cmd[i + 2] << 8)) + 1
                 data = cmd[i + 3:i + 3 + n]
@@ -220,6 +225,38 @@ class _FtdiTestCase(unittest.TestCase):
         t.connect()
         self.addCleanup(t.close)
         return t
+
+
+class OpenPinsTests(_FtdiTestCase):
+    """open_pins(): the channel for fcapz openocd-bridge, which drives the
+    pins itself."""
+
+    def test_opens_without_scanning_or_sharing(self):
+        self.lib.dev = _Device(idcode=0x12345001)  # unknown to connect()
+        t = FtdiMpsseTransport()
+        self.addCleanup(t.close)
+        self.assertEqual(t.open_pins(), ft._layout_for("Embedded FlashPro5 A"))
+        self.assertEqual(t.adapter.description, "Embedded FlashPro5 A")
+        self.assertIsNone(t.idcode)  # no chain scan
+        self.assertEqual(self.lib.dev.state, "RESET")
+        self.assertEqual(ft._OPEN_CHANNELS, [])  # no transport can join it
+
+    def test_exchange_and_close(self):
+        t = FtdiMpsseTransport()
+        t.open_pins()
+        reply = t.exchange(bytes((0x80, 0x0D, 0x0B, 0x81, 0x87)), 1)
+        self.assertEqual(reply, bytes((0x0D,)))
+        t.close()
+        self.assertEqual(self.lib.closes, 1)
+        t.close()  # idempotent
+        self.assertEqual(self.lib.closes, 1)
+
+    def test_a_second_open_is_refused(self):
+        t = FtdiMpsseTransport()
+        self.addCleanup(t.close)
+        t.open_pins()
+        with self.assertRaisesRegex(RuntimeError, "already holds"):
+            t.open_pins()
 
 
 class ConnectTests(_FtdiTestCase):

@@ -16,6 +16,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   lists, so an agent cannot have the server open an arbitrary path.
   `ir_table` also takes `"polarfire"` and `"efinix"`.
 
+- **`fcapz openocd-bridge`: OpenOCD on Windows through a vendor-driver FTDI
+  cable.** On Windows the PolarFire kits' FlashPro5 and Digilent cables are
+  bound to FTDI's D2XX driver, which OpenOCD's `ftdi` driver cannot open.
+  The bridge opens the cable through D2XX and serves it to OpenOCD over
+  `remote_bitbang` on `127.0.0.1`, so OpenOCD flows work without swapping the
+  driver (which breaks Libero and Vivado). TRST is driven on the FlashPro5;
+  OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
+  `exchange()` give it the adapter without a chain scan.
+
 ### Fixed
 
 - **RPC: an FTDI board is its adapter.** An EIO naming a different FTDI

@@ -1904,6 +1904,31 @@ Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
 `TimeoutError` for socket-level failures.
 
+#### `FtdiMpsseTransport.open_pins`
+
+```python
+open_pins() -> tuple[int, int]
+```
+
+Open the channel for code that drives the JTAG pins itself.
+
+Sets up MPSSE like `connect` but does not scan the chain, so any
+chain works, and the channel is not shared: no transport in this
+process can join it.  Drive it with `exchange`; `close`
+releases it.  Returns the `(ADBUS value, direction)` layout in
+force.  For `fcapz openocd-bridge`.
+
+#### `FtdiMpsseTransport.exchange`
+
+```python
+exchange(commands: bytes, reply_bytes: int) -> bytes
+```
+
+Send raw MPSSE *commands*, then read *reply_bytes* bytes of reply.
+
+For a channel opened with `open_pins`; *commands* must end with
+a send-immediate (`0x87`) when a reply is expected.
+
 #### `FtdiMpsseTransport.close`
 
 ```python
