@@ -226,14 +226,37 @@ The live RPC layer supports:
 | `hw_server` | `host`, `port`, `tap`, `ir_table` | `program`, `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap`, `ir_table` | - |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
+| `ftdi` | `hardware`, `ir_table` | `tck_mhz` (default 6) |
+| `serial` | `serial_port` | `baudrate` (default 1000000) |
 
-`ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"` or
-`"gowin"`. Omit it and the RPC layer infers one from `tap` (`gw*` is Gowin,
-`xcku*`/`xcvu*`/`xcau*` UltraScale, anything else 7-series); pass it when the
-tap name does not say which family the part is.
+`ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
+`"gowin"`, `"polarfire"` or `"efinix"`. Omit it and the RPC layer infers one
+from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale, anything else
+7-series), or on `ftdi` from the device IDCODE; pass it when the tap name does
+not say which family the part is.
+
+`ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver, with no
+daemon: the PolarFire kits' embedded FlashPro5, a Digilent cable, or any
+FT2232H/FT4232H JTAG adapter (see [Transports](14_transports.md)). `hardware`
+names the adapter by its D2XX description (for example
+`"Embedded FlashPro5 A"`) or serial. Omit it only when a single FlashPro or
+Digilent adapter is attached: other FTDI adapters (a generic FT2232H board,
+say) are not recognised and must be named.
+EIO, AXI and UART sessions on the same adapter share its handle.
+
+`serial` talks to the byte-stream TAP bridge (`rtl/fcapz_uart_tap.v`, used by
+the Efinix Trion example) over a serial port. `serial_port` is required and
+must be a port the machine lists (`COM5`, `/dev/ttyACM0`): the transport opens
+it as a device path, so any other name is refused rather than opened. The ELA
+session holds the port exclusively, so on `serial` an EIO works only in a
+core-manager slot on the ELA's own port and chain (its `chain` defaults to the
+ELA's), and AXI/UART are not available. Such a request is refused before the
+session it would replace is closed.
 
 Backend-irrelevant fields are rejected instead of being silently forwarded.
-`hw_server` and `openocd` default `host` to `127.0.0.1` when omitted.
+`hw_server` and `openocd` default `host` to `127.0.0.1` when omitted; `host`,
+`port` and `tap` are rejected for `ftdi` and `serial`, which are local USB and
+serial devices.
 `usb_blaster` (Intel/Altera via Quartus) has no host concept, so `host`,
 `port`, `tap` and `ir_table` are rejected for it — even an explicit `host="127.0.0.1"`.
 Any other backend name is rejected up front with `unknown backend: <name>`.
@@ -815,6 +838,22 @@ fcapz_axi_read(addr="0x40000000", count=16)
 fcapz_close(core="axi")
 ```
 
+PolarFire board on its embedded FlashPro5, no daemon:
+
+```text
+fcapz_connect(backend="ftdi")
+fcapz_capture(config={"pretrigger": 8, "posttrigger": 247}, timeout=10.0)
+fcapz_close()
+```
+
+Efinix Trion behind the serial TAP bridge:
+
+```text
+fcapz_connect(backend="serial", serial_port="COM5")
+fcapz_capture(config={"pretrigger": 8, "posttrigger": 247}, timeout=10.0)
+fcapz_close()
+```
+
 UART receive:
 
 ```text
@@ -833,6 +872,8 @@ fcapz_close(core="uart")
 | A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
+| `serial_port ... is not a serial port on this machine` | The name is not one the OS lists, or the board is not in bridge mode yet. | Use a name from the error's `present:` list (or `fcapz list-ports`); program the FPGA first so the bridge enumerates. |
+| `ftdi` connect finds no adapter, or the wrong one | Another program (OpenOCD, a vendor tool) holds the channel, or several adapters are attached. | Close the other program; pass `hardware` with the adapter's D2XX description or serial. |
 | The next session cannot open the cable after an HTTP server went away | The server was killed rather than stopped, so its shutdown never closed the board session and a backend process (for example `quartus_stp`) may still hold the JTAG cable. | Stop an HTTP server with Ctrl-C, which closes every hardware connection. After a hard kill, end the leftover backend process before reconnecting. |
 | HTTP client gets `401` | Missing, misspelled or wrong `Authorization: Bearer` header. | Send the exact token the server was started with (`FCAPZ_MCP_TOKEN` or `--http-token-file`). |
 | HTTP client gets `421 Invalid Host header` | A loopback-bound server only accepts `127.0.0.1`, `localhost` or `[::1]` as the `Host`. | Connect by one of those names, or bind a network address with `--http-host` (plus TLS). |
