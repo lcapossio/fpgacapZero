@@ -783,7 +783,9 @@ release_manager_ownership() -> None
 Clear this session's owner token from the managers it claimed.
 
 A manager whose `MGR_OWNER` holds another value (another session
-took it, or the hub was reset) is left alone.
+took it, or the hub was reset) is left alone.  The chain selected
+before is selected again after: a reconnect closes the old session
+after its caller picked the chain the new one starts on.
 
 #### `Transport.manager_select_writes`
 

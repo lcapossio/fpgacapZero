@@ -910,21 +910,28 @@ class Transport(ABC):
         """Clear this session's owner token from the managers it claimed.
 
         A manager whose ``MGR_OWNER`` holds another value (another session
-        took it, or the hub was reset) is left alone.
+        took it, or the hub was reset) is left alone.  The chain selected
+        before is selected again after: a reconnect closes the old session
+        after its caller picked the chain the new one starts on.
         """
         token = self.__dict__.get("_fcapz_owner_token")
         owned = self.__dict__.pop("_fcapz_owned_managers", set())
         if token is None or not owned:
             return
         with self.transaction_lock():
-            for chain, base in sorted(owned):
-                try:
-                    self.select_chain(chain)
-                except NotImplementedError:
-                    if chain != 1:
-                        continue
-                if int(self.read_reg(base + 0x24)) == token:
-                    self.write_reg(base + 0x24, 0)
+            selected = self._current_chain()
+            try:
+                for chain, base in sorted(owned):
+                    try:
+                        self.select_chain(chain)
+                    except NotImplementedError:
+                        if chain != 1:
+                            continue
+                    if int(self.read_reg(base + 0x24)) == token:
+                        self.write_reg(base + 0x24, 0)
+            finally:
+                if selected is not None:
+                    self.select_chain(selected)
 
     def _release_ownership_on_close(self) -> None:
         """:meth:`release_manager_ownership` for ``close()``, best effort.
@@ -2064,6 +2071,9 @@ class TapBridgeTransport(Transport):
     def connect(self) -> None:
         if self._open_channel:
             self.close()
+        # A new session may reach another image: nothing cached about the
+        # old one's managers holds.
+        self._forget_hub_state()
         self._open()
         self._open_channel = True
         self._out_of_step = False
