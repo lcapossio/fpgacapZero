@@ -108,6 +108,7 @@ EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
 | Subcommand | What it does |
 |---|---|
 | `list-ports` | List this machine's serial ports (for --backend serial) |
+| `openocd-bridge` | Serve an FTDI JTAG adapter to OpenOCD (remote_bitbang), e.g. a FlashPro5 or Digilent cable on Windows; --hardware picks the adapter |
 | `probe` | Read core identity registers |
 | `ela-list` | Read core manager and probe all ELA slots |
 | `discover` | List every fcapz core on the JTAG session, chain by chain |
@@ -143,6 +144,46 @@ Usage: `fcapz [global options] list-ports`
 No options of its own; the [global options](#global-options) apply.
 
 <!-- END GENERATED cli:list-ports -->
+
+## `openocd-bridge`
+
+Serve an FTDI JTAG adapter to OpenOCD over its `remote_bitbang` protocol. On
+Windows, the adapters that ship with a vendor driver (the PolarFire kits'
+embedded FlashPro5, Digilent cables) are bound to FTDI's D2XX driver, which
+OpenOCD's `ftdi` driver cannot open; replacing it with WinUSB (Zadig) breaks
+the vendor tools.  The bridge opens the adapter through D2XX instead and
+OpenOCD connects to it, so OpenOCD-based flows keep working next to Libero or
+Vivado (one program at a time on the cable).  `--hardware` names the adapter
+(D2XX description or serial); omit it when one is attached.  The bridge
+listens on `127.0.0.1` only, prints the OpenOCD adapter lines to use, and
+exits when OpenOCD shuts down (or on Ctrl-C).
+
+```sh
+fcapz --hardware "Embedded FlashPro5 A" openocd-bridge
+```
+
+then, in the OpenOCD config, instead of the `ftdi` adapter lines:
+
+```tcl
+adapter driver remote_bitbang
+remote_bitbang host 127.0.0.1
+remote_bitbang port 3335
+transport select jtag
+```
+
+TCK runs as fast as OpenOCD's bit stream crosses USB, and TRST/SRST are not
+driven.  See [OpenOCD on Windows](14_transports.md#openocd-on-windows-through-fcapz-openocd-bridge).
+
+<!-- BEGIN GENERATED cli:openocd-bridge (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] openocd-bridge [--listen-port N] [--once]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--listen-port N` | — | TCP port to listen on, on 127.0.0.1 (default 3335) |
+| `--once` | off | exit when the first OpenOCD session ends (default: serve until OpenOCD sends shutdown, or Ctrl-C) |
+
+<!-- END GENERATED cli:openocd-bridge -->
 
 ## `probe`
 

@@ -7,6 +7,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`fcapz openocd-bridge`: OpenOCD on Windows through a vendor-driver FTDI
+  cable.** On Windows the PolarFire kits' FlashPro5 and Digilent cables are
+  bound to FTDI's D2XX driver, which OpenOCD's `ftdi` driver cannot open.
+  The bridge opens the cable through D2XX and serves it to OpenOCD over
+  `remote_bitbang` on `127.0.0.1`, so OpenOCD flows work without swapping the
+  driver (which breaks Libero and Vivado). `FtdiMpsseTransport.open_pins()`
+  and `exchange()` give it the adapter without a chain scan.
+
 ### Fixed
 
 - **A core built with `USER1_DATA_EN=0` is no longer read as zeros.** Such a

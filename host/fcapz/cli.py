@@ -409,6 +409,22 @@ def build_parser() -> argparse.ArgumentParser:
         "list-ports",
         help="List this machine's serial ports (for --backend serial)",
     )
+    bridge = sub.add_parser(
+        "openocd-bridge",
+        help=(
+            "Serve an FTDI JTAG adapter to OpenOCD (remote_bitbang), e.g. a "
+            "FlashPro5 or Digilent cable on Windows; --hardware picks the adapter"
+        ),
+    )
+    bridge.add_argument(
+        "--listen-port", type=int, default=None, metavar="N",
+        help="TCP port to listen on, on 127.0.0.1 (default 3335)",
+    )
+    bridge.add_argument(
+        "--once", action="store_true",
+        help="exit when the first OpenOCD session ends (default: serve until "
+             "OpenOCD sends shutdown, or Ctrl-C)",
+    )
     sub.add_parser("probe", help="Read core identity registers")
     sub.add_parser("ela-list", help="Read core manager and probe all ELA slots")
     discover = sub.add_parser(
@@ -990,11 +1006,44 @@ def _run_axi_decode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_openocd_bridge(args: argparse.Namespace) -> int:
+    """``fcapz openocd-bridge``: OpenOCD's remote_bitbang on an FTDI adapter."""
+    from .ftdi_transport import FtdiMpsseTransport
+    from .rbb_bridge import DEFAULT_PORT, openocd_config, serve
+
+    port = DEFAULT_PORT if args.listen_port is None else args.listen_port
+    if not 1 <= port <= 65535:
+        print(f"--listen-port must be in 1..65535, got {port}", file=sys.stderr)
+        return 2
+    pins = FtdiMpsseTransport(device=getattr(args, "hardware", None))
+    layout = pins.open_pins()
+    try:
+        def ready(bound: int) -> None:
+            print(f"serving {pins.adapter.description!r} to OpenOCD on 127.0.0.1:{bound}")
+            print("OpenOCD adapter config:")
+            print(openocd_config(bound), end="", flush=True)
+
+        try:
+            serve(pins, layout, port=port, once=args.once, ready=ready,
+                  log=lambda m: print(m, flush=True))
+        except KeyboardInterrupt:
+            print("stopped")
+        except OSError as exc:
+            print(f"cannot serve on 127.0.0.1:{port}: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        pins.close()
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if args.cmd == "axi-decode":
         # Offline: no transport, no board.
         return _run_axi_decode(args)
+
+    if args.cmd == "openocd-bridge":
+        return _run_openocd_bridge(args)
 
     # Needs no transport, and deliberately opens nothing: opening a port
     # asserts DTR/RTS, which resets an RP2040/RP2350 and disturbs the JTAG

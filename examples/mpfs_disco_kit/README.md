@@ -103,10 +103,16 @@ The on-board FlashPro5 is an FTDI FT4232H, with JTAG on its channel A
   to open ftdi device"). Replacing the channel-A driver with WinUSB (for
   example with Zadig) lets OpenOCD in, but then Libero and FlashPro Express
   no longer see the programmer until the Microchip driver is restored.
+  Instead, run `fcapz --hardware "Embedded FlashPro5 A" openocd-bridge` and
+  point OpenOCD at it: replace the `ftdi` adapter lines of
+  `mpfs_disco_kit.cfg` with `adapter driver remote_bitbang`,
+  `remote_bitbang host 127.0.0.1` and `remote_bitbang port 3335` (see
+  [`openocd-bridge`](../../docs/10_cli_reference.md#openocd-bridge)).
 
 **Validation status:** all 11 hardware tests pass on this board directly over
-`--backend ftdi` (in about 2 s), and over OpenOCD through a `remote_bitbang`
-adapter on Windows. `mpfs_disco_kit.cfg` itself, OpenOCD's `ftdi` path, has
+`--backend ftdi` (in about 2 s), and over OpenOCD through
+`fcapz openocd-bridge` on Windows (in about 3 s; the probe's version check
+needs a bitstream built from the same release as the host). `mpfs_disco_kit.cfg` itself, OpenOCD's `ftdi` path, has
 not yet been run on hardware. Both transports read captures by single-chain
 burst: 256-bit scans on IR `0x20` after a `BURST_PTR` write. The wrapper's other
 options (`SINGLE_CHAIN_BURST=0`, `EXT_TRIG_EN`, `DECIM_EN` and the rest) are
