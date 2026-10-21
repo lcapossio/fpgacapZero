@@ -692,11 +692,25 @@ class Analyzer:
         left on whichever slot the manager has active.  A slot bound that way
         is looked up again: the new connection may hold another image.  The
         configuration is kept only when the slot is the same.
+
+        This opens the transport, replacing a session it already holds: a
+        second Analyzer on a shared transport uses :meth:`attach` instead.
         """
+        self._open(connect_transport=True)
+
+    def attach(self) -> None:
+        """Use an already-connected transport (shared with another Analyzer or
+        controller): as :meth:`connect`, without :meth:`Transport.connect`,
+        so the transport's session (and its xsdb, OpenOCD socket or serial
+        port) stays as it is."""
+        self._open(connect_transport=False)
+
+    def _open(self, *, connect_transport: bool) -> None:
         with self.transport.transaction_lock():
             self._select_chain()
-            self.transport.connect()
-            self.transport.forget_manager_chains()
+            if connect_transport:
+                self.transport.connect()
+                self.transport.forget_manager_chains()
             self._manager_caps = None
             self._manager_slot_caps = {}
             self._manager_found = None

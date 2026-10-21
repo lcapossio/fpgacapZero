@@ -91,7 +91,7 @@ Named IR-table presets (use as `ir_table=XilinxHwServerTransport.IR_TABLE_US`):
 | Constant | Maps to |
 |---|---|
 | `IR_TABLE_XILINX7` | `{1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}` (default) |
-| `IR_TABLE_XILINX_ULTRASCALE` | `{1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27}` |
+| `IR_TABLE_XILINX_ULTRASCALE` | `{1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}` (single-die UltraScale; the hw_server backend uses `use_register_ir=True` on UltraScale(+) parts instead) |
 | `IR_TABLE_US` | alias for `IR_TABLE_XILINX_ULTRASCALE` |
 
 See [chapter 14](14_transports.md) for more on the transports and
@@ -140,14 +140,21 @@ t = XilinxHwServerTransport(port=3121, fpga_name="xc7a100t",
 t.connect()                  # opens xsdb, programs FPGA, waits for readiness
 
 analyzer = Analyzer(t)
-analyzer.connect()           # selects chain 1, no transport open
+analyzer.attach()            # binds chain 1 / its slot on the open session
 
 eio = EioController(t, chain=3)
-eio.connect()                # selects chain 3, no second xsdb
+eio.attach()                 # selects chain 3, no second xsdb
 
 bridge = EjtagAxiController(t, chain=4)
-bridge.connect()             # selects chain 4, no third xsdb
+bridge.attach()              # selects chain 4, no third xsdb
 ```
+
+`attach()` uses the session the transport already holds; `connect()` opens
+the transport itself, and on a transport that is already connected it closes
+that session first and opens a new one (re-programming `bitfile`, if set).
+So connect a shared transport once, through `t.connect()` or the first
+controller's `connect()`, and `attach()` the rest: a second `Analyzer` for
+another manager slot is `Analyzer(t, instance=1)` plus `attach()`.
 
 The controllers cooperate on chain selection via `Transport.select_chain()`.
 Each controller's methods automatically restore chain 1 (the

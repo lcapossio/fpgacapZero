@@ -9,6 +9,7 @@ import unittest
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from fcapz import _version_tuple
 from fcapz.analyzer import (
@@ -528,6 +529,19 @@ class RpcManagerSlotTests(unittest.TestCase):
         analyzer.connect()
         self.assertEqual(analyzer.instance, 1)
         self.assertEqual(transport._active_ela, 1)
+
+    def test_attach_binds_like_connect_without_reopening_the_transport(self):
+        """A second Analyzer on a shared transport: one xsdb, not two."""
+        transport = self._EioSelectedTransport()  # an EIO slot is active
+        with mock.patch.object(transport, "connect") as connect:
+            first = Analyzer(transport, chain=1)
+            first.attach()
+            second = Analyzer(transport, chain=1, instance=1)
+            second.attach()
+        connect.assert_not_called()
+        self.assertEqual((first.instance, second.instance), (0, 1))
+        self.assertIsNotNone(first.probe_optional())
+        self.assertEqual(transport._active_ela, 0)
 
     def test_connect_leaves_a_chain_without_a_manager_unbound(self):
         transport = FakeTransport()

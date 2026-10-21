@@ -156,7 +156,7 @@ The canonical register / shift maps live in
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
 | Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
 | Microchip PolarFire wrapper | ✅ Hardware-validated on the PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
-| AMD/Xilinx UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`); standalone Kintex / Virtex UltraScale(+) not yet tested |
+| AMD/Xilinx UltraScale / UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`) and on a Kintex UltraScale KU035 (proprietary board); standalone UltraScale+ not yet tested |
 | ECP5 wrappers | RTL complete; host / hardware validation still limited |
 | Efinix (Trion / Titanium) wrapper | ⏳ Synthesized, placed and routed in Efinity 2025.1 (Trion T20F256, Titanium Ti60F225); hardware validation pending |
 | ELA / EIO / EJTAG-AXI / EJTAG-UART | ✅ Validated on Arty A7 and Kria KV260 (details in the manual) |

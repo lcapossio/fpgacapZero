@@ -111,6 +111,20 @@ left on whichever slot the manager has active.  A slot bound that way
 is looked up again: the new connection may hold another image.  The
 configuration is kept only when the slot is the same.
 
+This opens the transport, replacing a session it already holds: a
+second Analyzer on a shared transport uses `attach` instead.
+
+#### `Analyzer.attach`
+
+```python
+attach() -> None
+```
+
+Use an already-connected transport (shared with another Analyzer or
+controller): as `connect`, without `Transport.connect`,
+so the transport's session (and its xsdb, OpenOCD socket or serial
+port) stays as it is.
+
 #### `Analyzer.close`
 
 ```python
@@ -814,6 +828,11 @@ connect() -> None
 
 Open the transport connection.
 
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
+
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
 `TimeoutError` for socket-level failures.
@@ -1014,12 +1033,12 @@ Class constants:
 ```python
 DEFAULT_IR_TABLE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX7 = {1: 2, 2: 3, 3: 34, 4: 35}
-IR_TABLE_XILINX_ULTRASCALE = {1: 36, 2: 37, 3: 38, 4: 39}
+IR_TABLE_XILINX_ULTRASCALE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
 IR_TABLE_POLARFIRE = {1: 32, 2: 33}
 IR_TABLE_EFINIX = {1: 8, 2: 9}
-IR_TABLE_XILINX_ZYNQUS = {1: 36, 2: 37, 3: 38, 4: 39}
-IR_TABLE_US = {1: 36, 2: 37, 3: 38, 4: 39}
+IR_TABLE_XILINX_ZYNQUS = {1: 2306, 2: 2307, 3: 2338, 4: 2339}
+IR_TABLE_US = {1: 2, 2: 3, 3: 34, 4: 35}
 USER1_IR = 2
 READ_IDLE_CYCLES = 20
 _BATCH_TIMEOUT_SEC = 5.0
@@ -1033,6 +1052,11 @@ connect() -> None
 ```
 
 Open the transport connection.
+
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
 
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
@@ -1190,9 +1214,9 @@ Class constants:
 ```python
 DEFAULT_IR_TABLE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX7 = {1: 2, 2: 3, 3: 34, 4: 35}
-IR_TABLE_XILINX_ULTRASCALE = {1: 36, 2: 37, 3: 38, 4: 39}
+IR_TABLE_XILINX_ULTRASCALE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_XILINX_ZYNQUS = {1: 36, 2: 37, 3: 38, 4: 39}
-IR_TABLE_US = {1: 36, 2: 37, 3: 38, 4: 39}
+IR_TABLE_US = {1: 2, 2: 3, 3: 34, 4: 35}
 USER1_IR = 2
 USER2_IR = 3
 DR_BITS = 49
@@ -1222,6 +1246,11 @@ connect() -> None
 ```
 
 Open the transport connection.
+
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
 
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
@@ -1524,6 +1553,11 @@ connect() -> None
 
 Open the transport connection.
 
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
+
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
 `TimeoutError` for socket-level failures.
@@ -1801,6 +1835,11 @@ connect() -> None
 
 Open the transport connection.
 
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
+
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or
 `TimeoutError` for socket-level failures.
@@ -1872,8 +1911,8 @@ fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
 example `"Embedded FlashPro5 A"`) or serial; by default the single
 known JTAG adapter's channel A is used.  `ir_table` defaults to the
 family read from the device IDCODE: PolarFire (`0x20` / `0x21`),
-AMD/Xilinx 7-series (`0x02` / `0x03` / `0x22` / `0x23`; pass the
-UltraScale table explicitly) or Gowin.  `burst` defaults to that
+AMD/Xilinx 7-series and single-die UltraScale (`0x02` / `0x03` /
+`0x22` / `0x23`) or Gowin.  `burst` defaults to that
 family's wrapper default (on for PolarFire and AMD/Xilinx, off for
 Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
 
@@ -1899,6 +1938,11 @@ connect() -> None
 ```
 
 Open the transport connection.
+
+On a transport that is already connected it never leaks the old
+session: the backends close it and reconnect (the FTDI transport
+keeps its open channel).  Controllers sharing a connected transport
+use `attach()` instead.
 
 Raises `RuntimeError` if the backend cannot be reached (e.g. xsdb
 not on PATH, OpenOCD port not listening).  Raises `OSError` or

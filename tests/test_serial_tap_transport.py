@@ -243,6 +243,16 @@ def _connect(fake_serial, **kwargs):
     return t, fake_serial["obj"]
 
 
+def test_connect_again_closes_the_open_port_first(fake_serial):
+    """A second connect() (two Analyzers sharing the transport) releases the
+    port it holds before opening it again; the OS lets only one handle in."""
+    t, port = _connect(fake_serial)
+    with mock.patch.object(t, "_close", wraps=t._close) as close:
+        t.connect()
+    close.assert_called_once()
+    assert t.proto_version == 2
+
+
 # -- identity ---------------------------------------------------------------
 
 def test_connect_reads_identity(fake_serial):
