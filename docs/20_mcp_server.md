@@ -239,7 +239,9 @@ not say which family the part is.
 daemon: the PolarFire kits' embedded FlashPro5, a Digilent cable, or any
 FT2232H/FT4232H JTAG adapter (see [Transports](14_transports.md)). `hardware`
 names the adapter by its D2XX description (for example
-`"Embedded FlashPro5 A"`) or serial; omit it when one adapter is attached.
+`"Embedded FlashPro5 A"`) or serial. Omit it only when a single FlashPro or
+Digilent adapter is attached: other FTDI adapters (a generic FT2232H board,
+say) are not recognised and must be named.
 EIO, AXI and UART sessions on the same adapter share its handle.
 
 `serial` talks to the byte-stream TAP bridge (`rtl/fcapz_uart_tap.v`, used by
@@ -247,7 +249,9 @@ the Efinix Trion example) over a serial port. `serial_port` is required and
 must be a port the machine lists (`COM5`, `/dev/ttyACM0`): the transport opens
 it as a device path, so any other name is refused rather than opened. The ELA
 session holds the port exclusively, so on `serial` an EIO works only in a
-core-manager slot on the ELA's own chain, and AXI/UART are not available.
+core-manager slot on the ELA's own port and chain (its `chain` defaults to the
+ELA's), and AXI/UART are not available. Such a request is refused before the
+session it would replace is closed.
 
 Backend-irrelevant fields are rejected instead of being silently forwarded.
 `hw_server` and `openocd` default `host` to `127.0.0.1` when omitted; `host`,

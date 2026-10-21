@@ -51,7 +51,7 @@ class FakeRpc:
         self.requests.append(dict(req))
         cmd = req["cmd"]
         if cmd == "connect":
-            return {"ok": True, "schema_version": "test"}
+            return {"ok": True, "schema_version": "test", "chain": req.get("chain", 1)}
         if cmd == "close":
             return {"ok": True, "schema_version": "test"}
         if cmd == "probe":
@@ -417,6 +417,50 @@ class FcapzMcpSessionTests(unittest.TestCase):
                                         **{field: value})
             with self.assertRaisesRegex(ValueError, "baudrate"):
                 session.connect(backend="serial", serial_port="COM5", baudrate=0)
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_serial_eio_defaults_to_the_ela_chain(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        with self._ports("COM5"):
+            session.connect(backend="serial", serial_port="COM5")
+            session.eio_connect(backend="serial", serial_port="COM5")
+        self.assertEqual(rpc.requests[-1]["chain"], 1)
+        self.assertTrue(session.eio_connected)
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_refused_serial_side_connect_keeps_the_open_one(self):
+        """A side connect serial cannot serve is refused before the session it
+        would replace is closed."""
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        with self._ports("COM5", "COM6"):
+            session.connect(backend="serial", serial_port="COM5")
+            session.eio_connect(backend="serial", serial_port="COM5")
+            sent = len(rpc.requests)
+            for kwargs, match in (
+                ({"chain": 3}, "ELA's chain 1"),
+                ({"serial_port": "COM6"}, "connect the ELA"),
+            ):
+                with self.subTest(**kwargs):
+                    with self.assertRaisesRegex(ValueError, match):
+                        session.eio_connect(
+                            backend="serial", **{"serial_port": "COM5", **kwargs}
+                        )
+            for opener in (session.axi_connect, session.uart_connect):
+                with self.assertRaisesRegex(ValueError, "not available on the serial"):
+                    opener(backend="serial", serial_port="COM5")
+        self.assertEqual(len(rpc.requests), sent)  # nothing closed or sent
+        self.assertTrue(session.eio_connected)
+
+    @unittest.skipUnless(importlib.util.find_spec("serial"), "pyserial not installed")
+    def test_serial_eio_needs_a_serial_ela_session(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        session.connect(backend="hw_server")
+        with self._ports("COM5"), self.assertRaisesRegex(ValueError, "connect the ELA"):
+            session.eio_connect(backend="serial", serial_port="COM5")
+        self.assertEqual([r["cmd"] for r in rpc.requests], ["connect"])
 
     def test_serial_and_ftdi_fields_are_refused_on_jtag_backends(self):
         session = FcapzMcpSession(rpc=FakeRpc())

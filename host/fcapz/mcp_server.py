@@ -789,6 +789,9 @@ class FcapzMcpSession:
     _capture_cache: "_CaptureCache | None" = field(default=None, init=False, repr=False)
     # The connected AXI bridge's address width, which bounds a confined write.
     _axi_addr_w: int | None = field(default=None, init=False, repr=False)
+    # (port, chain) of an ELA session on the serial backend: the only place a
+    # serial EIO can go.
+    _serial_session: tuple[str, int] | None = field(default=None, init=False, repr=False)
     # One lock guards session state, the active-command slot and every command
     # state transition, so a commit and a watchdog giveup cannot interleave.
     _rpc_lock: RLock = field(default_factory=RLock, init=False, repr=False)
@@ -1154,8 +1157,14 @@ class FcapzMcpSession:
     # Each runs on the owner thread, under the session lock, while the command
     # still holds the hardware. Keep them small and non-blocking.
 
-    def _commit_connected(self, response: JsonDict) -> JsonDict:
+    def _commit_connected(self, response: JsonDict, req: JsonDict) -> JsonDict:
         self.connected = True
+        chain = response.get("chain")
+        self._serial_session = (
+            (req["serial_port"], chain)
+            if req.get("backend") == "serial" and isinstance(chain, int)
+            else None
+        )
         return response
 
     def _commit_closed(self, response: JsonDict) -> JsonDict:
@@ -1217,6 +1226,7 @@ class FcapzMcpSession:
         self.axi_connected = False
         self._axi_addr_w = None
         self.uart_connected = False
+        self._serial_session = None
         self.last_probe = None
         self._capture_cache = None
         self.last_eio_read = None
@@ -1447,7 +1457,9 @@ class FcapzMcpSession:
         # the session it would have replaced.
         if self.connected:
             self.close()
-        return self._rpc_call(req, commit=self._commit_connected)
+        return self._rpc_call(
+            req, commit=lambda response: self._commit_connected(response, req)
+        )
 
     _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -2632,6 +2644,30 @@ class FcapzMcpSession:
     def list_cores(self) -> JsonDict:
         return self._rpc_call({"cmd": "list_cores"})
 
+    def _check_serial_side(self, core: str, req: JsonDict) -> None:
+        """Refuse a side connect the serial backend cannot serve, before the
+        one it would replace is closed.
+
+        A serial bridge owns its port, so the only side core it carries is an
+        EIO in a manager slot on the ELA session's own port and chain, sharing
+        the session's transport.
+        """
+        if req.get("backend") != "serial":
+            return
+        if core != "eio":
+            raise ValueError(f"core={core!r} is not available on the serial backend")
+        session = self._serial_session
+        if session is None or session[0] != req["serial_port"]:
+            raise ValueError(
+                "a serial EIO shares the ELA session's port: connect the ELA "
+                f"with backend='serial', serial_port={req['serial_port']!r} first"
+            )
+        if req["chain"] != session[1]:
+            raise ValueError(
+                f"a serial EIO must be on the ELA's chain {session[1]}, "
+                f"got chain {req['chain']}"
+            )
+
     def _bridge_connect_req(
         self,
         *,
@@ -2683,10 +2719,16 @@ class FcapzMcpSession:
         baudrate: int | None = None,
         tck_mhz: float | None = None,
     ) -> JsonDict:
+        if chain is None:
+            chain = (
+                self._serial_session[1]
+                if backend == "serial" and self._serial_session is not None
+                else self._default_eio_chain(backend)
+            )
         req: JsonDict = {
             "cmd": "eio_connect",
             "backend": backend,
-            "chain": self._default_eio_chain(backend) if chain is None else int(chain),
+            "chain": int(chain),
         }
         self._add_connection_fields(
             req,
@@ -2701,6 +2743,7 @@ class FcapzMcpSession:
             baudrate=baudrate,
             tck_mhz=tck_mhz,
         )
+        self._check_serial_side("eio", req)
         if self.eio_connected:  # after validation, as in connect()
             self.eio_close()
         return self._rpc_call(req, commit=self._commit_eio_connected)
@@ -2770,6 +2813,7 @@ class FcapzMcpSession:
             baudrate=baudrate,
             tck_mhz=tck_mhz,
         )
+        self._check_serial_side("axi", req)
         if self.axi_connected:  # after validation, as in connect()
             self.axi_close()
         return self._rpc_call(req, commit=self._commit_axi_connected)
@@ -2891,6 +2935,7 @@ class FcapzMcpSession:
             baudrate=baudrate,
             tck_mhz=tck_mhz,
         )
+        self._check_serial_side("uart", req)
         if self.uart_connected:  # after validation, as in connect()
             self.uart_close()
         return self._rpc_call(req, commit=self._commit_uart_connected)
@@ -3454,13 +3499,14 @@ def build_mcp_server(
         quartus_stp executable — the latter spawns a host process, so it is
         rejected unless fcapz-mcp was started with --allow-program (omit it to
         use the server's configured toolchain). For ftdi, `hardware` names
-        the adapter by D2XX description or serial (omit it for the only one
-        attached) and `tck_mhz` sets TCK (default 6). For serial,
+        the adapter by D2XX description or serial (omit it only when a
+        single FlashPro or Digilent adapter is attached; any other FTDI
+        adapter must be named) and `tck_mhz` sets TCK (default 6). For serial,
         `serial_port` (required) names a port this machine lists, e.g. "COM5"
         or "/dev/ttyACM0", and `baudrate` defaults to 1000000. The ELA
         session holds a serial port exclusively, so on serial an EIO works
-        only in a core-manager slot on the ELA's own chain (pass that
-        `chain`) and AXI/UART are not available. A field that does not apply
+        only in a core-manager slot on the ELA's own port and chain (its
+        `chain` defaults to the ELA's) and AXI/UART are not available. A field that does not apply
         to the backend is rejected. `ir_table` picks the JTAG IR codes for
         hw_server/openocd/ftdi; omit it to infer them from the tap name (gw*
         is Gowin, xcku/xcvu/xcau UltraScale, else 7-series) or, on ftdi, from

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import types
+from unittest import mock
 
 import pytest
 
@@ -1049,6 +1050,25 @@ def test_rpc_eio_needing_its_own_serial_transport_is_refused_plainly():
         srv.handle(
             {"cmd": "eio_connect", "backend": "serial", "serial_port": "COM16", "chain": 3}
         )
+
+
+def test_rpc_refused_serial_side_connect_keeps_the_old_one():
+    """The refusal comes before the controller it would replace is dropped:
+    a bad reconnect must not cost the working session."""
+    srv = _rpc_server()
+    srv._analyzer = types.SimpleNamespace(bscan_chain=1, transport=None)
+    srv._analyzer_target = {"backend": "serial", "serial_port": "COM16"}
+    eio, axi, uart = (mock.MagicMock() for _ in range(3))
+    srv._eio, srv._eio_shared = eio, False
+    srv._axi, srv._uart = axi, uart
+    for cmd, chain in (("eio_connect", 3), ("axi_connect", 4), ("uart_connect", 4)):
+        with pytest.raises(ValueError, match="side connections"):
+            srv.handle(
+                {"cmd": cmd, "backend": "serial", "serial_port": "COM16", "chain": chain}
+            )
+    assert (srv._eio, srv._axi, srv._uart) == (eio, axi, uart)
+    for ctrl in (eio, axi, uart):
+        ctrl.close.assert_not_called()
 
 
 def test_discovery_never_probes_the_burst_chain(fake_serial, monkeypatch):
