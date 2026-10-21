@@ -7,7 +7,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **MCP server: `ftdi` and `serial` backends.** `fcapz_connect` reaches an
+  FTDI MPSSE adapter directly (`hardware`, `ir_table`, `tck_mhz`) and the
+  byte-stream TAP bridge over a serial port (`serial_port`, `baudrate`), as
+  the CLI, GUI and RPC already could. `serial_port` must be a port the machine
+  lists, so an agent cannot have the server open an arbitrary path.
+  `ir_table` also takes `"polarfire"` and `"efinix"`.
+
 ### Fixed
+
+- **RPC: an FTDI board is its adapter.** An EIO naming a different FTDI
+  adapter (`hardware`) than the ELA session was taken for the same board.
 
 - **A core built with `USER1_DATA_EN=0` is no longer read as zeros.** Such a
   core has no DATA / timestamp register window and answers it with zeros, so

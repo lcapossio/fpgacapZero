@@ -185,15 +185,23 @@ class RpcServer:
         ours.  Say so plainly instead.  (An EIO on the session's own port
         shares the analyzer's transport and never gets here.)
         """
-        if side and req.get("backend") == "serial":
+        if side:
+            self._refuse_serial_side(req)
+        transport = self._build_transport(req)
+        self._register_opening(transport)
+        return transport
+
+    @staticmethod
+    def _refuse_serial_side(req: Dict[str, Any]) -> None:
+        """Raise if *req* would open a side transport on the serial backend.
+        Callers that replace a controller check this before dropping the old
+        one, so a refused reconnect keeps it."""
+        if req.get("backend") == "serial":
             raise ValueError(
                 "the serial backend does not support EIO/AXI/UART side "
                 "connections on their own transport: the analyzer holds the "
                 "port exclusively, so a second connection to it cannot be opened"
             )
-        transport = self._build_transport(req)
-        self._register_opening(transport)
-        return transport
 
     def _register_opening(self, handle: Any) -> None:
         """Make *handle* (anything with ``cancel()``: a transport, or a
@@ -667,6 +675,9 @@ class RpcServer:
         backend = str(fields.get("backend", "hw_server"))
         if backend == "serial":
             return (backend, str(fields.get("serial_port", "") or "").strip())
+        if backend == "ftdi":
+            # The adapter, by D2XX description or serial; none is the only one.
+            return (backend, fields.get("hardware") or None)
         if backend == "usb_blaster":
             tap = str(fields.get("tap", "auto"))
             if tap in ("", "xc7a100t.tap"):
@@ -1391,7 +1402,6 @@ class RpcServer:
             return self._ok(**analyzer.status())
 
         if cmd == "eio_connect":
-            self._drop_eio()
             chain = int(req.get("chain", 3))
             base_addr = int(req.get("base_addr", 0))
             instance = req.get("instance")
@@ -1407,16 +1417,19 @@ class RpcServer:
                 and (instance is not None or chain == self._analyzer.bscan_chain)
                 and self._same_target(req)
             )
-            if shared and chain == self._analyzer.bscan_chain:
-                # The EIO's selects move MGR_ACTIVE: an analyzer that connect
-                # could not bind (its chain's active slot did not answer then)
-                # is bound to its first ELA slot before they start.
-                self._analyzer.bind_manager_slot()
             target_req = req
             if instance is not None and self._analyzer is not None and not shared:
                 # Another board, named by the fields given; the rest are the
                 # session's, as for the comparison (BUG-243).
                 target_req = self._with_session_target(req)
+            if not shared:
+                self._refuse_serial_side(target_req)
+            self._drop_eio()
+            if shared and chain == self._analyzer.bscan_chain:
+                # The EIO's selects move MGR_ACTIVE: an analyzer that connect
+                # could not bind (its chain's active slot did not answer then)
+                # is bound to its first ELA slot before they start.
+                self._analyzer.bind_manager_slot()
             eio = EioController(
                 self._analyzer.transport if shared
                 else self._new_transport(target_req, side=True),
@@ -1521,6 +1534,7 @@ class RpcServer:
             return self._ok()
 
         if cmd == "axi_connect":
+            self._refuse_serial_side(req)
             if self._axi is not None:
                 try:
                     self._axi.close()
@@ -1603,6 +1617,7 @@ class RpcServer:
             return self._ok(words=[f"0x{w:08X}" for w in words])
 
         if cmd == "uart_connect":
+            self._refuse_serial_side(req)
             if self._uart is not None:
                 try:
                     self._uart.close()
