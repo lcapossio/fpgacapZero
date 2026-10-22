@@ -51,8 +51,12 @@ Other options:
    `read_checkpoint -cell`.
 4. It connects the probe nets to `probe_in` and the clock to `sample_clk`, and
    ties `sample_rst` and `trigger_in` low.
-5. It constrains the BSCANE2 TCK and makes it asynchronous to every other
-   clock. The reference designs' XDC does the same.
+5. It constrains the BSCANE2 TCK. Every path between TCK and the sample clock
+   gets `set_max_delay -datapath_only` of one period of the faster clock.
+   That keeps the ELA's multi-bit settings and readback bundles timed: each
+   one must arrive before the synchronized toggle that tells the other side
+   to copy it. `build.tcl` writes those paths to `cdc.rpt`. The sample clock
+   must be constrained, or the script warns that the crossings are untimed.
 6. It writes a `.prob` file that maps each signal to its bits, so the host
    can name them:
 

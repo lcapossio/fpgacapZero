@@ -31,6 +31,12 @@ opt_design
 place_design
 route_design
 report_timing_summary -file $out/timing.rpt
+# The ELA's clock crossings, held to their set_max_delay bounds.
+set sclk [get_clocks board_clk]
+report_timing -from [get_clocks u_fcapz_ela_tck] -to $sclk -max_paths 10 \
+    -file $out/cdc.rpt
+report_timing -from $sclk -to [get_clocks u_fcapz_ela_tck] -max_paths 10 \
+    -append -file $out/cdc.rpt
 report_utilization    -file $out/utilization.rpt
 write_bitstream -force $here/insert_demo_top.bit
 puts "wrote $here/insert_demo_top.bit"

@@ -270,13 +270,28 @@ proc fcapz::insert {args} {
     connect_net -net ${cell}_gnd_net -objects $tie
 
     # -- 5. constraints -----------------------------------------------------
-    # As in the reference designs' XDC: TCK at the cable's speed (-tck_mhz),
-    # asynchronous to every other clock (the ELA synchronizes its crossings).
+    # TCK at the cable's speed (-tck_mhz). Every crossing between TCK and the
+    # sample clock gets a datapath-only bound of one period of the faster of
+    # the two. Each settings and readback bundle is registered with its
+    # toggle and copied at least two destination clocks after the toggle
+    # reaches its first synchronizer stage, so within that bound it arrives
+    # settled. Hold is not checked on these paths.
     set tck [get_pins -of_objects \
         [get_cells -hierarchical -filter "REF_NAME == BSCANE2 && NAME =~ $cell/*"] \
         -filter {REF_PIN_NAME == TCK}]
-    create_clock -name ${cell}_tck -period [expr {1000.0 / $o(tck_mhz)}] $tck
-    set_clock_groups -asynchronous -group [get_clocks ${cell}_tck]
+    set tck_ns [expr {1000.0 / $o(tck_mhz)}]
+    create_clock -name ${cell}_tck -period $tck_ns $tck
+    set tck_clk [get_clocks ${cell}_tck]
+    set sclks [get_clocks -quiet -of_objects [get_nets $clk_name]]
+    if {[llength $sclks] == 0} {
+        puts "WARNING: fcapz::insert: no clock is defined on $clk_name, so the\
+              ELA's clock crossings are not timed; constrain the sample clock"
+    }
+    foreach sclk $sclks {
+        set bound [expr {min($tck_ns, [get_property PERIOD $sclk])}]
+        set_max_delay -datapath_only -from $tck_clk -to $sclk $bound
+        set_max_delay -datapath_only -from $sclk -to $tck_clk $bound
+    }
 
     write_checkpoint -force $o(out)
 
