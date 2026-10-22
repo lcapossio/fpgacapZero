@@ -3,8 +3,9 @@
 #
 # Arty A7 pins for the openXC7 flow. nextpnr-xilinx reads only set_property on
 # ports and create_clock on ports or nets, so this is arty_a7.xdc without the
-# BSCANE2 TCK clock and its clock group (nextpnr does not time paths between
-# unrelated clocks).
+# BSCANE2 TCK clock (on cell pins) and the asynchronous clock groups. nextpnr
+# therefore checks TCK against its default target and also times the
+# clock-crossing paths; see README.md.
 
 set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports clk]
 create_clock -period 10.000 -name board_clk [get_ports clk]

@@ -38,7 +38,7 @@ python examples/arty_a7/openxc7/build_openxc7.py \
     --nextpnr-src ~/nextpnr-xilinx \
     --fasm2frames ~/prjxray/utils/fasm2frames.py \
     --xc7frames2bit ~/prjxray/build/tools/xc7frames2bit
-FPGACAP_BITFILE=examples/arty_a7/arty_a7_vex_top_openxc7.bit \
+FPGACAP_BITSTREAM_VARIANT=openxc7 \
     PYTHONPATH=host python -m pytest examples/arty_a7/test_hw_integration.py
 ```
 
@@ -60,14 +60,19 @@ and fasm2frames about 80 s on its pure-Python parser.
   `CLKFBOUT_MULT_F`. With the old 130 MHz setting (6.5) that MMCM never
   locked, which held the managed hub in reset. The top now uses ×13 with
   `DIVCLK_DIVIDE` 2, which gives the same 650 MHz VCO.
-- **Timing reports.** nextpnr's xc7 timing model reports clk_100, clk_150
-  and clk_130 failing (about 63, 103 and 108 MHz). The board passes the
-  full suite at 100, 150 and 130 MHz all the same. Treat these numbers as
-  the model's, not as sign-off.
-- **The AXI-monitor ELA.** Its 3.8 MHz JTAG-clock figure is real.
-  `fcapz_ela.v` divides by the constant `WORDS_PER_SAMPLE`. Vivado optimizes
-  that division, but yosys builds an array divider. The ELA reads correctly
-  at the default JTAG clock.
-- **No TCK constraint.** The XDC here is a reduced
-  [`arty_a7_openxc7.xdc`](arty_a7_openxc7.xdc). nextpnr reads constraints
-  only on ports and nets, and does not time paths between unrelated clocks.
+- **Timing reports.** nextpnr's estimates for clk_100, clk_150 and clk_130
+  fail (about 63, 103 and 108 MHz), yet the board passes the full suite at
+  100, 150 and 130 MHz. The XDC has none of Vivado's asynchronous clock
+  groups, so nextpnr also times the clock-crossing paths. And with no TCK
+  constraint, the BSCANE2 clocks are checked against nextpnr's 12 MHz
+  default. Read these figures as estimates from an unsigned-off flow, not as
+  timing closure.
+- **The AXI-monitor ELA's JTAG path.** nextpnr estimates 3.8 MHz for that
+  ELA's TCK domain, against the 12 MHz default. The long path is a divide by
+  the constant `WORDS_PER_SAMPLE` in `fcapz_ela.v`: Vivado optimizes it, but
+  yosys builds an array divider. The ELA read correctly in the hardware suite
+  at hw_server's default JTAG clock. That is the only JTAG clock tested.
+- **Reduced XDC.** [`arty_a7_openxc7.xdc`](arty_a7_openxc7.xdc) has only the
+  pins and the board clock. nextpnr reads `set_property` on ports and
+  `create_clock` on ports or nets, so Vivado's TCK clock (on BSCANE2 pins)
+  and its clock groups are left out.
