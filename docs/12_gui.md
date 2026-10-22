@@ -1,5 +1,11 @@
 # 12 — Desktop GUI (`fcapz-gui`)
 
+> [!WARNING]
+> **The desktop GUI is not actively maintained.**  It still ships and works,
+> but new features and fixes go to the web interface,
+> [`fcapz-web`](18_web_interface.md), which is the recommended graphical
+> front-end.
+
 > [!NOTE]
 > **Goal**: install, launch, and use the PySide6 desktop GUI.  By
 > the end of this chapter you will know what every panel does, how

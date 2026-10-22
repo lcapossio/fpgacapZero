@@ -78,6 +78,11 @@ backgrounds itself and stays alive until you reboot or
 
 ## Step 3: open the GUI, program the FPGA, and probe the core
 
+> [!NOTE]
+> This walkthrough uses the desktop GUI, which is no longer actively
+> maintained.  The web interface ([chapter 18](18_web_interface.md)) has the
+> same Connection, ELA and EIO controls and is the recommended front-end.
+
 Start the desktop GUI:
 
 ```bash

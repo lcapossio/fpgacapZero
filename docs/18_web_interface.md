@@ -1,7 +1,8 @@
 # 18 · Web interface (`fcapz-web`)
 
-`fcapz-web` is a **browser-based front-end** for fpgacapZero — an alternative to
-the desktop GUI ([chapter 12](12_gui.md)) that you can reach from the local
+`fcapz-web` is the **browser-based front-end** for fpgacapZero, and the
+recommended one: the desktop GUI ([chapter 12](12_gui.md)) is no longer actively
+maintained.  You can reach it from the local
 machine **or another machine on the network**. It is a small **FastAPI** server
 that wraps the fcapz host stack and serves a prebuilt browser UI (Vite + React)
 as static files, so running it needs **no Node.js** — just the Python package.
@@ -245,6 +246,6 @@ is served at `/surfer`, decoupled from the Vite output.
 
 - [Chapter 11 · JSON-RPC server](11_rpc_server.md) — the full command schema the
   web UI speaks.
-- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative.
+- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative (not actively maintained).
 - [Chapter 15 · Export formats](15_export_formats.md) — what the downloaded
   VCD / CSV / JSON contain.

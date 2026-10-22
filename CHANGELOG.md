@@ -28,6 +28,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
   `exchange()` give it the adapter without a chain scan.
 
+### Changed
+
+- **The desktop GUI (`fcapz-gui`) is no longer actively maintained.** It still
+  ships, but development goes to the web interface (`fcapz-web`), the
+  recommended graphical front-end. The README no longer advertises the desktop
+  GUI, and the manual marks it as unmaintained.
+
 ### Fixed
 
 - **UltraScale USER opcodes.** `IR_TABLE_XILINX_ULTRASCALE` / `IR_TABLE_US`

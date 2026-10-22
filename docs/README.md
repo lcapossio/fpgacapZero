@@ -32,7 +32,7 @@ back to individual chapters as you need them.
 | 09 | [Python API](09_python_api.md) | Complete reference for the `fcapz` Python package: `Analyzer`, `EioController`, `EjtagAxiController`, `EjtagUartController`, transports, events module, with worked examples. |
 | 10 | [CLI reference](10_cli_reference.md) | Every `fcapz` subcommand, every flag, with copy-pasteable examples. |
 | 11 | [JSON-RPC server](11_rpc_server.md) | Driving fpgacapZero from another language or process: the line-delimited JSON-RPC protocol, full schema, and all commands. |
-| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
+| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | Not actively maintained; prefer the web interface (chapter 18). The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
 | 13 | [Register map](13_register_map.md) | The full register map for all four cores. Stub chapter that links straight to the canonical reference at [`specs/register_map.md`](specs/register_map.md). |
 | 14 | [Transports](14_transports.md) | OpenOCD, AMD/Xilinx hw_server, Quartus USB-Blaster, the named AMD/Xilinx `IR_TABLE_*` presets, the readiness wait, and how to add a new transport backend. |
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |

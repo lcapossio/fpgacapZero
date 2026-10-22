@@ -95,6 +95,10 @@ console script:
 $ fcapz-gui                             # launches the desktop GUI
 ```
 
+The desktop GUI is not actively maintained: the web interface
+(`pip install -e ".[web]"`, then `fcapz-web`; see
+[chapter 18](18_web_interface.md)) is the recommended graphical front-end.
+
 The GUI is fully optional — the headless install above does not
 require any Qt dependency, which keeps your CI runners and
 headless servers slim.  See [chapter 12](12_gui.md) for the GUI
