@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Arty A7: an open-source build with openXC7.**
+  `examples/arty_a7/openxc7/build_openxc7.py` builds the VexRiscv reference
+  design with yosys, nextpnr-xilinx and prjxray instead of Vivado. Its
+  bitstream passes the full Arty hardware suite. The 130 MHz MMCM now uses
+  an integer multiplier (×13, ÷2), because nextpnr-xilinx truncated the
+  fractional 6.5 and that MMCM never locked.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
