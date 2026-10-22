@@ -10,13 +10,14 @@ bitstream can run the same hardware suite:
 
     python examples/arty_a7/openxc7/build_openxc7.py \\
         --prjxray-db ~/prjxray-db --nextpnr-src ~/nextpnr-xilinx
-    FPGACAP_BITFILE=examples/arty_a7/arty_a7_vex_top_openxc7.bit \\
+    FPGACAP_BITSTREAM_VARIANT=openxc7 \\
         python -m pytest examples/arty_a7/test_hw_integration.py
 
 Tools are taken from PATH unless given by flag or environment variable
 (YOSYS, NEXTPNR_XILINX, BBASM, FASM2FRAMES, XC7FRAMES2BIT, PRJXRAY_DB,
 NEXTPNR_XILINX_SRC). The chip database is built once from the nextpnr-xilinx
-sources and cached in the build directory; pass --chipdb to use an existing one.
+sources and cached in the build directory, rebuilt when the nextpnr-xilinx or
+prjxray-db revision changes; pass --chipdb to use an existing one.
 The firmware image is built as for Vivado, or reused with --skip-fw.
 """
 
@@ -68,7 +69,22 @@ def _load(name: str, path: Path):
 
 
 def _tool(flag: str | None, env: str, default: str) -> str:
-    return flag or os.environ.get(env) or default
+    """A bare name is looked up on PATH; a path is made absolute, since the
+    tools run in the build directory."""
+    tool = flag or os.environ.get(env) or default
+    if "/" in tool or os.sep in tool:
+        return str(Path(tool).expanduser().resolve())
+    return tool
+
+
+def _revision(path: Path) -> str:
+    """Git revision of a checkout (with a dirty marker), or '' if not a repo."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(path), "describe", "--always", "--dirty", "--abbrev=40"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
 
 
 def _run(cmd: list[str], log: Path, cwd: Path) -> None:
@@ -109,9 +125,10 @@ def main() -> int:
     if not (family_db / PART / "part.yaml").exists():
         sys.exit(f"[openxc7] no {PART}/part.yaml under {family_db}")
 
-    # Firmware image: $readmemh("fw.mem") resolves against yosys's cwd.
+    # The vendored core is verified either way; --skip-fw only skips the
+    # firmware compile.  $readmemh("fw.mem") resolves against yosys's cwd.
+    _load("vex_get_deps", COMMON_VEX / "get_deps.py").fetch_vexriscv()
     if not args.skip_fw:
-        _load("vex_get_deps", COMMON_VEX / "get_deps.py").fetch_vexriscv()
         _load("vex_build_fw", COMMON_VEX / "fw" / "build_fw.py").build_firmware(
             VEX_DIR / "fw", out)
     fw = VEX_DIR / "fw" / "fw.mem"
@@ -131,21 +148,37 @@ def main() -> int:
           f'write_json "{json_net.as_posix()}"'],
          out / "yosys.log", out)
 
-    # 2. chip database (once)
-    chipdb = Path(args.chipdb) if args.chipdb else out / f"{PART}.bin"
-    if not chipdb.exists():
+    # 2. chip database. One built here is kept and reused while the
+    # nextpnr-xilinx and prjxray-db revisions it came from are unchanged
+    # (its layout follows nextpnr's constant IDs); --chipdb is used as given.
+    if args.chipdb:
+        chipdb = Path(args.chipdb).expanduser().resolve()
+        if not chipdb.exists():
+            sys.exit(f"[openxc7] no chipdb at {chipdb}")
+    else:
         src = args.nextpnr_src or os.environ.get("NEXTPNR_XILINX_SRC")
         if not src:
             sys.exit("[openxc7] no chipdb: pass --chipdb or --nextpnr-src")
         src = Path(src).expanduser().resolve()
-        bba = out / f"{PART}.bba"
-        _run([sys.executable, str(src / "xilinx" / "python" / "bbaexport.py"),
-              "--device", PART, "--bba", str(bba)], out / "bbaexport.log", src / "xilinx")
-        built = [p for p in (src / "build" / "bbasm", src / "build" / "bba" / "bbasm")
-                 if p.exists()]
-        bbasm = _tool(args.bbasm, "BBASM", str(built[0]) if built else "bbasm")
-        _run([bbasm, "-l", str(bba), str(chipdb)], out / "bbasm.log", out)
-        bba.unlink()
+        chipdb = out / f"{PART}.bin"
+        stamp = chipdb.with_suffix(".stamp")
+        want = (f"nextpnr-xilinx {_revision(src)}\n"
+                f"prjxray-db {family_db} {_revision(family_db)}\n")
+        fresh = (chipdb.exists() and stamp.exists()
+                 and stamp.read_text() == want and "dirty" not in want)
+        if not fresh:
+            bba = out / f"{PART}.bba"
+            _run([sys.executable, str(src / "xilinx" / "python" / "bbaexport.py"),
+                  "--device", PART, "--xray", str(family_db), "--bba", str(bba)],
+                 out / "bbaexport.log", src / "xilinx")
+            built = [p for p in (src / "build" / "bbasm", src / "build" / "bba" / "bbasm")
+                     if p.exists()]
+            bbasm = _tool(args.bbasm, "BBASM", str(built[0]) if built else "bbasm")
+            partial = chipdb.with_suffix(".bin.partial")
+            _run([bbasm, "-l", str(bba), str(partial)], out / "bbasm.log", out)
+            os.replace(partial, chipdb)
+            stamp.write_text(want)
+            bba.unlink()
 
     # 3. place and route
     fasm = out / f"{TOP}.fasm"
