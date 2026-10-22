@@ -75,6 +75,7 @@ stay here.
 | `build_arty_vex.py` / `build_arty_vex.tcl` | VexRiscv build (verify core + build firmware + Vivado) |
 | `build_arty.tcl` | Vivado script for the legacy MicroBlaze top |
 | `build_vhdl.py` / `build_arty_vhdl.tcl` | Mixed-language VHDL (VexRiscv) build |
+| `openxc7/` | Open-source build of the VexRiscv top (yosys + nextpnr-xilinx, no Vivado) |
 | `arty_a7.cfg` | OpenOCD config for the onboard USB-JTAG adapter |
 | `arty_a7_hs3.cfg` | OpenOCD config for an external Digilent HS3 cable |
 | `test_hw_integration.py` | Hardware integration regression tests (default `vex`; `FPGACAP_BITSTREAM_VARIANT=verilog`/`vhdl` for the other tops) |
@@ -127,6 +128,10 @@ The `microblaze` variant needs a MicroBlaze licence and `mb-gcc` and writes
 subsystem (needs the RISC-V toolchain) and writes `arty_a7_top_vhdl.bit`.
 Its ELA, EIO, AXI monitor and EJTAG-AXI bridge are the VHDL cores. The VHDL
 bridge has no streaming read, so `stream_read` is not available on this image.
+
+The VexRiscv top also builds without Vivado, with the open-source openXC7
+flow; see [`openxc7/README.md`](openxc7/README.md). That bitstream passes the
+same hardware suite.
 
 ## Connect With hw_server
 
