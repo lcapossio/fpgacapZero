@@ -17,7 +17,8 @@ Tools are taken from PATH unless given by flag or environment variable
 (YOSYS, NEXTPNR_XILINX, BBASM, FASM2FRAMES, XC7FRAMES2BIT, PRJXRAY_DB,
 NEXTPNR_XILINX_SRC). The chip database is built once from the nextpnr-xilinx
 sources and cached in the build directory, rebuilt when the nextpnr-xilinx or
-prjxray-db revision changes; pass --chipdb to use an existing one.
+prjxray-db revision changes, is dirty, or cannot be read from git; pass
+--chipdb to use an existing one.
 The firmware image is built as for Vivado, or reused with --skip-fw.
 """
 
@@ -162,10 +163,13 @@ def main() -> int:
         src = Path(src).expanduser().resolve()
         chipdb = out / f"{PART}.bin"
         stamp = chipdb.with_suffix(".stamp")
-        want = (f"nextpnr-xilinx {_revision(src)}\n"
-                f"prjxray-db {family_db} {_revision(family_db)}\n")
-        fresh = (chipdb.exists() and stamp.exists()
-                 and stamp.read_text() == want and "dirty" not in want)
+        revs = (_revision(src), _revision(family_db))
+        want = (f"nextpnr-xilinx {revs[0]}\n"
+                f"prjxray-db {family_db} {revs[1]}\n")
+        # An unknown (not a git checkout) or dirty revision forces a rebuild.
+        known = all(r and not r.endswith("-dirty") for r in revs)
+        fresh = (known and chipdb.exists() and stamp.exists()
+                 and stamp.read_text() == want)
         if not fresh:
             bba = out / f"{PART}.bba"
             _run([sys.executable, str(src / "xilinx" / "python" / "bbaexport.py"),
