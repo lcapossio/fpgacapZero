@@ -322,6 +322,16 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             t.connect()
             self.assertEqual(t.tap, "GW1NR-9C.tap")
 
+    def test_connect_closes_a_live_socket_first(self):
+        old, new = MagicMock(), MagicMock()
+        new.recv.return_value = b""
+        t = OpenOcdTransport(tap="GW1NR-9C.tap")
+        t._sock = old
+        with patch("socket.create_connection", return_value=new):
+            t.connect()
+        old.close.assert_called_once()
+        self.assertIs(t._sock, new)
+
     def test_connect_keeps_explicit_tap(self):
         """A concrete tap name is left untouched (no auto-resolution)."""
         mock_sock = MagicMock()
@@ -359,12 +369,10 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_XILINX7)
 
     def test_ir_table_ultrascale_preset(self):
-        """Constructing with the UltraScale preset switches the IR codes."""
+        """Single-die UltraScale USER1-4 are the 7-series codes (KU035 BSDL:
+        000010, 000011, 100010, 100011), not 0x24-0x27."""
         t = OpenOcdTransport(ir_table=OpenOcdTransport.IR_TABLE_US)
-        self.assertEqual(t.ir_table[1], 0x24)  # USER1
-        self.assertEqual(t.ir_table[2], 0x25)  # USER2
-        self.assertEqual(t.ir_table[3], 0x26)  # USER3
-        self.assertEqual(t.ir_table[4], 0x27)  # USER4
+        self.assertEqual(t.ir_table, {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23})
 
     def test_ir_table_gowin_preset(self):
         """Gowin GW_JTAG ER1/ER2 have their own IR opcodes."""
@@ -1739,14 +1747,33 @@ class XilinxHwServerConnectFailureTests(unittest.TestCase):
         self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX7)
 
     def test_ir_table_ultrascale_preset(self):
-        """Constructing with the UltraScale preset switches the IR codes."""
+        """Single-die UltraScale uses the 7-series USER opcodes (BSDL)."""
         t = XilinxHwServerTransport(
             ir_table=XilinxHwServerTransport.IR_TABLE_US,
         )
-        self.assertEqual(t.ir_table[1], 0x24)
-        self.assertEqual(t.ir_table[2], 0x25)
-        self.assertEqual(t.ir_table[3], 0x26)
-        self.assertEqual(t.ir_table[4], 0x27)
+        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX7)
+
+    def test_openocd_zynq_us_table_is_the_bsdl_codes(self):
+        """Zynq US+ (12-bit IR): USER1-4 = 0x902, 0x903, 0x922, 0x923.  The
+        hw_server table differs: xsdb translates raw scans (KV260 sweep)."""
+        self.assertEqual(
+            OpenOcdTransport.IR_TABLE_XILINX_ZYNQUS,
+            {1: 0x902, 2: 0x903, 3: 0x922, 4: 0x923},
+        )
+        self.assertEqual(XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS[1], 0x024)
+
+    def test_connect_closes_a_live_xsdb_first(self):
+        """A second connect() (two Analyzers sharing the transport) must not
+        leave the first xsdb running."""
+        old = MagicMock()
+        t = XilinxHwServerTransport()
+        t._proc = old
+        with patch("shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError):  # stops before a new xsdb
+                t.connect()
+        old.stdin.write.assert_called_with("exit\n")
+        old.wait.assert_called_once()
+        self.assertIsNone(t._proc)
 
     def test_parse_bits_u32_raises_on_no_bit_string(self):
         """_parse_bits_u32() raises RuntimeError on malformed xsdb output."""

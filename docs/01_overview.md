@@ -124,17 +124,19 @@ want more debug endpoints than free USER chains: `fcapz_debug_multi_xilinx7`,
 `fcapz_debug_multi_xilinxus` and `fcapz_debug_multi_intel` share one
 vendor-free core and differ only in the TAP primitive.
 
-| Core | Default chain | Default IR (7-series) | Default IR (UltraScale) |
-|------|---------------|-----------------------|-------------------------|
-| ELA control | USER1 | `0x02` | `0x24` |
-| ELA burst data | USER1 by default; USER2 for legacy dual-chain burst | `0x02` / `0x03` | `0x24` / `0x25` |
-| EIO | USER3 | `0x22` | `0x26` |
-| EJTAG-AXI / EJTAG-UART | USER4 | `0x23` | `0x27` |
+| Core | Default chain | Default IR (7-series and single-die UltraScale, 6-bit IR) |
+|------|---------------|-----------------------------------------------------------|
+| ELA control | USER1 | `0x02` |
+| ELA burst data | USER1 by default; USER2 for legacy dual-chain burst | `0x02` / `0x03` |
+| EIO | USER3 | `0x22` |
+| EJTAG-AXI / EJTAG-UART | USER4 | `0x23` |
 
-The IR codes differ between 7-series and UltraScale, but you don't
-have to memorise either set: the Python transport ships named
-`IR_TABLE_XILINX7` and `IR_TABLE_XILINX_ULTRASCALE` (alias
-`IR_TABLE_US`) presets — see [chapter 14](14_transports.md).
+Multi-die UltraScale(+) parts (KU085, KU115, most Virtex UltraScale+) and
+Zynq UltraScale+ have a longer IR with other codes.  You don't have to look
+any of them up: on UltraScale(+) the `hw_server` backend uses xsdb's
+register-IR mode, which finds each part's USER instructions itself, and the
+transports ship named presets for raw-opcode backends — see
+[chapter 14](14_transports.md).
 
 ELA and EIO are independent cores, but they may be hosted either on
 separate chains or in managed slots on one chain.  The two bridges (AXI
@@ -221,7 +223,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Vendor | TAP primitive | RTL wrapper | Hardware-validated |
 |--------|--------------|-------------|---------------------|
 | AMD/Xilinx 7-series (Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000) | `BSCANE2` (unisim) | [`fcapz_*_xilinx7.v`](../rtl/) | ✅ |
-| AMD/Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ Kria KV260 (Zynq UltraScale+ MPSoC); standalone Kintex / Virtex UltraScale(+) not board-validated |
+| AMD/Xilinx UltraScale / UltraScale+ | `BSCANE2` (unisim) | [`fcapz_*_xilinxus.v`](../rtl/) (thin shims over `_xilinx7`) | ✅ Kria KV260 (Zynq UltraScale+ MPSoC); Kintex UltraScale KU035 on a proprietary board; standalone UltraScale+ not board-validated |
 | Lattice ECP5 | `JTAGG` | [`fcapz_*_ecp5.v`](../rtl/) | ❌ |
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |

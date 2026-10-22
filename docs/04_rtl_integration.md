@@ -28,7 +28,7 @@ features they expose.
 | Vendor / family | Wrapper suffix | Hardware-validated |
 |---|---|---|
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
-| AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ❌ implemented as a thin shim over `_xilinx7`, lint-clean, not yet HW-validated |
+| AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ✅ Kintex UltraScale KU035 on a proprietary board, over hw_server `-register` mode; Virtex UltraScale not yet HW-validated |
 | AMD/Xilinx Zynq UltraScale+ MPSoC | `_xilinxus` | ✅ Kria KV260 (`xck26`) over hw_server `-register` mode |
 | AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `_xilinxus` | ❌ same shim, not yet HW-validated on a standalone part |
 | Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
@@ -530,6 +530,15 @@ Vivado will tell you `Width mismatch ... probe_in expected 16 bits, got 8`.
 Either widen your probe (`{8'h0, my_8bit_signal}`) or set
 `SAMPLE_W=8`.
 
+### Only sample bits [31:0] can trigger without `WIDE_TRIG`
+
+Without `WIDE_TRIG=1`, comparator A's value and mask are 32 bits wide, so
+an ELA wider than 32 bits can trigger only on sample bits `[31:0]`.  The
+limit shows up only at `configure()` time, as "trigger value/mask exceed 32
+bits".  Put the signals you want to trigger on in the low 32 bits of
+`probe_in`, or build with `WIDE_TRIG=1`.  `probe()` reports
+`has_wide_trigger`.
+
 ### DEPTH must be a power of 2
 
 ```verilog
@@ -591,18 +600,22 @@ vendors is a one-line change to your top-level:
 ```
 
 The host stack does not need to change — the same
-`Analyzer.connect()` call works against either bitstream.  The only
-host-side knob you may need to flip is the `ir_table` preset, since
-UltraScale uses different IR opcodes than 7-series:
+`Analyzer.connect()` call works against either bitstream.  On UltraScale(+)
+use xsdb's register-IR mode, which looks up each part's USER instructions
+(the CLI, GUI, web UI and MCP pick it from the part name):
 
 ```python
 from fcapz import XilinxHwServerTransport
 transport = XilinxHwServerTransport(
     port=3121,
     fpga_name="xcku040",
-    ir_table=XilinxHwServerTransport.IR_TABLE_US,   # USER1=0x24, ...
+    use_register_ir=True,
 )
 ```
+
+Single-die UltraScale parts also answer the 7-series raw opcodes
+(`USER1..USER4 = 0x02, 0x03, 0x22, 0x23`); multi-die parts (KU085, KU115,
+most Virtex UltraScale+) have a longer IR.
 
 See [chapter 14](14_transports.md).
 

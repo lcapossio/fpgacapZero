@@ -661,9 +661,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
 - **One device on the chain.** `connect()` reads the IDCODE chain and
   measures the IR length.  Only single-device chains are supported.  The IR
   table comes from the IDCODE: PolarFire (`0x20` / `0x21`), AMD/Xilinx
-  7-series (IR length 6) or Gowin.  For anything else, UltraScale included,
-  pass `ir_table=` (CLI: `--tap xcku…` / `xcvu…` / `xcau…` selects the
-  UltraScale table).
+  (IR length 6: 7-series and single-die UltraScale, which share the USER
+  codes) or Gowin.  For anything else, multi-die UltraScale(+) included,
+  pass `ir_table=` with the part's codes from its BSDL.
 - **Burst.** `burst` defaults to the family's wrapper default: on for
   PolarFire and AMD/Xilinx (single chain), off for Gowin.  `burst=False`
   (CLI `--no-burst`) reads through the pipelined register window instead.
@@ -714,7 +714,7 @@ XilinxHwServerTransport.IR_TABLE_XILINX7
 # {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
 
 XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE
-# {1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27}
+# {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}  (single-die UltraScale, 6-bit IR)
 
 XilinxHwServerTransport.IR_TABLE_US        # alias for IR_TABLE_XILINX_ULTRASCALE
 ```
@@ -728,8 +728,8 @@ swap one for the other without changing the IR table.
 | Family | Preset | Extra constructor args |
 |---|---|---|
 | AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `IR_TABLE_XILINX7` (default; you can omit `ir_table=`) | none |
-| AMD/Xilinx Kintex / Virtex UltraScale (standalone) | `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) | none |
-| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `IR_TABLE_XILINX_ULTRASCALE` | none |
+| AMD/Xilinx Kintex / Virtex UltraScale (standalone) | none on hw_server; `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) for raw opcodes on single-die parts | `use_register_ir=True` on hw_server |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | none on hw_server; raw opcodes from the part's BSDL | `use_register_ir=True` on hw_server |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
 | Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
@@ -747,9 +747,19 @@ the scan the DAP bit sits on is not established (next section).
 
 CLI, GUI, RPC (web UI) and MCP users don't have to pick manually: a tap
 named `xck26` (or any `xck*` / `xczu*`) selects `use_register_ir=True`,
-and `xcku040` (any `xcku*` / `xcvu*` / `xcau*`) selects
-`IR_TABLE_XILINX_ULTRASCALE` with a 6-bit IR.  All of them use
-`fcapz.transport.hw_server_chain_shape_kwargs`.
+and so does a standalone UltraScale(+) part (any `xcku*` / `xcvu*` /
+`xcau*`).  All of them use `fcapz.transport.hw_server_chain_shape_kwargs`.
+
+The raw USER opcodes are not one table across UltraScale(+): single-die
+parts with a 6-bit IR use the 7-series codes (`0x02`, `0x03`, `0x22`,
+`0x23`, per e.g. the KU035 BSDL), while multi-die parts have a longer IR
+(KU085 / KU115: 12 bits, `USER1 = 0x0A4`) and Zynq UltraScale+ uses
+`0x902`, `0x903`, `0x922`, `0x923`.  Register-IR mode sidesteps all of
+them.  It is validated on a Kintex UltraScale KU035 (on a proprietary
+board, fcapz 0.5.0): two 144-bit × 1024 ELAs on separate sample clocks on
+USER3, sharing the JTAG port with Vivado's `dbg_hub` (USER1) and a
+MicroBlaze MDM (USER2), ran 20 full burst captures while another xsdb
+session held the JTAG UART, with TCK constrained at 30 MHz.
 
 ### Zynq UltraScale+ MPSoC — how the JTAG chain works with xsdb
 
@@ -771,8 +781,8 @@ requiring exactly 49 shifts.
 
 #### Why raw hex opcodes don't work on MPSoC
 
-On 7-series and standalone UltraScale(+), fcapz shifts USER opcodes as
-raw hex values (`irshift -hex 6 02` for USER1).  On MPSoC, xsdb
+On 7-series, fcapz shifts USER opcodes as raw hex values
+(`irshift -hex 6 02` for USER1).  On MPSoC, xsdb
 presents the PL TAP as a "virtual" target at the device level — and
 its internal chain-handling intercepts the `irshift -hex` path in ways
 that prevent USER2/3/4 from being reached:
@@ -912,7 +922,7 @@ t = XilinxHwServerTransport(
     port=3121,
     fpga_name="xcku040",                                    # not xc7a100t
     bitfile="my_ultrascale_design.bit",
-    ir_table=XilinxHwServerTransport.IR_TABLE_US,           # ← UltraScale codes
+    use_register_ir=True,                     # xsdb looks up USER1-4 per part
 )
 a = Analyzer(t)
 a.connect()

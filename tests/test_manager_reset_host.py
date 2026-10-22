@@ -206,6 +206,18 @@ class OwnerTokenTests(unittest.TestCase):
         t.release_manager_ownership()
         self.assertEqual(t.regs[ADDR_MGR_OWNER], 0xBEEF)
 
+    def test_release_restores_the_selected_chain(self):
+        """A reconnect closes the old session after the caller selected the
+        chain the new one starts on; releasing must not move it."""
+        t = ManagerTransport()
+        t._active_chain = 1
+        t.select_chain = lambda chain: setattr(t, "_active_chain", chain)
+        t.select_manager_instance_cached(1, 0xF008, 1)
+        t.select_chain(3)
+        t.release_manager_ownership()
+        self.assertEqual(t.regs[ADDR_MGR_OWNER], 0)
+        self.assertEqual(t._active_chain, 3)
+
     def test_manager_without_owner_register_is_not_written(self):
         t = ManagerTransport(caps=0x7)
         t.select_manager_instance_cached(1, 0xF008, 1)

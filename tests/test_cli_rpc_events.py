@@ -960,28 +960,13 @@ class ChainShapeKwargsTests(unittest.TestCase):
         kwargs = _chain_shape_kwargs("xczu7ev")
         self.assertEqual(kwargs, {"use_register_ir": True})
 
-    def test_standalone_kintex_ultrascale_no_dr_padding(self):
-        """Standalone US parts are single-device chains: no DAP bypass bits."""
-        kwargs = _chain_shape_kwargs("xcku040")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-        )
-        self.assertEqual(kwargs["ir_length"], 6)
-        self.assertNotIn("dr_extra_bits", kwargs)
-
-    def test_standalone_virtex_ultrascale_plus(self):
-        kwargs = _chain_shape_kwargs("xcvu9p")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-        )
-        self.assertEqual(kwargs["ir_length"], 6)
-
-    def test_standalone_artix_ultrascale_plus(self):
-        kwargs = _chain_shape_kwargs("xcau15p")
-        self.assertIs(
-            kwargs["ir_table"], XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-        )
-        self.assertEqual(kwargs["ir_length"], 6)
+    def test_standalone_ultrascale_uses_register_ir(self):
+        """xsdb looks up each part's USER instructions: multi-die parts
+        (xcku115, most Virtex US+) have a longer IR than any fixed table
+        assumes (validated on a KU035)."""
+        for part in ("xcku035", "xcku115", "xcvu9p", "xcau15p"):
+            with self.subTest(part=part):
+                self.assertEqual(_chain_shape_kwargs(part), {"use_register_ir": True})
 
     def test_7_series_artix_returns_empty_dict(self):
         """Empty dict means 'use all transport defaults'."""
@@ -1025,17 +1010,14 @@ class RpcChainShapeTests(unittest.TestCase):
         self.assertTrue(t.use_register_ir)
         self.assertEqual(t.dr_extra_bits, 0)
 
-    def test_standalone_ultrascale_uses_us_table_and_6_bit_ir(self):
+    def test_standalone_ultrascale_uses_register_ir(self):
         t = self._transport(tap="xcku040")
-        self.assertFalse(t.use_register_ir)
-        self.assertEqual(t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE)
-        self.assertEqual(t.ir_length, 6)
+        self.assertTrue(t.use_register_ir)
+        self.assertEqual(t.dr_extra_bits, 0)
 
     def test_explicit_ir_table_wins_over_the_inferred_one(self):
-        t = self._transport(tap="xcku040", ir_table="xilinx7")
-        self.assertNotEqual(
-            t.ir_table, XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-        )
+        t = self._transport(tap="xc7a100t", ir_table="gowin")
+        self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_GOWIN)
 
     def test_7_series_keeps_transport_defaults(self):
         t = self._transport(tap="xc7a100t")

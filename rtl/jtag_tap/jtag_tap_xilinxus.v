@@ -22,16 +22,16 @@
 //                       - Virtex UltraScale+ (VU3P/5P/7P/9P/11P/13P/...)
 //                       - Zynq UltraScale+   (ZU2/3/4/5/6/7/9/11/15/17/19/...)
 //
-// USER chain → IR encoding (verified in UG570 / UG574):
-//   CHAIN=1 → USER1 (IR=0x24)   note: differs from 7-series IR=0x02
-//   CHAIN=2 → USER2 (IR=0x25)
-//   CHAIN=3 → USER3 (IR=0x26)
-//   CHAIN=4 → USER4 (IR=0x27)
+// USER chain → IR encoding, from the parts' BSDL files:
+//   single-die parts (6-bit IR, e.g. KU035): the 7-series codes,
+//     USER1..USER4 = 0x02, 0x03, 0x22, 0x23
+//   multi-die parts (KU085/KU115: 12-bit IR, USER1 = 0x0A4) and Zynq
+//     UltraScale+ (12-bit IR, USER1 = 0x902) have longer codes
 //
 // The IR-to-USER mapping is handled inside BSCANE2 and is transparent
-// to this wrapper; what the host needs is the matching ir_table entry.
-// The Python host has a built-in `XilinxHwServerTransport.IR_TABLE_US`
-// preset that callers can pass as `ir_table=...` for UltraScale boards.
+// to this wrapper.  The host's hw_server backend uses xsdb's register-IR
+// mode on UltraScale(+) parts, which looks the instruction up per device;
+// raw-opcode backends (OpenOCD, FTDI) need the part's codes in ir_table.
 //
 // Versal devices (XCVM, XCVC, XCVP, XCVE, XCVH) use a different TAP
 // primitive (BSCANE2_INST or via the CIPS BlockRAM); they are NOT

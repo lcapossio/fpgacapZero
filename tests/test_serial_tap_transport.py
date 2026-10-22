@@ -243,6 +243,25 @@ def _connect(fake_serial, **kwargs):
     return t, fake_serial["obj"]
 
 
+def test_connect_again_closes_the_open_port_first(fake_serial):
+    """A second connect() (two Analyzers sharing the transport) releases the
+    port it holds before opening it again; the OS lets only one handle in."""
+    t, port = _connect(fake_serial)
+    with mock.patch.object(t, "_close", wraps=t._close) as close:
+        t.connect()
+    close.assert_called_once()
+    assert t.proto_version == 2
+
+
+def test_connect_forgets_the_old_sessions_managers(fake_serial):
+    """A new session may reach another image: a chain cached as having no
+    manager would otherwise skip slot selection there."""
+    t, _ = _connect(fake_serial)
+    with mock.patch.object(t, "forget_manager_chains") as forget:
+        t.connect()
+    forget.assert_called_once()
+
+
 # -- identity ---------------------------------------------------------------
 
 def test_connect_reads_identity(fake_serial):

@@ -337,8 +337,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     example ``"Embedded FlashPro5 A"``) or serial; by default the single
     known JTAG adapter's channel A is used.  ``ir_table`` defaults to the
     family read from the device IDCODE: PolarFire (``0x20`` / ``0x21``),
-    AMD/Xilinx 7-series (``0x02`` / ``0x03`` / ``0x22`` / ``0x23``; pass the
-    UltraScale table explicitly) or Gowin.  ``burst`` defaults to that
+    AMD/Xilinx 7-series and single-die UltraScale (``0x02`` / ``0x03`` /
+    ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that
     family's wrapper default (on for PolarFire and AMD/Xilinx, off for
     Gowin).  ``layout`` overrides the adapter's ``(ADBUS value, direction)``.
 

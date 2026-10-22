@@ -910,21 +910,28 @@ class Transport(ABC):
         """Clear this session's owner token from the managers it claimed.
 
         A manager whose ``MGR_OWNER`` holds another value (another session
-        took it, or the hub was reset) is left alone.
+        took it, or the hub was reset) is left alone.  The chain selected
+        before is selected again after: a reconnect closes the old session
+        after its caller picked the chain the new one starts on.
         """
         token = self.__dict__.get("_fcapz_owner_token")
         owned = self.__dict__.pop("_fcapz_owned_managers", set())
         if token is None or not owned:
             return
         with self.transaction_lock():
-            for chain, base in sorted(owned):
-                try:
-                    self.select_chain(chain)
-                except NotImplementedError:
-                    if chain != 1:
-                        continue
-                if int(self.read_reg(base + 0x24)) == token:
-                    self.write_reg(base + 0x24, 0)
+            selected = self._current_chain()
+            try:
+                for chain, base in sorted(owned):
+                    try:
+                        self.select_chain(chain)
+                    except NotImplementedError:
+                        if chain != 1:
+                            continue
+                    if int(self.read_reg(base + 0x24)) == token:
+                        self.write_reg(base + 0x24, 0)
+            finally:
+                if selected is not None:
+                    self.select_chain(selected)
 
     def _release_ownership_on_close(self) -> None:
         """:meth:`release_manager_ownership` for ``close()``, best effort.
@@ -983,6 +990,11 @@ class Transport(ABC):
     @abstractmethod
     def connect(self) -> None:
         """Open the transport connection.
+
+        On a transport that is already connected it never leaks the old
+        session: the backends close it and reconnect (the FTDI transport
+        keeps its open channel).  Controllers sharing a connected transport
+        use ``attach()`` instead.
 
         Raises ``RuntimeError`` if the backend cannot be reached (e.g. xsdb
         not on PATH, OpenOCD port not listening).  Raises ``OSError`` or
@@ -1497,11 +1509,14 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     # supports out of the box.  Pass via the ``ir_table`` constructor
     # argument or assign one of these to ``ir_table`` after construction.
     # The 7-series preset is the default and matches DEFAULT_IR_TABLE
-    # above; the UltraScale preset is documented in UG570 / UG574 and
-    # used by the rtl/jtag_tap_xilinxus.v wrapper instantiations.
+    # above.  Single-die UltraScale parts (6-bit IR) use the same USER1-4
+    # opcodes, per their BSDL files (KU025..KU095); the UltraScale preset is
+    # kept as a name for them.  Multi-die (SSI) parts have a longer IR and
+    # other codes (KU085/KU115: 12 bits, USER1 = 0x0A4): take those from the
+    # part's BSDL, or use hw_server's register-IR mode.
     IR_TABLE_XILINX7: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
-        1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
+        1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23,
     }
     # Gowin GW_JTAG exposes ER1/ER2 IR opcodes.  Current RTL wrappers still
     # instantiate one GW_JTAG primitive each, so combining cores should use the
@@ -1521,11 +1536,12 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this
     # preset is only useful when your openocd.cfg already declares the
-    # xck26 / xczu* chain correctly.  Values parallel
-    # ``XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS`` for symmetry.
+    # xck26 / xczu* chain correctly.  These are the 12-bit USER1-4 codes of the
+    # Zynq US+ BSDL files; ``XilinxHwServerTransport.IR_TABLE_XILINX_ZYNQUS``
+    # differs because xsdb translates raw IR scans at its PL-target level.
     # **Not yet hardware-validated via OpenOCD** — ship with caution.
     IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
-        1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
+        1: 0x902, 2: 0x903, 3: 0x922, 4: 0x923,
     }
     # Alias so callers can write IR_TABLE_US for brevity.
     IR_TABLE_US = IR_TABLE_XILINX_ULTRASCALE
@@ -1572,6 +1588,8 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         self.burst_data_chain = int(burst_data_chain)
 
     def connect(self) -> None:
+        if self._sock is not None:
+            self.close()
         self._forget_hub_state()
         self._sock = socket.create_connection(
             (self.host, self.port),
@@ -2051,6 +2069,11 @@ class TapBridgeTransport(Transport):
 
     # -- lifecycle ----------------------------------------------------------
     def connect(self) -> None:
+        if self._open_channel:
+            self.close()
+        # A new session may reach another image: nothing cached about the
+        # old one's managers holds.
+        self._forget_hub_state()
         self._open()
         self._open_channel = True
         self._out_of_step = False
@@ -4016,11 +4039,14 @@ class XilinxHwServerTransport(Transport):
     # supports out of the box.  Pass via the ``ir_table`` constructor
     # argument or assign one of these to ``ir_table`` after construction.
     # The 7-series preset is the default and matches DEFAULT_IR_TABLE
-    # above; the UltraScale preset is documented in UG570 / UG574 and
-    # used by the rtl/jtag_tap_xilinxus.v wrapper instantiations.
+    # above.  Single-die UltraScale parts (6-bit IR) use the same USER1-4
+    # opcodes, per their BSDL files (KU025..KU095); the UltraScale preset is
+    # kept as a name for them.  Multi-die (SSI) parts have a longer IR and
+    # other codes (KU085/KU115: 12 bits, USER1 = 0x0A4): take those from the
+    # part's BSDL, or use hw_server's register-IR mode.
     IR_TABLE_XILINX7: dict[int, int] = {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23}
     IR_TABLE_XILINX_ULTRASCALE: dict[int, int] = {
-        1: 0x24, 2: 0x25, 3: 0x26, 4: 0x27,
+        1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23,
     }
     # Zynq UltraScale+ MPSoC PL TAP (xck26 / xczu*), raw-opcode mode.
     # The supported MPSoC path is ``use_register_ir=True`` (the CLI picks
@@ -4032,8 +4058,10 @@ class XilinxHwServerTransport(Transport):
     # ``dr_extra_position="tdi"`` matched a KV260 TDO trace, which assumed
     # ``TDI → ARM DAP → PL TAP → TDO``; OpenOCD's xilinx_zynqmp.cfg implies
     # the DAP is nearest TDO instead, so treat the position as unverified.
-    # The PL BSCANE2 USER1..USER4 instructions share the 7-series opcode
-    # pattern but in the 12-bit IR land at 0x024, 0x025, 0x026, 0x027.
+    # These values are empirical, not the BSDL's: at xsdb's PL-target level
+    # 0x024 reaches USER1 (and 0x025-0x027 collapse onto it), while the BSDL
+    # codes 0x902/0x903/0x922/0x923 read BYPASS (KV260 sweep, see
+    # docs/14_transports.md).  Raw OpenOCD scans use the BSDL codes.
     IR_TABLE_XILINX_ZYNQUS: dict[int, int] = {
         1: 0x024, 2: 0x025, 3: 0x026, 4: 0x027,
     }
@@ -4167,6 +4195,11 @@ class XilinxHwServerTransport(Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        if self._proc is not None:
+            # A second connect() (two Analyzers sharing this transport, say)
+            # would otherwise leave the old xsdb running with nothing to
+            # close it.
+            self.close()
         self._forget_hub_state()
         timing = connect_timing_logs_enabled()
         marks: list[tuple[str, float]] = [("start", time.monotonic())]
@@ -5574,29 +5607,27 @@ def hw_server_chain_shape_kwargs(fpga_name: str) -> dict[str, object]:
     transports through it.  An empty dict means "use transport defaults"
     (7-series single-device 6-bit IR, no bypass padding).
 
-    MPSoC (Zynq UltraScale+, ``xck*`` / ``xczu*``) gets only
-    ``use_register_ir=True``: xsdb's ``-register userN`` mode routes the
-    IR through the PL TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS
-    itself, so the host shifts plain fcapz frames.  The PL still sees one
-    extra shift clock per DR scan, which the RTL tolerates.  Raw hex IR
-    opcodes on that two-TAP chain do not select USER2-4.
+    UltraScale and UltraScale+ (``xcku*`` / ``xcvu*`` / ``xcau*``, and the
+    Zynq US+ MPSoC ``xck*`` / ``xczu*``) get only ``use_register_ir=True``:
+    xsdb's ``-register userN`` mode finds the part's USER instruction itself,
+    whatever its IR length.  On MPSoC it also routes the IR through the PL
+    TAP and ARM DAP and pads the DAP's 1-bit DR BYPASS, so the host shifts
+    plain fcapz frames.  The PL still sees one extra shift clock per DR scan
+    there, which the RTL tolerates.  Raw hex IR opcodes on that two-TAP chain
+    do not select USER2-4.
 
     Versal parts (xcvm/xcvc/xcvp/xcve/xcvh) don't use BSCANE2 and aren't
     supported by fcapz; they fall through to defaults and fail loudly at
     the identity check rather than silently pretending to work.
     """
     name_lc = fpga_name.lower()
-    # Standalone UltraScale / UltraScale+ (Kintex, Virtex, Artix US+):
-    # 6-bit IR, different USER opcodes from 7-series.  Checked before the
-    # xck* / xczu* branch below because ``xcku040`` starts with ``xck``.
-    if name_lc.startswith(("xcku", "xcvu", "xcau")):
-        return {
-            "ir_table": XilinxHwServerTransport.IR_TABLE_XILINX_ULTRASCALE,
-            "ir_length": 6,
-        }
-    # Zynq UltraScale+ MPSoC (Kria xck24/xck26, ZCU+ xczu*): register-IR
-    # mode handles the PL TAP + ARM DAP routing and padding.
-    if name_lc.startswith(("xck", "xczu")):
+    # UltraScale / UltraScale+, standalone (Kintex, Virtex, Artix US+) or
+    # MPSoC (Kria xck24/xck26, ZCU+ xczu*): register-IR mode, so xsdb looks
+    # up each part's USER instructions.  Raw opcodes are not one table on
+    # these families: multi-die parts (KU085/KU115, most Virtex US+) have a
+    # 12-bit or longer IR, and MPSoC adds the ARM DAP to the chain.
+    # Validated on a KU035 and on Kria KV260.
+    if name_lc.startswith(("xcku", "xcvu", "xcau", "xck", "xczu")):
         return {"use_register_ir": True}
     # 7-series (xc7a / xc7k / xc7v / xc7s / xc7z) and anything else.
     return {}

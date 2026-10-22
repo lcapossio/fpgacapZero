@@ -9,6 +9,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
+  `[31:0]` can trigger; the RTL integration guide now says so.
+
 - **MCP server: `ftdi` and `serial` backends.** `fcapz_connect` reaches an
   FTDI MPSSE adapter directly (`hardware`, `ir_table`, `tck_mhz`) and the
   byte-stream TAP bridge over a serial port (`serial_port`, `baudrate`), as
@@ -26,6 +29,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `exchange()` give it the adapter without a chain scan.
 
 ### Fixed
+
+- **UltraScale USER opcodes.** `IR_TABLE_XILINX_ULTRASCALE` / `IR_TABLE_US`
+  said USER1-4 = `0x24`-`0x27`; single-die UltraScale parts use the 7-series
+  codes `0x02`, `0x03`, `0x22`, `0x23` (per their BSDL), so raw scans missed
+  the BSCANE2. On hw_server, UltraScale(+) parts (`xcku*`, `xcvu*`, `xcau*`)
+  now use xsdb's register-IR mode, which also covers multi-die parts with a
+  longer IR. Validated on a Kintex UltraScale KU035 on a proprietary board.
+  OpenOCD's `IR_TABLE_XILINX_ZYNQUS` now holds the BSDL codes (`0x902`...).
+
+- **A second `connect()` no longer leaks the transport's session.** hw_server
+  started a new xsdb each time and left the old one running; OpenOCD and the
+  serial bridge did the same with their socket and port. They now close the
+  old session first. New `Analyzer.attach()` joins an already-connected
+  transport without reopening it, as `EioController.attach()` does.
 
 - **RPC: an FTDI board is its adapter.** An EIO naming a different FTDI
   adapter (`hardware`) than the ELA session was taken for the same board.
