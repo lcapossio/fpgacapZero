@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Vivado: insert an ELA after synthesis (prototype).**
+  `tools/fcapz_insert_vivado.tcl` adds an `fcapz_ela_xilinx7` to a
+  synthesized 7-series checkpoint and wires it to the nets marked
+  `mark_debug`, so the design's RTL needs no fcapz instance. It also writes a
+  `.prob` file that names the probes for the host. The demo in
+  `examples/arty_a7_insert/` captures correctly on an Arty A7. It inserts one
+  ELA, sampling one clock domain.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
