@@ -24,14 +24,27 @@ your own flow, add `fcapz::insert` between synthesis and `opt_design`:
 ```tcl
 source tools/fcapz_insert_vivado.tcl
 fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl rtl \
-    -prob design.prob [-depth 1024] [-chain 1] [-clock <net>] [-clock_hz <hz>]
+    -prob design.prob -clock_hz 100000000
 # the instrumented design is left open: opt_design, place_design, ...
 ```
 
+Other options:
+- `-depth`: number of samples, 1024 by default.
+- `-chain`: the USER chain, 1 by default.
+- `-clock`: the full hierarchical name of the sample clock net, when it can't
+  be found automatically.
+- `-tck_mhz`: the TCK constraint, 10 MHz by default. Set it to the speed
+  your cable runs at.
+- `-cell`: the instance name, `u_fcapz_ela` by default.
+- `-part`: the FPGA part.
+
 ## What `fcapz::insert` does
 
-1. It collects every MARK_DEBUG net. It also finds the clock that drives them,
-   unless you pass `-clock`.
+1. It collects every MARK_DEBUG net. Each signal becomes one probe, named
+   after its netlist net, for example `u_gen/triple`. A bus must be marked on
+   every bit of its range. That range need not start at bit 0. The sample
+   clock is the clock of the flip-flops that drive the nets. A net driven by
+   anything else (a LUT, a RAM, a DSP) needs `-clock`.
 2. It synthesizes `fcapz_ela_xilinx7` out of context, with `SAMPLE_W` equal to
    the number of probe bits.
 3. It creates a black-box cell and fills it from that checkpoint with
@@ -39,15 +52,16 @@ fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl rtl \
 4. It connects the probe nets to `probe_in` and the clock to `sample_clk`, and
    ties `sample_rst` and `trigger_in` low.
 5. It constrains the BSCANE2 TCK and makes it asynchronous to every other
-   clock.
+   clock. The reference designs' XDC does the same.
 6. It writes a `.prob` file that maps each signal to its bits, so the host
    can name them:
 
 ```json
 {"format": "fpgacapzero.probes.v1", "core": "ela",
  "probes": [{"name": "count", "width": 8, "lsb": 0},
-            {"name": "lfsr", "width": 16, "lsb": 8}],
- "sample_clock_hz": 100000000, "sample_width": 24}
+            {"name": "lfsr", "width": 16, "lsb": 8},
+            {"name": "u_gen/triple", "width": 8, "lsb": 24}],
+ "sample_clock_hz": 100000000, "sample_width": 32}
 ```
 
 ## Limits of the prototype
@@ -56,7 +70,8 @@ fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl rtl \
   are refused.
 - It supports Xilinx 7-series only.
 - It inserts a standalone ELA on one USER chain, which must be free. It
-  stops if another BSCANE2 already uses that chain, for example Vivado's
-  `dbg_hub` on USER1.
+  stops if a BSCANE2 in the netlist already uses that chain. It also stops
+  if the checkpoint holds Vivado debug cores whose hub will take the chain
+  at `opt_design`. An ILA instantiated as IP in the RTL is not detected.
 - It does not add a multi-core manager or an EIO, and it does not support
   the external trigger.

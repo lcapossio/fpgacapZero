@@ -19,10 +19,23 @@ module insert_demo_top (
         lfsr  <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
     end
 
+    // A bus inside a submodule whose bits do not start at 0: it reaches the
+    // .prob as "u_gen/triple", 8 bits wide.
+    insert_demo_gen u_gen (.clk(clk), .count(count));
+
     reg [26:0] blink = 27'd0;
     always @(posedge clk) blink <= blink + 27'd1;
 
     assign led = {blink[26], lfsr[0], count[7], blink[25]};
+endmodule
+
+module insert_demo_gen (
+    input wire       clk,
+    input wire [7:0] count
+);
+    (* mark_debug = "true" *) reg [11:4] triple = 8'd0;
+
+    always @(posedge clk) triple <= count * 8'd3;
 endmodule
 
 `default_nettype wire

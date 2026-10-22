@@ -6,7 +6,8 @@
 
 The probe layout comes from the ``.prob`` file fcapz_insert_vivado.tcl wrote;
 the capture triggers on ``count == 0x40`` and checks that ``count`` steps by
-one and ``lfsr`` follows its feedback polynomial on every sample.
+one, ``lfsr`` follows its feedback polynomial and ``u_gen/triple`` is three
+times the previous count, on every sample.
 
     python examples/arty_a7_insert/capture.py [--port 3121] [--no-program]
 """
@@ -65,14 +66,19 @@ def main() -> int:
 
     counts = [field(s, "count") for s in result.samples]
     lfsrs = [field(s, "lfsr") for s in result.samples]
+    triples = [field(s, "u_gen/triple") for s in result.samples]
     errors = []
     for i in range(1, len(result.samples)):
         if (counts[i] - counts[i - 1]) & 0xFF != 1:
             errors.append(f"count[{i}] {counts[i - 1]:#04x} -> {counts[i]:#04x}")
         if lfsrs[i] != lfsr_next(lfsrs[i - 1]):
             errors.append(f"lfsr[{i}] {lfsrs[i - 1]:#06x} -> {lfsrs[i]:#06x}")
+        # u_gen/triple registers count * 3, so it trails count by a cycle.
+        if triples[i] != (counts[i - 1] * 3) & 0xFF:
+            errors.append(f"u_gen/triple[{i}] {triples[i]:#04x} != 3 * {counts[i - 1]:#04x}")
     for i in range(min(12, len(counts))):
-        print(f"{i:3d}  count={counts[i]:#04x}  lfsr={lfsrs[i]:#06x}")
+        print(f"{i:3d}  count={counts[i]:#04x}  lfsr={lfsrs[i]:#06x}  "
+              f"u_gen/triple={triples[i]:#04x}")
     print(f"{len(result.samples)} samples, 0x40 present: {0x40 in counts}, "
           f"{len(errors)} error(s)")
     for e in errors[:10]:

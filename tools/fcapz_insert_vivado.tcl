@@ -18,7 +18,11 @@
 #
 #   source tools/fcapz_insert_vivado.tcl
 #   fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl <repo>/rtl \
-#       -prob design.prob [-depth 1024] [-chain 1] [-clock <net>]
+#       -prob design.prob
+#
+# Optional: -depth (1024), -chain (USER chain, 1), -clock <full net name>,
+# -clock_hz (written to the .prob), -tck_mhz (TCK constraint, 10), -part,
+# -cell (instance name, u_fcapz_ela).
 
 namespace eval fcapz {}
 
@@ -32,6 +36,7 @@ set fcapz::ela_sources {
 
 proc fcapz::_opts {defaults argv} {
     array set o $defaults
+    if {[llength $argv] % 2} { error "fcapz::insert: options come in -name value pairs" }
     foreach {k v} $argv {
         set k [string trimleft $k -]
         if {![info exists o($k)]} { error "fcapz::insert: unknown option -$k" }
@@ -66,11 +71,16 @@ proc fcapz::_port_spec {} {
     return $spec
 }
 
-# Group bit nets into probes: {name width} in sample order, low bits first.
-# "u_core/count[3]" belongs to probe "u_core.count"; a scalar net is 1 bit.
+# Group bit nets into probes, in sample order, low bits first.  "u_core/count[3]"
+# belongs to probe "u_core/count" (the netlist's own name, so names stay unique);
+# a scalar net is 1 bit.  A bus probe spans its lowest to highest marked index
+# and must be marked without gaps, so every bit the .prob advertises is wired.
+# Returns {order width low bits}, bits holding {base index net-name} per net.
 # Takes and keeps net names: object handles go stale on read_checkpoint.
 proc fcapz::_probe_groups {names} {
-    array set width {}
+    array set lo {}
+    array set hi {}
+    array set count {}
     set order {}
     set bits {}
     foreach name $names {
@@ -78,23 +88,60 @@ proc fcapz::_probe_groups {names} {
             set base $name
             set idx 0
         }
-        if {![info exists width($base)]} {
-            set width($base) 0
+        if {![info exists lo($base)]} {
+            set lo($base) $idx
+            set hi($base) $idx
+            set count($base) 0
             lappend order $base
         }
         lappend bits [list $base $idx $name]
-        set width($base) [expr {max($width($base), $idx + 1)}]
+        set lo($base) [expr {min($lo($base), $idx)}]
+        set hi($base) [expr {max($hi($base), $idx)}]
+        incr count($base)
     }
-    return [list $order [array get width] $bits]
+    array set width {}
+    foreach b $order {
+        set width($b) [expr {$hi($b) - $lo($b) + 1}]
+        if {$count($b) != $width($b)} {
+            error "fcapz::insert: only $count($b) bits of $b\[$hi($b):$lo($b)\] carry MARK_DEBUG; mark the whole range"
+        }
+        if {[regexp {[:,\x00-\x1f]} $b]} {
+            error "fcapz::insert: probe name '$b' has a ':', ',' or control character, which the host's probe list cannot carry"
+        }
+    }
+    return [list $order [array get width] [array get lo] $bits]
 }
 
+# The clock a net is sampled on: the clock of the flip-flop that drives it.
+# Anything else (LUT, LUTRAM, BRAM, DSP, a port) returns {} and needs -clock,
+# since a primitive's clock pin need not be the clock of that output.
 proc fcapz::_clock_of {net} {
     set drv [get_pins -quiet -leaf -of_objects $net -filter {DIRECTION == OUT}]
     if {[llength $drv] != 1} { return {} }
     set cell [get_cells -of_objects $drv]
-    set cpin [get_pins -quiet -of_objects $cell -filter {IS_CLOCK}]
+    if {![regexp {^FD[CPRS]E$} [get_property REF_NAME $cell]]} { return {} }
+    set cpin [get_pins -quiet -of_objects $cell -filter {REF_PIN_NAME == C}]
     if {[llength $cpin] != 1} { return {} }
     return [get_nets -quiet -segments -top_net_of_hierarchical_group -of_objects $cpin]
+}
+
+# USER chains already spoken for: every BSCANE2 in the netlist, plus the chain
+# of the debug hub Vivado will insert at opt_design for its own debug cores.
+proc fcapz::_used_chains {} {
+    set used {}
+    foreach b [get_cells -quiet -hierarchical -filter {REF_NAME == BSCANE2}] {
+        lappend used [get_property JTAG_CHAIN $b]
+    }
+    if {[llength [get_debug_cores -quiet]] > 0} {
+        set hub [get_debug_cores -quiet -filter {NAME == dbg_hub}]
+        set chain 1
+        if {[llength $hub] == 1} {
+            set c [get_property -quiet C_USER_SCAN_CHAIN $hub]
+            if {$c ne ""} { set chain $c }
+        }
+        lappend used $chain
+    }
+    return [lsort -unique -integer $used]
 }
 
 # MARK_DEBUG makes a net DONT_TOUCH, which connect_net refuses to edit:
@@ -107,10 +154,26 @@ proc fcapz::_connect {name pins} {
     if {$dt} { set_property DONT_TOUCH true [get_nets $name] }
 }
 
+# A JSON string literal.
+proc fcapz::_json_str {s} {
+    set out ""
+    foreach ch [split $s ""] {
+        scan $ch %c code
+        if {$ch eq "\"" || $ch eq "\\"} {
+            append out "\\$ch"
+        } elseif {$code < 0x20} {
+            append out [format "\\u%04x" $code]
+        } else {
+            append out $ch
+        }
+    }
+    return "\"$out\""
+}
+
 proc fcapz::insert {args} {
     array set o [fcapz::_opts {
         in {} out {} rtl {} prob {} depth 1024 chain 1 clock {} cell u_fcapz_ela
-        part {} clock_hz {}
+        part {} clock_hz {} tck_mhz 10
     } $args]
     foreach req {in out rtl} {
         if {$o($req) eq ""} { error "fcapz::insert: -$req is required" }
@@ -125,8 +188,10 @@ proc fcapz::insert {args} {
     }
     set net_names {}
     foreach n $nets { lappend net_names [get_property NAME $n] }
-    lassign [fcapz::_probe_groups [lsort -dictionary $net_names]] order width_list bits
+    lassign [fcapz::_probe_groups [lsort -dictionary $net_names]] \
+        order width_list low_list bits
     array set width $width_list
+    array set low $low_list
     set lsb 0
     array set base_lsb {}
     foreach b $order {
@@ -140,7 +205,7 @@ proc fcapz::insert {args} {
         foreach n $nets {
             set c [fcapz::_clock_of $n]
             if {$c eq ""} {
-                error "fcapz::insert: cannot tell which clock drives $n; pass -clock"
+                error "fcapz::insert: $n is not driven by a flip-flop, so its clock is not known; pass -clock"
             }
             if {[lsearch -exact $clks $c] < 0} { lappend clks $c }
         }
@@ -149,15 +214,14 @@ proc fcapz::insert {args} {
         }
         set clk_net [lindex $clks 0]
     } else {
-        set clk_net [get_nets -hierarchical $o(clock)]
-        if {[llength $clk_net] != 1} { error "fcapz::insert: no single net $o(clock)" }
+        set clk_net [get_nets -quiet $o(clock)]
+        if {[llength $clk_net] != 1} {
+            error "fcapz::insert: no net named $o(clock) (give its full hierarchical name)"
+        }
     }
-    set used_chains {}
-    foreach b [get_cells -quiet -hierarchical -filter {REF_NAME == BSCANE2}] {
-        lappend used_chains [get_property JTAG_CHAIN $b]
-    }
+    set used_chains [fcapz::_used_chains]
     if {[lsearch -exact $used_chains $o(chain)] >= 0} {
-        error "fcapz::insert: USER$o(chain) is taken by another BSCANE2 (in use: $used_chains); pass -chain"
+        error "fcapz::insert: USER$o(chain) is taken (by a BSCANE2 or Vivado's debug hub; in use: $used_chains); pass -chain"
     }
     set clk_name [get_property NAME $clk_net]
     close_design
@@ -195,7 +259,7 @@ proc fcapz::insert {args} {
     # -- 4. wiring ----------------------------------------------------------
     foreach entry $bits {
         lassign $entry base idx name
-        set bit [expr {$base_lsb($base) + $idx}]
+        set bit [expr {$base_lsb($base) + $idx - $low($base)}]
         fcapz::_connect $name [get_pins $cell/probe_in[$bit]]
     }
     fcapz::_connect $clk_name [get_pins $cell/sample_clk]
@@ -206,30 +270,31 @@ proc fcapz::insert {args} {
     connect_net -net ${cell}_gnd_net -objects $tie
 
     # -- 5. constraints -----------------------------------------------------
+    # As in the reference designs' XDC: TCK at the cable's speed (-tck_mhz),
+    # asynchronous to every other clock (the ELA synchronizes its crossings).
     set tck [get_pins -of_objects \
         [get_cells -hierarchical -filter "REF_NAME == BSCANE2 && NAME =~ $cell/*"] \
         -filter {REF_PIN_NAME == TCK}]
-    create_clock -name ${cell}_tck -period 100.0 $tck
+    create_clock -name ${cell}_tck -period [expr {1000.0 / $o(tck_mhz)}] $tck
     set_clock_groups -asynchronous -group [get_clocks ${cell}_tck]
 
     write_checkpoint -force $o(out)
 
     # -- 6. the host's probe map ------------------------------------------
     if {$o(prob) ne ""} {
+        set rows {}
+        foreach b $order {
+            lappend rows "    {\"name\": [fcapz::_json_str $b], \"width\": $width($b), \"lsb\": $base_lsb($b)}"
+        }
         set fh [open $o(prob) w]
         puts $fh "{"
         puts $fh "  \"format\": \"fpgacapzero.probes.v1\","
         puts $fh "  \"core\": \"ela\","
         puts $fh "  \"probes\": \["
-        set rows {}
-        foreach b $order {
-            set pname [string map {/ .} $b]
-            lappend rows "    {\"name\": \"$pname\", \"width\": $width($b), \"lsb\": $base_lsb($b)}"
-        }
         puts $fh [join $rows ",\n"]
         puts $fh "  \],"
         if {$o(clock_hz) ne ""} {
-            puts $fh "  \"sample_clock_hz\": $o(clock_hz),"
+            puts $fh "  \"sample_clock_hz\": [expr {int($o(clock_hz))}],"
         }
         puts $fh "  \"sample_width\": $sample_w"
         puts $fh "}"
