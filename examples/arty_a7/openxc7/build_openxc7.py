@@ -41,6 +41,8 @@ XDC = Path(__file__).resolve().parent / "arty_a7_openxc7.xdc"
 TOP = "arty_a7_vex_top"
 PART = "xc7a100tcsg324-1"
 BITFILE = EXAMPLE_DIR / f"{TOP}_openxc7.bit"
+MIN_BIT_BYTES = 3_800_000
+SYNC_WORD = bytes.fromhex("aa995566")
 
 # Same list as build_arty_vex.tcl (fcapz_version.vh comes in through -I rtl).
 SOURCES = [
@@ -86,6 +88,21 @@ def _revision(path: Path) -> str:
             capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return ""
+
+
+def _publish_text(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".partial")
+    tmp.write_text(text, newline="\n")
+    os.replace(tmp, path)
+
+
+def _check_bitstream(path: Path) -> None:
+    """Reject a missing or truncated bitstream. A full uncompressed
+    xc7a100t bitstream is about 3.83 MB whatever the design."""
+    data = path.read_bytes() if path.exists() else b""
+    size = len(data)
+    if size < MIN_BIT_BYTES or SYNC_WORD not in data[:1024]:
+        sys.exit(f"[openxc7] {path.name} is missing or incomplete ({size} bytes)")
 
 
 def _run(cmd: list[str], log: Path, cwd: Path) -> None:
@@ -171,6 +188,9 @@ def main() -> int:
         fresh = (known and chipdb.exists() and stamp.exists()
                  and stamp.read_text() == want)
         if not fresh:
+            # Drop the old stamp first, so no stamp outlives the binary it
+            # describes if this rebuild stops part-way.
+            stamp.unlink(missing_ok=True)
             bba = out / f"{PART}.bba"
             _run([sys.executable, str(src / "xilinx" / "python" / "bbaexport.py"),
                   "--device", PART, "--xray", str(family_db), "--bba", str(bba)],
@@ -181,7 +201,7 @@ def main() -> int:
             partial = chipdb.with_suffix(".bin.partial")
             _run([bbasm, "-l", str(bba), str(partial)], out / "bbasm.log", out)
             os.replace(partial, chipdb)
-            stamp.write_text(want)
+            _publish_text(stamp, want)
             bba.unlink()
 
     # 3. place and route
@@ -199,10 +219,17 @@ def main() -> int:
     f2f_cmd = [sys.executable, f2f] if f2f.endswith(".py") else [f2f]
     _run([*f2f_cmd, "--part", PART, "--db-root", str(family_db), str(fasm), str(frames)],
          out / "fasm2frames.log", out)
+    # Written beside the final name and checked before it replaces it: the
+    # hardware tests trust a .bit by its mtime, and xc7frames2bit can exit 0
+    # without writing its output.
+    partial_bit = BITFILE.with_suffix(".bit.partial")
+    partial_bit.unlink(missing_ok=True)
     _run([_tool(args.xc7frames2bit, "XC7FRAMES2BIT", "xc7frames2bit"),
           "--part_file", str(family_db / PART / "part.yaml"), "--part_name", PART,
-          "--frm_file", str(frames), "--output_file", str(BITFILE)],
+          "--frm_file", str(frames), "--output_file", str(partial_bit)],
          out / "xc7frames2bit.log", out)
+    _check_bitstream(partial_bit)
+    os.replace(partial_bit, BITFILE)
     print(f"[openxc7] wrote {BITFILE}")
     return 0
 
