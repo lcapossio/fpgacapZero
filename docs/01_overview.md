@@ -163,7 +163,8 @@ Everything talks to a Python package called `fcapz`.  After
   long-running test harnesses.  Documented in
   [chapter 11](11_rpc_server.md).
 - **`fcapz-gui` desktop app** (optional, install with
-  `pip install fpgacapzero[gui]`) — PySide6 control panel that wraps
+  `pip install fpgacapzero[gui]`; not actively maintained, so prefer the
+  web interface, `fcapz-web`) — PySide6 control panel that wraps
   every controller with a graphical front-end, including an embedded
   `pyqtgraph` waveform preview and one-click "open in GTKWave /
   Surfer / WaveTrace" for the captured `.vcd`.  Documented in

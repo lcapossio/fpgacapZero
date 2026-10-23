@@ -1,7 +1,8 @@
 # 18 · Web interface (`fcapz-web`)
 
-`fcapz-web` is a **browser-based front-end** for fpgacapZero — an alternative to
-the desktop GUI ([chapter 12](12_gui.md)) that you can reach from the local
+`fcapz-web` is the **browser-based front-end** for fpgacapZero, and the
+recommended one: the desktop GUI ([chapter 12](12_gui.md)) is no longer actively
+maintained.  You can reach it from the local
 machine **or another machine on the network**. It is a small **FastAPI** server
 that wraps the fcapz host stack and serves a prebuilt browser UI (Vite + React)
 as static files, so running it needs **no Node.js** — just the Python package.
@@ -136,8 +137,9 @@ connected. The panels:
   an optional post-trigger clock limit), and
   **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
-  Trigger tab).
-- **Trigger** — its own tab, laid out like Vivado ILA's **Trigger Setup**.
+  Trigger drawer).
+- **Trigger** — a drawer on the viewer's right edge (hover the ⚡ Trigger rail,
+  or pin it open), laid out like Vivado ILA's **Trigger Setup**.
   **+ Add probe…** appends a row to the trigger table — named probes when
   defined, otherwise the raw probe bits (`bit0`…`bitN`), so triggering needs
   zero setup. Each row is **Name | Operator | Radix | Value**: operators
@@ -245,6 +247,6 @@ is served at `/surfer`, decoupled from the Vite output.
 
 - [Chapter 11 · JSON-RPC server](11_rpc_server.md) — the full command schema the
   web UI speaks.
-- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative.
+- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative (not actively maintained).
 - [Chapter 15 · Export formats](15_export_formats.md) — what the downloaded
   VCD / CSV / JSON contain.

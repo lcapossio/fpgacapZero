@@ -82,7 +82,23 @@ This adds **`pytest`** and **`ruff`**, which you need to run the
 test suite and lint the codebase.  No reason not to install them on
 a development machine.
 
-### Step 2b: install the GUI (optional)
+### Step 2b: install the web interface (recommended)
+
+```bash
+pip install -e ".[web]"
+```
+
+This adds **`fastapi`** and **`uvicorn`** and registers the browser
+front-end:
+
+```bash
+$ fcapz-web                             # serves on http://127.0.0.1:7373
+```
+
+[Chapter 03](03_first_capture.md) takes the first capture with it, and
+[chapter 18](18_web_interface.md) covers it in full.
+
+### Step 2c: install the desktop GUI (optional)
 
 ```bash
 pip install -e ".[gui]"
@@ -94,6 +110,9 @@ console script:
 ```bash
 $ fcapz-gui                             # launches the desktop GUI
 ```
+
+The desktop GUI is not actively maintained: the web interface
+(step 2b) is the recommended graphical front-end.
 
 The GUI is fully optional — the headless install above does not
 require any Qt dependency, which keeps your CI runners and
@@ -277,13 +296,13 @@ and raises `RuntimeError: ELA core identity check failed`).
 The fastest path:
 
 ```bash
-# 1. Build the reference bitstream (Vivado required, ~10-15 min)
-python examples/arty_a7/build.py
+# 1. Build the reference bitstream (Vivado and a RISC-V GCC, ~10-15 min)
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build.py
 
 # 2. Program + probe in one shot (--program flag)
 fcapz --backend hw_server --port 3121 \
       --tap xc7a100t \
-      --program examples/arty_a7/arty_a7_top.bit \
+      --program examples/arty_a7/arty_a7_vex_top.bit \
       probe
 ```
 

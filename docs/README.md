@@ -23,7 +23,7 @@ back to individual chapters as you need them.
 |---|---------|--------------|
 | 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
 | 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD, Vivado hw_server, or Quartus USB-Blaster). |
-| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the GUI, then repeat/export from the CLI. |
+| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the web interface, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
 | 06 | [EIO core](06_eio_core.md) | The Embedded I/O core: read fabric signals, drive fabric signals, clock domains, host API. |
@@ -32,7 +32,7 @@ back to individual chapters as you need them.
 | 09 | [Python API](09_python_api.md) | Complete reference for the `fcapz` Python package: `Analyzer`, `EioController`, `EjtagAxiController`, `EjtagUartController`, transports, events module, with worked examples. |
 | 10 | [CLI reference](10_cli_reference.md) | Every `fcapz` subcommand, every flag, with copy-pasteable examples. |
 | 11 | [JSON-RPC server](11_rpc_server.md) | Driving fpgacapZero from another language or process: the line-delimited JSON-RPC protocol, full schema, and all commands. |
-| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
+| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | Not actively maintained; prefer the web interface (chapter 18). The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
 | 13 | [Register map](13_register_map.md) | The full register map for all four cores. Stub chapter that links straight to the canonical reference at [`specs/register_map.md`](specs/register_map.md). |
 | 14 | [Transports](14_transports.md) | OpenOCD, AMD/Xilinx hw_server, Quartus USB-Blaster, the named AMD/Xilinx `IR_TABLE_*` presets, the readiness wait, and how to add a new transport backend. |
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |

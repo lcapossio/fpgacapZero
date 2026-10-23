@@ -14,7 +14,7 @@ JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
 Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
-and Microchip** parts (with **Efinix** support synthesized in Efinity, hardware validation pending), plus a Python / CLI / GUI
+and Microchip** parts (with **Efinix** support synthesized in Efinity, hardware validation pending), plus a Python / CLI / web
 host stack on top.
 
 > 📖 **New here? Start with the [User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — especially
@@ -34,9 +34,8 @@ Four small RTL cores, all driven over JTAG:
 Plus a host stack: a **browser-based web interface** (`fcapz-web`) with an
 embedded **Surfer** waveform viewer that you can reach from the local machine or
 across the network, a **Python API**, the **`fcapz` command-line tool**, a
-**JSON-RPC server**, an **MCP server** (`fcapz-mcp`) that exposes the lab
-controls to coding agents, and an optional **PySide6 desktop GUI**
-(`fcapz-gui`).
+**JSON-RPC server**, and an **MCP server** (`fcapz-mcp`) that exposes the lab
+controls to coding agents.
 
 ## Why fpgacapZero
 
@@ -96,14 +95,6 @@ across the network with a bearer token. See
 <p align="center">
   <img src="https://raw.githubusercontent.com/lcapossio/fpgacapZero/main/docs/assets/fcapz-web-demo.png" alt="fcapz-web browser interface showing connection, ELA capture controls, and the embedded Surfer waveform viewer" width="900">
 </p>
-
-Prefer a native desktop app? A PySide6 GUI with a built-in waveform preview
-ships alongside it:
-
-```bash
-pip install -e ".[gui]"     # core host stack + desktop GUI
-fcapz-gui
-```
 
 Prefer the command line? Build the Arty A7 reference bitstream (see
 [Build from source](#build-from-source) — or use your own), then capture:
@@ -186,7 +177,7 @@ CI jobs, and the hardware-in-the-loop tests are all documented in
 
 ```
 rtl/        Portable Verilog cores + vendor TAP wrappers (VHDL in rtl/vhdl/)
-host/fcapz/ Python host stack: Analyzer, transports, CLI, RPC, GUI
+host/fcapz/ Python host stack: Analyzer, transports, CLI, RPC, web, MCP
 examples/   Reference designs (Arty A7, Kria KV260, DE25-Nano, Gowin BRS-100,
             PolarFire SoC Discovery Kit, Forgix, and more)
 docs/       User manual (start at docs/README.md) + canonical specs
