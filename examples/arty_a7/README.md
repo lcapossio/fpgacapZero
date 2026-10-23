@@ -72,9 +72,10 @@ stay here.
 | `build_arty_vex.py` / `build_arty_vex.tcl` | VexRiscv build (verify core + build firmware + Vivado) |
 | `build_arty.tcl` | Vivado script for the legacy MicroBlaze top |
 | `build_vhdl.py` / `build_arty_vhdl.tcl` | Mixed-language VHDL (VexRiscv) build |
+| `openxc7/` | Open-source build of the VexRiscv top (yosys + nextpnr-xilinx, no Vivado) |
 | `arty_a7.cfg` | OpenOCD config for the onboard USB-JTAG adapter |
 | `arty_a7_hs3.cfg` | OpenOCD config for an external Digilent HS3 cable |
-| `test_hw_integration.py` | Hardware integration regression tests (default `vex`; `FPGACAP_BITSTREAM_VARIANT=verilog`/`vhdl` for the other tops) |
+| `test_hw_integration.py` | Hardware integration regression tests (default `vex`; `FPGACAP_BITSTREAM_VARIANT=verilog`/`vhdl`/`openxc7` for the other builds) |
 | `arty_a7_vex_top.bit` | Generated/reference bitstream (default variant) |
 
 ## Board I/O
@@ -122,6 +123,10 @@ python examples/arty_a7/build.py --variant vhdl         # mixed-language VHDL to
 The `microblaze` variant needs a MicroBlaze licence and `mb-gcc` and writes
 `arty_a7_top.bit`. The `vhdl` variant is the VHDL top with the same VexRiscv
 subsystem (needs the RISC-V toolchain) and writes `arty_a7_top_vhdl.bit`.
+
+The VexRiscv top also builds without Vivado, with the open-source openXC7
+flow; see [`openxc7/README.md`](openxc7/README.md). That bitstream passes the
+same hardware suite.
 
 ## Connect With hw_server
 
@@ -194,12 +199,13 @@ FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py
 ```
 
 The suite defaults to the **VexRiscv** bitstream (`arty_a7_vex_top.bit`). To run
-it against the legacy **MicroBlaze** top or the **VHDL** top instead, set the
+it against the legacy **MicroBlaze** top, the **VHDL** top or the **openXC7** build instead, set the
 variant (it selects the matching default bitfile and freshness sources):
 
 ```sh
 FPGACAP_BITSTREAM_VARIANT=verilog python -m pytest examples/arty_a7/test_hw_integration.py -v
 FPGACAP_BITSTREAM_VARIANT=vhdl python -m pytest examples/arty_a7/test_hw_integration.py -v
+FPGACAP_BITSTREAM_VARIANT=openxc7 python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
 To skip hardware tests in an environment without the board:

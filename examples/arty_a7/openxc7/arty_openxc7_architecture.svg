@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- SPDX-License-Identifier: Apache-2.0 -->
+  <!-- Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com> -->
+  <title>Arty A7 VexRiscv reference design built with openXC7</title>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .t  { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .s  { font-size: 12px; fill: #334155; }
+      .m  { font-size: 11px; fill: #64748b; }
+      .h  { font-size: 13px; font-weight: 700; fill: #475569; letter-spacing: 0.04em; }
+      .ln { stroke: #475569; stroke-width: 1.6; fill: none; }
+      .infra { fill: #f1f5f9; stroke: #64748b; }
+      .ela   { fill: #dbeafe; stroke: #2563eb; }
+      .eio   { fill: #dcfce7; stroke: #16a34a; }
+      .axi   { fill: #ffedd5; stroke: #ea580c; }
+      .cpu   { fill: #ede9fe; stroke: #7c3aed; }
+      .flow  { fill: #ccfbf1; stroke: #0d9488; }
+      .bx    { stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="860" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="20" y="34" font-size="20" font-weight="700" fill="#0f172a">Arty A7 VexRiscv reference design, built with openXC7</text>
+  <text x="20" y="56" class="s">Hardware suite on an Arty A7-100T: 70 passed, 7 skipped (UART loopback, off by default), 13 subtests passed</text>
+
+  <!-- Build flow -->
+  <rect x="20" y="76" width="1240" height="78" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="34" y="98" class="h">OPENXC7 BUILD</text>
+  <text x="34" y="116" class="m">build_openxc7.py, in WSL</text>
+  <text x="34" y="132" class="m">no Vivado</text>
+  <g class="bx">
+    <rect x="200" y="88" width="160" height="54" rx="6" class="flow"/>
+    <text x="280" y="110" text-anchor="middle" class="t">RTL + firmware</text>
+    <text x="280" y="128" text-anchor="middle" class="m">fcapz cores, VexRiscv, fw.mem</text>
+    <rect x="384" y="88" width="160" height="54" rx="6" class="flow"/>
+    <text x="464" y="110" text-anchor="middle" class="t">yosys</text>
+    <text x="464" y="128" text-anchor="middle" class="m">synth_xilinx -flatten</text>
+    <rect x="568" y="88" width="160" height="54" rx="6" class="flow"/>
+    <text x="648" y="110" text-anchor="middle" class="t">nextpnr-xilinx</text>
+    <text x="648" y="128" text-anchor="middle" class="m">place and route, cached chipdb</text>
+    <rect x="752" y="88" width="160" height="54" rx="6" class="flow"/>
+    <text x="832" y="110" text-anchor="middle" class="t">fasm2frames</text>
+    <text x="832" y="128" text-anchor="middle" class="m">prjxray database</text>
+    <rect x="936" y="88" width="140" height="54" rx="6" class="flow"/>
+    <text x="1006" y="110" text-anchor="middle" class="t">xc7frames2bit</text>
+    <text x="1006" y="128" text-anchor="middle" class="m">frames to .bit</text>
+    <rect x="1100" y="88" width="148" height="54" rx="6" class="flow"/>
+    <text x="1174" y="110" text-anchor="middle" class="t">.bit</text>
+    <text x="1174" y="128" text-anchor="middle" class="m">checked, then published</text>
+  </g>
+  <path d="M360,115 H382" class="ln" marker-end="url(#arr)"/>
+  <path d="M544,115 H566" class="ln" marker-end="url(#arr)"/>
+  <path d="M728,115 H750" class="ln" marker-end="url(#arr)"/>
+  <path d="M912,115 H934" class="ln" marker-end="url(#arr)"/>
+  <path d="M1076,115 H1098" class="ln" marker-end="url(#arr)"/>
+
+  <!-- Host PC -->
+  <rect x="20" y="174" width="270" height="666" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="34" y="198" class="h">HOST PC</text>
+  <g class="bx">
+    <rect x="36" y="214" width="238" height="70" rx="6" class="infra"/>
+    <text x="50" y="238" class="t">pytest</text>
+    <text x="50" y="256" class="s">test_hw_integration.py</text>
+    <text x="50" y="273" class="m">FPGACAP_BITSTREAM_VARIANT=openxc7</text>
+    <rect x="36" y="306" width="238" height="88" rx="6" class="infra"/>
+    <text x="50" y="330" class="t">fcapz host stack</text>
+    <text x="50" y="348" class="s">Analyzer (ELA) · EioController</text>
+    <text x="50" y="365" class="s">AxiMonitor · EJTAG-AXI</text>
+    <text x="50" y="382" class="m">probe, capture, read/write</text>
+    <rect x="36" y="416" width="238" height="62" rx="6" class="infra"/>
+    <text x="50" y="440" class="t">xsdb + hw_server</text>
+    <text x="50" y="458" class="s">TCP port 3121, target xc7a100t</text>
+    <rect x="36" y="500" width="238" height="62" rx="6" class="infra"/>
+    <text x="50" y="524" class="t">USB-JTAG</text>
+    <text x="50" y="542" class="s">Arty on-board FTDI cable</text>
+  </g>
+  <path d="M155,284 V304" class="ln" marker-end="url(#arr)"/>
+  <path d="M155,394 V414" class="ln" marker-end="url(#arr)"/>
+  <path d="M155,478 V498" class="ln" marker-end="url(#arr)"/>
+  <!-- bitstream into the host flow -->
+  <path d="M1174,142 V166 H155 V212" class="ln" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+  <text x="300" y="161" class="m">programmed with --program / FPGACAP_BITFILE</text>
+
+  <!-- FPGA -->
+  <rect x="316" y="174" width="944" height="666" rx="8" fill="#ffffff" stroke="#0f172a" stroke-width="1.8"/>
+  <text x="332" y="198" class="h">XC7A100TCSG324-1 · ARTY A7-100T</text>
+
+  <!-- JTAG cable into the TAP -->
+  <path d="M274,531 H300 V420 H330" class="ln" marker-end="url(#arr)"/>
+
+  <!-- BSCANE2 column -->
+  <text x="332" y="226" class="m">JTAG TAP</text>
+  <text x="332" y="240" class="m">BSCANE2 chains</text>
+  <g class="bx">
+    <rect x="332" y="252" width="110" height="250" rx="6" class="infra"/>
+    <text x="387" y="372" text-anchor="middle" class="t">USER1</text>
+    <rect x="332" y="530" width="110" height="64" rx="6" class="infra"/>
+    <text x="387" y="567" text-anchor="middle" class="t">USER2</text>
+    <rect x="332" y="608" width="110" height="44" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="5 4"/>
+    <text x="387" y="629" text-anchor="middle" class="s">USER3</text>
+    <text x="387" y="644" text-anchor="middle" class="m">free</text>
+    <rect x="332" y="666" width="110" height="64" rx="6" class="infra"/>
+    <text x="387" y="703" text-anchor="middle" class="t">USER4</text>
+  </g>
+
+  <!-- Core manager on USER1 -->
+  <rect x="466" y="214" width="452" height="296" rx="8" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="482" y="238" class="t">Debug core manager</text>
+  <text x="482" y="255" class="m">fcapz_debug_multi · four slots behind USER1</text>
+  <path d="M442,377 H464" class="ln" marker-end="url(#arr)"/>
+  <g class="bx">
+    <rect x="482" y="268" width="206" height="108" rx="6" class="ela"/>
+    <text x="496" y="290" class="t">Slot 0 · ELA0</text>
+    <text x="496" y="309" class="s">counter_150, 8 bits × 1024</text>
+    <text x="496" y="326" class="s">150 MHz sample clock</text>
+    <text x="496" y="343" class="m">timestamps, 4 segments,</text>
+    <text x="496" y="358" class="m">decimation, external trigger</text>
+    <rect x="700" y="268" width="206" height="108" rx="6" class="ela"/>
+    <text x="714" y="290" class="t">Slot 1 · ELA1</text>
+    <text x="714" y="309" class="s">counter_130 ^ 0xA5, 8 bits</text>
+    <text x="714" y="326" class="s">130 MHz sample clock</text>
+    <text x="714" y="343" class="m">CLI: --ela-instance 1</text>
+    <rect x="482" y="390" width="206" height="108" rx="6" class="eio"/>
+    <text x="496" y="412" class="t">Slot 2 · EIO0</text>
+    <text x="496" y="431" class="s">in: btn[3:0], slow_counter</text>
+    <text x="496" y="448" class="s">out: led[3:0]</text>
+    <text x="496" y="465" class="s">out[4]: ELA trigger_in</text>
+    <rect x="700" y="390" width="206" height="108" rx="6" class="eio"/>
+    <text x="714" y="412" class="t">Slot 3 · EIO1</text>
+    <text x="714" y="431" class="s">in: counter_130[3:0], btn</text>
+    <text x="714" y="448" class="m">second EIO for slot</text>
+    <text x="714" y="463" class="m">selection checks</text>
+  </g>
+
+  <!-- Clocking -->
+  <rect x="942" y="214" width="302" height="184" rx="8" class="infra bx"/>
+  <text x="956" y="238" class="t">Clocking</text>
+  <text x="956" y="260" class="s">board clock 100 MHz (pin E3)</text>
+  <text x="956" y="284" class="s">MMCM ×9 ÷6 → 150 MHz</text>
+  <text x="956" y="308" class="s">MMCM ×13 ÷2 ÷5 → 130 MHz</text>
+  <text x="970" y="325" class="m">650 MHz VCO; integer multiplier,</text>
+  <text x="970" y="340" class="m">since nextpnr-xilinx truncates ×6.5</text>
+  <text x="956" y="364" class="s">BUFG → 100 MHz AXI clock</text>
+  <text x="956" y="384" class="m">TCK from each BSCANE2</text>
+
+  <!-- Board I/O -->
+  <rect x="942" y="414" width="302" height="96" rx="8" class="infra bx"/>
+  <text x="956" y="438" class="t">Board I/O</text>
+  <text x="956" y="460" class="s">btn[3:0] → EIO inputs; btn[0] resets</text>
+  <text x="956" y="478" class="s">led[3:0] ← EIO0 outputs</text>
+  <text x="956" y="496" class="m">resynchronized into the 150 MHz domain</text>
+
+  <!-- AXI fabric -->
+  <rect x="466" y="530" width="778" height="294" rx="8" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="482" y="554" class="h">AXI FABRIC · 100 MHz</text>
+  <g class="bx">
+    <rect x="482" y="566" width="220" height="70" rx="6" class="axi"/>
+    <text x="496" y="589" class="t">AXI monitor</text>
+    <text x="496" y="607" class="s">passive tap, 256 samples</text>
+    <text x="496" y="624" class="m">transaction-event decode</text>
+    <rect x="482" y="664" width="220" height="70" rx="6" class="axi"/>
+    <text x="496" y="687" class="t">EJTAG-AXI bridge</text>
+    <text x="496" y="705" class="s">AXI4 master for the host</text>
+    <text x="496" y="722" class="m">singles, strobes, bursts</text>
+    <rect x="482" y="744" width="220" height="70" rx="6" class="cpu"/>
+    <text x="496" y="767" class="t">VexRiscv RV32I</text>
+    <text x="496" y="785" class="s">AXI4 master, 64 KB BRAM</text>
+    <text x="496" y="802" class="m">host-gated firmware</text>
+    <rect x="752" y="694" width="190" height="90" rx="6" class="infra"/>
+    <text x="847" y="724" text-anchor="middle" class="t">fcapz_axi_interconnect</text>
+    <text x="847" y="743" text-anchor="middle" class="s">2 × 1 crossbar</text>
+    <text x="847" y="760" text-anchor="middle" class="m">vendor-neutral RTL</text>
+    <rect x="1022" y="704" width="206" height="70" rx="6" class="axi"/>
+    <text x="1036" y="728" class="t">axi4_test_slave</text>
+    <text x="1036" y="746" class="s">32 words</text>
+    <text x="1036" y="763" class="m">error address returns SLVERR</text>
+  </g>
+  <!-- chains into AXI cores -->
+  <path d="M442,562 H462 V601 H480" class="ln" marker-end="url(#arr)"/>
+  <path d="M442,698 H480" class="ln" marker-end="url(#arr)"/>
+  <!-- masters into interconnect -->
+  <path d="M702,699 H726 V722 H750" class="ln" marker-end="url(#arr)"/>
+  <path d="M702,779 H726 V756 H750" class="ln" marker-end="url(#arr)"/>
+  <!-- interconnect to slave -->
+  <path d="M942,739 H1020" class="ln" marker-end="url(#arr)"/>
+  <!-- monitor tap -->
+  <circle cx="982" cy="739" r="4" fill="#ea580c"/>
+  <path d="M982,735 V601 H704" stroke="#ea580c" stroke-width="1.6" fill="none" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+  <text x="992" y="660" class="m">monitor tap on the shared bus</text>
+
+  <!-- Legend -->
+  <g font-size="11" fill="#334155">
+    <rect x="1036" y="574" width="14" height="10" rx="2" class="ela"/>
+    <text x="1056" y="583">logic analyzer</text>
+    <rect x="1036" y="592" width="14" height="10" rx="2" class="eio"/>
+    <text x="1056" y="601">embedded I/O</text>
+    <rect x="1036" y="610" width="14" height="10" rx="2" class="axi"/>
+    <text x="1056" y="619">AXI core</text>
+    <rect x="1140" y="574" width="14" height="10" rx="2" class="cpu"/>
+    <text x="1160" y="583">soft CPU</text>
+    <rect x="1140" y="592" width="14" height="10" rx="2" class="infra"/>
+    <text x="1160" y="601">infrastructure</text>
+    <rect x="1140" y="610" width="14" height="10" rx="2" class="flow"/>
+    <text x="1160" y="619">build step</text>
+  </g>
+</svg>
