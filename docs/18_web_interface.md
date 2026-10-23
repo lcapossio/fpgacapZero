@@ -138,7 +138,8 @@ connected. The panels:
   **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
   Trigger tab).
-- **Trigger** — its own tab, laid out like Vivado ILA's **Trigger Setup**.
+- **Trigger** — a drawer on the viewer's right edge (hover the ⚡ Trigger rail,
+  or pin it open), laid out like Vivado ILA's **Trigger Setup**.
   **+ Add probe…** appends a row to the trigger table — named probes when
   defined, otherwise the raw probe bits (`bit0`…`bitN`), so triggering needs
   zero setup. Each row is **Name | Operator | Radix | Value**: operators

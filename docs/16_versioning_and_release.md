@@ -324,10 +324,10 @@ breaking-changes block for the format.
 ### 6. Rebuild the reference bitstream (only if minor / major bump)
 
 ```bash
-python examples/arty_a7/build.py
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build.py
 ```
 
-This regenerates `examples/arty_a7/arty_a7_top.bit` with the new
+This regenerates `examples/arty_a7/arty_a7_vex_top.bit` with the new
 VERSION baked in.  The hardware integration tests' identity check
 compares against `fcapz._version_tuple()` so they automatically
 expect the new value — but they'll only pass if the bitstream was
@@ -342,13 +342,13 @@ drift unless explicitly checked).
 ```bash
 hw_server -d                                # start the daemon
 pytest examples/arty_a7/test_hw_integration.py
-# Should be 41 passed, 7 skipped (UART loopback gated)
+# Everything passes; the UART loopback tests skip unless enabled
 ```
 
 ### 8. Commit and push
 
 ```bash
-git add VERSION rtl/fcapz_version.vh CHANGELOG.md examples/arty_a7/arty_a7_top.bit
+git add VERSION rtl/fcapz_version.vh CHANGELOG.md   # bitstreams are not committed
 git commit -m "release: v0.3.1 — <one-line summary>"
 git push origin main
 ```

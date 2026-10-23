@@ -114,7 +114,7 @@ Expected output:
 ```json
 {
   "version_major": 0,
-  "version_minor": 3,
+  "version_minor": 5,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -204,7 +204,8 @@ happened before the event, not only after it.
 
 **Download…** in the Run bar saves the capture as VCD, CSV or JSON.  The
 second ELA, which captures `counter_130 ^ 0xA5` at 130 MHz, sits in the same
-debug manager; capture it from the CLI with `--ela-instance 1`.
+debug manager; capture it from the CLI with `--ela-instance 1` (and
+`--sample-clock-hz 130000000`).
 
 Click **Disconnect** in the **Connection** tab before the next step, so the CLI
 has the cable to itself.
@@ -225,8 +226,12 @@ fcapz --backend hw_server --port 3121 \
         --trigger-value 0x42 \
         --trigger-mask 0xFF \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --out my_capture.json
 ```
+
+`--sample-clock-hz` records ELA0's 150 MHz sample clock in the export;
+without it the CLI assumes 100 MHz.
 
 Note we do **not** pass `--program` this time — the bitstream is
 already loaded from step 3.  Reprogramming on every command is wasteful;
@@ -269,7 +274,7 @@ python -m json.tool my_capture.json | head -40
 ```json
 {
     "version": "1.0",
-    "sample_clock_hz": 100000000,
+    "sample_clock_hz": 150000000,
     "sample_width": 8,
     "depth": 1024,
     "pretrigger": 8,
@@ -316,6 +321,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-value 0x42 \
         --trigger-mask 0xFF \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format vcd \
         --out my_capture.vcd
 ```
@@ -343,8 +349,9 @@ showcase the features.  Each one is a deeper dive in a later chapter.
 
 ### a. Edge-detect trigger (chapter 05)
 
-Trigger when bit 0 of the counter rises (which it does every cycle —
-this is the highest-frequency signal you can pick):
+Trigger when bit 0 of the counter changes.  `edge_detect` fires on either
+edge, and bit 0 toggles every cycle, so this is the highest-frequency
+trigger you can pick:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -398,8 +405,10 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --format json --out decim.json
 ```
 
-The captured samples will be `0x20, 0x24, 0x28, ...` — counter
-values 4 apart, because of `decimation=3` (store every N+1 = 4th).
+From the trigger sample on, the captured values are `0x20, 0x24, 0x28, ...`:
+counter values 4 apart, because `decimation=3` stores every N+1 = 4th
+sample.  The spacing just before the trigger can be shorter, because the
+trigger sample is always stored.
 
 ### d. EIO read/write (chapter 06)
 

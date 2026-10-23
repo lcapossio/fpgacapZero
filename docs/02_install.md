@@ -296,13 +296,13 @@ and raises `RuntimeError: ELA core identity check failed`).
 The fastest path:
 
 ```bash
-# 1. Build the reference bitstream (Vivado required, ~10-15 min)
-python examples/arty_a7/build.py
+# 1. Build the reference bitstream (Vivado and a RISC-V GCC, ~10-15 min)
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build.py
 
 # 2. Program + probe in one shot (--program flag)
 fcapz --backend hw_server --port 3121 \
       --tap xc7a100t \
-      --program examples/arty_a7/arty_a7_top.bit \
+      --program examples/arty_a7/arty_a7_vex_top.bit \
       probe
 ```
 

@@ -482,7 +482,7 @@ the same arrangement.
 1. Launch `fcapz-gui` from a terminal.
 2. In the **Connection** panel, set backend = `hw_server`, port =
    `3121`, target = `xc7a100t`, bitfile =
-   `examples/arty_a7/arty_a7_top.bit`, click **Connect**.
+   `examples/arty_a7/arty_a7_vex_top.bit`, click **Connect**.
    For Intel/Altera, set backend = `usb_blaster`, target = `auto`,
    set **Quartus hardware** if more than one cable is connected, and
    set **quartus_stp** if Quartus is not on PATH.

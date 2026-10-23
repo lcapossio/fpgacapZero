@@ -66,7 +66,7 @@ transport = XilinxHwServerTransport(
     host="127.0.0.1",
     port=3121,
     fpga_name="xc7a100t",
-    bitfile="examples/arty_a7/arty_a7_top.bit",   # optional, programs FPGA on connect()
+    bitfile="examples/arty_a7/arty_a7_vex_top.bit",   # optional, programs FPGA on connect()
     ir_table=None,                                 # default = 7-series IR codes
     ready_probe_addr=0x0000,                       # ELA VERSION register
     ready_probe_timeout=2.0,                       # seconds
@@ -692,7 +692,7 @@ from fcapz import (
 transport = XilinxHwServerTransport(
     port=3121,
     fpga_name="xc7a100t",
-    bitfile="examples/arty_a7/arty_a7_top.bit",   # programs FPGA on connect
+    bitfile="examples/arty_a7/arty_a7_vex_top.bit",   # programs FPGA on connect
 )
 
 analyzer = Analyzer(transport)

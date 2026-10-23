@@ -356,7 +356,7 @@ import json
 
 # Configure + capture
 t = XilinxHwServerTransport(port=3121, fpga_name="xc7a100t",
-                            bitfile="examples/arty_a7/arty_a7_top.bit")
+                            bitfile="examples/arty_a7/arty_a7_vex_top.bit")
 a = Analyzer(t)
 a.connect()
 
