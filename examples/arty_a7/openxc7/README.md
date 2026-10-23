@@ -13,6 +13,10 @@ The resulting bitstream passes the same hardware suite as the Vivado build:
 managed hub with two ELAs and two EIOs on USER1, the AXI monitor on USER2,
 EJTAG-AXI on USER4, and the VexRiscv CPU.
 
+<p align="center">
+  <img src="arty_openxc7_architecture.svg" alt="The openXC7 build flow, the host test path over hw_server and USB-JTAG, and the FPGA design: a USER1 core manager with two ELAs and two EIOs, the AXI monitor on USER2, EJTAG-AXI on USER4, and the VexRiscv CPU sharing an AXI test slave" width="900">
+</p>
+
 ## Toolchain
 
 The flow needs yosys plus the [openXC7](https://github.com/openXC7) tools:
