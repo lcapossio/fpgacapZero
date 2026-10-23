@@ -82,7 +82,23 @@ This adds **`pytest`** and **`ruff`**, which you need to run the
 test suite and lint the codebase.  No reason not to install them on
 a development machine.
 
-### Step 2b: install the GUI (optional)
+### Step 2b: install the web interface (recommended)
+
+```bash
+pip install -e ".[web]"
+```
+
+This adds **`fastapi`** and **`uvicorn`** and registers the browser
+front-end:
+
+```bash
+$ fcapz-web                             # serves on http://127.0.0.1:7373
+```
+
+[Chapter 03](03_first_capture.md) takes the first capture with it, and
+[chapter 18](18_web_interface.md) covers it in full.
+
+### Step 2c: install the desktop GUI (optional)
 
 ```bash
 pip install -e ".[gui]"
@@ -96,8 +112,7 @@ $ fcapz-gui                             # launches the desktop GUI
 ```
 
 The desktop GUI is not actively maintained: the web interface
-(`pip install -e ".[web]"`, then `fcapz-web`; see
-[chapter 18](18_web_interface.md)) is the recommended graphical front-end.
+(step 2b) is the recommended graphical front-end.
 
 The GUI is fully optional — the headless install above does not
 require any Qt dependency, which keeps your CI runners and
