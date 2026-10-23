@@ -29,6 +29,9 @@ The flow needs yosys plus the [openXC7](https://github.com/openXC7) tools:
 
 The flow runs on Linux. On Windows, run it in WSL.
 
+The hardware result above was built with yosys 0.66+94, nextpnr-xilinx
+`bc9b234`, prjxray-db `a90f27c` and prjxray `c9f02d8`.
+
 The chip database for `xc7a100tcsg324-1` takes about 70 s to build from the
 nextpnr-xilinx sources. It is built once and kept in the build directory.
 
