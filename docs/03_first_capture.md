@@ -24,26 +24,29 @@ instantiates the Intel wrappers; see [chapter 02](02_install.md) and
 
 The reference design is at [`../examples/arty_a7/`](../examples/arty_a7/).
 It instantiates a USER1 debug manager with two ELA slots and two EIO
-slots, plus one EJTAG-AXI bridge.  ELA0 captures a free-running 8-bit
-counter in a generated 150 MHz sample domain.  ELA1 captures a separate
-130 MHz counter xored with `0xA5`.  EIO0 drives the board LED/control
-test signals, and EIO1 gives a second managed I/O target for
-slot-selection checks.  The AXI bridge is wired to a small AXI test slave
-so you have something to look at from each host path.
+slots, an AXI monitor on USER2, and an EJTAG-AXI bridge on USER4.  ELA0
+captures a free-running 8-bit counter in a generated 150 MHz sample
+domain.  ELA1 captures a separate 130 MHz counter xored with `0xA5`.  EIO0
+drives the board LED/control test signals, and EIO1 gives a second
+managed I/O target for slot-selection checks.  An open-source VexRiscv CPU
+and the AXI bridge share a small AXI test slave, which the AXI monitor
+watches, so you have something to look at from each host path.
+
+The VexRiscv firmware needs a bare-metal RISC-V GCC.  Set `RISCV_PREFIX` to
+its prefix (the build also tries common prefixes on `PATH`):
 
 ```bash
 cd /path/to/fpgacapZero
-python examples/arty_a7/build.py
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build.py
 ```
 
-This launches Vivado in batch mode via [`build.py`](../examples/arty_a7/build.py).
-Expect 10-15 minutes on a reasonable machine.  When it finishes you
-will have:
+This compiles the firmware and launches Vivado in batch mode via
+[`build.py`](../examples/arty_a7/build.py).  Expect 10-15 minutes on a
+reasonable machine.  When it finishes you will have:
 
 ```
-examples/arty_a7/arty_a7_top.bit         (the bitstream)
-vivado/logs/vivado_build.log             (the full Vivado log)
-vivado/logs/vivado_build.jou             (the journal)
+examples/arty_a7/arty_a7_vex_top.bit     (the bitstream)
+vivado/logs/                             (the Vivado logs)
 ```
 
 > If the build fails with `Project 1-161: Failed to remove the
@@ -82,7 +85,10 @@ The web interface connects to a board that is already programmed, so load the
 bitstream from the CLI first.  The same command checks that the ELA answers:
 
 ```bash
-fcapz --backend hw_server --port 3121       --tap xc7a100t       --program examples/arty_a7/arty_a7_top.bit       probe
+fcapz --backend hw_server --port 3121 \
+      --tap xc7a100t \
+      --program examples/arty_a7/arty_a7_vex_top.bit \
+      probe
 ```
 
 For `hw_server`, `--tap` is the FPGA target name (`xc7a100t`).  OpenOCD
@@ -93,7 +99,7 @@ The `--program` flag tells fcapz to:
 
 1. Connect to `hw_server`.
 2. Bind the JTAG target named `xc7a100t`.
-3. Send `fpga -file examples/arty_a7/arty_a7_top.bit` to xsdb.
+3. Send `fpga -file examples/arty_a7/arty_a7_vex_top.bit` to xsdb.
 4. Wait for the FPGA to come up — this is the **readiness wait** I
    added in v0.2.0; it polls the ELA `VERSION` register up to 2 s
    until it returns a non-zero value.  If it stays zero, you get
@@ -149,16 +155,19 @@ In the **Connection** tab:
 
 - Set **Backend** to `hw_server`.
 - Set **Host** to `127.0.0.1` and **Port** to `3121`.
-- Leave **Tap** blank; it is detected from the board.
+- Set **Tap** to `xc7a100t`.  Left blank, it is detected from the board;
+  when `hw_server` sees several targets, Connect lists them to pick from.
 - Click **Connect**.
 
-The dock jumps to the **Cores** tab, which lists every core on the board: the
-two ELAs and two EIOs behind the USER1 debug manager, and the EJTAG-AXI bridge.
-The ELA the session uses is marked **in use**, with its parameters:
-sample width 8, depth 1024, timestamps, and 4 segments.  On the Arty reference
-bitstream the first ELA captures the plain counter in the 150 MHz domain; the
-second captures `counter_130 ^ 0xA5` at 130 MHz and can be selected with
-**Use this core**.
+<p align="center">
+  <img src="assets/fcapz-web-connection.png" alt="fcapz-web Connection tab with backend hw_server, host 127.0.0.1, port 3121 and tap xc7a100t" width="760">
+</p>
+
+The dock jumps to the **Cores** tab, which lists the cores behind the USER1
+debug manager: the two ELAs, the manager itself, and the two EIOs.  Each ELA
+shows its parameters: sample width 8, depth 1024, timestamps, and 4 segments.
+The session uses the first ELA, which captures the plain counter in the
+150 MHz domain.
 
 The reference design's probe is a free-running 8-bit counter
 (`probe_in[7:0]`) so we know it eventually hits any value 0–255.
@@ -184,7 +193,7 @@ the capture opens in the **Viewer: ELA** tab, the embedded Surfer waveform
 viewer.
 
 <p align="center">
-  <img src="assets/fcapz-web-demo.png" alt="fcapz-web browser interface showing connection, ELA capture controls, and the embedded Surfer waveform viewer" width="900">
+  <img src="assets/fcapz-web-capture.png" alt="fcapz-web after the capture: the ELA window set to 25 samples with the trigger at 9, the Trigger drawer with counter == 0x42, and the waveform with 0x42 at the trigger marker" width="900">
 </p>
 
 You should see 25 samples: 8 before the trigger, the trigger sample, and
@@ -193,10 +202,9 @@ samples are the counter incrementing.  That pre-trigger context is
 the killer feature of an in-chip logic analyzer: you get to see what
 happened before the event, not only after it.
 
-**Download…** in the Run bar saves the capture as VCD, CSV or JSON.  To look
-at the second ELA, click **Use this core** on it in the **Cores** tab and arm
-again: each capture core gets its own viewer tab, so the first capture stays
-where it was.
+**Download…** in the Run bar saves the capture as VCD, CSV or JSON.  The
+second ELA, which captures `counter_130 ^ 0xA5` at 130 MHz, sits in the same
+debug manager; capture it from the CLI with `--ela-instance 1`.
 
 Click **Disconnect** in the **Connection** tab before the next step, so the CLI
 has the cable to itself.
