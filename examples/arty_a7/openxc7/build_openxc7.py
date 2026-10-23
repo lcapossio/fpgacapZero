@@ -96,13 +96,31 @@ def _publish_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _bit_payload_complete(data: bytes) -> bool:
+    """True if a .bit file holds exactly the payload its header declares.
+    The header is a 9-byte preamble, then fields a-d (key, 16-bit length,
+    data) and field e (key, 32-bit payload length), then the payload."""
+    try:
+        i = 2 + int.from_bytes(data[0:2], "big") + 2
+        for key in b"abcd":
+            if data[i] != key:
+                return False
+            i += 3 + int.from_bytes(data[i + 1:i + 3], "big")
+        if data[i] != ord("e"):
+            return False
+        length = int.from_bytes(data[i + 1:i + 5], "big")
+        payload = data[i + 5:]
+    except IndexError:
+        return False
+    return len(payload) == length and SYNC_WORD in payload[:256]
+
+
 def _check_bitstream(path: Path) -> None:
     """Reject a missing or truncated bitstream. A full uncompressed
     xc7a100t bitstream is about 3.83 MB whatever the design."""
     data = path.read_bytes() if path.exists() else b""
-    size = len(data)
-    if size < MIN_BIT_BYTES or SYNC_WORD not in data[:1024]:
-        sys.exit(f"[openxc7] {path.name} is missing or incomplete ({size} bytes)")
+    if len(data) < MIN_BIT_BYTES or not _bit_payload_complete(data):
+        sys.exit(f"[openxc7] {path.name} is missing or incomplete ({len(data)} bytes)")
 
 
 def _run(cmd: list[str], log: Path, cwd: Path) -> None:
