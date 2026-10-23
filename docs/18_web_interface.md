@@ -137,7 +137,7 @@ connected. The panels:
   an optional post-trigger clock limit), and
   **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
-  Trigger tab).
+  Trigger drawer).
 - **Trigger** — a drawer on the viewer's right edge (hover the ⚡ Trigger rail,
   or pin it open), laid out like Vivado ILA's **Trigger Setup**.
   **+ Add probe…** appends a row to the trigger table — named probes when

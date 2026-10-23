@@ -362,6 +362,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-value 0 \
         --trigger-mask 0x01 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format vcd --out edge.vcd
 ```
 
@@ -380,6 +381,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-mask 0xFF \
         --trigger-delay 4 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format json --out delayed.json
 ```
 
@@ -402,13 +404,15 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-mask 0xFF \
         --decimation 3 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format json --out decim.json
 ```
 
-From the trigger sample on, the captured values are `0x20, 0x24, 0x28, ...`:
-counter values 4 apart, because `decimation=3` stores every N+1 = 4th
-sample.  The spacing just before the trigger can be shorter, because the
-trigger sample is always stored.
+The trigger sample is `0x20`, and after the first post-trigger sample the
+values step by 4, because `decimation=3` stores every N+1 = 4th sample.
+The two intervals next to the trigger sample can be shorter: the trigger
+sample is always stored, and the decimation counter does not restart at the
+trigger.
 
 ### d. EIO read/write (chapter 06)
 
