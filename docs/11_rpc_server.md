@@ -406,7 +406,7 @@ Response:
   "schema_version": "1.1",
   "probe": {
     "version_major": 0,
-    "version_minor": 3,
+    "version_minor": 5,
     "core_id": 19521,
     "sample_width": 8,
     "depth": 1024,
@@ -444,10 +444,10 @@ Response:
   "ok": true,
   "cores": [
     {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
-     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 4,
+     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 5,
      "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
     {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
-     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 4,
+     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 5,
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
@@ -685,7 +685,7 @@ Present → the bridge identity plus the `chain` it was found on; absent →
   "present": true, "chain": 4,
   "bridge_id": 19032, "core_id": 19032,
   "legacy_id": false, "legacy_raw_id": null,
-  "version_major": 0, "version_minor": 4,
+  "version_major": 0, "version_minor": 5,
   "addr_w": 32, "data_w": 32, "fifo_depth": 16
 }
 ```
@@ -714,9 +714,9 @@ Response includes the cached `fifo_depth`:
   "core_id": 19032,
   "legacy_id": false,
   "legacy_raw_id": null,
-  "version": 281176,
+  "version": 346712,
   "version_major": 0,
-  "version_minor": 4,
+  "version_minor": 5,
   "addr_w": 32,
   "data_w": 32,
   "fifo_depth": 16

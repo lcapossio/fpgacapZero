@@ -62,7 +62,7 @@ After install, three things are available:
 ```bash
 $ fcapz --help                          # CLI tool on your PATH
 $ python -c "import fcapz; print(fcapz.__version__)"
-0.4.0
+0.5.0
 $ python -m fcapz.cli --help            # equivalent to `fcapz`
 ```
 
@@ -312,7 +312,7 @@ Expected output (the exact `version_minor` will match
 ```json
 {
   "version_major": 0,
-  "version_minor": 3,
+  "version_minor": 5,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,

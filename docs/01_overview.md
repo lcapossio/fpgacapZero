@@ -109,9 +109,11 @@ Use cases that just work:
 - Two FPGAs talk over JTAG via two `fcapz-uart` instances on the
   host, no UART wires.
 
-Full chapter: [chapter 08](08_ejtag_uart_bridge.md).  Note: there is
-one known limitation with internal loopback at 115200 baud — see
-chapter 17 for details.
+Full chapter: [chapter 08](08_ejtag_uart_bridge.md).  The bytes once
+dropped on back-to-back internal-loopback traffic at 115200 baud
+(BUG-002) were a host-side bug, fixed without a bitstream change; the
+Arty A7 loopback stress test has not been re-run since the fix.  See
+chapter 08 for details.
 
 ## How the cores fit together
 

@@ -403,7 +403,7 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
 | `probe_file` | Name of a probe definition file directly inside `--probe-root`. |
-| `channel` | Capture channel or runtime probe mux channel. |
+| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). The runtime probe mux slice (`probe_sel`) is not exposed over MCP or RPC and stays at `0`; select another slice from Python (`CaptureConfig(probe_sel=...)`) or the CLI (`--probe-sel`). |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
 | `stor_qual_mode` | Storage qualification: `0` off, `1` store only matching samples, `2` store only non-matching ones. `1` needs a core reporting `COMPARE_CAPS` bit 22; older cores have only `2`. |
@@ -832,6 +832,7 @@ fcapz_close()
 AXI read:
 
 ```text
+fcapz_connect(backend="hw_server")       # the ELA session comes first
 fcapz_connect(core="axi", backend="hw_server", chain=4)
 fcapz_axi_read(addr="0x40000000")
 fcapz_axi_read(addr="0x40000000", count=16)
@@ -857,6 +858,7 @@ fcapz_close()
 UART receive:
 
 ```text
+fcapz_connect(backend="hw_server")       # the ELA session comes first
 fcapz_connect(core="uart", backend="hw_server", chain=4)
 fcapz_uart_recv(count=256, timeout=0.5)
 fcapz_close(core="uart")
@@ -868,8 +870,8 @@ fcapz_close(core="uart")
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
 | `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
-| Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | The server attempted a session-wide backend cancellation. Retry only if `fcapz_status` responds; restart if the next call reports a previous RPC still running. |
-| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
+| Tool call raises `TimeoutError` | The RPC watchdog (`--rpc-timeout`, 30 s by default) fired before the backend returned. | The board session is torn down, or is being torn down if the call was abandoned. Poll `fcapz_status` until `session_state` is `ready`, then call `fcapz_connect` again. Restart `fcapz-mcp` only if it never returns to `ready`. |
+| A new tool call is refused while the session is recovering from an abandoned call (`session_recovering`) | A timed-out hardware call is still being torn down; `session_state` is `poisoned`. | Wait: once the abandoned call returns, the server closes the board session, clears its state and goes back to `ready`. Then reconnect. Restart only if recovery never completes. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
 | `serial_port ... is not a serial port on this machine` | The name is not one the OS lists, or the board is not in bridge mode yet. | Use a name from the error's `present:` list (or `fcapz list-ports`); program the FPGA first so the bridge enumerates. |
