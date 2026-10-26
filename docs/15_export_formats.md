@@ -29,10 +29,15 @@ the output.
 
 ## JSON
 
-The JSON format is the **richest** of the three.  It contains the
-full `CaptureConfig` that produced the capture (so a downstream
-tool knows the trigger, decimation, sample width, etc.), the
-sample array, and timestamps if present.
+The JSON format is the **richest** of the three.  It records a subset
+of the `CaptureConfig` that produced the capture: `sample_clock_hz`,
+`sample_width`, `depth`, `pretrigger`, `posttrigger`, `channel`,
+`decimation`, `stor_qual_mode`, `ext_trigger_mode`, the simple
+`trigger` (`mode`, `value`, `mask`) and the probe map.  It also holds
+`overflow`, `segment`, the sample array, and timestamps if present.
+It does **not** record the sequencer stages (`sequence`),
+`trigger_delay`, `trigger_holdoff`, `stor_qual_value` / `stor_qual_mask`,
+`probe_sel`, `startup_arm`, `rle` or `post_clocks`.
 
 ```json
 {
@@ -161,15 +166,32 @@ digital simulation.  Every serious waveform viewer reads it.  The
 `Analyzer.write_vcd()` helper produces a fully spec-compliant
 VCD with:
 
-- A `$timescale` based on `sample_clock_hz` (e.g. 10 ns for 100 MHz)
+- A fixed `$timescale` of `1 ns`, used as a plain tick: the time axis
+  counts samples or cycles, not real nanoseconds (see below)
 - One `$var wire` declaration per `ProbeSpec` from the
   `CaptureConfig` (or one giant `sample` signal if no probes
   were defined)
 - A `$var wire` declaration for the timestamp counter if
   `TIMESTAMP_W > 0`
-- Per-cycle value-change records using the actual cycle number
-  (or sample index, when no timestamps are present). A run-length
-  capture places each entry at its start clock.
+- One value-change record per stored sample, at the tick described
+  below.
+
+The `#` time of each sample is:
+
+- **Without timestamps**: the stored-sample index, `0 .. n-1`.  One
+  tick is one stored sample, so with decimation `N` a tick is `N+1`
+  sample clocks.  A run-length capture places each entry at its start
+  clock instead.
+- **With timestamps**: the sample's timestamp minus the first sample's,
+  so the dump starts at `#0` and one tick is one sample-clock cycle.  The
+  `timestamp` wire still carries the raw counter values.
+
+The viewer labels the axis "ns", but the number is a tick count.  To get
+physical time, multiply by the period of one tick: with timestamps (or
+without them, when every cycle was stored: no decimation and no storage
+qualification) that is `1 / sample_clock_hz`, e.g. tick 150 at 150 MHz is
+1 µs.  The rate is not in the VCD; it is in the JSON export's
+`sample_clock_hz`.
 
 For segmented captures, `Analyzer.export_vcd_text_segments(results)` emits all
 segments in **one** VCD: the same signals and `logic` scope, segments
@@ -191,7 +213,7 @@ $version
   fcapz-mvp
 $end
 $timescale
-  10 ns
+  1 ns
 $end
 $scope module logic $end
 $var wire 4 a addr $end
@@ -256,9 +278,12 @@ The generator is at
 viewer (GTKWave)" but you can also use it from your own scripts:
 
 ```python
+from pathlib import Path
 from fcapz.gui.gtkw_writer import write_gtkw_for_capture
-write_gtkw_for_capture(result, vcd_path="cap.vcd", gtkw_path="cap.gtkw")
+write_gtkw_for_capture(result, vcd_path=Path("cap.vcd"), gtkw_path=Path("cap.gtkw"))
 ```
+
+The paths must be `Path` objects; plain strings raise `AttributeError`.
 
 GTKWave then opens with the layout pre-loaded:
 
@@ -266,7 +291,14 @@ GTKWave then opens with the layout pre-loaded:
 gtkwave cap.vcd --save cap.gtkw
 ```
 
-A future commit could generate Surfer's state file the same way.
+Surfer gets the same treatment: "Open in viewer (Surfer)" writes a
+Surfer command file
+([`host/fcapz/gui/surfer_command_writer.py`](../host/fcapz/gui/surfer_command_writer.py),
+`write_surfer_command_file_for_capture(result, Path(...))`) that adds the
+signals and places a marker on the trigger sample, and launches
+`surfer --command-file <file> <vcd>`.  When the GUI reuses a running Surfer
+for repeated captures, it reloads the new wave through Surfer's WCP
+connection where available.
 
 ## Waveform viewer integration
 
@@ -280,17 +312,17 @@ below.
 | Class | Detects | Launch | Layout file |
 |---|---|---|---|
 | `GtkWaveViewer` | `gtkwave` on PATH | `subprocess.Popen([gtkwave, vcd, "--save", gtkw])` | yes (`.gtkw`) |
-| `SurferViewer` | `surfer` on PATH | `subprocess.Popen([surfer, vcd])` | not yet (planned) |
+| `SurferViewer` | `surfer` on PATH | `subprocess.Popen([surfer, "--command-file", cmd, vcd])` | yes (Surfer command file with trigger marker) |
 | `WaveTraceViewer` | `wavetrace` on PATH | `subprocess.Popen([wavetrace, vcd])` | no |
-| `CustomCommandViewer` | n/a | substitute `{VCD}` and `{GTKW}` in user template, spawn | depends on user template |
+| `CustomCommandViewer` | n/a | substitute `{VCD}` and `{SAVE}` in user argv template, spawn | depends on user template |
 
 The custom command variant is the escape hatch for anything not
-covered by the built-ins:
+covered by the built-ins.  It is an argv list, one element per argument:
 
 ```toml
-# in ~/.config/fpgacapzero/gui.toml
-[viewers.custom]
-command = "myviewer --vcd {VCD}"
+# in ~/.config/fpgacapzero/gui.toml (Windows: %APPDATA%\fpgacapzero\gui.toml)
+[viewers]
+custom_argv = ["myviewer", "--vcd", "{VCD}"]
 ```
 
 Then "Open in viewer (Custom command)" appears in the GUI
@@ -300,16 +332,17 @@ dropdown alongside the auto-detected ones.
 
 At GUI startup, [`viewer_registry.py`](../host/fcapz/gui/viewer_registry.py)
 calls each `WaveformViewer` subclass's `detect_executable()`
-classmethod (which uses `shutil.which()`) and only enables the
-ones it finds.  Missing viewers are grayed out in the dropdown
-with a tooltip explaining how to install them.
+classmethod (which uses `shutil.which()`) and lists only the
+ones it finds (or that have a path override).  Missing viewers are
+left out of the dropdown.
 
 You can override the auto-detected path in **Settings →
 Viewers** if your install lives somewhere unusual:
 
 ```toml
-[viewers.gtkwave]
-path = "/opt/gtkwave/bin/gtkwave"
+[viewers]
+gtkwave_executable = "/opt/gtkwave/bin/gtkwave"
+# also: surfer_executable, wavetrace_executable
 ```
 
 ### Embedding caveat
@@ -360,6 +393,7 @@ cfg = CaptureConfig(
     pretrigger=8, posttrigger=16,
     trigger=TriggerConfig(mode="value_match", value=0x42, mask=0xFF),
     sample_width=8, depth=1024,
+    sample_clock_hz=150_000_000,   # reference ELA0 samples at 150 MHz
     probes=[ProbeSpec(name="counter", width=8, lsb=0)],
 )
 a.configure(cfg); a.arm()
@@ -423,8 +457,8 @@ CSV is the path of least friction for ad-hoc analysis.
 
 | Question | JSON | CSV | VCD |
 |---|---|---|---|
-| Includes trigger config? | ✅ | ❌ | partial (`$comment`) |
-| Includes timestamps? | ✅ if `TIMESTAMP_W>0` | ✅ if `TIMESTAMP_W>0` | ✅ via `$timescale` |
+| Includes trigger config? | ✅ (simple trigger only) | ❌ | ❌ |
+| Includes timestamps? | ✅ if `TIMESTAMP_W>0` | ✅ if `TIMESTAMP_W>0` | ✅ if `TIMESTAMP_W>0` (`timestamp` wire; ticks follow it) |
 | Named probes? | ✅ | ❌ | ✅ if `--probes` set |
 | Round-trippable into Python? | as a dict | as a DataFrame | as text only |
 | Suitable for waveform viewer? | ❌ | ❌ | ✅ |
