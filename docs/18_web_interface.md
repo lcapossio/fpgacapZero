@@ -29,13 +29,19 @@ on the command line — one server can drive whatever board you point it at.
 ### Reaching it from another machine
 
 ```bash
-fcapz-web --host 0.0.0.0 --port 7373 --token "$(openssl rand -hex 16)"
+export FCAPZ_WEB_TOKEN="$(openssl rand -hex 16)"
+echo "$FCAPZ_WEB_TOKEN"                 # note it: the browser needs the same value
+fcapz-web --host 0.0.0.0 --port 7373    # --token defaults to $FCAPZ_WEB_TOKEN
 ```
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or the
 `FCAPZ_WEB_TOKEN` environment variable) whenever you do: it is then required as
 `Authorization: Bearer <token>` on every `/api` route and as `?token=` on the
-WebSocket, and the UI hides the token field until a server asks for it. There is
+WebSocket. The server never prints the token, so keep the value you generated.
+The UI hides the token field until a server asks for it: once a request is
+refused as unauthorized (typically your first **Connect**), the Connection panel
+shows an **API token** field; paste the same value there and press **Connect**
+again. The browser remembers it for that server's address. There is
 **no TLS** — put it behind a reverse proxy or an SSH tunnel if it leaves a
 trusted network. `fcapz-web` prints a warning if you bind a non-localhost host
 without a token.
@@ -87,9 +93,15 @@ can still point `--openocd-cfg-dir` at a folder of your own configs, or
 launched, and only from a **localhost** browser — a remote client cannot spawn
 processes, even with a valid token.
 
-None of this is required just to *use* the web frontend: without these flags you
-simply connect to an already-running OpenOCD or hw_server via the backend/host/
-port fields, and the "Start OpenOCD" button is hidden.
+None of this is required just to *use* the web frontend: you can always connect
+to an already-running OpenOCD or hw_server via the backend/host/port fields. The
+server-side OpenOCD start stays off only when discovery comes up without a
+usable binary or config, for example on a plain `pip install` run outside a
+source checkout, where there are no bundled `examples/` configs. `fcapz-web`
+prints a startup warning when it finds a binary but no config, or a config but
+no binary. When the feature is on, the "Start OpenOCD" button is only a picker:
+it appears when Connect finds no board and the server offers more than one
+config; with a single config, Connect starts OpenOCD by itself.
 
 ## The workspace
 
