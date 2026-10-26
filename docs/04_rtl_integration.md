@@ -13,7 +13,7 @@ Every fcapz core ships in two flavors:
 | Flavor | Files | Use when |
 |---|---|---|
 | **Vendor wrapper** | `rtl/fcapz_*_xilinx7.v`, `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v` | **Almost always.** Single instantiation, bundles the TAP primitive + register interface + core internally.  No JTAG knowledge required. |
-| **Vendor-agnostic core** | `rtl/fcapz_ela.v`, `fcapz_eio.v`, `fcapz_ejtagaxi.v`, `fcapz_ejtaguart.v` | Only if you already have your own JTAG TAP plumbing and want to wire the core's `tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel` directly.  Advanced use. |
+| **Vendor-agnostic core** | `rtl/fcapz_ela.v`, `fcapz_eio.v`, `fcapz_ejtagaxi.v`, `fcapz_ejtaguart.v` | Only if you already have your own JTAG TAP plumbing.  Advanced use.  `fcapz_ejtagaxi` and `fcapz_ejtaguart` take the TAP signals (`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel`) directly.  `fcapz_ela` and `fcapz_eio` take a decoded register bus (`jtag_clk`, `jtag_wr_en`, `jtag_addr`, `jtag_wdata`, `jtag_rdata`, ...); put [`jtag_reg_iface`](../rtl/jtag_reg_iface.v) (49-bit register DR) or [`jtag_pipe_iface`](../rtl/jtag_pipe_iface.v) (register DR plus single-chain 256-bit burst) between your TAP and the core, as the wrappers do. |
 
 **99% of users want the wrappers.**  This chapter is about wrappers.
 The agnostic cores are documented in chapters 05-08 alongside the
@@ -58,10 +58,10 @@ validates the PolarFire wrapper. The Kria KV260 test
 ([`examples/kv260`](../examples/kv260/)) validates Zynq UltraScale+ MPSoC: the
 `_xilinxus` JTAG-UART and AXI bridge, and the `_xilinx7` multi-core manager
 (4-stage sequencer, storage qualification, relational compares) and AXI
-monitor, all on `xck26` over hw_server's `-register` mode. ECP5 and
-standalone Kintex / Virtex UltraScale(+) wrappers should be treated as
-RTL-implemented and lint-clean until a board-level smoke test is added for
-that family.
+monitor, all on `xck26` over hw_server's `-register` mode. For the
+remaining families (ECP5, standalone UltraScale / UltraScale+) see the
+[vendor support matrix](01_overview.md#vendor-support-matrix); a family with
+no board result there is RTL-implemented and lint-clean only.
 
 > [!NOTE]
 > **Why the UltraScale wrapper is a "thin shim"**: AMD's BSCANE2
@@ -86,9 +86,9 @@ the project version and per-core ASCII identifiers as `\`define`s:
 
 ```verilog
 `define FCAPZ_VERSION_MAJOR   8'h00
-`define FCAPZ_VERSION_MINOR   8'h03
+`define FCAPZ_VERSION_MINOR   8'h05
 `define FCAPZ_VERSION_PATCH   8'h00
-`define FCAPZ_VERSION_STRING  "0.4.0"
+`define FCAPZ_VERSION_STRING  "0.5.0"
 `define FCAPZ_ELA_CORE_ID     16'h4C41   // "LA" — Logic Analyzer
 `define FCAPZ_EIO_CORE_ID     16'h494F   // "IO" — Embedded I/O
 `define FCAPZ_ELA_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_ELA_CORE_ID}
@@ -104,14 +104,14 @@ and the ELA testbench all stay in lockstep automatically.  CI fails
 the build if the header has drifted from `VERSION`.  See
 [chapter 16](16_versioning_and_release.md) for the full story.
 
-**You don't need to do anything special** to make the header
-visible to your RTL: it lives in `rtl/` next to all the core files,
-and any tool that reads them (Vivado `add_files`, iverilog with
-`-I rtl`, your synthesis flow) will pick it up.  The reference
-[`build_arty.tcl`](../examples/arty_a7/build_arty.tcl) explicitly
-adds it as a "Verilog Header" file type and marks it
-`is_global_include = true` so every source file in the project sees
-it.
+**Your build flow must make the header visible** to the RTL; don't
+rely on the tool finding it on its own.  In Vivado, add `rtl/fcapz_version.vh` to the project with the other
+sources, set its file type to "Verilog Header" and mark it
+`is_global_include = true` so every source file sees it; the reference
+[`build_arty_vex.tcl`](../examples/arty_a7/build_arty_vex.tcl) does exactly
+this.  For iverilog, pass `-I rtl`.  See
+[Forgetting to add `fcapz_version.vh`](#forgetting-to-add-fcapz_versionvh-in-your-build-flow)
+for the error you get otherwise.
 
 ## Minimal instantiation: ELA only
 
@@ -143,6 +143,37 @@ register file declarations.  The wrapper takes care of:
 - Instantiating `jtag_burst_read` for legacy two-chain burst builds
 - Instantiating `fcapz_ela` (the actual capture core)
 - Wiring everything together
+
+The wrapper does not pull in its submodules by itself.  For this example,
+add these files from `rtl/` to your Vivado project (the paths are relative
+to the repository root):
+
+```tcl
+add_files [list \
+    rtl/fcapz_version.vh \
+    rtl/fcapz_ela_xilinx7.v \
+    rtl/jtag_tap/jtag_tap_xilinx7.v \
+    rtl/reset_sync.v \
+    rtl/jtag_pipe_iface.v \
+    rtl/jtag_reg_iface.v \
+    rtl/jtag_burst_read.v \
+    rtl/fcapz_regbus_mux.v \
+    rtl/fcapz_eio.v \
+    rtl/fcapz_ela.v \
+    rtl/trig_compare.v \
+    rtl/dpram.v \
+]
+set_property file_type "Verilog Header" [get_files rtl/fcapz_version.vh]
+set_property is_global_include true     [get_files rtl/fcapz_version.vh]
+```
+
+`jtag_reg_iface`, `jtag_burst_read`, `fcapz_regbus_mux` and `fcapz_eio` are
+only instantiated for `SINGLE_CHAIN_BURST=0` or `EIO_EN=1`; keeping them in the
+list lets you change those parameters without editing the file list, and the
+unused ones cost nothing.  `fcapz_ela_xilinxus` needs the same list plus
+`fcapz_ela_xilinxus.v`.  The LiteX helper's `ela_rtl_sources()` returns a
+superset of this list (it adds the `fcapz_debug_multi_*` hub files) for each
+vendor.
 
 Resource usage: ~912 slice LUTs + 0.5 BRAM on xc7a100t (Vivado 2025.2
 synthesis) for an 8b x 1024 single-comparator, single-chain fast-readout
@@ -266,16 +297,24 @@ override at instantiation:
 fcapz_ela_xilinx7 #(
     .SAMPLE_W   (8),
     .DEPTH      (1024),
-    .CTRL_CHAIN (3),     // move ELA control to USER3
-    .SINGLE_CHAIN_BURST(0), // use a separate burst-data chain
-    .DATA_CHAIN (4)         // move ELA legacy burst data to USER4
+    .CTRL_CHAIN (2)      // ELA control + single-chain burst on USER2
 ) u_ela (
     ...
 );
 ```
 
-If you do this, **also update the host's `ir_table`** to match —
-see [chapter 14](14_transports.md).
+Then point the host at that chain: `fcapz --chain 2 capture ...` on the CLI,
+or `Analyzer(transport, chain=2)` from Python.  The `ir_table` does not need
+to change: it maps every USER chain number to its IR opcode, so the
+[preset](14_transports.md#ir-table-presets) for your part already covers
+USER1..USER4.  hw_server's named-register mode (`use_register_ir=True`)
+ignores `ir_table` altogether and selects `user<N>` directly.
+
+Moving the legacy two-chain burst (`SINGLE_CHAIN_BURST=0`) is more limited:
+`XilinxHwServerTransport` always issues those bursts on USER2, so keep
+`DATA_CHAIN=2` for hw_server.  `OpenOcdTransport` and the TAP-bridge
+transports take a `burst_data_chain=` argument for a different chain.  See
+[chapter 14](14_transports.md).
 
 ## ELA wrapper parameter reference
 
@@ -302,7 +341,6 @@ module fcapz_ela_xilinx7 #(
     parameter REL_COMPARE  = 0,      // 1=enable <, >, <=, >= trigger modes
     parameter DUAL_COMPARE = 1,      // 0=A-only compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,     // 0=disable slow USER1 DATA window readback
-    parameter WIDE_TRIG    = 0,      // 1=comparator A programmable across full SAMPLE_W
     parameter RLE_W        = 0       // 0=off, 1..16=run-length capture count width
 ) ( ... );
 ```
@@ -326,14 +364,14 @@ module fcapz_ela_xilinx7 #(
 | `REL_COMPARE` | bit | 0/1 | Enables relational trigger modes `<`, `>`, `<=`, and `>=`. Default `0` keeps the comparator path smaller and faster; EQ/NEQ/rising/falling/changed remain available. For high-frequency `REL_COMPARE=1` builds, use `INPUT_PIPE>=1`; that automatically registers compare hits for timing at the cost of one additional sample-clock decision latency. |
 | `DUAL_COMPARE` | bit | 0/1 | Enables comparator B plus B-only/AND/OR trigger combinations. Default `1` preserves the full trigger sequencer. Set `0` for a smaller single-comparator ELA build; the host reports `has_dual_compare=False` and rejects B-combine sequences. |
 | `USER1_DATA_EN` | bit | 0/1 | Enables the slow USER1 `DATA`/timestamp readback window. Default `1` preserves compatibility and supports fallback reads. Set `0` in minimal AMD/Xilinx builds that rely on fast burst readout to remove the sample-clock USER1 data CDC and part of the readback mux. Such a core can only be read by burst: when a capture would need the window (no burst on the transport, `--no-burst`, or a manager slot the transport's burst cannot reach), the host raises `DataWindowError` rather than returning the zeros the core answers. |
-| `WIDE_TRIG` | bit | 0/1 | Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
+| `WIDE_TRIG` | bit | 0/1 | Not a parameter of the ELA vendor wrappers or the `fcapz_debug_multi_*` hubs: only the bare `fcapz_ela` core (default `0`) and the AXI monitor (`fcapz_axi_mon` and its `_xilinx7` / `_intel` wrappers, default `1`) expose it. Makes comparator A's value/mask programmable across the full `SAMPLE_W` via the `WIDE_SEL`/`WIDE_DATA` indexed-word window, instead of only the low 32 bits (upper bits masked to 0). Default `0` keeps the register path minimal and is bit-identical to prior builds. Set `1` on wide-sample cores (e.g. the AXI monitor) that need to trigger on fields above bit 31; `COMPARE_CAPS` bit 18 advertises it. Only meaningful when `SAMPLE_W > 32`. |
 | `BURST_W` | int | 256 | Burst DR width.  Don't change unless you know exactly what you're doing. |
 | `BURST_EN` | bit | 0/1 | AMD/Xilinx and PolarFire wrapper option to instantiate the legacy DATA_CHAIN (PolarFire: `IR_USER2`) burst read engine when `SINGLE_CHAIN_BURST=0`. Default `1` keeps that compatibility path available only when selected. |
 | `SINGLE_CHAIN_BURST` | bit | 0/1 | AMD/Xilinx and PolarFire wrapper option to keep fast 256-bit burst readout on `CTRL_CHAIN` (PolarFire: `IR_USER1`) instead of using a second USER chain. Default `1`: one USER chain carries both 49-bit register packets and 256-bit data packets. Set `0` only for legacy two-chain builds, and construct the host transport with `single_chain_burst=False`. |
 | `CTRL_CHAIN` | int | 1..4 | BSCANE2 USER chain for the control register interface. |
 | `DATA_CHAIN` | int | 1..4 | BSCANE2 USER chain for the burst data readback. |
 | `IR_USER1` / `IR_USER2` | 8-bit | `0x10..0x7F` | PolarFire wrappers only, in place of `CTRL_CHAIN` / `DATA_CHAIN`: the `UJTAG` IR opcodes of the two chains. Default `0x20` / `0x21`, clear of the PolarFire SoC MSS debug module at `0x10` / `0x11`. |
-| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  The standalone `fcapz_eio_xilinx7` / `_xilinxus` wrappers cannot coexist with this — pick one. |
+| `EIO_EN` | bit | 0/1 | When `1`, the ELA wrapper also instantiates an EIO core and muxes it onto `CTRL_CHAIN` via an address decoder — ELA registers live at `0x0000..0x7FFF`, EIO registers at `0x8000..0xFFFF`.  Lets you use both cores on a single USER chain when you want to conserve BSCAN primitives or share a chain for deployment reasons.  A standalone `fcapz_eio_xilinx7` / `_xilinxus` can still sit on a different, unused USER chain, but not on `CTRL_CHAIN`. |
 | `NUM_EIOS` | int | 0..N | `fcapz_debug_multi_*` wrappers only. Number of managed EIO slots after the ELA slots. Defaults to `EIO_EN` for one-EIO compatibility; `NUM_ELAS=0` with `NUM_EIOS>0` builds an EIO-only hub. |
 | `EIO_IN_W` | int | 1..N | EIO input bus width when `EIO_EN=1`. |
 | `EIO_OUT_W` | int | 1..N | EIO output bus width when `EIO_EN=1`. |
@@ -355,24 +393,35 @@ programming instead of relying on power-up auto-arm behavior.
 
 The default config is intentionally small and single-chain, while still
 keeping compatibility features such as comparator B and USER1 fallback
-readout enabled. The reference Arty A7 design uses:
+readout enabled. The reference Arty A7 design builds its two ELAs through
+the debug manager with these overrides (both slots share them):
 
 ```verilog
-fcapz_ela_xilinx7 #(
-    .SAMPLE_W     (8),
-    .DEPTH        (1024),
-    .DECIM_EN     (1),
-    .EXT_TRIG_EN  (1),
-    .TIMESTAMP_W  (32),
-    .NUM_SEGMENTS (4),
-    .TRIG_STAGES  (4),
-    .STOR_QUAL    (1)
-) u_ela ( ... );
+fcapz_debug_multi_xilinx7 #(
+    .NUM_ELAS         (2),
+    .EIO_EN           (1),
+    .NUM_EIOS         (2),
+    .SAMPLE_W         (8),
+    .DEPTH            (1024),
+    .INPUT_PIPE       (1),
+    .DECIM_EN         (1),
+    .EXT_TRIG_EN      (1),
+    .TIMESTAMP_W      (32),
+    .NUM_SEGMENTS     (4),
+    .STARTUP_ARM      (1),
+    .DEFAULT_TRIG_EXT (2),
+    .EIO_IN_W         (8),
+    .EIO_OUT_W        (8)
+) u_debug ( ... );
 ```
 
-This is the "everything on" config and what the hardware integration
-tests exercise.  See [chapter 05](05_ela_core.md) for what each
-feature actually does at runtime.
+Everything else stays at the defaults: `TRIG_STAGES=1`, `STOR_QUAL=0`,
+`REL_COMPARE=0`, `DUAL_COMPARE=1`, `USER1_DATA_EN=1`, `NUM_CHANNELS=1`,
+`PROBE_MUX_W=0`, and no run-length capture.  This is the configuration the
+Arty hardware integration tests exercise; the sequencer, storage
+qualification and relational compares are covered by the KV260 test
+instead.  See [chapter 05](05_ela_core.md) for what each feature actually
+does at runtime.
 
 ### Combining ELA + EIO on a single USER chain (`EIO_EN=1`)
 
@@ -428,11 +477,13 @@ eio.write_outputs(0x1)
 ```
 
 **Limits:**
-- The ELA burst readback still uses USER2 (256-bit DR) — that stays on
-  its own chain; only the 49-bit register path is shared.
-- You cannot also instantiate a standalone `fcapz_eio_xilinx7` /
-  `_xilinxus` elsewhere in the same design (two BSCANE2s on the same
-  USER chain).
+- With the default `SINGLE_CHAIN_BURST=1`, the 256-bit burst readback
+  shares USER1 too, so the whole ELA + EIO pair uses one chain.  Only a
+  legacy `SINGLE_CHAIN_BURST=0` build keeps burst readback on its own
+  `DATA_CHAIN` (USER2 by default).
+- A standalone `fcapz_eio_xilinx7` / `_xilinxus` must not reuse the same
+  USER chain (two BSCANE2s on one chain).  On another unused chain, such
+  as USER3, it works alongside the shared one.
 - For multiple ELAs plus EIO on one chain, prefer the
   `fcapz_debug_multi_<vendor>` hub (`xilinx7`, `xilinxus`, `intel`); it uses
   the descriptor-capable `"CM"` active-slot manager instead of the older fixed
@@ -477,7 +528,7 @@ module fcapz_ejtagaxi_xilinx7 #(
 
 | Parameter | Range | Effect |
 |---|---|---|
-| `ADDR_W` | 32, 64 | AXI address width.  64 is supported but not hardware-validated. |
+| `ADDR_W` | 32 | AXI address width.  Only 32 is supported: the JTAG command DR carries a 32-bit address field (`[31:0]`) and the host masks every address to 32 bits.  The parameter accepts a wider value, but nothing above bit 31 is host-reachable: the set-address and burst-setup paths zero-extend the 32-bit field, and the direct read/write path part-selects past it.  Wider builds are untested. |
 | `DATA_W` | 32 | AXI data width.  Only 32 is supported today. |
 | `FIFO_DEPTH` | 1..256, **power of 2** | Async FIFO depth for burst reads.  Limits the maximum burst length the host can request — the host caches this from `FEATURES[23:16]` and rejects oversized requests at the API boundary.  See [chapter 07](07_ejtag_axi_bridge.md). |
 | `CMD_FIFO_DEPTH` | power of 2 | TCK-to-AXI command queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
@@ -509,7 +560,7 @@ module fcapz_ejtaguart_xilinx7 #(
 | `BAUD_RATE` | int | Target UART baud rate.  Common values 9600 / 115200 / 921600. |
 | `TX_FIFO_DEPTH` | power of 2 | TX async FIFO depth in bytes. |
 | `RX_FIFO_DEPTH` | power of 2 | RX async FIFO depth in bytes. |
-| `PARITY` | 0/1/2 | 0=none, 1=odd, 2=even. |
+| `PARITY` | 0/1/2 | 0=none, 1=even, 2=odd. |
 
 ## Common pitfalls
 
@@ -533,9 +584,11 @@ Either widen your probe (`{8'h0, my_8bit_signal}`) or set
 Without `WIDE_TRIG=1`, comparator A's value and mask are 32 bits wide, so
 an ELA wider than 32 bits can trigger only on sample bits `[31:0]`.  The
 limit shows up only at `configure()` time, as "trigger value/mask exceed 32
-bits".  Put the signals you want to trigger on in the low 32 bits of
-`probe_in`, or build with `WIDE_TRIG=1`.  `probe()` reports
-`has_wide_trigger`.
+bits".  The ELA vendor wrappers and the `fcapz_debug_multi_*` hubs build
+without `WIDE_TRIG` and have no parameter to turn it on, so put the signals
+you want to trigger on in the low 32 bits of `probe_in`.  `WIDE_TRIG=1` is
+available only on the bare `fcapz_ela` core and on the AXI monitor, where it
+is on by default.  `probe()` reports `has_wide_trigger`.
 
 ### DEPTH must be a power of 2
 
@@ -576,15 +629,32 @@ Vivado synthesis dies with:
 ERROR: [Synth 8-403] could not find file fcapz_version.vh
 ```
 
-The fix is at the top of [`build_arty.tcl`](../examples/arty_a7/build_arty.tcl) —
-copy that pattern.  iverilog needs `-I rtl` on the command line; the
+The fix is to add the header and the two `set_property` lines from the
+[minimal file list](#minimal-instantiation-ela-only) (the same pattern
+[`build_arty_vex.tcl`](../examples/arty_a7/build_arty_vex.tcl) uses).  iverilog needs `-I rtl` on the command line; the
 project's [`sim/run_sim.py`](../sim/run_sim.py) already does this.
 
 ## Vendor wrapper differences
 
-The wrappers all have **identical port lists** for a given core.  The
-*only* difference is which TAP primitive lives inside.  Switching
-vendors is a one-line change to your top-level:
+The wrappers share the same fabric-side ports (`sample_clk`,
+`sample_rst`, `probe_in`, ...), but the port lists are not identical
+across vendors:
+
+- `_xilinx7` and `_xilinxus` have identical ports and parameters; only the
+  module name differs.
+- `_intel` matches them for an ELA-only design but has no EIO ports
+  (`EIO_EN` is not a parameter there).
+- `_ecp5` has no external-trigger ports (`trigger_in` / `trigger_out` /
+  `armed_out`).
+- `_gowin` and `_polarfire` need top-level JTAG pad connections
+  (`*_pad_i` / `tdo_pad_o`); Gowin also takes a `clk` input and drives a
+  `jtag_activity` output.
+- `_efinix` exposes two groups of TAP signals (`jtag1_*`, `jtag2_*`) that
+  you connect to the JTAG User TAP blocks set up in Efinity's Interface
+  Designer.
+
+So only the AMD/Xilinx 7-series to UltraScale(+) switch is a one-line
+change to your top-level:
 
 ```diff
 -fcapz_ela_xilinx7 #(.SAMPLE_W(8), .DEPTH(1024)) u_ela (
