@@ -13,8 +13,7 @@
 > like GTKWave, where settings are stored, and how to drive every
 > fcapz core from a graphical front-end.
 >
-> **Audience**: anyone who would rather click than type.  All the
-> same operations are also available via the CLI
+> All the same operations are also available via the CLI
 > ([chapter 10](10_cli_reference.md)) and the Python API
 > ([chapter 09](09_python_api.md)).  Prefer a browser, or need to
 > reach the board from another machine? See the web interface
@@ -138,13 +137,16 @@ After connecting **with** an ELA on USER1, this panel shows the live
 `Analyzer.probe()` output for the selected ELA core:
 
 ```
-Version : 0.4
-Core ID : 0x4C41 ('LA')
-Sample W: 8 bits
-Depth   : 1024 samples
-Channels: 1
-Features: decimation, ext-trigger, timestamps (32-bit), 4 segments
+ELA core v0.5
+8-bit samples · depth 1024 · 1 channel(s)
+Trigger sequencer stages: 4
+Features: decimation, ext trigger, timestamp (32 b)
+segments 4 · probe mux width 0
 ```
+
+The full `probe()` dictionary is available as JSON under the
+collapsible **Raw probe JSON** section of the same dock (titled
+**ELA identity** in the window).
 
 If USER1 does not present the ELA core id, the GUI still connects
 and this panel explains that ELA capture is unavailable.  Managed
@@ -197,6 +199,17 @@ The **Load .prob** button fills the same field from a probe sidecar, so
 generated LiteX maps or hand-authored non-LiteX maps can be reused without
 typing the lane list each time.
 
+**Trigger sequencer table** (collapsible section below **Advanced**):
+tick **Use trigger sequencer**, then **Add stage** / **Remove stage**
+to edit up to `TRIG_STAGES` rows (the status line above the section
+shows the depth the bitstream reports in FEATURES[3:0]).  Each row has
+the columns `cmp_a`, `cmp_b`, `combine` (A only / B only / AND / OR),
+`next`, `final`, `count`, `val_a`, `mask_a`, `val_b`, `mask_b` and
+becomes one `SequencerStage` in `CaptureConfig.sequence`.  The section
+is disabled when the bitstream reports `TRIG_STAGES=0`.  Picking an
+entry from the **Trigger preset** dropdown (recent trigger settings)
+also restores its sequencer stages.
+
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 
@@ -212,10 +225,9 @@ ELA dock — bottom **action buttons**:
 **Auto re-arm** (toolbar checkbox): when checked, **Arm** or **Trigger Immediate** repeats in a loop (re-configure + arm + capture each time) until **Stop** — continuous / auto re-arm behaviour for either normal or immediate trigger.
 
 The capture itself runs on a **`QThread` worker** so the GUI
-stays responsive while waiting for the trigger.  When the worker
-emits `captureFinished`, the History panel adds a row.  When it
-emits `captureFailed`, a non-blocking notification appears at the
-bottom of the window.
+stays responsive while waiting for the trigger.  Each finished
+capture adds a row to the History panel.  A failed capture opens a
+warning dialog with the error message.
 
 After **Connect**, the **Advanced** block grays out options the
 bitstream does not implement: **decimation** (FEATURES bit 5),
@@ -315,47 +327,37 @@ Uncheck **Poll inputs** or disconnect to stop periodic JTAG reads.
 
 ### EJTAG-AXI bridge panel
 
-Three sub-areas:
+Pick the bridge's **Chain** and click **Attach AXI**.  The info line
+then shows the bridge version, `addr_w`, `data_w` and `fifo_depth`
+(the last one explains why long bursts get rejected).
 
-**Single ops**:
+- **Address** + **Write data** + **WSTRB** inputs with **Read**
+  (`axi_read()`) and **Write** (`axi_write()`) buttons.
+- **Dump address** + **Word count** + **Dump** button →
+  `read_block()`, or `burst_read()` when **Burst read** is ticked.
+- **Load address** + **Load file…** button → file picker → the file
+  is padded to a multiple of 4 bytes, split into little-endian
+  32-bit words and written with `write_block()`, or `burst_write()`
+  when **Burst write** is ticked.
 
-- Address input + **Read** button → `bridge.axi_read()`, value
-  shown next to the button
-- Address + Data + Wstrb inputs + **Write** button →
-  `bridge.axi_write()`
-
-**Block ops**:
-
-- Address + Count inputs + **Dump** button →
-  `bridge.read_block()` or `bridge.burst_read()` depending on a
-  "burst mode" checkbox; result goes into a scrollable hex table
-- Address + Pattern + Count inputs + **Fill** button →
-  `bridge.write_block()` / `burst_write()`
-- **Load file** button → file picker → reads as little-endian
-  32-bit words → `write_block()` / `burst_write()` at the
-  configured address
-
-**Status**:
-
-- The cached `fifo_depth` from `connect()` is shown so you can
-  see why long bursts get rejected
-- AXI errors (`AXIError`) appear as red text below the action
-  buttons; the panel does not pop up modal dialogs for them
-  because they're often expected in a debug session
+Every result (read value, write response, dumped words, load
+summary) is appended to the **Log** box at the bottom of the panel.
+Errors, including `AXIError`, open a warning dialog.
 
 ### EJTAG-UART terminal panel
 
-A **scrolling text widget** plus an input line:
+Pick the bridge's **Chain** and click **Attach UART**; the info line
+shows the bridge id and version.  Below it:
 
-- The top half is a `QPlainTextEdit` that shows incoming bytes
-  decoded as UTF-8 (with replacement characters for invalid
-  sequences).  A worker thread polls `uart.recv(count=0,
-  timeout=0.1)` continuously and appends new bytes.
-- The bottom half is a single-line input + Send button.  Hitting
-  Enter sends the line plus a newline via `uart.send()`.
-- A **Clear** button wipes the display.
-- Status indicators (TX full, RX overflow, frame error, TX free
-  bytes) update from `uart.status()` once per second.
+- A read-only text area that shows received bytes decoded as
+  UTF-8 (with replacement characters for invalid sequences).
+- **Poll RX** checkbox: while ticked, a 100 ms timer calls
+  `uart.recv(count=0, timeout=0.05)` and appends what arrives.  A
+  receive error unticks it and opens a warning dialog.
+- A single-line input and a **Send** button.  **Send** transmits
+  the text exactly as typed, UTF-8 encoded, with no newline added,
+  and echoes `>> sent N bytes` into the text area.  Pressing Enter
+  in the input does not send.
 
 For binary data, use the CLI (`fcapz uart-send --hex` /
 `--file`) instead of the GUI — the terminal panel is for
@@ -373,14 +375,14 @@ Built-in viewer classes (in
 
 | Class | Detects | Launch |
 |---|---|---|
-| `GtkWaveViewer` | `gtkwave` on PATH | `subprocess.Popen([gtkwave, vcd, "--save", gtkw])` |
-| `SurferViewer` | `surfer` on PATH | `subprocess.Popen([surfer, vcd])` |
-| `WaveTraceViewer` | `wavetrace` on PATH | `subprocess.Popen([wavetrace, vcd])` |
-| `CustomCommandViewer` | user-supplied template like `myviewer --vcd {VCD}` | substitutes `{VCD}` and `{GTKW}` and spawns |
+| `GtkWaveViewer` | `gtkwave` on PATH | `gtkwave <vcd> --save <gtkw>` |
+| `SurferViewer` | `surfer` on PATH | `surfer --command-file <cmd> <vcd>` (generated command file adds the signals and a trigger marker) |
+| `WaveTraceViewer` | `wavetrace` on PATH | `wavetrace <vcd>` |
+| `CustomCommandViewer` | user-supplied argv template like `myviewer --wave {VCD}` | substitutes `{VCD}` and the optional `{SAVE}` sidecar path |
 
-The viewer is spawned as a **separate top-level process** with
-`start_new_session=True`, so it lives in its own window and
-closing the GUI does not kill it.  See [chapter 15](15_export_formats.md)
+The GUI starts the viewer as a **separate process** (a `QProcess`)
+in its own window.  It tracks the processes it started and stops
+them when you close `fcapz-gui`.  See [chapter 15](15_export_formats.md)
 "Embedding caveat" for why most external viewers cannot be
 embedded inside the Qt window.
 
@@ -406,43 +408,80 @@ instead of the bare signal tree.  See
 [`gtkw_writer.py`](../host/fcapz/gui/gtkw_writer.py) for the
 generation logic.
 
+### Viewer reuse and automatic opening
+
+Two checkboxes in the History panel (also under **File → Settings… →
+Viewers**) control what happens after each capture; both default to
+on and are saved in `gui.toml`:
+
+- **Open viewer after capture** opens the selected viewer on every
+  new capture automatically.
+- **Reuse external viewer (live wave folder)** keeps one viewer
+  process when possible.  Each open overwrites `capture.vcd` (and its
+  layout sidecar) in a `live-wave` folder next to `gui.toml` instead
+  of using a per-capture temp folder.  If the same viewer is still
+  running:
+  - **Surfer** is told to reload over its WCP control socket (the GUI
+    launches it with `--wcp-initiate`).  If WCP is unavailable, or
+    the pre-trigger position changed (so the trigger marker must
+    move), Surfer is restarted instead.
+  - **Other viewers on Linux/macOS** are left running and rely on
+    the viewer's own file watching; reload by hand if the view does
+    not refresh.
+  - **Other viewers on Windows** are closed and reopened on the new
+    file.
+
+With reuse off, each open replaces the running viewer with a new
+instance on that capture's own VCD.
+
 ## Settings dialog
 
 **File → Settings...** opens a dialog with three tabs:
 
-1. **Connection** — last-used backend, host, port, FPGA target /
-   Quartus device, Quartus hardware / `quartus_stp` path, bitfile
-   path, IR-table preset.  Persists across sessions.
-2. **Viewers** — detected viewer paths and their per-viewer
-   override paths (in case you have a non-standard install of
-   GTKWave).  Default viewer dropdown: which one is selected by
-   default in the History panel's "Open in viewer" button.
-3. **Probe profiles** — named sets of `ProbeSpec` lists you can
-   reuse across sessions.  e.g. "uart-debug" maps to a specific
-   probe layout you use a lot.
+1. **Appearance** — UI font size and the Log dock's monospace font
+   size.
+2. **Viewers** — default viewer (the one selected in the History
+   panel's viewer dropdown), optional executable paths for GTKWave,
+   Surfer and WaveTrace (in case they are not on `PATH`), the
+   **Custom argv** template, and the **Open viewer after capture** /
+   **Reuse external viewer** checkboxes.
+3. **Probe profiles** — named `name:width:lsb,...` probe strings you
+   can reuse across sessions (also usable as `--profile` in the
+   CLI).  e.g. "uart-debug" maps to a specific probe layout you use
+   a lot.
 
-All settings are stored in TOML at
+There is no Connection tab: the connection fields are saved from the
+connection panel each time a **Connect** succeeds.
+
+These settings are stored in TOML at
 `~/.config/fpgacapzero/gui.toml` (or `%APPDATA%/fpgacapzero/gui.toml`).
-The file is human-editable; the GUI loads it on startup and
-re-saves on close.
+The file is human-editable; the GUI reads it on startup and writes
+it when a setting changes (successful Connect, **OK** in this
+dialog, toggling a viewer checkbox).  **File → Open settings
+folder** opens the directory that holds it.
 
 ## Threading model
 
-The GUI uses one **`QThread` worker** per active controller
-(Analyzer / EIO / AXI / UART).  Worker threads call the
-synchronous controller methods (`analyzer.capture(...)`,
-`uart.recv(...)`) and emit Qt signals when they finish:
+Three operations run on a **`QThread` worker**
+([`worker.py`](../host/fcapz/gui/worker.py)):
 
-- `captureFinished(result)` → main thread updates the History
-  panel
-- `captureFailed(error_message)` → main thread shows a
-  non-blocking notification
-- `uartRxBytes(data)` → main thread appends to the terminal panel
+- **Capture** (`CaptureWorker`): configure, arm and
+  `analyzer.capture(...)`, including the auto re-arm loop.  It emits
+  `progress` / `finished` with each `CaptureResult` (the main thread
+  adds it to History) or `failed` with an error message (the main
+  thread shows a warning dialog).
+- **Connect** (`ConnectWorker`): transport setup, optional FPGA
+  programming and the readiness probe.
+- **Scan** (`TargetScanWorker`): the connection panel's target / TAP
+  scan.
 
-This means **the GUI stays responsive** during long captures and
-slow JTAG round-trips.  No spinning beach ball, no "Application
-not responding" — you can browse the capture history, look at
-old captures, change panels, all while a capture is in flight.
+So the window stays usable while a capture waits for its trigger:
+you can browse the capture history and look at old captures.
+
+Everything else runs on the GUI thread.  AXI reads, writes, dumps
+and loads run inside the button handler, and EIO input polling and
+UART RX polling run from `QTimer` callbacks, so a slow JTAG round
+trip in those panels briefly freezes the window until it returns.
 
 ## Layout customisation
 
@@ -450,24 +489,20 @@ The main window uses Qt's docking layout, so you can:
 
 - Drag a panel out to a separate floating window
 - Snap two panels side by side
-- Hide panels you don't need (View menu → uncheck)
-- Save and restore your layout (View menu → Save layout / Load layout)
+- Hide panels you don't need (**Window** menu → uncheck; **Show all
+  panels** brings them back)
+- Switch to a built-in arrangement (**Window → Layout presets**:
+  Default, Minimal, Waveform focus, Diagnostics)
+- Save and restore your own layouts (**Window → Save layout as…**,
+  **Load user layout**, **Delete user layout**)
 
-Layouts are persisted in `gui.toml` so the next launch reopens
-the same arrangement.
+The window geometry and dock arrangement are saved automatically,
+together with your named layouts, in `fcapz-gui-window.ini` in the
+same directory as `gui.toml`, so the next launch reopens the same
+arrangement.
 
 ## Limitations
 
-- **No sequencer table editor**.  The capture panel exposes the
-  simple-trigger fields (mode, value, mask, delay).  For
-  multi-stage sequencer configs, edit a JSON file and pass the
-  path via the **Trigger sequence file** input.  A graphical
-  table editor is on the roadmap but not implemented.
-- **No live waveform reload** for external viewers.  When you
-  capture again, the GUI opens a new viewer instance — it does
-  not push a "reload this VCD" command to an already-open
-  GTKWave window.  GTKWave's reload-on-change support is flaky
-  enough that we don't try to use it.
 - **No embedded GTKWave / Surfer / WaveTrace**.  The embedded
   preview is `pyqtgraph` only.  See [chapter 15](15_export_formats.md)
   for why and what the embedding constraints are for each viewer.

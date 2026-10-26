@@ -6,9 +6,8 @@
 > usage lines and option tables are generated from the CLI itself
 > (`tools/gen_docs.py`), so they always match `fcapz --help`.
 >
-> **Audience**: anyone who wants to use fcapz from a shell instead
-> of writing Python.  Pre-read [chapter 03](03_first_capture.md) for
-> the guided walkthrough that uses many of these commands.
+> [Chapter 03](03_first_capture.md) is a guided walkthrough that uses
+> many of these commands.
 
 ## Invoking the CLI
 
@@ -226,7 +225,7 @@ Output (formatted JSON to stdout):
 ```json
 {
   "version_major": 0,
-  "version_minor": 3,
+  "version_minor": 5,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -418,7 +417,9 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out decim.json
 
-# Storage qualification (only store samples where bit 0 is high)
+# Storage qualification (only store samples where bit 0 is high).
+# Needs a STOR_QUAL=1 build; the reference Arty bitstream is STOR_QUAL=0
+# and fails with "storage qualification not present in this bitstream".
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --pretrigger 4 --posttrigger 16 \
@@ -428,7 +429,10 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out sparse.json
 
-# Multi-stage trigger sequencer (inline JSON)
+# Multi-stage trigger sequencer (inline JSON).
+# Needs a build with TRIG_STAGES >= the number of stages (2 here); the
+# reference Arty bitstream is TRIG_STAGES=1 and fails with
+# "sequence has 2 stages but hw supports only 1".
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --pretrigger 4 --posttrigger 16 \
@@ -439,7 +443,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out sequenced.json
 
-# Same, but loaded from a JSON file
+# Same, but loaded from a JSON file (same TRIG_STAGES requirement)
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --trigger-sequence my_sequence.json \

@@ -6,10 +6,6 @@
 > `tools/sync_version.py` into the RTL `fcapz_version.vh`, the
 > per-core `core_id` magic registers, and the procedure for
 > cutting a new release.
->
-> **Audience**: maintainers cutting releases, and contributors who
-> need to bump the version when their PR introduces a breaking
-> change.
 
 ## The problem
 
@@ -35,6 +31,8 @@ plus a generator script that pushes the value into every place
 that needs it.
 
 ### The pipeline
+
+<!-- docs-sync: skip (illustrative version numbers) -->
 
 ```mermaid
 flowchart TB
@@ -69,7 +67,7 @@ CI fails the build if the generated header has drifted from
 ### `VERSION`
 
 ```
-0.3.0
+0.5.0
 ```
 
 One line, semver `MAJOR.MINOR.PATCH`.  Each component must fit in
@@ -84,7 +82,7 @@ should edit.
 The generator.  Two modes:
 
 ```bash
-python tools/sync_version.py            # regenerate rtl/fcapz_version.vh
+python tools/sync_version.py            # regenerate rtl/fcapz_version.vh and rtl/vhdl/pkg/fcapz_pkg.vhd
 python tools/sync_version.py --check    # exit 1 if drift, 0 if in sync
 ```
 
@@ -92,9 +90,12 @@ The check mode is what CI runs.  If you bump `VERSION` but forget
 to re-run the script, CI fails with:
 
 ```
-error: rtl/fcapz_version.vh is out of sync with VERSION (0.3.1).
-Run `python tools/sync_version.py` and commit the result.
+error: rtl/fcapz_version.vh out of sync with VERSION (0.3.1). Run `python tools/sync_version.py` and commit the result.
 ```
+
+The message names every drifted file; the script also generates
+`rtl/vhdl/pkg/fcapz_pkg.vhd`, the VHDL package that carries the same
+constants.
 
 ### `rtl/fcapz_version.vh`
 
@@ -111,21 +112,33 @@ Auto-generated.  **Never edit by hand.**  Contents:
 `define FCAPZ_VERSION_VH
 
 `define FCAPZ_VERSION_MAJOR  8'h00
-`define FCAPZ_VERSION_MINOR  8'h03
+`define FCAPZ_VERSION_MINOR  8'h05
 `define FCAPZ_VERSION_PATCH  8'h00
-`define FCAPZ_VERSION_STRING "0.3.0"
+`define FCAPZ_VERSION_STRING "0.5.0"
 
-// Per-core 16-bit ASCII identifiers
+// Per-core 16-bit ASCII identifiers, packed into VERSION[15:0] of
+// each core's identity register.  Constant per-core; never zero.
 `define FCAPZ_ELA_CORE_ID 16'h4C41  // "LA" - Logic Analyzer
 `define FCAPZ_EIO_CORE_ID 16'h494F  // "IO" - Embedded I/O
+`define FCAPZ_EJTAGAXI_CORE_ID 16'h4A58  // "JX" - EJTAG-AXI bridge
+`define FCAPZ_EJTAGUART_CORE_ID 16'h4A55  // "JU" - EJTAG-UART bridge
+`define FCAPZ_AXIMON_CORE_ID 16'h414D  // "AM" - AXI Monitor
 
-// Packed VERSION registers for each core
-`define FCAPZ_ELA_VERSION_REG \
-  {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_ELA_CORE_ID}
-`define FCAPZ_EIO_VERSION_REG \
-  {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EIO_CORE_ID}
+// Packed VERSION registers for each core (read at addr 0x0000 of
+// the core's register space).  Layout:
+//   [31:24] major (8-bit)
+//   [23:16] minor (8-bit)
+//   [15:0]  core_id (ASCII, constant per-core)
+//
+// Hosts must verify the low-16 magic before trusting any other
+// register on the same chain.
+`define FCAPZ_ELA_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_ELA_CORE_ID}
+`define FCAPZ_EIO_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EIO_CORE_ID}
+`define FCAPZ_EJTAGAXI_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EJTAGAXI_CORE_ID}
+`define FCAPZ_EJTAGUART_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_EJTAGUART_CORE_ID}
+`define FCAPZ_AXIMON_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_AXIMON_CORE_ID}
 
-`endif
+`endif  // FCAPZ_VERSION_VH
 ```
 
 `fcapz_ela.v` and `fcapz_eio.v` `\`include "fcapz_version.vh"`
@@ -137,13 +150,16 @@ update automatically with the file.
 
 Reads the version at import time:
 
-1. **First try `importlib.metadata`** — works after `pip install`,
+1. **First try the repo `VERSION` file** — resolved relative to
+   `_version.py` (`host/fcapz/` → repo root).  This works in
+   development without `pip install -e .`, e.g. when running tests
+   via the repo-root conftest that just inserts `host/` into
+   `sys.path`, and keeps a source-tree run tied to the local RTL
+   headers even when an older wheel or editable install is present.
+2. **Fallback to `importlib.metadata`** — used when no `VERSION`
+   file sits next to the package (a wheel in `site-packages`); it
    reads what setuptools wrote into `PKG-INFO` from the `VERSION`
    file via `dynamic = ["version"]`.
-2. **Fallback to direct `VERSION` file read** — works in
-   development without `pip install -e .`, e.g. when running
-   tests via the repo-root conftest that just inserts `host/`
-   into `sys.path`.
 3. **Fallback to `"0+unknown"`** — only if both above fail.  CI
    install-smoke catches this.
 
@@ -168,7 +184,10 @@ static field — look it up dynamically".  The
 `VERSION` file).
 
 After `pip install -e .` the version is committed to the egg-info,
-and `importlib.metadata.version("fpgacapzero")` returns it.
+and `importlib.metadata.version("fpgacapzero")` returns it.  That
+metadata can lag an edited `VERSION` until the next install, but
+`fcapz.__version__` does not: from the source tree it reads
+`VERSION` first.
 
 ## Per-core identity registers (the "core_id magic")
 
@@ -181,12 +200,13 @@ into three fields:
 [15:0]  = CORE_ID  (16-bit ASCII, constant per-core)
 ```
 
-| Core | `core_id` ASCII | Value | Full v0.4.0 register |
+| Core | `core_id` ASCII | Value | Full v0.5.0 register |
 |---|---|---|---|
-| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0004_4C41` |
-| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0004_494F` |
-| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0004_4A58` |
-| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0004_4A55` |
+| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0005_4C41` |
+| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0005_494F` |
+| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0005_4A58` |
+| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0005_4A55` |
+| AXI monitor | `"AM"` (AXI Monitor) | `0x414D` | `0x0005_414D` |
 
 All cores use the unified `{major, minor, core_id}` identity word. ELA
 and EIO expose it through their 49-bit register interface; EJTAG-AXI and
@@ -203,6 +223,8 @@ identity words. Upgrade the host before rebuilding or deploying v0.4.0
 bitstreams.
 
 ### Why the magic exists
+
+<!-- docs-sync: skip (what an unprogrammed FPGA reads) -->
 
 Without a `core_id` magic, an unprogrammed FPGA reads `0x0000_0000`
 on every register access — and the host's `Analyzer.probe()` would
@@ -280,39 +302,50 @@ Use semver:
 echo "0.3.1" > VERSION
 ```
 
-### 3. Regenerate the RTL header
+### 3. Regenerate the HDL version constants
 
 ```bash
 python tools/sync_version.py
-# wrote rtl/fcapz_version.vh (0.3.1)
+# wrote <repo>/rtl/fcapz_version.vh (0.3.1)
+# wrote <repo>/rtl/vhdl/pkg/fcapz_pkg.vhd (0.3.1)
 ```
+
+The script only reads `VERSION`; it never writes it.
 
 ### 4. Run the test sweep
 
 ```bash
 python -m ruff check .
-python -m pytest tests/                     # 218 unit tests
+python -m pytest tests/
 python sim/run_sim.py                       # RTL lint + simulation matrix
+python sim/run_cocotb.py --runner native --hdl verilog --clean --skip-ela
+                                            # cocotb protocol shard (CI also runs --hdl vhdl)
 python tools/sync_version.py --check        # should print OK
 ```
 
-If any test asserts a hardcoded version number, fix it to use
-`fcapz._version_tuple()` instead.
+A version bump can break tests that hardcode the version.  Python
+tests should use `fcapz._version_tuple()`; testbenches under `tb/`
+must take it from `fcapz_version.vh` or the `VERSION` file.  The
+0.5.0 bump broke `tb/cocotb/core_test.py` and
+`tb/fcapz_core_manager_tb.sv`, which still expected 0.4, so grep
+`tb/` for the previous version and run the cocotb protocol shard
+before tagging.  `tests/test_docs_sync.py` also fails until the manual's
+current-output examples (`version_minor`, version-register values,
+`FCAPZ_VERSION_*` excerpts) show the new version; it lists each line to
+refresh.
 
 ### 5. Update the CHANGELOG
 
-Edit `CHANGELOG.md` and add a new section:
+Retitle the `## [Unreleased]` section of `CHANGELOG.md` with the new
+version and the release date, and start a fresh, empty
+`## [Unreleased]` above it:
 
 ```markdown
-## [0.3.1] - 2026-MM-DD
+## [Unreleased]
 
-### Fixed
-- ...
+## [0.3.1] — 2026-MM-DD
 
 ### Added
-- ...
-
-### Changed
 - ...
 ```
 
@@ -348,34 +381,60 @@ pytest examples/arty_a7/test_hw_integration.py
 ### 8. Commit and push
 
 ```bash
-git add VERSION rtl/fcapz_version.vh CHANGELOG.md   # bitstreams are not committed
-git commit -m "release: v0.3.1 — <one-line summary>"
+git add VERSION rtl/fcapz_version.vh rtl/vhdl/pkg/fcapz_pkg.vhd CHANGELOG.md
+git add docs/ README.md   # examples refreshed for tests/test_docs_sync.py
+# plus any tb/ or tests/ version fixes from step 4; bitstreams are not committed
+git commit -m "Release v0.3.1"
 git push origin main
 ```
+
+Wait for CI to go green on `main` before tagging: the tag publishes
+whatever commit it points at.
 
 ### 9. Tag and push the tag
 
 ```bash
-git tag -a v0.3.1 -m "v0.3.1"
+git tag -a v0.3.1 -m "Release v0.3.1"
 git push origin v0.3.1
 ```
 
-The tag triggers nothing automatically — there's no PyPI release
-workflow yet.  When we add one, it'll fire on tag push.
+Pushing a `v*` tag runs
+[`.github/workflows/release.yml`](../.github/workflows/release.yml),
+which publishes the release to PyPI:
 
-### 10. Cut a GitHub release
+1. **Build** — checks that the tag matches `VERSION` (`v0.3.1` needs
+   `0.3.1`; a mismatch fails the job and nothing is published), then
+   builds the sdist and wheel and runs `twine check`.
+2. **Publish** — uploads both to PyPI through Trusted Publishing:
+   GitHub Actions mints a short-lived OIDC token that PyPI checks
+   against the publisher registered for this repo and workflow.  No
+   API token is stored anywhere.  The job runs in the `release`
+   environment, which can be given required reviewers on GitHub.
 
-Open https://github.com/lcapossio/fpgacapZero/releases and
-"Draft a new release" from the tag.  Paste the CHANGELOG section
-for this version into the release notes.
+For a dry run, start the workflow by hand (`workflow_dispatch`,
+"Run workflow" on the Actions tab) **from a branch such as `main`**,
+with "Publish to TestPyPI" left ticked: it builds the distributions,
+skipping the tag check, and publishes to TestPyPI only, which needs its
+own trusted publisher registered on test.pypi.org.  Do not pick a `v*`
+tag in the "Use workflow from" menu: the workflow's PyPI job keys on
+the ref being a `v*` tag, not on how the run started, so a manual run
+on a tag publishes to the real PyPI as well.
+
+### 10. Check the published package
+
+Confirm the new version is on PyPI, for example with
+`pip install fpgacapzero==0.3.1` in a fresh environment.  The
+workflow does not create a GitHub Release; the tag and the
+CHANGELOG section are the release record.
 
 ## Common release-procedure pitfalls
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `python tools/sync_version.py --check` fails after editing VERSION | Forgot to re-run the generator without `--check` | `python tools/sync_version.py` (no `--check`) |
-| `fcapz.__version__` returns the old version after editing VERSION | Stale `*.egg-info` from a previous `pip install` | `find . -name "*.egg-info" -exec rm -rf {} +` then `pip install -e .` |
-| `fcapz.__version__ == "0+unknown"` | Both metadata read paths failed (no install + no VERSION file) | Run `pip install -e .` from the repo root |
+| `fcapz.__version__` returns the old version after editing VERSION | Python is importing an installed, non-editable copy of `fcapz` (for example a wheel in `site-packages`), which finds no `VERSION` file beside it and reports its own metadata | Check `python -c "import fcapz; print(fcapz.__file__)"`; run with `PYTHONPATH=host`, or replace the copy with `pip install -e .` |
+| `fcapz.__version__ == "0+unknown"` | Neither read path worked: no `VERSION` file beside the package and no installed metadata | Run `pip install -e .` from the repo root |
+| Release workflow fails at "Verify tag matches VERSION" | The pushed tag is not `v` + the `VERSION` contents | Delete the tag (`git push origin :refs/tags/vX.Y.Z`, `git tag -d vX.Y.Z`), fix `VERSION` or the tag, and tag again |
 | Hardware integration tests fail with `version_minor` mismatch after a release | Forgot to rebuild the bitstream | `python examples/arty_a7/build.py` |
 | `parse_version` raises `does not fit in 8 bits` | A version component is >255 | Don't.  We're not at v256.0.0 yet. |
 

@@ -152,9 +152,9 @@ print(info)
 #   "core_id": 0x4A58,
 #   "legacy_id": False,
 #   "legacy_raw_id": None,
-#   "version": 0x00044A58,
+#   "version": 0x00054A58,
 #   "version_major": 0,
-#   "version_minor": 4,
+#   "version_minor": 5,
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,            # <-- cached from FEATURES register
@@ -284,8 +284,8 @@ The bridge has an on-chip async FIFO between the AXI side and the
 JTAG side, sized by the `FIFO_DEPTH` parameter at build time
 (default 16, max 256, must be a power of 2).
 
-When you call `burst_read(count=N)` or `burst_write(count=N)`, the
-host checks:
+When you call `burst_read(addr, count=N)` or `burst_write()` with an
+N-word `data` list, the host checks (it does not split the burst):
 
 ```python
 if count > self._fifo_depth:

@@ -27,16 +27,20 @@ Higher `probe_out` bits are used as fabric-side debug controls for the
 hardware tests: bit 4 is the manual ELA external trigger, bit 5 asks
 the Arty top to emit an early one-shot trigger 2 cycles after the ELA
 enters `ARMED`, and bit 6 asks it to assert a late trigger starting 8
-cycles after `ARMED`.  After programming, you can:
+cycles after `ARMED`.  The reference EIOs sit behind the USER1 core
+manager (EIO0 is slot 2, EIO1 slot 3), so select EIO0 with
+`--chain 1 --instance 2`; without them the commands look for a
+standalone EIO on USER3.  After programming, you can:
 
 ```bash
-$ fcapz eio-read
+$ fcapz eio-read --chain 1 --instance 2
 0xA7
-$ fcapz eio-write 0x55
-wrote 0x55
+$ fcapz eio-write --chain 1 --instance 2 0x05
+wrote 0x5
 ```
 
-— and watch the LEDs change to `0x55` immediately, no rebuild.
+— and watch the LEDs change to `0x5` immediately, no rebuild.  Keep bits
+4–6 clear unless you mean to drive the trigger-test controls.
 
 ### Arty A7 + desktop GUI
 
@@ -112,8 +116,8 @@ EIO's register at `0x0000` is the per-core `VERSION` register with
 the same `{major, minor, core_id}` layout as the ELA:
 
 ```
-[31:24] = FCAPZ_VERSION_MAJOR  (= 0x00 in v0.3.0)
-[23:16] = FCAPZ_VERSION_MINOR  (= 0x03)
+[31:24] = FCAPZ_VERSION_MAJOR  (= 0x00 in v0.5.0)
+[23:16] = FCAPZ_VERSION_MINOR  (= 0x05)
 [15:0]  = FCAPZ_EIO_CORE_ID   = ASCII "IO" = 0x494F
 ```
 

@@ -382,31 +382,51 @@ as long as the synchronizer), at the cost of `SAMPLE_W` flops and that
 setting's latency.  An asynchronous
 `trigger_in` has an inherent one-clock uncertainty either way.
 
-The reference Arty A7 design ties `trigger_in` to an EIO-controlled
-fabric signal, so you can manually fire the trigger from the host
-without rebuilding the bitstream — try it from the GUI or the CLI:
+The reference Arty A7 design ties ELA0's `trigger_in` to EIO0
+`probe_out[4]` (managed slot 2 on USER1), so you can manually fire the
+trigger from the host without rebuilding the bitstream — try it from the
+GUI or the CLI.  Start an AND-gated capture in one shell:
 
 ```bash
-fcapz capture \
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+    capture \
     --pretrigger 8 --posttrigger 16 \
     --trigger-mode value_match \
     --trigger-value 0xFF --trigger-mask 0xFF \
-    --ext-trigger-mode or \
+    --ext-trigger-mode and \
     --probes counter:8:0 \
+    --sample-clock-hz 150000000 \
+    --timeout 30 \
     --out manual_trigger.json
 ```
 
-(`0xFF` is unlikely to ever match the counter at the moment you arm,
-so the OR-with-external-trigger behavior is the only way the trigger
-fires.)
+While it waits, raise the external-trigger bit from a second shell, then
+drop it again:
+
+```bash
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+    eio-write --chain 1 --instance 2 0x10
+fcapz --backend hw_server --port 3121 --tap xc7a100t \
+    eio-write --chain 1 --instance 2 0x00
+```
+
+The counter passes `0xFF` every 256 sample clocks, so a value match on its
+own (or `--ext-trigger-mode or`) fires almost as soon as you arm.  With
+`and`, the capture fires on the first `0xFF` after `trigger_in` goes high.
+`trigger_in` is level-sensitive, so clear bit 4 before the next capture or
+it fires again at once.
 
 ## Per-sample timestamps (`TIMESTAMP_W=32` or `48`)
 
 When built with `TIMESTAMP_W > 0`, the ELA captures a free-running
 cycle counter alongside every sample.  The host stack reads them
-back and exposes them as `result.timestamps: list[int]`.  They are
-exported into VCD with the right `$timescale` so GTKWave / Surfer
-show them as real time.
+back and exposes them as `result.timestamps: list[int]`.  In a VCD
+export they place each sample at its sample-clock cycle, counted from
+the first stored sample, and the raw counter is also dumped as a
+`timestamp` signal.  The VCD axis counts cycles, not nanoseconds
+(`$timescale` is always `1 ns`, one tick per cycle); divide by
+`sample_clock_hz` for seconds.  See
+[chapter 15](15_export_formats.md#vcd).
 
 Use cases:
 
@@ -575,7 +595,8 @@ needs a board test.  Gowin's TAP has separate `shift_in`/`shift_out` strobes,
 which the shared pipe does not take, so a Gowin hub needs its own adapter: a
 register-only one can drive `fcapz_debug_multi_core` with `BURST_EN=0`, and
 every slot is then read through its register window.  UltraScale reuses the
-Xilinx 7 TAP code and has no board test yet.  The lower-level
+Xilinx 7 TAP code; its board validation is recorded in the
+[vendor support matrix](01_overview.md#vendor-support-matrix).  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
 `fcapz_ela` slots to custom plumbing yourself.
 
@@ -1019,9 +1040,11 @@ Difference vs `PROBE_MUX_W`:
 | Use case | Several distinct signals | One wide structured bus you want to observe pieces of |
 | Cost | Mux N → 1 of `SAMPLE_W` bits | Same |
 
-You can use both at once if you really want to (one ELA observing N
-channels of M signals each), but in practice pick the one that fits
-your bus naturally.
+The two are alternative modes, not stackable: `probe_in` is
+`PROBE_MUX_W` bits wide when the probe mux is built and
+`NUM_CHANNELS * SAMPLE_W` otherwise.  If both are set, the probe mux
+takes precedence and `channel` is ignored.  Pick the one that fits your
+bus.
 
 When an arm changes the selection, the probe pipeline still holds a few
 samples of the old one.  For those clocks (the probe pipeline length plus
@@ -1041,7 +1064,7 @@ the bitstream:
 info = analyzer.probe()
 # {
 #   "version_major": 0,
-#   "version_minor": 3,
+#   "version_minor": 5,
 #   "core_id": 0x4C41,
 #   "sample_width": 8,
 #   "depth": 1024,

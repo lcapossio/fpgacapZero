@@ -109,8 +109,13 @@ if mon.present:
 ```
 
 `write_addr_capture_config` builds the trigger at `awaddr`'s real bit offset and,
-by default, also requires `awvalid` — so it fires on a genuine write-address
-handshake, not on a stale address the bus is parked on while `awvalid` is low.
+by default, also requires `awvalid` — so it fires when a master presents a valid
+write address, not on a stale address the bus is parked on while `awvalid` is low.
+It does not look at `awready`, so it can fire on a cycle the slave has not yet
+accepted. To trigger only on the completed handshake, also set the `awready`
+bit (from `mon.probe_map().probes`) in `cfg.trigger.value` and
+`cfg.trigger.mask` before `configure`. `read_addr_capture_config` is the
+read-channel mirror (`araddr` plus `arvalid`, same caveat for `arready`).
 It works on **both** `DECODE_EN` builds (the address is reached wherever it lands
 in the sample, not just the low 32 bits — see *Full-width triggering* below).
 

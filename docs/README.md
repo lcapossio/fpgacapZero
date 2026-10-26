@@ -80,12 +80,14 @@ and should be corrected.
 
 - Hardware bring-up for vendor wrappers beyond the validated boards:
   AMD/Xilinx 7-series (Arty A7), Zynq UltraScale+ MPSoC (Kria KV260),
-  Intel / Altera (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery
-  Kit) and the serial TAP bridge on an Efinix Trion (Forgix). The shared
-  core RTL is covered by simulation, and the remaining
-  vendor wrappers are lint-elaborated, but ECP5 and standalone Kintex /
-  Virtex UltraScale(+) board-level smoke tests are still future work. See
-  chapter 04 for the support matrix and validation levels.
+  Kintex UltraScale (KU035, on a proprietary board), Intel / Altera
+  (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery Kit) and the
+  serial TAP bridge on an Efinix Trion (Forgix). The shared core RTL is
+  covered by simulation, and the remaining vendor wrappers are
+  lint-elaborated, but ECP5 and standalone UltraScale+ board-level smoke
+  tests are still future work. See the
+  [vendor support matrix](01_overview.md#vendor-support-matrix) for
+  validation levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.

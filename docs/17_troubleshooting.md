@@ -4,8 +4,6 @@
 > **Goal**: a single page you can grep when something breaks.  Each
 > entry is **symptom → cause → fix**, ordered roughly by how often
 > we've seen it in practice.
->
-> **Audience**: you, at 2 a.m., with a board that won't talk.
 
 ## Connection / identity
 
@@ -163,16 +161,17 @@ host kept it inside one batched raw-scan sequence.
   contains the USER4 bridge and that the chain number matches the RTL
   wrapper (`CHAIN=4` on the Arty reference top).
 
-### `ValueError: burst length 32 exceeds FIFO_DEPTH-1=15`
+### `ValueError: burst_read: count 32 exceeds bridge FIFO_DEPTH (16)`
 
-**Cause**: the bridge was synthesized with `FIFO_DEPTH=16`, so the
-hardware can only accept AXI4 `awlen` up to 15 (16 beats).  You
-asked for 32.
+**Cause**: the bridge was synthesized with `FIFO_DEPTH=16`, so a
+burst can carry at most 16 beats (AXI4 `awlen`/`arlen` = beats − 1,
+so up to 15).  You asked for 32.  `burst_write()` raises the same
+error with `burst_write:` in front.
 
-**Fix**: split the transfer into chunks ≤ `FIFO_DEPTH-1`, or
-re-synthesize the bridge with a deeper FIFO.  The host's
-`burst_read()` / `burst_write()` will chunk for you if you call
-the high-level helper.  See [chapter 07](07_ejtag_axi_bridge.md).
+**Fix**: split the transfer yourself into bursts of at most
+`FIFO_DEPTH` beats at successive addresses; `burst_read()` and
+`burst_write()` do not chunk.  Or re-synthesize the bridge with a
+deeper FIFO.  See [chapter 07](07_ejtag_axi_bridge.md).
 
 ### AXI reads return `0xDEADBEEF` or all-ones
 
@@ -294,10 +293,11 @@ a real display / X forwarding for interactive use.  See
 
 ### `fcapz.__version__ == "0+unknown"`
 
-**Cause**: both the `importlib.metadata` lookup and the
-direct-`VERSION`-file fallback failed.  Usually because you're
-running from a fresh clone with no `pip install -e .` and the
-`VERSION` file isn't reachable from `_version.py`.
+**Cause**: both version sources failed.  `_version.py` first reads
+the repo `VERSION` file relative to itself, then falls back to the
+installed package metadata.  Usually because you're importing a
+copy of `fcapz` that sits outside the repo and was never installed,
+so neither is found.
 
 **Fix**: `pip install -e .` from the repo root.
 
