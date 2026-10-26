@@ -255,31 +255,77 @@ def test_verilog_snippets_match_rtl():
 SHELL_LANGS = {"bash", "sh", "shell", "console", "powershell", "ps1", ""}
 
 
+def _tokens(line: str) -> list[str]:
+    """Shell words of ``line``; pipes, redirects, ``;`` and ``&&`` come out
+    as separate tokens and ``#`` comments are dropped, quoting respected.
+    Raises ValueError on an unclosed quote."""
+    lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+
+
 def _commands(block: Block):
-    """(line offset, argv) for each ``fcapz`` command in a shell block."""
+    """(line offset, argv) for each ``fcapz`` command in a shell block, or
+    (line offset, None) for one that cannot be tokenized."""
     lines = block.text.splitlines()
     k = 0
     while k < len(lines):
         start = k
         line = lines[k]
-        while (line.rstrip().endswith(("\\", "`")) and k + 1 < len(lines)):
-            k += 1
-            line = line.rstrip()[:-1] + " " + lines[k]
         k += 1
         line = re.sub(r"^\s*(\$|PS>|>)\s+", "", line).strip()
         line = re.sub(r"^(\w+=\S*\s+)+", "", line)  # VAR=value prefixes
         if not line.startswith("fcapz "):
             continue
-        for sep in ("|", "&&", "||", ";", " > ", " 2>"):
-            line = line.split(sep, 1)[0]
-        line = re.sub(r"\s#.*$", "", line)
-        if re.search(r"<[^>]+>|\.\.\.|…|\$\(|\{[^}]*\}", line):
+        # Join backslash/backtick continuations and quoted strings that span
+        # lines (e.g. inline JSON) until the command tokenizes.
+        while True:
+            if line.rstrip().endswith(("\\", "`")) and k < len(lines):
+                line = line.rstrip()[:-1] + " " + lines[k]
+                k += 1
+                continue
+            try:
+                tokens = _tokens(line)
+                break
+            except ValueError:
+                if k >= len(lines):
+                    tokens = None
+                    break
+                line = line + "\n" + lines[k]
+                k += 1
+        if re.search(r"<[A-Za-z][^<>\s]*>|\.\.\.|…|\$\(", line):
             continue  # placeholder syntax, not a literal command
-        try:
-            argv = shlex.split(line)
-        except ValueError:
+        if tokens is None:
+            yield start, None
             continue
-        yield start, argv[1:]
+        for n, tok in enumerate(tokens):
+            if tok and set(tok) <= set("();<>|&"):
+                # stop at a pipe, redirect or separator (and the fd of 2>&1)
+                if tok[0] in "<>" and n > 1 and tokens[n - 1].isdigit():
+                    n -= 1
+                tokens = tokens[:n]
+                break
+        yield start, tokens[1:]
+
+
+@pytest.mark.parametrize("text, expected", [
+    # inline JSON is checked, not mistaken for a placeholder
+    ("fcapz capture --trigger-sequence '[{\"a\":1}]' --bad\n",
+     [["capture", "--trigger-sequence", '[{"a":1}]', "--bad"]]),
+    # a quoted string spanning lines joins with the continuations around it
+    ("fcapz capture \\\n  --trigger-sequence '[\n  {\"a\":1}\n]' \\\n  --bad\n",
+     [["capture", "--trigger-sequence", '[\n  {"a":1}\n]', "--bad"]]),
+    # pipes inside quotes stay; a real pipe, redirect or comment ends it
+    ("fcapz capture --probes 'a|b' --out x.json | tee log  # note\n",
+     [["capture", "--probes", "a|b", "--out", "x.json"]]),
+    ("fcapz probe 2>&1 | grep x\n", [["probe"]]),
+    # usage lines with placeholders are skipped; an unclosed quote is reported
+    ("fcapz [global options] <subcommand>\n", []),
+    ("fcapz capture --trigger-sequence '[ --out x\n", [None]),
+])
+def test_command_extraction(text, expected):
+    block = Block(ROOT / "docs" / "x.md", 1, "bash", text, True)
+    assert [argv for _, argv in _commands(block)] == expected
 
 
 def _parser_without_file_opening():
@@ -306,6 +352,9 @@ def test_cli_examples_parse():
         if not block.fenced or block.lang not in SHELL_LANGS or "fcapz " not in block.text:
             continue
         for offset, argv in _commands(block):
+            if argv is None:
+                failures.append(f"{block.where(offset)}: cannot tokenize (unclosed quote?)")
+                continue
             if not argv:
                 continue
             err = io.StringIO()
@@ -346,15 +395,14 @@ def test_version_strings_are_current():
     for block in ALL_BLOCKS:
         for offset, line in enumerate(block.text.splitlines()):
             where = block.where(offset)
-            for m in re.finditer(r"version_minor\W{1,4}?(\d+)\b", line):
-                if int(m.group(1)) != minor:
-                    problems.append(f"{where}: {m.group(0)!r} (minor is {minor})")
-            for m in re.finditer(r"version_major\W{1,4}?(\d+)\b", line):
-                if int(m.group(1)) != major:
-                    problems.append(f"{where}: {m.group(0)!r} (major is {major})")
-            for m in re.finditer(r"FCAPZ_VERSION_MINOR\s+(?:8'h|\(=\s*0x)([0-9A-Fa-f]+)", line):
-                if int(m.group(1), 16) != minor:
-                    problems.append(f"{where}: {m.group(0)!r} (minor is {minor})")
+            for field, want in (("major", major), ("minor", minor), ("patch", patch)):
+                for m in re.finditer(rf"version_{field}\W{{1,4}}?(\d+)\b", line):
+                    if int(m.group(1)) != want:
+                        problems.append(f"{where}: {m.group(0)!r} ({field} is {want})")
+                for m in re.finditer(rf"FCAPZ_VERSION_{field.upper()}\s+(?:8'h|\(=\s*0x)"
+                                     r"([0-9A-Fa-f]+)", line):
+                    if int(m.group(1), 16) != want:
+                        problems.append(f"{where}: {m.group(0)!r} ({field} is {want})")
             for m in re.finditer(r"FCAPZ_VERSION_STRING\s+\"([^\"]+)\"", line):
                 if m.group(1) != current:
                     problems.append(f"{where}: {m.group(0)!r} (VERSION is {current})")

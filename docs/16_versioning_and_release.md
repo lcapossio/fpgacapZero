@@ -382,7 +382,8 @@ pytest examples/arty_a7/test_hw_integration.py
 
 ```bash
 git add VERSION rtl/fcapz_version.vh rtl/vhdl/pkg/fcapz_pkg.vhd CHANGELOG.md
-# bitstreams are not committed
+git add docs/ README.md   # examples refreshed for tests/test_docs_sync.py
+# plus any tb/ or tests/ version fixes from step 4; bitstreams are not committed
 git commit -m "Release v0.3.1"
 git push origin main
 ```
@@ -411,9 +412,13 @@ which publishes the release to PyPI:
    environment, which can be given required reviewers on GitHub.
 
 For a dry run, start the workflow by hand (`workflow_dispatch`,
-"Run workflow" on the Actions tab): it builds the distributions,
-skipping the tag check, and publishes to TestPyPI instead, which
-needs its own trusted publisher registered on test.pypi.org.
+"Run workflow" on the Actions tab) **from a branch such as `main`**,
+with "Publish to TestPyPI" left ticked: it builds the distributions,
+skipping the tag check, and publishes to TestPyPI only, which needs its
+own trusted publisher registered on test.pypi.org.  Do not pick a `v*`
+tag in the "Use workflow from" menu: the workflow's PyPI job keys on
+the ref being a `v*` tag, not on how the run started, so a manual run
+on a tag publishes to the real PyPI as well.
 
 ### 10. Check the published package
 
