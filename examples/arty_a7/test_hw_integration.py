@@ -50,10 +50,11 @@ _BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "vex").lower()
 # The open-source VexRiscv variant (arty_a7_vex_top) is now the DEFAULT design;
 # it is a drop-in for the deprecated MicroBlaze one (same debug cores, same
 # host-gated CPU bus pattern), so this whole suite runs against it unchanged.
-# Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, or =vhdl
-# for the VHDL top.
+# Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, =vhdl
+# for the VHDL top, or =openxc7 for the vex top built by openxc7/build_openxc7.py.
 _DEFAULT_BITNAME = {
     "vex": "arty_a7_vex_top.bit",
+    "openxc7": "arty_a7_vex_top_openxc7.bit",
     "vhdl": "arty_a7_top_vhdl.bit",
 }.get(_BITSTREAM_VARIANT, "arty_a7_top.bit")
 BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
@@ -196,10 +197,22 @@ _BITSTREAM_SOURCES_VEX = [
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
 ]
 
+# The same design built by the open-source flow: its own XDC and build script
+# in place of Vivado's.
+_BITSTREAM_SOURCES_OPENXC7 = [
+    s for s in _BITSTREAM_SOURCES_VEX
+    if s not in (_EXAMPLE_DIR / "arty_a7.xdc", _EXAMPLE_DIR / "build_arty_vex.tcl")
+] + [
+    _EXAMPLE_DIR / "openxc7" / "arty_a7_openxc7.xdc",
+    _EXAMPLE_DIR / "openxc7" / "build_openxc7.py",
+]
+
 if _BITSTREAM_VARIANT == "vhdl":
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VHDL
 elif _BITSTREAM_VARIANT == "vex":
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VEX
+elif _BITSTREAM_VARIANT == "openxc7":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_OPENXC7
 else:
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VERILOG
 
@@ -226,6 +239,7 @@ def _check_bitstream_freshness() -> str | None:
         build_cmd = {
             "vhdl": "python examples/arty_a7/build_vhdl.py",
             "vex": "python examples/arty_a7/build_arty_vex.py",
+            "openxc7": "python examples/arty_a7/openxc7/build_openxc7.py",
         }.get(_BITSTREAM_VARIANT, "python examples/arty_a7/build.py")
         parts = []
         if missing:
