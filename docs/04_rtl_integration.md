@@ -5,10 +5,6 @@
 > your own design.  You will know which wrapper to instantiate, what
 > every parameter does, how `fcapz_version.vh` fits in, and how to
 > tie the cores into your existing fabric clock domain.
->
-> **Audience**: junior FPGA dev who has written a `module` before
-> and knows what `parameter` and `wire` mean, but has never
-> instantiated a vendor primitive like BSCANE2 directly.
 
 ## The wrappers vs the cores
 
@@ -25,23 +21,25 @@ features they expose.
 
 ## Picking the right wrapper for your FPGA
 
-| Vendor / family | Wrapper suffix | Hardware-validated |
-|---|---|---|
-| AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` | ✅ Arty A7-100T |
-| AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` | ✅ Kintex UltraScale KU035 on a proprietary board, over hw_server `-register` mode; Virtex UltraScale not yet HW-validated |
-| AMD/Xilinx Zynq UltraScale+ MPSoC | `_xilinxus` | ✅ Kria KV260 (`xck26`) over hw_server `-register` mode |
-| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `_xilinxus` | ❌ same shim, not yet HW-validated on a standalone part |
-| Lattice ECP5 | `_ecp5` | ❌ implemented in RTL, not yet HW-validated |
-| Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` | ✅ DE25-Nano (Agilex 5) via USB-Blaster |
-| Gowin GW1N / GW2A | `_gowin` | ✅ BRS-100-GW1NR9 |
-| Microchip PolarFire / PolarFire SoC | `_polarfire` | ✅ PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
-| Microchip SmartFusion2 / IGLOO2 | `_polarfire` | ❌ same `UJTAG` ports as PolarFire, not yet HW-validated |
-| Efinix Trion / Titanium | `_efinix` | ⏳ synthesized, placed and routed in Efinity on Trion T20F256 and Titanium Ti60F225 (two JTAG User TAP blocks via the Efinity Interface Designer); hardware validation pending |
-| Any FPGA without fabric JTAG | `fcapz_ela_uart` (UART TAP bridge, see [chapter 14](14_transports.md)) | ✅ Forgix (Efinix Trion T8F49) |
-| AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** | not supported — Versal uses a different TAP primitive |
+| Vendor / family | Wrapper suffix |
+|---|---|
+| AMD/Xilinx Artix-7, Kintex-7, Virtex-7, Spartan-7, Zynq-7000 | `_xilinx7` |
+| AMD/Xilinx Kintex / Virtex UltraScale | `_xilinxus` |
+| AMD/Xilinx Zynq UltraScale+ MPSoC | `_xilinxus` |
+| AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | `_xilinxus` |
+| Lattice ECP5 | `_ecp5` |
+| Intel / Altera (Cyclone, Arria, Stratix, Agilex) | `_intel` |
+| Gowin GW1N / GW2A | `_gowin` |
+| Microchip PolarFire / PolarFire SoC | `_polarfire` |
+| Microchip SmartFusion2 / IGLOO2 | `_polarfire` |
+| Efinix Trion / Titanium | `_efinix` |
+| Any FPGA without fabric JTAG | `fcapz_ela_uart` (UART TAP bridge, see [chapter 14](14_transports.md)) |
+| AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | **none** (not supported: Versal uses a different TAP primitive) |
 
-If your vendor isn't on the list, see [chapter 14](14_transports.md)
-"Adding a new transport / vendor wrapper" for the porting guide.
+Which boards each wrapper has been validated on is in the
+[vendor support matrix](01_overview.md#vendor-support-matrix).  If your
+vendor isn't on the list, see [chapter 14](14_transports.md) "Adding a new
+transport / vendor wrapper" for the porting guide.
 
 ### Validation Levels
 
