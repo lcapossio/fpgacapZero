@@ -6,10 +6,6 @@
 > `tools/sync_version.py` into the RTL `fcapz_version.vh`, the
 > per-core `core_id` magic registers, and the procedure for
 > cutting a new release.
->
-> **Audience**: maintainers cutting releases, and contributors who
-> need to bump the version when their PR introduces a breaking
-> change.
 
 ## The problem
 

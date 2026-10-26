@@ -7,9 +7,6 @@
 > and reuse the same controllers that the CLI, RPC server, and GUI
 > are built on top of.
 >
-> **Audience**: junior FPGA dev who can write basic Python and has
-> read [chapter 02](02_install.md) so the package is installed.
->
 > **Reference**: every public name with its full signature and docstring
 > is in the generated [Python API reference](specs/python_api.md).
 

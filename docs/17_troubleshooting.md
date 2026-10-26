@@ -4,8 +4,6 @@
 > **Goal**: a single page you can grep when something breaks.  Each
 > entry is **symptom → cause → fix**, ordered roughly by how often
 > we've seen it in practice.
->
-> **Audience**: you, at 2 a.m., with a board that won't talk.
 
 ## Connection / identity
 

@@ -13,8 +13,7 @@
 > like GTKWave, where settings are stored, and how to drive every
 > fcapz core from a graphical front-end.
 >
-> **Audience**: anyone who would rather click than type.  All the
-> same operations are also available via the CLI
+> All the same operations are also available via the CLI
 > ([chapter 10](10_cli_reference.md)) and the Python API
 > ([chapter 09](09_python_api.md)).  Prefer a browser, or need to
 > reach the board from another machine? See the web interface

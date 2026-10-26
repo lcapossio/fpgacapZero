@@ -6,10 +6,6 @@
 > JSON commands over its stdin, parse the JSON responses on its
 > stdout, and integrate fcapz into a non-Python test harness or
 > CI pipeline.
->
-> **Audience**: anyone integrating fcapz with a Tcl test bench, a
-> Rust test runner, a Node.js dashboard, or any environment that
-> can read/write a child process's stdio.
 
 ## Why RPC and not the Python API directly
 

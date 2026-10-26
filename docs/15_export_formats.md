@@ -5,10 +5,6 @@
 > each contains, when to use which, how the auto-generated `.gtkw`
 > waveform-viewer layout file works, and the practical embedding
 > caveats for the four supported viewers.
->
-> **Audience**: anyone who wants to feed captured data into another
-> tool — a waveform viewer, a Python notebook, an LLM, a regression
-> harness, a spreadsheet.
 
 ## Three formats, one capture
 

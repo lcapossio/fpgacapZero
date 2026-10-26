@@ -6,9 +6,8 @@
 > usage lines and option tables are generated from the CLI itself
 > (`tools/gen_docs.py`), so they always match `fcapz --help`.
 >
-> **Audience**: anyone who wants to use fcapz from a shell instead
-> of writing Python.  Pre-read [chapter 03](03_first_capture.md) for
-> the guided walkthrough that uses many of these commands.
+> [Chapter 03](03_first_capture.md) is a guided walkthrough that uses
+> many of these commands.
 
 ## Invoking the CLI
 

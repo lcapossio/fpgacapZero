@@ -6,10 +6,6 @@
 > `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
 > differences, the readiness wait that catches "FPGA isn't programmed yet",
 > the TCL injection prevention, and how to add a new transport.
->
-> **Audience**: anyone whose default transport doesn't work for
-> their board, or anyone porting fcapz to a new JTAG cable / TCF /
-> raw USB stack.
 
 ## What a transport is
 
