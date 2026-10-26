@@ -62,6 +62,12 @@ Vivado/XSDB are optional and only needed for hardware tests.
   `python tools/gen_docs.py`; CI fails if they are out of date. Only
   Markdown that GitHub renders belongs in `docs/`: `mkdocs build --strict`
   (see `mkdocs.yml`) rejects site-only syntax and broken links.
+- `tests/test_docs_sync.py` checks the hand-written examples: Verilog
+  snippets must only use parameters and ports the `rtl/` module has, every
+  `fcapz ...` command in a shell block must parse, and version strings must
+  match `VERSION`. Mark an example that is deliberately not current (a past
+  measurement, an illustration) with `<!-- docs-sync: skip (why) -->` on the
+  line before it.
 
 ---
 

@@ -116,8 +116,8 @@ EIO's register at `0x0000` is the per-core `VERSION` register with
 the same `{major, minor, core_id}` layout as the ELA:
 
 ```
-[31:24] = FCAPZ_VERSION_MAJOR  (= 0x00 in v0.3.0)
-[23:16] = FCAPZ_VERSION_MINOR  (= 0x03)
+[31:24] = FCAPZ_VERSION_MAJOR  (= 0x00 in v0.5.0)
+[23:16] = FCAPZ_VERSION_MINOR  (= 0x05)
 [15:0]  = FCAPZ_EIO_CORE_ID   = ASCII "IO" = 0x494F
 ```
 

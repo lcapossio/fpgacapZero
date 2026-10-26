@@ -28,6 +28,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
   `exchange()` give it the adapter without a chain scan.
 
+- **Docs sync check.** `tests/test_docs_sync.py` fails CI when the manual's
+  hand-written examples drift from the code: Verilog snippets naming a
+  parameter or port the RTL module lacks, `fcapz` commands the CLI parser
+  rejects, and version strings that don't match `VERSION`. A deliberately old
+  example opts out with `<!-- docs-sync: skip (why) -->`.
+
 ### Changed
 
 - **The desktop GUI (`fcapz-gui`) is no longer actively maintained.** It still
@@ -36,6 +42,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   GUI, and the manual marks it as unmaintained.
 
 ### Fixed
+
+- **Manual corrections.** A full review of the manual against the code fixed
+  wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;
+  EJTAG-AXI reaches 32-bit addresses only; `WIDE_TRIG` is not a parameter of
+  the ELA wrappers; the reference Arty ELA has one trigger stage and no
+  storage qualification; VCD time is in sample-clock ticks; pushing a `v*` tag
+  publishes to PyPI; the desktop GUI chapter now describes the panels as built.
 
 - **UltraScale USER opcodes.** `IR_TABLE_XILINX_ULTRASCALE` / `IR_TABLE_US`
   said USER1-4 = `0x24`-`0x27`; single-die UltraScale parts use the 7-series

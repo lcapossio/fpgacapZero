@@ -813,6 +813,8 @@ DRs with no extra bits.
 
 Verified on xck26 / KV260:
 
+<!-- docs-sync: skip (measured on a v0.3 bitstream) -->
+
 | `-register` name | DR width | Result |
 |---|---|---|
 | `user1` | 49 | ELA VERSION `0x0003_4C41` ("LA") |

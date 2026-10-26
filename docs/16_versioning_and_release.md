@@ -32,6 +32,8 @@ that needs it.
 
 ### The pipeline
 
+<!-- docs-sync: skip (illustrative version numbers) -->
+
 ```mermaid
 flowchart TB
     V["VERSION (text file at repo root), e.g. 0.3.0<br>single source of truth"]
@@ -198,12 +200,13 @@ into three fields:
 [15:0]  = CORE_ID  (16-bit ASCII, constant per-core)
 ```
 
-| Core | `core_id` ASCII | Value | Full v0.4.0 register |
+| Core | `core_id` ASCII | Value | Full v0.5.0 register |
 |---|---|---|---|
-| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0004_4C41` |
-| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0004_494F` |
-| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0004_4A58` |
-| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0004_4A55` |
+| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0005_4C41` |
+| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0005_494F` |
+| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0005_4A58` |
+| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0005_4A55` |
+| AXI monitor | `"AM"` (AXI Monitor) | `0x414D` | `0x0005_414D` |
 
 All cores use the unified `{major, minor, core_id}` identity word. ELA
 and EIO expose it through their 49-bit register interface; EJTAG-AXI and
@@ -220,6 +223,8 @@ identity words. Upgrade the host before rebuilding or deploying v0.4.0
 bitstreams.
 
 ### Why the magic exists
+
+<!-- docs-sync: skip (what an unprogrammed FPGA reads) -->
 
 Without a `core_id` magic, an unprogrammed FPGA reads `0x0000_0000`
 on every register access — and the host's `Analyzer.probe()` would
@@ -324,7 +329,10 @@ must take it from `fcapz_version.vh` or the `VERSION` file.  The
 0.5.0 bump broke `tb/cocotb/core_test.py` and
 `tb/fcapz_core_manager_tb.sv`, which still expected 0.4, so grep
 `tb/` for the previous version and run the cocotb protocol shard
-before tagging.
+before tagging.  `tests/test_docs_sync.py` also fails until the manual's
+current-output examples (`version_minor`, version-register values,
+`FCAPZ_VERSION_*` excerpts) show the new version; it lists each line to
+refresh.
 
 ### 5. Update the CHANGELOG
 
