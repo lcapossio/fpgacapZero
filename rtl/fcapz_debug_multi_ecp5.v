@@ -7,7 +7,8 @@
 // Slot order is ELA[0..NUM_ELAS-1], then EIO[0..NUM_EIOS-1].
 //
 // Lattice ECP5: JTAGG user chain CTRL_CHAIN (1 = ER1, 2 = ER2).
-// JTAGG has no Test-Logic-Reset output, so TLR_RESET_EN is not offered.
+// jtag_tap_ecp5 uses JTAGG's JRSTN (Test-Logic-Reset) only to clear its own
+// chain select and does not pass it on, so TLR_RESET_EN is not offered.
 // Everything but the TAP lives in the vendor-free fcapz_debug_multi.
 
 module fcapz_debug_multi_ecp5 #(
@@ -110,6 +111,7 @@ module fcapz_debug_multi_ecp5 #(
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .tlr(1'b0),
+        .hub_por(1'b0),
         .ela_sample_clk(ela_sample_clk),
         .ela_sample_rst(ela_sample_rst),
         .ela_probe_in(ela_probe_in),

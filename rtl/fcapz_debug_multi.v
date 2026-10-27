@@ -14,7 +14,9 @@
 // Resets (fcapz_hub_reset): the slots' sample resets reset the hub only until
 // the first release; after that each slot resets alone.  The pipe also resets
 // on the TAP's Test-Logic-Reset when TLR_RESET_EN (tie tlr to 0 if the TAP
-// has no such output).  Each burst's first scan carries a header naming the
+// has no such output).  hub_por, a power-on reset for flows that drop
+// register initial values, resets the hub and every slot while high (tie it
+// to 0 elsewhere).  Each burst's first scan carries a header naming the
 // slot, pointer and epochs it belongs to.
 
 module fcapz_debug_multi #(
@@ -75,6 +77,8 @@ module fcapz_debug_multi #(
     input  wire update,
     input  wire sel,
     input  wire tlr,
+    // Power-on reset, active high; 0 where initial values are kept
+    input  wire hub_por,
 
     input  wire [ELA_PORT_COUNT-1:0] ela_sample_clk,
     input  wire [ELA_PORT_COUNT-1:0] ela_sample_rst,
@@ -92,6 +96,7 @@ module fcapz_debug_multi #(
     localparam HEADER_W = 160;
 
     wire por_rst, proto_rst, tlr_sync;
+    wire [ELA_PORT_COUNT-1:0] sample_rst = ela_sample_rst | {ELA_PORT_COUNT{hub_por}};
     wire jtag_clk, pipe_reg_rst;
     wire jtag_wr_en, jtag_rd_en;
     wire [15:0] jtag_addr;
@@ -120,7 +125,8 @@ module fcapz_debug_multi #(
         .TLR_RESET_EN(TLR_RESET_EN)
     ) u_hub_reset (
         .tck(tck),
-        .any_sample_rst(|ela_sample_rst),
+        .any_sample_rst(|sample_rst),
+        .hub_por(hub_por),
         .tlr(tlr),
         .por_rst(por_rst),
         .proto_rst(proto_rst),
@@ -180,7 +186,7 @@ module fcapz_debug_multi #(
         .EIO_IN_WS(EIO_IN_WS), .EIO_OUT_WS(EIO_OUT_WS)
     ) u_core (
         .ela_sample_clk(ela_sample_clk),
-        .ela_sample_rst(ela_sample_rst),
+        .ela_sample_rst(sample_rst),
         .ela_probe_in(ela_probe_in),
         .ela_trigger_in(ela_trigger_in),
         .ela_trigger_out(ela_trigger_out),

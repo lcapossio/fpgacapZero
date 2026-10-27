@@ -210,7 +210,9 @@ Each slot resets alone. An ELA's `ela_sample_rst` (or `MGR_CTRL` bit 1/2)
 resets that ELA's sample side and, synchronised to TCK, its register side; it
 reaches no other slot, no EIO output and no manager register. The hub's own
 reset is the power-up reset, which follows the slots' sample resets only until
-it is first released, plus `MGR_CTRL` bit 0. Before per-slot resets, any ELA's
+it is first released, plus `MGR_CTRL` bit 0.  On PolarFire, whose flow drops
+register initial values, the shell's `hub_por` input marks power-up instead
+and resets the hub and every slot. Before per-slot resets, any ELA's
 sample reset reset the whole hub: `MGR_ACTIVE`, every EIO output, and the
 register side of every ELA, which made another ELA that had been armed once see
 a phantom arm and re-arm over its capture.

@@ -121,6 +121,7 @@ module fcapz_debug_multi_efinix #(
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .tlr(1'b0),
+        .hub_por(1'b0),
         .ela_sample_clk(ela_sample_clk),
         .ela_sample_rst(ela_sample_rst),
         .ela_probe_in(ela_probe_in),

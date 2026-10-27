@@ -3,9 +3,10 @@
 
 -- Mixed debug wrapper for Lattice ECP5 (JTAGG user chain CTRL_CHAIN,
 -- 1 = ER1, 2 = ER2): multiple ELAs plus optional EIOs behind the core
--- manager on one JTAG chain. JTAGG has no Test-Logic-Reset output, so
--- TLR_RESET_EN is not offered. Only the TAP is vendor-specific; the rest is
--- fcapz_debug_multi.
+-- manager on one JTAG chain. jtag_tap_ecp5 uses JTAGG's JRSTN
+-- (Test-Logic-Reset) only to clear its own chain select and does not pass it
+-- on, so TLR_RESET_EN is not offered. Only the TAP is vendor-specific; the
+-- rest is fcapz_debug_multi.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -137,6 +138,7 @@ begin
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel,
             tlr => '0',
+            hub_por => '0',
             ela_sample_clk => ela_sample_clk,
             ela_sample_rst => ela_sample_rst,
             ela_probe_in => ela_probe_in,

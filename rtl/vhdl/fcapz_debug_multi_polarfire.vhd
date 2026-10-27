@@ -8,8 +8,11 @@
 -- top-level ports; Libero binds them to the dedicated JTAG pins. Only one
 -- UJTAG is allowed per device, so this hub cannot coexist with
 -- fcapz_ela_polarfire or fcapz_eio_polarfire. UJTAG has no Test-Logic-Reset
--- output, so TLR_RESET_EN is not offered. Only the TAP is vendor-specific;
--- the rest is fcapz_debug_multi.
+-- output, so TLR_RESET_EN is not offered. Libero ignores register initial
+-- values on PolarFire: drive hub_por high from power-up until the fabric is
+-- initialised (the inverted FABRIC_POR_N of PF_INIT_MONITOR, or a
+-- CORERESET_PF reset); it resets the hub and every slot. Only the TAP is
+-- vendor-specific; the rest is fcapz_debug_multi.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -75,6 +78,9 @@ entity fcapz_debug_multi_polarfire is
         ela_armed_out   : out std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
         eio_probe_in    : in  std_logic_vector(fcapz_nonzero_width(NUM_EIOS) * EIO_IN_W - 1 downto 0);
         eio_probe_out   : out std_logic_vector(fcapz_nonzero_width(NUM_EIOS) * EIO_OUT_W - 1 downto 0);
+
+        -- Power-on reset, active high: from power-up until the fabric is ready.
+        hub_por         : in  std_logic;
 
         -- UJTAG JTAG pins: wire straight to top-level ports.
         tck_pad_i   : in  std_logic;
@@ -154,6 +160,7 @@ begin
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel,
             tlr => '0',
+            hub_por => hub_por,
             ela_sample_clk => ela_sample_clk,
             ela_sample_rst => ela_sample_rst,
             ela_probe_in => ela_probe_in,

@@ -84,6 +84,8 @@ _DEBUG_MULTI_PARAMS = {
 _DEBUG_MULTI_VHDL_PARAMS = {"polarfire": {}}
 # Vendors whose TAP has a Test-Logic-Reset output (TLR_RESET_EN offered).
 _DEBUG_MULTI_TLR = ("xilinx7", "xilinxus", "intel")
+# Vendors whose shell has a hub_por port (flows that drop initial values).
+_DEBUG_MULTI_HUB_POR = ("polarfire",)
 
 
 def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
@@ -95,7 +97,8 @@ def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
     tap_v, tap_vhdl = _DEBUG_MULTI_TAP_SRC[vendor]
     tests = ("fcapz_debug_multi_tlr",) if tlr_reset else (
         ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets")
-        + (("fcapz_debug_multi_tlr",) if vendor in _DEBUG_MULTI_TLR else ()))
+        + (("fcapz_debug_multi_tlr",) if vendor in _DEBUG_MULTI_TLR else ())
+        + (("fcapz_debug_multi_hub_por",) if vendor in _DEBUG_MULTI_HUB_POR else ()))
     params = {**_DEBUG_MULTI_PARAMS[vendor], **({"TLR_RESET_EN": 1} if tlr_reset else {})}
     vhdl = () if tap_vhdl is None else (
         *_VHDL_CORE_PKGS,

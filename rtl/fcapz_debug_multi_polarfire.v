@@ -14,7 +14,11 @@
 // dedicated JTAG pins.  Only one UJTAG is allowed per device, so this hub
 // cannot coexist with fcapz_ela_polarfire or fcapz_eio_polarfire.
 // UJTAG has no Test-Logic-Reset output, so TLR_RESET_EN is not offered.
-// Everything but the TAP lives in the vendor-free fcapz_debug_multi.
+// Libero ignores register initial values on PolarFire, so the hub cannot
+// tell power-up from a later slot reset by itself: drive hub_por high from
+// power-up until the fabric is initialised (the inverted FABRIC_POR_N of
+// PF_INIT_MONITOR, or a CORERESET_PF reset).  It resets the hub and every
+// slot.  Everything but the TAP lives in the vendor-free fcapz_debug_multi.
 
 module fcapz_debug_multi_polarfire #(
     parameter NUM_ELAS = 2,
@@ -76,6 +80,9 @@ module fcapz_debug_multi_polarfire #(
     input  wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_IN_W-1:0] eio_probe_in,
     output wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_OUT_W-1:0] eio_probe_out,
 
+    // Power-on reset, active high: from power-up until the fabric is ready.
+    input  wire hub_por,
+
     // UJTAG JTAG pins: wire straight to top-level ports.
     input  wire tck_pad_i,
     input  wire tms_pad_i,
@@ -128,6 +135,7 @@ module fcapz_debug_multi_polarfire #(
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .tlr(1'b0),
+        .hub_por(hub_por),
         .ela_sample_clk(ela_sample_clk),
         .ela_sample_rst(ela_sample_rst),
         .ela_probe_in(ela_probe_in),

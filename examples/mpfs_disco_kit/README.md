@@ -165,12 +165,13 @@ tests pass over `--backend ftdi`.
   41 s through the register window before burst readout.
 - **No initial values.** Libero ignores register initial values on PolarFire
   (Synplify warns "User-specified initial value ... is being ignored"), so
-  registers that rely on them power up random. The power-on reset in these
-  tops (`por_cnt`) is one of them, and so is the hub's own power-up reset, so
-  hub registers such as `MGR_OWNER` can start with garbage (the host warns
-  about an unknown owner token). The host writes what it uses, and a hub
-  reset (`MGR_CTRL` bit 0) clears the rest. The manager's epochs keep their
-  meaning (odd while a reset is held) whatever they power up to.
+  registers that rely on them power up random. The tops therefore take their
+  power-on reset from the `INIT` primitive's `FABRIC_POR_N` (what
+  `PF_INIT_MONITOR` wraps), and the manager top also drives the hub's
+  `hub_por` from it: without it the hub cannot tell power-up from a later
+  SWITCH1 reset, and could start with garbage in `MGR_OWNER`, `MGR_ACTIVE`
+  and the burst state. The manager's epochs keep their meaning (odd while a
+  reset is held) whatever they power up to.
 - **Second chain.** The wrapper keeps burst data on USER1
   (`SINGLE_CHAIN_BURST=1`, the default). IR `0x21` (USER2) is used only by a
   `SINGLE_CHAIN_BURST=0` build.

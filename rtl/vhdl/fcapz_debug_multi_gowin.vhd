@@ -136,7 +136,7 @@ begin
     u_hub_reset : entity work.fcapz_hub_reset
         generic map (TLR_RESET_EN => 0)
         port map (
-            tck => clk, any_sample_rst => any_sample_rst, tlr => '0',
+            tck => clk, any_sample_rst => any_sample_rst, hub_por => '0', tlr => '0',
             por_rst => por_rst, proto_rst => proto_rst, tlr_sync => tlr_sync
         );
 

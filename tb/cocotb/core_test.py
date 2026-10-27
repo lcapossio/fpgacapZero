@@ -1499,7 +1499,8 @@ class _DebugMultiBench:
         dut = self.dut
         self._tap_init()
         # Shell inputs the bench does not use (JTAG pads, Efinix's DR clock).
-        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i"):
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i",
+                     "hub_por"):
             if hasattr(dut, name):
                 getattr(dut, name).value = 0
         dut.ela_sample_clk.value = 0
@@ -1778,6 +1779,49 @@ async def fcapz_debug_multi_resets(dut):
     assert await tb.read(0xF024) == 0
     assert int(dut.eio_probe_out.value) == 1
     assert await tb.slot_epochs() == [e0 + 4, e1 + 4, e2 + 2]
+
+
+@cocotb.test()
+async def fcapz_debug_multi_hub_por(dut):
+    """hub_por resets the hub and every slot after hub_started is set.
+
+    On PolarFire hub_started powers up random, so a hub that came up with it
+    set never saw its power-up reset; hub_por, held while TCK is still
+    idle, must give it one anyway.
+    """
+    tb = _DebugMultiBench(dut)
+    await tb.start()
+    mgr_epoch = await tb.read(0xF020)
+    e0, e1, e2 = await tb.slot_epochs()
+    capture_len = await tb.capture(1)
+    assert capture_len > 0
+    await tb.write(0xF008, 2)
+    await tb.write(0x0100, 1)
+    await tb.write(0xF024, 0xC0FFEE)
+    await tb.write(0xF008, 1)
+    assert int(dut.eio_probe_out.value) == 1
+
+    # Power-on reset with no TCK, as at power-up.
+    dut.hub_por.value = 1
+    await Timer(200, unit="ns")
+    assert int(dut.eio_probe_out.value) == 0, "hub_por did not reset the EIO outputs"
+    dut.hub_por.value = 0
+    await tb.idle(40)
+    assert await tb.read(0xF024) == 0, "MGR_OWNER survived hub_por"
+    assert await tb.read(0xF008) == 0, "ACTIVE survived hub_por"
+    assert await tb.read(0xF020) == (mgr_epoch + 2) & 0xFFFF
+    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2 + 2]
+    await tb.write(0xF008, 1)
+    assert await tb.read(0x0008) & 0x7 == 0, "ELA 1 not reset by hub_por"
+
+    # The hub runs as usual afterwards; a later slot reset stays local.
+    dut.ela_sample_rst.value = 0b01
+    await tb.idle(20)
+    dut.ela_sample_rst.value = 0
+    await tb.idle(40)
+    assert await tb.read(0xF020) == (mgr_epoch + 2) & 0xFFFF
+    capture_len = await tb.capture(0)
+    await tb.check_capture(0, capture_len, 1)
 
 
 @cocotb.test()

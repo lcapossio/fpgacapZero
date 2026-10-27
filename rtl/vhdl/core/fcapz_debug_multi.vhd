@@ -72,6 +72,8 @@ entity fcapz_debug_multi is
         update  : in  std_logic;
         sel     : in  std_logic;
         tlr     : in  std_logic;
+        -- Power-on reset, active high; '0' where initial values are kept
+        hub_por : in  std_logic;
 
         ela_sample_clk  : in  std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
         ela_sample_rst  : in  std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
@@ -92,6 +94,7 @@ architecture rtl of fcapz_debug_multi is
     constant HEADER_W        : positive := 160;
 
     signal any_sample_rst : std_logic;
+    signal sample_rst     : std_logic_vector(ELA_PORT_COUNT - 1 downto 0);
     signal por_rst, proto_rst, tlr_sync : std_logic;
     signal jtag_clk, pipe_reg_rst, jtag_wr_en, jtag_rd_en : std_logic;
     signal jtag_addr : std_logic_vector(15 downto 0);
@@ -111,12 +114,13 @@ begin
                " is not 256, the host burst scan width"
         severity failure;
 
-    any_sample_rst <= '1' when ela_sample_rst /= (ela_sample_rst'range => '0') else '0';
+    sample_rst <= ela_sample_rst or (ela_sample_rst'range => hub_por);
+    any_sample_rst <= '1' when sample_rst /= (sample_rst'range => '0') else '0';
 
     u_hub_reset : entity work.fcapz_hub_reset
         generic map (TLR_RESET_EN => TLR_RESET_EN)
         port map (
-            tck => tck, any_sample_rst => any_sample_rst, tlr => tlr,
+            tck => tck, any_sample_rst => any_sample_rst, hub_por => hub_por, tlr => tlr,
             por_rst => por_rst, proto_rst => proto_rst, tlr_sync => tlr_sync
         );
 
@@ -175,7 +179,7 @@ begin
             EIO_IN_WS => EIO_IN_WS, EIO_OUT_WS => EIO_OUT_WS
         )
         port map (
-            ela_sample_clk => ela_sample_clk, ela_sample_rst => ela_sample_rst,
+            ela_sample_clk => ela_sample_clk, ela_sample_rst => sample_rst,
             ela_probe_in => ela_probe_in, ela_trigger_in => ela_trigger_in,
             ela_trigger_out => ela_trigger_out, ela_armed_out => ela_armed_out,
             eio_probe_in => eio_probe_in, eio_probe_out => eio_probe_out,

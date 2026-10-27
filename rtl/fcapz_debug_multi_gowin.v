@@ -134,6 +134,7 @@ module fcapz_debug_multi_gowin #(
     ) u_hub_reset (
         .tck(clk),
         .any_sample_rst(|ela_sample_rst),
+        .hub_por(1'b0),
         .tlr(1'b0),
         .por_rst(por_rst),
         .proto_rst(proto_rst),
