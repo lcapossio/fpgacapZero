@@ -1436,7 +1436,7 @@ def _debug_multi_primitive(dut):
         return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index", 1
     if vendor == "ecp5":
         # JTAGG has no CAPTURE pin: jtag_tap_ecp5 derives capture from the
-        # rise of JCE<n>, the chain's select.  No Test-Logic-Reset output.
+        # rise of JCE<n>, the chain's select.  The shell does not use JRSTN.
         pins = dict(tck="JTCK", tdi="JTDI", capture=None, shift="JSHIFT",
                     update="JUPDATE", sel=f"JCE{_DEBUG_MULTI_ER_CHAIN}", tlr=None)
         return dut.u_tap_ctrl.u_jtagg, pins, None, 1
@@ -1481,6 +1481,9 @@ class _DebugMultiBench:
         self.prim, pins, self.chain_param, self.sel_on = _debug_multi_primitive(dut)
         self.pin = {role: getattr(self.prim, name) for role, name in pins.items() if name}
         self.intel = pins["sel"] is None
+        # JTAGG's JCE<n> covers Capture-DR and Shift-DR only: it is low again
+        # in Exit1-DR and Update-DR, where JUPDATE rises for any instruction.
+        self.ce_drops = self.prim is not dut and pins["sel"] == f"JCE{_DEBUG_MULTI_ER_CHAIN}"
         self.rng = random.Random(0x5EED)
         # A probe value per ELA that replaces its count while not None.
         self.hold: list[int | None] = [None, None]
@@ -1548,7 +1551,9 @@ class _DebugMultiBench:
             await self.tck_tick()
         pin["tdi"].value = 0
 
-    async def scan(self, bits: int, frame: int = 0) -> int:
+    async def scan(self, bits: int, frame: int = 0, ours: bool = True) -> int:
+        """One DR scan; *ours* False scans another instruction's register
+        (ECP5 only: JCE stays low and JUPDATE still rises)."""
         pin = self.pin
         captured = 0
         if "capture" not in pin:
@@ -1556,7 +1561,7 @@ class _DebugMultiBench:
             pin["sel"].value = 0
             await self.tck_tick()
         if "sel" in pin:
-            pin["sel"].value = self.sel_on
+            pin["sel"].value = self.sel_on if ours else 0
         if "capture" in pin:
             pin["capture"].value = 1
         await self.tck_tick()
@@ -1570,6 +1575,9 @@ class _DebugMultiBench:
             await self.tck_tick()
         pin["shift"].value = 0
         pin["tdi"].value = 0
+        if self.ce_drops:
+            pin["sel"].value = 0
+            await self.tck_tick()  # Exit1-DR
         pin["update"].value = 1
         await self.tck_tick()
         pin["update"].value = 0
@@ -1657,6 +1665,18 @@ async def fcapz_debug_multi_wrapper(dut):
         await tb.write(0xF014, slot)
         assert await tb.read(0xF018) == core, f"slot {slot} core id"
         assert await tb.read(0xF01C) == burst, f"slot {slot} burst capability"
+
+    if tb.ce_drops:
+        # BUG-275: a write commits at Update-DR with JCE already low, and the
+        # Update-DR of another instruction's scan does not repeat it
+        # (MGR_SELECT_COUNT counts every MGR_ACTIVE write).
+        count = await tb.read(0xF034)
+        await tb.write(0xF008, 1)
+        await tb.scan(49, make_frame(0xF008, 1, True), ours=False)
+        await tb.idle(8)
+        assert await tb.read(0xF008) == 1
+        assert await tb.read(0xF034) == (count + 1) & 0xFFFF
+        await tb.write(0xF008, 0)
 
     # Each ELA: capture, then two burst packets, then straight back to the
     # register path by switching ACTIVE.

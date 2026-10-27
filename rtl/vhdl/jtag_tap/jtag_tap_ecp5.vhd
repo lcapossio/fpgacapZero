@@ -42,11 +42,13 @@ architecture rtl of jtag_tap_ecp5 is
     signal jupdate  : std_logic;
     signal jce1     : std_logic;
     signal jce2     : std_logic;
-    signal sel_i    : std_logic;
-    signal sel_prev : std_logic := '0';
+    signal ce       : std_logic;
+    signal ce_prev  : std_logic := '0';
+    -- "This DR scan is ours", Capture-DR to Update-DR; see jtag_tap_ecp5.v.
+    signal scan_ours : std_logic := '0';
+    signal jrstn    : std_logic;
     signal jtdo1_i : std_logic;
     signal jtdo2_i : std_logic;
-    signal jrstn_unused : std_logic;
     signal jrti1_unused : std_logic;
     signal jrti2_unused : std_logic;
 begin
@@ -61,7 +63,7 @@ begin
             JTDO2   => jtdo2_i,
             JSHIFT  => jshift,
             JUPDATE => jupdate,
-            JRSTN   => jrstn_unused,
+            JRSTN   => jrstn,
             JCE1    => jce1,
             JCE2    => jce2,
             JRTI1   => jrti1_unused,
@@ -72,15 +74,20 @@ begin
     tdi <= jtdi;
     shift <= jshift;
     update <= jupdate;
-    sel_i <= jce1 when CHAIN = 1 else jce2;
-    sel <= sel_i;
+    ce <= jce1 when CHAIN = 1 else jce2;
+    sel <= ce or (jupdate and scan_ours);
 
     p_sel : process(jtck)
     begin
         if rising_edge(jtck) then
-            sel_prev <= sel_i;
+            ce_prev <= ce;
+            if jrstn = '0' or jupdate = '1' then
+                scan_ours <= '0';
+            elsif ce = '1' then
+                scan_ours <= '1';
+            end if;
         end if;
     end process;
 
-    capture <= sel_i and (not sel_prev) and (not jshift);
+    capture <= ce and (not ce_prev) and (not jshift);
 end architecture rtl;
