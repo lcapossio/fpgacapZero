@@ -1580,6 +1580,10 @@ class _DebugMultiBench:
         assert 0x80 in samples, f"slot {slot} trigger sample missing"
         return header
 
+    async def check_capture(self, slot: int, capture_len: int, step: int) -> None:
+        """Read ELA *slot*'s capture back the fastest way the shell offers."""
+        await self.burst(slot, capture_len, step)
+
 
 @cocotb.test()
 async def fcapz_debug_multi_wrapper(dut):
@@ -1626,7 +1630,8 @@ async def fcapz_debug_multi_wrapper(dut):
 @cocotb.test()
 async def fcapz_debug_multi_resets(dut):
     """Each slot resets alone; MGR_CTRL resets the hub or slots (BUG-229)."""
-    tb = _DebugMultiBench(dut)
+    gowin = os.environ.get("FCAPZ_COCOTB_TARGET", "").endswith("_gowin")
+    tb = _GowinDebugMultiBench(dut) if gowin else _DebugMultiBench(dut)
     await tb.start()
 
     # The hub resets only at power-up, and the counters never: tests that ran
@@ -1661,7 +1666,7 @@ async def fcapz_debug_multi_resets(dut):
     tb.hold[1] = None
     # ELA 0 captures again after its reset.
     capture_len = await tb.capture(0)
-    await tb.burst(0, capture_len, 1)
+    await tb.check_capture(0, capture_len, 1)
 
     # MGR_CTRL bit 1 resets the DESC_INDEX slot only.
     await tb.write(0xF008, 1)
@@ -1784,6 +1789,13 @@ class _GowinDebugMultiBench(_DebugMultiBench):
         for _ in range(n):
             await self.gw_tick()
 
+    async def check_capture(self, slot: int, capture_len: int, step: int) -> None:
+        # No burst path: the capture comes through the register window.
+        samples = [await self.read(0x0100 + 4 * i) & 0xFF for i in range(capture_len)]
+        for i in range(1, capture_len):
+            assert samples[i] == (samples[i - 1] + step) & 0xFF,                 f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+
     async def scan(self, bits: int, frame: int = 0) -> int:
         # Capture-DR, bits Shift-DR states, then Exit1-DR: the TAP shifts in
         # on the falling edge after each shift_dr_capture_dr_o one, so TDI
@@ -1816,11 +1828,7 @@ async def fcapz_debug_multi_gowin(dut):
         assert await tb.read(0xF01C) == 0, f"slot {slot} burst capability"
 
     for slot, step in ((0, 1), (1, -1)):
-        capture_len = await tb.capture(slot)
-        samples = [await tb.read(0x0100 + 4 * i) & 0xFF for i in range(capture_len)]
-        for i in range(1, capture_len):
-            assert samples[i] == (samples[i - 1] + step) & 0xFF,                 f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
-        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+        await tb.check_capture(slot, await tb.capture(slot), step)
 
     await tb.write(0xF008, 2)
     assert await tb.read(0x0004) == 1

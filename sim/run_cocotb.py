@@ -322,7 +322,7 @@ TARGETS: tuple[Target, ...] = (
          RTL / "fcapz_debug_multi_core.v",
          RTL / "fcapz_hub_reset.v",
          RTL / "fcapz_debug_multi_gowin.v"),
-        "fcapz_debug_multi_gowin",
+        ("fcapz_debug_multi_gowin", "fcapz_debug_multi_resets"),
         {"CTRL_CHAIN": 2},
         (*_VHDL_CORE_PKGS,
          RTL / "vhdl" / "gowin" / "gw_jtag.vhd",
