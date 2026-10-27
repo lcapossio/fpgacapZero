@@ -19,7 +19,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Gowin hub is register-only: its slots report no burst and the host reads
   captures through the register window. None offers `TLR_RESET_EN`. Efinix
   had no EIO before; this hub gives it one. All four pass the cocotb hub
-  tests in Verilog and VHDL; none has run on a board yet.
+  tests in Verilog and VHDL. The PolarFire hub passes on the Discovery Kit
+  (`mpfs_disco_kit_manager_top.v`, `test_hw_manager.py`: two ELAs with
+  timestamps and burst readout, two EIOs). The Gowin hub's BRS-100 variant
+  builds with timing met but has not run on a board; ECP5 and Efinix have
+  no board build.
 
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.

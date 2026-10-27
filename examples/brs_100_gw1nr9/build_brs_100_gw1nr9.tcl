@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Craig Haywood - BrisbaneSilicon - <support@brisbanesilicon.com.au>
 
 if {$argc < 1} {
-    error "Expecting -tclargs <repo path>"
+    error "Expecting -tclargs <repo path> \[manager\]"
 }
 
 set repo_path           [lindex $argv 0]
+# "manager" builds the core-manager variant (brs_100_gw1nr9_manager_top.v).
+set manager             [expr {[lsearch -exact [lrange $argv 1 end] manager] >= 0}]
 
 set project_name        "proj"
 set target_part_number  "GW1NR-LV9QN88PC7/I6"
@@ -13,7 +15,17 @@ set target_part_version "C"
 
 set examples_dir        "examples"
 set brs_100_gw1nr9_dir  "brs_100_gw1nr9"
-set build_dir           "out"
+if {$manager} {
+    set build_dir       "out_manager"
+    set top_module      "brs_100_gw1nr9_manager_top"
+    set bitfile         "fcapz_brs_100_gw1nr9_manager.fs"
+    set timing_sdc      "brs_100_gw1nr9_manager_timing.sdc"
+} else {
+    set build_dir       "out"
+    set top_module      "brs_100_gw1nr9_top"
+    set bitfile         "fcapz_brs_100_gw1nr9.fs"
+    set timing_sdc      "brs_100_gw1nr9_timing.sdc"
+}
 
 set this_path            "${repo_path}/${examples_dir}/${brs_100_gw1nr9_dir}"
 set output_dir           "${this_path}/${build_dir}"
@@ -60,10 +72,14 @@ set verilog_files [list \
     $repo_path/rtl/fcapz_eio_gowin.v \
     $repo_path/rtl/dff_sync.v \
     $repo_path/rtl/dff_reg_sync.v \
+    $repo_path/rtl/fcapz_core_manager.v \
+    $repo_path/rtl/fcapz_debug_multi_core.v \
+    $repo_path/rtl/fcapz_hub_reset.v \
+    $repo_path/rtl/fcapz_debug_multi_gowin.v \
     \
     $repo_path/rtl/gowin/gw_jtag.v \
     \
-    $this_path/brs_100_gw1nr9_top.v
+    $this_path/${top_module}.v
 ]
 
 foreach src $verilog_files {
@@ -71,9 +87,9 @@ foreach src $verilog_files {
 }
 
 add_file "${this_path}/brs_100_gw1nr9_loc.cst"
-add_file "${this_path}/brs_100_gw1nr9_timing.sdc"
+add_file "${this_path}/${timing_sdc}"
 
-set_option -top_module brs_100_gw1nr9_top
+set_option -top_module $top_module
 
 puts "Launching Synthesis"
 run syn
@@ -87,4 +103,4 @@ puts "Deploying Bitstream"
 file mkdir $output_dir
 # Gowin create_project nests the project under ${project_dir}/${project_name},
 # so PnR writes the bitstream to ${project_dir}/${project_name}/impl/pnr/.
-file copy -force ${project_dir}/${project_name}/impl/pnr/${project_name}.fs ${output_dir}/fcapz_brs_100_gw1nr9.fs
+file copy -force ${project_dir}/${project_name}/impl/pnr/${project_name}.fs ${output_dir}/${bitfile}

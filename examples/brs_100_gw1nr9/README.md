@@ -22,6 +22,10 @@ register-bus mux at offset `0x8000`.
 | `build.py` | Preferred Gowin batch-build launcher |
 | `build_brs_100_gw1nr9.tcl` | Gowin project/script used by `build.py` |
 | `brs_100_gw1nr9.cfg` | OpenOCD config for the board JTAG adapter |
+| `brs_100_gw1nr9_manager_top.v` | Core-manager variant: two ELAs and two EIOs behind one hub |
+| `brs_100_gw1nr9_manager_timing.sdc` | The timing constraints, for the manager top |
+| `test_hw_integration.py` | Hardware tests for the reference design |
+| `test_hw_manager.py` | Hardware tests for the core-manager variant |
 
 ## Design Summary
 
@@ -184,6 +188,31 @@ trigger match, register roundtrip, JSON/VCD export) and the shared-chain EIO
 board the tests **skip** (OpenOCD unreachable or no fcapz design loaded); set
 `FPGACAP_SKIP_HW=1` to skip unconditionally. Override the port/tap with
 `FPGACAP_OPENOCD_PORT` / `FPGACAP_OPENOCD_TAP`.
+
+## Core-manager variant
+
+`brs_100_gw1nr9_manager_top.v` replaces the ELA and its shared-chain EIO with
+one `fcapz_debug_multi_gowin` hub on `GW_JTAG` ER1, carrying four slots:
+
+| Slot | Core | What it sees |
+| --- | --- | --- |
+| 0 | ELA, 8-bit x 64 | free-running counter (60 MHz) |
+| 1 | ELA, 8-bit x 64 | that counter XOR `0xA5` |
+| 2 | EIO, 8 in / 8 out | in: `{buttons[1:0], 2'b00, slow counter[3:0]}`; out: LED[5:0] |
+| 3 | EIO, 8 in / 8 out | its own outputs, looped back |
+
+The Gowin hub is register-only: every slot reports no burst, and the host reads
+captures through the register window. Clocking, pins and the JTAG helper clock
+are those of the reference design.
+
+```sh
+python examples/brs_100_gw1nr9/build.py --variant manager
+# program out_manager/fcapz_brs_100_gw1nr9_manager.fs, start OpenOCD, then:
+python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
+```
+
+The variant builds with timing met (about 25 % of the logic) but has not yet
+run on a board.
 
 ## Notes
 
