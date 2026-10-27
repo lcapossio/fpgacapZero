@@ -599,7 +599,9 @@ burst on the hub's chain exactly as on Xilinx.  Gowin's TAP has separate
 register adapter with `BURST_EN=0`: every slot reports no burst
 (`MGR_DESC_CAPS` = 0) and the host reads each capture through its register
 window, which is slower than a burst.  Keep `USER1_DATA_EN=1` there.  Like
-`fcapz_ela_gowin`, the Gowin hub needs `clk` to run well above TCK.
+`fcapz_ela_gowin`, the Gowin hub needs `clk` to run well above TCK.  None of
+these four hubs sees the TAP's Test-Logic-Reset, so their `MGR_TLR_COUNT`
+always reads 0.
 
 The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
 others, but none has run on a board yet; their TAPs' CAPTURE/UPDATE timing is
