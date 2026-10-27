@@ -578,24 +578,33 @@ vendor-specific:
 | `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tlr`, `tdo` out): hub resets (`fcapz_hub_reset`), `jtag_pipe_iface`, then the core. |
 | `fcapz_debug_multi_<vendor>` | One `jtag_tap_<vendor>` on `CTRL_CHAIN` feeding `fcapz_debug_multi`. |
 
-Packaged vendor shells (all share the parameter and port list shown above):
+Packaged vendor shells (all share the parameter and port list shown above,
+plus the extra ports noted):
 
-| Wrapper | TAP | `CTRL_CHAIN` means |
-|---|---|---|
-| `fcapz_debug_multi_xilinx7` | `BSCANE2` | USER chain 1..4 |
-| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | USER chain 1..4 |
-| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `sld_instance_index` |
+| Wrapper | TAP | Chain selection | Differences |
+|---|---|---|---|
+| `fcapz_debug_multi_xilinx7` | `BSCANE2` | `CTRL_CHAIN`: USER chain 1..4 | |
+| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | `CTRL_CHAIN`: USER chain 1..4 | |
+| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `CTRL_CHAIN`: `sld_instance_index` | |
+| `fcapz_debug_multi_ecp5` | `JTAGG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | No `TLR_RESET_EN` (JTAGG has no Test-Logic-Reset output). |
+| `fcapz_debug_multi_polarfire` | `UJTAG` | `IR_USER1` opcode (default `0x20`) instead of `CTRL_CHAIN` | JTAG pad ports `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`, `tdo_pad_o` to top-level ports; one UJTAG per device, so it cannot coexist with `fcapz_ela_polarfire` / `fcapz_eio_polarfire`.  No `TLR_RESET_EN`. |
+| `fcapz_debug_multi_efinix` | Efinity JTAG User TAP (Interface Designer) | Whichever User TAP block the `jtag1_*` ports are wired to; no `CTRL_CHAIN` | `jtag1_*` ports to an Interface Designer JTAG User TAP block.  No `TLR_RESET_EN`. |
+| `fcapz_debug_multi_gowin` | `GW_JTAG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | **Register-only** (see below); a `clk` input that oversamples the TAP, a `jtag_activity` output and the JTAG pad ports.  No `BURST_W` or `TLR_RESET_EN`. |
 
-Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  A new
-vendor needs only a shell when its `jtag_tap_<vendor>` presents the same single
-`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel` interface, as the ECP5 and
-PolarFire wrappers do; the manager, slots and pipe are already covered by the
-shared simulation and parity checks, but that TAP's CAPTURE/UPDATE timing still
-needs a board test.  Gowin's TAP has separate `shift_in`/`shift_out` strobes,
-which the shared pipe does not take, so a Gowin hub needs its own adapter: a
-register-only one can drive `fcapz_debug_multi_core` with `BURST_EN=0`, and
-every slot is then read through its register window.  UltraScale reuses the
-Xilinx 7 TAP code; its board validation is recorded in the
+Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  The
+ECP5, PolarFire and Efinix shells reuse `fcapz_debug_multi`, so their slots
+burst on the hub's chain exactly as on Xilinx.  Gowin's TAP has separate
+`shift_in`/`shift_out` strobes, which the shared pipe does not take, so
+`fcapz_debug_multi_gowin` drives `fcapz_debug_multi_core` through the Gowin
+register adapter with `BURST_EN=0`: every slot reports no burst
+(`MGR_DESC_CAPS` = 0) and the host reads each capture through its register
+window, which is slower than a burst.  Keep `USER1_DATA_EN=1` there.  Like
+`fcapz_ela_gowin`, the Gowin hub needs `clk` to run well above TCK.
+
+The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
+others, but none has run on a board yet; their TAPs' CAPTURE/UPDATE timing is
+what a board test still has to confirm.  UltraScale reuses the Xilinx 7 TAP
+code; its board validation is recorded in the
 [vendor support matrix](01_overview.md#vendor-support-matrix).  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
 `fcapz_ela` slots to custom plumbing yourself.
