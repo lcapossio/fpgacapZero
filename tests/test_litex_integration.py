@@ -77,7 +77,8 @@ _PRIMITIVE_STUBS = {
     "xilinxus": "bscane2_stub.v",
     "ecp5": "jtagg_stub.v",
     "intel": "sld_virtual_jtag_stub.v",
-    "gowin": "gw_jtag_stub.v",
+    # The Gowin list carries GW_JTAG's declaration (rtl/gowin/gw_jtag.v).
+    "gowin": None,
     "polarfire": "ujtag_stub.v",
 }
 
@@ -92,7 +93,8 @@ def test_ela_rtl_sources_elaborate(vendor, tmp_path):
         result = subprocess.run(
             ["iverilog", "-g2012", "-I", str(root / "rtl"), "-s", top,
              "-o", str(tmp_path / "elab.vvp"),
-             str(root / "sim" / _PRIMITIVE_STUBS[vendor]), *sources],
+             *([str(root / "sim" / _PRIMITIVE_STUBS[vendor])] if _PRIMITIVE_STUBS[vendor] else []),
+             *sources],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, f"{top}:\n{result.stdout}{result.stderr}"

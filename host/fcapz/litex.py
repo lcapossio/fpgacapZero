@@ -69,6 +69,8 @@ _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
         "jtag_tap/jtag_tap_gowin.v",
         "dff_reg_sync.v",
         "dff_sync.v",
+        # GW_JTAG's synthesis declaration, for builds without GAO.
+        "gowin/gw_jtag.v",
     ),
     "polarfire": (
         "fcapz_ela_polarfire.v",
