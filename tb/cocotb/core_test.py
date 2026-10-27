@@ -1352,6 +1352,9 @@ async def fcapz_ela_xilinx7_single_chain(dut):
 # sim/run_cocotb.py build them: default slots (two 8-bit ELAs, DEPTH 1024,
 # one 1-bit EIO) on a nondefault chain; the *_tlr targets add TLR_RESET_EN.
 _DEBUG_MULTI_CHAIN = 3
+# ECP5 and Gowin have two user chains; PolarFire selects by UJTAG IR opcode.
+_DEBUG_MULTI_ER_CHAIN = 2
+_DEBUG_MULTI_POLARFIRE_IR = 0x24
 _DEBUG_MULTI_SAMPLE_W = 8
 _DEBUG_MULTI_DEPTH = 1024
 _DEBUG_MULTI_BURST_W = 256
@@ -1361,19 +1364,39 @@ _MGR_CAPS_TLR_RESET = 0x40
 
 
 def _debug_multi_primitive(dut):
-    """Return (primitive, pin names, chain parameter name) for the shell's TAP stub."""
+    """Return (primitive, pin names, chain parameter name or None, select level)
+    for the shell's TAP stub.  A pin named None does not exist on that TAP."""
     target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
-    vendor = next(v for v in ("xilinx7", "xilinxus", "intel") if f"_{v}" in target)
+    vendor = next(v for v in ("xilinx7", "xilinxus", "intel", "ecp5", "polarfire", "efinix")
+                  if f"_{v}" in target)
     if vendor == "intel":
         # sld_virtual_jtag has no sel; jtag_tap_intel ties it high.
         pins = dict(tck="tck", tdi="tdi", capture="virtual_state_cdr",
                     shift="virtual_state_sdr", update="virtual_state_udr", sel=None,
                     tlr="jtag_state_tlr")
-        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index"
+        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index", 1
+    if vendor == "ecp5":
+        # JTAGG has no CAPTURE pin: jtag_tap_ecp5 derives capture from the
+        # rise of JCE<n>, the chain's select.  No Test-Logic-Reset output.
+        pins = dict(tck="JTCK", tdi="JTDI", capture=None, shift="JSHIFT",
+                    update="JUPDATE", sel=f"JCE{_DEBUG_MULTI_ER_CHAIN}", tlr=None)
+        return dut.u_tap_ctrl.u_jtagg, pins, None, 1
+    if vendor == "polarfire":
+        # UJTAG selects the chain by the user instruction in UIREG.
+        pins = dict(tck="UDRCK", tdi="UTDI", capture="UDRCAP", shift="UDRSH",
+                    update="UDRUPD", sel="UIREG", tlr=None)
+        # The VHDL shell keeps the default IR_USER1 (run_cocotb.py).
+        ir = _DEBUG_MULTI_POLARFIRE_IR if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog" else 0x20
+        return dut.u_tap_ctrl.u_ujtag, pins, None, ir
+    if vendor == "efinix":
+        # The Interface Designer User TAP block's signals are shell ports.
+        pins = dict(tck="jtag1_tck", tdi="jtag1_tdi", capture="jtag1_capture",
+                    shift="jtag1_shift", update="jtag1_update", sel="jtag1_sel", tlr=None)
+        return dut, pins, None, 1
     pins = dict(tck="TCK", tdi="TDI", capture="CAPTURE", shift="SHIFT",
                 update="UPDATE", sel="SEL", tlr="RESET")
     ctrl = dut.u_tap_ctrl.u_tap if vendor == "xilinxus" else dut.u_tap_ctrl
-    return ctrl.u_bscan, pins, "JTAG_CHAIN"
+    return ctrl.u_bscan, pins, "JTAG_CHAIN", 1
 
 
 def _check_burst_header(header: int, *, slot: int, mgr_epoch: int, slot_epoch: int,
@@ -1396,20 +1419,27 @@ class _DebugMultiBench:
 
     def __init__(self, dut) -> None:
         self.dut = dut
-        self.prim, pins, self.chain_param = _debug_multi_primitive(dut)
+        self.prim, pins, self.chain_param, self.sel_on = _debug_multi_primitive(dut)
         self.pin = {role: getattr(self.prim, name) for role, name in pins.items() if name}
         self.intel = pins["sel"] is None
         self.rng = random.Random(0x5EED)
         # A probe value per ELA that replaces its count while not None.
         self.hold: list[int | None] = [None, None]
 
-    async def start(self) -> None:
-        dut = self.dut
-        if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
+    def _tap_init(self) -> None:
+        if self.chain_param and os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
             assert int(getattr(self.prim, self.chain_param).value) == _DEBUG_MULTI_CHAIN
         for role in ("tck", "tdi", "capture", "shift", "update", "sel", "tlr"):
             if role in self.pin:
                 self.pin[role].value = 0
+
+    async def start(self) -> None:
+        dut = self.dut
+        self._tap_init()
+        # Shell inputs the bench does not use (JTAG pads, Efinix's DR clock).
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i"):
+            if hasattr(dut, name):
+                getattr(dut, name).value = 0
         dut.ela_sample_clk.value = 0
         dut.ela_sample_rst.value = 0b11
         dut.ela_probe_in.value = 0
@@ -1462,11 +1492,17 @@ class _DebugMultiBench:
     async def scan(self, bits: int, frame: int = 0) -> int:
         pin = self.pin
         captured = 0
+        if "capture" not in pin:
+            # Select-DR-Scan with the select low, so its rise marks Capture-DR.
+            pin["sel"].value = 0
+            await self.tck_tick()
         if "sel" in pin:
-            pin["sel"].value = 1
-        pin["capture"].value = 1
+            pin["sel"].value = self.sel_on
+        if "capture" in pin:
+            pin["capture"].value = 1
         await self.tck_tick()
-        pin["capture"].value = 0
+        if "capture" in pin:
+            pin["capture"].value = 0
         pin["shift"].value = 1
         for i in range(bits):
             pin["tdi"].value = (frame >> i) & 1
@@ -1695,6 +1731,106 @@ async def fcapz_debug_multi_tlr(dut):
                         owner=owner)
     await tb.test_logic_reset()
     assert await tb.read(0xF030) == tlr_count + 2
+
+
+class _GowinDebugMultiBench(_DebugMultiBench):
+    """Drives fcapz_debug_multi_gowin at its GW_JTAG primitive's outputs.
+
+    jtag_tap_gowin oversamples GW_JTAG on clk and acts once per TCK falling
+    edge, so each tick holds TCK high and low for several clk periods.  The
+    TAP state outputs change with TCK's rising edge.  The instruction (ER1 or
+    ER2) stays loaded throughout, so enable_er<n>_o stays high; the TAP then
+    raises capture on every falling edge outside a scan, from the
+    shift_dr_capture_dr_o rise until the falling edge after Update-DR.
+    """
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.prim = dut.u_tap_ctrl.u_jtag
+        self.chain_idx = _DEBUG_MULTI_ER_CHAIN - 1
+        self.intel = False
+        self.rng = random.Random(0x5EED)
+        self.hold: list[int | None] = [None, None]
+
+    def _tap_init(self) -> None:
+        prim = self.prim
+        cocotb.start_soon(Clock(self.dut.clk, 10, unit="ns").start())
+        for name in ("tck_o", "tdi_o", "shift_dr_capture_dr_o", "update_dr_o"):
+            getattr(prim, name).value = 0
+        prim.enable_er1_o.value = int(self.chain_idx == 0)
+        prim.enable_er2_o.value = int(self.chain_idx == 1)
+
+    async def start(self) -> None:
+        await super().start()
+        # jtag_tap_gowin's hold and chain flags have no reset; the first
+        # scan sets them.  It reads address 0, which changes nothing.
+        await self.scan(49)
+        await self.idle(4)
+
+    async def gw_tick(self, sc: int = 0, update: int = 0, tdi: int = 0) -> int:
+        """One TCK period; return the chain's TDO as it stood before TCK fell."""
+        prim = self.prim
+        prim.tck_o.value = 1
+        prim.shift_dr_capture_dr_o.value = sc
+        prim.update_dr_o.value = update
+        prim.tdi_o.value = tdi
+        await Timer(50, unit="ns")
+        tdo = (int(self.dut.tap_tdo.value) >> self.chain_idx) & 1
+        prim.tck_o.value = 0
+        await Timer(50, unit="ns")
+        return tdo
+
+    async def idle(self, n: int) -> None:
+        for _ in range(n):
+            await self.gw_tick()
+
+    async def scan(self, bits: int, frame: int = 0) -> int:
+        # Capture-DR, bits Shift-DR states, then Exit1-DR: the TAP shifts in
+        # on the falling edge after each shift_dr_capture_dr_o one, so TDI
+        # lags a tick behind TDO.
+        captured = 0
+        for k in range(bits + 1):
+            tdi = (frame >> (k - 1)) & 1 if k else 0
+            tdo = await self.gw_tick(sc=int(k < bits), tdi=tdi)
+            if k < bits:
+                captured |= tdo << k
+        await self.gw_tick(update=1)
+        await self.gw_tick()
+        return captured
+
+
+@cocotb.test()
+async def fcapz_debug_multi_gowin(dut):
+    """The register-only Gowin hub: no slot bursts, captures read back
+    through the register window."""
+    tb = _GowinDebugMultiBench(dut)
+    await tb.start()
+
+    assert await tb.read(0xF000) & 0xFFFF == 0x434D
+    assert await tb.read(0xF004) == 3
+    # No burst header and no Test-Logic-Reset reset.
+    assert await tb.read(0xF010) == _DEBUG_MULTI_CAPS & ~0x50
+    for slot, core in enumerate((0x4C41, 0x4C41, 0x494F)):
+        await tb.write(0xF014, slot)
+        assert await tb.read(0xF018) == core, f"slot {slot} core id"
+        assert await tb.read(0xF01C) == 0, f"slot {slot} burst capability"
+
+    for slot, step in ((0, 1), (1, -1)):
+        capture_len = await tb.capture(slot)
+        samples = [await tb.read(0x0100 + 4 * i) & 0xFF for i in range(capture_len)]
+        for i in range(1, capture_len):
+            assert samples[i] == (samples[i - 1] + step) & 0xFF,                 f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+
+    await tb.write(0xF008, 2)
+    assert await tb.read(0x0004) == 1
+    for level in (1, 0):
+        await tb.write(0x0100, level)
+        await tb.idle(8)
+        assert int(dut.eio_probe_out.value) == level
+        dut.eio_probe_in.value = level
+        await tb.idle(8)
+        assert await tb.read(0x0010) == level
 
 
 @cocotb.test()

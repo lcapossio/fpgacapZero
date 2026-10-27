@@ -368,6 +368,69 @@ TARGETS = (
         ),
     ),
     LintTarget(
+        name="fcapz_debug_multi_ecp5",
+        top="fcapz_debug_multi_ecp5",
+        sources=(
+            SIM / "jtagg_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_ecp5.v",
+            RTL / "fcapz_debug_multi_ecp5.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_ecp5_er2",
+        top="fcapz_debug_multi_ecp5",
+        sources=(
+            SIM / "jtagg_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_ecp5.v",
+            RTL / "fcapz_debug_multi_ecp5.v",
+        ),
+        extra_flags=("-GCTRL_CHAIN=2",),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_polarfire",
+        top="fcapz_debug_multi_polarfire",
+        sources=(
+            SIM / "ujtag_stub.v",
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_polarfire.v",
+            RTL / "fcapz_debug_multi_polarfire.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_efinix",
+        top="fcapz_debug_multi_efinix",
+        sources=(
+            *DEBUG_MULTI_SOURCES,
+            RTL / "jtag_tap" / "jtag_tap_efinix.v",
+            RTL / "fcapz_debug_multi_efinix.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_gowin",
+        top="fcapz_debug_multi_gowin",
+        sources=(
+            SIM / "gw_jtag_stub.v",
+            *DEBUG_MULTI_CORE_SOURCES,
+            RTL / "jtag_reg_iface_gowin.v",
+            RTL / "jtag_tap" / "jtag_tap_gowin.v",
+            RTL / "fcapz_debug_multi_gowin.v",
+        ),
+    ),
+    LintTarget(
+        name="fcapz_debug_multi_gowin_er2",
+        top="fcapz_debug_multi_gowin",
+        sources=(
+            SIM / "gw_jtag_stub.v",
+            *DEBUG_MULTI_CORE_SOURCES,
+            RTL / "jtag_reg_iface_gowin.v",
+            RTL / "jtag_tap" / "jtag_tap_gowin.v",
+            RTL / "fcapz_debug_multi_gowin.v",
+        ),
+        extra_flags=("-GCTRL_CHAIN=2",),
+    ),
+    LintTarget(
         name="lint_eio_en_xilinx7",
         top="lint_eio_en_xilinx7",
         sources=(
