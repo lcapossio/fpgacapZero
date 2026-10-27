@@ -389,7 +389,12 @@ burst path (`SINGLE_CHAIN_BURST=0`, `BURST_EN=0`) is opened with
 and synthesis flow preserving register initial values at configuration time
 (for example, AMD/Xilinx GSR/INIT behavior). If a target family or flow does not
 guarantee those initial values, configure the registers from the host after
-programming instead of relying on power-up auto-arm behavior.
+programming instead of relying on power-up auto-arm behavior. Libero on
+PolarFire is such a flow: it ignores register initial values, so a core
+manager's hub registers (`MGR_OWNER`, the burst owner) can power up with
+garbage until the host writes them or resets the hub (`MGR_CTRL` bit 0).
+The manager's epochs stay correct there: their bit 0 is the reset level, not
+a count.
 
 The default config is intentionally small and single-chain, while still
 keeping compatibility features such as comparator B and USER1 fallback

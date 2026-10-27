@@ -55,6 +55,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Core-manager epochs on flows that drop initial values.** `MGR_EPOCH` and
+  `MGR_SLOT_EPOCH` counted both reset edges from a power-up 0. Libero
+  (Synplify) on PolarFire ignores initial values, so they came up random,
+  and an odd one made the host refuse that slot as held in reset, for good,
+  since each reset adds 2. An epoch is now `{releases, held}`, with bit 0 the
+  reset's level: the parity is right whatever the counter powers up to, and
+  the value is unchanged where initial values are kept.
+
 - **LiteX: Gowin sources.** `ela_rtl_sources("gowin")` left out
   `jtag_reg_iface_gowin.v`, `dff_reg_sync.v` and `dff_sync.v`, which
   `fcapz_ela_gowin` needs, so a LiteX Gowin build could not elaborate.

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.handle import Force, Release
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
 
@@ -1143,6 +1144,64 @@ async def fcapz_core_manager_resets(dut):
     assert await manager_read(dut, 0xF008) == 1
     assert await manager_read(dut, 0xF024) == 0x1234
     assert await manager_read(dut, 0xF020) == epoch + 2
+
+
+@cocotb.test()
+async def fcapz_core_manager_epoch_parity(dut):
+    """An epoch's parity is the reset level whatever its counters hold.
+
+    PolarFire ignores initial values, so the release counters and the
+    registered reset levels power up random; an odd epoch with no reset held
+    would make the host refuse the slot for good.
+    """
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
+    manager_reset(dut, 0)
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.burst_rd_active.value = 0
+    await FallingEdge(dut.jtag_clk)
+    if hasattr(dut, "u_dut"):
+        # GHDL keeps a forced or deposited signal after Release, so the VHDL
+        # twin cannot start from garbage here; formal parity covers it.
+        cocotb.pass_test("Verilog only: GHDL cannot release a forced signal")
+    # Force for half a cycle, then release.
+    core = dut
+    garbage = {
+        "mgr_releases": 0x2AAB,
+        "mgr_rst_d": 1,
+        "slot_releases": (0x7FFF << 30) | (0x1235 << 15) | 0x0001,
+        "slot_rst_d": 0b101,
+    }
+    for name, value in garbage.items():
+        getattr(core, name).value = Force(value)
+    await RisingEdge(dut.jtag_clk)
+    await Timer(1, unit="ns")
+    for name in garbage:
+        getattr(core, name).value = Release()
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+
+    async def slot_epoch(slot: int) -> int:
+        await manager_write(dut, 0xF014, slot)
+        return await manager_read(dut, 0xF02C)
+
+    epoch = await manager_read(dut, 0xF020)
+    assert epoch % 2 == 0, epoch
+    base = [await slot_epoch(s) for s in range(3)]
+    assert [e % 2 for e in base] == [0, 0, 0], base
+
+    dut.slot_rst.value = 0b001
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert await slot_epoch(0) == (base[0] + 1) & 0xFFFF
+    dut.slot_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+    assert [await slot_epoch(s) for s in range(3)] == [
+        (base[0] + 2) & 0xFFFF, base[1], base[2]]
+    await manager_write(dut, 0xF028, 0x1)
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF020) == (epoch + 2) & 0xFFFF
 
 
 @cocotb.test()
