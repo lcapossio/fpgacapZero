@@ -586,8 +586,8 @@ plus the extra ports noted):
 | `fcapz_debug_multi_xilinx7` | `BSCANE2` | `CTRL_CHAIN`: USER chain 1..4 | |
 | `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | `CTRL_CHAIN`: USER chain 1..4 | |
 | `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `CTRL_CHAIN`: `sld_instance_index` | |
-| `fcapz_debug_multi_ecp5` | `JTAGG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | No `TLR_RESET_EN` (JTAGG has no Test-Logic-Reset output). |
-| `fcapz_debug_multi_polarfire` | `UJTAG` | `IR_USER1` opcode (default `0x20`) instead of `CTRL_CHAIN` | JTAG pad ports `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`, `tdo_pad_o` to top-level ports; one UJTAG per device, so it cannot coexist with `fcapz_ela_polarfire` / `fcapz_eio_polarfire`.  No `TLR_RESET_EN`. |
+| `fcapz_debug_multi_ecp5` | `JTAGG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | No `TLR_RESET_EN`: the TAP adapter uses JTAGG's `JRSTN` only to clear its own chain select. |
+| `fcapz_debug_multi_polarfire` | `UJTAG` | `IR_USER1` opcode (default `0x20`) instead of `CTRL_CHAIN` | JTAG pad ports `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`, `tdo_pad_o` to top-level ports; one UJTAG per device, so it cannot coexist with `fcapz_ela_polarfire` / `fcapz_eio_polarfire`.  A `hub_por` power-on reset input (see below).  No `TLR_RESET_EN`. |
 | `fcapz_debug_multi_efinix` | Efinity JTAG User TAP (Interface Designer) | Whichever User TAP block the `jtag1_*` ports are wired to; no `CTRL_CHAIN` | `jtag1_*` ports to an Interface Designer JTAG User TAP block.  No `TLR_RESET_EN`. |
 | `fcapz_debug_multi_gowin` | `GW_JTAG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | **Register-only** (see below); a `clk` input that oversamples the TAP, a `jtag_activity` output and the JTAG pad ports.  No `BURST_W` or `TLR_RESET_EN`. |
 
@@ -603,10 +603,21 @@ window, which is slower than a burst.  Keep `USER1_DATA_EN=1` there.  Like
 these four hubs sees the TAP's Test-Logic-Reset, so their `MGR_TLR_COUNT`
 always reads 0.
 
+Libero ignores register initial values on PolarFire, so the hub cannot tell
+its power-up from a later ELA reset by itself.  Drive the PolarFire shell's
+`hub_por` high from power-up until the fabric is initialised, for example
+from the inverted `FABRIC_POR_N` of `PF_INIT_MONITOR` (the Discovery Kit
+example uses the `INIT` primitive it wraps); it resets the hub and every
+slot.
+
 The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
-others, but none has run on a board yet; their TAPs' CAPTURE/UPDATE timing is
-what a board test still has to confirm.  UltraScale reuses the Xilinx 7 TAP
-code; its board validation is recorded in the
+others.  The PolarFire hub also passes on the PolarFire SoC Discovery Kit
+(`examples/mpfs_disco_kit`, manager variant).  The Gowin hub builds for the
+BRS-100 with timing met but has not run on a board, and the ECP5 and Efinix
+hubs have run in simulation only.  The ECP5 TAP adapter holds the chain
+select from Capture-DR through Update-DR, because `JCE1`/`JCE2` are low again
+by Update-DR; a board test still has to confirm that timing.  UltraScale
+reuses the Xilinx 7 TAP code; its board validation is recorded in the
 [vendor support matrix](01_overview.md#vendor-support-matrix).  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
 `fcapz_ela` slots to custom plumbing yourself.

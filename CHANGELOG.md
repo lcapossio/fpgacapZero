@@ -17,7 +17,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   EIOs behind one chain on every supported vendor, with VHDL twins. The ECP5,
   PolarFire and Efinix hubs burst on that chain as the Xilinx ones do. The
   Gowin hub is register-only: its slots report no burst and the host reads
-  captures through the register window. None offers `TLR_RESET_EN`. Efinix
+  captures through the register window. None offers `TLR_RESET_EN`. The
+  PolarFire hub has a `hub_por` power-on reset input: Libero drops register
+  initial values, so the hub needs it to see its power-up reset (the
+  Discovery Kit example drives it from `FABRIC_POR_N`). Efinix
   had no EIO before; this hub gives it one. All four pass the cocotb hub
   tests in Verilog and VHDL. The PolarFire hub passes on the Discovery Kit
   (`mpfs_disco_kit_manager_top.v`, `test_hw_manager.py`: two ELAs with
@@ -67,9 +70,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reset's level: the parity is right whatever the counter powers up to, and
   the value is unchanged where initial values are kept.
 
+- **ECP5: register writes at Update-DR.** `jtag_tap_ecp5` passed JTAGG's
+  `JCE1`/`JCE2` on as the chain select, but they cover Capture-DR and
+  Shift-DR only, and the register and pipe adapters act at Update-DR only
+  while the select is high, so no ECP5 wrapper could commit a register
+  access. The adapter now holds the select from Capture-DR through
+  Update-DR, cleared by Update-DR or Test-Logic-Reset, so another
+  instruction's Update-DR still does nothing. Simulation only; ECP5 has not
+  run on a board.
+
+- **PolarFire example power-on reset.** The Discovery Kit tops built their
+  reset from registers with initial values, which Libero ignores, so it was
+  not guaranteed at power-up. It now comes from the `INIT` primitive's
+  `FABRIC_POR_N`.
+
 - **LiteX: Gowin sources.** `ela_rtl_sources("gowin")` left out
-  `jtag_reg_iface_gowin.v`, `dff_reg_sync.v` and `dff_sync.v`, which
-  `fcapz_ela_gowin` needs, so a LiteX Gowin build could not elaborate.
+  `jtag_reg_iface_gowin.v`, `dff_reg_sync.v`, `dff_sync.v` and the `GW_JTAG`
+  declaration `gowin/gw_jtag.v`, which `fcapz_ela_gowin` needs, so a LiteX
+  Gowin build could not elaborate.
+
+- **`core.json` lists what the new hubs need:** the PolarFire and Efinix TAP
+  adapters, the Gowin register adapter, its synchronisers and the `GW_JTAG`
+  declaration.
 
 - **Manual corrections.** A full review of the manual against the code fixed
   wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;
