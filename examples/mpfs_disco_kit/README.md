@@ -119,6 +119,29 @@ options (`SINGLE_CHAIN_BURST=0`, `EXT_TRIG_EN`, `DECIM_EN` and the rest) are
 covered in simulation (`tb/fcapz_ela_polarfire_tb.sv`) but not built for this
 board.
 
+## Core-manager variant
+
+`mpfs_disco_kit_manager_top.v` puts four slots behind one
+`fcapz_debug_multi_polarfire` hub on USER1:
+
+| Slot | Core | What it sees |
+|------|------|--------------|
+| 0 | ELA, 8-bit x 1024, 32-bit timestamps, 4 segments | free-running 8-bit counter |
+| 1 | ELA, same shape | that counter XOR `0xA5` |
+| 2 | EIO, 8 in / 8 out | in: SWITCH2, SWITCH1, a slow counter; out: LED1..LED6 |
+| 3 | EIO, 8 in / 8 out | its own outputs, looped back |
+
+Both ELAs read back through the hub's single-chain burst.
+
+```bash
+python examples/mpfs_disco_kit/build.py --variant manager --program
+FPGACAP_BACKEND=ftdi python -m pytest examples/mpfs_disco_kit/test_hw_manager.py -v
+```
+
+The variant builds as its own Libero project (`libero/mpfs_disco_kit_manager_fcapz/`),
+with timing met at about 4,100 logic elements (4 %), and all 10 of its hardware
+tests pass over `--backend ftdi`.
+
 ## Things to know about PolarFire
 
 - **One UJTAG per device.** The ELA and EIO cannot each have their own
@@ -140,6 +163,14 @@ board.
   `--backend ftdi`. Over OpenOCD it depends on the adapter path: about
   0.06 s through a `remote_bitbang` bridge on the FlashPro5, against about
   41 s through the register window before burst readout.
+- **No initial values.** Libero ignores register initial values on PolarFire
+  (Synplify warns "User-specified initial value ... is being ignored"), so
+  registers that rely on them power up random. The power-on reset in these
+  tops (`por_cnt`) is one of them, and so is the hub's own power-up reset, so
+  hub registers such as `MGR_OWNER` can start with garbage (the host warns
+  about an unknown owner token). The host writes what it uses, and a hub
+  reset (`MGR_CTRL` bit 0) clears the rest. The manager's epochs keep their
+  meaning (odd while a reset is held) whatever they power up to.
 - **Second chain.** The wrapper keeps burst data on USER1
   (`SINGLE_CHAIN_BURST=1`, the default). IR `0x21` (USER2) is used only by a
   `SINGLE_CHAIN_BURST=0` build.
@@ -156,3 +187,5 @@ board.
 | `build.py` | finds Libero and runs the two scripts |
 | `mpfs_disco_kit.cfg` | OpenOCD: embedded FlashPro5, MPFS095T TAP only |
 | `test_hw_integration.py` | hardware tests (skipped with `FPGACAP_SKIP_HW=1`) |
+| `mpfs_disco_kit_manager_top.v` | core-manager variant: two ELAs and two EIOs behind one hub |
+| `test_hw_manager.py` | hardware tests for the core-manager variant |
