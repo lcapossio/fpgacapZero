@@ -8,10 +8,13 @@
 // Use this when a reset source may be unrelated to the destination clock
 // domain, but the destination logic expects clean reset release on that clock.
 // It powers up asserted, as the VHDL twin does, and releases after STAGES
-// clocks.
+// clocks.  INIT=0 makes it power up deasserted instead, for synchronising a
+// level that must not read high before its source has been high (the TAP's
+// Test-Logic-Reset).
 
 module reset_sync #(
-    parameter STAGES = 2
+    parameter STAGES = 2,
+    parameter INIT = 1
 ) (
     input  wire clk,
     input  wire arst,
@@ -20,7 +23,7 @@ module reset_sync #(
 
     (* ASYNC_REG = "TRUE" *) reg [STAGES-1:0] sync_ff;
 
-    initial sync_ff = {STAGES{1'b1}};
+    initial sync_ff = (INIT != 0) ? {STAGES{1'b1}} : {STAGES{1'b0}};
 
     always @(posedge clk or posedge arst) begin
         if (arst)

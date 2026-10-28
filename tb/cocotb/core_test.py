@@ -1861,6 +1861,44 @@ async def fcapz_debug_multi_tlr(dut):
     assert await tb.read(0xF030) == tlr_count + 2
 
 
+@cocotb.test()
+async def fcapz_debug_multi_tlr_powerup(dut):
+    """MGR_TLR_COUNT starts at 0 and counts only entries seen happen.
+
+    Run alone on a fresh simulation (the *_powerup targets): the count has no
+    reset, so it carries the power-up state.  The *_powerup_tlrhigh target
+    holds the TAP in Test-Logic-Reset from time 0, as after configuration;
+    that residency is not an entry.
+    """
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    tb = (_GowinDebugMultiBench if "_gowin" in target else _DebugMultiBench)(dut)
+    has_tlr = "tlr" in getattr(tb, "pin", {})
+    start_high = target.endswith("_tlrhigh")
+    assert has_tlr or not start_high
+    if start_high:
+        tap_init = tb._tap_init
+
+        def _tap_init_in_tlr() -> None:
+            tap_init()
+            tb.pin["tlr"].value = 1
+
+        tb._tap_init = _tap_init_in_tlr
+    await tb.start()
+    assert await tb.read(0xF030) == 0, "power-up counted as a Test-Logic-Reset"
+    if not has_tlr:
+        await tb.idle(16)
+        assert await tb.read(0xF030) == 0
+        return
+    if start_high:
+        tb.pin["tlr"].value = 0
+        await tb.idle(4)
+        assert await tb.read(0xF030) == 0, "Test-Logic-Reset at power-up counted"
+    await tb.test_logic_reset()
+    assert await tb.read(0xF030) == 1
+    await tb.test_logic_reset()
+    assert await tb.read(0xF030) == 2
+
+
 class _GowinDebugMultiBench(_DebugMultiBench):
     """Drives fcapz_debug_multi_gowin at its GW_JTAG primitive's outputs.
 

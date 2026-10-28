@@ -21,7 +21,9 @@
 // 2.  The LSB is the level rather than a count of edges, so the parity holds
 // even where the flow drops initial values (PolarFire powers these up
 // random); a reset still held when the host looked changes the epoch again
-// on release.  MGR_SELECT_COUNT counts every
+// on release.  MGR_TLR_COUNT counts the TAP's entries into Test-Logic-Reset
+// that the manager sees happen: tlr_d powers up high, so a TAP already in
+// Test-Logic-Reset at configuration is not counted.  MGR_SELECT_COUNT counts every
 // MGR_ACTIVE write, accepted or not, from any controller: a host that counts
 // its own writes tells from the difference that another controller selected a
 // slot, even one that selected its slot back.
@@ -145,7 +147,7 @@ module fcapz_core_manager #(
         mgr_releases = 15'h0;
         slot_rst_d = {NUM_SLOTS{1'b0}};
         slot_releases = {NUM_SLOTS{15'h0}};
-        tlr_d = 1'b0;
+        tlr_d = 1'b1;
         tlr_count = 16'h0;
         select_count = 16'h0;
     end

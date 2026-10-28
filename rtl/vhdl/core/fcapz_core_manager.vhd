@@ -116,7 +116,8 @@ architecture rtl of fcapz_core_manager is
     -- {releases, held}; see fcapz_core_manager.v.
     signal mgr_epoch      : unsigned(15 downto 0);
     signal slot_epoch     : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0);
-    signal tlr_d          : std_logic := '0';
+    -- Powers up high: only entries seen happen count; see fcapz_core_manager.v.
+    signal tlr_d          : std_logic := '1';
     signal tlr_count      : unsigned(15 downto 0) := (others => '0');
     -- Every MGR_ACTIVE write, accepted or not; see fcapz_core_manager.v.
     signal select_count   : unsigned(15 downto 0) := (others => '0');

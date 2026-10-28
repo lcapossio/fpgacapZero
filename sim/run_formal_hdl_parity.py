@@ -461,6 +461,7 @@ def check_init_parity(
     manifest: dict[str, Any],
     work: Path,
     yosys: str,
+    after_reset: bool = True,
 ) -> str | None:
     """Compare the state the two sides start the proofs from.
 
@@ -476,13 +477,23 @@ def check_init_parity(
     ``"init_after_reset": false`` in its manifest, since its power-up value is
     that contract.  A register left undefined after the reset is reported:
     the check cannot compare it.  Returns a failure message, or ``None``.
+
+    The reset can also hide a difference: a register that follows an input
+    held at 0 (an edge detector's last-seen copy) is flushed to 0 on both
+    sides.  ``"raw_init_check": true`` in a manifest runs the check a second
+    time with *after_reset* False, on the raw power-up values.
     """
     formal = manifest.get("formal", {})
     reset_inputs = formal.get("reset_inputs", [])
     reset_cycles = int(formal.get("reset_cycles", 0))
     clock_inputs = formal.get("clock_inputs", [])
     reset_sim: list[str] = []
-    if reset_inputs and reset_cycles and formal.get("init_after_reset", True):
+    if (
+        after_reset
+        and reset_inputs
+        and reset_cycles
+        and formal.get("init_after_reset", True)
+    ):
         reset_sim.append(
             "sim -zinit -w"
             + "".join(f" -clock {clock}" for clock in clock_inputs)
@@ -494,7 +505,7 @@ def check_init_parity(
         ("gold", gold_read, golden),
         ("gate", gate_read, candidate),
     ):
-        out = work / f"init_{name}.json"
+        out = work / f"init_{name}{'' if after_reset else '_raw'}.json"
         renames = side.get("state_renames") or {}
         script = "\n".join(
             [
@@ -551,10 +562,11 @@ def check_init_parity(
         for name, index in gold.keys() & gate.keys()
         if "x" in (gold[(name, index)], gate[(name, index)])
     )
+    when = "after the reset" if reset_sim else "at power-up"
     if undefined:
         shown = ", ".join(undefined[:8])
         more = f" (+{len(undefined) - 8} more)" if len(undefined) > 8 else ""
-        return f"registers undefined after the reset: {shown}{more}"
+        return f"registers undefined {when}: {shown}{more}"
     mismatches = [
         f"{name}[{index}] {gold[(name, index)]}/{gate[(name, index)]}"
         for name, index in sorted(gold.keys() & gate.keys())
@@ -563,7 +575,7 @@ def check_init_parity(
     if mismatches:
         shown = ", ".join(mismatches[:8])
         more = f" (+{len(mismatches) - 8} more)" if len(mismatches) > 8 else ""
-        return f"power-up values differ (Verilog/VHDL): {shown}{more}"
+        return f"values {when} differ (Verilog/VHDL): {shown}{more}"
     return None
 
 
@@ -593,6 +605,11 @@ def prove_config(
     init_error = check_init_parity(
         gold_read, gate_read, golden, candidate, manifest, work, yosys
     )
+    if init_error is None and manifest.get("formal", {}).get("raw_init_check"):
+        init_error = check_init_parity(
+            gold_read, gate_read, golden, candidate, manifest, work, yosys,
+            after_reset=False,
+        )
     if init_error is not None:
         return "FAIL", init_error
     script = "\n".join(

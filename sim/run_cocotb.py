@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from _runner_utils import check_results, relaunch_in_wsl, running_in_wsl
@@ -88,17 +88,20 @@ _DEBUG_MULTI_TLR = ("xilinx7", "xilinxus", "intel")
 _DEBUG_MULTI_HUB_POR = ("polarfire",)
 
 
-def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
+def _debug_multi_target(vendor: str, *, tlr_reset: bool = False, powerup: str = "") -> Target:
     """One fcapz_debug_multi_<vendor> shell driven at its TAP primitive's pins.
 
     With *tlr_reset* the shell is built with TLR_RESET_EN and runs only the
-    test that depends on it.
+    test that depends on it.  A *powerup* suffix ("_powerup", or
+    "_powerup_tlrhigh" for a TAP in Test-Logic-Reset from time 0) runs only
+    the power-up count test, alone on a fresh simulation.
     """
     tap_v, tap_vhdl = _DEBUG_MULTI_TAP_SRC[vendor]
-    tests = ("fcapz_debug_multi_tlr",) if tlr_reset else (
-        ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets")
-        + (("fcapz_debug_multi_tlr",) if vendor in _DEBUG_MULTI_TLR else ())
-        + (("fcapz_debug_multi_hub_por",) if vendor in _DEBUG_MULTI_HUB_POR else ()))
+    tests = ("fcapz_debug_multi_tlr_powerup",) if powerup else (
+        ("fcapz_debug_multi_tlr",) if tlr_reset else (
+            ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets")
+            + (("fcapz_debug_multi_tlr",) if vendor in _DEBUG_MULTI_TLR else ())
+            + (("fcapz_debug_multi_hub_por",) if vendor in _DEBUG_MULTI_HUB_POR else ())))
     params = {**_DEBUG_MULTI_PARAMS[vendor], **({"TLR_RESET_EN": 1} if tlr_reset else {})}
     vhdl = () if tap_vhdl is None else (
         *_VHDL_CORE_PKGS,
@@ -115,7 +118,7 @@ def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
         RTL / "vhdl" / "core" / "fcapz_debug_multi.vhd",
         RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd")
     return Target(
-        f"fcapz_debug_multi_{vendor}" + ("_tlr" if tlr_reset else ""),
+        f"fcapz_debug_multi_{vendor}" + ("_tlr" if tlr_reset else "") + powerup,
         f"fcapz_debug_multi_{vendor}",
         (*tap_v,
          RTL / "reset_sync.v",
@@ -346,6 +349,11 @@ TARGETS: tuple[Target, ...] = (
     _debug_multi_target("xilinx7", tlr_reset=True),
     _debug_multi_target("xilinxus", tlr_reset=True),
     _debug_multi_target("intel", tlr_reset=True),
+    # MGR_TLR_COUNT from power-up: a TAP with a Test-Logic-Reset output, low
+    # and then high from time 0, and a shell that ties it low.
+    _debug_multi_target("xilinx7", powerup="_powerup"),
+    _debug_multi_target("xilinx7", powerup="_powerup_tlrhigh"),
+    _debug_multi_target("ecp5", powerup="_powerup"),
     Target(
         "fcapz_async_fifo_equiv",
         "fcapz_async_fifo_equiv_wrap",
@@ -422,6 +430,11 @@ TARGETS: tuple[Target, ...] = (
             RTL / "vhdl" / "core" / "fcapz_ejtaguart.vhd",
         ),
     ),
+)
+TARGETS += tuple(
+    replace(target, name=target.name + "_powerup", testcase="fcapz_debug_multi_tlr_powerup")
+    for target in TARGETS
+    if target.name == "fcapz_debug_multi_gowin"
 )
 
 TARGET_BY_NAME = {target.name: target for target in TARGETS}

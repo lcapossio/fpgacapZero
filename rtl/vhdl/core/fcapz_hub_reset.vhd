@@ -36,7 +36,11 @@ begin
             srst => por_sync
         );
 
+    -- Powers up low; see fcapz_hub_reset.v.
     u_tlr_sync : entity work.reset_sync
+        generic map (
+            INIT => 0
+        )
         port map (
             clk  => tck,
             arst => tlr,

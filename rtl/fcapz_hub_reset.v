@@ -14,7 +14,9 @@
 // event, which must reset together.  It is por_rst, plus the TAP's
 // Test-Logic-Reset when TLR_RESET_EN, so a host that restarts mid-burst
 // cannot leave the pipe expecting more burst scans.  tlr_sync is the
-// synchronised Test-Logic-Reset level, for counting.
+// synchronised Test-Logic-Reset level, for counting.  It powers up low, so it
+// is high only once the TAP has been in Test-Logic-Reset; the power-up
+// protocol reset comes from por_rst.
 //
 // hub_por is a power-on reset for flows that drop register initial values
 // (Libero on PolarFire), where hub_started could power up set and the hub
@@ -47,7 +49,9 @@ module fcapz_hub_reset #(
         .srst(por_sync)
     );
 
-    reset_sync u_tlr_sync (
+    reset_sync #(
+        .INIT(0)
+    ) u_tlr_sync (
         .clk(tck),
         .arst(tlr),
         .srst(tlr_sync)
