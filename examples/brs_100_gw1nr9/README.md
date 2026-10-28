@@ -189,6 +189,18 @@ board the tests **skip** (OpenOCD unreachable or no fcapz design loaded); set
 `FPGACAP_SKIP_HW=1` to skip unconditionally. Override the port/tap with
 `FPGACAP_OPENOCD_PORT` / `FPGACAP_OPENOCD_TAP`.
 
+On Windows, where the adapter's channel A ("USB Debugger A") is bound to
+FTDI's D2XX driver, OpenOCD's `ftdi` driver cannot open it.  Serve it with
+[`fcapz openocd-bridge`](../../docs/10_cli_reference.md#openocd-bridge)
+instead, and use the adapter lines it prints in place of the cfg's:
+
+```sh
+fcapz --hardware "USB Debugger A" openocd-bridge &
+openocd -c "adapter driver remote_bitbang; remote_bitbang host 127.0.0.1" \
+  -c "remote_bitbang port 3335; transport select jtag; reset_config none" \
+  -c "jtag newtap GW1NR-9C tap -irlen 8 -expected-id 0x1100481B; init" &
+```
+
 ## Core-manager variant
 
 `brs_100_gw1nr9_manager_top.v` replaces the ELA and its shared-chain EIO with
@@ -211,8 +223,11 @@ python examples/brs_100_gw1nr9/build.py --variant manager
 python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
 ```
 
-The variant builds with timing met (about 25 % of the logic) but has not yet
-run on a board.
+The variant builds with timing met (about 25 % of the logic) and passes
+`test_hw_manager.py` on the board, over OpenOCD through
+`fcapz openocd-bridge` and over `--backend ftdi`.  The board's
+FT2232-compatible adapter has no MPSSE pin I/O; the bridge detects that and
+serves it with clocked commands.
 
 ## Notes
 

@@ -24,9 +24,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   had no EIO before; this hub gives it one. All four pass the cocotb hub
   tests in Verilog and VHDL. The PolarFire hub passes on the Discovery Kit
   (`mpfs_disco_kit_manager_top.v`, `test_hw_manager.py`: two ELAs with
-  timestamps and burst readout, two EIOs). The Gowin hub's BRS-100 variant
-  builds with timing met but has not run on a board; ECP5 and Efinix have
-  no board build.
+  timestamps and burst readout, two EIOs). The Gowin hub passes on the
+  BRS-100 (`test_hw_manager.py`: two ELAs, two EIOs, over `--backend ftdi`
+  and over OpenOCD through `fcapz openocd-bridge`); ECP5 and Efinix have no
+  board build.
 
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
@@ -61,6 +62,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   GUI, and the manual marks it as unmaintained.
 
 ### Fixed
+
+- **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
+  Test-Logic-Reset synchroniser powered up asserted, so on flows that keep
+  initial values the count read 1 after configuration with no
+  Test-Logic-Reset at all. `reset_sync` takes an `INIT` parameter and that
+  synchroniser now powers up low, and the manager counts only entries into
+  Test-Logic-Reset it sees happen, not a TAP already there at configuration.
+
+- **`fcapz openocd-bridge` on FT2232-compatible adapters without pin I/O.**
+  Some clones (the BRS-100's) implement only MPSSE's clocked commands: pin
+  writes do nothing and pin reads return a constant, so OpenOCD read every
+  TDO bit as 0. The bridge checks for that when it opens the adapter and then
+  sends each rising TCK edge as a one-bit clocked command, which also reads
+  TDO where OpenOCD samples it. TRST is not driven there.
+
+- **`--backend ftdi` setup on full-speed FT2232C/D chips.** They reject the
+  H-series clock opcodes setup sends, and those rejections were left in the
+  reply queue; TCK was also computed from the H-series 30 MHz base instead
+  of 6 MHz. Setup now reads the rejections and picks the base from them.
+  Untested on a real FT2232D.
 
 - **Core-manager epochs on flows that drop initial values.** `MGR_EPOCH` and
   `MGR_SLOT_EPOCH` counted both reset edges from a power-up 0. Libero

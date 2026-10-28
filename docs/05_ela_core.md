@@ -601,7 +601,8 @@ register adapter with `BURST_EN=0`: every slot reports no burst
 window, which is slower than a burst.  Keep `USER1_DATA_EN=1` there.  Like
 `fcapz_ela_gowin`, the Gowin hub needs `clk` to run well above TCK.  None of
 these four hubs sees the TAP's Test-Logic-Reset, so their `MGR_TLR_COUNT`
-always reads 0.
+keeps its power-up value: 0, except on PolarFire, where Libero drops
+initial values and the count powers up arbitrary (it is never reset).
 
 Libero ignores register initial values on PolarFire, so the hub cannot tell
 its power-up from a later ELA reset by itself.  Drive the PolarFire shell's
@@ -612,8 +613,8 @@ slot.
 
 The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
 others.  The PolarFire hub also passes on the PolarFire SoC Discovery Kit
-(`examples/mpfs_disco_kit`, manager variant).  The Gowin hub builds for the
-BRS-100 with timing met but has not run on a board, and the ECP5 and Efinix
+(`examples/mpfs_disco_kit`, manager variant), and the Gowin hub on the
+BRS-100 (`examples/brs_100_gw1nr9`, manager variant).  The ECP5 and Efinix
 hubs have run in simulation only.  The ECP5 TAP adapter holds the chain
 select from Capture-DR through Update-DR, because `JCE1`/`JCE2` are low again
 by Update-DR; a board test still has to confirm that timing.  UltraScale
@@ -646,7 +647,9 @@ Test-Logic-Reset between scans, and check with `MGR_TLR_COUNT` first.  Quartus
 Test-Logic-Reset many times a second between the host's scans (about 170 with
 Vivado 2025.2), which would cancel bursts.  Leave `TLR_RESET_EN=0` on Xilinx
 boards.  `MGR_TLR_COUNT` is 16 bits and wraps, so behind `hw_server` it only
-says something across a short interval.
+says something across a short interval.  It counts the entries into
+Test-Logic-Reset the manager sees happen: a TAP that is already in
+Test-Logic-Reset when the FPGA finishes configuring is not counted.
 
 Each ELA can also override the scalar/default wrapper settings with packed
 per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the
