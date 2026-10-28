@@ -578,24 +578,47 @@ vendor-specific:
 | `fcapz_debug_multi` | TAP-level signals in (`tck`, `tdi`, `capture`, `shift`, `update`, `sel`, `tlr`, `tdo` out): hub resets (`fcapz_hub_reset`), `jtag_pipe_iface`, then the core. |
 | `fcapz_debug_multi_<vendor>` | One `jtag_tap_<vendor>` on `CTRL_CHAIN` feeding `fcapz_debug_multi`. |
 
-Packaged vendor shells (all share the parameter and port list shown above):
+Packaged vendor shells (all share the parameter and port list shown above,
+plus the extra ports noted):
 
-| Wrapper | TAP | `CTRL_CHAIN` means |
-|---|---|---|
-| `fcapz_debug_multi_xilinx7` | `BSCANE2` | USER chain 1..4 |
-| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | USER chain 1..4 |
-| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `sld_instance_index` |
+| Wrapper | TAP | Chain selection | Differences |
+|---|---|---|---|
+| `fcapz_debug_multi_xilinx7` | `BSCANE2` | `CTRL_CHAIN`: USER chain 1..4 | |
+| `fcapz_debug_multi_xilinxus` | `BSCANE2` (UltraScale/UltraScale+) | `CTRL_CHAIN`: USER chain 1..4 | |
+| `fcapz_debug_multi_intel` | `sld_virtual_jtag` | `CTRL_CHAIN`: `sld_instance_index` | |
+| `fcapz_debug_multi_ecp5` | `JTAGG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | No `TLR_RESET_EN`: the TAP adapter uses JTAGG's `JRSTN` only to clear its own chain select. |
+| `fcapz_debug_multi_polarfire` | `UJTAG` | `IR_USER1` opcode (default `0x20`) instead of `CTRL_CHAIN` | JTAG pad ports `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`, `tdo_pad_o` to top-level ports; one UJTAG per device, so it cannot coexist with `fcapz_ela_polarfire` / `fcapz_eio_polarfire`.  A `hub_por` power-on reset input (see below).  No `TLR_RESET_EN`. |
+| `fcapz_debug_multi_efinix` | Efinity JTAG User TAP (Interface Designer) | Whichever User TAP block the `jtag1_*` ports are wired to; no `CTRL_CHAIN` | `jtag1_*` ports to an Interface Designer JTAG User TAP block.  No `TLR_RESET_EN`. |
+| `fcapz_debug_multi_gowin` | `GW_JTAG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | **Register-only** (see below); a `clk` input that oversamples the TAP, a `jtag_activity` output and the JTAG pad ports.  No `BURST_W` or `TLR_RESET_EN`. |
 
-Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  A new
-vendor needs only a shell when its `jtag_tap_<vendor>` presents the same single
-`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel` interface, as the ECP5 and
-PolarFire wrappers do; the manager, slots and pipe are already covered by the
-shared simulation and parity checks, but that TAP's CAPTURE/UPDATE timing still
-needs a board test.  Gowin's TAP has separate `shift_in`/`shift_out` strobes,
-which the shared pipe does not take, so a Gowin hub needs its own adapter: a
-register-only one can drive `fcapz_debug_multi_core` with `BURST_EN=0`, and
-every slot is then read through its register window.  UltraScale reuses the
-Xilinx 7 TAP code; its board validation is recorded in the
+Each shell has a VHDL twin under `rtl/vhdl/` with the same generics.  The
+ECP5, PolarFire and Efinix shells reuse `fcapz_debug_multi`, so their slots
+burst on the hub's chain exactly as on Xilinx.  Gowin's TAP has separate
+`shift_in`/`shift_out` strobes, which the shared pipe does not take, so
+`fcapz_debug_multi_gowin` drives `fcapz_debug_multi_core` through the Gowin
+register adapter with `BURST_EN=0`: every slot reports no burst
+(`MGR_DESC_CAPS` = 0) and the host reads each capture through its register
+window, which is slower than a burst.  Keep `USER1_DATA_EN=1` there.  Like
+`fcapz_ela_gowin`, the Gowin hub needs `clk` to run well above TCK.  None of
+these four hubs sees the TAP's Test-Logic-Reset, so their `MGR_TLR_COUNT`
+keeps its power-up value: 0, except on PolarFire, where Libero drops
+initial values and the count powers up arbitrary (it is never reset).
+
+Libero ignores register initial values on PolarFire, so the hub cannot tell
+its power-up from a later ELA reset by itself.  Drive the PolarFire shell's
+`hub_por` high from power-up until the fabric is initialised, for example
+from the inverted `FABRIC_POR_N` of `PF_INIT_MONITOR` (the Discovery Kit
+example uses the `INIT` primitive it wraps); it resets the hub and every
+slot.
+
+The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
+others.  The PolarFire hub also passes on the PolarFire SoC Discovery Kit
+(`examples/mpfs_disco_kit`, manager variant), and the Gowin hub on the
+BRS-100 (`examples/brs_100_gw1nr9`, manager variant).  The ECP5 and Efinix
+hubs have run in simulation only.  The ECP5 TAP adapter holds the chain
+select from Capture-DR through Update-DR, because `JCE1`/`JCE2` are low again
+by Update-DR; a board test still has to confirm that timing.  UltraScale
+reuses the Xilinx 7 TAP code; its board validation is recorded in the
 [vendor support matrix](01_overview.md#vendor-support-matrix).  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
 `fcapz_ela` slots to custom plumbing yourself.
@@ -624,7 +647,9 @@ Test-Logic-Reset between scans, and check with `MGR_TLR_COUNT` first.  Quartus
 Test-Logic-Reset many times a second between the host's scans (about 170 with
 Vivado 2025.2), which would cancel bursts.  Leave `TLR_RESET_EN=0` on Xilinx
 boards.  `MGR_TLR_COUNT` is 16 bits and wraps, so behind `hw_server` it only
-says something across a short interval.
+says something across a short interval.  It counts the entries into
+Test-Logic-Reset the manager sees happen: a TAP that is already in
+Test-Logic-Reset when the FPGA finishes configuring is not counted.
 
 Each ELA can also override the scalar/default wrapper settings with packed
 per-slot parameter vectors.  For example, this keeps `SAMPLE_W=32` as the

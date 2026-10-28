@@ -25,6 +25,8 @@ build/
 # FPGA example build output (vendor toolchains) -- keep example *source* tracked
 # Gowin: build dir + stale snapshots
 examples/*/out/
+examples/*/out_manager/
+examples/*/out_manager_stale_*/
 examples/*/out_stale_*/
 # Intel/Altera Quartus: generated databases, checkpoints, outputs
 examples/**/qdb/

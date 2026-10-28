@@ -13,6 +13,11 @@ Usage
     python examples/mpfs_disco_kit/build.py --program    # build, then program
     python examples/mpfs_disco_kit/build.py --program-only
     python examples/mpfs_disco_kit/build.py --libero PATH/TO/libero
+    python examples/mpfs_disco_kit/build.py --variant manager --program
+
+The ``manager`` variant puts two ELAs and two EIOs behind one
+fcapz_debug_multi_polarfire hub (mpfs_disco_kit_manager_top.v); its tests are
+test_hw_manager.py.
 
 Libero is found from ``--libero``, then ``PATH``, then ``$LIBERO_DIR`` /
 ``$ACTEL_SW_DIR``, then the usual install roots.  Synthesis needs a Synplify
@@ -39,7 +44,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 BUILD_DIR = HERE / "libero"
-PROJECT = BUILD_DIR / "mpfs_disco_kit_fcapz" / "mpfs_disco_kit_fcapz.prjx"
+# Libero project name per variant.
+VARIANTS = {"default": "mpfs_disco_kit_fcapz", "manager": "mpfs_disco_kit_manager_fcapz"}
 LIBERO_EXE = "libero.exe" if sys.platform == "win32" else "libero"
 
 
@@ -102,6 +108,10 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--libero", default=None, help="Libero executable or its bin folder")
+    parser.add_argument(
+        "--variant", choices=sorted(VARIANTS), default="default",
+        help="default: ELA + EIO wrapper; manager: core-manager hub",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--program", action="store_true", help="program the board after building")
     group.add_argument(
@@ -115,16 +125,22 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    variant_args = ["manager"] if args.variant == "manager" else []
+    suffix = "" if args.variant == "default" else f"_{args.variant}"
     if not args.program_only:
-        rc = run_libero(libero, "build_mpfs_disco_kit.tcl", [], "build.log")
+        rc = run_libero(libero, "build_mpfs_disco_kit.tcl", variant_args, f"build{suffix}.log")
         if rc != 0:
             return rc
 
     if args.program or args.program_only:
-        if not PROJECT.is_file():
-            print(f"error: no project to program at {PROJECT}; build first", file=sys.stderr)
+        name = VARIANTS[args.variant]
+        project = BUILD_DIR / name / f"{name}.prjx"
+        if not project.is_file():
+            print(f"error: no project to program at {project}; build first", file=sys.stderr)
             return 2
-        rc = run_libero(libero, "program_mpfs_disco_kit.tcl", [], "program.log")
+        rc = run_libero(
+            libero, "program_mpfs_disco_kit.tcl", variant_args, f"program{suffix}.log"
+        )
         if rc != 0:
             return rc
 

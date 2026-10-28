@@ -9,6 +9,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Core-manager hubs for ECP5, PolarFire, Efinix and Gowin.**
+  `fcapz_debug_multi_ecp5` (`JTAGG`, `CTRL_CHAIN` 1 = ER1 / 2 = ER2),
+  `fcapz_debug_multi_polarfire` (`UJTAG`, `IR_USER1`),
+  `fcapz_debug_multi_efinix` (`jtag1_*` ports to an Interface Designer User
+  TAP block) and `fcapz_debug_multi_gowin` (`GW_JTAG`) put several ELAs and
+  EIOs behind one chain on every supported vendor, with VHDL twins. The ECP5,
+  PolarFire and Efinix hubs burst on that chain as the Xilinx ones do. The
+  Gowin hub is register-only: its slots report no burst and the host reads
+  captures through the register window. None offers `TLR_RESET_EN`. The
+  PolarFire hub has a `hub_por` power-on reset input: Libero drops register
+  initial values, so the hub needs it to see its power-up reset (the
+  Discovery Kit example drives it from `FABRIC_POR_N`). Efinix
+  had no EIO before; this hub gives it one. All four pass the cocotb hub
+  tests in Verilog and VHDL. The PolarFire hub passes on the Discovery Kit
+  (`mpfs_disco_kit_manager_top.v`, `test_hw_manager.py`: two ELAs with
+  timestamps and burst readout, two EIOs). The Gowin hub passes on the
+  BRS-100 (`test_hw_manager.py`: two ELAs, two EIOs, over `--backend ftdi`
+  and over OpenOCD through `fcapz openocd-bridge`); ECP5 and Efinix have no
+  board build.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
@@ -42,6 +62,57 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   GUI, and the manual marks it as unmaintained.
 
 ### Fixed
+
+- **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
+  Test-Logic-Reset synchroniser powered up asserted, so on flows that keep
+  initial values the count read 1 after configuration with no
+  Test-Logic-Reset at all. `reset_sync` takes an `INIT` parameter and that
+  synchroniser now powers up low, and the manager counts only entries into
+  Test-Logic-Reset it sees happen, not a TAP already there at configuration.
+
+- **`fcapz openocd-bridge` on FT2232-compatible adapters without pin I/O.**
+  Some clones (the BRS-100's) implement only MPSSE's clocked commands: pin
+  writes do nothing and pin reads return a constant, so OpenOCD read every
+  TDO bit as 0. The bridge checks for that when it opens the adapter and then
+  sends each rising TCK edge as a one-bit clocked command, which also reads
+  TDO where OpenOCD samples it. TRST is not driven there.
+
+- **`--backend ftdi` setup on full-speed FT2232C/D chips.** They reject the
+  H-series clock opcodes setup sends, and those rejections were left in the
+  reply queue; TCK was also computed from the H-series 30 MHz base instead
+  of 6 MHz. Setup now reads the rejections and picks the base from them.
+  Untested on a real FT2232D.
+
+- **Core-manager epochs on flows that drop initial values.** `MGR_EPOCH` and
+  `MGR_SLOT_EPOCH` counted both reset edges from a power-up 0. Libero
+  (Synplify) on PolarFire ignores initial values, so they came up random,
+  and an odd one made the host refuse that slot as held in reset, for good,
+  since each reset adds 2. An epoch is now `{releases, held}`, with bit 0 the
+  reset's level: the parity is right whatever the counter powers up to, and
+  the value is unchanged where initial values are kept.
+
+- **ECP5: register writes at Update-DR.** `jtag_tap_ecp5` passed JTAGG's
+  `JCE1`/`JCE2` on as the chain select, but they cover Capture-DR and
+  Shift-DR only, and the register and pipe adapters act at Update-DR only
+  while the select is high, so no ECP5 wrapper could commit a register
+  access. The adapter now holds the select from Capture-DR through
+  Update-DR, cleared by Update-DR or Test-Logic-Reset, so another
+  instruction's Update-DR still does nothing. Simulation only; ECP5 has not
+  run on a board.
+
+- **PolarFire example power-on reset.** The Discovery Kit tops built their
+  reset from registers with initial values, which Libero ignores, so it was
+  not guaranteed at power-up. It now comes from the `INIT` primitive's
+  `FABRIC_POR_N`.
+
+- **LiteX: Gowin sources.** `ela_rtl_sources("gowin")` left out
+  `jtag_reg_iface_gowin.v`, `dff_reg_sync.v`, `dff_sync.v` and the `GW_JTAG`
+  declaration `gowin/gw_jtag.v`, which `fcapz_ela_gowin` needs, so a LiteX
+  Gowin build could not elaborate.
+
+- **`core.json` lists what the new hubs need:** the PolarFire and Efinix TAP
+  adapters, the Gowin register adapter, its synchronisers and the `GW_JTAG`
+  declaration.
 
 - **Manual corrections.** A full review of the manual against the code fixed
   wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;

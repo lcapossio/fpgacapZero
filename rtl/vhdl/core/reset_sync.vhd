@@ -6,7 +6,9 @@ use ieee.std_logic_1164.all;
 
 entity reset_sync is
     generic (
-        STAGES : positive := 2
+        STAGES : positive := 2;
+        -- Power-up level; 0 for a synchronised level, see reset_sync.v.
+        INIT   : natural  := 1
     );
     port (
         clk  : in  std_logic;
@@ -16,7 +18,15 @@ entity reset_sync is
 end entity reset_sync;
 
 architecture rtl of reset_sync is
-    signal sync_ff : std_logic_vector(STAGES - 1 downto 0) := (others => '1');
+    function init_level(v : natural) return std_logic is
+    begin
+        if v /= 0 then
+            return '1';
+        end if;
+        return '0';
+    end function;
+
+    signal sync_ff : std_logic_vector(STAGES - 1 downto 0) := (others => init_level(INIT));
     attribute ASYNC_REG : string;
     attribute ASYNC_REG of sync_ff : signal is "TRUE";
 begin

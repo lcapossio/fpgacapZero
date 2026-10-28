@@ -38,19 +38,40 @@ module mpfs_disco_kit_top (
 
     wire clk = REF_CLK_50MHz;
 
-    // Power-on reset: fabric registers come up at zero after programming,
-    // so hold reset for 16 cycles, then follow SWITCH1.
-    reg [4:0] por_cnt = 5'd0;
-    reg [1:0] sw1_sync = 2'b00;
-    reg [1:0] sw2_sync = 2'b00;
-    reg       rst = 1'b1;
+    // Power-on reset.  Libero ignores register initial values on PolarFire,
+    // so it comes from the INIT primitive (what PF_INIT_MONITOR wraps):
+    // FABRIC_POR_N is low until the fabric is initialised.  Hold reset for
+    // 16 cycles after that, then follow SWITCH1.
+    wire fabric_por_n;
+    INIT u_init (
+        .FABRIC_POR_N    (fabric_por_n),
+        .GPIO_ACTIVE     (),
+        .HSIO_ACTIVE     (),
+        .PCIE_INIT_DONE  (),
+        .RFU             (),
+        .SRAM_INIT_DONE  (),
+        .UIC_INIT_DONE   (),
+        .USRAM_INIT_DONE ()
+    );
 
-    always @(posedge clk) begin
-        if (!por_cnt[4])
-            por_cnt <= por_cnt + 5'd1;
-        sw1_sync <= {sw1_sync[0], ~SWITCH1};
-        sw2_sync <= {sw2_sync[0], ~SWITCH2};
-        rst      <= ~por_cnt[4] | sw1_sync[1];
+    reg [4:0] por_cnt;
+    reg [1:0] sw1_sync;
+    reg [1:0] sw2_sync;
+    reg       rst;
+
+    always @(posedge clk or negedge fabric_por_n) begin
+        if (!fabric_por_n) begin
+            por_cnt  <= 5'd0;
+            sw1_sync <= 2'b00;
+            sw2_sync <= 2'b00;
+            rst      <= 1'b1;
+        end else begin
+            if (!por_cnt[4])
+                por_cnt <= por_cnt + 5'd1;
+            sw1_sync <= {sw1_sync[0], ~SWITCH1};
+            sw2_sync <= {sw2_sync[0], ~SWITCH2};
+            rst      <= ~por_cnt[4] | sw1_sync[1];
+        end
     end
 
     reg [7:0] counter;

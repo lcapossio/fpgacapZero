@@ -20,6 +20,10 @@ Usage
     python examples/brs_100_gw1nr9/build.py --gowin PATH/TO/gw_sh
         # NOTE: explicit gw_sh executable path also works
 
+    python examples/brs_100_gw1nr9/build.py --variant manager
+        # NOTE: core-manager variant (brs_100_gw1nr9_manager_top.v), built
+        # under out_manager/; its tests are test_hw_manager.py
+
 Exit code 0 on success, non-zero otherwise.
 """
 
@@ -33,11 +37,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-PROJECT_NAME = "out"
 BUILD_SCRIPT = ROOT / "examples" / "brs_100_gw1nr9" / "build_brs_100_gw1nr9.tcl"
-BITFILE = ROOT / "examples" / "brs_100_gw1nr9" / PROJECT_NAME / "fcapz_brs_100_gw1nr9.fs"
 PROJECT_PARENT = ROOT / "examples" / "brs_100_gw1nr9"
-PROJECT_DIR = PROJECT_PARENT / PROJECT_NAME
+# Project folder and bitstream per variant (build_brs_100_gw1nr9.tcl).
+VARIANTS = {
+    "default": ("out", "fcapz_brs_100_gw1nr9.fs"),
+    "manager": ("out_manager", "fcapz_brs_100_gw1nr9_manager.fs"),
+}
 
 GW_SH_PROC = "gw_sh.exe" if sys.platform == "win32" else "gw_sh"
 
@@ -216,7 +222,15 @@ def main() -> int:
         default=None,
         help="Path to GoWIN installation root or gw_sh executable",
     )
+    parser.add_argument(
+        "--variant", choices=sorted(VARIANTS), default="default",
+        help="default: ELA + EIO wrapper; manager: core-manager hub",
+    )
     args = parser.parse_args()
+
+    project_name, bitname = VARIANTS[args.variant]
+    project_dir = PROJECT_PARENT / project_name
+    bitfile = project_dir / bitname
 
     gw_sh = find_gowin(args.gowin)
 
@@ -234,12 +248,12 @@ def main() -> int:
     # and sidestep it by building under a timestamped project directory.
     # The bitstream always lands at the same final path, so downstream
     # tools don't care which project dir produced it.
-    if PROJECT_DIR.exists() and not _runs_dir_is_deletable(PROJECT_DIR):
+    if project_dir.exists() and not _runs_dir_is_deletable(project_dir):
         import time
-        stale_name = f"{PROJECT_NAME}_stale_{int(time.time())}"
+        stale_name = f"{project_name}_stale_{int(time.time())}"
         stale_dir = PROJECT_PARENT / stale_name
         try:
-            PROJECT_DIR.rename(stale_dir)
+            project_dir.rename(stale_dir)
             print(
                 f"[build.py] old project dir was locked; renamed to "
                 f"{stale_dir.name} and starting fresh"
@@ -248,7 +262,7 @@ def main() -> int:
             # Rename failed too — fall back to a fresh-named sibling dir.
             # Caller's build will use the sibling; bitstream still ends
             # up at the canonical example path via the tcl copy step.
-            sibling = PROJECT_PARENT / f"{PROJECT_NAME}_{int(time.time())}"
+            sibling = PROJECT_PARENT / f"{project_name}_{int(time.time())}"
             print(
                 f"[build.py] old project dir locked and cannot be renamed; "
                 f"building under sibling path {sibling}"
@@ -260,12 +274,13 @@ def main() -> int:
         print(f"error: tcl script not found: {BUILD_SCRIPT}", file=sys.stderr)
         return 2
 
+    variant_args = ["manager"] if args.variant == "manager" else []
     if sys.platform == "linux":
         env = load_linux_dependencies(gw_sh)
-        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT)]
+        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT), *variant_args]
     elif sys.platform == "win32":
         env = load_windows_dependencies(gw_sh)
-        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT)]
+        cmd = [str(gw_sh), str(BUILD_SCRIPT), str(ROOT), *variant_args]
     else:
         print(f"error: unsupported platform: {sys.platform}", file=sys.stderr)
         return 2
@@ -283,14 +298,14 @@ def main() -> int:
         )
         return result.returncode
 
-    if not BITFILE.is_file():
+    if not bitfile.is_file():
         print(
-            f"[build.py] build reported success but bitfile missing: {BITFILE}",
+            f"[build.py] build reported success but bitfile missing: {bitfile}",
             file=sys.stderr,
         )
         return 4
 
-    print(f"[build.py] success: {BITFILE}")
+    print(f"[build.py] success: {bitfile}")
     return 0
 
 

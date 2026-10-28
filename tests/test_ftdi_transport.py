@@ -102,9 +102,17 @@ class _Device:
 
 
 class _FakeD2xx:
-    """D2XX entry points over an MPSSE interpreter driving ``_Device``."""
+    """D2XX entry points over an MPSSE interpreter driving ``_Device``.
 
-    def __init__(self, device=None, devices=None):
+    *chip* picks the MPSSE flavour: ``"h"`` (FT2232H/FT4232H), ``"d"`` (a
+    full-speed FT2232D, which rejects the H-series opcodes), or ``"clone"``
+    (an FT2232-compatible adapter that accepts them but has no pin I/O: it
+    ignores 0x80 writes and answers 0x81 reads with 0x01, as the BRS-100's
+    does).  A 0x80 write that raises TCK clocks the TAP.
+    """
+
+    def __init__(self, device=None, devices=None, chip="h"):
+        self.chip = chip
         self.dev = device or _Device()
         self.devices = devices or [
             FtdiDevice(0, "Embedded FlashPro5 A", "FP5SN0A", 0x15142008, False),
@@ -167,16 +175,26 @@ class _FakeD2xx:
         i = 0
         while i < len(cmd):
             op = cmd[i]
-            if op in (0x8A, 0x97, 0x8D, 0x85, 0x87):
+            if op in (0x8A, 0x97, 0x8D) and self.chip == "d":
+                self.rx += bytes((0xFA, op))  # H-series only
+                i += 1
+            elif op in (0x8A, 0x97, 0x8D, 0x85, 0x87):
                 i += 1
             elif op == 0x86:
                 self.divisor = cmd[i + 1] | (cmd[i + 2] << 8)
                 i += 3
-            elif op == 0x80:
-                self.pins = cmd[i + 1]
+            elif op == 0x80 and self.chip == "clone":
                 i += 3
-            elif op == 0x81:  # read ADBUS: the pins as last driven
-                self.rx.append(self.pins or 0)
+            elif op == 0x80:
+                pins = cmd[i + 1]
+                if pins & 0x01 and not (self.pins or 0) & 0x01:  # TCK rises
+                    self._clock((pins >> 3) & 1, (pins >> 1) & 1)
+                self.pins = pins
+                i += 3
+            elif op == 0x81:  # read ADBUS: the pins as last driven, and TDO
+                shifting = self.dev.state in ("SHIFT_DR", "SHIFT_IR")
+                tdo = 0x04 if shifting and self.dev.sr & 1 else 0
+                self.rx.append(0x01 if self.chip == "clone" else (self.pins or 0) | tdo)
                 i += 1
             elif op in (0x19, 0x39):
                 n = (cmd[i + 1] | (cmd[i + 2] << 8)) + 1
@@ -257,6 +275,71 @@ class OpenPinsTests(_FtdiTestCase):
         t.open_pins()
         with self.assertRaisesRegex(RuntimeError, "already holds"):
             t.open_pins()
+
+    def test_gpio_is_checked_without_clocking_the_tap(self):
+        for chip, works in (("h", True), ("d", True), ("clone", False)):
+            with self.subTest(chip=chip):
+                self.lib = _FakeD2xx(chip=chip)
+                with mock.patch.object(ft, "_load_d2xx", lambda: self.lib):
+                    t = FtdiMpsseTransport()
+                    layout = t.open_pins()
+                    try:
+                        self.assertIs(t.gpio, works)
+                        self.assertEqual(self.lib.dev.state, "RESET")
+                        # Levels restored (the clone never takes any).
+                        self.assertEqual(self.lib.pins, layout[0] if works else None)
+                        self.assertEqual(self.lib.rx, bytearray())  # nothing left over
+                    finally:
+                        t.close()
+
+
+class SetupTests(_FtdiTestCase):
+    """MPSSE setup on H-series, full-speed and clone chips."""
+
+    def _connect_on(self, chip, **kw):
+        self.lib = _FakeD2xx(chip=chip)
+        with mock.patch.object(ft, "_load_d2xx", lambda: self.lib):
+            return self._transport(**kw)
+
+    def test_full_speed_chip_rejections_are_drained(self):
+        # A genuine FT2232D rejects 0x8A/0x97/0x8D: their 0xFA echoes must
+        # not be taken for the IDCODE scan's data.
+        t = self._connect_on("d")
+        self.assertEqual(t.idcode, POLARFIRE_IDCODE)
+        self.assertEqual(self.lib.rx, bytearray())
+
+    def test_full_speed_chip_clocks_from_6_mhz(self):
+        t = self._connect_on("d", tck_hz=1e6)
+        self.assertEqual(self.lib.divisor, 5)
+        self.assertEqual(t.actual_tck_hz, 1e6)
+        t.close()
+        ft._OPEN_CHANNELS.clear()
+        t = self._connect_on("d", tck_hz=30e6)  # the D's fastest is 6 MHz
+        self.assertEqual((self.lib.divisor, t.actual_tck_hz), (0, 6e6))
+
+    def test_high_speed_and_clone_clock_from_30_mhz(self):
+        for chip in ("h", "clone"):
+            with self.subTest(chip=chip):
+                ft._OPEN_CHANNELS.clear()
+                t = self._connect_on(chip, tck_hz=1e6)
+                self.assertEqual(self.lib.divisor, 29)
+                self.assertEqual(t.actual_tck_hz, 1e6)
+                self.assertEqual(t.idcode, POLARFIRE_IDCODE)
+                t.close()
+
+    def test_unexpected_setup_reply_fails_cleanly(self):
+        lib = _FakeD2xx()
+        run = lib._run
+
+        def garbled(cmd):
+            run(cmd)
+            if 0xAB in cmd:
+                lib.rx[:0] = b"\x12\x34"
+        lib._run = garbled
+        with mock.patch.object(ft, "_load_d2xx", lambda: lib):
+            with self.assertRaisesRegex(RuntimeError, "unexpected MPSSE setup reply 1234"):
+                FtdiMpsseTransport().connect()
+        self.assertEqual(lib.closes, 1)
 
 
 class ConnectTests(_FtdiTestCase):

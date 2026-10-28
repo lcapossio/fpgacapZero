@@ -72,7 +72,7 @@ in that bridge’s section.
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
-| `0x00F8` | CAPTURE_GEN | RO | `COMPARE_CAPS` bit 21. `[15:0]` counts every `CTRL` write with bit 0 (arm) or bit 1 (reset) and every release of the core's register-side reset: each can start a capture that overwrites the buffer. A release and such a write in the same cycle count two. Never reset (power-up 0), wraps at 16 bits. `STARTUP_ARM` arms and segment re-arms are not counted: the first follows a counted reset, and the second fill the segments of one capture. (`0x00E8` is the AXI monitor's `AXI_MON_ID`.) A host reads it after its arm and around a readout to know that the samples it read are the capture it armed. |
+| `0x00F8` | CAPTURE_GEN | RO | `COMPARE_CAPS` bit 21. `[15:0]` counts every `CTRL` write with bit 0 (arm) or bit 1 (reset) and every release of the core's register-side reset: each can start a capture that overwrites the buffer. A release and such a write in the same cycle count two. Never reset (power-up 0 where the flow keeps initial values, arbitrary on PolarFire), wraps at 16 bits. `STARTUP_ARM` arms and segment re-arms are not counted: the first follows a counted reset, and the second fill the segments of one capture. (`0x00E8` is the AXI monitor's `AXI_MON_ID`.) A host reads it after its arm and around a readout to know that the samples it read are the capture it armed. |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. The host raises `DataWindowError` instead of reading it on a core that reports none (`COMPARE_CAPS` bit 21 without bit 20); older cores cannot say. |
 
 <a id="regmap-seq-cfg"></a>
@@ -185,10 +185,10 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` and `MGR_SLOT_EPOCH` reads, and the slot `MGR_CTRL` bit 1 resets. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
-| `0xF020` | MGR_EPOCH | RO | `[15:0]` counts both edges of the hub reset (`MGR_CTRL` bit 0, or the power-up reset): odd while it is held, even once it is released, so each reset adds 2. `[31:16]` read 0. The power-up value is 0, so a hub that came up normally reads 2. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF020` | MGR_EPOCH | RO | `[15:0]` is `{releases, held}` for the hub reset (`MGR_CTRL` bit 0, or the power-up reset): bit 0 is the reset's level, so the epoch is odd while it is held and even once it is released, and each reset adds 2. `[31:16]` read 0. Never reset. The release count powers up 0 where the flow keeps initial values, so a hub that came up normally reads 2; where it does not (PolarFire), it powers up at an arbitrary value, so a host compares epochs and tests their parity, never their value. Present when `MGR_CAPS[3]=1`. |
 | `0xF024` | MGR_OWNER | RW | Owner token of the host session using the hub. Advisory: the hub never acts on it. The host writes a random nonzero token when it first selects a slot on the chain, warns if another nonzero token was there, and writes 0 when it closes. Cleared by the hub reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF028` | MGR_CTRL | WO | Reads 0. Write 1s to: bit 0 reset the hub (`MGR_ACTIVE`, `MGR_DESC_INDEX`, `MGR_OWNER` and the burst owner, but no slot); bit 1 reset the `MGR_DESC_INDEX` slot; bit 2 reset every slot. A slot reset is the slot's own reset: an ELA's sample and register sides together, an EIO's outputs. Present when `MGR_CAPS[5]=1`. |
-| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts both edges of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2): odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` is `{releases, held}` for the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2), like `MGR_EPOCH`: odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF030` | MGR_TLR_COUNT | RO | `[15:0]` counts entries of the TAP into Test-Logic-Reset. Never reset. Present when `MGR_CAPS[5]=1`. |
 | `0xF034` | MGR_SELECT_COUNT | RO | `[15:0]` counts every `MGR_ACTIVE` write, from any controller, including writes the manager refuses. Never reset, wraps at 16 bits. Present when `MGR_CAPS[7]=1`. A host that counts its own `MGR_ACTIVE` writes learns from the difference that another controller selected a slot, even one that selected the host's slot back. |
 
@@ -210,7 +210,9 @@ Each slot resets alone. An ELA's `ela_sample_rst` (or `MGR_CTRL` bit 1/2)
 resets that ELA's sample side and, synchronised to TCK, its register side; it
 reaches no other slot, no EIO output and no manager register. The hub's own
 reset is the power-up reset, which follows the slots' sample resets only until
-it is first released, plus `MGR_CTRL` bit 0. Before per-slot resets, any ELA's
+it is first released, plus `MGR_CTRL` bit 0.  On PolarFire, whose flow drops
+register initial values, the shell's `hub_por` input marks power-up instead
+and resets the hub and every slot. Before per-slot resets, any ELA's
 sample reset reset the whole hub: `MGR_ACTIVE`, every EIO output, and the
 register side of every ELA, which made another ELA that had been armed once see
 a phantom arm and re-arm over its capture.
@@ -223,8 +225,9 @@ when the JTAG server keeps the TAP out of Test-Logic-Reset between scans:
 Xilinx `hw_server`/`xsdb` walks it through Test-Logic-Reset many times a second
 while a session is open, which would cancel bursts.  The epochs and
 `MGR_TLR_COUNT` are never reset, so a host compares them before and after an
-operation to learn that a reset happened in between; because an epoch counts
-both edges, it also differs when a reset was asserted and not yet released.
+operation to learn that a reset happened in between; because an epoch's bit 0
+is the reset level, it also differs when a reset was asserted and not yet
+released.
 The Python host reads `MGR_ACTIVE` (an analyzer with an `instance` refuses
 another slot there), that slot's epoch and `MGR_EPOCH` before and after
 `configure()`, refuses to

@@ -173,7 +173,9 @@ transport select jtag
 TCK runs as fast as OpenOCD's bit stream crosses USB.  TRST drives the
 FlashPro5's nTRST pin, so a `reset_config trst_only` config works there; other
 adapters have no TRST here, and the bridge then prints `reset_config none`
-with the adapter lines.  SRST is never driven.  OpenOCD's
+with the adapter lines.  SRST is never driven.  An FT2232-compatible adapter
+whose MPSSE pin commands do nothing (the BRS-100's) is served with clocked
+commands instead; the bridge says so when it starts.  OpenOCD's
 `remote_bitbang use_remote_sleep on` delays are honoured in order.  The pin
 layouts are the ones `--backend ftdi` knows (FlashPro5, and Digilent cables
 wired like the Arty's: buffer enable on ADBUS7); a Digilent JTAG-HS2 needs a

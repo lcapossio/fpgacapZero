@@ -16,9 +16,14 @@
 // pipe's last-seen copy, so it is the pipe's own reset (power-up, or TAP
 // Test-Logic-Reset).  Slots are reset only through their own domains
 // (slot_rst_req); the epoch counters below survive every reset so the host can
-// tell that one happened.  They count both edges of a reset, so an odd epoch
-// means that reset is held now, and a reset still held when the host looked
-// changes the epoch again on release.  MGR_SELECT_COUNT counts every
+// tell that one happened.  An epoch is {releases, held}: bit 0 is the reset's
+// level, so an odd epoch means that reset is held now, and each release adds
+// 2.  The LSB is the level rather than a count of edges, so the parity holds
+// even where the flow drops initial values (PolarFire powers these up
+// random); a reset still held when the host looked changes the epoch again
+// on release.  MGR_TLR_COUNT counts the TAP's entries into Test-Logic-Reset
+// that the manager sees happen: tlr_d powers up high, so a TAP already in
+// Test-Logic-Reset at configuration is not counted.  MGR_SELECT_COUNT counts every
 // MGR_ACTIVE write, accepted or not, from any controller: a host that counts
 // its own writes tells from the difference that another controller selected a
 // slot, even one that selected its slot back.
@@ -128,9 +133,9 @@ module fcapz_core_manager #(
     reg                 mgr_rst_req;
     reg [NUM_SLOTS-1:0] slot_rst_req_r;
     reg                 mgr_rst_d;
-    reg [15:0]          mgr_epoch;
+    reg [14:0]          mgr_releases;
     reg [NUM_SLOTS-1:0] slot_rst_d;
-    reg [NUM_SLOTS*16-1:0] slot_epoch;
+    reg [NUM_SLOTS*15-1:0] slot_releases;
     reg                 tlr_d;
     reg [15:0]          tlr_count;
     reg [15:0]          select_count;
@@ -139,13 +144,22 @@ module fcapz_core_manager #(
         mgr_rst_req = 1'b0;
         slot_rst_req_r = {NUM_SLOTS{1'b0}};
         mgr_rst_d = 1'b0;
-        mgr_epoch = 16'h0;
+        mgr_releases = 15'h0;
         slot_rst_d = {NUM_SLOTS{1'b0}};
-        slot_epoch = {NUM_SLOTS{16'h0}};
-        tlr_d = 1'b0;
+        slot_releases = {NUM_SLOTS{15'h0}};
+        tlr_d = 1'b1;
         tlr_count = 16'h0;
         select_count = 16'h0;
     end
+
+    wire [15:0] mgr_epoch = {mgr_releases, mgr_rst_d};
+    wire [NUM_SLOTS*16-1:0] slot_epoch;
+    genvar e;
+    generate
+        for (e = 0; e < NUM_SLOTS; e = e + 1) begin : g_epochs
+            assign slot_epoch[e*16 +: 16] = {slot_releases[e*15 +: 15], slot_rst_d[e]};
+        end
+    endgenerate
 
     wire mgr_rst = jtag_rst | mgr_rst_req;
     wire burst_rst = mgr_rst | proto_rst;
@@ -207,7 +221,7 @@ module fcapz_core_manager #(
             burst_start_r <= ~burst_start_r;
     end
 
-    // One-cycle reset requests; the epochs count both edges of each reset.
+    // One-cycle reset requests; the epochs count the releases of each reset.
     always @(posedge jtag_clk) begin : reset_events
         integer i;  // block-local: a shared one gets a driver per block
         mgr_rst_req <= ctrl_wr && jtag_wdata[0];
@@ -216,12 +230,12 @@ module fcapz_core_manager #(
                 && (jtag_wdata[2] || (jtag_wdata[1] && desc_idx == i[IDX_W-1:0]));
 
         mgr_rst_d <= mgr_rst;
-        if (mgr_rst_d != mgr_rst)
-            mgr_epoch <= mgr_epoch + 16'd1;
+        if (mgr_rst_d && !mgr_rst)
+            mgr_releases <= mgr_releases + 15'd1;
         slot_rst_d <= slot_rst;
         for (i = 0; i < NUM_SLOTS; i = i + 1)
-            if (slot_rst_d[i] != slot_rst[i])
-                slot_epoch[i*16 +: 16] <= slot_epoch[i*16 +: 16] + 16'd1;
+            if (slot_rst_d[i] && !slot_rst[i])
+                slot_releases[i*15 +: 15] <= slot_releases[i*15 +: 15] + 15'd1;
         tlr_d <= tlr;
         if (tlr && !tlr_d)
             tlr_count <= tlr_count + 16'd1;
