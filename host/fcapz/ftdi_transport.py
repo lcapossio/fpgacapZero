@@ -192,6 +192,10 @@ _DATA_BITS_INOUT = 0x3B
 _TMS_OUT = 0x4B
 _TMS_INOUT = 0x6B
 _SEND_IMMEDIATE = 0x87
+# Not an opcode: its rejection (0xFA 0xAB) marks the end of setup replies.
+_SYNC_MARK = 0xAB
+# ADBUS bits of the JTAG pins (TDO is ADBUS2).
+_PIN_TCK, _PIN_TDI, _PIN_TMS = 0x01, 0x02, 0x08
 
 # TAP paths from Run-Test/Idle.
 _IDLE_TO_SHIFT_IR = (1, 1, 0, 0)
@@ -392,6 +396,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.actual_tck_hz: float | None = None
         #: ``(ADBUS value, direction)`` set up by :meth:`open_pins`.
         self.pin_layout: tuple[int, int] | None = None
+        #: Set by :meth:`open_pins`: whether the MPSSE pin commands work
+        #: (``0x80`` write, ``0x81`` read).  False on FT2232-compatible
+        #: adapters that implement only the clocked commands.
+        self.gpio: bool | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -458,7 +466,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         chain works, and the channel is not shared: no transport in this
         process can join it.  Drive it with :meth:`exchange`; :meth:`close`
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
-        force.  For ``fcapz openocd-bridge``.
+        force, and sets :attr:`gpio`.  For ``fcapz openocd-bridge``.
         """
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
@@ -469,7 +477,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._channel, self.adapter = ch, dev
             self._io_lock = ch.lock
             self.pin_layout = layout
-            return layout
+        try:
+            self.gpio = self._gpio_works(layout)
+        except Exception:
+            self.close()
+            raise
+        return layout
 
     def exchange(self, commands: bytes, reply_bytes: int) -> bytes:
         """Send raw MPSSE *commands*, then read *reply_bytes* bytes of reply.
@@ -531,15 +544,55 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         echo = self._read(2)
         if echo != b"\xfa\xaa":
             raise RuntimeError(f"MPSSE did not sync (got {echo.hex()})")
-        divisor = max(0, min(0xFFFF, round(30e6 / self.tck_hz) - 1))
-        self.actual_tck_hz = 30e6 / (divisor + 1)
+        # 60 MHz base, no adaptive clocking, no 3-phase: H-series opcodes.  A
+        # full-speed FT2232C/D rejects each one (0xFA <opcode>) and clocks
+        # from 6 MHz.  Read their replies up to a marker opcode, so none is
+        # left to be taken for a scan's data.
+        self._write(bytes((0x8A, 0x97, 0x8D, _SYNC_MARK, _SEND_IMMEDIATE)))
+        rejected = self._read_rejections(_SYNC_MARK, limit=3)
+        base_hz = 6e6 if 0x8A in rejected else 30e6
+        divisor = max(0, min(0xFFFF, round(base_hz / self.tck_hz) - 1))
+        # The TCK the divisor programs.  An FT2232-compatible clone can
+        # accept the opcodes and still run a clock of its own.
+        self.actual_tck_hz = base_hz / (divisor + 1)
         value, direction = layout
         self._write(bytes((
-            0x8A, 0x97, 0x8D,                       # 60 MHz base, no adaptive / 3-phase
-            0x86, divisor & 0xFF, divisor >> 8,     # TCK = 30 MHz / (divisor + 1)
+            0x86, divisor & 0xFF, divisor >> 8,     # TCK = base / (divisor + 1)
             0x80, value & 0xFF, direction & 0xFF,   # ADBUS value / direction
             0x85,                                   # loopback off
         )))
+
+    def _read_rejections(self, mark: int, limit: int) -> list[int]:
+        """Read ``0xFA <opcode>`` replies up to the one for *mark*; return
+        the other rejected opcodes (at most *limit* of them)."""
+        rejected: list[int] = []
+        while True:
+            echo = self._read(2)
+            if echo[0] != 0xFA or (echo[1] != mark and len(rejected) == limit):
+                raise RuntimeError(f"unexpected MPSSE setup reply {echo.hex()}")
+            if echo[1] == mark:
+                return rejected
+            rejected.append(echo[1])
+
+    def _gpio_works(self, layout: tuple[int, int]) -> bool:
+        """Whether ADBUS reads (0x81) return the levels ADBUS writes (0x80)
+        drive.
+
+        Some FT2232-compatible adapters ignore the writes and answer the
+        reads with a constant.  This drives TMS and TDI both ways with TCK
+        held low, so the TAP sees no clock, then restores the layout's
+        levels.
+        """
+        value, direction = layout
+        idle = value & ~(_PIN_TCK | _PIN_TDI | _PIN_TMS) & 0xFF
+        both = _PIN_TDI | _PIN_TMS
+        reply = self.exchange(bytes((
+            0x80, idle | both, direction, 0x81,
+            0x80, idle, direction, 0x81,
+            0x80, value & 0xFF, direction, _SEND_IMMEDIATE,
+        )), 2)
+        mask = _PIN_TCK | both
+        return reply[0] & mask == both and reply[1] & mask == 0
 
     def _write(self, data: bytes) -> None:
         written = ctypes.c_ulong()

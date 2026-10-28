@@ -373,6 +373,13 @@ Discovery Kit the full hardware suite runs this way, captures by burst
 write, so it is slower than OpenOCD's own `ftdi` driver for long scans; for
 fcapz alone, [`FtdiMpsseTransport`](#ftdimpssetransport) is faster still.
 
+Some FT2232-compatible adapters (the BRS-100's) implement only MPSSE's
+clocked commands: pin writes (`0x80`) do nothing and pin reads (`0x81`)
+return a constant.  The bridge checks for that when it opens the adapter
+and then sends each rising TCK edge as a one-bit clocked command, which
+also reads TDO where OpenOCD samples it; it says so when it starts.  TRST
+is not driven there.  The Gowin BRS-100 hardware suite runs this way.
+
 #### Efinix (Trion / Titanium) over OpenOCD
 
 Efinix boards use this transport with

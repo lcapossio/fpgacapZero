@@ -1962,7 +1962,7 @@ Sets up MPSSE like `connect` but does not scan the chain, so any
 chain works, and the channel is not shared: no transport in this
 process can join it.  Drive it with `exchange`; `close`
 releases it.  Returns the `(ADBUS value, direction)` layout in
-force.  For `fcapz openocd-bridge`.
+force, and sets `gpio`.  For `fcapz openocd-bridge`.
 
 #### `FtdiMpsseTransport.exchange`
 

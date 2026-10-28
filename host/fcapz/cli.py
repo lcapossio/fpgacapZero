@@ -1018,17 +1018,21 @@ def _run_openocd_bridge(args: argparse.Namespace) -> int:
     pins = FtdiMpsseTransport(device=getattr(args, "hardware", None))
     layout = pins.open_pins()
     try:
-        trst = trst_pin_for(pins.adapter.description)
+        # Without pin commands the bridge drives no TRST pin.
+        trst = trst_pin_for(pins.adapter.description) if pins.gpio else 0
 
         def ready(bound: int) -> None:
             print(f"serving {pins.adapter.description!r} to OpenOCD on 127.0.0.1:{bound}"
                   + ("" if trst else " (no TRST pin: SRST/TRST are not driven)"))
+            if not pins.gpio:
+                print("this adapter has no MPSSE pin I/O: each TCK edge is sent "
+                      "as a clocked command")
             print("OpenOCD adapter config:")
             print(openocd_config(bound, trst=bool(trst)), end="", flush=True)
 
         try:
             serve(pins, layout, trst=trst, port=port, once=args.once, ready=ready,
-                  log=lambda m: print(m, flush=True))
+                  log=lambda m: print(m, flush=True), gpio=bool(pins.gpio))
         except KeyboardInterrupt:
             print("stopped")
         except OSError as exc:
