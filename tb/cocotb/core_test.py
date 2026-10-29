@@ -1954,7 +1954,9 @@ class _GowinDebugMultiBench(_DebugMultiBench):
         # No burst path: the capture comes through the register window.
         samples = [await self.read(0x0100 + 4 * i) & 0xFF for i in range(capture_len)]
         for i in range(1, capture_len):
-            assert samples[i] == (samples[i - 1] + step) & 0xFF,                 f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+            assert samples[i] == (samples[i - 1] + step) & 0xFF, (
+                f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+            )
         assert 0x80 in samples, f"slot {slot} trigger sample missing"
 
     async def scan(self, bits: int, frame: int = 0) -> int:
