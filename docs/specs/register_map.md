@@ -395,7 +395,7 @@ polling required.
 | 0x7 | BURST_WDATA | Push one word into burst write buffer |
 | 0x8 | BURST_RDATA | Pop one word from burst read FIFO |
 | 0x9 | BURST_RSTART | Initiate burst read (addr channel) |
-| 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise answers OKAY and does nothing. |
+| 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise a NOP (nothing is queued, no response). |
 | 0xE | CONFIG | Read bridge config register (addr selects register) |
 | 0xF | RESET | Reset bridge state machines |
 
@@ -416,7 +416,9 @@ polling required.
 > delay — the host sends a priming `BURST_RDATA` before reading N words.
 > A read that times out on `rvalid`, or that RESET cuts off after the
 > slave accepted its address, is drained: the bridge holds `rready` high
-> and discards the beats up to `rlast` before the next command.
+> and discards the beats up to `rlast`, however late. Commands wait for
+> the drain up to `TIMEOUT` cycles without a beat; then writes and CONFIG
+> run, and reads answer SLVERR without issuing an AR until the drain ends.
 
 <a id="regmap-ejtag-axi-stream"></a>
 ### Stream mode (`STREAM_RSTART`)

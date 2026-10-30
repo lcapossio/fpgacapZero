@@ -66,9 +66,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   data.** A read that timed out waiting for `rvalid`, or that `CMD_RESET` cut
   off after the slave accepted its address, left the slave's beats on the R
   channel; the next read took them as its own data with resp OKAY. The bridge
-  now holds `rready` and discards them up to `rlast` before the next command
-  (Verilog and VHDL). Write-channel timeouts and a RESET during an unaccepted
-  address phase are not covered yet.
+  now holds `rready` and discards them up to `rlast`, however late (Verilog
+  and VHDL). Commands wait for the drain up to `TIMEOUT` cycles without a
+  beat; after that writes and CONFIG run and reads answer SLVERR without
+  issuing an AR, so a slave that never answers cannot hang the bridge.
+  Write-channel timeouts and a RESET during an unaccepted address phase are
+  not covered yet.
 
 - **Manual corrections.** A full review of the manual against the code fixed
   wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;

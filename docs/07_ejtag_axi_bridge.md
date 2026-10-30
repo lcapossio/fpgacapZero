@@ -85,8 +85,12 @@ themselves (`wready`, `bvalid`, `arready`, `rvalid`).
 A read whose address the slave has accepted is never abandoned on the
 R channel.  If it times out waiting for `rvalid`, or a RESET cuts it
 off, the bridge keeps `rready` high and discards the late beats up to
-`rlast` before it starts the next command, so they cannot come back
-as the data of a later read.
+`rlast`, however late they come, so they cannot come back as the data
+of a later read.  The next command waits for them up to `TIMEOUT`
+cycles without a beat; after that, writes and CONFIG run normally,
+while reads answer SLVERR without touching the bus until the owed
+beats have arrived.  A slave that never answers therefore costs
+SLVERRs, not a hung bridge.
 
 ## The 72-bit DR shift format
 
