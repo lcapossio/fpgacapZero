@@ -21,7 +21,7 @@
 //   CMD_FIFO_DEPTH  - async command FIFO depth (default 2*FIFO_DEPTH)
 //   RESP_FIFO_DEPTH - async response FIFO depth (default 2*FIFO_DEPTH)
 //   TIMEOUT    - AXI ready timeout in axi_clk cycles   (default 4096)
-//   STREAM_EN  - streaming read mode (default 1; needs DATA_W = 32)
+//   STREAM_EN  - streaming read mode (default 0; needs DATA_W = 32)
 //   *_FIFO_MEMORY_TYPE - XPM storage selectors ("auto", "block", "distributed")
 //
 // 72-bit DR format (LSB first):
@@ -55,7 +55,7 @@ module fcapz_ejtagaxi #(
     parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
-    parameter STREAM_EN  = 1,
+    parameter STREAM_EN  = 0,
     parameter USE_BEHAV_ASYNC_FIFO    = 1,
     parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1),
     parameter CMD_FIFO_MEMORY_TYPE   = "auto",

@@ -43,6 +43,7 @@ module fcapz_ejtagaxi_drain_tb;
     wire [31:0] m_axi_rdata; wire [1:0] m_axi_rresp; wire m_axi_rvalid, m_axi_rlast, m_axi_rready;
 
     fcapz_ejtagaxi #(.ADDR_W(32), .DATA_W(32), .FIFO_DEPTH(FIFO_DEPTH), .TIMEOUT(TIMEOUT),
+                     .STREAM_EN(1),
                      .USE_BEHAV_ASYNC_FIFO(1)) dut (
         .tck(tck), .tdi(tdi), .tdo(tdo), .capture(capture), .shift_en(shift_en),
         .update(update), .sel(sel), .axi_clk(axi_clk), .axi_rst(axi_rst),

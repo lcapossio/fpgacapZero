@@ -79,6 +79,7 @@ module fcapz_ejtagaxi_stream_tb;
         .DATA_W               (32),
         .FIFO_DEPTH           (FIFO_DEPTH),
         .TIMEOUT              (4096),
+        .STREAM_EN            (1),
         .USE_BEHAV_ASYNC_FIFO (USE_BEHAV_ASYNC_FIFO),
         .ASYNC_FIFO_IMPL      (ASYNC_FIFO_IMPL)
     ) dut (
