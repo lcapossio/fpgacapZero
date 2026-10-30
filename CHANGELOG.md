@@ -9,6 +9,25 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 8191
+  words per long DR scan as 33-bit `{data, valid}` slots, so the cable sets
+  the rate instead of the per-scan tool overhead: about 133 KB/s over a
+  Platform Cable USB II at 12 MHz, against 1.7 KB/s for `read_block`. Opt in
+  with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
+  200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
+  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream()`,
+  `connect()` reports `"stream"`. Every scan's header is checked, a failed
+  attempt rereads the whole range, and words are returned only after the
+  range's AXI response reads OKAY.
+
+- **Transport: `raw_dr_capture()`, `jtag_lock()` / `jtag_unlock()`.**
+  `raw_dr_capture(width, tdi=0)` is one long constant-TDI DR scan returning
+  TDO; `XilinxHwServerTransport` does it with `drshift -tdi`, so a 270 kbit
+  scan costs about its TCK time. `jtag_lock()` / `jtag_unlock()` (hw_server
+  only) hold xsdb's `jtag lock`, which `stream_read()` takes per attempt:
+  without it other hw_server clients' scans aborted streams within tens of
+  milliseconds.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
@@ -42,6 +61,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   GUI, and the manual marks it as unmaintained.
 
 ### Fixed
+
+- **EJTAG-AXI: late R beats after a timeout or RESET became the next read's
+  data.** A read that timed out waiting for `rvalid`, or that `CMD_RESET` cut
+  off after the slave accepted its address, left the slave's beats on the R
+  channel; the next read took them as its own data with resp OKAY. The bridge
+  now holds `rready` and discards them up to `rlast` before the next command
+  (Verilog and VHDL). Write-channel timeouts and a RESET during an unaccepted
+  address phase are not covered yet.
 
 - **Manual corrections.** A full review of the manual against the code fixed
   wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;

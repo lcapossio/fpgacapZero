@@ -519,6 +519,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
+    parameter STREAM_EN  = 0,
     parameter CMD_FIFO_MEMORY_TYPE   = "auto",
     parameter RESP_FIFO_MEMORY_TYPE  = "auto",
     parameter BURST_FIFO_MEMORY_TYPE = "auto",
@@ -535,6 +536,7 @@ module fcapz_ejtagaxi_xilinx7 #(
 | `RESP_FIFO_DEPTH` | power of 2 | AXI-to-TCK response queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
 | `TIMEOUT` | int | AXI handshake timeout in `axi_clk` cycles.  Applies to `wready`/`bvalid`/`arready`/`rvalid` waits, **not** between burst beats. |
 | `DEBUG_EN` | 0, 1 | Enables the 256-bit debug buses and debug CONFIG capture records. Defaults off to let synthesis prune debug-only storage and counters. |
+| `STREAM_EN` | 0, 1 | Builds the streaming read (`CMD_STREAM_RSTART`, `FEATURES[24]`): up to 8191 words per long DR scan instead of one per scan.  About 200 LUTs and 200 FFs, no BRAM; needs `DATA_W=32`.  Verilog wrappers only for now.  See [chapter 07](07_ejtag_axi_bridge.md#streaming-read). |
 | `CMD_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the command queue. Ignored by the portable behavioral FIFO. |
 | `RESP_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the response queue. Ignored by the portable behavioral FIFO. |
 | `BURST_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the burst read FIFO. Ignored by the portable behavioral FIFO. |

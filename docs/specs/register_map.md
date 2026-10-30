@@ -16,7 +16,7 @@
 - **EIO** (USER3 standalone, or a managed USER1 slot)
   - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
 - **EJTAG-AXI** (USER4)
-  - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
+  - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [stream mode](#regmap-ejtag-axi-stream), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
 - **EJTAG-UART** (USER4, mutually exclusive with AXI)
   - [32-bit DR format](#regmap-ejtag-uart) — [commands](#regmap-ejtag-uart-cmd), [CONFIG byte map](#regmap-ejtag-uart-config), [shift-out status](#regmap-ejtag-uart-status)
 
@@ -395,6 +395,7 @@ polling required.
 | 0x7 | BURST_WDATA | Push one word into burst write buffer |
 | 0x8 | BURST_RDATA | Pop one word from burst read FIFO |
 | 0x9 | BURST_RSTART | Initiate burst read (addr channel) |
+| 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise answers OKAY and does nothing. |
 | 0xE | CONFIG | Read bridge config register (addr selects register) |
 | 0xF | RESET | Reset bridge state machines |
 
@@ -413,6 +414,30 @@ polling required.
 > arready, rvalid). Inter-beat timing in burst writes is host-paced via
 > JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
 > delay — the host sends a priming `BURST_RDATA` before reading N words.
+> A read that times out on `rvalid`, or that RESET cuts off after the
+> slave accepted its address, is drained: the bridge holds `rready` high
+> and discards the beats up to `rlast` before the next command.
+
+<a id="regmap-ejtag-axi-stream"></a>
+### Stream mode (`STREAM_RSTART`)
+
+After `STREAM_RSTART` the DR stops decoding commands.  Every scan, of any
+length, shifts out 33-bit slots `{data[31:0], valid}`, LSB first:
+
+| Slot | `valid` | `data` |
+|------|---------|--------|
+| 0 (header) | 0 | words not yet delivered |
+| 1… | 1 | next word of the range |
+| 1… | 0 | FIFO empty, nothing consumed |
+
+A word is delivered once all 33 bits of its slot are out; a scan that ends
+inside a slot re-sends that word in the next scan.  TDI must be 0: a scan
+that shifts in any 1 aborts the stream like `CMD_RESET`.  Stream mode ends
+at the UPDATE of the first scan whose header reads 0, and the next normal
+scan returns the range's AXI response (the first non-OKAY `rresp`) with
+`prev_valid`.  The AXI side reads the range in INCR bursts of
+`FIFO_DEPTH/4` beats that never cross 4 KB and start only when the burst
+FIFO has room for the whole burst.
 
 <a id="regmap-ejtag-axi-config"></a>
 ### Config registers (CMD_CONFIG)
@@ -421,7 +446,7 @@ polling required.
 |---------|------|-------|-------------|
 | `0x0000` | VERSION | varies | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"JX"` (`0x4A58`). Hosts verify `VERSION[15:0]` before trusting the core. Legacy bitstreams that still return `"EJAX"` (`0x454A4158`) at this address are accepted with a warning. |
 | `0x0004` | VERSION_ALIAS | same as `0x0000` | Mirror of VERSION for explorer-friendly reads at the old VERSION slot. |
-| `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
+| `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). `[24]`=STREAM_ON (streaming read built in, `STREAM_EN=1`). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
 
 [↑ Top](#regmap-top)
 

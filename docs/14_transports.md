@@ -19,6 +19,7 @@ operations the controllers care about:
 | `select_chain(chain)` | Switch to a BSCANE2 USER chain (`1`..`4`) — internally this picks an IR opcode from the `ir_table` |
 | `read_reg(addr)` / `write_reg(addr, value)` | 49-bit DR scan against the chain's register interface |
 | `raw_dr_scan(bits, width)` / `raw_dr_scan_batch(...)` | Raw DR shift for the burst engines (32-, 72-, 256-bit) |
+| `raw_dr_capture(width, tdi=0)` | One long DR scan shifting a constant TDI, returning TDO (the EJTAG-AXI streaming read). The default builds the word and calls `raw_dr_scan()` |
 
 For EJTAG-AXI on Arty / `hw_server`, the batched form matters in
 practice: isolated USER4 raw scans were observed to return zeros on
@@ -240,6 +241,23 @@ bugs (BUG-004).
 # Called internally by Analyzer.capture() — you don't call this directly
 timestamps = transport.read_timestamp_block(0x1100, capture_len, 32)
 ```
+
+#### Long scans and the chain lock
+
+Two methods serve the EJTAG-AXI [streaming read](07_ejtag_axi_bridge.md#streaming-read):
+
+- `raw_dr_capture(width, tdi=0)` shifts one DR scan of a constant TDI
+  with `drshift -tdi`, so no per-bit Tcl string goes in, and reads TDO
+  back with `run -hex`.  A 270 kbit scan costs about its TCK time.
+- `jtag_lock(timeout_ms=5000)` / `jtag_unlock()` wrap xsdb's
+  `jtag lock` / `jtag unlock`.  One `jtag sequence` always runs
+  uninterrupted, but between two sequences other hw_server clients (a
+  soft-CPU debugger, the Vivado hardware manager, hw_server's own
+  polls) can scan the chain.  A protocol that keeps state across
+  sequences holds the lock for its whole length.  `jtag_lock()` raises
+  `RuntimeError` when the lock is not granted; `jtag_unlock()` is best
+  effort.  Only `XilinxHwServerTransport` has them; `stream_read()`
+  looks them up with `getattr` and runs unprotected without them.
 
 ### `OpenOcdTransport`
 
