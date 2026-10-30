@@ -1369,11 +1369,14 @@ Release `jtag_lock` (errors ignored: best effort).
 raw_dr_capture(width: int, *, chain: int | None = None, tdi: int = 0) -> int
 ```
 
-One long DR scan of a constant *tdi* via `drshift -tdi`.
+One long DR scan of a constant *tdi*.
 
-No per-bit TCL string goes in and `run -hex` brings TDO back at 4
-bits per character (little-endian bytes, two hex digits each), so a
-270 kbit scan costs about as much as its TCK time.
+The constant data is built inside xsdb (`string repeat`), so no
+per-bit TCL string crosses the pipe, and `run -hex` brings TDO back
+at 4 bits per character (little-endian bytes, two hex digits each):
+a 270 kbit scan costs about as much as its TCK time.  Not
+`drshift -tdi 0`: through the Arty's Digilent cable (Vivado 2025.2)
+it shifts ones, which aborts an EJTAG-AXI stream.
 
 #### `XilinxHwServerTransport.read_reg`
 

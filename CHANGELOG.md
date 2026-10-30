@@ -22,8 +22,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Transport: `raw_dr_capture()`, `jtag_lock()` / `jtag_unlock()`.**
   `raw_dr_capture(width, tdi=0)` is one long constant-TDI DR scan returning
-  TDO; `XilinxHwServerTransport` does it with `drshift -tdi`, so a 270 kbit
-  scan costs about its TCK time. `jtag_lock()` / `jtag_unlock()` (hw_server
+  TDO; `XilinxHwServerTransport` builds the constant inside xsdb, so a 540 kbit
+  scan costs about its shift time. `jtag_lock()` / `jtag_unlock()` (hw_server
   only) hold xsdb's `jtag lock`, which `stream_read()` takes per attempt:
   without it other hw_server clients' scans aborted streams within tens of
   milliseconds.

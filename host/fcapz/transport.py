@@ -4665,18 +4665,22 @@ class XilinxHwServerTransport(Transport):
     def raw_dr_capture(
         self, width: int, *, chain: int | None = None, tdi: int = 0
     ) -> int:
-        """One long DR scan of a constant *tdi* via ``drshift -tdi``.
+        """One long DR scan of a constant *tdi*.
 
-        No per-bit TCL string goes in and ``run -hex`` brings TDO back at 4
-        bits per character (little-endian bytes, two hex digits each), so a
-        270 kbit scan costs about as much as its TCK time.
+        The constant data is built inside xsdb (``string repeat``), so no
+        per-bit TCL string crosses the pipe, and ``run -hex`` brings TDO back
+        at 4 bits per character (little-endian bytes, two hex digits each):
+        a 270 kbit scan costs about as much as its TCK time.  Not
+        ``drshift -tdi 0``: through the Arty's Digilent cable (Vivado 2025.2)
+        it shifts ones, which aborts an EJTAG-AXI stream.
         """
         ch = chain if chain is not None else self._active_chain
         total = self._user_dr_bits(width)
+        fill = f"[string repeat {'F' if tdi else '0'} {(total + 7) // 8 * 2}]"
         tcl = (
             f"set _rc [jtag sequence]; "
             f"{self._irshift_tcl('_rc', ch)}; "
-            f"$_rc drshift -state DRUPDATE -capture -tdi {1 if tdi else 0} {total}; "
+            f"$_rc drshift -state DRUPDATE -capture -hex {total} {fill}; "
             f"$_rc state IDLE {self.RAW_DR_IDLE_CYCLES}; "
             f"puts [$_rc run -hex]; $_rc delete"
         )

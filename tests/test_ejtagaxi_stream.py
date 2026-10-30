@@ -286,14 +286,14 @@ class HwServerCaptureParseTests(unittest.TestCase):
     def test_hex_reply_is_little_endian_bytes(self):
         t = self._transport("4000000080\n")
         self.assertEqual(t.raw_dr_capture(40), (1 << 39) | (1 << 6))
-        self.assertIn("drshift -state DRUPDATE -capture -tdi 0 40", t.sent[0])
+        self.assertIn("drshift -state DRUPDATE -capture -hex 40 [string repeat 0 10]", t.sent[0])
         self.assertIn("-register user4", t.sent[0])
 
     def test_tdi_one_and_bypass_padding(self):
         # One BYPASS bit on the TDO side: 41 bits shifted, the first dropped.
         t = self._transport("000000000001 0001\n", extra_bits=1)
         self.assertEqual(t.raw_dr_capture(40, tdi=1), 1 << 39)
-        self.assertIn("-tdi 1 41", t.sent[0])
+        self.assertIn("-hex 41 [string repeat F 12]", t.sent[0])
 
     def test_missing_reply_raises(self):
         t = self._transport("error: no target\n")
