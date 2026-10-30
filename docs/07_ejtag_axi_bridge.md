@@ -299,9 +299,10 @@ The streaming read moves up to 16383 words in one long DR scan
 speed.  Measured on the Arty A7 reference design (`arty_a7_vex_top`,
 onboard FT2232H cable, `hw_server`, TCK 30 MHz): about 1.9 MB/s for
 a 4 MiB read, against 6 KB/s for `read_block`.  That is about what
-`hw_server` shifts through that cable (about 18 Mbit/s at 30 MHz),
-so a faster TCK is the only further gain: set it in xsdb with
-`jtag frequency` (hw_server keeps it per cable).
+`hw_server` shifts through that cable (about 18 Mbit/s at TCK
+30 MHz), so over `hw_server` the TCK rate is what is left to tune:
+check or set it in xsdb with `jtag frequency` (hw_server keeps it
+per cable).
 
 It is built only when the bridge has `STREAM_EN=1` (default 0, about
 200 LUTs and 200 FFs, no BRAM; Verilog core only for now):

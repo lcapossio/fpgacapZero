@@ -4669,8 +4669,9 @@ class XilinxHwServerTransport(Transport):
 
         The constant data is built inside xsdb (``string repeat``), so no
         per-bit TCL string crosses the pipe, and ``run -hex`` brings TDO back
-        at 4 bits per character (little-endian bytes, two hex digits each):
-        a 270 kbit scan costs about as much as its TCK time.  Not
+        at 4 bits per character (little-endian bytes, two hex digits each).
+        The scan then runs at what hw_server shifts through the cable: on
+        the Arty A7 at TCK 30 MHz, about 18 Mbit/s.  Not
         ``drshift -tdi 0``: through the Arty's Digilent cable (Vivado 2025.2)
         it shifts ones, which aborts an EJTAG-AXI stream.
         """
