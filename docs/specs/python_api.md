@@ -1341,6 +1341,28 @@ raw_dr_scan_batch(
 
 Perform multiple raw DR scans in one XSDB jtag sequence.
 
+#### `XilinxHwServerTransport.jtag_lock`
+
+```python
+jtag_lock(timeout_ms: int = 5000) -> None
+```
+
+Lock the FPGA's scan chain against every other hw_server client.
+
+One `jtag sequence` always runs uninterrupted, but between two
+sequences other clients (the MicroBlaze debugger, Vivado, hw_server's
+own polls) may scan the chain.  A protocol that keeps state across
+sequences, such as the EJTAG-AXI streaming read, holds this lock for
+its whole length.  Raises RuntimeError if the lock is not granted.
+
+#### `XilinxHwServerTransport.jtag_unlock`
+
+```python
+jtag_unlock() -> None
+```
+
+Release `jtag_lock` (errors ignored: best effort).
+
 #### `XilinxHwServerTransport.raw_dr_capture`
 
 ```python
