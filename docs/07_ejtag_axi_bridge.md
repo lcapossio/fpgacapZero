@@ -302,7 +302,9 @@ a 4 MiB read, against 6 KB/s for `read_block`.  That is about what
 `hw_server` shifts through that cable (about 18 Mbit/s at TCK
 30 MHz), so over `hw_server` the TCK rate is what is left to tune:
 check or set it in xsdb with `jtag frequency` (hw_server keeps it
-per cable).
+per cable).  The same cable driven directly by
+[`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport) at 30 MHz
+reads about 2.8 MB/s.
 
 It is built only when the bridge has `STREAM_EN=1` (default 0, about
 200 LUTs and 200 FFs, no BRAM; Verilog core only for now):

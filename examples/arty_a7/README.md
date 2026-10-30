@@ -10,8 +10,9 @@ Digilent Arty A7-100T (`xc7a100tcsg324-1`). It instantiates the Xilinx
 - an open-source VexRiscv soft CPU on the shared bus (USER3 free — the legacy
   MicroBlaze variant instead puts its debug module there)
 - one EJTAG-AXI bridge on USER4, with the streaming read (`STREAM_EN=1`):
-  about 1.9 MB/s over the onboard cable at TCK 30 MHz, the fastest it runs
-  and the rate the TCK constraint in `arty_a7.xdc` is timed for
+  about 1.9 MB/s over `hw_server` and 2.8 MB/s over `--backend ftdi` at TCK
+  30 MHz, the fastest the onboard cable runs and the rate the TCK
+  constraint in `arty_a7.xdc` is timed for
 
 The design is intentionally self-stimulating, so you can build it, program the
 board, and exercise the debug cores without adding any external user logic.
@@ -145,7 +146,7 @@ Run a simple ELA capture:
 ```sh
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
   --program examples/arty_a7/arty_a7_vex_top.bit \
-  capture --pretrigger 64 --posttrigger 192 \
+  capture --pretrigger 64 --posttrigger 191 \
   --trigger-value 66 --trigger-mask 0xff \
   --out capture.json --format json
 ```
