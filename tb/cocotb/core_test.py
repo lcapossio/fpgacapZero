@@ -147,6 +147,7 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "r_timeout_drain",
         "burst_timeout_drain",
         "reset_inflight_drain",
+        "drain_bounded",
     ),
 )
 
@@ -2304,11 +2305,12 @@ async def clear_after_error(dut) -> None:
 @cocotb.test()
 async def fcapz_ejtagaxi_r_drain(dut):
     """A read the slave answers too late (R timeout) or that RESET cuts off is
-    drained: its late beats must not become the data of the next read.
+    drained: its late beats must not become the data of the next read, and a
+    slave that never answers must not wedge the bridge.
 
     Runs with TIMEOUT=64; the slave holds its R channel back past it.
     """
-    axi_ram, _ = await init_ejtagaxi(dut)
+    axi_ram, axi_trace = await init_ejtagaxi(dut)
     r_channel = axi_ram.read_if.r_channel
     for i in range(8):
         axi_ram.write_dword(0x100 + 4 * i, 0x1111_0000 + i)
@@ -2356,6 +2358,29 @@ async def fcapz_ejtagaxi_r_drain(dut):
     assert not (axi_status(out) & 0x4)
     await read_ok(0x208, 0x2222_0002, "read after RESET with a read in flight")
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_inflight_drain")
+
+    # A slave that keeps the beat: after TIMEOUT cycles commands run again,
+    # but a read answers SLVERR without an AR while the beat is owed, and a
+    # write goes through.  Once the beat arrives it is drained and reads work.
+    r_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x10C, 0, 0))
+    out = await wait_resp(dut, "read to a silent slave")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    ars = len(axi_trace.ar)
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x20C, 0, 0))
+    out = await wait_resp(dut, "read while a beat is owed")
+    assert axi_resp(out) == 2
+    assert len(axi_trace.ar) == ars, "a read issued an AR while a beat was owed"
+    await clear_after_error(dut)
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x300, 0x3333_0000, 0xF), "write while a beat is owed")
+    assert axi_resp(out) == 0
+    assert axi_mem_read32(axi_ram, 0x300) == 0x3333_0000
+    r_channel.pause = False
+    await axi_cdc_wait(dut, 20)
+    await read_ok(0x210, 0x2222_0004, "read once the owed beat is drained")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("drain_bounded")
 
 
 UART_CMD_NOP = 0x0

@@ -237,6 +237,8 @@ architecture rtl of fcapz_ejtagaxi is
     signal m_axi_rready_o : std_logic;
     -- Discard the rest of a read cut off by RESET or an R timeout.
     signal r_drain : std_logic := '0';
+    -- Cycles without a beat while draining (saturates at TIMEOUT - 1).
+    signal drain_cnt : unsigned(31 downto 0) := (others => '0');
     -- A read the slave has accepted and not finished (see r_drain).
     signal r_inflight : std_logic;
 
@@ -635,6 +637,7 @@ begin
             m_axi_arvalid_i <= '0';
             m_axi_rready_i <= '0';
             r_drain <= '0';
+            drain_cnt <= (others => '0');
             cmdq_rd_en_i <= '0';
             respq_wr_en_i <= '0';
             cmdq_rst_axi <= '0';
@@ -652,8 +655,18 @@ begin
             fifo_rst_axi <= '0';
             reset_req_sync1_axi <= reset_req_toggle;
             reset_req_sync2_axi <= reset_req_sync1_axi;
-            if r_drain = '1' and m_axi_rvalid = '1' and m_axi_rlast = '1' then
-                r_drain <= '0';
+            -- The drain only ends at RLAST: a beat that arrives however late
+            -- is still discarded.  Commands wait for it at most TIMEOUT
+            -- cycles without a beat (drain_cnt); after that they run, but
+            -- reads answer SLVERR without issuing an AR (ST_IDLE), so a
+            -- slave that never answers cannot wedge the bridge.
+            if r_drain = '0' or m_axi_rvalid = '1' then
+                drain_cnt <= (others => '0');
+                if r_drain = '1' and m_axi_rvalid = '1' and m_axi_rlast = '1' then
+                    r_drain <= '0';
+                end if;
+            elsif drain_cnt < to_unsigned(TIMEOUT - 1, drain_cnt'length) then
+                drain_cnt <= drain_cnt + 1;
             end if;
 
             if reset_req_sync2_axi /= reset_req_seen_axi then
@@ -687,7 +700,9 @@ begin
                         m_axi_rready_i <= '0';
                         timeout_cnt <= (others => '0');
                         beat_count <= (others => '0');
-                        if cmdq_empty = '0' and cmdq_rd_rst_busy = '0' and r_drain = '0' then
+                        if cmdq_empty = '0' and cmdq_rd_rst_busy = '0' and
+                           (r_drain = '0' or
+                            drain_cnt >= to_unsigned(TIMEOUT - 1, drain_cnt'length)) then
                             cmd_cmd := cmdq_rd_data(CMDQ_W - 1 downto CMDQ_W - 4);
                             cmd_addr := cmdq_rd_data(CMDQ_W - 5 downto CMDQ_W - 4 - ADDR_W);
                             cmd_wdata := cmdq_rd_data(12 + DATA_BYTES + DATA_W downto 13 + DATA_BYTES);
@@ -728,6 +743,10 @@ begin
                                 m_axi_wlast_i <= '1' when unsigned(cmd_len) = 0 else '0';
                                 beat_count <= (others => '0');
                                 axi_state <= ST_BURST_AW_W;
+                            elsif (cmd_cmd = CMD_READ or cmd_cmd = CMD_BURST_RSTART) and
+                                  r_drain = '1' then
+                                -- Earlier beats still owed: no AR until they are in.
+                                axi_state <= ST_TIMEOUT_ERR;
                             elsif cmd_cmd = CMD_READ then
                                 m_axi_araddr_i <= cmd_addr;
                                 m_axi_arlen_i <= (others => '0');

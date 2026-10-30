@@ -280,6 +280,7 @@ module fcapz_ejtagaxi #(
     reg [3:0]  axi_state;
     reg        rready_q;   // R-channel ready for single reads
     reg        r_drain;    // discard the rest of a read cut off by RESET or an R timeout
+    reg [11:0] drain_cnt;  // cycles without a beat while draining (saturates)
     reg [11:0] timeout_cnt;
     reg [7:0]  beat_count;
     reg        reset_req_sync1_axi;
@@ -1290,6 +1291,7 @@ module fcapz_ejtagaxi #(
         m_axi_arvalid       = 1'b0;
         rready_q            = 1'b0;
         r_drain             = 1'b0;
+        drain_cnt           = 12'd0;
         cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
         respq_rst_axi       = 1'b0;
@@ -1354,6 +1356,7 @@ module fcapz_ejtagaxi #(
             m_axi_arvalid     <= 1'b0;
             rready_q          <= 1'b0;
             r_drain           <= 1'b0;
+            drain_cnt         <= 12'd0;
             cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
             respq_rst_axi     <= 1'b0;
@@ -1365,8 +1368,18 @@ module fcapz_ejtagaxi #(
             strm_err          <= 2'b00;
         end else begin
             reset_req_sync1_axi <= reset_req_toggle;
-            if (r_drain && m_axi_rvalid && m_axi_rlast)
-                r_drain <= 1'b0;
+            // The drain only ends at RLAST: a beat that arrives however late
+            // is still discarded.  Commands wait for it at most TIMEOUT
+            // cycles without a beat (drain_cnt); after that they run, but
+            // reads answer SLVERR without issuing an AR (ST_CMD_DISPATCH), so
+            // a slave that never answers cannot wedge the bridge.
+            if (!r_drain || m_axi_rvalid) begin
+                drain_cnt <= 12'd0;
+                if (r_drain && m_axi_rvalid && m_axi_rlast)
+                    r_drain <= 1'b0;
+            end else if (drain_cnt < TIMEOUT - 1) begin
+                drain_cnt <= drain_cnt + 1;
+            end
             reset_req_sync2_axi <= reset_req_sync1_axi;
             if (DEBUG_EN) begin
                 dbg_axi_deq_fire <= 1'b0;
@@ -1456,7 +1469,7 @@ module fcapz_ejtagaxi #(
                     timeout_cnt   <= 12'd0;
                     beat_count    <= 8'd0;
 
-                    if (!cmdq_empty && !r_drain) begin
+                    if (!cmdq_empty && (!r_drain || drain_cnt >= TIMEOUT - 1)) begin
                         // Give FWFT async FIFO one full rd_clk cycle with
                         // empty=0 before sampling/popping the head word.
                         axi_state <= ST_CMD_FETCH;
@@ -1490,12 +1503,17 @@ module fcapz_ejtagaxi #(
                         end
 
                         CMD_READ: begin
-                            m_axi_araddr  <= launch_addr;
-                            m_axi_arlen   <= 8'd0;
-                            m_axi_arsize  <= 3'b010;
-                            m_axi_arburst <= 2'b01;
-                            m_axi_arvalid <= 1'b1;
-                            axi_state     <= ST_AR;
+                            if (r_drain) begin
+                                // Earlier beats still owed: no AR until they are in.
+                                axi_state     <= ST_TIMEOUT_ERR;
+                            end else begin
+                                m_axi_araddr  <= launch_addr;
+                                m_axi_arlen   <= 8'd0;
+                                m_axi_arsize  <= 3'b010;
+                                m_axi_arburst <= 2'b01;
+                                m_axi_arvalid <= 1'b1;
+                                axi_state     <= ST_AR;
+                            end
                         end
 
                         CMD_BURST_WDATA: begin
@@ -1513,12 +1531,16 @@ module fcapz_ejtagaxi #(
                         end
 
                         CMD_BURST_RSTART: begin
-                            m_axi_araddr  <= launch_addr;
-                            m_axi_arlen   <= launch_burst_len;
-                            m_axi_arsize  <= launch_burst_size;
-                            m_axi_arburst <= launch_burst_type;
-                            m_axi_arvalid <= 1'b1;
-                            axi_state     <= ST_BURST_AR;
+                            if (r_drain) begin
+                                axi_state     <= ST_TIMEOUT_ERR;
+                            end else begin
+                                m_axi_araddr  <= launch_addr;
+                                m_axi_arlen   <= launch_burst_len;
+                                m_axi_arsize  <= launch_burst_size;
+                                m_axi_arburst <= launch_burst_type;
+                                m_axi_arvalid <= 1'b1;
+                                axi_state     <= ST_BURST_AR;
+                            end
                         end
 
                         CMD_STREAM_RSTART: begin
@@ -1748,7 +1770,9 @@ module fcapz_ejtagaxi #(
                     end else if (!strm_len_ok) begin
                         strm_len    <= strm_len_nxt[7:0];
                         strm_len_ok <= 1'b1;
-                    end else if (strm_room) begin
+                    end else if (strm_room && !r_drain) begin
+                        // While earlier beats are still owed the stream
+                        // stalls; the host sees no words and aborts.
                         m_axi_araddr  <= strm_addr;
                         m_axi_arlen   <= strm_len - 8'd1;
                         m_axi_arsize  <= 3'b010;
