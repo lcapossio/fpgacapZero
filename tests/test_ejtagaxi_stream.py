@@ -11,6 +11,7 @@ from fcapz.ejtagaxi import (
     DR_WIDTH,
     STREAM_SLOT_W,
     EjtagAxiController,
+    _stream_words,
 )
 from fcapz.transport import XilinxHwServerTransport
 
@@ -299,6 +300,23 @@ class HwServerCaptureParseTests(unittest.TestCase):
         t = self._transport("error: no target\n")
         with self.assertRaises(RuntimeError):
             t.raw_dr_capture(40)
+
+
+class StreamWordsTests(unittest.TestCase):
+    """_stream_words against a plain per-slot reading of the scan."""
+
+    def test_matches_per_slot_parse(self):
+        import random
+
+        rng = random.Random(7)
+        for nslots in (1, 2, 7, 8, 9, 15, 16, 17, 64, 1000, 4097):
+            slots = [(0, rng.getrandbits(32))]  # header: valid clear
+            slots += [(rng.random() > 0.2, rng.getrandbits(32)) for _ in range(nslots - 1)]
+            raw = 0
+            for k, (valid, data) in enumerate(slots):
+                raw |= (int(valid) | data << 1) << (STREAM_SLOT_W * k)
+            want = [data for valid, data in slots if valid]
+            self.assertEqual(_stream_words(raw, nslots), want, nslots)
 
 
 if __name__ == "__main__":

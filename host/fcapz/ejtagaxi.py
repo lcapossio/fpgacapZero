@@ -56,6 +56,33 @@ class _StreamLost(RuntimeError):
     """A stream scan did not show what the host expected; restart the stream."""
 
 
+# Eight 33-bit slots are exactly 33 bytes.
+_STREAM_GROUP_BYTES = STREAM_SLOT_W
+_STREAM_GROUP_SHIFTS = tuple(range(0, 8 * STREAM_SLOT_W, STREAM_SLOT_W))
+
+
+def _stream_words(raw: int, nslots: int) -> list[int]:
+    """The data of every slot of a stream scan whose valid bit is set.
+
+    The scan is cut into 33-byte groups of eight slots and each group's slots
+    are taken by shift and mask on a small int: about twice as fast as
+    slicing a bit string, and on a fast cable parsing is most of the host's
+    time per scan.  Slot 0, the header, has its valid bit clear.
+    """
+    ngroups = -(-nslots // 8)
+    data = raw.to_bytes(ngroups * _STREAM_GROUP_BYTES, "little")
+    from_bytes = int.from_bytes
+    words: list[int] = []
+    extend = words.extend
+    for off in range(0, len(data), _STREAM_GROUP_BYTES):
+        group = from_bytes(data[off:off + _STREAM_GROUP_BYTES], "little")
+        extend([
+            (group >> (s + 1)) & 0xFFFFFFFF
+            for s in _STREAM_GROUP_SHIFTS if (group >> s) & 1
+        ])
+    return words
+
+
 class EjtagAxiController:
     """Controller for the fcapz_ejtagaxi JTAG-to-AXI4 bridge."""
 
@@ -655,24 +682,18 @@ class EjtagAxiController:
             nslots = 1 if owed == 0 else min(slots, owed + 1 + self._STREAM_SLACK)
             nbits = nslots * STREAM_SLOT_W
             raw = self._transport.raw_dr_capture(nbits, chain=self._chain)
-            # LSB-first bit string: slot k is bits[33k] (valid) and
-            # bits[33k+1 .. 33k+32] (data, LSB first).
-            bits = format(raw, f"0{nbits}b")[::-1]
-            header = int(bits[1:STREAM_SLOT_W][::-1], 2)
-            if bits[0] != "0" or header != owed:
+            # Slot k is bit 33k (valid) and bits 33k+1 .. 33k+32 (data).
+            header = (raw >> 1) & 0xFFFFFFFF
+            if raw & 1 or header != owed:
                 raise _StreamLost(
-                    f"{context}: header valid={bits[0]} left={header}, "
+                    f"{context}: header valid={raw & 1} left={header}, "
                     f"expected {owed} (word {count - owed} of {count})"
                 )
             out.extend(pending)
             left = owed
             if left == 0:
                 break
-            pending = [
-                int(bits[k + 1:k + STREAM_SLOT_W][::-1], 2)
-                for k in range(STREAM_SLOT_W, nbits, STREAM_SLOT_W)
-                if bits[k] == "1"
-            ]
+            pending = _stream_words(raw, nslots)
             if len(pending) > left:
                 raise _StreamLost(
                     f"{context}: {len(pending)} words in a scan, {left} owed"
