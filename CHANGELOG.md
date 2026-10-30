@@ -28,6 +28,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   without it other hw_server clients' scans aborted streams within tens of
   milliseconds.
 
+- **FTDI backend: TDO sampled on the falling edge above 15 MHz.**
+  `FtdiMpsseTransport` reads TDO a full TCK period after the target drives it
+  when the clock is above 15 MHz (`tdo_sample_edge` overrides it): at 30 MHz
+  the Arty A7's onboard cable returned every bit one late on the rising edge.
+  Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
+  capture and EJTAG-AXI reads.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 

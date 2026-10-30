@@ -1953,6 +1953,7 @@ FtdiMpsseTransport(
     burst_data_chain: int = 2,
     layout: tuple[int, int] | None = None,
     timeout_ms: int = 2000,
+    tdo_sample_edge: str | None = None,
 )
 ```
 
@@ -1968,9 +1969,14 @@ AMD/Xilinx 7-series and single-die UltraScale (`0x02` / `0x03` /
 `0x22` / `0x23`) or Gowin.  `burst` defaults to that
 family's wrapper default (on for PolarFire and AMD/Xilinx, off for
 Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
+`tdo_sample_edge` is `"rising"` or `"falling"`; by default TDO is
+sampled on the rising edge up to 15 MHz and on the falling edge above,
+where a cable's TDO round trip can exceed half a TCK period (the Arty
+A7 reads a shifted IDCODE at 30 MHz on the rising edge).
 
 Transports on the same channel in one process share its handle (the
-first one's clock and layout apply); the channel closes with the last.
+first one's clock, layout and sample edge apply); the channel closes
+with the last.
 
 Class constants:
 
