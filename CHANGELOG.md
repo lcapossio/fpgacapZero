@@ -9,10 +9,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 8191
+- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 16383
   words per long DR scan as 33-bit `{data, valid}` slots, so the cable sets
-  the rate instead of the per-scan tool overhead: about 133 KB/s over a
-  Platform Cable USB II at 12 MHz, against 1.7 KB/s for `read_block`. Opt in
+  the rate instead of the per-scan tool overhead: about 1.9 MB/s on the
+  Arty A7 over `hw_server` at TCK 30 MHz, against 6 KB/s for `read_block`. Opt in
   with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
   200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
   announces it. Host: `EjtagAxiController.stream_read()` and `has_stream()`,

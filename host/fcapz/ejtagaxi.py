@@ -67,11 +67,12 @@ class EjtagAxiController:
 
     _MAX_BUSY_RETRIES = 16
 
-    # Streaming read: slots per DR scan (header included; 8192 slots = 270 kbit,
-    # about 9 ms of TCK at 30 MHz), extra slots on the last scan for words the
-    # AXI side has not delivered yet, and how many scans in a row may come back
-    # empty before the stream counts as stalled.
-    _STREAM_SLOTS = 8192
+    # Streaming read: slots per DR scan (header included; 16384 slots = 540 kbit,
+    # about 18 ms of TCK at 30 MHz, the fastest size on the Arty A7), extra
+    # slots on the last scan for words the AXI side has not delivered yet,
+    # and how many scans in a row may come back empty before the stream
+    # counts as stalled.
+    _STREAM_SLOTS = 16384
     _STREAM_SLACK = 64
     _STREAM_MAX_EMPTY = 64
 
