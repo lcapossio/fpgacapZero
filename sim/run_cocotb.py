@@ -415,6 +415,11 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",
     ),
+    "fcapz_ejtagaxi_r_drain": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
     "fcapz_ejtaguart": (
         "fcapz_ejtaguart",
         "EJTAG_UART_COCOTB_COVERAGE_JSON",
