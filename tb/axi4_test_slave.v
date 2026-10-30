@@ -12,6 +12,9 @@ module axi4_test_slave #(
     parameter DATA_W       = 32,
     parameter NUM_WORDS    = 16,
     parameter STALL_CYCLES = 0,
+    // STALL_FIRST_R=1: only the first read burst stalls STALL_CYCLES (an R
+    // channel that goes quiet once, longer than the master's timeout).
+    parameter STALL_FIRST_R = 0,
     parameter ERROR_ADDR   = 32'hFFFF_FFFC,
     parameter HANG_ADDR    = 32'hFFFF_FFF8,
     // HANG_EN=0 disables the never-ready hang behaviour entirely: HANG_ADDR then
@@ -198,6 +201,7 @@ module axi4_test_slave #(
     reg                r_error;
     reg                r_hang;
     reg [15:0]         r_stall_cnt;
+    reg                r_stalled;      // first read burst has stalled
 
     always @(posedge clk) begin
         if (rst) begin
@@ -213,6 +217,7 @@ module axi4_test_slave #(
             r_error       <= 1'b0;
             r_hang        <= 1'b0;
             r_stall_cnt   <= 16'd0;
+            r_stalled     <= 1'b0;
         end else begin
             case (r_state)
                 R_IDLE: begin
@@ -225,7 +230,8 @@ module axi4_test_slave #(
                         r_error       <= is_error_addr(s_axi_araddr);
                         r_hang        <= is_hang_addr(s_axi_araddr);
                         s_axi_arready <= 1'b0;
-                        if (STALL_CYCLES > 0) begin
+                        if (STALL_CYCLES > 0 && !(STALL_FIRST_R && r_stalled)) begin
+                            r_stalled   <= 1'b1;
                             r_stall_cnt <= STALL_CYCLES[15:0];
                             r_state     <= R_STALL;
                         end else begin

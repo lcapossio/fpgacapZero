@@ -995,6 +995,19 @@ Default implementation calls `raw_dr_scan` in a loop.
 Override for transports that support batched transfers (e.g. a
 single `jtag sequence` round-trip in XSDB).
 
+#### `Transport.raw_dr_capture`
+
+```python
+raw_dr_capture(width: int, *, chain: int | None = None, tdi: int = 0) -> int
+```
+
+One DR scan of *width* bits shifting a constant *tdi* (0 or 1).
+
+Returns the captured TDO value.  Used for long scans such as the
+EJTAG-AXI streaming read, where only TDO carries data.  The default
+builds the constant word and calls `raw_dr_scan`; transports
+with a cheaper way to shift a constant override it.
+
 ### `OpenOcdTransport`
 
 ```python
@@ -1327,6 +1340,18 @@ raw_dr_scan_batch(
 ```
 
 Perform multiple raw DR scans in one XSDB jtag sequence.
+
+#### `XilinxHwServerTransport.raw_dr_capture`
+
+```python
+raw_dr_capture(width: int, *, chain: int | None = None, tdi: int = 0) -> int
+```
+
+One long DR scan of a constant *tdi* via `drshift -tdi`.
+
+No per-bit TCL string goes in and `run -hex` brings TDO back at 4
+bits per character (little-endian bytes, two hex digits each), so a
+270 kbit scan costs about as much as its TCK time.
 
 #### `XilinxHwServerTransport.read_reg`
 
@@ -2709,7 +2734,19 @@ _BUSY = 2
 _ERROR = 4
 _FIFO_NOTEMPTY = 8
 _MAX_BUSY_RETRIES = 16
+_STREAM_SLOTS = 8192
+_STREAM_SLACK = 64
+_STREAM_MAX_EMPTY = 64
 ```
+
+#### `EjtagAxiController.has_stream`
+
+```python
+@property
+has_stream -> bool
+```
+
+True when the bridge reports the streaming read (FEATURES[24]).
 
 #### `EjtagAxiController.connect`
 
@@ -2810,6 +2847,40 @@ fifo[0]. So we need a priming scan before the data scans.
 **Raises:**
 
 - `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES. The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
+
+#### `EjtagAxiController.stream_read`
+
+```python
+stream_read(
+    base_addr: int,
+    count: int,
+    *,
+    slots_per_scan: int | None = None,
+    retries: int = 2,
+) -> list[int]
+```
+
+Read *count* consecutive words from *base_addr* with the streaming read.
+
+CMD_RESET (the burst FIFO must start empty), CMD_STREAM_RSTART, then
+long DR scans of 33-bit slots until every word is in; the AXI side
+keeps the burst FIFO filled with bursts that never cross 4 KiB.  Each
+scan's header must equal the words still owed, so a lost or repeated
+word cannot go unnoticed: on a mismatch, a stall or a transport error
+the stream is aborted (any TDI 1 in stream mode is a CMD_RESET) and
+the whole range is read again, up to *retries* times.  The whole
+range, because the AXI response of a stream (first non-OKAY resp) is
+only reported once the stream completes: an aborted stream's words
+were never checked.  Words are returned only after that response
+reads OKAY.  A slot cut short by the end of a scan is re-sent by the
+bridge.  Before an error is raised the stream is aborted, so the
+bridge is back in normal mode for the next command.
+
+**Raises:**
+
+- `ValueError`: unaligned address, `count <= 0` or a range past the 32-bit address space.
+- `RuntimeError`: the bridge has no streaming read (FEATURES[24]=0).
+- `AXIError`: an AXI read in the range returned a non-OKAY response, or the stream failed more than *retries* times.
 
 #### `EjtagAxiController.close`
 
