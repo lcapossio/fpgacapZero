@@ -1419,7 +1419,12 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
     def test_burst_write_read(self):
         """AXI4 burst write 8 words, burst read back, verify."""
-        data = [0xBEEF0000 + i for i in range(8)]
+        # Over openocd/ftdi the slave keeps earlier tests' words: seed others
+        # first, so a burst write that writes nothing cannot pass.
+        sentinel = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, sentinel)
+        self.assertEqual(self.bridge.read_block(0x00, 8), sentinel)
+        data = [0xC0DE0000 + i for i in range(8)]
         self.bridge.burst_write(0x00, data)
         result = self.bridge.burst_read(0x00, 8)
         self.assertEqual(result, data)
@@ -1430,18 +1435,25 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
         if not self.bridge.has_stream:
             self.skipTest("bitstream built without STREAM_EN")
-        # The slave aliases (addr>>2) % 32; words 16..31 belong to the CPU, so
-        # only the host's words 0..15 are checked.
+        # The slave aliases (addr>>2) % 32, so this checks the data path, not
+        # address progression across bursts and 4 KiB pages (that is covered
+        # by tb/fcapz_ejtagaxi_stream_tb.sv).  Words 16..31 belong to the CPU:
+        # every word that holds still across the read is checked.
         data = [0x5A000000 | (i * 0x00010203) for i in range(16)]
         self.bridge.write_block(0x00, data)
+        before = self.bridge.read_block(0x00, 32)
+        self.assertEqual(before[:16], data)
         n = 65536
         t0 = time.perf_counter()
         words = self.bridge.stream_read(0x00, n)
         elapsed = time.perf_counter() - t0
         print(f"\n  stream_read {n} words: {elapsed:.3f}s = "
               f"{4 * n / 1e6 / elapsed:.2f} MB/s")
+        after = self.bridge.read_block(0x00, 32)
+        stable = {k for k in range(32) if before[k] == after[k]}
+        self.assertTrue(set(range(16)) <= stable, "host words changed during the read")
         self.assertEqual(len(words), n)
-        bad = [i for i in range(n) if i % 32 < 16 and words[i] != data[i % 32]]
+        bad = [i for i in range(n) if i % 32 in stable and words[i] != before[i % 32]]
         self.assertEqual(bad, [], f"{len(bad)} wrong words, first at {bad[:4]}")
 
     def test_error_on_error_addr(self):
@@ -1639,13 +1651,20 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     def _set_go(self, value: int) -> None:
         self.bridge.axi_write(self.GO_OFF, value)
 
-    def _arm_on_writes(self, pretrigger=4, posttrigger=32):
+    def _seed_cpu_words(self) -> None:
+        """With the CPU gated off, overwrite words 16/17 with sentinels."""
+        for off in (self.D0_OFF, self.D1_OFF):
+            self.bridge.axi_write(off, 0x0BAD0000 | off)
+            self.assertEqual(self.bridge.axi_read(off), 0x0BAD0000 | off)
+
+    def _arm_on_writes(self, pretrigger=4, posttrigger=32, *, quiet_bus=True):
         cfg = self.mon.event_capture_config(
             "aw_hs", pretrigger=pretrigger, posttrigger=posttrigger, depth=256
         )
         self.an.configure(cfg)
         self.an.arm()
-        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+        if quiet_bus:  # with CPU writes flowing, it triggers before we look
+            self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
 
     def test_cpu_quiet_until_gated_on(self):
         """Gated off, the CPU issues no writes: an aw_hs-armed monitor stays
@@ -1664,8 +1683,14 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         bridge reads the CPU's pattern back from the shared slave (repeatably)."""
         import time
 
-        self._arm_on_writes(pretrigger=2, posttrigger=12)
-        self._set_go(1)  # turn the CPU loose
+        # Over openocd/ftdi the slave keeps an earlier test's CPU words: seed
+        # sentinels while the CPU is gated off, so only new CPU writes pass.
+        self._seed_cpu_words()
+        # Turn the CPU loose *first*: armed before, the host's own write to the
+        # go word would trigger the monitor.
+        self._set_go(1)
+        time.sleep(0.05)
+        self._arm_on_writes(pretrigger=2, posttrigger=12, quiet_bus=False)
 
         deadline = time.time() + 3.0
         status = 0
@@ -1690,6 +1715,7 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         written over word16 via EJTAG survives (the CPU no longer overwrites it)."""
         import time
 
+        self._seed_cpu_words()
         self._set_go(1)
         time.sleep(0.05)
         self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)
